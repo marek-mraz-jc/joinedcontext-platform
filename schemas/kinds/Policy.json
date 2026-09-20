@@ -366,14 +366,14 @@
           "type": "string"
         },
         {
-          "description": "Retrieve entity type details (`GET /types/{type}`).",
+          "description": "Retrieve details of the available entity types (`GET /types?details=true`).",
           "enum": [
             "retrieveEntityTypeDetails"
           ],
           "type": "string"
         },
         {
-          "description": "Retrieve entity type info (`GET /types/{type}/info`).",
+          "description": "Retrieve one entity type's information (`GET /types/{type}`).",
           "enum": [
             "retrieveEntityTypeInfo"
           ],
@@ -387,14 +387,14 @@
           "type": "string"
         },
         {
-          "description": "Retrieve attribute type details (`GET /attributes/{attr}`).",
+          "description": "Retrieve details of the available attributes (`GET /attributes?details=true`).",
           "enum": [
             "retrieveAttrTypeDetails"
           ],
           "type": "string"
         },
         {
-          "description": "Retrieve attribute type info (`GET /attributes/{attr}/info`).",
+          "description": "Retrieve one attribute's information (`GET /attributes/{attr}`).",
           "enum": [
             "retrieveAttrTypeInfo"
           ],
