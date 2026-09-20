@@ -6,6 +6,12 @@
 //!
 //! Every host here is under `.invalid`, so a case that passes the allow-list fails on a name
 //! that resolves nowhere rather than reaching a registry that exists.
+//!
+//! A registry that does not answer is `502 Bad Gateway`, not `500`: since T-1695 this route
+//! reaches the registry through `fetch::checked`/`fetch::follow`, the same two functions the
+//! fetch route uses, so both answer an unreachable outside host in the same words. The four
+//! cases below reach the network stage on a name nothing resolves, which is what they are for —
+//! the refusal they each prove happens before it.
 
 mod common;
 
@@ -93,7 +99,7 @@ async fn the_allowed_host_passes_in_any_case() {
         let response = get(&["Registry.Invalid"], &format!("/v1/packages/{host}/serde")).await;
         assert_eq!(
             response.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
             "{host} was refused"
         );
     }
@@ -140,7 +146,7 @@ async fn a_control_character_in_the_path_stays_inside_one_segment() {
         .await;
         assert_eq!(
             response.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
             "'{rest}' answered {}",
             response.status()
         );
@@ -192,7 +198,7 @@ async fn an_empty_host_or_an_empty_path_matches_no_route() {
 #[tokio::test]
 async fn an_unreachable_registry_leaks_no_credential() {
     let response = get(&["registry.invalid"], "/v1/packages/registry.invalid/serde").await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let detail = body_of(response).await;
     for secret in [
         "mock-model-key",
@@ -223,7 +229,7 @@ async fn a_query_string_does_not_travel_with_the_download() {
     .await;
     assert_eq!(
         response.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_GATEWAY,
         "the path was accepted and the unreachable host refused it"
     );
 }
