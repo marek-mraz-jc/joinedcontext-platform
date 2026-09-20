@@ -30,6 +30,24 @@ fn proxy(hosts: &[&str], budget: u64) -> axum::Router {
     app(run, Bases::default())
 }
 
+/// The same proxy, with a Portal that holds no run and answers `404` to every lookup.
+///
+/// `Bases::default()` points the Portal at a name that resolves nowhere, which since T-2418 is a
+/// failure of the platform's (`503`) rather than a bad credential (`401`). A case about a run id
+/// nobody holds has to ask a Portal that is there.
+fn proxy_asking(portal: &wiremock::MockServer, hosts: &[&str], budget: u64) -> axum::Router {
+    let mut run = sample_run(false);
+    run.allowed_hosts = hosts.iter().map(|host| (*host).to_owned()).collect();
+    run.max_egress_bytes_per_run = budget;
+    app(
+        run,
+        Bases {
+            portal: portal.uri(),
+            ..Bases::default()
+        },
+    )
+}
+
 async fn fetch(hosts: &[&str], budget: u64, query: &str) -> axum::http::Response<Body> {
     proxy(hosts, budget)
         .oneshot(
@@ -64,8 +82,9 @@ async fn a_fetch_without_credentials_is_refused() {
 /// AG-22: a ticket that is not this run's opens nothing, and neither does a run id nobody holds.
 #[tokio::test]
 async fn a_ticket_that_is_not_this_runs_opens_nothing() {
+    let portal = wiremock::MockServer::start().await;
     for (run, ticket) in [(RUN_ID, "replayed-from-another-run"), ("nobody", TICKET)] {
-        let response = proxy(&["docs.invalid"], 1024)
+        let response = proxy_asking(&portal, &["docs.invalid"], 1024)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/v1/fetch?url=https%3A%2F%2Fdocs.invalid%2F")

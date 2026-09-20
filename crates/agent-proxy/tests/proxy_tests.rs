@@ -104,7 +104,14 @@ fn test_state_with_all(
 
     let config_arc = Arc::new(config);
     let credentials = CredentialManager::new(config_arc.clone());
-    let runs = RunResolver::with_cached(run);
+    // A test that names a Portal gets a resolver that asks it: an id this run does not hold is
+    // then "no such run" (404 → 401) rather than "the Portal could not be reached" (503, T-2418).
+    let runs = match portal.as_deref() {
+        Some(base) => {
+            RunResolver::with_cached_at(base.parse().expect("the portal base is a URL"), run)
+        }
+        None => RunResolver::with_cached(run),
+    };
     let limits = LimitManager::default();
     let http = reqwest::Client::new();
     // No redirect of its own: the fetch route checks every hop against the run's allow-list.
@@ -1631,7 +1638,13 @@ const TICKET: &str = "secret-ticket-123";
 
 /// One request through the router with the headers a test chose.
 async fn with_headers(headers: &[(&str, &str)]) -> StatusCode {
-    let app = router(test_state(sample_run(false, "building")));
+    // A Portal that holds no run and answers 404 to every lookup: these cases are about the
+    // credential presented, and a Portal that cannot be reached is a different answer (T-2418).
+    let portal = wiremock::MockServer::start().await;
+    let app = router(test_state_with_portal(
+        sample_run(false, "building"),
+        &portal.uri(),
+    ));
     let mut req = Request::builder().uri("/v1/data/ngsi-ld/v1/entities");
     for (name, value) in headers {
         req = req.header(*name, *value);
@@ -1786,7 +1799,11 @@ async fn a_refusal_says_the_same_thing_whether_the_run_or_the_ticket_was_wrong()
 
 /// The body of one refusal, for comparing two of them.
 async fn body_of(headers: &[(&str, &str)]) -> String {
-    let app = router(test_state(sample_run(false, "building")));
+    let portal = wiremock::MockServer::start().await;
+    let app = router(test_state_with_portal(
+        sample_run(false, "building"),
+        &portal.uri(),
+    ));
     let mut req = Request::builder().uri("/v1/data/ngsi-ld/v1/entities");
     for (name, value) in headers {
         req = req.header(*name, *value);

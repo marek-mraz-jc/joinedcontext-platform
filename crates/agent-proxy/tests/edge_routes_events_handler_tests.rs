@@ -68,10 +68,16 @@ async fn an_event_without_credentials_is_refused_before_the_portal_is_asked() {
 }
 
 /// AG-22: a ticket of another run writes into no run's conversation.
+///
+/// The Portal here holds no run and answers `404` to the lookup, which is what "no such run" is.
+/// A Portal that cannot be reached at all is a failure of the platform's and answers `503`, not
+/// `401` (T-2418); this case is about the caller's credential.
 #[tokio::test]
 async fn a_ticket_of_another_run_writes_no_event() {
+    // A Portal that holds no run: every lookup is unmatched and answers 404.
+    let portal = MockServer::start().await;
     for (run, ticket) in [(RUN_ID, "another-runs-ticket"), ("nobody", TICKET)] {
-        let response = proxy("http://portal.invalid:8080", 100)
+        let response = proxy(&portal.uri(), 100)
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")

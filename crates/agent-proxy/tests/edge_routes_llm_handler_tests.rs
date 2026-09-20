@@ -26,6 +26,22 @@ fn proxy(model: &str, steps: u32, tokens: u64) -> axum::Router {
     )
 }
 
+/// The same proxy, asking a Portal that holds no run and answers `404` to every lookup.
+///
+/// `Bases::default()` points the Portal at a name that resolves nowhere, which since T-2418 is a
+/// failure of the platform's (`503`) rather than a bad credential (`401`). A case about a run id
+/// nobody holds has to ask a Portal that is there.
+fn proxy_asking(model: &str, portal: &wiremock::MockServer) -> axum::Router {
+    app(
+        sample_run(false),
+        Bases {
+            model: model.to_owned(),
+            portal: portal.uri(),
+            ..Bases::default()
+        },
+    )
+}
+
 fn body(text: &str) -> Body {
     Body::from(text.to_owned())
 }
@@ -56,8 +72,9 @@ async fn a_model_call_without_credentials_is_refused_before_the_provider_is_aske
 /// AG-22: a ticket of another run buys no model time.
 #[tokio::test]
 async fn a_ticket_of_another_run_buys_no_model_time() {
+    let portal = wiremock::MockServer::start().await;
     for (run, ticket) in [(RUN_ID, "another-runs-ticket"), ("nobody", TICKET)] {
-        let response = proxy("http://model.invalid", 0, 1000)
+        let response = proxy_asking("http://model.invalid", &portal)
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
