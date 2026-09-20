@@ -15,6 +15,7 @@ pub mod kinds;
 pub mod kpi;
 pub mod names;
 pub mod registry;
+pub mod secret;
 pub mod urn;
 
 pub use envelope::{
@@ -49,4 +50,5 @@ pub use kinds::{
     DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
+pub use secret::Secret;
 pub use urn::{apply_render_prefix, Urn};

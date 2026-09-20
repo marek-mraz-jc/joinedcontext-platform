@@ -123,7 +123,7 @@ async fn main() -> ExitCode {
                         context_gateway::previews::WorkloadToken::new(
                             token_url,
                             id.clone(),
-                            secret.clone(),
+                            secret.expose().to_owned(),
                         ),
                     )),
                     _ => {
