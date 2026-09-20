@@ -33,17 +33,32 @@ impl Polygon {
 
     /// Whether this polygon lies entirely inside `other` (GW11, T-0149).
     ///
-    /// Every vertex inside and no edge crossing an edge: for the simple polygons a policy
-    /// draws — a district, a cadastral area — that is containment exactly. A polygon that
-    /// only touches `other`'s boundary counts as contained, the same way a point on the
-    /// boundary counts as inside, so a grant drawn on the district border does not refuse
-    /// the district.
+    /// Every vertex inside, no edge crossing an edge, and no hole of `other` reaching into
+    /// this one: for the simple polygons a policy draws — a district, a cadastral area — that
+    /// is containment exactly. A polygon that only touches `other`'s boundary counts as
+    /// contained, the same way a point on the boundary counts as inside, so a grant drawn on
+    /// the district border does not refuse the district.
+    ///
+    /// The hole leg is what a vertex-and-crossing test alone misses (T-2327). An area drawn
+    /// **around** a carve-out has every vertex inside the grant and crosses none of its edges,
+    /// because it surrounds the hole rather than cutting it — and `geo::intersect` reads a
+    /// `true` here as "the caller asked for less than it was granted" and forwards the
+    /// caller's own area with nothing to filter against, so the protected site would be
+    /// answered from. A hole that merely touches this polygon's boundary counts as reaching
+    /// into it, which refuses a little more than containment strictly requires; on a carve-out
+    /// that is the right direction to be wrong in.
     pub fn within(&self, other: &Polygon) -> bool {
         if !self.outer.iter().all(|point| other.contains(*point)) {
             return false;
         }
         let theirs = std::iter::once(&other.outer).chain(other.holes.iter());
-        !theirs.into_iter().any(|ring| crosses(&self.outer, ring))
+        if theirs.into_iter().any(|ring| crosses(&self.outer, ring)) {
+            return false;
+        }
+        !other
+            .holes
+            .iter()
+            .any(|hole| hole.iter().any(|point| ring_contains(&self.outer, *point)))
     }
 }
 

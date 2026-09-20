@@ -273,19 +273,16 @@ fn knocking_while_refused_does_not_make_the_wait_longer() {
     }
 }
 
-/// The map is not allowed to grow with every address that ever appeared, and `evict_idle`
-/// exists to stop it: it drops buckets that are both idle and full, because a full bucket
-/// would hand out a full burst anyway.
+/// The map is not allowed to grow with every address that ever appeared, and `evict_idle` is
+/// what stops it: a bucket that has been idle long enough to be full again would hand out a full
+/// burst whether it is remembered or not (OPS-35, T-2356).
 ///
-/// **It drops nothing.** A bucket's `tokens` is the value at its last touch, and every call
-/// that is allowed subtracts one before storing — so `tokens < capacity` holds for every
-/// bucket that has ever been checked, and `retain` keeps all of them. The map therefore grows
-/// with every distinct `(slug, caller)`, which on a public endpoint is every client address.
-///
-/// Asserted here as it stands so the change is visible when it lands: **T-2324** holds the fix
-/// and replaces this case with the one below it in that task.
+/// It dropped nothing until this case landed. A bucket's `tokens` is the value at its last touch,
+/// and an allowed call subtracts one before storing, so the old `tokens < capacity` clause held
+/// for every bucket that had ever been checked. The refill is computed on read and never written
+/// back, which is exactly what that clause was trying to read.
 #[test]
-fn eviction_drops_nothing_today_because_a_touched_bucket_is_never_full() {
+fn eviction_drops_a_bucket_that_has_refilled_to_its_burst() {
     let limiter = RateLimiter::new();
     let limits = limits(60, Some(2));
     let start = Instant::now();
@@ -299,25 +296,76 @@ fn eviction_drops_nothing_today_because_a_touched_bucket_is_never_full() {
         "the map is large enough for eviction to run"
     );
 
-    // Long past `IDLE_EVICTION`, so every one of those buckets would be full again, and one
-    // more call to trigger the sweep.
+    // Long past `IDLE_EVICTION`, so every one of those buckets has refilled to its burst, and
+    // one more call to trigger the sweep.
     let later = start + Duration::from_secs(3_600);
     limiter.check(SLUG, "somebody-new", &limits, later);
 
     assert_eq!(
         limiter.len(),
-        before + 1,
-        "nothing was evicted: every bucket spent a token, so none is `full` by the test \
-         `evict_idle` makes (T-2324)",
+        1,
+        "every idle, refilled bucket is gone and the caller that swept them is what is left"
     );
+}
 
-    // What the eviction is there to protect is still true of the buckets themselves: a caller
-    // whose bucket is old gets its full burst back, whether the bucket was dropped or kept.
-    let old = limiter.check(SLUG, "caller-7", &limits, later);
-    assert!(old.allowed);
+/// A bucket is dropped only when dropping it changes nothing: the caller gets the same number of
+/// calls whether it was remembered or not.
+#[test]
+fn a_caller_whose_bucket_was_dropped_gets_no_more_than_an_idle_caller_would() {
+    let limits = limits(60, Some(2));
+    let start = Instant::now();
+    let later = start + Duration::from_secs(3_600);
+
+    let swept = RateLimiter::new();
+    for caller in 0..1_200 {
+        swept.check(SLUG, &format!("caller-{caller}"), &limits, start);
+    }
+    swept.check(SLUG, "somebody-new", &limits, later);
+    let dropped = swept.check(SLUG, "caller-7", &limits, later);
+
+    let kept = RateLimiter::new();
+    kept.check(SLUG, "caller-7", &limits, start);
+    let remembered = kept.check(SLUG, "caller-7", &limits, later);
+
+    assert_eq!(dropped.allowed, remembered.allowed);
     assert_eq!(
-        old.remaining, 1,
-        "refilled to its burst, less the one just spent"
+        dropped.remaining, remembered.remaining,
+        "a dropped bucket and a kept one that refilled allow the same calls"
+    );
+    assert_eq!(
+        remembered.remaining, 1,
+        "refilled to its burst, less this one"
+    );
+}
+
+/// A caller that is still out of tokens keeps its bucket, whatever the sweep finds around it: the
+/// sweep must never be a way to buy a fresh burst by waiting for somebody else's traffic.
+#[test]
+fn the_sweep_never_hands_a_drained_caller_a_fresh_burst() {
+    let limiter = RateLimiter::new();
+    // One request a minute, a burst of sixty: a drained bucket needs an hour to fill, so it is
+    // still drained at the moment the idle sweep runs.
+    let slow = limits(1, Some(60));
+    let start = Instant::now();
+
+    for _ in 0..60 {
+        limiter.check(SLUG, "heavy", &slow, start);
+    }
+    let refused = limiter.check(SLUG, "heavy", &slow, start);
+    assert!(!refused.allowed, "the burst is spent");
+
+    let busy = limits(600, Some(600));
+    for caller in 0..1_200 {
+        limiter.check(SLUG, &format!("caller-{caller}"), &busy, start);
+    }
+    let later = start + Duration::from_secs(600);
+    limiter.check(SLUG, "somebody-new", &busy, later);
+
+    let again = limiter.check(SLUG, "heavy", &slow, later);
+    assert_eq!(
+        again.remaining, 9,
+        "ten minutes buys ten of the sixty tokens it spent, one of which this call took — \
+         a swept bucket would have answered 59"
     );
 }
 

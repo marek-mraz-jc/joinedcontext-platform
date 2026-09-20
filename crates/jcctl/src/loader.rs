@@ -308,6 +308,11 @@ pub struct Repository {
     /// SharedSpaceReferences whose `endpointRef` names no Endpoint, or one whose audience
     /// leaves the referring project out (EP-77, EP-15), as `(resource, path, why)`.
     unresolved_references: Vec<(ResourceId, PathBuf, String)>,
+    /// DataAgreements sharing one `spec.agreementId` (DS-09), as `(resource, path, why)`, one
+    /// entry per claiming manifest. A Dataspace Protocol identifier is unique by construction,
+    /// and the gateway serves nothing for a contested one (T-2355), so both parties lose their
+    /// transfer tokens until the repository says which manifest owns the id.
+    contested_agreement_ids: Vec<(ResourceId, PathBuf, String)>,
 }
 
 /// The namespace an organization-scoped manifest lives in.
@@ -375,6 +380,70 @@ fn prefix_references(
         }
         _ => {}
     }
+}
+
+/// The DataAgreements whose `spec.agreementId` another manifest also claims (DS-09, T-2355).
+///
+/// A Dataspace Protocol identifier is unique by construction, so a repository holding two is one
+/// somebody wrote wrong — or wrote deliberately: the id decides which project's endpoints a
+/// transfer token under it may be used in, and whoever may write a manifest in any project could
+/// otherwise take another project's id. The gateway therefore serves **neither**, which makes the
+/// victim's agreement stop working with nothing to read anywhere; that is why this is a finding
+/// and not a warning. Every claiming manifest is named, so the answer is not "one of these is
+/// wrong" but "these two claim the same id".
+///
+/// The id is read from the raw spec: a manifest that does not parse or does not validate is left
+/// out of the gateway's table anyway, but it still claims the id in the repository, and a
+/// collision that disappears when the other manifest is broken would be a finding that comes and
+/// goes with an unrelated typo.
+fn contested_agreement_ids(
+    resources: &BTreeMap<ResourceId, LoadedResource>,
+) -> Vec<(ResourceId, PathBuf, String)> {
+    let mut claims: BTreeMap<&str, Vec<(&ResourceId, &LoadedResource)>> = BTreeMap::new();
+    for (id, loaded) in resources
+        .iter()
+        .filter(|(id, _)| id.kind == "DataAgreement")
+    {
+        let Some(agreement_id) = loaded
+            .manifest
+            .spec
+            .get("agreementId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        claims.entry(agreement_id).or_default().push((id, loaded));
+    }
+
+    let mut found = Vec::new();
+    for (agreement_id, claimants) in claims {
+        if claimants.len() < 2 {
+            continue;
+        }
+        let names: Vec<String> = claimants
+            .iter()
+            .map(|(id, _)| match &id.namespace {
+                Some(namespace) => format!("{namespace}/{}", id.name),
+                None => id.name.clone(),
+            })
+            .collect();
+        for (id, loaded) in &claimants {
+            found.push((
+                (*id).clone(),
+                loaded.path.clone(),
+                format!(
+                    "agreementId \"{agreement_id}\" is claimed by {} ({}). A Dataspace Protocol \
+                     identifier belongs to one agreement, and the gateway serves none of them \
+                     while it is contested (DS-09, DS-12).",
+                    claimants.len(),
+                    names.join(", ")
+                ),
+            ));
+        }
+    }
+    found
 }
 
 /// Renders every SharedSpaceReference's `endpointRef` as the `endpointSlug` this environment
@@ -831,6 +900,7 @@ impl Repository {
         }
 
         let unresolved_references = resolve_endpoint_refs(&mut resources);
+        let contested_agreement_ids = contested_agreement_ids(&resources);
 
         Ok(Self {
             root: root.to_path_buf(),
@@ -840,6 +910,7 @@ impl Repository {
             hosts,
             literal_domains,
             unresolved_references,
+            contested_agreement_ids,
         })
     }
 
@@ -853,6 +924,12 @@ impl Repository {
     /// `(resource, path, why)`.
     pub fn unresolved_references(&self) -> &[(ResourceId, PathBuf, String)] {
         &self.unresolved_references
+    }
+
+    /// The DataAgreements that claim an `agreementId` another manifest also claims (DS-09), as
+    /// `(resource, path, why)`, one entry per claiming manifest.
+    pub fn contested_agreement_ids(&self) -> &[(ResourceId, PathBuf, String)] {
+        &self.contested_agreement_ids
     }
 
     /// The `bento.yaml` files beside Pipeline manifests that type a space segment or the

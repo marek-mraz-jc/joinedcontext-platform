@@ -169,7 +169,7 @@ pub fn subject(
 /// forgiving: an agreement the gateway cannot parse is left out rather than half-applied,
 /// which means no token under it is honoured.
 pub fn agreements_of(repo: &Repository) -> Agreements {
-    let mut by_id: BTreeMap<String, Agreement> = BTreeMap::new();
+    let mut claimed: BTreeMap<String, Vec<Agreement>> = BTreeMap::new();
     for (id, resource) in repo.iter() {
         if id.kind != "DataAgreement" {
             continue;
@@ -181,13 +181,29 @@ pub fn agreements_of(repo: &Repository) -> Agreements {
         if spec.validate().is_err() {
             continue;
         }
-        by_id.insert(
-            spec.agreement_id.clone(),
-            Agreement {
+        claimed
+            .entry(spec.agreement_id.clone())
+            .or_default()
+            .push(Agreement {
                 project: id.namespace.clone().unwrap_or_default(),
                 spec,
-            },
-        );
+            });
     }
+
+    // A contested id serves nothing (T-2355). A DSP identifier is unique by construction, so
+    // two manifests claiming one is a repository written wrong — and keeping either of them
+    // would decide, by nothing but the order the loader walks in, which project's endpoints a
+    // transfer token under that id reaches. Anyone who may write a manifest in any project
+    // could then take another project's id by choosing a namespace that sorts after it, which
+    // is a project boundary crossed (CC-08). Both are left out: a gateway that serves nothing
+    // for a contested id refuses more than it did, never less. `jcctl validate` names the
+    // collision, so the repository is fixed rather than silently half-served.
+    let by_id = claimed
+        .into_iter()
+        .filter_map(|(id, mut claims)| match claims.len() {
+            1 => Some((id, claims.remove(0))),
+            _ => None,
+        })
+        .collect();
     Agreements { by_id }
 }
