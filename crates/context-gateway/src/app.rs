@@ -257,6 +257,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             post(egress::notifications::deliver),
         )
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
+        .route("/api/endpoint/{slug}/file.json", get(file_json))
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
         .route("/api/endpoint/{slug}/file.zip", get(file_zip))
@@ -276,6 +277,14 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/cs/{space}", get(space_record))
         .route("/cs/{space}/ngsi-ld/v1/{*rest}", any(space_ngsi_ld))
         .route("/cs/{space}/mcp", post(space_mcp_message))
+        // SP-04: `schema/` is a child of every space, and the record advertises it. The
+        // same two routes as the endpoint surface, because it is the same surface named
+        // by its space (SP-03).
+        .route("/cs/{space}/schema/index.json", get(space_schema_index))
+        .route(
+            "/cs/{space}/schema/{version}/{artifact}",
+            get(space_schema_artifact),
+        )
         .route(
             "/api/endpoint/{slug}/.well-known/oauth-protected-resource",
             get(protected_resource),
@@ -1721,10 +1730,28 @@ async fn schema_index(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
+    schema_index_of(&endpoint, &subject, request.headers())
+}
 
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    let document = schema::index(&endpoint, &visible, sha256_hex);
-    revalidated(&document, "application/json", request.headers())
+/// The same catalogue under the space prefix, which SP-04 makes a child of every space.
+async fn space_schema_index(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (space, subject) = match admit_space(&gateway, &name, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    schema_index_of(&space.endpoint, &subject, request.headers())
+}
+
+/// One catalogue, whichever prefix the caller came in by (SP-03, EP-46).
+fn schema_index_of(endpoint: &Endpoint, subject: &Subject, headers: &HeaderMap) -> Response<Body> {
+    let visible = schema::visible(subject, endpoint, crate::pdp::now());
+    let document = schema::index(endpoint, &visible, sha256_hex);
+    revalidated(&document, "application/json", headers)
 }
 
 /// One schema document of one major version, projected to the grant (T-0162, EP-47, EP-49).
@@ -1738,7 +1765,37 @@ async fn schema_artifact(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
+    schema_artifact_of(&endpoint, &subject, &version, &artifact, request.headers())
+}
 
+/// The same document under the space prefix (SP-03, SP-04).
+async fn space_schema_artifact(
+    State(gateway): State<Arc<Gateway>>,
+    Path((name, version, artifact)): Path<(String, String, String)>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (space, subject) = match admit_space(&gateway, &name, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    schema_artifact_of(
+        &space.endpoint,
+        &subject,
+        &version,
+        &artifact,
+        request.headers(),
+    )
+}
+
+/// One schema document, whichever prefix the caller came in by (SP-03, EP-49).
+fn schema_artifact_of(
+    endpoint: &Endpoint,
+    subject: &Subject,
+    version: &str,
+    artifact: &str,
+    headers: &HeaderMap,
+) -> Response<Body> {
     // `schema/v2/...`: the major of the model, never its full version (DM-22).
     let Some(major) = version
         .strip_prefix('v')
@@ -1746,12 +1803,11 @@ async fn schema_artifact(
     else {
         return ProblemDetails::not_found().into_response();
     };
-    let accept = request
-        .headers()
+    let accept = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("*/*");
-    let Some(wanted) = schema::artifact_of(&artifact, accept) else {
+    let Some(wanted) = schema::artifact_of(artifact, accept) else {
         return ProblemDetails::not_found().into_response();
     };
 
@@ -1763,13 +1819,13 @@ async fn schema_artifact(
     if models.is_empty() {
         return ProblemDetails::not_found().into_response();
     }
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let visible = schema::visible(subject, endpoint, crate::pdp::now());
     if !wanted.is_json() {
         // SHACL, OWL, RDF, LinkML and Markdown are rendered from the projected model rather
         // than served from a committed file, so no formalism can carry a slot the grant
         // forbids (T-0284, EP-47).
         let body = schema::render(&models, wanted, &visible);
-        return revalidated_text(body.into_bytes(), wanted.media_type(), request.headers());
+        return revalidated_text(body.into_bytes(), wanted.media_type(), headers);
     }
 
     let mut redacted = Vec::new();
@@ -1777,7 +1833,7 @@ async fn schema_artifact(
         schema::Artifact::JsonSchema => schema::json_schema(&models, &visible, &mut redacted),
         _ => schema::context(&models, &visible, &mut redacted),
     };
-    revalidated(&document, wanted.media_type(), request.headers())
+    revalidated(&document, wanted.media_type(), headers)
 }
 
 /// A schema document with the strong `ETag` a client revalidates against (EP-51).
@@ -2224,6 +2280,63 @@ async fn space_record(
     }
 }
 
+/// `file.json`: the whole dataset as one JSON array of projected entities (EP-41, EP-44).
+///
+/// The record has advertised this download since the `json` representation was added to the
+/// Endpoint kind, and the router did not serve it (T-2382). It is the NGSI-LD document a
+/// caller gets from `/ngsi-ld/v1/entities`, over the whole dataset rather than one broker
+/// page, bounded by the endpoint's own `fileLimits` and named as an attachment.
+async fn file_json(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    broker_speaks_json(&mut request);
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::Json),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+
+    let params = query::parse(request.uri().query().unwrap_or_default());
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    let (entities, restricted) = match paged_entities(
+        &gateway,
+        &endpoint,
+        &subject,
+        &params,
+        &mut request,
+        &limits,
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(problem) => return *problem,
+    };
+
+    let Ok(bytes) = serde_json::to_vec(&entities) else {
+        tracing::error!("a download does not serialize");
+        return ProblemDetails::internal().into_response();
+    };
+    // The same ceiling the tabular downloads apply to their own bytes: a file past it is
+    // refused whole, because half a JSON array is not a smaller answer, it is a broken one.
+    if bytes.len() as u64 > limits.max_bytes {
+        return too_large();
+    }
+    download_response(
+        &endpoint.slug,
+        Body::from(bytes),
+        "application/json",
+        "json",
+        restricted,
+    )
+}
+
 /// `file.csv`: the whole answer as one flat table (EP-08, EP-44, EP-45).
 async fn file_csv(
     State(gateway): State<Arc<Gateway>>,
@@ -2299,17 +2412,28 @@ async fn tabular_download(
         },
     };
 
+    download_response(&endpoint.slug, body, media, extension, restricted)
+}
+
+/// One download's response: the body under its media type, named after the endpoint, with the
+/// narrowing signal when the projection dropped something (EP-43, R22).
+fn download_response(
+    slug: &str,
+    body: Body,
+    media: &str,
+    extension: &str,
+    restricted: bool,
+) -> Response<Body> {
     let mut response = Response::new(body);
     let headers = response.headers_mut();
     if let Ok(media) = HeaderValue::from_str(media) {
         headers.insert(axum::http::header::CONTENT_TYPE, media);
     }
-    // The slug is base32 and the extension is one of two literals, so the filename needs
+    // The slug is base32 and the extension is one of three literals, so the filename needs
     // no quoting beyond the quotes themselves (EP-43).
-    if let Ok(disposition) = HeaderValue::from_str(&format!(
-        "attachment; filename=\"{}.{extension}\"",
-        endpoint.slug
-    )) {
+    if let Ok(disposition) =
+        HeaderValue::from_str(&format!("attachment; filename=\"{slug}.{extension}\""))
+    {
         headers.insert(axum::http::header::CONTENT_DISPOSITION, disposition);
     }
     if restricted {
