@@ -335,7 +335,10 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> S
     for model in &endpoint.models {
         let mut redacted = Vec::new();
         let schema = json_schema(std::slice::from_ref(&model), visible, &mut redacted);
-        let context = context(std::slice::from_ref(&model), visible, &mut Vec::new());
+        // The same list the JSON Schema fills: a term the committed `@context` carries and no
+        // `$defs` mentions is redacted by this builder alone, and `redacted: true` has to be
+        // raised from that too (EP-47, T-2341).
+        let context = context(std::slice::from_ref(&model), visible, &mut redacted);
 
         let types: Vec<&String> = model
             .classes
@@ -538,17 +541,32 @@ fn derive_defs(model: &Model, visible: &Visible, into: &mut Map<String, Value>) 
 pub fn context(models: &[&Model], visible: &Visible, redacted: &mut Vec<String>) -> Value {
     let mut terms = Map::new();
     let mut derived = false;
+    // One document, several models: a term one model calls a class and another an attribute,
+    // or one derives and another has committed, is kept when any model covers it. What it is
+    // reported as is therefore decided once, against the finished document.
+    let mut left_out: Vec<String> = Vec::new();
     for model in models {
         match model.context.as_ref().and_then(inner_context) {
             Some(compiled) => {
                 for (term, definition) in compiled {
-                    if term.starts_with('@')
-                        || visible.covers_attr(term)
-                        || visible.covers_type(term)
-                    {
+                    // A term is either a class of this model or an attribute, and the two are
+                    // not asked the same question. Answering both with one `||` chain meant a
+                    // caller with no type whitelist — a grant that names no `information`, the
+                    // dev seed's `public-read` among them — covered every name by the class
+                    // test, and the attribute test in front of it could never refuse anything.
+                    // Both things it protects were lost that way: the endpoint's
+                    // `hiddenAttributes` (EP-61) and the attributes a prohibition takes back
+                    // (GW8), because both live in `denied_attrs` (T-2341).
+                    let covered = term.starts_with('@')
+                        || if model.classes.iter().any(|class| class == term) {
+                            visible.covers_type(term)
+                        } else {
+                            visible.covers_attr(term)
+                        };
+                    if covered {
                         terms.insert(term.clone(), definition.clone());
                     } else {
-                        redacted.push(term.clone());
+                        left_out.push(term.clone());
                     }
                 }
             }
@@ -574,6 +592,11 @@ pub fn context(models: &[&Model], visible: &Visible, redacted: &mut Vec<String>)
     if derived && !terms.contains_key("@vocab") {
         terms.insert("@vocab".to_owned(), json!("#"));
     }
+    redacted.extend(
+        left_out
+            .into_iter()
+            .filter(|term| !terms.contains_key(term)),
+    );
     json!({ "@context": [CORE_CONTEXT, terms] })
 }
 
