@@ -661,11 +661,12 @@ fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
 
 /// The names an author's mapping may read out of the runner (PL-57, PF-84).
 ///
-/// `JC_ORG_DOMAIN` is the organisation's domain, a variable of the runner's process;
-/// `JC_SPACE`, `JC_SPACE_2`, … are the space segment of each output, which the renderer writes
-/// into the stream before it reaches the runner; `JC_SOURCE_SPACE` is the space an indicator
-/// pipeline records its provenance from. None of the four names a credential, and everything
-/// else in that environment does.
+/// - `JC_ORG_DOMAIN` — the organisation's domain, a variable of the runner's process.
+/// - `JC_SPACE`, `JC_SPACE_2`, … — the space segment of each output, which the renderer writes
+///   into the stream before it reaches the runner.
+/// - `JC_SOURCE_SPACE` — the space an indicator pipeline records its provenance from.
+///
+/// None of the four names a credential, and everything else in that environment does.
 fn is_injected_env(name: &str) -> bool {
     name == "JC_ORG_DOMAIN"
         || name == "JC_SOURCE_SPACE"

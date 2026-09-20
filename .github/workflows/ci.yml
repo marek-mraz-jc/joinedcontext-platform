@@ -31,6 +31,11 @@ jobs:
       # And the contract those descriptions make: every field has one, and none of them is a
       # credential. `--lib --bins` above does not run an integration test (T-2145).
       - run: cargo test -p jc-core --test kind_documentation_tests --locked
+      # Every environment variable a service reads is explained where it is read, and no
+      # secret is read into a log line (T-2140, OPS-27). The configuration reference in the
+      # docs is generated from those sentences, so a variable added without one is caught
+      # here rather than a lane later.
+      - run: cargo test -p jc-core --test configuration_documentation_tests --locked
   model-tools:
     # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
     # than after it, so the fast lane stays as long as its slowest job and no longer.
