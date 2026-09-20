@@ -246,6 +246,25 @@ pub enum ConflictPolicy {
     Rename,
 }
 
+/// The inbound credential of a webhook-driven [`SyncSourceSpec`] (MF-44).
+///
+/// The signature the origin sends covers the request body and not the path it posts to, so one
+/// secret shared between sources would let the origin of any one of them force a run of every
+/// other, in projects it has no binding in. Each source therefore carries its own, by reference
+/// like every other credential (MF-24): what a department is handed opens their door and nothing
+/// else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebhookAuth {
+    /// The secret the origin signs the request body with, HMAC-SHA256.
+    pub secret_ref: SecretRef,
+    /// The secret being retired, accepted alongside the current one so that moving the origin's
+    /// own hook to the new value is a separate step from writing it here — without a window,
+    /// every rotation is an outage and nobody rotates (T-0982).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_secret_ref: Option<SecretRef>,
+}
+
 /// Desired specification of a [`SyncSource`][crate::kinds::SyncSource] resource (MF-27..MF-32).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -267,6 +286,10 @@ pub struct SyncSourceSpec {
     /// Whether a clean sync merge request merges itself (CC-70, MF-29).
     #[serde(default)]
     pub auto_merge: bool,
+    /// What authorises a run through the webhook route (MF-44). Required by, and only
+    /// meaningful with, `schedule: { webhook: true }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookAuth>,
 }
 
 impl Kind for SyncSourceSpec {
@@ -286,6 +309,34 @@ impl SyncSourceSpec {
     pub fn validate(&self) -> Result<()> {
         self.source.validate()?;
         self.schedule.validate()?;
+        // A webhook schedule with no credential would be a door with no lock, and a credential
+        // with no webhook schedule a lock on no door: both are refused where they are written,
+        // rather than discovered as a source that never runs (MF-44).
+        match (self.schedule.webhook == Some(true), &self.webhook) {
+            (true, None) => {
+                return Err(Error::Invalid {
+                    field: "spec.webhook".to_string(),
+                    reason: "a webhook-driven source is authorised by its own secret: set \
+                             spec.webhook.secretRef (MF-44)"
+                        .to_string(),
+                })
+            }
+            (false, Some(_)) => {
+                return Err(Error::Invalid {
+                    field: "spec.webhook".to_string(),
+                    reason: "only a source with schedule: { webhook: true } is reached through \
+                             the webhook route (MF-44)"
+                        .to_string(),
+                })
+            }
+            (true, Some(auth)) => {
+                auth.secret_ref.validate("spec.webhook.secretRef")?;
+                if let Some(previous) = &auth.previous_secret_ref {
+                    previous.validate("spec.webhook.previousSecretRef")?;
+                }
+            }
+            (false, None) => {}
+        }
         for (key, value) in &self.selector {
             if !LABEL_KEY_RE.is_match(key) || key.len() > 253 {
                 return Err(Error::Name {

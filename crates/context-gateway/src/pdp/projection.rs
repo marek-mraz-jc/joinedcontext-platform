@@ -70,18 +70,78 @@ pub fn project(body: &mut Value, granted: &BTreeSet<String>, hidden: &BTreeSet<S
 /// answer is cut by the entity's own types instead: a `Vehicle` in an answer to
 /// `type=User,Vehicle` keeps `weight` and never the `age` the projection gives to a `User`.
 pub fn project_by_type(body: &mut Value, constraints: &Constraints) {
+    // The same areas the answer itself is filtered by, so an entity the broker inlined under
+    // a Relationship is judged by every rule a top-level one is (T-1859).
+    let areas = super::geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
     match body {
         Value::Array(entities) => {
             for entity in entities {
-                entity_by_type(entity, constraints);
+                entity_by_type(entity, constraints, areas.as_ref());
             }
         }
-        entity => entity_by_type(entity, constraints),
+        entity => entity_by_type(entity, constraints, areas.as_ref()),
+    }
+}
+
+/// One entity, stripped by the attributes its own types may serve, and then by what a join
+/// inlined into it.
+fn entity_by_type(
+    entity: &mut Value,
+    constraints: &Constraints,
+    areas: Option<&super::geo::Areas>,
+) {
+    retain_by_type(entity, constraints);
+    narrow_joined(entity, constraints, areas, JOIN_DEPTH);
+}
+
+/// The deepest chain of inlined entities the gateway walks, which is the bound the read
+/// surface clamps `joinLevel` to (CIM 009 clause 6.3.11, [`crate::query`]).
+const JOIN_DEPTH: usize = 3;
+
+/// An entity the broker inlined under a Relationship (`join=inline`) is an entity the caller
+/// reads, so it is judged and cut exactly like a top-level one (EP-26, R9, T-1859).
+///
+/// The projection above retains whole members, and an inlined entity travels inside one: a
+/// granted Relationship would otherwise carry a whole entity of a type, a space or an area no
+/// grant reaches. What stays either way is the Relationship's `object`, the URN — the link is
+/// not the secret, the entity behind it is.
+fn narrow_joined(
+    entity: &mut Value,
+    constraints: &Constraints,
+    areas: Option<&super::geo::Areas>,
+    depth: usize,
+) {
+    let Some(members) = entity.as_object_mut() else {
+        return;
+    };
+    for value in members.values_mut() {
+        // An attribute is one instance or, with `datasetId`, a list of them.
+        let instances: Vec<&mut Value> = match value {
+            Value::Array(list) => list.iter_mut().collect(),
+            other => vec![other],
+        };
+        for instance in instances {
+            let Some(attribute) = instance.as_object_mut() else {
+                continue;
+            };
+            let Some(joined) = attribute.get_mut("entity") else {
+                continue;
+            };
+            if depth == 0
+                || !permitted(joined, constraints)
+                || !areas.is_none_or(|areas| areas.admits(joined))
+            {
+                attribute.remove("entity");
+                continue;
+            }
+            retain_by_type(joined, constraints);
+            narrow_joined(joined, constraints, areas, depth - 1);
+        }
     }
 }
 
 /// One entity, stripped by the attributes its own types may serve.
-fn entity_by_type(entity: &mut Value, constraints: &Constraints) {
+fn retain_by_type(entity: &mut Value, constraints: &Constraints) {
     if constraints.attrs_by_type.is_empty() {
         project_entity(entity, &constraints.attrs, &constraints.hidden);
         return;

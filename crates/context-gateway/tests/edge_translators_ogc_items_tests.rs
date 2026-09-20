@@ -60,7 +60,7 @@ fn the_next_link_follows_the_page_being_full() {
         (1, 1, true),
         (0, 0, true), // a limit of zero is a full page of nothing; the handler never sends one
     ] {
-        let collection = items(ENDPOINT, TYPE, &page(returned), limit, 0, "", STAMP);
+        let collection = items(ENDPOINT, TYPE, &page(returned), limit, 0, "", STAMP, None);
         assert_eq!(
             link_of(&collection, "next").is_some(),
             expected,
@@ -73,7 +73,7 @@ fn the_next_link_follows_the_page_being_full() {
 #[test]
 fn the_next_cursor_is_this_offset_plus_the_limit() {
     for (limit, offset) in [(10, 0), (10, 10), (1, 0), (3, 999)] {
-        let collection = items(ENDPOINT, TYPE, &page(limit), limit, offset, "", STAMP);
+        let collection = items(ENDPOINT, TYPE, &page(limit), limit, offset, "", STAMP, None);
         let next = href(&collection, "next");
         let cursor = next
             .rsplit("next=")
@@ -88,7 +88,7 @@ fn the_next_cursor_is_this_offset_plus_the_limit() {
 #[test]
 fn the_callers_query_is_carried_and_its_cursor_is_replaced() {
     let asked = "limit=10&bbox=19.1%2C48.7%2C19.2%2C48.8&next=Z2FyYmFnZQ";
-    let collection = items(ENDPOINT, TYPE, &page(10), 10, 10, asked, STAMP);
+    let collection = items(ENDPOINT, TYPE, &page(10), 10, 10, asked, STAMP, None);
 
     assert!(
         href(&collection, "self").ends_with(asked),
@@ -136,7 +136,7 @@ fn an_entity_without_a_geometry_is_not_counted_as_a_feature() {
         "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:station-004",
         null,
     ]);
-    let collection = items(ENDPOINT, TYPE, &mixed, 10, 0, "", STAMP);
+    let collection = items(ENDPOINT, TYPE, &mixed, 10, 0, "", STAMP, None);
 
     assert_eq!(collection["numberReturned"], json!(2));
     assert_eq!(
@@ -150,7 +150,7 @@ fn an_entity_without_a_geometry_is_not_counted_as_a_feature() {
 #[test]
 fn an_empty_page_is_an_empty_feature_collection() {
     for empty in [json!([]), json!({}), json!("nothing"), Value::Null] {
-        let collection = items(ENDPOINT, TYPE, &empty, 10, 0, "", STAMP);
+        let collection = items(ENDPOINT, TYPE, &empty, 10, 0, "", STAMP, None);
         assert_eq!(collection["type"], json!("FeatureCollection"), "{empty}");
         assert_eq!(collection["numberReturned"], json!(0), "{empty}");
         assert_eq!(collection["features"], json!([]), "{empty}");
@@ -161,7 +161,7 @@ fn an_empty_page_is_an_empty_feature_collection() {
 /// Every feature keeps the attributes the projection left on its entity and gains nothing.
 #[test]
 fn a_feature_carries_what_its_entity_carried_and_nothing_more() {
-    let collection = items(ENDPOINT, TYPE, &page(1), 10, 0, "", STAMP);
+    let collection = items(ENDPOINT, TYPE, &page(1), 10, 0, "", STAMP, None);
     let feature = &collection["features"][0];
 
     assert_eq!(feature["type"], json!("Feature"));
@@ -177,7 +177,7 @@ fn a_feature_carries_what_its_entity_carried_and_nothing_more() {
 #[test]
 fn the_timestamp_is_the_one_the_handler_passed() {
     for stamp in [STAMP, "", "not a time"] {
-        let collection = items(ENDPOINT, TYPE, &page(1), 10, 0, "", stamp);
+        let collection = items(ENDPOINT, TYPE, &page(1), 10, 0, "", stamp, None);
         assert_eq!(collection["timeStamp"], json!(stamp));
     }
 }
@@ -185,7 +185,7 @@ fn the_timestamp_is_the_one_the_handler_passed() {
 /// The links are the endpoint's own root, so a client never follows one to another endpoint.
 #[test]
 fn every_link_stays_inside_this_endpoint() {
-    let collection = items(ENDPOINT, TYPE, &page(10), 10, 0, "limit=10", STAMP);
+    let collection = items(ENDPOINT, TYPE, &page(10), 10, 0, "limit=10", STAMP, None);
     for rel in ["self", "collection", "next"] {
         assert!(
             href(&collection, rel).starts_with(&format!("{ENDPOINT}/ogc")),
@@ -205,7 +205,7 @@ fn every_link_stays_inside_this_endpoint() {
 fn a_query_with_its_own_punctuation_survives_into_the_next_link() {
     let asked = "datetime=2026-09-18T09%3A00%3A00Z%2F..&filter=pm10%20%3E%2010&limit=10";
     let next = href(
-        &items(ENDPOINT, TYPE, &page(10), 10, 0, asked, STAMP),
+        &items(ENDPOINT, TYPE, &page(10), 10, 0, asked, STAMP, None),
         "next",
     );
 
@@ -219,18 +219,55 @@ fn a_query_with_its_own_punctuation_survives_into_the_next_link() {
 /// The same page twice is the same answer: nothing in here carries state between calls.
 #[test]
 fn the_same_page_translates_the_same_way_twice() {
-    let once = items(ENDPOINT, TYPE, &page(3), 10, 0, "limit=10", STAMP);
-    let twice = items(ENDPOINT, TYPE, &page(3), 10, 0, "limit=10", STAMP);
+    let once = items(ENDPOINT, TYPE, &page(3), 10, 0, "limit=10", STAMP, None);
+    let twice = items(ENDPOINT, TYPE, &page(3), 10, 0, "limit=10", STAMP, None);
     assert_eq!(once, twice);
 }
 
 /// A large page is translated whole, and the count is the count.
 #[test]
 fn a_large_page_is_translated_to_its_last_entity() {
-    let collection = items(ENDPOINT, TYPE, &page(1000), 1000, 0, "", STAMP);
+    let collection = items(ENDPOINT, TYPE, &page(1000), 1000, 0, "", STAMP, None);
     assert_eq!(collection["numberReturned"], json!(1000));
     assert_eq!(
         collection["features"][999]["id"],
         json!("urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:station-999")
+    );
+}
+
+/// EP-37: the page is made of the same features the GeoJSON route serves, so the unit and the
+/// instant an attribute carries are in the OGC answer too — and the caller's language decides
+/// the text of a LanguageProperty there as well.
+#[test]
+fn a_page_carries_the_unit_the_instant_and_the_callers_language() {
+    let measured = json!([{
+        "id": "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:station-001",
+        "type": TYPE,
+        "pm10": {
+            "type": "Property",
+            "value": 63.2,
+            "unitCode": "GQ",
+            "observedAt": "2026-09-05T11:50:00Z",
+        },
+        "label": {
+            "type": "LanguageProperty",
+            "languageMap": { "sk": "Merací bod", "en": "Measuring point" },
+        },
+        "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [19.15, 48.73] } },
+    }]);
+
+    let collection = items(ENDPOINT, TYPE, &measured, 10, 0, "", STAMP, Some("sk"));
+    let properties = &collection["features"][0]["properties"];
+
+    assert_eq!(properties["pm10"], json!(63.2));
+    assert_eq!(properties["pm10_unitCode"], json!("GQ"));
+    assert_eq!(properties["pm10_observedAt"], json!("2026-09-05T11:50:00Z"));
+    assert_eq!(properties["label"], json!("Merací bod"));
+
+    let in_english = items(ENDPOINT, TYPE, &measured, 10, 0, "", STAMP, Some("en"));
+    assert_eq!(
+        in_english["features"][0]["properties"]["label"],
+        json!("Measuring point"),
+        "the page answers the language the caller asked for"
     );
 }

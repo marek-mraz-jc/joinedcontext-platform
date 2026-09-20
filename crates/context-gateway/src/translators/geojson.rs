@@ -9,6 +9,7 @@
 //! has exactly one geometry.
 
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 
 /// The media type of the answer.
 pub const MEDIA_TYPE: &str = "application/geo+json";
@@ -26,7 +27,7 @@ pub struct Untranslatable;
 /// An empty answer translates to an empty collection: nothing to show is not a type
 /// error. An answer that has entities and no geometry at all is one, because the caller
 /// asked a non-spatial type for a spatial representation (EP-10).
-pub fn feature_collection(entities: &Value) -> Result<Value, Untranslatable> {
+pub fn feature_collection(entities: &Value, lang: Option<&str>) -> Result<Value, Untranslatable> {
     let entities: Vec<&Value> = match entities {
         Value::Array(entities) => entities.iter().collect(),
         entity if entity.is_object() => vec![entity],
@@ -38,7 +39,7 @@ pub fn feature_collection(entities: &Value) -> Result<Value, Untranslatable> {
 
     let features: Vec<Value> = entities
         .iter()
-        .filter_map(|entity| feature(entity))
+        .filter_map(|entity| feature(entity, lang))
         .collect();
     if features.is_empty() {
         return Err(Untranslatable);
@@ -47,7 +48,10 @@ pub fn feature_collection(entities: &Value) -> Result<Value, Untranslatable> {
 }
 
 /// One entity as a `Feature`, or nothing when it has no geometry.
-pub fn feature(entity: &Value) -> Option<Value> {
+///
+/// `lang` is the caller's `Accept-Language`, which decides the text of a `LanguageProperty`
+/// (EP-37). An answer that depends on it says so in `Vary`.
+pub fn feature(entity: &Value, lang: Option<&str>) -> Option<Value> {
     let geometry = geometry_of(entity)?;
     let mut feature = Map::new();
     feature.insert("type".to_owned(), json!("Feature"));
@@ -55,7 +59,10 @@ pub fn feature(entity: &Value) -> Option<Value> {
         feature.insert("id".to_owned(), id.clone());
     }
     feature.insert("geometry".to_owned(), geometry);
-    feature.insert("properties".to_owned(), Value::Object(properties(entity)));
+    feature.insert(
+        "properties".to_owned(),
+        Value::Object(properties(entity, lang)),
+    );
     Some(Value::Object(feature))
 }
 
@@ -88,8 +95,9 @@ fn geometry_of(entity: &Value) -> Option<Value> {
         .map(|_| geometry.clone())
 }
 
-/// The entity's attributes, flattened to the plain key-value pairs a GeoJSON client reads.
-fn properties(entity: &Value) -> Map<String, Value> {
+/// The entity's attributes, flattened to the plain key-value pairs a GeoJSON client reads
+/// (EP-37, the flattening table of API/02 section 6).
+fn properties(entity: &Value, lang: Option<&str>) -> Map<String, Value> {
     let mut properties = Map::new();
     let Some(members) = entity.as_object() else {
         return properties;
@@ -103,19 +111,57 @@ fn properties(entity: &Value) -> Map<String, Value> {
                 properties.insert("type".to_owned(), value.clone());
             }
             _ => {
-                properties.insert(name.clone(), flatten(value));
+                properties.insert(name.clone(), flatten(value, lang));
+                // What the value alone does not say: what it is measured in, and when it was
+                // observed. Both are members of the attribute the projection already allowed
+                // through, so nothing new reaches the wire — and without them a client cannot
+                // tell micrograms from milligrams, or an hour ago from last year (EP-37).
+                for member in [UNIT_CODE, OBSERVED_AT] {
+                    if let Some(beside) = value.get(member).filter(|it| !it.is_null()) {
+                        properties.insert(format!("{name}_{member}"), beside.clone());
+                    }
+                }
             }
         }
     }
     properties
 }
 
+/// The member naming the unit an attribute's value is measured in (CIM 009 clause 4.5.4).
+const UNIT_CODE: &str = "unitCode";
+/// The member naming the instant an attribute's value was observed (CIM 009 clause 4.8).
+const OBSERVED_AT: &str = "observedAt";
+
 /// One attribute as a plain value: a Property's `value`, a Relationship's `object`, a
-/// concise attribute as it stands.
-fn flatten(attribute: &Value) -> Value {
+/// `LanguageProperty`'s text in the caller's language, a concise attribute as it stands.
+fn flatten(attribute: &Value, lang: Option<&str>) -> Value {
+    if let Some(texts) = attribute.get("languageMap") {
+        // The map itself where nothing in it is text: a client reading one key too many is a
+        // better answer than a feature that lost the attribute.
+        return texts
+            .as_object()
+            .and_then(|texts| language_text(texts, lang))
+            .unwrap_or_else(|| texts.clone());
+    }
     attribute
         .get("value")
         .or_else(|| attribute.get("object"))
         .cloned()
         .unwrap_or_else(|| attribute.clone())
+}
+
+/// A `LanguageProperty` as the one text the caller asked for (EP-37, EP-45).
+///
+/// The same matching rule the landing page's title uses, so one endpoint answers one language
+/// to one request. `None` where the map holds no text at all, and then the map travels whole
+/// rather than the feature losing the attribute.
+fn language_text(texts: &Map<String, Value>, lang: Option<&str>) -> Option<Value> {
+    let by_locale: BTreeMap<String, String> = texts
+        .iter()
+        .filter_map(|(locale, text)| text.as_str().map(|text| (locale.clone(), text.to_owned())))
+        .collect();
+    if by_locale.is_empty() {
+        return None;
+    }
+    Some(json!(super::ogc::localized(&by_locale, lang, None)))
 }

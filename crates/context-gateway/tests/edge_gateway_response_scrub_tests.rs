@@ -13,10 +13,14 @@ use axum::extract::Request;
 use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::routing::get;
 use axum::Router;
+use context_gateway::app::Gateway;
 use context_gateway::middleware::response::{
     asked_about_narrowing, scrub, RESULTS_RESTRICTED, WARNING,
 };
 use context_gateway::middleware::tenancy::TENANT;
+use context_gateway::pdp::PolicyPdp;
+use context_gateway::proxy::Broker;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 /// A handler that answers with whatever a test hands it, so the layer is the only thing measured.
@@ -30,7 +34,16 @@ fn answering(build: fn(&mut Response<Body>)) -> Router {
                 response
             }),
         )
-        .layer(axum::middleware::from_fn(scrub))
+        .layer(axum::middleware::from_fn_with_state(
+            // The layer resolves the endpoint of a data path to write the `describedby` link;
+            // `/entities` is not one, so these cases measure the scrubbing alone (EP-50).
+            Arc::new(Gateway::new(
+                Broker::new("http://127.0.0.1:1".to_owned()),
+                Box::new(PolicyPdp),
+                "hel.fi",
+            )),
+            scrub,
+        ))
 }
 
 fn asking(header_values: &[(&'static str, &'static str)]) -> Request {
@@ -62,7 +75,15 @@ async fn every_answer_says_it_belongs_to_one_caller() {
     let vary = response.headers()[header::VARY]
         .to_str()
         .expect("a readable Vary");
-    for named in ["Authorization", "Accept", "NGSILD-Results-Restricted"] {
+    // EP-37: `Accept-Language` joined them when a LanguageProperty started answering in the
+    // caller's language — a cache keyed without it would hand a Slovak label to an English
+    // reader.
+    for named in [
+        "Authorization",
+        "Accept",
+        "Accept-Language",
+        "NGSILD-Results-Restricted",
+    ] {
         assert!(vary.contains(named), "Vary does not name {named}: {vary}");
     }
 }

@@ -33,6 +33,14 @@ const OPEN: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const WIDE: &str = "w8k3zq6nxv2htb5rjs9cyd4gpm";
 /// The same, needing a token.
 const CLOSED: &str = "p9d2wc5kzn8mth4rqvb7xj3sfy";
+/// A grant that names no `information` at all — the dev seed's own `public-read` — so the
+/// caller has no type whitelist, on an endpoint that hides two attributes (T-2341).
+const UNLISTED: &str = "b6t4hm9xq3vzk7npwr2sjc5dyg";
+/// The same open grant, with a prohibition taking one attribute back instead (GW8).
+const PROHIBITED: &str = "r3v8sn5kqz2mbt7hxwc9jd4pgf";
+/// The same open grant, hiding only the attribute that lives in the committed `@context` and
+/// in no `$defs`: the one case where the context builder is the only thing that redacts.
+const CONTEXT_ONLY: &str = "y2c7wk4rq9zmxs6btn3hjd5vpf";
 
 /// Every spelling of every formalism this surface serves.
 const ARTIFACTS: &[&str] = &[
@@ -90,12 +98,24 @@ fn air_quality() -> Model {
                 "InternalIncident": "https://bb.example.sk/schema/air-quality/InternalIncident",
                 "pm10": "https://bb.example.sk/schema/air-quality/pm10",
                 "internalNote": "https://bb.example.sk/schema/air-quality/internalNote",
+                // In the committed context and in no `$defs`: the JSON Schema builder never
+                // sees this term, so only the `@context` can give it away.
+                "stationApiKey": "https://bb.example.sk/schema/air-quality/stationApiKey",
             }
         })),
     }
 }
 
 fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoint {
+    endpoint_with(slug, audience, policies, &[])
+}
+
+fn endpoint_with(
+    slug: &str,
+    audience: Audience,
+    policies: Vec<PolicySpec>,
+    hidden: &[&str],
+) -> Endpoint {
     Endpoint {
         slug: slug.to_owned(),
         title: Default::default(),
@@ -107,7 +127,7 @@ fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoi
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
         file_limits: None,
-        hidden_attributes: Default::default(),
+        hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![air_quality()],
@@ -144,6 +164,35 @@ information:
     )]
 }
 
+/// Every operation, no `information`: the shape the dev seed's `public-read` policy has, and
+/// the one that leaves `Visible::types` empty (T-2341).
+fn unlisted_grant() -> Vec<PolicySpec> {
+    vec![policy(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+"#,
+    )]
+}
+
+fn prohibited_grant() -> Vec<PolicySpec> {
+    let mut policies = unlisted_grant();
+    policies.push(policy(
+        r#"contextSpaceRef: ovzdusie
+effect: prohibition
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+    propertyNames: [internalNote]
+"#,
+    ));
+    policies
+}
+
 fn app_of(realm: &common::Realm) -> axum::Router {
     router(Arc::new(
         Gateway::new(
@@ -155,6 +204,19 @@ fn app_of(realm: &common::Realm) -> axum::Router {
             endpoint(OPEN, Audience::Public, narrow_grant()),
             endpoint(WIDE, Audience::Public, wide_grant()),
             endpoint(CLOSED, Audience::Organization, narrow_grant()),
+            endpoint_with(
+                UNLISTED,
+                Audience::Public,
+                unlisted_grant(),
+                &["internalNote", "stationApiKey"],
+            ),
+            endpoint(PROHIBITED, Audience::Public, prohibited_grant()),
+            endpoint_with(
+                CONTEXT_ONLY,
+                Audience::Public,
+                unlisted_grant(),
+                &["stationApiKey"],
+            ),
         ])
         .authenticate(
             Arc::new(realm.verifier()),
@@ -506,4 +568,100 @@ async fn nothing_but_a_get_on_two_segments_reaches_an_artifact() {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path} answered");
     }
+}
+
+/// EP-61, EP-26, T-2341: an endpoint's `hiddenAttributes` are what it does not serve, so the
+/// `@context` may not name them either — the schema and the data cannot disagree about which
+/// attributes exist. The caller here has no type whitelist, which is what used to make the
+/// class test in the term condition answer true for every name and swallow the attribute test
+/// in front of it.
+#[tokio::test]
+async fn a_context_under_a_grant_with_no_type_whitelist_still_hides_the_endpoints_attributes() {
+    let (status, media, _, body) = call(artifact(UNLISTED, "v1", "context.jsonld")).await;
+    assert_eq!(status, StatusCode::OK, "{body:.200}");
+    assert_eq!(media, "application/ld+json");
+
+    for hidden in ["internalNote", "stationApiKey"] {
+        assert!(
+            !body.contains(hidden),
+            "the @context names {hidden}, which this endpoint hides: {body:.400}"
+        );
+    }
+    assert!(
+        body.contains("pm10"),
+        "the granted attribute was narrowed away with the hidden ones: {body:.400}"
+    );
+}
+
+/// GW8, EP-61, T-2341: a prohibition takes an attribute back from a grant that would otherwise
+/// carry it, and `denied_attrs` is the same set the endpoint's `hiddenAttributes` land in — so
+/// the term goes the same way out of the `@context`.
+#[tokio::test]
+async fn a_prohibition_takes_a_term_out_of_the_context_as_well() {
+    let (status, _, _, body) = call(artifact(PROHIBITED, "v1", "context.jsonld")).await;
+    assert_eq!(status, StatusCode::OK, "{body:.200}");
+    assert!(
+        !body.contains("internalNote"),
+        "the @context names an attribute a prohibition took back: {body:.400}"
+    );
+    assert!(
+        body.contains("pm10"),
+        "the attribute the prohibition left alone is gone too: {body:.400}"
+    );
+}
+
+/// MP-02, T-2341: the class terms are the reason the type test is in that condition at all, and
+/// this is the path that already worked — a caller **with** a type whitelist. The class the
+/// grant names stays in the `@context`, the class it does not is still redacted, and neither
+/// answer changes because the attribute terms are now decided separately.
+#[tokio::test]
+async fn the_class_terms_of_a_projected_model_survive_the_attribute_narrowing() {
+    let (status, _, _, narrow) = call(artifact(OPEN, "v1", "context.jsonld")).await;
+    assert_eq!(status, StatusCode::OK, "{narrow:.200}");
+    assert!(
+        narrow.contains("AirQualityObserved"),
+        "the granted class left the @context: {narrow:.400}"
+    );
+    assert!(
+        !narrow.contains("InternalIncident"),
+        "a class the grant does not name is in the @context: {narrow:.400}"
+    );
+
+    let (status, _, _, wide) = call(artifact(WIDE, "v1", "context.jsonld")).await;
+    assert_eq!(status, StatusCode::OK, "{wide:.200}");
+    for class in ["AirQualityObserved", "InternalIncident"] {
+        assert!(
+            wide.contains(class),
+            "the wider grant lost {class} from the @context: {wide:.400}"
+        );
+    }
+}
+
+/// EP-47, T-2341: the index says *that* something was left out and never what. A term the
+/// committed `@context` carries and no `$defs` mentions is only ever redacted by the context
+/// builder, so the flag has to be raised from what that builder kept back too — otherwise an
+/// endpoint that hides exactly such an attribute reports a complete model.
+#[tokio::test]
+async fn the_index_reports_a_term_only_the_context_left_out() {
+    let request = Request::builder()
+        .uri(format!("/api/endpoint/{CONTEXT_ONLY}/schema/index.json"))
+        .body(Body::empty())
+        .expect("a request");
+    let (status, _, _, body) = call(request).await;
+    assert_eq!(status, StatusCode::OK, "{body:.200}");
+
+    let index: serde_json::Value = serde_json::from_str(&body).expect("the index is JSON");
+    let model = index["models"]
+        .as_array()
+        .and_then(|models| models.first())
+        .expect("the index describes the model");
+    assert_eq!(
+        model["redacted"],
+        json!(true),
+        "the index reports a complete model although the @context hides two terms: {body:.400}"
+    );
+    assert!(
+        !body.contains("stationApiKey"),
+        "the index names what was left out: {body:.400}"
+    );
 }

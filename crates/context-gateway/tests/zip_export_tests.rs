@@ -52,7 +52,12 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
                     "pm10": { "type": "number" }, "secret": { "type": "number" }
                 } } }
             })),
-            context: Some(json!({ "@context": { "pm10": "https://smartdatamodels.org/pm10" } })),
+            // The committed context describes the whole model, the attribute this endpoint
+            // hides included: narrowing it is the gateway's job, not the model author's.
+            context: Some(json!({ "@context": {
+                "pm10": "https://smartdatamodels.org/pm10",
+                "secret": "https://smartdatamodels.org/secret"
+            } })),
         }],
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
@@ -337,4 +342,46 @@ async fn a_dataset_without_geometry_still_bundles() {
     assert_eq!(features["features"], json!([]));
     let csv = String::from_utf8(member(&members, "data/entities.csv").to_vec()).expect("utf-8");
     assert_eq!(csv.lines().count(), 2, "the row is still there:\n{csv}");
+}
+
+/// EP-61, MP-02, T-2341: the bundle's `schema/v1/context.jsonld` is a schema document like the
+/// six beside it, and a term is a name *and* an IRI. A grant that names no `information` — the
+/// dev seed's own `public-read` is exactly that — leaves the caller with no type whitelist, and
+/// a whitelist-free caller used to cover every term of the committed context by the class test,
+/// which the hidden-attribute test in front of it could then never refuse.
+#[tokio::test]
+async fn no_schema_document_in_the_bundle_describes_a_hidden_attribute() {
+    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2)])]).await;
+    let (_, archive, _) = download(
+        gateway(&broker.url, endpoint(None, &["secret"])),
+        &format!("/api/endpoint/{SLUG}/file.zip"),
+    )
+    .await;
+
+    let schemas: Vec<_> = members(&archive)
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("schema/"))
+        .collect();
+    assert!(
+        schemas
+            .iter()
+            .any(|(path, _)| path.ends_with("context.jsonld")),
+        "the bundle carries no @context to check: {:?}",
+        schemas.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+    for (path, body) in &schemas {
+        let text = String::from_utf8_lossy(body);
+        assert!(
+            !text.contains("secret"),
+            "{path} names an attribute the endpoint hides: {text:.400}"
+        );
+    }
+
+    // The attribute the endpoint does serve is still described, or the check above would pass
+    // on an empty document.
+    let context = member(&members(&archive), "schema/v1/context.jsonld").to_vec();
+    assert!(
+        String::from_utf8_lossy(&context).contains("pm10"),
+        "the granted attribute was narrowed away with the hidden one"
+    );
 }

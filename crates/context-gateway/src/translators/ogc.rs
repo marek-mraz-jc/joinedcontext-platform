@@ -298,7 +298,9 @@ pub struct Extent {
 pub fn extent_of(entities: &Value) -> Extent {
     let mut extent = Extent::default();
     for entity in entities.as_array().into_iter().flatten() {
-        if let Some(feature) = geojson::feature(entity) {
+        // The bounding box is the geometry's; no text of the answer is read here, so the
+        // caller's language cannot change an extent.
+        if let Some(feature) = geojson::feature(entity, None) {
             for [x, y] in positions(&feature["geometry"]) {
                 extent.bbox = Some(match extent.bbox {
                     None => [x, y, x, y],
@@ -376,6 +378,7 @@ fn observed_times(entity: &Value) -> Vec<&str> {
 /// `raw_query` is the caller's query string exactly as it arrived, so the `self` link is the
 /// request and the `next` link is the request with one parameter replaced. Entities without a
 /// geometry are dropped rather than refused: a page that happens to hold one is still a page.
+#[allow(clippy::too_many_arguments)]
 pub fn items(
     endpoint: &str,
     name: &str,
@@ -384,13 +387,14 @@ pub fn items(
     offset: usize,
     raw_query: &str,
     timestamp: &str,
+    lang: Option<&str>,
 ) -> Value {
     let root = root(endpoint);
     let features: Vec<Value> = entities
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|entity| feature(endpoint, name, entity))
+        .filter_map(|entity| feature(endpoint, name, entity, lang))
         .collect();
     let returned = features.len();
 
@@ -427,8 +431,8 @@ pub fn items(
 }
 
 /// One feature, with the links back to what it really is (EP-33, EP-38).
-pub fn feature(endpoint: &str, name: &str, entity: &Value) -> Option<Value> {
-    let mut feature = geojson::feature(entity)?;
+pub fn feature(endpoint: &str, name: &str, entity: &Value, lang: Option<&str>) -> Option<Value> {
+    let mut feature = geojson::feature(entity, lang)?;
     let Some(id) = feature.get("id").and_then(Value::as_str).map(str::to_owned) else {
         return Some(feature);
     };

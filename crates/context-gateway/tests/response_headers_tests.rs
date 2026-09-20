@@ -11,8 +11,12 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
+use context_gateway::app::Gateway;
 use context_gateway::middleware::response::{scrub, RESULTS_RESTRICTED};
 use context_gateway::middleware::tenancy::TENANT;
+use context_gateway::pdp::PolicyPdp;
+use context_gateway::proxy::Broker;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 /// A handler that answers the way the broker and the projection stage do: with both headers
@@ -31,7 +35,16 @@ async fn answers_with_both() -> Response<Body> {
 fn app() -> Router {
     Router::new()
         .route("/entities", get(answers_with_both))
-        .layer(axum::middleware::from_fn(scrub))
+        .layer(axum::middleware::from_fn_with_state(
+            // The layer needs the resolver for the `describedby` link of a data path; this
+            // one is `/entities`, which is not an endpoint surface (EP-50).
+            Arc::new(Gateway::new(
+                Broker::new("http://127.0.0.1:1".to_owned()),
+                Box::new(PolicyPdp),
+                "hel.fi",
+            )),
+            scrub,
+        ))
 }
 
 async fn answer(request: Request) -> Response<Body> {
@@ -116,7 +129,14 @@ async fn a_repeated_header_is_removed_entirely() {
     }
     let response = Router::new()
         .route("/entities", get(twice))
-        .layer(axum::middleware::from_fn(scrub))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(Gateway::new(
+                Broker::new("http://127.0.0.1:1".to_owned()),
+                Box::new(PolicyPdp),
+                "hel.fi",
+            )),
+            scrub,
+        ))
         .oneshot(asking(None))
         .await
         .expect("the layer answers");

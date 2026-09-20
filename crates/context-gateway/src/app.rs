@@ -234,6 +234,9 @@ impl Gateway {
 
 /// The router: two probes and the endpoint surface.
 pub fn router(gateway: Arc<Gateway>) -> Router {
+    // The outermost layer resolves the endpoint of a path itself, to write the `describedby`
+    // link no handler can then forget (EP-50).
+    let gateway_for_scrub = Arc::clone(&gateway);
     // The recorder belongs to the surface rather than to `main`: without it every
     // `metrics::` call in the process is a no-op, and a test that builds a router would
     // measure nothing while looking like it measured zero (OPS-16).
@@ -299,7 +302,8 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .fallback(missing)
         // Outside every handler, so nothing the gateway concluded for itself — the tenant,
         // and the narrowing signal nobody asked for — leaves in a header (SP-05, R22).
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            gateway_for_scrub,
             crate::middleware::response::scrub,
         ))
         .layer(axum::middleware::from_fn(telemetry::record))
@@ -1871,14 +1875,33 @@ async fn file_geojson(
     };
 
     let params = query::parse(request.uri().query().unwrap_or_default());
-    let (entities, restricted) =
-        match query_entities(&gateway, &endpoint, &subject, &params, &mut request).await {
-            Ok(answer) => answer,
-            Err(problem) => return *problem,
-        };
+    // A download is the whole dataset, paged out of the broker and held to this endpoint's
+    // ceilings, exactly like `file.csv` (EP-44, T-1700). One broker query instead would answer
+    // a page and call it a file: a truncated FeatureCollection is indistinguishable from a
+    // complete one, and the caller acts on half the data.
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    let (entities, restricted) = match paged_entities(
+        &gateway,
+        &endpoint,
+        &subject,
+        &params,
+        &mut request,
+        &limits,
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(problem) => return *problem,
+    };
 
-    match geojson::feature_collection(&entities) {
+    match geojson::feature_collection(&entities, accept_language(request.headers())) {
         Ok(collection) => {
+            // The byte ceiling is the endpoint's own, measured on what would be sent (EP-44).
+            if serde_json::to_vec(&collection)
+                .is_ok_and(|bytes| bytes.len() as u64 > limits.max_bytes)
+            {
+                return too_large();
+            }
             let mut response = json_response(&collection);
             response.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
@@ -2799,7 +2822,16 @@ async fn ogc_items(
         };
 
     let timestamp = crate::pdp::now().to_rfc3339();
-    let page = ogc::items(base, name, &entities, limit, offset, raw_query, &timestamp);
+    let page = ogc::items(
+        base,
+        name,
+        &entities,
+        limit,
+        offset,
+        raw_query,
+        &timestamp,
+        accept_language(request.headers()),
+    );
     let mut response = typed_json_response(&page, ogc::GEOJSON);
     response
         .headers_mut()
@@ -2838,7 +2870,7 @@ async fn ogc_item(
     let Some(feature) = entities
         .as_array()
         .and_then(|list| list.first())
-        .and_then(|entity| ogc::feature(base, name, entity))
+        .and_then(|entity| ogc::feature(base, name, entity, accept_language(request.headers())))
     else {
         return ProblemDetails::not_found().into_response();
     };
@@ -2903,6 +2935,13 @@ async fn ogc_sample(
             extent.bbox.is_some().then_some((name, extent))
         })
         .collect())
+}
+
+/// The language the caller asked for, as they wrote it (EP-37, EP-45).
+fn accept_language(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
 }
 
 /// The endpoint's title and description in the caller's language (EP-32).
