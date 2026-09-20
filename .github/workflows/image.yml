@@ -48,6 +48,28 @@ jobs:
         run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
       - if: steps.has.outputs.df != ''
         run: echo "digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      # OPS-41 asks for the bill of materials in CycloneDX; `sbom: true` above attaches
+      # BuildKit's SPDX one. The CycloneDX document is read off the pushed digest and attested
+      # to it, because an uploaded artifact expires and an attestation travels with the image
+      # (T-2412).
+      - if: steps.has.outputs.df != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+          format: cyclonedx
+          output: sbom.cdx.json
+      - if: steps.has.outputs.df != ''
+        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+      # Read back what was just attested, by the same digest and under the identity of this
+      # workflow: a lane that stops attesting, or attests under another identity, goes red here
+      # instead of publishing an image nothing describes. Before the vulnerability gate below,
+      # because an image that fails that gate is the one whose contents somebody needs.
+      - if: steps.has.outputs.df != ''
+        run: |
+          cosign verify-attestation --type cyclonedx \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/image.yml@${{ github.ref }}" \
+            "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" > /dev/null
       - if: steps.has.outputs.df != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
@@ -91,5 +113,24 @@ jobs:
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
       - run: cosign sign --yes ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}
       - run: echo "model-tools digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      # OPS-41 asks for the bill of materials in CycloneDX; `sbom: true` above attaches
+      # BuildKit's SPDX one. The CycloneDX document is read off the pushed digest and attested
+      # to it, because an uploaded artifact expires and an attestation travels with the image
+      # (T-2412).
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}"
+          format: cyclonedx
+          output: sbom.cdx.json
+      - run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}
+      # Read back what was just attested, by the same digest and under the identity of this
+      # workflow: a lane that stops attesting, or attests under another identity, goes red here
+      # instead of publishing an image nothing describes. Before the vulnerability gate below,
+      # because an image that fails that gate is the one whose contents somebody needs.
+      - run: |
+          cosign verify-attestation --type cyclonedx \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/image.yml@${{ github.ref }}" \
+            "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}" > /dev/null
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { image-ref: "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
