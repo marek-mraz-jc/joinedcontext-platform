@@ -1,5 +1,5 @@
 # Model Tools: the one non-Rust runtime component (Architecture/11 §6.5, DM-18).
-# Published by .github/workflows/image.yml as ghcr.io/marek-mraz/joinedcontext-platform/model-tools
+# Published by .github/workflows/image.yml as ghcr.io/marek-mraz-jc/joinedcontext-platform/model-tools
 # and pinned by digest in the deployment; DM-19 pins the same version for CI and the preview.
 #
 # Build context is this folder: `docker build tools/model-tools`.

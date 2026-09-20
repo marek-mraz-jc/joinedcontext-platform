@@ -8,4 +8,4 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/marek-mraz/joinedcontext-platform"]
+allow-git = ["https://github.com/marek-mraz-jc/joinedcontext-platform"]

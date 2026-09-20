@@ -63,7 +63,7 @@ docker run --rm -p 8080:8080 model-tools
 ```
 
 `.github/workflows/image.yml` publishes it as
-`ghcr.io/marek-mraz/joinedcontext-platform/model-tools`, signs it and scans it, and the lane
+`ghcr.io/marek-mraz-jc/joinedcontext-platform/model-tools`, signs it and scans it, and the lane
 runs the built image against a real model before signing: the failure this catches is
 packaging, not code, because an image that cannot resolve the shipped `ngsi-ld-core` import
 answers with errors and no artifacts and every unit test still passes.

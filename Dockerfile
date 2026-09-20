@@ -1,6 +1,6 @@
 # joinedcontext-platform: one image, four binaries (context-gateway = entrypoint; jcctl, jc-agent-proxy
 # and jc-functions = `docker run … <binary>`, which is how the agent runner and functions components run them).
-# Published by .github/workflows/image.yml as ghcr.io/marek-mraz/joinedcontext-platform, pinned by digest in the deployment.
+# Published by .github/workflows/image.yml as ghcr.io/marek-mraz-jc/joinedcontext-platform, pinned by digest in the deployment.
 FROM rust:1.90-slim-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*

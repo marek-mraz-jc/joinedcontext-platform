@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
 env:
-  PLATFORM_IMAGE: ghcr.io/marek-mraz/joinedcontext-platform:main
+  PLATFORM_IMAGE: ghcr.io/marek-mraz-jc/joinedcontext-platform:main
   CONFTEST_VERSION: "0.62.0"
 jobs:
   gate:

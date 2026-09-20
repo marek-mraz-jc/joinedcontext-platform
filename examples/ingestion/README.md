@@ -98,5 +98,5 @@ is here only so `tests/decoder.yaml` can decode the binary fixture without the i
 
 ## Related
 
-- [Architecture/08 §6](https://github.com/marek-mraz/joinedcontext-docs/blob/main/Architecture/08-pipelines.md) — the `DataSource` kind and what each type becomes in Bento.
-- [Development/06a-ingestion-examples.md](https://github.com/marek-mraz/joinedcontext-docs/blob/main/Development/06a-ingestion-examples.md) — the same four recipes end to end, with the curls that verify them.
+- [Architecture/08 §6](https://github.com/marek-mraz-jc/joinedcontext-docs/blob/main/Architecture/08-pipelines.md) — the `DataSource` kind and what each type becomes in Bento.
+- [Development/06a-ingestion-examples.md](https://github.com/marek-mraz-jc/joinedcontext-docs/blob/main/Development/06a-ingestion-examples.md) — the same four recipes end to end, with the curls that verify them.

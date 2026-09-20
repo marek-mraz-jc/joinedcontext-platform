@@ -5,5 +5,5 @@
 # a preview disagree for a reason no diff can show (DM-19). `image` is what runs; the version
 # it reports on /healthz is `generatorVersion`, and `jcctl model` refuses anything else.
 modelTools:
-  image: ghcr.io/marek-mraz/joinedcontext-platform/model-tools:main
+  image: ghcr.io/marek-mraz-jc/joinedcontext-platform/model-tools:main
   generatorVersion: linkml-1.11.1
