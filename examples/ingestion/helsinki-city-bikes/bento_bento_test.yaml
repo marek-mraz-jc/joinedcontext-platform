@@ -1,0 +1,80 @@
+# Golden transformation tests for the GBFS city bike pipeline (PL-22, T-0321).
+#
+#   bento test ./examples/ingestion/helsinki-city-bikes/...
+
+tests:
+  - name: one GBFS response becomes one entity per installed station
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          last_updated: 1788738140
+          ttl: 10
+          version: "2.2"
+          data:
+            stations:
+              - station_id: "008"
+                num_bikes_available: 9
+                num_docks_available: 15
+                is_installed: true
+                is_renting: true
+                is_returning: true
+                last_reported: 1788738135
+              - station_id: "070"
+                num_bikes_available: 0
+                num_docks_available: 12
+                is_installed: true
+                is_renting: false
+                is_returning: true
+                last_reported: 1788738100
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:BikeHireDockingStation:hel.fi:bikes:008",
+              "type": "BikeHireDockingStation",
+              "availableBikeNumber": { "type": "Property", "value": 9, "observedAt": "2026-09-06T23:42:15Z" },
+              "freeSlotNumber": { "type": "Property", "value": 15, "observedAt": "2026-09-06T23:42:15Z" },
+              "totalSlotNumber": { "type": "Property", "value": 24, "observedAt": "2026-09-06T23:42:15Z" },
+              "status": { "type": "Property", "value": "working", "observedAt": "2026-09-06T23:42:15Z" },
+              "dateModified": { "type": "Property", "value": "2026-09-06T23:42:15Z" },
+              "source": { "type": "Property", "value": "https://www.hsl.fi/en/citybikes" }
+            },
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:BikeHireDockingStation:hel.fi:bikes:070",
+              "type": "BikeHireDockingStation",
+              "availableBikeNumber": { "type": "Property", "value": 0, "observedAt": "2026-09-06T23:41:40Z" },
+              "freeSlotNumber": { "type": "Property", "value": 12, "observedAt": "2026-09-06T23:41:40Z" },
+              "totalSlotNumber": { "type": "Property", "value": 12, "observedAt": "2026-09-06T23:41:40Z" },
+              "status": { "type": "Property", "value": "outOfService", "observedAt": "2026-09-06T23:41:40Z" },
+              "dateModified": { "type": "Property", "value": "2026-09-06T23:41:40Z" },
+              "source": { "type": "Property", "value": "https://www.hsl.fi/en/citybikes" }
+            }
+          ]
+
+  - name: a station the operator has taken out of the ground writes nothing
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          data:
+            stations:
+              - station_id: "999"
+                num_bikes_available: 0
+                num_docks_available: 0
+                is_installed: false
+                is_renting: false
+                is_returning: false
+                last_reported: 1788738000
+    output_batches: []

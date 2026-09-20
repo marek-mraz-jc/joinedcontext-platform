@@ -1,0 +1,51 @@
+{
+  "@context": {
+    "@vocab": "https://hel.fi/ns/",
+    "AirQualityObserved": {
+      "@id": "hel:AirQualityObserved"
+    },
+    "Entity": {
+      "@id": "ngsi-ld:Entity"
+    },
+    "dateObserved": {
+      "@id": "hel:dateObserved",
+      "@type": "xsd:dateTime"
+    },
+    "geojson": "https://purl.org/geojson/vocab#",
+    "hel": "https://hel.fi/ns/",
+    "id": "@id",
+    "linkml": "https://w3id.org/linkml/",
+    "location": {
+      "@id": "geojson:geometry"
+    },
+    "ngsi-ld": "https://uri.etsi.org/ngsi-ld/",
+    "observedAt": {
+      "@id": "ngsi-ld:observedAt",
+      "@type": "xsd:dateTime"
+    },
+    "pm25": {
+      "@id": "hel:pm25",
+      "@type": "xsd:float"
+    },
+    "qudt-quantkind": "http://qudt.org/vocab/quantitykind/",
+    "qudt-unit": "http://qudt.org/vocab/unit/",
+    "refStation": {
+      "@id": "hel:refStation",
+      "@type": "@id"
+    },
+    "schema": "http://schema.org/",
+    "shex": "http://www.w3.org/ns/shex#",
+    "stationName": {
+      "@container": "@language",
+      "@id": "hel:stationName"
+    },
+    "temperature": {
+      "@id": "hel:temperature",
+      "@type": "xsd:float"
+    },
+    "type": "@type",
+    "unece": "https://vocabulary.uncefact.org/UnitMeasureCode#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#"
+  },
+  "x-generator-version": "linkml-1.11.1"
+}

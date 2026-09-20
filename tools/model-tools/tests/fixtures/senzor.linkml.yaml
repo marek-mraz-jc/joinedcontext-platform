@@ -1,0 +1,105 @@
+# One model exercising every NGSI-LD kind the generators treat specially, plus a unit, an
+# enum and a class that accepts undeclared attributes. The tests read this instead of writing
+# a schema each: a generator that gets one kind wrong fails here and nowhere else.
+id: https://banskabystrica.sk/ns/senzor
+name: senzor
+title: Ovzdusie sensor readings
+prefixes:
+  linkml: https://w3id.org/linkml/
+  bb: https://banskabystrica.sk/ns/
+  # The vocabularies the unit mappings cite; a CURIE under an undeclared prefix dangles in
+  # every artifact that carries it (DM-59).
+  unece: https://vocabulary.uncefact.org/UnitMeasureCode#
+  qudt-unit: http://qudt.org/vocab/unit/
+  qudt-quantkind: http://qudt.org/vocab/quantitykind/
+default_prefix: bb
+default_range: string
+imports:
+  - linkml:types
+  - ngsi-ld-core
+
+classes:
+  AirQualityObserved:
+    class_uri: bb:AirQualityObserved
+    description: One air quality reading of one sensor.
+    is_a: Entity
+    slots: [temperature, reliability, refDevice, label, address, pollutant, measuredAt]
+  Address:
+    class_uri: bb:Address
+    description: A nested object with a shape, carried inline and not by reference.
+    attributes:
+      streetAddress:
+        slot_uri: bb:streetAddress
+        range: string
+        annotations:
+          ngsi_ld_kind: Property
+  FreeForm:
+    class_uri: bb:FreeForm
+    description: A class that still accepts attributes the model does not declare.
+    is_a: Entity
+    annotations:
+      open_world: "true"
+
+slots:
+  temperature:
+    slot_uri: bb:temperature
+    description: Air temperature at the sensor.
+    range: float
+    required: true
+    unit:
+      ucum_code: Cel
+      symbol: "°C"
+      exact_mappings:
+        - unece:CEL
+        - qudt-unit:DEG_C
+      has_quantity_kind: qudt-quantkind:Temperature
+    annotations:
+      ngsi_ld_kind: Property
+  reliability:
+    slot_uri: bb:reliability
+    description: How much the reading can be trusted.
+    range: ReliabilityLevel
+    annotations:
+      ngsi_ld_kind: Property
+  refDevice:
+    slot_uri: bb:refDevice
+    description: The device that produced the reading.
+    annotations:
+      ngsi_ld_kind: Relationship
+  label:
+    slot_uri: bb:label
+    description: What the sensor is called, per locale.
+    annotations:
+      ngsi_ld_kind: LanguageProperty
+  address:
+    slot_uri: bb:address
+    description: Where the sensor stands, as an inline object rather than a reference.
+    range: Address
+    annotations:
+      ngsi_ld_kind: JsonProperty
+  pollutant:
+    slot_uri: bb:pollutant
+    description: Which pollutant this reading is of, as a term of a vocabulary.
+    range: Pollutant
+    annotations:
+      ngsi_ld_kind: VocabProperty
+  measuredAt:
+    slot_uri: bb:measuredAt
+    description: The depths the sensor sampled, in the order it sampled them.
+    range: float
+    multivalued: true
+    annotations:
+      ngsi_ld_kind: ListProperty
+
+enums:
+  ReliabilityLevel:
+    permissible_values:
+      low:
+      medium:
+      high:
+  Pollutant:
+    permissible_values:
+      pm10:
+        meaning: bb:pm10
+      pm25:
+        meaning: bb:pm25

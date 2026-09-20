@@ -1,0 +1,38 @@
+# The source side of the golden Mapping: an upstream air quality model, close enough to the
+# Smart Data Model that the renames in the mapping are the real ones a city writes.
+id: https://smartdatamodels.example/ns/airquality
+name: sdm-airquality
+title: Upstream air quality observation
+prefixes:
+  linkml: https://w3id.org/linkml/
+  sdm: https://smartdatamodels.example/ns/
+default_prefix: sdm
+default_range: string
+imports:
+  - linkml:types
+
+classes:
+  AirQualityObserved:
+    class_uri: sdm:AirQualityObserved
+    description: One reading as the upstream model carries it.
+    attributes:
+      id:
+        range: string
+      pm2p5:
+        range: float
+      temperature:
+        range: float
+        unit:
+          ucum_code: m
+      distanceToRoad:
+        range: float
+        unit:
+          ucum_code: m
+      stationName:
+        range: string
+      areaServed:
+        range: string
+      airQualityLevel:
+        range: string
+      readingCount:
+        range: string

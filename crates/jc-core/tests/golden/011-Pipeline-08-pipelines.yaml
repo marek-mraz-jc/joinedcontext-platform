@@ -1,0 +1,15 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: smart-meter-mqtt
+  namespace: bb-energie
+spec:
+  class: resident             # resident | scheduled | auto
+  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:energie:ep-smart-meters
+  secretRefs:
+    - name: mqtt-credentials
+      key: password
+      envVar: MQTT_PASSWORD
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 250

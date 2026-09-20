@@ -1,0 +1,48 @@
+# Golden transformation tests for the reaper (PL-22, PL-32, T-1158).
+#
+#   bento test ./examples/ingestion/vehicle-reaper/...
+#
+# The cutoff is `now()`, so the fixtures are written relative to it rather than as fixed
+# instants: a golden test with a hard-coded timestamp passes until the date it names goes past
+# the window, and then fails for a reason that has nothing to do with the mapping.
+
+tests:
+  - name: what aged past the window is deleted by id, and what did not is left alone
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: '[{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-1","type":"Vehicle","dateObserved":{"type":"Property","value":"2020-01-01T00:00:00Z"}},{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-2","type":"Vehicle","dateObserved":{"type":"Property","value":"2999-01-01T00:00:00Z"}},{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-3","type":"Vehicle","dateObserved":{"type":"Property","value":"2020-01-01T00:00:00Z"}}]'
+    output_batches:
+      - - json_equals: [
+            "urn:ngsi-ld:Vehicle:hel.fi:transport:bus-1",
+            "urn:ngsi-ld:Vehicle:hel.fi:transport:bus-3"
+          ]
+
+  - name: an entity nobody dated is not old, it is unknown, and it stays
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '[{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-9","type":"Vehicle"}]'
+    output_batches: []
+
+  - name: an unparsable observation time is not a deletion either
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '[{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-8","type":"Vehicle","dateObserved":{"type":"Property","value":"the day before yesterday"}}]'
+    output_batches: []
+
+  - name: a page with nothing on it deletes nothing
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '[]'
+    output_batches: []
+
+  - name: a page where everything aged out deletes all of it in one request
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '[{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-4","type":"Vehicle","dateObserved":{"type":"Property","value":"2019-05-01T10:00:00Z"}},{"id":"urn:ngsi-ld:Vehicle:hel.fi:transport:bus-5","type":"Vehicle","dateObserved":{"type":"Property","value":"2019-05-01T10:00:01Z"}}]'
+    output_batches:
+      - - json_equals: [
+            "urn:ngsi-ld:Vehicle:hel.fi:transport:bus-4",
+            "urn:ngsi-ld:Vehicle:hel.fi:transport:bus-5"
+          ]

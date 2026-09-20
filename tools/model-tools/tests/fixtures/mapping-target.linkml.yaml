@@ -1,0 +1,40 @@
+# The target side of the golden Mapping: the city's own air quality model, the names the
+# Context Space publishes. The mapping between the two is what a city actually writes when it
+# adopts a Smart Data Model and keeps its own vocabulary.
+id: https://example.org/ns/city-airquality
+name: city-airquality
+title: City air quality observation
+prefixes:
+  linkml: https://w3id.org/linkml/
+  city: https://example.org/ns/
+default_prefix: city
+default_range: string
+imports:
+  - linkml:types
+
+classes:
+  AirQuality:
+    class_uri: city:AirQuality
+    description: One reading in the names the Context Space publishes.
+    attributes:
+      id:
+        range: string
+      pm25:
+        range: float
+        unit:
+          ucum_code: ug/m3
+      label:
+        description: Station and area as one human-readable line.
+        range: string
+      band:
+        description: The published air quality band.
+        range: string
+      readings:
+        range: integer
+      degrees:
+        description: The reading's temperature, truncated to whole degrees.
+        range: integer
+      distanceCm:
+        range: float
+        unit:
+          ucum_code: cm

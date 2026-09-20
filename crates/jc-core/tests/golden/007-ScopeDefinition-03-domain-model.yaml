@@ -1,0 +1,10 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: ScopeDefinition
+metadata:
+  name: geo-sk-bb-radvan
+  namespace: ovzdusie
+  title: { sk: "Radvaň", en: "Radvan" }
+spec:
+  scopeString: /geo/SK/BB/Radvan    # one of the three roots of section 4
+  isRoot: false
+  isChildOf: /geo/SK/BB             # absent when isRoot is true (ADR 005, R19)

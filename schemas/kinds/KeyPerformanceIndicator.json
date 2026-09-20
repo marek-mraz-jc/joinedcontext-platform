@@ -1,0 +1,384 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "DateTime": {
+      "additionalProperties": false,
+      "description": "An NGSI-LD DateTime value.",
+      "properties": {
+        "@type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DateTimeKind"
+            }
+          ],
+          "description": "Always `DateTime`."
+        },
+        "@value": {
+          "description": "The instant, RFC 3339.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "@type",
+        "@value"
+      ],
+      "type": "object"
+    },
+    "DateTimeKind": {
+      "description": "The one value `@type` takes on a DateTime.",
+      "oneOf": [
+        {
+          "description": "`\"DateTime\"`.",
+          "enum": [
+            "DateTime"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "IndicatorValue": {
+      "anyOf": [
+        {
+          "description": "A measured or computed number.",
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "description": "A grade or a state, when the indicator is not a number.",
+          "type": "string"
+        }
+      ],
+      "description": "The value of an indicator: a number, or a text for an indicator that is a grade or a state."
+    },
+    "Objects": {
+      "anyOf": [
+        {
+          "description": "One URI.",
+          "type": "string"
+        },
+        {
+          "description": "A list of URIs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "One URI or a list of them, as NGSI-LD writes a relationship's object."
+    },
+    "Period": {
+      "additionalProperties": false,
+      "description": "The window an indicator's value covers, ISO 8601 instants.",
+      "properties": {
+        "end": {
+          "description": "The last instant covered, RFC 3339.",
+          "type": "string"
+        },
+        "start": {
+          "description": "The first instant covered, RFC 3339.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "end",
+        "start"
+      ],
+      "type": "object"
+    },
+    "PropertyKind": {
+      "description": "The one value `type` takes on a Property.",
+      "oneOf": [
+        {
+          "description": "`\"Property\"`.",
+          "enum": [
+            "Property"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Property_for_DateTime": {
+      "additionalProperties": false,
+      "description": "A Property in normalized NGSI-LD form.",
+      "properties": {
+        "observedAt": {
+          "description": "When the value was observed, RFC 3339.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PropertyKind"
+            }
+          ],
+          "description": "Always `Property`."
+        },
+        "unitCode": {
+          "description": "A UN/CEFACT common code, on the value that has a unit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DateTime"
+            }
+          ],
+          "description": "The value itself."
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Property_for_IndicatorValue": {
+      "additionalProperties": false,
+      "description": "A Property in normalized NGSI-LD form.",
+      "properties": {
+        "observedAt": {
+          "description": "When the value was observed, RFC 3339.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PropertyKind"
+            }
+          ],
+          "description": "Always `Property`."
+        },
+        "unitCode": {
+          "description": "A UN/CEFACT common code, on the value that has a unit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/IndicatorValue"
+            }
+          ],
+          "description": "The value itself."
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Property_for_Period": {
+      "additionalProperties": false,
+      "description": "A Property in normalized NGSI-LD form.",
+      "properties": {
+        "observedAt": {
+          "description": "When the value was observed, RFC 3339.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PropertyKind"
+            }
+          ],
+          "description": "Always `Property`."
+        },
+        "unitCode": {
+          "description": "A UN/CEFACT common code, on the value that has a unit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Period"
+            }
+          ],
+          "description": "The value itself."
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Property_for_String": {
+      "additionalProperties": false,
+      "description": "A Property in normalized NGSI-LD form.",
+      "properties": {
+        "observedAt": {
+          "description": "When the value was observed, RFC 3339.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PropertyKind"
+            }
+          ],
+          "description": "Always `Property`."
+        },
+        "unitCode": {
+          "description": "A UN/CEFACT common code, on the value that has a unit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "description": "The value itself.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ],
+      "type": "object"
+    },
+    "Relationship": {
+      "additionalProperties": false,
+      "description": "A Relationship in normalized NGSI-LD form: one URI or several.",
+      "properties": {
+        "object": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Objects"
+            }
+          ],
+          "description": "The URI or URIs the relationship points to."
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/RelationshipKind"
+            }
+          ],
+          "description": "Always `Relationship`."
+        }
+      },
+      "required": [
+        "object",
+        "type"
+      ],
+      "type": "object"
+    },
+    "RelationshipKind": {
+      "description": "The one value `type` takes on a Relationship.",
+      "oneOf": [
+        {
+          "description": "`\"Relationship\"`.",
+          "enum": [
+            "Relationship"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "description": "One indicator, normalized NGSI-LD (PF-54, PF-55).",
+  "properties": {
+    "@context": {
+      "description": "The JSON-LD context, present on the wire and absent inside a broker's response body."
+    },
+    "calculationFormula": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Property_for_String"
+        }
+      ],
+      "description": "How the value is computed, e.g. `avg(pm10) over AirQualityObserved`."
+    },
+    "calculationPeriod": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Property_for_Period"
+        }
+      ],
+      "description": "The window the value covers."
+    },
+    "computedBy": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Relationship"
+        }
+      ],
+      "description": "The Pipeline URN or the agent run URN that computed the value."
+    },
+    "currentValue": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Property_for_IndicatorValue"
+        }
+      ],
+      "description": "The value as last computed, with its unit code and observation time."
+    },
+    "derivedFrom": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Relationship"
+        }
+      ],
+      "description": "The Endpoint URN the sources were read through, and the source entity URNs when few."
+    },
+    "id": {
+      "description": "`urn:ngsi-ld:KeyPerformanceIndicator:{orgDomain}:{project}-kpi:{name}`.",
+      "type": "string"
+    },
+    "name": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Property_for_String"
+        }
+      ],
+      "description": "The short name, the `{localId}` of the id."
+    },
+    "type": {
+      "description": "Always `KeyPerformanceIndicator`.",
+      "type": "string"
+    },
+    "updatedAt": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/Property_for_DateTime"
+        }
+      ],
+      "description": "When the value was written."
+    }
+  },
+  "required": [
+    "calculationFormula",
+    "calculationPeriod",
+    "computedBy",
+    "currentValue",
+    "derivedFrom",
+    "id",
+    "name",
+    "type",
+    "updatedAt"
+  ],
+  "title": "KeyPerformanceIndicator",
+  "type": "object"
+}

@@ -1,0 +1,9 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: CkanInstance
+metadata:
+  name: open-data
+  namespace: ovzdusie
+spec:
+  url: https://data.banskabystrica.sk
+  organizationDefault: mesto-banska-bystrica
+  apiTokenRef: { name: ckan-open-data, key: apiToken }

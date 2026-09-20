@@ -1,0 +1,19 @@
+# The connection, declared once (MF-35). HSL's high-frequency positioning broker is public,
+# so this source references no credential at all; the write side is where the token is.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hsl-hfp
+  namespace: helsinki
+  title:
+    en: HSL high-frequency positioning
+    fi: HSL:n suurtaajuinen paikannus
+spec:
+  type: mqtt
+  mqtt:
+    urls:
+      - tls://mqtt.hsl.fi:8883
+    topics:
+      - /hfp/v2/journey/ongoing/vp/bus/#
+    qos: 0
+    cleanSession: true

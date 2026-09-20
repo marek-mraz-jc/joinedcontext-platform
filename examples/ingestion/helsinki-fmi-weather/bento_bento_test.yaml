@@ -1,0 +1,155 @@
+# Golden transformation tests for the FMI weather pipeline (PL-22, T-0324).
+#
+#   bento test ./examples/ingestion/helsinki-fmi-weather/...
+
+tests:
+  - name: the newest timestep of a twelve-hour answer becomes one observation
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <wfs:FeatureCollection timeStamp="2026-09-06T15:33:00Z" numberReturned="6"
+            xmlns:wfs="http://www.opengis.net/wfs/2.0"
+            xmlns:gml="http://www.opengis.net/gml/3.2"
+            xmlns:BsWfs="http://xml.fmi.fi/schema/wfs/2.0">
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.1">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.1" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2026-09-06T15:20:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>t2m</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>15.4</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.2">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.2" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2026-09-06T15:20:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>rh</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>50.0</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.3">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.3" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2026-09-06T15:20:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>p_sea</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>1012.8</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.4">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.4" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2026-09-06T15:30:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>t2m</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>15.9</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.5">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.5" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2026-09-06T15:30:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>rh</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>25.0</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.6">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.6" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2026-09-06T15:30:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>p_sea</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>1013.2</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+          </wfs:FeatureCollection>
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:WeatherObserved:hel.fi:weather:kaisaniemi",
+              "type": "WeatherObserved",
+              "name": { "type": "Property", "value": "Helsinki Kaisaniemi" },
+              "dateObserved": { "type": "Property", "value": "2026-09-06T15:30:00Z" },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [24.94459, 60.17523] }
+              },
+              "temperature": {
+                "type": "Property", "value": 15.9, "unitCode": "CEL",
+                "observedAt": "2026-09-06T15:30:00Z"
+              },
+              "relativeHumidity": {
+                "type": "Property", "value": 0.25, "observedAt": "2026-09-06T15:30:00Z"
+              },
+              "atmosphericPressure": {
+                "type": "Property", "value": 1013.2, "unitCode": "HPA",
+                "observedAt": "2026-09-06T15:30:00Z"
+              },
+              "source": { "type": "Property", "value": "https://opendata.fmi.fi/wfs" }
+            }
+          ]
+
+  - name: a sensor that reported NaN leaves its attribute out rather than writing a null
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      # One timestep and one parameter: the single-member document, where `member` is an object
+      # rather than an array, is the shape the normalisation above exists for.
+      - content: |
+          <?xml version="1.0" encoding="UTF-8"?>
+          <wfs:FeatureCollection timeStamp="2027-01-15T09:05:00Z" numberReturned="1"
+            xmlns:wfs="http://www.opengis.net/wfs/2.0"
+            xmlns:gml="http://www.opengis.net/gml/3.2"
+            xmlns:BsWfs="http://xml.fmi.fi/schema/wfs/2.0">
+            <wfs:member>
+              <BsWfs:BsWfsElement gml:id="BsWfsElement.1.1.1">
+                <BsWfs:Location>
+                  <gml:Point gml:id="BsWfsElementP.1.1.1" srsDimension="2" srsName="http://www.opengis.net/def/crs/EPSG/0/4258">
+                    <gml:pos>60.17523 24.94459 </gml:pos>
+                  </gml:Point>
+                </BsWfs:Location>
+                <BsWfs:Time>2027-01-15T09:00:00Z</BsWfs:Time>
+                <BsWfs:ParameterName>t2m</BsWfs:ParameterName>
+                <BsWfs:ParameterValue>NaN</BsWfs:ParameterValue>
+              </BsWfs:BsWfsElement>
+            </wfs:member>
+          </wfs:FeatureCollection>
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:WeatherObserved:hel.fi:weather:kaisaniemi" &&
+              this.index(0).dateObserved.value == "2027-01-15T09:00:00Z" &&
+              !this.index(0).exists("temperature") &&
+              !this.index(0).exists("relativeHumidity") &&
+              this.index(0).location.value.coordinates == [24.94459, 60.17523]

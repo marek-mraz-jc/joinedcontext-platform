@@ -1,0 +1,32 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Mapping
+metadata:
+  name: sdm-airquality-to-bb
+  namespace: bb-ovzdusie
+  title: { sk: "SDM AirQualityObserved → BB kvalita ovzdušia", en: "SDM AirQualityObserved → BB air quality" }
+spec:
+  contextSpaceRef: ovzdusie       # the space this mapping belongs to (MF-06)
+  source: { kind: DataModel, name: sdm-airqualityobserved, version: "1" }
+  target: { kind: DataModel, name: bb-air-quality, version: "2" }
+  transformation:                 # verbatim LinkML-Map TransformationSpecification
+    id: https://bb.example.sk/mappings/sdm-airquality-to-bb
+    class_derivations:
+      BBAirQuality:
+        populated_from: AirQualityObserved
+        slot_derivations:
+          id:          { populated_from: id }
+          pm10:        { populated_from: pm10 }
+          pm25:        { populated_from: pm2p5 }                     # rename
+          temperatureC:
+            populated_from: temperature
+            unit_conversion: { target_unit: Cel }                  # source declares its unit in LinkML
+          observedAt:  { populated_from: dateObserved }
+          label:
+            expr: "{stationName} + ' (' + {areaServed} + ')'"
+          qualityBand:
+            populated_from: airQualityLevel
+            value_mappings: { good: A, moderate: B, unhealthy: C }  # enum_derivation
+  vocabularyAlignment: { sssomRef: { kind: Mapping, name: sdm-to-bb-terms } }   # optional SSSOM set
+  tests:
+    - input:  examples/sdm-example.jsonld
+      expect: examples/bb-example.jsonld

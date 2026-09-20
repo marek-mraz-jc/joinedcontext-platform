@@ -1,0 +1,22 @@
+# A day is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). A cadence this
+# long needs the cron expression: without one the job would run every minute and each pod would
+# sit idle waiting out the period, which for a day is a resident pipeline in all but name
+# (PL-27). The statistics themselves are published once a year; the daily run is what notices.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: paavo-population
+  namespace: helsinki
+  title:
+    fi: Väestömäärä postinumeroalueittain
+    en: Population counts by postal code
+spec:
+  class: auto
+  period: 24h
+  schedule: "20 3 * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: paavo-postal-statistics }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:statistics:ep-hri-population
+  quotas:
+    maxMemoryMb: 64
+    cpuMillicores: 100

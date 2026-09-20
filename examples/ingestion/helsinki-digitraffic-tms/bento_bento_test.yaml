@@ -1,0 +1,102 @@
+# Golden transformation tests for the Digitraffic TMS pipeline (PL-22, T-0323).
+#
+#   bento test ./examples/ingestion/helsinki-digitraffic-tms/...
+
+tests:
+  - name: one counter becomes one entity per measured direction
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          dataUpdatedTime: "2026-09-06T23:36:25Z"
+          stations:
+            - id: 20002
+              tmsNumber: 20002
+              dataUpdatedTime: "2026-09-06T23:36:25Z"
+              sensorValues:
+                - name: OHITUKSET_5MIN_KIINTEA_SUUNTA1
+                  unit: kpl/h
+                  value: 120.0
+                  timeWindowStart: "2026-09-06T23:30:00Z"
+                  timeWindowEnd: "2026-09-06T23:35:00Z"
+                  measuredTime: "2026-09-06T23:36:11Z"
+                - name: KESKINOPEUS_5MIN_KIINTEA_SUUNTA1
+                  unit: km/h
+                  value: 95.0
+                  timeWindowStart: "2026-09-06T23:30:00Z"
+                  timeWindowEnd: "2026-09-06T23:35:00Z"
+                  measuredTime: "2026-09-06T23:36:11Z"
+                - name: OHITUKSET_5MIN_KIINTEA_SUUNTA2
+                  unit: kpl/h
+                  value: 48.0
+                  timeWindowStart: "2026-09-06T23:30:00Z"
+                  timeWindowEnd: "2026-09-06T23:35:00Z"
+                  measuredTime: "2026-09-06T23:36:11Z"
+                - name: OHITUKSET_60MIN_KIINTEA_SUUNTA1
+                  unit: kpl/h
+                  value: 76.0
+                  timeWindowStart: "2026-09-06T22:00:00Z"
+                  timeWindowEnd: "2026-09-06T23:00:00Z"
+                  measuredTime: "2026-09-06T23:36:11Z"
+            - id: 89
+              tmsNumber: 89
+              dataUpdatedTime: "1970-01-01T00:00:00Z"
+              sensorValues: []
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:TrafficFlowObserved:hel.fi:traffic:20002-1",
+              "type": "TrafficFlowObserved",
+              "dateObserved": { "type": "Property", "value": "2026-09-06T23:36:11Z" },
+              "dateObservedFrom": { "type": "Property", "value": "2026-09-06T23:30:00Z" },
+              "dateObservedTo": { "type": "Property", "value": "2026-09-06T23:35:00Z" },
+              "intensity": { "type": "Property", "value": 120, "observedAt": "2026-09-06T23:36:11Z" },
+              "laneDirection": { "type": "Property", "value": "outbound" },
+              "refTMSStation": { "type": "Property", "value": 20002 },
+              "source": { "type": "Property", "value": "https://tie.digitraffic.fi" },
+              "averageVehicleSpeed": {
+                "type": "Property",
+                "value": 95,
+                "unitCode": "KMH",
+                "observedAt": "2026-09-06T23:36:11Z"
+              }
+            },
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:TrafficFlowObserved:hel.fi:traffic:20002-2",
+              "type": "TrafficFlowObserved",
+              "dateObserved": { "type": "Property", "value": "2026-09-06T23:36:11Z" },
+              "dateObservedFrom": { "type": "Property", "value": "2026-09-06T23:30:00Z" },
+              "dateObservedTo": { "type": "Property", "value": "2026-09-06T23:35:00Z" },
+              "intensity": { "type": "Property", "value": 48, "observedAt": "2026-09-06T23:36:11Z" },
+              "laneDirection": { "type": "Property", "value": "inbound" },
+              "refTMSStation": { "type": "Property", "value": 20002 },
+              "source": { "type": "Property", "value": "https://tie.digitraffic.fi" }
+            }
+          ]
+
+  - name: a response in which nothing is counted writes nothing
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          stations:
+            - id: 89
+              sensorValues: []
+            - id: 91
+              sensorValues:
+                - name: KESKINOPEUS_60MIN_KIINTEA_SUUNTA1
+                  value: 88.0
+                  measuredTime: "2026-09-06T23:36:11Z"
+    output_batches: []

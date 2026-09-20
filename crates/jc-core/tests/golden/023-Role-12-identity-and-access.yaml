@@ -1,0 +1,12 @@
+# users/roles/pipeline-developer.yaml
+apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata: { name: pipeline-developer, namespace: org }
+spec:
+  rules:
+    - kinds: [Pipeline, DataSource, Mapping]
+      verbs: [propose]                       # propose | approve | delete
+    - kinds: [Endpoint]
+      verbs: [propose]
+      constraints:
+        - { field: spec.audience, notIn: [public] }   # a public endpoint is another role's

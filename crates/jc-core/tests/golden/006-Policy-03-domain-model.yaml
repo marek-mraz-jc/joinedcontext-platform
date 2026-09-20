@@ -1,0 +1,22 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Policy
+metadata:
+  name: public-air-quality
+  namespace: ovzdusie
+  title: { sk: "Verejné dáta o ovzduší", en: "Public air-quality data" }
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: ovzdusie }
+  assigner: did:web:banskabystrica.sk
+  assignee: { kind: role, id: public }        # user | group | role | serviceAccount | did
+  operations: [queryEntity, retrieveEntity, queryTemporal]   # CIM 009 names only (R8)
+  information:                                # RegistrationInfo shape (R6)
+    - entities:
+        - type: AirQualityObserved
+          idPattern: "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:.*$"
+      propertyNames: [pm10, pm25, dateObserved, location]
+      relationshipNames: [refDistrict]
+  q: "pm10>=0"
+  scopeQ: "/geo/SK/BB"
+  geoQ: "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]"
+  temporalQ: "timerel=after;timeAt=P-1D"
+  validity: { from: "2026-09-01T00:00:00Z", to: "2027-09-01T00:00:00Z" }

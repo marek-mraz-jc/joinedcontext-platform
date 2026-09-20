@@ -1,0 +1,89 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTPS fetch from the
+# referenced DataSource (PL-39). One fetch is one GeoJSON collection, not one area.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this.features
+    - unarchive:
+        format: json_array
+
+    # The layer is the parking-area register, and a no-parking area is registered in it too.
+    # Publishing one as an OffStreetParking would advertise capacity where standing is
+    # forbidden, so it is dropped rather than mapped.
+    - mapping: |
+        root = if this.properties.tyyppi == "Pysäköintikielto" { deleted() } else { this }
+
+    # RFC 7946: a polygon ring is closed, its first position equal to its last, and it has at
+    # least four positions. GeoServer closes its rings today, but an example that assumed so
+    # would publish an invalid polygon the day it stops. The ring is closed here, and an area
+    # whose ring is too short to bound anything is dropped rather than repaired into a guess.
+    - mapping: |
+        let rings = if this.geometry.get("type") == "MultiPolygon" {
+          this.geometry.coordinates.map_each(polygon -> polygon.map_each(ring -> (
+            if ring.index(0) == ring.index(-1) { ring } else { ring.append(ring.index(0)) }
+          )))
+        } else { [] }
+        root = if $rings.length() == 0 {
+          deleted()
+        } else if $rings.index(0).index(0).length() < 4 {
+          deleted()
+        } else {
+          this.assign({ "rings": $rings })
+        }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "OffStreetParking", $domain, "parking", this.properties.id.string())
+        let name = this.properties.luokka_nimi
+        let category = this.properties.tyyppi
+        let capacity = this.properties.paikat_ala
+        let hours = this.properties.voimassaolo
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "OffStreetParking",
+          "location": {
+            "type": "GeoProperty",
+            "value": { "type": "MultiPolygon", "coordinates": this.rings }
+          },
+          "name": if $name.type() == "string" && $name != "" {
+            { "type": "Property", "value": $name }
+          } else { null },
+          "category": if $category.type() == "string" && $category != "" {
+            { "type": "Property", "value": [ $category ] }
+          } else { null },
+          "totalSpotNumber": if $capacity.type() == "number" {
+            { "type": "Property", "value": $capacity }
+          } else { null },
+          "description": if $hours.type() == "string" && $hours != "" {
+            { "type": "Property", "value": $hours }
+          } else { null },
+          "source": { "type": "Property", "value": "https://kartta.hel.fi/ws/geoserver/avoindata/wfs" }
+        }
+        # An empty string is how this register writes "not recorded". Writing one through would
+        # publish a name nobody chose, so the attribute is left out instead.
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-parking-zones/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

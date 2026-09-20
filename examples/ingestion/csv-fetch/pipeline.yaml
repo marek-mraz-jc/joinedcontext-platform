@@ -1,0 +1,18 @@
+# Forty-five seconds: past the thirty-second rule, but under the minute cron can express. The
+# reconciler renders a CronJob on `* * * * *` that fetches once per period (PL-27).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: parking-csv-fetch
+  namespace: helsinki
+  title:
+    en: Car park occupancy from a CSV export
+spec:
+  class: auto
+  period: 45s
+  source:
+    dataSourceRef: { kind: DataSource, name: parking-csv }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:transport:ep-parking
+  quotas:
+    maxMemoryMb: 64
+    cpuMillicores: 100

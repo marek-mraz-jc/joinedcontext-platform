@@ -1,0 +1,72 @@
+# Golden transformation tests for the GTFS-realtime pipeline (PL-22, T-0297).
+#
+#   bento test ./examples/ingestion/gtfs-rt/...
+#
+# The input here is a FeedMessage as the reconciler's decoder hands it over. The binary side of
+# that decode is tested in tests/decoder_bento_test.yaml, against the same feed.
+
+tests:
+  - name: a feed becomes one Vehicle per position and one Trip per update
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: '{"header":{"gtfsRealtimeVersion":"2.0","incrementality":"FULL_DATASET","timestamp":"1788728400"},"entity":[{"id":"v-701","vehicle":{"trip":{"tripId":"t-1","routeId":"r-2550","startTime":"07:45:00","startDate":"20260906"},"vehicle":{"id":"22-701","label":"550"},"position":{"latitude":48.7359,"longitude":19.1462,"bearing":126.0,"speed":8.3},"timestamp":"1788728400","currentStatus":"IN_TRANSIT_TO"}},{"id":"t-1","tripUpdate":{"trip":{"tripId":"t-1","routeId":"r-2550","startTime":"07:45:00","startDate":"20260906"},"timestamp":"1788728400","stopTimeUpdate":[{"stopId":"s-12","arrival":{"delay":63}}]}},{"id":"a-1","alert":{"headerText":{"translation":[{"text":"Obchádzka","language":"sk"}]}}}]}'
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:Vehicle:hel.fi:transport:22-701",
+              "type": "Vehicle",
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [19.1462, 48.7359] },
+                "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "speed": {
+                "type": "Property", "value": 8.3, "unitCode": "MTS",
+                "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "heading": {
+                "type": "Property", "value": 126, "unitCode": "DD",
+                "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "vehicleType": { "type": "Property", "value": "bus" },
+              "fleetVehicleId": { "type": "Property", "value": "22-701" },
+              "refTrip": {
+                "type": "Relationship",
+                "object": "urn:ngsi-ld:Trip:hel.fi:transport:t-1",
+                "observedAt": "2026-09-06T21:00:00Z"
+              }
+            },
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:Trip:hel.fi:transport:t-1",
+              "type": "Trip",
+              "route": { "type": "Property", "value": "r-2550" },
+              "startTime": { "type": "Property", "value": "07:45:00" },
+              "startDate": { "type": "Property", "value": "20260906" },
+              "delay": {
+                "type": "Property", "value": 63, "unitCode": "SEC",
+                "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "nextStop": {
+                "type": "Property", "value": "s-12",
+                "observedAt": "2026-09-06T21:00:00Z"
+              }
+            }
+          ]
+
+  - name: a feed with nothing but an alert writes nothing
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '{"header":{"gtfsRealtimeVersion":"2.0"},"entity":[{"id":"a-1","alert":{}}]}'
+    output_batches: []

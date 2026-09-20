@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joinedcontext-model-tools"
+version = "0.1.0"
+description = "LinkML generators and the Smart Data Models importer, the one non-Rust runtime component"
+requires-python = ">=3.11"
+
+# Pinned exactly. The version that renders an artifact is recorded in the artifact itself
+# (DM-19, DM-43) and CI must run the same one as the Portal preview, so a floating range here
+# would silently make a committed artifact and a preview disagree.
+dependencies = [
+  "linkml==1.11.1",
+  "linkml-runtime==1.11.1",
+  # The reference engine `test_mapping_parity` compares the compiled Bloblang against,
+  # and the unit registry `compile_bloblang` reduces a unit_conversion with (DM-39).
+  "linkml-map==0.5.4",
+  "schema-automator==0.5.7",
+  "pyshacl==0.40.1",
+  "jsonschema==4.26.0",
+  "requests==2.34.2",
+  "rdflib==7.6.0",
+  "PyYAML==6.0.3",
+  # The sample readers of `infer_schema` (DM-54). defusedxml is what makes openpyxl refuse
+  # external entities (DM-55); the test suite asserts it is in place.
+  "openpyxl==3.1.5",
+  "defusedxml==0.7.1",
+  "pypdf==6.14.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = [
+  "common",
+  "compile_bloblang",
+  "compile_mapping_ir",
+  "gen_json_schema",
+  "gen_context",
+  "gen_docs",
+  "gen_example",
+  "gen_rdf_artifacts",
+  "gen_typescript",
+  "import_sdm",
+  "infer_schema",
+  "service",
+  "test_mapping_parity",
+]
+
+# `models/` sits beside `src/` and is not part of a package, so it is copied into the image
+# rather than installed; `MODEL_TOOLS_MODELS` tells `common.py` where it landed (DM-09, DM-18).
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

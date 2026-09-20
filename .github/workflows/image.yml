@@ -1,0 +1,90 @@
+name: image
+# builds and pushes the OCI image(s) on every push to main and on tags; skipped until a Dockerfile exists.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+# Read-only by default: only a job that publishes may hold the permissions that push an image
+# under the project's name and mint its signing identity (T-0851).
+permissions: { contents: read }
+concurrency: { group: "image-${{ github.ref }}", cancel-in-progress: true }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write, id-token: write }
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: has
+        run: echo "df=$(ls Dockerfile* 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
+      - if: steps.has.outputs.df == ''
+        run: echo "no Dockerfile yet"
+      - if: steps.has.outputs.df != ''
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - if: steps.has.outputs.df != ''
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - if: steps.has.outputs.df != ''
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ steps.has.outputs.df }}
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }},ghcr.io/${{ github.repository }}:main
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+      - if: steps.has.outputs.df != ''
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - if: steps.has.outputs.df != ''
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+      - if: steps.has.outputs.df != ''
+        run: echo "digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.has.outputs.df != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
+  model-tools:
+    # The one non-Rust runtime component (Architecture/11 §6.5, DM-18) is its own image: a
+    # Python image carrying LinkML has nothing in common with the distroless Rust one, and the
+    # Portal reaches it over HTTP, not by running a binary out of the platform image.
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write, id-token: write }
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: tools/model-tools
+          push: true
+          tags: ghcr.io/${{ github.repository }}/model-tools:${{ github.sha }},ghcr.io/${{ github.repository }}/model-tools:main
+          cache-from: type=gha,scope=model-tools
+          cache-to: type=gha,mode=max,scope=model-tools
+          provenance: true
+          sbom: true
+      - name: the image renders the preview, with the generator version it pins (DM-19)
+        # The packaging is what breaks here, not the code: an image that cannot resolve the
+        # shipped `ngsi-ld-core` import answers 200 with errors and no artifacts, which a unit
+        # test run from the source tree never sees.
+        run: |
+          set -eu
+          image="ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}"
+          docker run -d --name model-tools -p 8080:8080 "$image"
+          for _ in $(seq 30); do curl -sf localhost:8080/healthz >/dev/null && break || sleep 1; done
+          jq -Rs '{source: .}' tools/model-tools/tests/fixtures/senzor.linkml.yaml > body.json
+          curl -sf -H 'content-type: application/json' -d @body.json localhost:8080/generate > out.json
+          jq -e '.errors == [] and (.jsonSchema | type == "object") and (.context["@context"].Entity | length > 0)' out.json
+          pinned=$(grep -o 'linkml==[0-9.]*' tools/model-tools/pyproject.toml | head -1 | cut -d= -f3)
+          jq -e --arg v "$pinned" '.generatorVersion == "linkml-" + $v' out.json
+          docker rm -f model-tools
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - run: cosign sign --yes ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}
+      - run: echo "model-tools digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }

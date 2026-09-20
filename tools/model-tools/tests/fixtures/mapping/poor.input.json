@@ -1,0 +1,10 @@
+{
+  "id": "urn:ngsi-ld:AirQualityObserved:example.org:air:juh-02",
+  "pm2p5": 88.25,
+  "temperature": -3.5,
+  "distanceToRoad": 0.0,
+  "stationName": "Juh",
+  "areaServed": "Zvolen",
+  "airQualityLevel": "poor",
+  "readingCount": "-4"
+}

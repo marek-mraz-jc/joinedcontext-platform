@@ -1,0 +1,16 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: banskabystrica              # DNS-1123 label, unique in the Instance
+  namespace: org
+  title: { sk: "Mesto Banská Bystrica", en: "City of Banská Bystrica" }
+  description: { sk: "Krajské mesto", en: "Regional capital" }
+spec:
+  domain: banskabystrica.sk         # verified internet domain, the {orgDomain} of every URN (PF-41)
+  gitRepositoryUrl: https://forge.banskabystrica.sk/mesto/config.git
+  locales: [sk, en, de, cs]         # ordered, most preferred first (PF-25)
+  defaultLocale: sk                 # the fallback locale, MUST be one of spec.locales (PF-25, PF-26)
+  contacts:
+    - role: administrative          # administrative | technical | data-protection | security
+      name: "Odbor digitalizácie"
+      email: digitalizacia@banskabystrica.sk

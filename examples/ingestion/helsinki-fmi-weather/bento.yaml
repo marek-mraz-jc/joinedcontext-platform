@@ -1,0 +1,88 @@
+# Native Bento, no wrapper (PL-03). There is no `input`: the pipeline references a DataSource
+# and the reconciler renders the HTTPS fetch in front of these processors (PL-39, MF-35). One
+# fetch is one WFS document, and one document is one observation.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # FMI's simple feature format is XML, one `BsWfsElement` per parameter per timestep, all of
+    # them for the same station. `parse_xml` drops the namespace prefixes, so `wfs:member`
+    # arrives as `member`; a document with a single member arrives as an object rather than an
+    # array, which is the shape a station reporting one parameter would produce.
+    - mapping: |
+        let members = content().string().parse_xml().FeatureCollection.member
+        let list = if $members.type() == "array" { $members } else { [ $members ] }
+        root = $list.map_each(member -> member.BsWfsElement)
+
+    # The stored query has no "latest" flag and answers with the last twelve hours. The newest
+    # timestep is the observation; the stamps are ISO 8601 in UTC, which sorts chronologically,
+    # so a string sort finds it without parsing seventy-two of them.
+    - mapping: |
+        let latest = this.map_each(element -> element.Time).sort().index(-1)
+        let readings = this.filter(element -> element.Time == $latest)
+        root = {
+          "time": $latest,
+          "position": $readings.index(0).Location.Point.pos.trim(),
+          "values": $readings.map_each(r -> { r.ParameterName: r.ParameterValue }).squash()
+        }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "WeatherObserved", $domain, "weather", "kaisaniemi")
+        # `gml:pos` is EPSG:4258, whose axis order is latitude first; RFC 7946 wants longitude
+        # first, so the two are swapped rather than copied.
+        let point = this.position.split(" ")
+        let t2m = this.values.t2m
+        let rh = this.values.rh
+        let pressure = this.values.p_sea
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "WeatherObserved",
+          "name": { "type": "Property", "value": "Helsinki Kaisaniemi" },
+          "dateObserved": { "type": "Property", "value": this.time },
+          "location": {
+            "type": "GeoProperty",
+            "value": {
+              "type": "Point",
+              "coordinates": [ $point.index(1).number(), $point.index(0).number() ]
+            }
+          },
+          "temperature": if $t2m == null || $t2m == "NaN" { null } else {
+            { "type": "Property", "value": $t2m.number(), "unitCode": "CEL", "observedAt": this.time }
+          },
+          "relativeHumidity": if $rh == null || $rh == "NaN" { null } else {
+            { "type": "Property", "value": $rh.number() / 100, "observedAt": this.time }
+          },
+          "atmosphericPressure": if $pressure == null || $pressure == "NaN" { null } else {
+            { "type": "Property", "value": $pressure.number(), "unitCode": "HPA", "observedAt": this.time }
+          },
+          "source": { "type": "Property", "value": "https://opendata.fmi.fi/wfs" }
+        }
+        # FMI writes `NaN` for a sensor that read nothing, and leaves the parameter out of the
+        # document altogether when the station does not carry it. Both mean the same thing here.
+        # NGSI-LD has no null Property and a consumer would read one as a measurement, so the
+        # attribute is left out instead.
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-fmi-weather/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

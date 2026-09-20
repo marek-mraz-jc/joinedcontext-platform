@@ -1,0 +1,51 @@
+# The golden Mapping (DM-33, DM-39). It exercises every derivation the compiler supports:
+# a rename, an expression, a value mapping, a cast and a unit conversion. `test_mapping_parity`
+# runs its golden tests through the LinkML-Map reference engine and through the compiled
+# Bloblang, and the two have to agree.
+apiVersion: joinedcontext.com/v1
+kind: Mapping
+metadata:
+  name: airquality
+spec:
+  contextSpaceRef: air
+  source:
+    kind: DataModel
+    name: sdm-airquality
+    version: 1.0.0
+  target:
+    kind: DataModel
+    name: city-airquality
+    version: 1.0.0
+  transformation:
+    id: https://example.org/ns/city-airquality/transform
+    class_derivations:
+      AirQuality:
+        populated_from: AirQualityObserved
+        slot_derivations:
+          id:
+            populated_from: id
+          pm25:
+            populated_from: pm2p5
+          label:
+            expr: '{stationName} + " (" + {areaServed} + ")"'
+          band:
+            populated_from: airQualityLevel
+            value_mappings:
+              good: A
+              moderate: B
+              poor: C
+          readings:
+            populated_from: readingCount
+            range: integer
+          degrees:
+            populated_from: temperature
+            range: integer
+          distanceCm:
+            populated_from: distanceToRoad
+            unit_conversion:
+              target_unit: cm
+  tests:
+    - input: good.input.json
+      expect: good.expect.json
+    - input: poor.input.json
+      expect: poor.expect.json

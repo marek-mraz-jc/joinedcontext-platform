@@ -1,0 +1,21 @@
+# The Finnish Meteorological Institute publishes its observations as an open WFS. No credential,
+# so the source declares none; HTTPS all the same, because an unencrypted fetch is a fetch
+# anybody on the path can rewrite. The stored query answers in XML and has no "latest" flag: one
+# response carries the last twelve hours for the station, and the pipeline keeps the newest
+# timestep. The query is part of the URL because WFS has no body.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: fmi-kaisaniemi-wfs
+  namespace: helsinki
+  title:
+    fi: Ilmatieteen laitoksen säähavainnot (WFS)
+    en: FMI weather observations (WFS)
+spec:
+  type: http
+  http:
+    url: https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature&storedquery_id=fmi::observations::weather::simple&place=kaisaniemi&parameters=t2m,rh,p_sea
+    verb: GET
+    headers:
+      Accept: application/xml
+    timeout: 30s

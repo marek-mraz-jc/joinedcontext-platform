@@ -1,0 +1,66 @@
+# Native Bento, no wrapper (PL-03). There is no `input`: the pipeline references a DataSource
+# and the reconciler renders the HTTPS poll in front of these processors (PL-39, MF-35).
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # One response carries every station in the system; each station is one entity.
+    - mapping: |
+        root = this.data.stations
+
+    - unarchive:
+        format: json_array
+
+    # A station that is not installed is a station the operator has taken out of the ground.
+    # It reports nothing, so it writes nothing rather than a row of zeroes.
+    - mapping: |
+        root = if this.is_installed { this } else { deleted() }
+
+    # GBFS station_status is the dynamic half of a station: how many bikes and docks are free
+    # right now. Name, position and capacity are the static half and live in
+    # station_information.json, which changes when a station is built or removed rather than
+    # every minute; this pipeline does not re-send them sixty times an hour.
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "BikeHireDockingStation", $domain, "bikes", this.station_id)
+        let seen = this.last_reported.number().ts_format("2006-01-02T15:04:05Z")
+        let bikes = this.num_bikes_available.number()
+        let docks = this.num_docks_available.number()
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "BikeHireDockingStation",
+          "availableBikeNumber": { "type": "Property", "value": $bikes, "observedAt": $seen },
+          "freeSlotNumber": { "type": "Property", "value": $docks, "observedAt": $seen },
+          "totalSlotNumber": { "type": "Property", "value": $bikes + $docks, "observedAt": $seen },
+          "status": {
+            "type": "Property",
+            "value": if this.is_renting && this.is_returning { "working" } else { "outOfService" },
+            "observedAt": $seen
+          },
+          "dateModified": { "type": "Property", "value": $seen },
+          "source": { "type": "Property", "value": "https://www.hsl.fi/en/citybikes" }
+        }
+
+    # One request per run rather than one per station.
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-bikes/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

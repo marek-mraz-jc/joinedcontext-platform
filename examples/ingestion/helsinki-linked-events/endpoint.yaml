@@ -1,0 +1,27 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-linked-events
+  namespace: helsinki
+  title:
+    fi: Helsingin tapahtumat
+    en: Helsinki events
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: events }
+  slug: cckiljht7afxj2ltj26fysronb
+  audience: public
+  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  # The organizer's contact line is free text and often a named person with a mobile number. The
+  # space keeps it, because the city's own event coordination reads it; this Endpoint removes it
+  # from every representation it serves, including the catalogue mirror (EP-61). A projection
+  # only narrows: an attribute a Policy already withholds stays withheld.
+  projection:
+    hiddenAttributes: [contactPoint]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: city-events
+      datastore: { representation: csv, refresh: onChange }

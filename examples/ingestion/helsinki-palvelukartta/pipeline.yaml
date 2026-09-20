@@ -1,0 +1,22 @@
+# An hour is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). The cron
+# expression is declared rather than left to the fallback: with one, the job starts, fetches once
+# and exits, instead of holding a pod for the length of the period (PL-27). The register is
+# edited by hand and changes a few times a day, so the minute inside the hour is arbitrary.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: palvelukartta-units
+  namespace: helsinki
+  title:
+    fi: Palvelukartan toimipisteet kiinnostavina kohteina
+    en: Service map units as points of interest
+spec:
+  class: auto
+  period: 1h
+  schedule: "7 * * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: hel-servicemap-units }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:services:ep-palvelukartta
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 100

@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/schema#",
+  "$id": "https://smart-data-models.github.io/data-models/common-schema.json",
+  "title": "Smart Data Models - Common schema definitions",
+  "definitions": {
+    "GSMA-Commons": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "format": "uri" },
+        "dateCreated": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Property. Entity creation timestamp."
+        },
+        "dateModified": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Property. Timestamp of the last modification."
+        },
+        "source": { "type": "string", "description": "Property. A sequence of characters giving the source of the entity data." },
+        "name": { "type": "string", "description": "Property. The name of this item." },
+        "alternateName": { "type": "string", "description": "Property. An alternative name for this item." },
+        "dataProvider": { "type": "string", "description": "Property. A sequence of characters identifying the provider of the harmonised data entity." },
+        "owner": {
+          "type": "array",
+          "description": "Property. A List containing a JSON encoded sequence of characters referencing the unique Ids of the owner(s).",
+          "items": { "type": "string" }
+        },
+        "seeAlso": {
+          "type": "array",
+          "description": "Property. list of uri pointing to additional resources about the item.",
+          "items": { "type": "string", "format": "uri" }
+        }
+      }
+    },
+    "Location-Commons": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "object",
+          "description": "Property. The mailing address.",
+          "properties": {
+            "streetAddress": { "type": "string", "description": "Property. The street address." },
+            "addressLocality": { "type": "string", "description": "Property. The locality in which the street address is." },
+            "addressCountry": { "type": "string", "description": "Property. The country." },
+            "areaServed": {
+              "type": "object",
+              "description": "Property. The geographic area where a service is provided.",
+              "properties": {
+                "name": { "type": "string", "description": "Property. The name of the area." }
+              }
+            }
+          },
+          "required": ["streetAddress"]
+        }
+      }
+    }
+  }
+}

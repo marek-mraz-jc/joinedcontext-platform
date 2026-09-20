@@ -1,0 +1,19 @@
+# The reaper reads what it is about to delete, through the endpoint and never the broker
+# (PL-18): the same policy decides the read and the write, so a reaper can delete nothing its
+# own grant does not show it. A read names a type (GW33), and the page is the window it reaps.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: helsinki-vehicles-page
+  namespace: helsinki
+  title:
+    fi: Bussisijaintien sivu
+    en: A page of the bus positions the space holds
+spec:
+  type: http
+  http:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-vehicles/ngsi-ld/v1/entities?type=Vehicle&limit=1000&options=keyValues
+    verb: GET
+    headers:
+      Accept: application/json
+    timeout: 15s

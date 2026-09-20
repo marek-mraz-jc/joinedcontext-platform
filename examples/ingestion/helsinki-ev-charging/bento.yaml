@@ -1,0 +1,97 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTPS fetch from the
+# referenced DataSource (PL-39). One fetch is one Overpass answer, not one station.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this.elements
+    - unarchive:
+        format: json_array
+
+    # `out center` gives a node its own `lat`/`lon` and gives a way or a relation a `center`.
+    # An element with neither is not a place and cannot be a charging station on a map.
+    # `assign` and not `merge`: a node already carries its own `lat`, and merging a key that
+    # is already there makes an array of both values rather than replacing one with the other.
+    - mapping: |
+        let lat = this.lat.or(this.center.lat.or(null))
+        let lon = this.lon.or(this.center.lon.or(null))
+        root = if $lat == null {
+          deleted()
+        } else if $lon == null {
+          deleted()
+        } else {
+          this.assign({ "lat": $lat, "lon": $lon })
+        }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44). An OpenStreetMap
+        # id is unique only inside its element type, so a node 42 and a way 42 are two places
+        # and the type is part of the local segment.
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "EVChargingStation", $domain, "charging", "%v-%v".format(this.type, this.id))
+        let tags = this.tags.or({})
+        let name = $tags.name.or($tags.operator.or(null))
+        let capacity = $tags.capacity.or("").re_find_all("[0-9]+").index(0).catch(null)
+        # `socket:type2` says a connector is present, `socket:type2:output` says how much it
+        # delivers. Mappers write the output as "22 kW", "22kW", "11+22kW" or "22 kW;11 kW", so
+        # every number in every output tag is read and the largest is what the station can give.
+        let sockets = $tags.
+          filter(entry -> entry.key.has_prefix("socket:") && !entry.key.has_suffix(":output")).
+          keys().
+          map_each(key -> key.slice(7))
+        let outputs = $tags.
+          filter(entry -> entry.key.has_prefix("socket:") && entry.key.has_suffix(":output")).
+          values().
+          map_each(value -> value.re_find_all("[0-9]+(?:\\.[0-9]+)?")).
+          flatten().
+          map_each(number -> number.number()).
+          sort()
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "EVChargingStation",
+          "location": {
+            "type": "GeoProperty",
+            "value": { "type": "Point", "coordinates": [ this.lon, this.lat ] }
+          },
+          "name": if $name == null { null } else { { "type": "Property", "value": $name } },
+          "capacity": if $capacity == null { null } else {
+            { "type": "Property", "value": $capacity.number() }
+          },
+          "socketType": if $sockets.length() == 0 { null } else {
+            { "type": "Property", "value": $sockets }
+          },
+          "powerLevel": if $outputs.length() == 0 { null } else {
+            { "type": "Property", "value": $outputs.index(-1), "unitCode": "KWT" }
+          },
+          "source": { "type": "Property", "value": "https://www.openstreetmap.org" },
+          "dataProvider": {
+            "type": "Property",
+            "value": "OpenStreetMap contributors, ODbL 1.0"
+          }
+        }
+        # A station nobody has tagged with a connector still belongs on the map; the attribute
+        # is left out rather than written as a zero somebody would read as "no sockets".
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-ev-charging/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

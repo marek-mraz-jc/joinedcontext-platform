@@ -1,0 +1,71 @@
+# Native Bento, no wrapper (PL-03). There is no `input`: the pipeline references a DataSource
+# and the reconciler renders the HTTPS poll in front of these processors (PL-39, MF-35).
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # A station's hour is written the way a Finn reads it, "7.9.2026 klo 2", in local time and
+    # with no zone. Bloblang cannot parse a local time in a named zone, so the offset in force
+    # at the moment of the response is measured once here, from GeoServer's own UTC stamp, and
+    # every station's label is corrected by it below. Measuring it beats a constant: Helsinki
+    # is UTC+2 in winter and UTC+3 in summer.
+    - mapping: |
+        let now = this.timeStamp.ts_parse("2006-01-02T15:04:05.999Z")
+        let local = $now.ts_tz("Europe/Helsinki").ts_format("2006-01-02T15:04:05")
+        let offset = $local.ts_parse("2006-01-02T15:04:05").ts_unix() - $now.ts_unix()
+        root = this.features.map_each(feature -> feature.merge({ "utcOffset": $offset }))
+
+    - unarchive:
+        format: json_array
+
+    # A station with no index has not reported this hour: it writes nothing rather than a null.
+    - mapping: |
+        root = if this.properties.Ilmanlaatuindeksi.type() == "number" { this } else { deleted() }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "AirQualityObserved", $domain, "air-quality",
+          "station-%v".format(this.properties.Mittausaseman_numero))
+        let label = this.properties.Aika.ts_parse("2.1.2006 klo 15").ts_unix()
+        let observed = ($label - this.utcOffset).ts_format("2006-01-02T15:04:05Z")
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "AirQualityObserved",
+          "name": { "type": "Property", "value": this.properties.Mittausasema },
+          "dateObserved": { "type": "Property", "value": $observed },
+          "airQualityIndex": {
+            "type": "Property",
+            "value": this.properties.Ilmanlaatuindeksi.number(),
+            "observedAt": $observed
+          },
+          "address": {
+            "type": "Property",
+            "value": { "streetAddress": this.properties.Mittausaseman_osoite }
+          },
+          "location": { "type": "GeoProperty", "value": this.geometry },
+          "source": { "type": "Property", "value": "https://kartta.hsy.fi/geoserver/wfs" }
+        }
+
+    # One request per run rather than one per station.
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-hsy-air/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

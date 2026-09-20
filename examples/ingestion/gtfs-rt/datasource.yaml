@@ -1,0 +1,16 @@
+# The `gtfs-rt` type is the one connection that contributes a processor: the reconciler puts a
+# protobuf decoder in front of the pipeline's own mapping, so the mapping reads plain JSON
+# (Architecture/08 section 6, PL-39).
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hsl-gtfs-rt
+  namespace: helsinki
+  title:
+    fi: HSL, GTFS-realtime
+    en: Helsinki region public transport, GTFS-realtime
+spec:
+  type: gtfs-rt
+  gtfsRt:
+    url: https://gtfs.hsl.fi/realtime/vehiclepositions.pb
+    feed: vehiclePositions

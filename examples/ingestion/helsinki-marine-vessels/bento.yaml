@@ -1,0 +1,70 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTPS fetch from the
+# referenced DataSource (PL-39). One fetch is one GeoJSON collection, not one vessel.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this.features
+    - unarchive:
+        format: json_array
+
+    # A report without a position is an AIS static message that slipped through the location
+    # feed: it names a vessel but says nothing about where it is, and publishing it would put a
+    # Vessel entity on the map at whatever a consumer guesses.
+    - mapping: |
+        root = if this.exists("geometry") { this } else { deleted() }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44). The MMSI is the
+        # vessel's own identifier and is what the local segment is minted from.
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "Vessel", $domain, "marine", this.mmsi.string())
+        let observed = (this.properties.timestampExternal / 1000).floor().ts_format("2006-01-02T15:04:05Z")
+        # ITU-R M.1371 reserves one value in each field for "not available": 102.3 knots for
+        # speed over ground, 360 degrees for course, 511 for heading and 15 for the navigational
+        # status. Copying them through would publish a vessel doing a hundred knots on a course
+        # nobody steers, so each of the four is left out instead.
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "Vessel",
+          "mmsi": { "type": "Property", "value": this.mmsi },
+          "location": { "type": "GeoProperty", "value": this.geometry, "observedAt": $observed },
+          "dateObserved": { "type": "Property", "value": $observed },
+          "speed": if this.properties.sog == 102.3 { null } else {
+            { "type": "Property", "value": this.properties.sog, "unitCode": "KNT", "observedAt": $observed }
+          },
+          "course": if this.properties.cog == 360 { null } else {
+            { "type": "Property", "value": this.properties.cog, "observedAt": $observed }
+          },
+          "heading": if this.properties.heading == 511 { null } else {
+            { "type": "Property", "value": this.properties.heading, "observedAt": $observed }
+          },
+          "navigationalStatus": if this.properties.navStat == 15 { null } else {
+            { "type": "Property", "value": this.properties.navStat, "observedAt": $observed }
+          },
+          "source": { "type": "Property", "value": "https://meri.digitraffic.fi" }
+        }
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-marine-vessels/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

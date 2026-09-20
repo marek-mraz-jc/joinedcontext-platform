@@ -1,0 +1,19 @@
+# A model minting its own term under a namespace the organisation does not own (DM-04, DM-16).
+id: https://banskabystrica.sk/ns/squat
+name: squat
+prefixes:
+  linkml: https://w3id.org/linkml/
+  bb: https://banskabystrica.sk/ns/
+  sdm: https://smartdatamodels.org/
+default_prefix: bb
+default_range: string
+imports:
+  - linkml:types
+classes:
+  Reading:
+    class_uri: bb:Reading
+    slots: [ourOwnIdea]
+slots:
+  ourOwnIdea:
+    # Not an upstream term: invented here, published under someone else's namespace.
+    slot_uri: sdm:ourOwnIdea

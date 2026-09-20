@@ -1,0 +1,30 @@
+# Charging stations from OpenStreetMap, read through Overpass. No credential, so the source
+# declares none; HTTPS all the same, because an unencrypted fetch is a fetch anybody on the path
+# can rewrite. Overpass has no request body, so the query travels in the URL percent-encoded; in
+# plain text it is
+#
+#   [out:json][timeout:60];
+#   nwr["amenity"="charging_station"](60.10,24.75,60.30,25.20);
+#   out center tags;
+#
+# `nwr` takes nodes, ways and relations, and `out center` gives the ways and relations a single
+# point so every answer has coordinates. The bounding box is the Helsinki region.
+#
+# Overpass is donated capacity and asks callers not to poll it hard; half an hour between runs
+# and one request per run is what that costs here.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: osm-charging-stations
+  namespace: helsinki
+  title:
+    fi: Sähköauton latauspisteet (OpenStreetMap)
+    en: EV charging stations (OpenStreetMap)
+spec:
+  type: http
+  http:
+    url: https://overpass-api.de/api/interpreter?data=%5Bout%3Ajson%5D%5Btimeout%3A60%5D%3Bnwr%5B%22amenity%22%3D%22charging_station%22%5D%2860.10%2C24.75%2C60.30%2C25.20%29%3Bout%20center%20tags%3B
+    verb: GET
+    headers:
+      Accept: application/json
+    timeout: 90s

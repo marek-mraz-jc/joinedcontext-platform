@@ -1,0 +1,9 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: hel
+  namespace: org
+spec:
+  domain: hel.fi
+  locales: ["fi", "sv", "en"]
+  defaultLocale: fi

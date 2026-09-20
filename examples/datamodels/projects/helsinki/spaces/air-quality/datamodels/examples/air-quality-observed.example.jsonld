@@ -1,0 +1,19 @@
+{
+  "dateObserved": "2026-01-01T00:00:00Z",
+  "id": "urn:ngsi-ld:AirQualityObserved:hel.fi:example:1",
+  "location": {
+    "coordinates": [
+      0.0,
+      0.0
+    ],
+    "type": "Point"
+  },
+  "observedAt": "2026-01-01T00:00:00Z",
+  "pm25": 0.0,
+  "refStation": "urn:ngsi-ld:Entity:hel.fi:example:1",
+  "stationName": {
+    "en": "stationName"
+  },
+  "temperature": 0.0,
+  "type": "AirQualityObserved"
+}

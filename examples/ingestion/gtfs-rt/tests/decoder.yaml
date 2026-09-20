@@ -1,0 +1,16 @@
+# What the reconciler puts in front of the pipeline for a `gtfs-rt` DataSource, isolated so the
+# binary side of the decode is under test too (PL-39, T-0297).
+#
+# The one difference from the rendered config is `import_paths`: the runner image carries the
+# GTFS-realtime descriptors at /opt/bento/gtfs-realtime, and this copy of the same file lets
+# the test decode without the image. `jcctl`'s bento_datasource_render_tests keep the two in
+# step. Bento resolves `import_paths` against the working directory, so the path below is
+# written from the repository root, which is where `bento test` is run.
+
+pipeline:
+  processors:
+    - protobuf:
+        operator: to_json
+        message: transit_realtime.FeedMessage
+        import_paths:
+          - examples/ingestion/gtfs-rt/proto

@@ -1,0 +1,24 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Subscription
+metadata:
+  name: air-quality-alerts
+  namespace: helsinki               # = project slug
+  title: "Air-quality alerts"
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: air-quality }
+  entities:
+    - type: AirQualityObserved      # a type, an id or an idPattern; at least one of them
+  watchedAttributes: [airQualityIndex]
+  q: "airQualityIndex>50"
+  notification:
+    endpoint:
+      uri: https://alerts.example.fi/hooks/air-quality
+      accept: application/json
+      receiverInfo:
+        - { key: X-Space, value: air-quality }
+      secretRef: { name: alerts-webhook, key: token }
+    attributes: [airQualityIndex, location]
+    format: normalized
+  throttling: 60                    # seconds between two notifications
+  expiresAt: "2027-01-01T00:00:00Z" # optional; open-ended without it
+  isActive: true

@@ -1,0 +1,62 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTP fetch from the
+# referenced DataSource (PL-39). One fetch is one CSV file, not one row.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # The file becomes one message per row. A CSV with a header and nothing else is a file
+    # the source published early; it writes nothing rather than failing the run.
+    - mapping: |
+        let rows = content().string().parse_csv()
+        root = if $rows.length() == 0 { deleted() } else { $rows }
+    - unarchive:
+        format: json_array
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "OffStreetParking", $domain, "transport", this.id.string())
+        let total = this.capacity.number()
+        let free = this.free.number()
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "OffStreetParking",
+          "name": { "type": "Property", "value": this.name },
+          "location": {
+            "type": "GeoProperty",
+            "value": { "type": "Point", "coordinates": [ this.lon.number(), this.lat.number() ] }
+          },
+          "totalSpotNumber": { "type": "Property", "value": $total },
+          "availableSpotNumber": {
+            "type": "Property",
+            "value": $free,
+            "observedAt": this.at
+          },
+          "occupancy": {
+            "type": "Property",
+            "value": if $total > 0 { ((($total - $free) / $total) * 100).round() / 100 } else { 0 },
+            "observedAt": this.at
+          }
+        }
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-parking/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

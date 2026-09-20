@@ -1,0 +1,61 @@
+# Native Bento, no wrapper (PL-03). There is no `input`: the reconciler renders the HTTP poll
+# from the referenced DataSource, with the bearer token as an interpolation (PL-39, PL-16).
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # One response carries the whole station list; each station is one entity.
+    - unarchive:
+        format: json_array
+
+    # A station without a reading is a station that has nothing to say yet.
+    - mapping: |
+        root = if this.exists("measurements") { this } else { deleted() }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "AirQualityObserved", $domain, "air-quality", this.station_id.string())
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "AirQualityObserved",
+          "dateObserved": { "type": "Property", "value": this.measured_at },
+          "location": {
+            "type": "GeoProperty",
+            "value": { "type": "Point", "coordinates": [ this.lon.number(), this.lat.number() ] }
+          },
+          "pm10": {
+            "type": "Property",
+            "value": this.measurements.pm10.number(),
+            "unitCode": "GQ",
+            "observedAt": this.measured_at
+          },
+          "pm25": {
+            "type": "Property",
+            "value": this.measurements.pm25.number(),
+            "unitCode": "GQ",
+            "observedAt": this.measured_at
+          }
+        }
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-air/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

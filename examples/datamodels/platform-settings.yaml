@@ -1,0 +1,9 @@
+# Instance-wide settings. Not a manifest: no apiVersion, no kind, and `jcctl` reads it by name
+# (Architecture/06 section 1).
+
+# CI and the Portal preview must render with the same Model Tools, or a committed artifact and
+# a preview disagree for a reason no diff can show (DM-19). `image` is what runs; the version
+# it reports on /healthz is `generatorVersion`, and `jcctl model` refuses anything else.
+modelTools:
+  image: ghcr.io/marek-mraz/joinedcontext-platform/model-tools:main
+  generatorVersion: linkml-1.11.1

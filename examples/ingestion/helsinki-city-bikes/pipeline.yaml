@@ -1,0 +1,19 @@
+# Sixty seconds is past the thirty-second rule, so `auto` makes this a CronJob that scales to
+# zero between runs (PL-26).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: citybikes-gbfs
+  namespace: helsinki
+  title:
+    fi: Kaupunkipyöräasemat GBFS-syötteestä
+    en: City bike docking stations from the GBFS station status feed
+spec:
+  class: auto
+  period: 60s
+  source:
+    dataSourceRef: { kind: DataSource, name: hsl-citybikes-gbfs }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:bikes:ep-bikes
+  quotas:
+    maxMemoryMb: 64
+    cpuMillicores: 100

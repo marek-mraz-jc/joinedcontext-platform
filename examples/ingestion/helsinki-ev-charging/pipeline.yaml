@@ -1,0 +1,21 @@
+# Thirty minutes is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). The cron
+# expression is declared rather than left to the fallback: with one, the job starts, fetches once
+# and exits, instead of holding a pod for the length of the period (PL-27).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: ev-charging-osm
+  namespace: helsinki
+  title:
+    fi: Latauspisteet OpenStreetMapista
+    en: Charging stations from OpenStreetMap
+spec:
+  class: auto
+  period: 30m
+  schedule: "*/30 * * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: osm-charging-stations }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:charging:ep-ev-charging
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 100

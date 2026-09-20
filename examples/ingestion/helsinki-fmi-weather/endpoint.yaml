@@ -1,0 +1,21 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-fmi-weather
+  namespace: helsinki
+  title:
+    fi: Kaisaniemen säähavainnot
+    en: Kaisaniemi weather observations
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: weather }
+  slug: hgr5guedgpy66jhylikhl4yyyb
+  audience: public
+  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: weather-observations-kaisaniemi
+      datastore: { representation: csv, refresh: onChange }

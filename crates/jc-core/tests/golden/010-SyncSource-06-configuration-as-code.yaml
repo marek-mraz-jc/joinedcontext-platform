@@ -1,0 +1,14 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: SyncSource
+metadata:
+  name: regional-datamodels
+  namespace: bb-doprava
+spec:
+  source:
+    git: { url: https://git.region.sk/udp/datamodels.git, ref: main, path: models/transport, secretRef: { name: region-git-ro } }
+  schedule: { interval: 30m }        # or { webhook: true }
+  mode: mirror                       # source wins inside the synced subtree; local edits show as drift
+  selector: { joinedcontext.com/tier: standard }
+  conflictPolicy: replace
+  prune: false                       # deletions are never implied (CC-19)
+  autoMerge: false                   # true = green lane for this subtree; enabling it is a red-lane change (CC-70)

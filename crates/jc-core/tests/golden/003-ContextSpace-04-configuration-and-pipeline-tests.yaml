@@ -1,0 +1,7 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSpace # or DataModel, Policy, Subscription, Endpoint, Pipeline
+metadata:
+  name: air-quality
+  namespace: banskabystrica
+spec:
+  # Literal spec or NGSI-LD payload

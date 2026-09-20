@@ -1,0 +1,41 @@
+# Written by `jcctl roles render` (PF-51, PF-52, CC-59). The gate every merge request of this
+# repository passes: every manifest parses and sits where its kind prescribes, the rendered
+# CODEOWNERS and policies match users/, and the author's role bindings allow every change.
+# Edit users/ to change who may do what; the next render overwrites this file.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+env:
+  PLATFORM_IMAGE: ghcr.io/marek-mraz/joinedcontext-platform:main
+  CONFTEST_VERSION: "0.62.0"
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: every manifest parses and sits where its kind prescribes (MF-09)
+        run: docker run --rm -v "$PWD:/repo" --entrypoint /usr/local/bin/jcctl "$PLATFORM_IMAGE" validate --repo-dir /repo
+      - name: CODEOWNERS and policies are what users/ says (PF-51)
+        run: |
+          docker run --rm -v "$PWD:/repo" --entrypoint /usr/local/bin/jcctl "$PLATFORM_IMAGE" roles render --repo-dir /repo
+          git diff --exit-code -- CODEOWNERS policies/roles.json policies/roles.rego policies/tests .gitea/workflows/ci.yaml
+      - name: the author's bindings allow every changed manifest (PF-52)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.base_ref }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          AUTHOR_EMAIL: ${{ github.event.pull_request.user.email }}
+        run: |
+          set -eu
+          git fetch --no-tags origin "$BASE"
+          git diff --name-status "origin/$BASE...HEAD" > /tmp/changes.txt
+          mkdir -p /tmp/base && git archive "origin/$BASE" | tar -x -C /tmp/base
+          docker run --rm -v "$PWD:/repo" -v /tmp:/tmp --entrypoint /usr/local/bin/jcctl "$PLATFORM_IMAGE" \
+            roles input --repo-dir /repo --base-dir /tmp/base --changes /tmp/changes.txt \
+            --author "$AUTHOR" --author-email "${AUTHOR_EMAIL:-}" > /tmp/input.json
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" | tar xz conftest
+          ./conftest verify -p policies
+          ./conftest test /tmp/input.json -p policies -d policies/roles.json

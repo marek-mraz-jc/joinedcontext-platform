@@ -1,0 +1,35 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Dashboard
+metadata:
+  name: air-quality-overview
+  namespace: helsinki
+spec:
+  title:
+    fi: "Ilmanlaadun yleiskatsaus"
+    en: "Air Quality Overview"
+  visibility: public        # private | project | organization | public
+  pages:
+    - title: "Mapa staníc"
+      layout: full-map
+      layers:
+        - air-quality-stations
+        - organisational-districts
+    - title: "Analýzy"
+      layout: grid-2x2
+      widgets:
+        - widgetType: temporal-chart
+          endpointRef: ep-air-quality
+          entityId: "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:station-01"
+          property: pm10
+        - widgetType: grid
+          endpointRef: ep-air-quality
+          entityType: AirQualityObserved
+          grid:
+            columns:
+              - attr: pm10
+                format: number
+              - attr: temperature
+                format: number
+            pageSize: 25
+            history:
+              enabled: true

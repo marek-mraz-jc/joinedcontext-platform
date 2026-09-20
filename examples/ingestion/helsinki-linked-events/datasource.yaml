@@ -1,0 +1,24 @@
+# The City of Helsinki publishes its event register through the Linked Events API. No credential
+# for reading, so the source declares none; HTTPS all the same, because an unencrypted fetch is a
+# fetch anybody on the path can rewrite. `include=location` asks the API to expand the place
+# reference into the record, which is what turns an event into something with coordinates.
+#
+# One response is one page. The query is narrowed to the events happening today so that a page
+# holds the whole set; a mirror of the entire register would have to follow `meta.next`, and the
+# reconciler renders a single fetch rather than a paging loop.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hel-linked-events
+  namespace: helsinki
+  title:
+    fi: Helsingin tapahtumat (Linked Events)
+    en: Helsinki events (Linked Events)
+spec:
+  type: http
+  http:
+    url: https://api.hel.fi/linkedevents/v1/event/?include=location&start=today&end=today&page_size=100&sort=start_time
+    verb: GET
+    headers:
+      Accept: application/json
+    timeout: 30s

@@ -1,0 +1,9 @@
+{
+  "id": "urn:ngsi-ld:AirQualityObserved:example.org:air:sever-01",
+  "pm25": 12.5,
+  "label": "Sever (Banská Bystrica)",
+  "band": "A",
+  "readings": 7,
+  "distanceCm": 250.0,
+  "degrees": 21
+}

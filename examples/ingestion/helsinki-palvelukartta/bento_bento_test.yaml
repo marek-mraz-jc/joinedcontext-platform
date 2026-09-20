@@ -1,0 +1,86 @@
+# Golden transformation tests for the service map pipeline (PL-22, T-0328).
+#
+#   bento test ./examples/ingestion/helsinki-palvelukartta/...
+
+tests:
+  - name: one service map unit becomes one PointOfInterest with its address and categories
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          count: 1
+          next: null
+          results:
+            - id: 78749
+              name:
+                fi: "Helsingin pääpoliisiasema, Poliisitalo 2"
+                sv: "Helsingfors huvudpolisstation, Polishus 2"
+                en: "Helsinki Main Police Station, Police house 2"
+              location: { type: Point, coordinates: [24.926199, 60.20064] }
+              street_address: { fi: "Pasilanraitio 11", sv: "Böletået 11", en: "Pasilanraitio 11" }
+              address_zip: "00240"
+              municipality: "helsinki"
+              service_nodes: [1077]
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:PointOfInterest:hel.fi:services:unit-78749",
+              "type": "PointOfInterest",
+              "name": {
+                "type": "LanguageProperty",
+                "languageMap": {
+                  "fi": "Helsingin pääpoliisiasema, Poliisitalo 2",
+                  "sv": "Helsingfors huvudpolisstation, Polishus 2",
+                  "en": "Helsinki Main Police Station, Police house 2"
+                }
+              },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [24.926199, 60.20064] }
+              },
+              "address": {
+                "type": "Property",
+                "value": {
+                  "streetAddress": "Pasilanraitio 11",
+                  "postalCode": "00240",
+                  "addressLocality": "Helsinki"
+                }
+              },
+              "category": { "type": "Property", "value": ["1077"] },
+              "source": { "type": "Property", "value": "https://api.hel.fi/servicemap/v2/" }
+            }
+          ]
+
+  - name: a unit without coordinates is dropped and a sparse unit keeps only what it has
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          results:
+            - id: 80001
+              name: { fi: "Kirjaamaton toimipiste" }
+              location: null
+              municipality: "helsinki"
+              service_nodes: []
+            - id: 80002
+              name: { fi: "Väestönsuoja", sv: "", en: null }
+              location: { type: Point, coordinates: [24.9401, 60.1701] }
+              street_address: null
+              address_zip: null
+              municipality: "helsinki"
+              service_nodes: []
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:PointOfInterest:hel.fi:services:unit-80002" &&
+              this.index(0).name.languageMap == { "fi": "Väestönsuoja" } &&
+              this.index(0).address.value == { "addressLocality": "Helsinki" } &&
+              !this.index(0).exists("category")

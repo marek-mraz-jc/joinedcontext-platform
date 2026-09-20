@@ -1,0 +1,13 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Project
+metadata:
+  name: ovzdusie
+  namespace: org
+  title: { sk: "Ovzdušie", en: "Air quality" }
+spec:
+  organizationRef: { kind: Organization, name: banskabystrica }
+  quotas:                           # structural quotas per Project (PF-17), checked by Conftest (PF-18)
+    contextSpaces: 5
+    residentPipelines: 3
+    publicEndpoints: 2
+    ingestEventsPerSecond: 500

@@ -1,0 +1,19 @@
+# HSY publishes the air quality of the capital region as an open WFS. No credential, so the
+# source declares none; HTTPS all the same, because an unencrypted fetch is a fetch anybody on
+# the path can rewrite. The query is part of the URL: WFS has no body.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hsy-ilmanlaatu-wfs
+  namespace: helsinki
+  title:
+    fi: HSY:n ilmanlaatu (WFS)
+    en: HSY air quality (WFS)
+spec:
+  type: http
+  http:
+    url: https://kartta.hsy.fi/geoserver/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=ilmanlaatu:Ilmanlaatu_nyt&outputFormat=application/json&srsName=EPSG:4326
+    verb: GET
+    headers:
+      Accept: application/json
+    timeout: 30s

@@ -1,0 +1,10 @@
+{
+  "id": "urn:ngsi-ld:AirQualityObserved:example.org:air:sever-01",
+  "pm2p5": 12.5,
+  "temperature": 21.0,
+  "distanceToRoad": 2.5,
+  "stationName": "Sever",
+  "areaServed": "Banská Bystrica",
+  "airQualityLevel": "good",
+  "readingCount": "7"
+}

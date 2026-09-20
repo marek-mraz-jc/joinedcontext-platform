@@ -1,0 +1,77 @@
+# Golden transformation tests for the HSY air quality pipeline (PL-22, T-0322).
+#
+#   bento test ./examples/ingestion/helsinki-hsy-air/...
+
+tests:
+  - name: one WFS response becomes one entity per reporting station
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          type: FeatureCollection
+          totalFeatures: 2
+          timeStamp: "2026-09-06T23:38:42.973Z"
+          features:
+            - type: Feature
+              id: Ilmanlaatu_nyt.fid-1
+              geometry: { type: Point, coordinates: [24.81117317, 60.2202584] }
+              properties:
+                Mittausasema: "Leppävaara, vilkasliikenteinen alue"
+                Aika: "7.9.2026 klo 2"
+                Ilmanlaatuindeksi: 13
+                Mittausaseman_osoite: "Läkkisepänkuja 1, Espoo"
+                Mittausaseman_numero: 1
+            - type: Feature
+              id: Ilmanlaatu_nyt.fid-2
+              geometry: { type: Point, coordinates: [24.9384, 60.1699] }
+              properties:
+                Mittausasema: "Mannerheimintie"
+                Aika: "7.9.2026 klo 2"
+                Ilmanlaatuindeksi: null
+                Mittausaseman_osoite: "Mannerheimintie 5, Helsinki"
+                Mittausaseman_numero: 4
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:station-1",
+              "type": "AirQualityObserved",
+              "name": { "type": "Property", "value": "Leppävaara, vilkasliikenteinen alue" },
+              "dateObserved": { "type": "Property", "value": "2026-09-06T23:00:00Z" },
+              "airQualityIndex": { "type": "Property", "value": 13, "observedAt": "2026-09-06T23:00:00Z" },
+              "address": { "type": "Property", "value": { "streetAddress": "Läkkisepänkuja 1, Espoo" } },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [24.81117317, 60.2202584] }
+              },
+              "source": { "type": "Property", "value": "https://kartta.hsy.fi/geoserver/wfs" }
+            }
+          ]
+
+  - name: the hour label is read as Helsinki local time, not as UTC
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      # January: the same wall clock is UTC+2 rather than UTC+3, and the pipeline measures the
+      # offset from the response rather than assuming one.
+      - json_content:
+          timeStamp: "2027-01-15T09:05:00.000Z"
+          features:
+            - geometry: { type: Point, coordinates: [24.9384, 60.1699] }
+              properties:
+                Mittausasema: "Mannerheimintie"
+                Aika: "15.1.2027 klo 11"
+                Ilmanlaatuindeksi: 41
+                Mittausaseman_osoite: "Mannerheimintie 5, Helsinki"
+                Mittausaseman_numero: 4
+    output_batches:
+      - - bloblang: |
+            root = this.index(0).dateObserved.value == "2027-01-15T09:00:00Z" &&
+              this.index(0).id == "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:station-4"

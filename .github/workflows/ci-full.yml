@@ -1,0 +1,38 @@
+name: ci-full
+# the slow lane: runs once an hour on main and on demand; never a PR gate.
+# The MVP pushes to main many times an hour, and a full run per push queued behind the next
+# one; ci.yml stays the per-push gate. tasks/ci files a task for a red hourly run like any other.
+# To put the per-push trigger back: add `push: { branches: [main] }` under `on:`.
+on:
+  schedule: [{ cron: "7 * * * *" }]
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency: { group: "ci-full-${{ github.ref }}", cancel-in-progress: false }
+jobs:
+  test-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --all-targets --all-features
+      - run: cargo doc --workspace --no-deps
+        env: { RUSTDOCFLAGS: "-D warnings" }
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with: { tool: "cargo-audit,cargo-deny" }
+      - run: cargo audit
+      - run: cargo deny check advisories bans licenses sources
+  trivy-fs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { scan-type: fs, severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }

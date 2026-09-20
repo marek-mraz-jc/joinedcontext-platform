@@ -1,0 +1,93 @@
+# Native Bento, no wrapper (PL-03). There is no `input`: the pipeline references a DataSource
+# and the reconciler renders the MQTT input in front of these processors (PL-39, MF-35).
+
+cache_resources:
+  - label: fleet
+    memory:
+      default_ttl: 30m
+      compaction_interval: 60s
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # One topic tree carries several frame kinds; only a VP frame is a position report.
+    - mapping: |
+        root = if this.exists("VP") { this.VP } else { deleted() }
+
+    # The bus this frame belongs to: operator and vehicle number, the local part of its URN.
+    - mapping: |
+        meta vehicle = "%v-%v".format(this.oper, this.veh)
+
+    # The 30-bus cap. A bus keeps the slot it was given, so the demo follows the same 30
+    # buses for the life of the runner instead of flickering between hundreds of them.
+    # The cache is the state; `counter()` hands out the slots in arrival order.
+    - branch:
+        request_map: 'root = ""'
+        processors:
+          - cache:
+              resource: fleet
+              operator: get
+              key: '${! meta("vehicle") }'
+          - catch:
+              - mapping: 'root = counter()'
+              - cache:
+                  resource: fleet
+                  operator: set
+                  key: '${! meta("vehicle") }'
+                  value: '${! content() }'
+        result_map: 'meta slot = content().string()'
+
+    - mapping: |
+        root = if meta("slot").number() > 30 { deleted() } else { this }
+
+    # The entity. The reconciler injects `JC_ORG_DOMAIN` into the runner from the project's
+    # Organization, so the domain is never written into a pipeline file (PF-44, PF-42).
+    - mapping: |
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format("Vehicle", $domain, "transport", meta("vehicle"))
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "Vehicle",
+          "location": {
+            "type": "GeoProperty",
+            "value": { "type": "Point", "coordinates": [ this.long.number(), this.lat.number() ] },
+            "observedAt": this.tst
+          },
+          "speed": {
+            "type": "Property",
+            "value": this.spd.number(),
+            "unitCode": "MTS",
+            "observedAt": this.tst
+          },
+          "heading": {
+            "type": "Property",
+            "value": this.hdg.number(),
+            "unitCode": "DD",
+            "observedAt": this.tst
+          },
+          "route": { "type": "Property", "value": this.route.string(), "observedAt": this.tst },
+          "vehicleType": { "type": "Property", "value": "bus" },
+          "fleetVehicleId": { "type": "Property", "value": meta("vehicle") }
+        }
+
+    # One request per batch rather than per bus.
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-vehicles/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

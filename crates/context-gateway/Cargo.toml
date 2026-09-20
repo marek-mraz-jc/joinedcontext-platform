@@ -1,0 +1,70 @@
+[package]
+name = "context-gateway"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum"] }
+jcctl = { path = "../jcctl", version = "0.1.0" }
+arc-swap = "1"
+# base64url for the opaque OGC page cursor (EP-36); already in the tree via jsonwebtoken
+base64 = "0.22"
+argon2 = "0.5"
+axum = "0.8"
+http-body-util = "0.1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
+regex = "1"
+# The preview list from the Portal (Architecture/06 §7.2); already in the tree through jcctl.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+jsonwebtoken = "9"
+# sha256 for the schema surface's strong ETags; jsonwebtoken already links it
+ring = "0.17"
+# xlsx is a zip of XML parts: the XML is written here, the container is not worth rewriting
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+jsonschema = { version = "0.54", default-features = false }
+
+# The gateway's own Prometheus surface (OPS-16, TS-22). The facade is what the modules speak
+# and the exporter exists only in `telemetry`; no default features, because the exporter's own
+# HTTP listener and push gateway would be a second server on a second port when the surface
+# already has one.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
+
+# A notification is delivered to a subscriber outside the cluster, so the outbound client
+# speaks TLS (R46). `ring` rather than the default aws-lc-rs: the crate already links ring for
+# the schema surface's ETags, and this adds no second C toolchain to the image build. The
+# public roots are read from the image at start-up (`/etc/ssl/certs/ca-certificates.crt`, which
+# the distroless base ships), so a withdrawn root arrives with the next base image rather than
+# with a crate release. `rustls-pki-types` is here for its PEM reader and comes with rustls
+# anyway.
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
+rustls-pki-types = "1"
+
+[dev-dependencies]
+serde_norway = "0.9"
+# `oneshot`, so the tenancy middleware is tested through a real tower stack.
+tower = { version = "0.5", features = ["util"] }
+# the workbook is read back part by part, so the test asserts a package rather than bytes
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# `test-util` pauses the clock, so the reaper's five-second bound is measured
+# without a test that actually sleeps for five seconds.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+# The TLS sink of the egress tests: a certificate minted per run, because a test key in the
+# repository is a finding for the secret scanner and an expiry date waiting to happen.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+hyper = { version = "1", features = ["http1", "server"] }

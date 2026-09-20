@@ -1,0 +1,21 @@
+# The operator's own GBFS feed: open, no credential, so the source declares none. Digitransit
+# mirrors the same feed at https://api.digitransit.fi/map/v2/hsl/gbfs/en/station_status.json
+# behind a subscription key; that variant is this manifest plus
+# `authorization: { header: digitransit-subscription-key, headerRef: { name: …, key: … } }`
+# (MF-35, Architecture/08 §6).
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hsl-citybikes-gbfs
+  namespace: helsinki
+  title:
+    fi: Kaupunkipyöräasemien tila (GBFS)
+    en: City bike station status (GBFS)
+spec:
+  type: http
+  http:
+    url: https://gbfs.theta.fifteen.eu/gbfs/2.2/helsinki/en/station_status.json
+    verb: GET
+    headers:
+      Accept: application/json
+    timeout: 15s

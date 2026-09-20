@@ -1,0 +1,62 @@
+# Golden transformation tests for the postal-code population pipeline (PL-22, T-0329).
+#
+#   bento test ./examples/ingestion/helsinki-hri-population/...
+
+tests:
+  - name: a postal code with residents becomes one StatisticalPopulation
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: |
+          FID,id,postinumeroalue,nimi,vuosi,kunta,he_vakiy,he_naiset,he_miehet
+          pno_tilasto.1,1,00100,Helsinki keskusta - Etu-Töölö,2026,091,18492,9734,8758
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:StatisticalPopulation:hel.fi:statistics:pno-00100",
+              "type": "StatisticalPopulation",
+              "name": { "type": "Property", "value": "Helsinki keskusta - Etu-Töölö" },
+              "postalCode": { "type": "Property", "value": "00100" },
+              "refYear": { "type": "Property", "value": 2026 },
+              "populationCount": {
+                "type": "Property", "value": 18492, "observedAt": "2026-01-01T00:00:00Z"
+              },
+              "femalePopulation": {
+                "type": "Property", "value": 9734, "observedAt": "2026-01-01T00:00:00Z"
+              },
+              "malePopulation": {
+                "type": "Property", "value": 8758, "observedAt": "2026-01-01T00:00:00Z"
+              },
+              "source": {
+                "type": "Property", "value": "https://geo.stat.fi/geoserver/postialue/wfs"
+              }
+            }
+          ]
+
+  - name: an area too small to publish is dropped, and so is a breakdown that is too small
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      # 00230 is the Helsinki mail centre: a postal code with no residents at all. 00231 is the
+      # suppression marker Paavo writes, -1. 00232 has enough residents to publish, but three of
+      # them are women, and three women in one postal code is a person somebody can name.
+      - content: |
+          FID,id,postinumeroalue,nimi,vuosi,kunta,he_vakiy,he_naiset,he_miehet
+          pno_tilasto.13,13,00230,Helsinki postikeskus,2026,091,0,0,0
+          pno_tilasto.14,14,00231,Vaiettu alue,2026,091,-1,-1,-1
+          pno_tilasto.15,15,00232,Pieni alue,2026,091,41,3,38
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:StatisticalPopulation:hel.fi:statistics:pno-00232" &&
+              this.index(0).populationCount.value == 41 &&
+              !this.index(0).exists("femalePopulation") &&
+              this.index(0).malePopulation.value == 38

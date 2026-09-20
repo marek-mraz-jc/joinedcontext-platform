@@ -1,0 +1,271 @@
+//! T-0525: `kind: Role` and `kind: RoleBinding` (PF-49, PF-52).
+
+use chrono::{TimeZone, Utc};
+use jc_core::envelope::ResourceEnvelope;
+use jc_core::error::Error;
+use jc_core::kinds::{Role, RoleBindingSpec, Verb};
+
+const ROLE: &str = include_str!("golden/023-Role-12-identity-and-access.yaml");
+const BINDING: &str = include_str!("golden/024-RoleBinding-12-identity-and-access.yaml");
+
+type RoleBinding = ResourceEnvelope<RoleBindingSpec>;
+
+fn role(replace: &str, with: &str) -> Result<Role, Error> {
+    let manifest =
+        Role::from_yaml(&ROLE.replace(replace, with)).map_err(|e| Error::Parse(e.to_string()))?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+fn binding(replace: &str, with: &str) -> Result<RoleBinding, Error> {
+    let manifest = RoleBinding::from_yaml(&BINDING.replace(replace, with))
+        .map_err(|e| Error::Parse(e.to_string()))?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+#[test]
+fn the_documented_role_round_trips() {
+    let role = role("", "").expect("the golden role validates");
+    assert_eq!(role.spec.rules.len(), 2);
+    assert_eq!(role.spec.rules[0].verbs, vec![Verb::Propose]);
+    assert_eq!(role.spec.rules[1].constraints[0].not_in, vec!["public"]);
+    let yaml = serde_norway::to_string(&role).expect("serializes");
+    let again = Role::from_yaml(&yaml).expect("parses back");
+    assert_eq!(again, role);
+    assert!(!yaml.contains("one_of"), "serde name is `in`: {yaml}");
+}
+
+#[test]
+fn the_documented_binding_round_trips() {
+    let binding = binding("", "").expect("the golden binding validates");
+    assert_eq!(binding.spec.subjects.len(), 2);
+    assert_eq!(
+        binding.spec.subjects[0].group.as_deref(),
+        Some("air-quality-team")
+    );
+    assert_eq!(binding.spec.scope.project.as_deref(), Some("ovzdusie"));
+    let yaml = serde_norway::to_string(&binding).expect("serializes");
+    assert_eq!(RoleBinding::from_yaml(&yaml).expect("parses back"), binding);
+}
+
+#[test]
+fn a_role_without_rules_kinds_or_verbs_is_refused() {
+    let err = role("  rules:\n    - kinds: [Pipeline, DataSource, Mapping]\n      verbs: [propose]                       # propose | approve | delete\n    - kinds: [Endpoint]\n      verbs: [propose]\n      constraints:\n        - { field: spec.audience, notIn: [public] }   # a public endpoint is another role's\n", "  rules: []\n")
+        .expect_err("no rules");
+    assert!(err.to_string().contains("spec.rules"), "{err}");
+    let err = role("kinds: [Endpoint]", "kinds: []").expect_err("no kinds");
+    assert!(err.to_string().contains("kinds"), "{err}");
+    let err = role("kinds: [Endpoint]", "kinds: [endpoint]").expect_err("lowercase kind");
+    assert!(err.to_string().contains("Pipeline"), "{err}");
+    let err = role(
+        "      verbs: [propose]\n      constraints",
+        "      verbs: []\n      constraints",
+    )
+    .expect_err("no verbs");
+    assert!(err.to_string().contains("verbs"), "{err}");
+    let err = role(
+        "verbs: [propose]                       #",
+        "verbs: [publish] #",
+    )
+    .expect_err("unknown verb");
+    assert!(matches!(err, Error::Parse(_)), "{err}");
+}
+
+#[test]
+fn a_constraint_has_exactly_one_operator_on_a_spec_field() {
+    let err = role("notIn: [public] }", "notIn: [public], equals: internal }")
+        .expect_err("two operators");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+    let err = role("notIn: [public] }", "}").expect_err("no operator");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+    let err = role("field: spec.audience", "field: metadata.name").expect_err("not a spec field");
+    assert!(err.to_string().contains("spec field"), "{err}");
+    let err = role("notIn: [public] }", "matches: [public] }").expect_err("unknown operator");
+    assert!(matches!(err, Error::Parse(_)), "{err}");
+    role("notIn: [public] }", "in: [internal, private] }").expect("`in` is an operator");
+}
+
+#[test]
+fn a_binding_needs_subjects_a_role_and_one_scope() {
+    let err = binding(
+        "subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]",
+        "subjects: []",
+    )
+    .expect_err("no subjects");
+    assert!(err.to_string().contains("subjects"), "{err}");
+    let err = binding(
+        "{ group: air-quality-team }",
+        "{ group: air-quality-team, user: x }",
+    )
+    .expect_err("two names");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+    let err = binding("{ group: air-quality-team }", "{ group: \"\" }").expect_err("empty name");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+    let err = binding("{ group: air-quality-team }", "{ token: abc }")
+        .expect_err("no secret field exists");
+    assert!(matches!(err, Error::Parse(_)), "{err}");
+    let err = binding("role: pipeline-developer", "role: Pipeline Developer")
+        .expect_err("role is a label");
+    assert!(
+        err.to_string().contains("DNS-1123") || err.to_string().contains("label"),
+        "{err}"
+    );
+    let err = binding(
+        "scope: { project: ovzdusie }",
+        "scope: { project: ovzdusie, organization: bb }",
+    )
+    .expect_err("two scopes");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+    let err = binding("scope: { project: ovzdusie }", "scope: {}").expect_err("no scope");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+}
+
+#[test]
+fn validity_is_ordered_and_bounds_are_inclusive() {
+    let err = binding(
+        "validity: { notAfter: \"2026-12-31T23:59:59Z\" }",
+        "validity: { notBefore: \"2027-01-01T00:00:00Z\", notAfter: \"2026-12-31T23:59:59Z\" }",
+    )
+    .expect_err("ends before it starts");
+    assert!(err.to_string().contains("notAfter"), "{err}");
+
+    let binding = binding("", "").expect("valid");
+    let validity = binding.spec.validity.as_ref().expect("has validity");
+    assert!(validity.contains(Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap()));
+    assert!(!validity.contains(Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()));
+    assert!(jc_core::kinds::BindingValidity::default()
+        .contains(Utc.with_ymd_and_hms(2030, 6, 1, 0, 0, 0).unwrap()));
+}
+
+#[test]
+fn both_kinds_live_in_users_of_the_organization_repository() {
+    let role_info = jc_core::registry::by_kind("Role").expect("registered");
+    // No namespace is the organization's, never a project's (PF-68).
+    assert_eq!(
+        role_info.repo_path("", "", "pipeline-developer"),
+        "users/roles/pipeline-developer.yaml"
+    );
+    let binding_info = jc_core::registry::by_kind("RoleBinding").expect("registered");
+    assert_eq!(
+        binding_info.repo_path("", "", "ovzdusie-developers"),
+        "users/assignments/ovzdusie-developers.yaml"
+    );
+    let err = binding("namespace: org", "namespace: ovzdusie").expect_err("organization scope");
+    assert!(err.to_string().contains("org"), "{err}");
+}
+
+/// PF-59: `read` is a verb of its own, and `propose` implies it, because nobody proposes a
+/// change to what they may not see. `approve` and `delete` imply nothing: a role that only
+/// approves reads nothing by that rule.
+#[test]
+fn propose_implies_read_and_approve_does_not() {
+    let rule = jc_core::kinds::role::Rule {
+        kinds: vec!["Pipeline".to_owned()],
+        verbs: vec![Verb::Propose],
+        constraints: vec![],
+    };
+    assert!(rule.grants("Pipeline", Verb::Read));
+    assert!(rule.grants("Pipeline", Verb::Propose));
+    assert!(!rule.grants("Pipeline", Verb::Approve));
+    assert!(
+        !rule.grants("Endpoint", Verb::Read),
+        "never outside its kinds"
+    );
+
+    let approving = jc_core::kinds::role::Rule {
+        kinds: vec!["Endpoint".to_owned()],
+        verbs: vec![Verb::Approve, Verb::Delete],
+        constraints: vec![],
+    };
+    assert!(!approving.grants("Endpoint", Verb::Read));
+    assert!(approving.grants("Endpoint", Verb::Approve));
+
+    let reading = jc_core::kinds::role::Rule {
+        kinds: vec!["Endpoint".to_owned()],
+        verbs: vec![Verb::Read],
+        constraints: vec![],
+    };
+    assert!(reading.grants("Endpoint", Verb::Read));
+    assert!(
+        !reading.grants("Endpoint", Verb::Propose),
+        "read grants nothing else"
+    );
+}
+
+/// The verb is written `read` in a manifest, beside the three that were there before.
+#[test]
+fn the_read_verb_parses_from_a_manifest() {
+    let viewer = role("verbs: [propose]", "verbs: [read]").expect("a viewer role validates");
+    assert_eq!(viewer.spec.rules[0].verbs, vec![Verb::Read]);
+    let yaml = serde_norway::to_string(&viewer).expect("serializes");
+    assert!(yaml.contains("- read"), "serde name is `read`: {yaml}");
+}
+
+// ---------------------------------------------------------------------------
+// A role of a project (PF-68, T-0871)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_role_in_a_project_lands_in_that_project_and_names_project_kinds_only() {
+    use jc_core::envelope::Kind;
+
+    // The same rules, in a project: the path is the project's, not the organization's.
+    let in_project = role("namespace: org", "namespace: ovzdusie").expect("a project role");
+    assert_eq!(
+        in_project.spec.repo_path(&in_project.metadata),
+        "projects/ovzdusie/roles/pipeline-developer.yaml"
+    );
+    let in_org = role("", "").expect("the organization's role");
+    assert_eq!(
+        in_org.spec.repo_path(&in_org.metadata),
+        "users/roles/pipeline-developer.yaml"
+    );
+
+    // Naming an organization kind from a project would let a project write the rules.
+    for forbidden in ["Role", "RoleBinding", "Group", "Organization", "Project"] {
+        let yaml = ROLE
+            .replace("namespace: org", "namespace: ovzdusie")
+            .replace("[Pipeline, DataSource, Mapping]", &format!("[{forbidden}]"));
+        let manifest = Role::from_yaml(&yaml).expect("parses");
+        let err = manifest
+            .validate()
+            .expect_err("{forbidden} is out of reach");
+        assert!(
+            err.to_string().contains(forbidden) && err.to_string().contains("PF-68"),
+            "{err}"
+        );
+    }
+
+    // The same kinds are a role of the organization's own, unchanged.
+    let yaml = ROLE.replace("[Pipeline, DataSource, Mapping]", "[Role, RoleBinding]");
+    Role::from_yaml(&yaml)
+        .expect("parses")
+        .validate()
+        .expect("the organization's role names the organization's kinds");
+}
+
+#[test]
+fn the_registry_knows_where_a_role_lives_in_either_place() {
+    use jc_core::envelope::Scope;
+
+    let info = jc_core::registry::by_kind("Role").expect("Role is catalogued");
+    assert_eq!(info.scope, Scope::OrganizationOrProject);
+    assert!(info.scope.allows_organization() && info.scope.allows_project());
+    assert_eq!(
+        info.repo_path("org", "", "pipeline-developer"),
+        "users/roles/pipeline-developer.yaml"
+    );
+    assert_eq!(
+        info.repo_path("ovzdusie", "", "air-analyst"),
+        "projects/ovzdusie/roles/air-analyst.yaml"
+    );
+
+    // Every other kind lives in one place and is unchanged by the second template.
+    let binding = jc_core::registry::by_kind("RoleBinding").expect("RoleBinding is catalogued");
+    assert_eq!(binding.project_path_template, None);
+    assert_eq!(
+        binding.repo_path("ovzdusie", "", "analysts"),
+        "users/assignments/analysts.yaml"
+    );
+}

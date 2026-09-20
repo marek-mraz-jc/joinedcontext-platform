@@ -1,0 +1,24 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Layer
+metadata:
+  name: air-quality-stations
+  namespace: helsinki
+spec:
+  sourceEndpointRef: ep-air-quality
+  entityType: AirQualityObserved
+  style: circle             # circle | heatmap | hexagon | icon | line | fill
+  visible: true
+  filter:
+    q: 'pm10>0'
+    scopeQ: '/geo/FI/HKI/#'
+  colorBy:
+    property: pm10
+    palette: "YlOrRd"
+    domain: [0, 100]
+  sizeBy:
+    property: pm10
+    range: [4, 18]
+  popupProperties:
+    - stationName
+    - pm10
+    - temperature

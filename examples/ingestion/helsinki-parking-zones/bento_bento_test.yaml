@@ -1,0 +1,113 @@
+# Golden transformation tests for the Helsinki parking-area pipeline (PL-22, T-0326).
+#
+#   bento test ./examples/ingestion/helsinki-parking-zones/...
+
+tests:
+  - name: one registered area becomes one OffStreetParking with its polygon and capacity
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          type: FeatureCollection
+          numberReturned: 1
+          features:
+            - type: Feature
+              id: Pysakointipaikat_alue.15506
+              geometry:
+                type: MultiPolygon
+                coordinates: [[[[24.94807891, 60.16297805], [24.94804289, 60.16297733], [24.94801576, 60.1632241], [24.94804739, 60.16322412], [24.94807891, 60.16297805]]]]
+              properties:
+                id: 15506
+                luokka: 9
+                luokka_nimi: "Pysäköinti sallittu pysäköintikieltoajan ulkopuolella"
+                tyyppi: ""
+                voimassaolo: "8-18"
+                pinta_ala: 51.62
+                paikat_des: 4.3016667
+                paikat_ala: 4
+                paivitetty_tietopalveluun: "2026-09-04"
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:OffStreetParking:hel.fi:parking:15506",
+              "type": "OffStreetParking",
+              "location": {
+                "type": "GeoProperty",
+                "value": {
+                  "type": "MultiPolygon",
+                  "coordinates": [[[[24.94807891, 60.16297805], [24.94804289, 60.16297733], [24.94801576, 60.1632241], [24.94804739, 60.16322412], [24.94807891, 60.16297805]]]]
+                }
+              },
+              "name": {
+                "type": "Property",
+                "value": "Pysäköinti sallittu pysäköintikieltoajan ulkopuolella"
+              },
+              "totalSpotNumber": { "type": "Property", "value": 4 },
+              "description": { "type": "Property", "value": "8-18" },
+              "source": {
+                "type": "Property",
+                "value": "https://kartta.hel.fi/ws/geoserver/avoindata/wfs"
+              }
+            }
+          ]
+
+  - name: a no-parking area in the same layer is not published as parking capacity
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          features:
+            - type: Feature
+              geometry:
+                type: MultiPolygon
+                coordinates: [[[[24.9481, 60.1629], [24.9480, 60.1629], [24.9480, 60.1632], [24.9481, 60.1629]]]]
+              properties: { id: 91001, tyyppi: "Pysäköintikielto", paikat_ala: 0, luokka_nimi: null, voimassaolo: "" }
+            - type: Feature
+              geometry:
+                type: MultiPolygon
+                coordinates: [[[[24.9401, 60.1701], [24.9402, 60.1701], [24.9402, 60.1703], [24.9401, 60.1701]]]]
+              properties: { id: 91002, tyyppi: "Sähköauto", paikat_ala: 2, luokka_nimi: null, voimassaolo: "" }
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:OffStreetParking:hel.fi:parking:91002" &&
+              this.index(0).category.value == ["Sähköauto"] &&
+              !this.index(0).exists("name") &&
+              !this.index(0).exists("description")
+
+  - name: a ring the producer left open is closed before it is published
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      # Four distinct positions and no repeat of the first: valid for GeoServer, invalid for
+      # RFC 7946, and a consumer that reads it literally draws an unclosed shape.
+      - json_content:
+          features:
+            - type: Feature
+              geometry:
+                type: MultiPolygon
+                coordinates: [[[[24.9401, 60.1701], [24.9402, 60.1701], [24.9402, 60.1703], [24.9401, 60.1703]]]]
+              properties: { id: 91003, tyyppi: "", paikat_ala: 6, luokka_nimi: "Kertamaksu enintään 4 tuntia", voimassaolo: "" }
+            # A ring of two positions bounds nothing; RFC 7946 wants four, so the area is
+            # dropped rather than published as a polygon that is not one.
+            - type: Feature
+              geometry:
+                type: MultiPolygon
+                coordinates: [[[[24.9501, 60.1801], [24.9502, 60.1801]]]]
+              properties: { id: 91004, tyyppi: "", paikat_ala: 1, luokka_nimi: null, voimassaolo: "" }
+    output_batches:
+      - - bloblang: |
+            let ring = this.index(0).location.value.coordinates.index(0).index(0)
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:OffStreetParking:hel.fi:parking:91003" &&
+              $ring.length() == 5 &&
+              $ring.index(0) == $ring.index(-1)

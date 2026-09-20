@@ -1,0 +1,21 @@
+# pipeline.yaml
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: district-air-index-daily
+  namespace: bb-ovzdusie
+spec:
+  class: scheduled
+  schedule: "10 0 * * *"                   # once a day, after midnight
+  source:
+    endpointRef: { kind: Endpoint, name: ovzdusie-internal }   # read grant, same or another space
+    query: { type: AirQualityObserved, attrs: [pm10, pm25, refDistrict], temporalQ: { window: P1D } }
+    # resident alternative: trigger: { subscription: { type: AirQualityObserved, watchedAttributes: [pm10, pm25] } }
+  compute:
+    kind: wasm                             # bloblang | mapping | wasm | container
+    module: ./compute                      # Rust crate beside the pipeline, built in CI to wasm32-wasip1
+    function: process
+  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived   # write grant; may point into another space
+  output:
+    type: AirQualityIndexDaily
+    mode: upsert                           # upsert | update-attrs (same entity, new attributes)

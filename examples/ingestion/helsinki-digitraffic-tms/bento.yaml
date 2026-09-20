@@ -1,0 +1,90 @@
+# Native Bento, no wrapper (PL-03). There is no `input`: the pipeline references a DataSource
+# and the reconciler renders the HTTPS poll in front of these processors (PL-39, MF-35).
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # One response carries every counter in the country.
+    - mapping: |
+        root = this.stations
+
+    - unarchive:
+        format: json_array
+
+    # A counter that is offline reports an empty list rather than zeroes.
+    - mapping: |
+        root = if this.sensorValues.length() > 0 { this } else { deleted() }
+
+    # A counter measures both directions of the road separately, and one TrafficFlowObserved
+    # carries one intensity, so a station becomes one entity per direction. The sensor names
+    # are the contract: OHITUKSET is passings, KESKINOPEUS is average speed, SUUNTA is the
+    # direction, and KIINTEA is the fixed five-minute window rather than the sliding one.
+    - mapping: |
+        let sensors = this.sensorValues.map_each(sensor -> { sensor.name: sensor }).squash()
+        let readings = [1, 2].map_each(direction -> {
+          "station": this.id,
+          "direction": direction,
+          "flow": $sensors.get("OHITUKSET_5MIN_KIINTEA_SUUNTA%v".format(direction)).catch(null),
+          "speed": $sensors.get("KESKINOPEUS_5MIN_KIINTEA_SUUNTA%v".format(direction)).catch(null)
+        }).filter(reading -> reading.flow != null)
+        root = if $readings.length() == 0 { deleted() } else { $readings }
+
+    - unarchive:
+        format: json_array
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44). The direction is
+        # part of the local id because the two directions of one counter are two observations.
+        let domain = env("JC_ORG_DOMAIN")
+        let local = "%v-%v".format(this.station, this.direction)
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format("TrafficFlowObserved", $domain, "traffic", $local)
+        let seen = this.flow.measuredTime
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "TrafficFlowObserved",
+          "dateObserved": { "type": "Property", "value": $seen },
+          "dateObservedFrom": { "type": "Property", "value": this.flow.timeWindowStart },
+          "dateObservedTo": { "type": "Property", "value": this.flow.timeWindowEnd },
+          # Digitraffic publishes the passings of a five-minute window as vehicles per hour;
+          # the window itself is above, so the rate is readable without a unit code that does
+          # not exist in UN/CEFACT.
+          "intensity": { "type": "Property", "value": this.flow.value.number(), "observedAt": $seen },
+          "laneDirection": {
+            "type": "Property",
+            "value": if this.direction == 1 { "outbound" } else { "inbound" }
+          },
+          "refTMSStation": { "type": "Property", "value": this.station },
+          "source": { "type": "Property", "value": "https://tie.digitraffic.fi" }
+        }
+        # A counter that reports passings but no speed is a counter with one sensor, not an
+        # entity with a null speed.
+        root.averageVehicleSpeed = if this.speed == null { deleted() } else {
+          {
+            "type": "Property",
+            "value": this.speed.value.number(),
+            "unitCode": "KMH",
+            "observedAt": this.speed.measuredTime
+          }
+        }
+
+    # One request per run rather than one per counter.
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-traffic/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

@@ -1,0 +1,9 @@
+{
+  "id": "urn:ngsi-ld:AirQualityObserved:example.org:air:juh-02",
+  "pm25": 88.25,
+  "label": "Juh (Zvolen)",
+  "band": "C",
+  "readings": -4,
+  "distanceCm": 0.0,
+  "degrees": -3
+}

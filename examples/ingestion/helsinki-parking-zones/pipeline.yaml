@@ -1,0 +1,22 @@
+# Five minutes is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). The cron
+# expression is declared rather than left to the fallback: with one, the job starts, fetches once
+# and exits, instead of holding a pod for the length of the period (PL-27). The register itself
+# changes a few times a week; five minutes is the lag a change may sit unpublished.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: parking-zones-wfs
+  namespace: helsinki
+  title:
+    fi: Pysäköintialueet Helsingin WFS-rajapinnasta
+    en: Parking areas from the Helsinki WFS service
+spec:
+  class: auto
+  period: 5m
+  schedule: "*/5 * * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: hel-parking-wfs }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:parking:ep-parking-zones
+  quotas:
+    maxMemoryMb: 256
+    cpuMillicores: 200

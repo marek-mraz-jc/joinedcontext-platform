@@ -1,0 +1,81 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTPS fetch from the
+# referenced DataSource (PL-39). One fetch is one page of events, not one event.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this.data
+    - unarchive:
+        format: json_array
+
+    # Two rows the register really contains and a map cannot use. An event whose place record
+    # has no `position` has no coordinates at all, and one whose `start_time` carries a
+    # mistyped year ("0026-09-23") would answer every time query wrongly for the next two
+    # thousand years. Both are dropped rather than guessed at.
+    - mapping: |
+        let position = this.location.position.or(null)
+        let year = this.start_time.or("").slice(0, 4).number().catch(0)
+        root = if $position == null || $year < 2000 { deleted() } else { this }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44). A Linked Events id
+        # is `helsinki:agpg4hzprq`; the colon would open a segment inside the URN's own
+        # separator, so it becomes a hyphen.
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "Event", $domain, "events", this.id.replace_all(":", "-"))
+        let names = this.name.or({}).filter(entry -> entry.value.type() == "string" && entry.value != "")
+        let summaries = this.short_description.or({}).filter(entry -> entry.value.type() == "string" && entry.value != "")
+        let street = this.location.street_address.or({}).fi.or(null)
+        let contact = this.provider_contact_info.or(null)
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "Event",
+          "name": if $names.length() > 0 {
+            { "type": "LanguageProperty", "languageMap": $names }
+          } else { null },
+          "description": if $summaries.length() > 0 {
+            { "type": "LanguageProperty", "languageMap": $summaries }
+          } else { null },
+          "startDate": { "type": "Property", "value": this.start_time },
+          "endDate": if this.end_time.or(null) == null { null } else {
+            { "type": "Property", "value": this.end_time }
+          },
+          "eventStatus": { "type": "Property", "value": this.event_status },
+          "location": { "type": "GeoProperty", "value": this.location.position },
+          "address": if $street == null { null } else {
+            {
+              "type": "Property",
+              "value": { "streetAddress": $street, "addressLocality": "Helsinki" }
+            }
+          },
+          "contactPoint": if $contact == null || $contact == "" { null } else {
+            { "type": "Property", "value": $contact }
+          },
+          "source": { "type": "Property", "value": "https://api.hel.fi/linkedevents/v1/" }
+        }
+        # The register writes a field it does not have as null or as an empty string in every
+        # language. Copying either through would publish an attribute with nothing in it.
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-linked-events/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

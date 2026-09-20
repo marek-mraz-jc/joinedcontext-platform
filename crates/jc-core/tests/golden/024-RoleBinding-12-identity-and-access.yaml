@@ -1,0 +1,9 @@
+# users/assignments/ovzdusie-developers.yaml
+apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata: { name: ovzdusie-developers, namespace: org }
+spec:
+  subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]
+  role: pipeline-developer
+  scope: { project: ovzdusie }              # organization | project | contextSpace
+  validity: { notAfter: "2026-12-31T23:59:59Z" }

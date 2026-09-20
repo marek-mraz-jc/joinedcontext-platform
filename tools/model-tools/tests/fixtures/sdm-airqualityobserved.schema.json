@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/schema#",
+  "$id": "https://smart-data-models.github.io/dataModel.Environment/AirQualityObserved/schema.json",
+  "title": "Smart Data Models - Air Quality Observed",
+  "description": "An observation of air quality conditions at a certain place and time.",
+  "type": "object",
+  "allOf": [
+    {
+      "$ref": "https://smart-data-models.github.io/data-models/common-schema.json#/definitions/GSMA-Commons"
+    },
+    {
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uri"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "AirQualityObserved"
+          ]
+        },
+        "dateObserved": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date and time of this observation in ISO8601 UTC format."
+        },
+        "temperature": {
+          "type": "number",
+          "description": "Temperature of the item. Units:'Celsius degrees'"
+        },
+        "airQualityIndex": {
+          "type": "number",
+          "description": "Air quality index. Units:'w/m2'"
+        },
+        "reliability": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Reliability of the observation."
+        },
+        "location": {
+          "type": "object",
+          "description": "Geojson reference to the item."
+        },
+        "refDevice": {
+          "type": "string",
+          "format": "uri",
+          "description": "A reference to the device which captured this observation."
+        },
+        "address": {
+          "$ref": "https://smart-data-models.github.io/data-models/common-schema.json#/definitions/Location-Commons/properties/address"
+        },
+        "refWeatherObserved": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "description": "Property. Identifier format of any NGSI entity"
+            },
+            {
+              "type": "string",
+              "format": "uri",
+              "description": "Property. Identifier format of any NGSI entity"
+            }
+          ],
+          "description": "Relationship. A reference to the weather observed at this place and time"
+        },
+        "airQualityLevel": {
+          "type": "string",
+          "description": "The overall qualitative level, with no kind written in front of it."
+        }
+      }
+    }
+  ],
+  "required": [
+    "id",
+    "type",
+    "dateObserved"
+  ]
+}

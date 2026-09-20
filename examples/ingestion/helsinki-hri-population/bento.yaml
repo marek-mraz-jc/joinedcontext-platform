@@ -1,0 +1,77 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTPS fetch from the
+# referenced DataSource (PL-39). One fetch is one CSV file, not one row.
+#
+# The type and its attributes are this project's own rather than a Smart Data Model: the space's
+# DataModel manifest is where `StatisticalPopulation` is declared, and the names below are the
+# ones it declares.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # A file with a header and nothing else is a file the producer published early: it writes
+    # nothing rather than failing the run.
+    - mapping: |
+        let rows = content().string().parse_csv()
+        root = if $rows.length() == 0 { deleted() } else { $rows }
+    - unarchive:
+        format: json_array
+
+    # Statistical disclosure control. Paavo writes -1 where it has already suppressed a cell,
+    # and a postal code with a handful of residents identifies them even when the number is
+    # real: 00230 is the Helsinki mail centre and has none. Under five residents the row is
+    # dropped rather than republished, which is the threshold the producer itself works to.
+    - mapping: |
+        root = if this.he_vakiy.number().catch(-1) < 5 { deleted() } else { this }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "StatisticalPopulation", $domain, "statistics",
+          "pno-%v".format(this.postinumeroalue))
+        let women = this.he_naiset.number().catch(-1)
+        let men = this.he_miehet.number().catch(-1)
+        let year = "%v-01-01T00:00:00Z".format(this.vuosi)
+        # A breakdown is disclosive on the same threshold as the total, so a component under
+        # five is left out even when the area as a whole is large enough to publish.
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "StatisticalPopulation",
+          "name": { "type": "Property", "value": this.nimi },
+          "postalCode": { "type": "Property", "value": this.postinumeroalue },
+          "refYear": { "type": "Property", "value": this.vuosi.number() },
+          "populationCount": {
+            "type": "Property",
+            "value": this.he_vakiy.number(),
+            "observedAt": $year
+          },
+          "femalePopulation": if $women < 5 { null } else {
+            { "type": "Property", "value": $women, "observedAt": $year }
+          },
+          "malePopulation": if $men < 5 { null } else {
+            { "type": "Property", "value": $men, "observedAt": $year }
+          },
+          "source": { "type": "Property", "value": "https://geo.stat.fi/geoserver/postialue/wfs" }
+        }
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-hri-population/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

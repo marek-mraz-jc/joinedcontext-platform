@@ -1,0 +1,22 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62). The slug is the endpoint's only address and
+# carries no meaning, so guessing it is as hard as guessing the key (EP-02).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-bikes
+  namespace: helsinki
+  title:
+    fi: Kaupunkipyöräasemat
+    en: City bike docking stations
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: bikes }
+  slug: qaa2dub4omnxk7uhszlmntvf3a
+  audience: public
+  enabledRepresentations: [ngsi-ld, geojson, csv, mcp]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: city-bike-docking-stations
+      datastore: { representation: csv, refresh: onChange }

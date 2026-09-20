@@ -1,0 +1,22 @@
+# Fintraffic's marine Digitraffic service publishes AIS positions of vessels in Finnish waters
+# as open data. No credential: the service asks callers to identify themselves with a
+# `Digitraffic-User` header so it can reach an operator when a client misbehaves, which is a
+# courtesy string and not a secret. It also requires gzip, and answers 406 without it.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: digitraffic-ais
+  namespace: helsinki
+  title:
+    fi: Alusten AIS-sijainnit (Digitraffic)
+    en: Vessel AIS locations (Digitraffic)
+spec:
+  type: http
+  http:
+    url: https://meri.digitraffic.fi/api/ais/v1/locations?radius=20&latitude=60.15&longitude=24.95
+    verb: GET
+    headers:
+      Accept: application/json
+      Accept-Encoding: gzip
+      Digitraffic-User: joinedcontext/pipeline-examples
+    timeout: 15s

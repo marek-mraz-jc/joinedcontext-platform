@@ -1,0 +1,23 @@
+# Fintraffic's TMS counters for the whole country, open and without a credential.
+#
+# Digitraffic refuses a request that does not accept gzip, and it asks every client to identify
+# itself. `Digitraffic-User` is that identification, not a credential. `Accept-Encoding` is
+# deliberately NOT declared: the runner's HTTP client adds it and decompresses the response by
+# itself, and a header written here would take that away and leave the pipeline holding gzip.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: digitraffic-tms
+  namespace: helsinki
+  title:
+    fi: Liikenteen automaattiset mittausasemat (LAM)
+    en: Traffic measurement stations (TMS)
+spec:
+  type: http
+  http:
+    url: https://tie.digitraffic.fi/api/tms/v1/stations/data
+    verb: GET
+    headers:
+      Accept: application/json
+      Digitraffic-User: joinedcontext-pipeline-example
+    timeout: 30s

@@ -1,0 +1,21 @@
+# HTTPS only, and the bearer token is a reference: the value lives in the secret store and
+# reaches the runner as ${DS_AQ_OPENDATA_TOKEN} (CC-06, PL-16, MF-35).
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: aq-opendata
+  namespace: helsinki
+  title:
+    fi: Ilmanlaadun avoin data
+    en: Air quality open data
+spec:
+  type: http
+  http:
+    url: https://opendata.hel.fi/api/v1/air-quality/stations.json
+    verb: GET
+    headers:
+      Accept: application/json
+    authorization:
+      scheme: Bearer
+      headerRef: { name: aq-opendata, key: token }
+    timeout: 10s

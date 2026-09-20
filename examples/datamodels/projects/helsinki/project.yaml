@@ -1,0 +1,7 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Project
+metadata:
+  name: helsinki
+  namespace: org
+spec:
+  organizationRef: hel

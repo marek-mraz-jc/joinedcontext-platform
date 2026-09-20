@@ -1,0 +1,21 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-palvelukartta
+  namespace: helsinki
+  title:
+    fi: Palvelukartan toimipisteet
+    en: Service map units
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: services }
+  slug: fzx3k4sxaakjycwe7jhqta3qkz
+  audience: public
+  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: service-map-units
+      datastore: { representation: csv, refresh: onChange }

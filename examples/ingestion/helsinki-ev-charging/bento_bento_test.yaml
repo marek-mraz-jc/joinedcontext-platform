@@ -1,0 +1,96 @@
+# Golden transformation tests for the OpenStreetMap charging station pipeline (PL-22, T-0330).
+#
+#   bento test ./examples/ingestion/helsinki-ev-charging/...
+
+tests:
+  - name: a tagged node becomes one EVChargingStation with its connectors and power
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          version: 0.6
+          generator: Overpass API
+          elements:
+            - type: node
+              id: 1685871616
+              lat: 60.2183073
+              lon: 24.8105179
+              tags:
+                amenity: charging_station
+                name: "Sello charging points"
+                operator: "Plugsurfing.com"
+                capacity: "24"
+                fee: "yes"
+                socket:type2: "24"
+                socket:type2:output: "22 kW"
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:EVChargingStation:hel.fi:charging:node-1685871616",
+              "type": "EVChargingStation",
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [24.8105179, 60.2183073] }
+              },
+              "name": { "type": "Property", "value": "Sello charging points" },
+              "capacity": { "type": "Property", "value": 24 },
+              "socketType": { "type": "Property", "value": ["type2"] },
+              "powerLevel": { "type": "Property", "value": 22, "unitCode": "KWT" },
+              "source": { "type": "Property", "value": "https://www.openstreetmap.org" },
+              "dataProvider": {
+                "type": "Property",
+                "value": "OpenStreetMap contributors, ODbL 1.0"
+              }
+            }
+          ]
+
+  - name: the largest number in a messy output tag is the power, and a bare station still maps
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          elements:
+            # A way, so its point comes from `center` rather than from `lat`/`lon`, and nobody
+            # has tagged it with a connector or a name.
+            - type: way
+              id: 268989332
+              center: { lat: 60.2152485, lon: 25.0912952 }
+              tags:
+                amenity: charging_station
+            # Two mappers, two spellings, three connector types.
+            - type: node
+              id: 4242
+              lat: 60.1701
+              lon: 24.9401
+              tags:
+                amenity: charging_station
+                operator: "Recharge"
+                capacity: "4 pistoketta"
+                socket:type2: "2"
+                socket:type2:output: "22 kW;11 kW"
+                socket:type2_combo: "1"
+                socket:type2_combo:output: "11+50kW"
+                socket:chademo: "1"
+    output_batches:
+      - - bloblang: |
+            let bare = this.index(0)
+            let rich = this.index(1)
+            root = this.length() == 2 &&
+              $bare.id == "urn:ngsi-ld:EVChargingStation:hel.fi:charging:way-268989332" &&
+              $bare.location.value.coordinates == [25.0912952, 60.2152485] &&
+              !$bare.exists("name") &&
+              !$bare.exists("capacity") &&
+              !$bare.exists("socketType") &&
+              !$bare.exists("powerLevel") &&
+              $rich.name.value == "Recharge" &&
+              $rich.capacity.value == 4 &&
+              $rich.socketType.value.sort() == ["chademo", "type2", "type2_combo"] &&
+              $rich.powerLevel.value == 50

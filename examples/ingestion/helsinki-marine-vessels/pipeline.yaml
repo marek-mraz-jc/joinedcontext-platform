@@ -1,0 +1,21 @@
+# Sixty seconds is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). The cron
+# expression is declared rather than left to the fallback: with one, the job starts, fetches once
+# and exits, instead of holding a pod for the length of the period (PL-27).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: marine-vessels-ais
+  namespace: helsinki
+  title:
+    fi: Alusten sijainnit Helsingin edustalla
+    en: Vessel positions off Helsinki
+spec:
+  class: auto
+  period: 60s
+  schedule: "* * * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: digitraffic-ais }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:marine:ep-marine-vessels
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 200

@@ -1,0 +1,22 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataModel
+metadata:
+  name: bb-air-quality
+  namespace: bb-ovzdusie
+  title: { sk: "Kvalita ovzdušia", en: "Air quality" }
+spec:
+  contextSpaceRef: ovzdusie              # the space this model belongs to; with metadata.namespace it
+                                         # determines the repository path projects/{p}/spaces/{s}/datamodels/ (MF-06)
+  linkml: ./bb-air-quality.linkml.yaml   # the authoring source, relative to this manifest (DM-01)
+  version: 2.1.0                         # semantic version; the major is the served schema/v{major} (DM-22)
+  lifecycle: published                   # draft | published | deprecated | retired (DM-26)
+  classes: [AirQualityObserved]          # NGSI-LD entity types this model defines
+  source:                                # provenance of an imported model (DM-08); absent for a hand-authored one
+    repository: https://github.com/smart-data-models/dataModel.Environment
+    path: AirQualityObserved
+    commit: 9f1c2b7d4e6a8c0b2d4f6a8c0e2b4d6f8a0c2e4b
+  artifacts:                             # generated beside the source in the same commit (DM-02)
+    jsonSchema: ./json-schema/bb-air-quality.v2.json
+    context: ./context/bb-air-quality.v2.jsonld
+    docs: ./docs/bb-air-quality.md
+    example: ./examples/bb-air-quality.example.jsonld

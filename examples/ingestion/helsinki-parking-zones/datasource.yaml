@@ -1,0 +1,21 @@
+# The City of Helsinki publishes its parking-area register as an open WFS. No credential, so the
+# source declares none; HTTPS all the same, because an unencrypted fetch is a fetch anybody on
+# the path can rewrite. `outputFormat=application/json` asks GeoServer for GeoJSON, which writes
+# longitude before latitude the way RFC 7946 requires, even though `EPSG:4326` on its own means
+# the opposite axis order in WFS 2.0.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hel-parking-wfs
+  namespace: helsinki
+  title:
+    fi: Helsingin pysäköintipaikat (WFS)
+    en: Helsinki parking areas (WFS)
+spec:
+  type: http
+  http:
+    url: https://kartta.hel.fi/ws/geoserver/avoindata/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=avoindata:Pysakointipaikat_alue&outputFormat=application/json&srsName=EPSG:4326
+    verb: GET
+    headers:
+      Accept: application/json
+    timeout: 60s

@@ -1,0 +1,22 @@
+# Ten minutes is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). The cron
+# expression is declared rather than left to the fallback: with one, the job starts, fetches once
+# and exits, instead of holding a pod for the length of the period (PL-27). The station itself
+# reports every ten minutes.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: fmi-weather-wfs
+  namespace: helsinki
+  title:
+    fi: Kaisaniemen säähavainnot Ilmatieteen laitoksen WFS-rajapinnasta
+    en: Kaisaniemi weather observations from the FMI WFS service
+spec:
+  class: auto
+  period: 10m
+  schedule: "*/10 * * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: fmi-kaisaniemi-wfs }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:weather:ep-fmi-weather
+  quotas:
+    maxMemoryMb: 64
+    cpuMillicores: 100

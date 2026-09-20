@@ -1,0 +1,810 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Build": {
+      "additionalProperties": false,
+      "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
+      "properties": {
+        "builtAt": {
+          "description": "When the build lane published it.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler deploys this and nothing else (AP-72).",
+          "type": "string"
+        },
+        "sdkVersion": {
+          "description": "The version of the app SDK the artifact was built against.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtAt",
+        "commit",
+        "digest",
+        "sdkVersion"
+      ],
+      "type": "object"
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "Status condition entry.",
+      "properties": {
+        "lastTransitionTime": {
+          "description": "Last transition timestamp.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable reason code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Status value (\"True\", \"False\", \"Unknown\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of condition (e.g. Reconciled, Ready).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "type"
+      ],
+      "type": "object"
+    },
+    "DashboardSpec": {
+      "additionalProperties": false,
+      "description": "`spec` of a Dashboard (UI-17).",
+      "properties": {
+        "pages": {
+          "description": "At least one page.",
+          "items": {
+            "$ref": "#/definitions/Page"
+          },
+          "type": "array"
+        },
+        "title": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Text"
+            }
+          ],
+          "description": "The title (UI-50): one string, or the legacy map per locale (PF-24)."
+        },
+        "visibility": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DashboardVisibility"
+            }
+          ],
+          "default": "private",
+          "description": "Who may open it."
+        }
+      },
+      "required": [
+        "pages",
+        "title"
+      ],
+      "type": "object"
+    },
+    "DashboardVisibility": {
+      "description": "Who may open the dashboard (UI-19); `private` when undeclared.",
+      "oneOf": [
+        {
+          "description": "Its author.",
+          "enum": [
+            "private"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The members of its project.",
+          "enum": [
+            "project"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every signed-in user of the organization.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Anyone; every layer must then read through an `audience: public` Endpoint.",
+          "enum": [
+            "public"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "GridColumn": {
+      "additionalProperties": false,
+      "description": "One column of a `grid` view (SDK-30, UI-71).",
+      "properties": {
+        "attr": {
+          "description": "The attribute shown, which has to be one the source asked for.",
+          "type": "string"
+        },
+        "editable": {
+          "description": "Whether this column takes a correction, in `mode: edit`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the value is drawn, when the rows alone do not say."
+        },
+        "label": {
+          "description": "The heading, in place of the attribute's own name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pinned": {
+          "description": "Whether the column stays in view while the grid scrolls sideways.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "show": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridColumnShow"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which of the value's metadata columns start open."
+        },
+        "width": {
+          "description": "The column's width in pixels.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attr"
+      ],
+      "type": "object"
+    },
+    "GridColumnShow": {
+      "additionalProperties": false,
+      "description": "Which metadata columns of one attribute start open beside its value.",
+      "properties": {
+        "createdAt": {
+          "description": "When the attribute was first written.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "datasetId": {
+          "description": "Which dataset the instance belongs to.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "modifiedAt": {
+          "description": "When the attribute last changed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "observedAt": {
+          "description": "When the value was observed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "unit": {
+          "description": "What the value is measured in.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GridConfig": {
+      "additionalProperties": false,
+      "description": "The configuration of a `grid` view: `EntityGridConfig` of the SDK without the two fields the application decides for it (SDK-30). It reads through the app's own endpoint and shows the type of the view's source, so a spec can neither point the grid at another endpoint nor at another type; everything else — the columns, the page size, the filters, the edit — is the spec's.",
+      "properties": {
+        "columns": {
+          "description": "The columns shown, in order; every attribute of the loaded rows when empty.",
+          "items": {
+            "$ref": "#/definitions/GridColumn"
+          },
+          "type": "array"
+        },
+        "density": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridDensity"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How much room a row takes."
+        },
+        "editableAttrs": {
+          "description": "The attributes a correction may be typed into, which `mode: edit` requires.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entityTimestamps": {
+          "description": "Whether the entity's own `createdAt` and `modifiedAt` are columns too.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "filters": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridFilters"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What may be filtered, and what is filtered from the start."
+        },
+        "history": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridHistory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether an attribute's history may be opened from its column."
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether a correction may be typed into a cell; read only when absent."
+        },
+        "pageSize": {
+          "description": "Entities per page, 1 to 1000; 50 when absent.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rowActions": {
+          "description": "The row actions the host offers, by name; the host renders them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "GridDensity": {
+      "description": "How much room a row takes.",
+      "oneOf": [
+        {
+          "description": "More rows on screen.",
+          "enum": [
+            "compact"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "More room per row.",
+          "enum": [
+            "comfortable"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "GridFilters": {
+      "additionalProperties": false,
+      "description": "What the grid may be filtered by, and what it is filtered by from the start.",
+      "properties": {
+        "allowed": {
+          "description": "The columns whose filter row is offered; every filterable one when absent.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "preset": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridPreset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the grid asks the endpoint for before anyone filters on screen."
+        }
+      },
+      "type": "object"
+    },
+    "GridFormat": {
+      "description": "How a cell is drawn when the loaded rows do not say by themselves.",
+      "oneOf": [
+        {
+          "description": "Plain text.",
+          "enum": [
+            "text"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A number, aligned and formatted by the locale.",
+          "enum": [
+            "number"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A timestamp.",
+          "enum": [
+            "date"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A link the cell opens.",
+          "enum": [
+            "link"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "GridHistory": {
+      "additionalProperties": false,
+      "description": "Whether one attribute's history may be opened, and how much of it is read.",
+      "properties": {
+        "enabled": {
+          "description": "Whether an attribute's history may be opened at all.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "maxPoints": {
+          "description": "Points one history read returns at most.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GridMode": {
+      "description": "Whether the grid takes a correction at all.",
+      "oneOf": [
+        {
+          "description": "Read only.",
+          "enum": [
+            "view"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A correction may be typed into the columns `editableAttrs` names.",
+          "enum": [
+            "edit"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "GridPreset": {
+      "additionalProperties": false,
+      "description": "The query the grid always asks the endpoint with, before anyone filters on screen.",
+      "properties": {
+        "attrs": {
+          "description": "The attributes asked for, when not every one of them.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "idPattern": {
+          "description": "A regular expression the ids must match.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "q": {
+          "description": "An NGSI-LD `q` the grid always asks with.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeQ": {
+          "description": "A scope expression the entities must be in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MultiLanguageMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Multi-language map keyed by ISO 639-1 two-letter lowercase language codes",
+      "propertyNames": {
+        "pattern": "^[a-z]{2}$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "ObjectMeta": {
+      "additionalProperties": false,
+      "description": "Metadata envelope attached to every platform resource (MF-02).",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value annotations for provenance and ownership (MF-08).",
+          "type": "object"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable description: one string, or the legacy map per locale (UI-50, PF-24)."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value labels for filtering (MF-10).",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name (DNS-1123 label).",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Resource namespace (\"org\" or project slug).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable title: one string, or the legacy map per locale (UI-50, PF-24)."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Page": {
+      "additionalProperties": false,
+      "description": "One page: a map of layers, or a grid of widgets, or both.",
+      "properties": {
+        "layers": {
+          "description": "Names of `Layer` manifests of the same project, drawn bottom to top.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "layout": {
+          "description": "`full-map`, `grid-2x2`, …; the Portal's default when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "Shown as the page's tab.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "widgets": {
+          "description": "The widgets of the page.",
+          "items": {
+            "$ref": "#/definitions/Widget"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Phase": {
+      "description": "Lifecycle phase enumeration.",
+      "oneOf": [
+        {
+          "description": "Resource manifest is in draft state.",
+          "enum": [
+            "Draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is pending review or approval.",
+          "enum": [
+            "Pending"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource deployment is in progress.",
+          "enum": [
+            "Deploying"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is live and active in cluster.",
+          "enum": [
+            "Live"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reconciliation error.",
+          "enum": [
+            "Error"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The platform holds something the repository does not declare, or no longer holds what it does (CC-21, UI-25). Configuration cannot reach this phase — every component reads it from the repository (CC-72) — so it is a space whose seed entities the broker answers differently, and the two resolutions of UI-26 are what a person does about it.",
+          "enum": [
+            "Drifted"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "additionalProperties": false,
+      "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Build"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the build lane published for an `App`, and the only place its artifact is named (AP-13a). Written back by the build lane in the commit that publishes the artifact; an App without it renders no pod, and no other principal may set it (AP-73)."
+        },
+        "conditions": {
+          "description": "Reconciler condition transitions.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        },
+        "observedRevision": {
+          "description": "Git commit revision observed during reconciliation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    },
+    "Text": {
+      "anyOf": [
+        {
+          "description": "The form every new manifest writes.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            }
+          ],
+          "description": "The legacy `{locale: text}` map."
+        }
+      ],
+      "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
+    },
+    "Widget": {
+      "additionalProperties": false,
+      "description": "A widget of an analytics page (Architecture/10 §1).",
+      "properties": {
+        "endpointRef": {
+          "description": "The Endpoint it reads through.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entityId": {
+          "description": "The entity it shows.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entityType": {
+          "description": "The entity type a `grid` widget shows; the type decides its columns (UI-71).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "grid": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GridConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The configuration of a `grid` widget: the same object the explorer and a generated application are configured by, without the source and the type those two fields decide (SDK-30, T-1440)."
+        },
+        "property": {
+          "description": "The property it shows.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "widgetType": {
+          "description": "The widget, e.g. `temporal-chart` or `grid`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "widgetType"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
+  "properties": {
+    "apiVersion": {
+      "description": "API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Resource kind name (must match [`Kind::KIND`]).",
+      "type": "string"
+    },
+    "metadata": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ObjectMeta"
+        }
+      ],
+      "description": "Metadata identifying and labeling the resource."
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/DashboardSpec"
+        }
+      ],
+      "description": "Desired spec state."
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Server-computed status. Stripped during export and serialization."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ResourceEnvelope_for_DashboardSpec",
+  "type": "object"
+}

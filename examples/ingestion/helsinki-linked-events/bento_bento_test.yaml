@@ -1,0 +1,99 @@
+# Golden transformation tests for the Linked Events pipeline (PL-22, T-0327).
+#
+#   bento test ./examples/ingestion/helsinki-linked-events/...
+
+tests:
+  - name: an event becomes one Event with its titles in every language it has one
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          meta: { count: 1, next: null, previous: null }
+          data:
+            - id: "helsinki:agpg4hzprq"
+              name: { fi: "Kinaporin päivätanssit", sv: "", en: null }
+              short_description: { fi: "Kinaporin päivätansseissa on aina live bändi." }
+              start_time: "2026-09-23T11:20:11Z"
+              end_time: "2026-09-23T13:00:00Z"
+              event_status: "EventScheduled"
+              provider_contact_info: "Tapahtumatuotanto, p. 09 310 1691"
+              location:
+                position: { type: Point, coordinates: [24.962286, 60.18901] }
+                street_address:
+                  fi: "Kinaporinkatu 7-9 A"
+                  sv: "Kinaborgsgatan 7-9 A"
+                  en: "Kinaporinkatu 7-9 A"
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:Event:hel.fi:events:helsinki-agpg4hzprq",
+              "type": "Event",
+              "name": {
+                "type": "LanguageProperty",
+                "languageMap": { "fi": "Kinaporin päivätanssit" }
+              },
+              "description": {
+                "type": "LanguageProperty",
+                "languageMap": { "fi": "Kinaporin päivätansseissa on aina live bändi." }
+              },
+              "startDate": { "type": "Property", "value": "2026-09-23T11:20:11Z" },
+              "endDate": { "type": "Property", "value": "2026-09-23T13:00:00Z" },
+              "eventStatus": { "type": "Property", "value": "EventScheduled" },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [24.962286, 60.18901] }
+              },
+              "address": {
+                "type": "Property",
+                "value": { "streetAddress": "Kinaporinkatu 7-9 A", "addressLocality": "Helsinki" }
+              },
+              "contactPoint": { "type": "Property", "value": "Tapahtumatuotanto, p. 09 310 1691" },
+              "source": { "type": "Property", "value": "https://api.hel.fi/linkedevents/v1/" }
+            }
+          ]
+
+  - name: a mistyped year and a place without coordinates are dropped, the rest publishes
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          data:
+            # The register really carries rows like this one: the year is 26, not 2026.
+            - id: "helsinki:aaaa1"
+              name: { fi: "Väärä vuosiluku" }
+              start_time: "0026-09-23T11:20:11Z"
+              end_time: null
+              event_status: "EventScheduled"
+              location: { position: { type: Point, coordinates: [24.94, 60.17] } }
+            # A place record that exists but has never been given coordinates.
+            - id: "helsinki:aaaa2"
+              name: { fi: "Paikaton tapahtuma" }
+              start_time: "2026-09-23T09:00:00Z"
+              end_time: null
+              event_status: "EventScheduled"
+              location: { position: null, street_address: { fi: "Ei osoitetta" } }
+            - id: "helsinki:aaaa3"
+              name: { fi: "Kunnollinen tapahtuma" }
+              short_description: { fi: "" }
+              start_time: "2026-09-23T10:00:00Z"
+              end_time: null
+              event_status: "EventCancelled"
+              provider_contact_info: null
+              location: { position: { type: Point, coordinates: [24.95, 60.18] } }
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:Event:hel.fi:events:helsinki-aaaa3" &&
+              this.index(0).eventStatus.value == "EventCancelled" &&
+              !this.index(0).exists("endDate") &&
+              !this.index(0).exists("description") &&
+              !this.index(0).exists("contactPoint") &&
+              !this.index(0).exists("address")

@@ -1,0 +1,104 @@
+# Golden transformation tests for the Digitraffic AIS pipeline (PL-22, T-0325).
+#
+#   bento test ./examples/ingestion/helsinki-marine-vessels/...
+
+tests:
+  - name: one AIS location report becomes one Vessel with its position and speed
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden id below is the one that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          type: FeatureCollection
+          dataUpdatedTime: "2026-09-07T03:24:11Z"
+          features:
+            - type: Feature
+              mmsi: 230994000
+              geometry: { type: Point, coordinates: [24.958851, 60.153099] }
+              properties:
+                mmsi: 230994000
+                sog: 12.4
+                cog: 207.2
+                navStat: 0
+                rot: 0
+                posAcc: true
+                raim: false
+                heading: 205
+                timestamp: 11
+                timestampExternal: 1788751451011
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:Vessel:hel.fi:marine:230994000",
+              "type": "Vessel",
+              "mmsi": { "type": "Property", "value": 230994000 },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [24.958851, 60.153099] },
+                "observedAt": "2026-09-07T03:24:11Z"
+              },
+              "dateObserved": { "type": "Property", "value": "2026-09-07T03:24:11Z" },
+              "speed": {
+                "type": "Property", "value": 12.4, "unitCode": "KNT",
+                "observedAt": "2026-09-07T03:24:11Z"
+              },
+              "course": { "type": "Property", "value": 207.2, "observedAt": "2026-09-07T03:24:11Z" },
+              "heading": { "type": "Property", "value": 205, "observedAt": "2026-09-07T03:24:11Z" },
+              "navigationalStatus": { "type": "Property", "value": 0, "observedAt": "2026-09-07T03:24:11Z" },
+              "source": { "type": "Property", "value": "https://meri.digitraffic.fi" }
+            }
+          ]
+
+  - name: the AIS not-available codes are left out rather than published as measurements
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      # A vessel moored at Katajanokka: no speed, no course, no heading, and a transponder that
+      # reports the reserved values for all three.
+      - json_content:
+          features:
+            - type: Feature
+              mmsi: 230111190
+              geometry: { type: Point, coordinates: [25.183997, 60.206118] }
+              properties:
+                mmsi: 230111190
+                sog: 102.3
+                cog: 360
+                navStat: 15
+                heading: 511
+                timestampExternal: 1788751451011
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:Vessel:hel.fi:marine:230111190" &&
+              !this.index(0).exists("speed") &&
+              !this.index(0).exists("course") &&
+              !this.index(0).exists("heading") &&
+              !this.index(0).exists("navigationalStatus") &&
+              this.index(0).location.value.coordinates == [25.183997, 60.206118]
+
+  - name: a report without a position is dropped and the rest of the batch still publishes
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - json_content:
+          features:
+            - type: Feature
+              mmsi: 230111190
+              properties: { mmsi: 230111190, sog: 0.0, cog: 0.0, navStat: 5, heading: 511, timestampExternal: 1788751451011 }
+            - type: Feature
+              mmsi: 230994000
+              geometry: { type: Point, coordinates: [24.958851, 60.153099] }
+              properties: { mmsi: 230994000, sog: 8.1, cog: 90.0, navStat: 0, heading: 91, timestampExternal: 1788751451011 }
+    output_batches:
+      - - bloblang: |
+            root = this.length() == 1 &&
+              this.index(0).id == "urn:ngsi-ld:Vessel:hel.fi:marine:230994000"

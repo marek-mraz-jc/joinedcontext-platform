@@ -1,0 +1,8 @@
+target/
+.secrets/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+
+# Agent worktrees, never part of the repository
+.claude/

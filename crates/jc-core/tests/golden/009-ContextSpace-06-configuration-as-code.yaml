@@ -1,0 +1,21 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSpace
+metadata:
+  name: ovzdusie                 # DNS-1123, unique per kind in the namespace
+  namespace: bb-doprava          # = project slug ("org" for organization-level kinds)
+  labels:
+    joinedcontext.com/domain: environment
+  annotations:
+    joinedcontext.com/managed-attributes: "title,description,tags"
+    joinedcontext.com/imported-from: "https://udp.example.sk/bb-doprava@3f9c2e1"
+  title: { sk: "Ovzdušie", en: "Air quality", de: "Luftqualität", cs: "Ovzduší" }
+  description: { sk: "Merania kvality ovzdušia", en: "Air-quality observations" }
+spec:
+  isSandbox: false
+  defaultLocale: sk
+# status is computed by jcctl and served by the Portal API only — never committed:
+# status:
+#   phase: Live
+#   observedRevision: 3f9c2e1
+#   conditions:
+#     - { type: Reconciled, status: "True", reason: Applied, lastTransitionTime: 2026-09-05T10:00:00Z }

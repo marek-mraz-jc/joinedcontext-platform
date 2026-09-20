@@ -1,0 +1,16 @@
+kind: ContextSpace               # Resource type name
+apiVersion: joinedcontext.com/v1alpha1
+metadata:
+  name: mobility-traffic         # DNS-1123 label, unique per kind in the namespace
+  namespace: mobility            # project slug ("org" for organization-level kinds)
+  labels: { joinedcontext.com/domain: mobility }
+  annotations: {}                # provenance (blueprint, imported-from, sync-source, managed-attributes)
+  title:                         # Multilingual human titles
+    en: "Mobility & Traffic Space"
+    sk: "Priestor mobility a dopravy"
+  description:
+    en: "Live traffic telemetry and sensor observations"
+    sk: "Živé telemetrické dáta z dopravy"
+spec:
+  # Resource-specific desired state (pure NGSI-LD payload for NGSI-LD kinds)
+# status: never in Git — computed by jcctl, served by the Portal API (phase, conditions, observedRevision)

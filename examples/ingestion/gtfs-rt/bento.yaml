@@ -1,0 +1,116 @@
+# Native Bento, no wrapper (PL-03). Neither the `input` nor the protobuf decoder is written
+# here: the reconciler renders both from the referenced DataSource, so these processors already
+# see a decoded FeedMessage as JSON (PL-39, Architecture/08 section 6).
+#
+# Field names are protojson's: the proto's `trip_update` reaches Bloblang as `tripUpdate`, and
+# every 64-bit field, timestamps included, arrives as a string.
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # One feed carries many entities; each one is a message of its own from here on.
+    - mapping: |
+        root = this.entity.or([])
+    - unarchive:
+        format: json_array
+
+    # A feed entity is a vehicle position, a trip update or a service alert. The first two
+    # become entities; an alert is not part of this example and is dropped rather than
+    # half-mapped.
+    - switch:
+        - check: this.exists("vehicle")
+          processors:
+            - mapping: |
+                let v = this.vehicle
+                # The domain comes from the reconciler, never from this file (PF-44).
+                let domain = env("JC_ORG_DOMAIN")
+                let seen = $v.timestamp.number().ts_format("2006-01-02T15:04:05Z", "UTC")
+                root = {
+                  "@context": [
+                    "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                    "https://smartdatamodels.org/context.jsonld"
+                  ],
+                  "id": "urn:ngsi-ld:%v:%v:%v:%v".format("Vehicle", $domain, "transport", $v.vehicle.id.string()),
+                  "type": "Vehicle",
+                  "location": {
+                    "type": "GeoProperty",
+                    "value": {
+                      "type": "Point",
+                      "coordinates": [
+                        $v.position.longitude.number(),
+                        $v.position.latitude.number()
+                      ]
+                    },
+                    "observedAt": $seen
+                  },
+                  "speed": {
+                    "type": "Property",
+                    "value": $v.position.speed.number().catch(0),
+                    "unitCode": "MTS",
+                    "observedAt": $seen
+                  },
+                  "heading": {
+                    "type": "Property",
+                    "value": $v.position.bearing.number().catch(0),
+                    "unitCode": "DD",
+                    "observedAt": $seen
+                  },
+                  "vehicleType": { "type": "Property", "value": "bus" },
+                  "fleetVehicleId": { "type": "Property", "value": $v.vehicle.id },
+                  "refTrip": {
+                    "type": "Relationship",
+                    "object": "urn:ngsi-ld:%v:%v:%v:%v".format("Trip", $domain, "transport", $v.trip.tripId.string()),
+                    "observedAt": $seen
+                  }
+                }
+
+        - check: this.exists("tripUpdate")
+          processors:
+            - mapping: |
+                let u = this.tripUpdate
+                let domain = env("JC_ORG_DOMAIN")
+                let seen = $u.timestamp.number().ts_format("2006-01-02T15:04:05Z", "UTC")
+                let next = $u.stopTimeUpdate.index(0).catch({})
+                root = {
+                  "@context": [
+                    "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                    "https://smartdatamodels.org/context.jsonld"
+                  ],
+                  "id": "urn:ngsi-ld:%v:%v:%v:%v".format("Trip", $domain, "transport", $u.trip.tripId.string()),
+                  "type": "Trip",
+                  "route": { "type": "Property", "value": $u.trip.routeId },
+                  "startTime": { "type": "Property", "value": $u.trip.startTime },
+                  "startDate": { "type": "Property", "value": $u.trip.startDate },
+                  "delay": {
+                    "type": "Property",
+                    "value": $next.arrival.delay.number().catch(0),
+                    "unitCode": "SEC",
+                    "observedAt": $seen
+                  },
+                  "nextStop": {
+                    "type": "Property",
+                    "value": $next.stopId.catch(null),
+                    "observedAt": $seen
+                  }
+                }
+
+        # An alert, or anything a later feed version adds.
+        - processors:
+            - mapping: 'root = deleted()'
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-transit/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

@@ -1,0 +1,21 @@
+# Thirty minutes is past the thirty-second rule, so `auto` makes this a CronJob (PL-26). The cron
+# expression is declared rather than left to the fallback: with one, the job starts, fetches once
+# and exits, instead of holding a pod for the length of the period (PL-27).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: linked-events
+  namespace: helsinki
+  title:
+    fi: Päivän tapahtumat Linked Events -rajapinnasta
+    en: Today's events from the Linked Events API
+spec:
+  class: auto
+  period: 30m
+  schedule: "*/30 * * * *"
+  source:
+    dataSourceRef: { kind: DataSource, name: hel-linked-events }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:events:ep-linked-events
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 100

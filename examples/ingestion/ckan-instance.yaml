@@ -1,0 +1,16 @@
+# The open-data catalogue the three Helsinki endpoints publish to (EP-62, T-0321…T-0323). One
+# instance per project, referenced by every Endpoint that publishes; the API token is a
+# reference the reconciler resolves at run time and the schema has no field to write one into
+# (EP-67, CC-06).
+apiVersion: joinedcontext.com/v1alpha1
+kind: CkanInstance
+metadata:
+  name: open-data
+  namespace: helsinki
+  title:
+    fi: Helsingin avoin data
+    en: Helsinki open data
+spec:
+  url: https://opendata.hel.fi
+  organizationDefault: city-of-helsinki
+  apiTokenRef: { name: ckan-open-data, key: apiToken }

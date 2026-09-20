@@ -1,0 +1,16 @@
+# Push-based: no period, so the thirty-second rule leaves it resident (PL-26).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: hsl-hfp-vehicles
+  namespace: helsinki
+  title:
+    en: HSL buses into the transport space
+spec:
+  class: auto
+  source:
+    dataSourceRef: { kind: DataSource, name: hsl-hfp }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:transport:ep-vehicles
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 250

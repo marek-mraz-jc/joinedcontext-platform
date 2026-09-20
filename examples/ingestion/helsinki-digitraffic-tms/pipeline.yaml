@@ -1,0 +1,20 @@
+# Sixty seconds is past the thirty-second rule, so `auto` makes this a CronJob that scales to
+# zero between runs (PL-26). The counters themselves publish a new five-minute window every
+# five minutes; polling every minute keeps the lag under a minute without a resident pod.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: digitraffic-tms-flow
+  namespace: helsinki
+  title:
+    fi: Liikennemäärät ja nopeudet LAM-asemilta
+    en: Traffic volumes and speeds from the TMS counters
+spec:
+  class: auto
+  period: 60s
+  source:
+    dataSourceRef: { kind: DataSource, name: digitraffic-tms }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:traffic:ep-traffic
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 200

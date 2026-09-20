@@ -1,0 +1,44 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the read from the
+# referenced DataSource, which is the endpoint's own query surface (PL-39, PL-18).
+#
+# The reaper is the write mode the other examples do not show: a deletion. DEMO.md step 3 keeps
+# ten minutes of bus positions, so every minute this reads what the endpoint holds and deletes
+# what has aged past that. Nothing is deleted by a filter the runner writes: the ids are read
+# first and named in the request, so the entities that go are the entities this run saw (PL-32).
+
+rate_limit_resources:
+  - label: pipeline_egress
+    local:
+      count: 500
+      interval: 1s
+
+pipeline:
+  processors:
+    # One read answers the page as an array; each entity is one message.
+    - unarchive:
+        format: json_array
+
+    # What is older than the window, by the entity's own observation time. An entity with no
+    # `dateObserved` is not old — it is unknown, and a reaper that deleted what it could not
+    # date would delete whatever a feed forgot to stamp.
+    - mapping: |
+        let cutoff = now().ts_sub_iso8601("PT10M").ts_unix()
+        let seen = this.dateObserved.value.ts_parse("2006-01-02T15:04:05Z07:00").ts_unix().catch(-1)
+        root = if $seen >= 0 && $seen < $cutoff { this } else { deleted() }
+
+    # One message per page again, and then the ids: `entityOperations/delete` takes a list of
+    # them, not the entities. The order is the archive's, which is the order they were read in.
+    - archive:
+        format: json_array
+
+    - mapping: |
+        root = this.map_each(entity -> entity.id)
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-vehicles/ngsi-ld/v1/entityOperations/delete
+    verb: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

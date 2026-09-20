@@ -1,0 +1,43 @@
+# Golden transformation tests for the HTTP polling pipeline (PL-22, T-0296).
+#
+#   bento test ./examples/ingestion/http-json-poll/...
+
+tests:
+  - name: one response page becomes one entity per station that has a reading
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: '[{"station_id":"station-1","measured_at":"2026-09-06T21:00:00Z","lat":48.7359,"lon":19.1462,"measurements":{"pm10":18.4,"pm25":11.2}},{"station_id":"station-2","measured_at":"2026-09-06T21:00:00Z","lat":48.74,"lon":19.15}]'
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:station-1",
+              "type": "AirQualityObserved",
+              "dateObserved": { "type": "Property", "value": "2026-09-06T21:00:00Z" },
+              "location": {
+                "type": "GeoProperty",
+                "value": { "type": "Point", "coordinates": [19.1462, 48.7359] }
+              },
+              "pm10": {
+                "type": "Property", "value": 18.4, "unitCode": "GQ",
+                "observedAt": "2026-09-06T21:00:00Z"
+              },
+              "pm25": {
+                "type": "Property", "value": 11.2, "unitCode": "GQ",
+                "observedAt": "2026-09-06T21:00:00Z"
+              }
+            }
+          ]
+
+  - name: an empty page writes nothing at all
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '[]'
+    output_batches: []

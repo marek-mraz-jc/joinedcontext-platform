@@ -1,0 +1,16 @@
+{
+  "@context": {
+    "type": "@type",
+    "id": "@id",
+    "AirQualityObserved": "https://smartdatamodels.org/dataModel.Environment/AirQualityObserved",
+    "airQualityIndex": "https://smartdatamodels.org/dataModel.Environment/airQualityIndex",
+    "dateObserved": "https://smartdatamodels.org/dateObserved",
+    "location": "https://uri.etsi.org/ngsi-ld/location",
+    "refDevice": {
+      "@id": "https://smartdatamodels.org/dataModel.Device/refDevice",
+      "@type": "@id"
+    },
+    "reliability": "https://smartdatamodels.org/dataModel.Environment/reliability",
+    "temperature": "https://smartdatamodels.org/temperature"
+  }
+}

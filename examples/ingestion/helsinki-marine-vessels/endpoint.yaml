@@ -1,0 +1,21 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-marine-vessels
+  namespace: helsinki
+  title:
+    fi: Alusten sijainnit
+    en: Vessel positions
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: marine }
+  slug: fsibru2qayyl3xemwme4a5ethd
+  audience: public
+  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: marine-vessel-positions
+      datastore: { representation: csv, refresh: onChange }

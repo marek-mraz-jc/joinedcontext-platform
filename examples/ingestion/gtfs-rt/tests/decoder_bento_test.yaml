@@ -1,0 +1,25 @@
+# The binary feed decodes into the JSON the pipeline's own golden test starts from (PL-22).
+#
+#   bento test ./examples/ingestion/gtfs-rt/...
+
+tests:
+  - name: a GTFS-realtime frame decodes into a FeedMessage
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - file_content: ./feed.pb
+    output_batches:
+      - - bloblang: |
+            this.header.gtfsRealtimeVersion == "2.0" &&
+              this.entity.length() == 3 &&
+              this.entity.index(0).vehicle.vehicle.id == "22-701" &&
+              this.entity.index(0).vehicle.position.latitude == 48.7359 &&
+              this.entity.index(1).tripUpdate.stopTimeUpdate.index(0).arrival.delay == 63
+
+  # A truncated frame is the shape a lossy feed actually takes; it must fail the message rather
+  # than reach the mapping as half an entity.
+  - name: a truncated frame is an error, not a partial entity
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: "\n\r\n\x032.0\x10\x00\x18\xd0"
+    output_batches:
+      - - bloblang: 'errored() && error().contains("failed to unmarshal protobuf message")'

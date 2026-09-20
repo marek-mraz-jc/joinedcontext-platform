@@ -1,0 +1,22 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataModel
+metadata:
+  name: air-quality-observed
+  namespace: helsinki
+  title:
+    en: "Air quality observed"
+    fi: "Ilmanlaatuhavainto"
+spec:
+  contextSpaceRef: air-quality
+  linkml: air-quality-observed.linkml.yaml
+  version: 1.0.0
+  lifecycle: draft
+  classes: ["AirQualityObserved"]
+  # The four artifacts DM-02 commits beside the source. `jcctl model generate` writes them and
+  # CI fails on any difference; a declared artifact Model Tools does not render fails the run
+  # rather than being committed empty.
+  artifacts:
+    jsonSchema: json-schema/air-quality-observed.v1.json
+    context: context/air-quality-observed.v1.jsonld
+    docs: docs/air-quality-observed.md
+    example: examples/air-quality-observed.example.jsonld

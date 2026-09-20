@@ -1,0 +1,2 @@
+# Test fixtures that look like secrets to the scanner (T-0606): the redaction test of the diagnostics door.
+eca854de1779b6244cb6f54359621c9873dfc96d:crates/agent-proxy/src/routes/diagnostics.rs:generic-api-key:180

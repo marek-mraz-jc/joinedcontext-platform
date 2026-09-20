@@ -1,0 +1,68 @@
+# Native Bento, no wrapper (PL-03). No `input`: the reconciler renders the HTTPS fetch from the
+# referenced DataSource (PL-39). One fetch is one page of units, not one unit.
+
+rate_limit_resources:
+  # The service map asks callers to keep their rate modest. One run is one request, and this
+  # limiter caps what the run may push onward so a large page cannot turn into a burst.
+  - label: pipeline_egress
+    local:
+      count: 200
+      interval: 1s
+
+pipeline:
+  processors:
+    - mapping: |
+        root = this.results
+    - unarchive:
+        format: json_array
+
+    # A unit the register has never been given coordinates for cannot be a point of interest.
+    - mapping: |
+        root = if this.location.or(null) == null { deleted() } else { this }
+
+    - mapping: |
+        # The domain comes from the reconciler, never from this file (PF-44).
+        let domain = env("JC_ORG_DOMAIN")
+        let id = "urn:ngsi-ld:%v:%v:%v:%v".format(
+          "PointOfInterest", $domain, "services", "unit-%v".format(this.id))
+        let names = this.name.or({}).filter(entry -> entry.value.type() == "string" && entry.value != "")
+        let address = {
+          "streetAddress": this.street_address.or({}).fi.or(null),
+          "postalCode": this.address_zip.or(null),
+          "addressLocality": this.municipality.or("").capitalize()
+        }.filter(entry -> entry.value != null && entry.value != "")
+        let categories = this.service_nodes.or([]).map_each(node -> node.string())
+        root = {
+          "@context": [
+            "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+            "https://smartdatamodels.org/context.jsonld"
+          ],
+          "id": $id,
+          "type": "PointOfInterest",
+          "name": if $names.length() > 0 {
+            { "type": "LanguageProperty", "languageMap": $names }
+          } else { null },
+          "location": { "type": "GeoProperty", "value": this.location },
+          "address": if $address.length() > 0 {
+            { "type": "Property", "value": $address }
+          } else { null },
+          "category": if $categories.length() > 0 {
+            { "type": "Property", "value": $categories }
+          } else { null },
+          "source": { "type": "Property", "value": "https://api.hel.fi/servicemap/v2/" }
+        }
+        # The register writes a field it does not have as null or as an empty string. Copying
+        # either through would publish an attribute with nothing in it.
+        root = root.filter(entry -> entry.value != null)
+
+    - archive:
+        format: json_array
+
+output:
+  http_client:
+    url: https://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/ep-palvelukartta/ngsi-ld/v1/entityOperations/upsert
+    verb: POST
+    headers:
+      Content-Type: application/ld+json
+      Authorization: Bearer ${SERVICE_ACCOUNT_TOKEN}
+    rate_limit: pipeline_egress

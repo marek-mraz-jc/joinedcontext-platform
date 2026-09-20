@@ -1,0 +1,742 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AgentAccess": {
+      "additionalProperties": false,
+      "description": "The most an agent of this profile may reach; the starting person's own permissions narrow it further at every call, and nothing here widens them (AG-70, MF-40).",
+      "properties": {
+        "endpoints": {
+          "description": "Endpoints the agent may read or write through.",
+          "items": {
+            "$ref": "#/definitions/EndpointGrant"
+          },
+          "type": "array"
+        },
+        "kinds": {
+          "description": "Kinds the agent may read or propose changes to.",
+          "items": {
+            "$ref": "#/definitions/KindGrant"
+          },
+          "type": "array"
+        },
+        "operations": {
+          "description": "Registry operation names (`jc_…`) the agent may call.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "AgentEgress": {
+      "additionalProperties": false,
+      "description": "What one run may read from the internet, and how much of it (AG-50, AG-65).\n\nThe default is nothing: a profile that names no host reaches no host, and the workspace has no route of its own to fall back on (AG-34).",
+      "properties": {
+        "allowedHosts": {
+          "description": "Bare hostnames the package and fetch routes may reach; everything else is refused (AG-50).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "maxBytesPerRun": {
+          "description": "Bytes one run may read from those hosts in total, across every fetch (AG-65).\n\nAbsent means [`DEFAULT_EGRESS_BYTES_PER_RUN`]: reading documentation is what the allow-list is for, and a profile that had to name a number to get it would have every author guessing one. The cap is what stops a run from mirroring a site, not what stops it from reading a page.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AgentLimits": {
+      "additionalProperties": false,
+      "description": "Computational, execution, and rate bounds per run (AG-41).",
+      "properties": {
+        "concurrentRunsPerOrganization": {
+          "description": "Runs one organization may have in flight at once.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxResponseBytes": {
+          "description": "Bytes one proxied response may carry.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestsPerMinute": {
+          "description": "Proxied requests per minute per run.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "stepsPerRun": {
+          "description": "Agent steps one run may take before it stops and hands over the last log (AG-51).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "wallClock": {
+          "description": "ISO 8601 duration (e.g. `PT20M`), maximum 1 hour (`PT1H`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "concurrentRunsPerOrganization",
+        "maxResponseBytes",
+        "requestsPerMinute",
+        "stepsPerRun",
+        "wallClock"
+      ],
+      "type": "object"
+    },
+    "AgentModel": {
+      "additionalProperties": false,
+      "description": "Model selection and token budgeting.",
+      "properties": {
+        "maxTokensPerRun": {
+          "description": "Tokens one run may consume before the proxy ends it (AG-41).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Model identifier the provider knows.",
+          "type": "string"
+        },
+        "provider": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelProvider"
+            }
+          ],
+          "description": "Which protocol the proxy speaks to the model provider."
+        },
+        "reasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How hard the model thinks on every call of a run; absent, no reasoning setting is sent (AG-72)."
+        }
+      },
+      "required": [
+        "maxTokensPerRun",
+        "name",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "AgentProfileRole": {
+      "description": "Profile execution role (AG-26, AG-47).",
+      "oneOf": [
+        {
+          "description": "Builder profile: coding tools in ephemeral workspace, egress allowlist.",
+          "enum": [
+            "builder"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Steward profile: MCP only, no internet egress.",
+          "enum": [
+            "steward"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgentProfileSpec": {
+      "additionalProperties": false,
+      "description": "Specification for a `kind: AgentProfile` resource (AG-47…AG-50).",
+      "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What an agent of this profile may reach. Absent: read-only operations and nothing else (AG-70)."
+        },
+        "egress": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentEgress"
+            }
+          ],
+          "description": "Where the package route may go."
+        },
+        "limits": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentLimits"
+            }
+          ],
+          "description": "The bounds every run of this profile is held to."
+        },
+        "model": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentModel"
+            }
+          ],
+          "description": "The model the proxy calls on the run's behalf."
+        },
+        "role": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentProfileRole"
+            }
+          ],
+          "description": "What the profile is allowed to be used for (AG-26)."
+        },
+        "runtime": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentRuntime"
+            }
+          ],
+          "description": "The runtime image a run of this profile executes."
+        },
+        "tools": {
+          "description": "Tools the workspace carries; a steward profile carries none.",
+          "items": {
+            "$ref": "#/definitions/AgentTool"
+          },
+          "type": "array"
+        },
+        "workspace": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentWorkspace"
+            }
+          ],
+          "description": "Resources the workspace container gets."
+        }
+      },
+      "required": [
+        "egress",
+        "limits",
+        "model",
+        "role",
+        "runtime",
+        "workspace"
+      ],
+      "type": "object"
+    },
+    "AgentRuntime": {
+      "additionalProperties": false,
+      "description": "Container runtime image specification (AG-49).",
+      "properties": {
+        "digest": {
+          "description": "Cryptographic container digest (`sha256:...`). Required for admission (AG-49).",
+          "type": "string"
+        },
+        "image": {
+          "description": "Container image repository and tag.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "digest",
+        "image"
+      ],
+      "type": "object"
+    },
+    "AgentTool": {
+      "description": "Available coding and debugging tools in the builder workspace.",
+      "oneOf": [
+        {
+          "description": "A shell in the ephemeral workspace.",
+          "enum": [
+            "shell"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The Rust toolchain.",
+          "enum": [
+            "cargo"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The Node package manager.",
+          "enum": [
+            "pnpm"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Git, reaching the forge through the proxy alone.",
+          "enum": [
+            "git"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A headless browser for smoke tests.",
+          "enum": [
+            "playwright"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgentWorkspace": {
+      "additionalProperties": false,
+      "description": "Workspace hardware resource allocations.",
+      "properties": {
+        "cpu": {
+          "description": "CPU request and limit of the workspace container.",
+          "type": "string"
+        },
+        "ephemeralStorage": {
+          "description": "Size of the `emptyDir` the workspace works in.",
+          "type": "string"
+        },
+        "memory": {
+          "description": "Memory request and limit of the workspace container.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cpu",
+        "ephemeralStorage",
+        "memory"
+      ],
+      "type": "object"
+    },
+    "Build": {
+      "additionalProperties": false,
+      "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
+      "properties": {
+        "builtAt": {
+          "description": "When the build lane published it.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler deploys this and nothing else (AP-72).",
+          "type": "string"
+        },
+        "sdkVersion": {
+          "description": "The version of the app SDK the artifact was built against.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtAt",
+        "commit",
+        "digest",
+        "sdkVersion"
+      ],
+      "type": "object"
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "Status condition entry.",
+      "properties": {
+        "lastTransitionTime": {
+          "description": "Last transition timestamp.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable reason code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Status value (\"True\", \"False\", \"Unknown\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of condition (e.g. Reconciled, Ready).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "type"
+      ],
+      "type": "object"
+    },
+    "EndpointGrant": {
+      "additionalProperties": false,
+      "description": "One endpoint an agent may reach, and how.",
+      "properties": {
+        "name": {
+          "description": "The endpoint's manifest name, a DNS-1123 label.",
+          "type": "string"
+        },
+        "verbs": {
+          "description": "At least one verb.",
+          "items": {
+            "$ref": "#/definitions/EndpointVerb"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "verbs"
+      ],
+      "type": "object"
+    },
+    "EndpointVerb": {
+      "description": "What an agent may do through an endpoint (AG-70).",
+      "oneOf": [
+        {
+          "description": "Read entities through the endpoint.",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Write entities through the endpoint, under its policy.",
+          "enum": [
+            "write"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "KindGrant": {
+      "additionalProperties": false,
+      "description": "One kind an agent may reach, and how.",
+      "properties": {
+        "kind": {
+          "description": "A manifest kind of the catalogue, e.g. `Endpoint`.",
+          "type": "string"
+        },
+        "verbs": {
+          "description": "At least one verb.",
+          "items": {
+            "$ref": "#/definitions/KindVerb"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "verbs"
+      ],
+      "type": "object"
+    },
+    "KindVerb": {
+      "description": "What an agent may do to a kind of manifest (AG-70).",
+      "oneOf": [
+        {
+          "description": "Read manifests of the kind.",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Propose a change to a manifest of the kind; a person still approves it.",
+          "enum": [
+            "propose"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ModelProvider": {
+      "description": "Model provider choice.",
+      "oneOf": [
+        {
+          "description": "Anthropic's Messages API.",
+          "enum": [
+            "anthropic"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Any provider speaking the OpenAI chat-completions protocol.",
+          "enum": [
+            "openai-compatible"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MultiLanguageMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Multi-language map keyed by ISO 639-1 two-letter lowercase language codes",
+      "propertyNames": {
+        "pattern": "^[a-z]{2}$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "ObjectMeta": {
+      "additionalProperties": false,
+      "description": "Metadata envelope attached to every platform resource (MF-02).",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value annotations for provenance and ownership (MF-08).",
+          "type": "object"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable description: one string, or the legacy map per locale (UI-50, PF-24)."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value labels for filtering (MF-10).",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name (DNS-1123 label).",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Resource namespace (\"org\" or project slug).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable title: one string, or the legacy map per locale (UI-50, PF-24)."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Phase": {
+      "description": "Lifecycle phase enumeration.",
+      "oneOf": [
+        {
+          "description": "Resource manifest is in draft state.",
+          "enum": [
+            "Draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is pending review or approval.",
+          "enum": [
+            "Pending"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource deployment is in progress.",
+          "enum": [
+            "Deploying"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is live and active in cluster.",
+          "enum": [
+            "Live"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reconciliation error.",
+          "enum": [
+            "Error"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The platform holds something the repository does not declare, or no longer holds what it does (CC-21, UI-25). Configuration cannot reach this phase — every component reads it from the repository (CC-72) — so it is a space whose seed entities the broker answers differently, and the two resolutions of UI-26 are what a person does about it.",
+          "enum": [
+            "Drifted"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ReasoningEffort": {
+      "description": "The provider's reasoning setting a run's model calls carry (AG-72).",
+      "oneOf": [
+        {
+          "description": "A short think before each answer.",
+          "enum": [
+            "low"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The setting the reference `app-builder` profile uses (SDK-26).",
+          "enum": [
+            "medium"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The longest think the provider offers for the setting.",
+          "enum": [
+            "high"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "additionalProperties": false,
+      "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Build"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the build lane published for an `App`, and the only place its artifact is named (AP-13a). Written back by the build lane in the commit that publishes the artifact; an App without it renders no pod, and no other principal may set it (AP-73)."
+        },
+        "conditions": {
+          "description": "Reconciler condition transitions.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        },
+        "observedRevision": {
+          "description": "Git commit revision observed during reconciliation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    },
+    "Text": {
+      "anyOf": [
+        {
+          "description": "The form every new manifest writes.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            }
+          ],
+          "description": "The legacy `{locale: text}` map."
+        }
+      ],
+      "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
+    }
+  },
+  "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
+  "properties": {
+    "apiVersion": {
+      "description": "API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Resource kind name (must match [`Kind::KIND`]).",
+      "type": "string"
+    },
+    "metadata": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ObjectMeta"
+        }
+      ],
+      "description": "Metadata identifying and labeling the resource."
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AgentProfileSpec"
+        }
+      ],
+      "description": "Desired spec state."
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Server-computed status. Stripped during export and serialization."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ResourceEnvelope_for_AgentProfileSpec",
+  "type": "object"
+}

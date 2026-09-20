@@ -1,0 +1,24 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: air-quality-today
+  namespace: bb-ovzdusie
+  title: { sk: "Kvalita ovzdušia dnes", en: "Air quality today" }
+  annotations:
+    joinedcontext.com/generated-by: "agent:app-builder@bb"     # attribution (AG-17)
+    joinedcontext.com/prompt-digest: "sha256:…"               # the request that produced it, stored in apps/{name}/PROMPT.md
+spec:
+  kind: fullstack                    # static | service | fullstack
+  source: { path: ./src }            # or { git: {url, ref, path} }
+  build: { rust: "1.90", node: "22" }   # Rust axum backend + Vite/React UI in one image
+  visibility: public
+  dataNeeds:
+    - contextSpaceRef: { kind: ContextSpace, name: ovzdusie }
+      types: [AirQualityObserved, District]
+      attrs: [pm10, pm25, airQualityIndex, location, name, refDistrict]
+      operations: [queryEntity, retrieveEntity, queryTemporal]      # CIM 009 names (R8)
+      temporalQ: { window: P1D }                                     # today only
+      geoQ: { within: { scopeRef: /geo/SK/BB } }
+      representations: [ngsi-ld, geojson]           # Endpoint.enabledRepresentations vocabulary (EP-08)
+  limits: { requestsPerMinute: 600, maxFileRows: 20000 }
+  csp: { connectSrc: [self], frameAncestors: [none] }               # defaults; only the app's own endpoint is reachable

@@ -1,0 +1,21 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-hsy-air
+  namespace: helsinki
+  title:
+    fi: Ilmanlaadun mittausasemat
+    en: Air quality monitoring stations
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: air-quality }
+  slug: i7pud3ma3xo3ghm2t3dv5wfh5m
+  audience: public
+  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: air-quality-monitoring-stations
+      datastore: { representation: csv, refresh: onChange }

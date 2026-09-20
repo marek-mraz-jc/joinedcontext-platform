@@ -1,0 +1,19 @@
+# Every minute, which is past the thirty-second rule, so `auto` makes this a CronJob that
+# scales to zero between runs (PL-26).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: vehicles-reaper
+  namespace: helsinki
+  title:
+    fi: Vanhojen bussisijaintien poisto
+    en: Removes bus positions older than ten minutes
+spec:
+  class: auto
+  period: 60s
+  source:
+    dataSourceRef: { kind: DataSource, name: helsinki-vehicles-page }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:transport:ep-vehicles
+  quotas:
+    maxMemoryMb: 64
+    cpuMillicores: 100

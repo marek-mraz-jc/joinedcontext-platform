@@ -1,0 +1,18 @@
+# Fifteen seconds is inside the thirty-second rule, so the poll stays in the project's resident
+# runner rather than starting a pod four times a minute (PL-26).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: hsl-gtfs-rt-ingest
+  namespace: helsinki
+  title:
+    en: Public transport vehicles and trips from GTFS-realtime
+spec:
+  class: auto
+  period: 15s
+  source:
+    dataSourceRef: { kind: DataSource, name: hsl-gtfs-rt }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:transport:ep-transit
+  quotas:
+    maxMemoryMb: 128
+    cpuMillicores: 200

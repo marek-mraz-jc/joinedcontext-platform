@@ -1,0 +1,24 @@
+# Population by postal code, from the Paavo postal-code statistics that Statistics Finland
+# publishes as open data and Helsinki Region Infoshare catalogues. No credential, so the source
+# declares none; HTTPS all the same, because an unencrypted fetch is a fetch anybody on the path
+# can rewrite.
+#
+# `outputFormat=csv` asks GeoServer for the attribute table without the geometry, which is the
+# whole of what this pipeline needs, and `cql_filter` narrows it to Helsinki: eighty-four rows
+# rather than every postal code in Finland.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: paavo-postal-statistics
+  namespace: helsinki
+  title:
+    fi: Väestö postinumeroalueittain (Paavo, CSV)
+    en: Population by postal code (Paavo, CSV)
+spec:
+  type: http
+  http:
+    url: https://geo.stat.fi/geoserver/postialue/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=postialue:pno_tilasto&outputFormat=csv&propertyName=postinumeroalue,nimi,vuosi,kunta,he_vakiy,he_naiset,he_miehet&cql_filter=kunta%3D%27091%27
+    verb: GET
+    headers:
+      Accept: text/csv
+    timeout: 60s

@@ -1,0 +1,26 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: UiSchema
+metadata:
+  name: endpoint
+  namespace: org
+spec:
+  for: Endpoint                      # the kind whose form this arranges
+  order: [name, slug, audience, enabledRepresentations, caching]
+  groups:                            # visual grouping of a flat schema
+    - title: Basics
+      fields: [name, slug]
+    - title: Access
+      description: Who may read
+      fields: [audience, enabledRepresentations]
+  fields:
+    slug:
+      widget: text
+      help: The unguessable address
+      placeholder: "26 characters"
+      columns: 6                     # of twelve
+      readOnly: false
+      advanced: false
+    enabledRepresentations:
+      widget: checkboxes
+    commitMessage:
+      advanced: true                 # hidden outside the advanced mode (CC-29)

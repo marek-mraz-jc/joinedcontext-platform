@@ -1,0 +1,19 @@
+# Five minutes is past the thirty-second rule, so `auto` makes this a CronJob that scales to
+# zero between runs (PL-26). The stations themselves publish one value an hour.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: hsy-air-wfs
+  namespace: helsinki
+  title:
+    fi: Ilmanlaadun mittausasemat HSY:n WFS-rajapinnasta
+    en: Air quality stations from the HSY WFS service
+spec:
+  class: auto
+  period: 5m
+  source:
+    dataSourceRef: { kind: DataSource, name: hsy-ilmanlaatu-wfs }
+  targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:air-quality:ep-hsy-air
+  quotas:
+    maxMemoryMb: 64
+    cpuMillicores: 100

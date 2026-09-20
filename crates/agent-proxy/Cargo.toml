@@ -1,0 +1,39 @@
+[package]
+name = "agent-proxy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "jc-agent-proxy"
+path = "src/main.rs"
+
+[dependencies]
+jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum"] }
+argon2 = "0.5"
+axum = { version = "0.8", features = ["macros"] }
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+futures = "0.3"
+http-body-util = "0.1"
+regex = "1"
+# Native roots, like `jcctl`: `rustls-tls` would bundle `webpki-roots`, whose Mozilla root data
+# carries CDLA-Permissive-2.0 and is not on this workspace's licence allow-list. The distroless
+# base carries the system trust store the proxy needs for the model provider.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+# `password_hash::rand_core::OsRng` only exists with getrandom on; the tests hash a ticket.
+rand_core = { version = "0.6", features = ["getrandom"] }
+tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"

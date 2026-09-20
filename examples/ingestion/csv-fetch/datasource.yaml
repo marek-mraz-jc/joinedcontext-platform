@@ -1,0 +1,18 @@
+# A public CSV export: no credential, so the source declares none. HTTPS all the same, because
+# an unencrypted fetch is a fetch anybody on the path can rewrite.
+apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: parking-csv
+  namespace: helsinki
+  title:
+    fi: Pysäköinnin käyttöaste (CSV)
+    en: Car park occupancy (CSV)
+spec:
+  type: http
+  http:
+    url: https://opendata.hel.fi/parking/occupancy.csv
+    verb: GET
+    headers:
+      Accept: text/csv
+    timeout: 15s

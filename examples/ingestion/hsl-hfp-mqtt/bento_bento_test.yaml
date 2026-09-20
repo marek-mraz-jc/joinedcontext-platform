@@ -1,0 +1,120 @@
+# Golden transformation tests for the HSL HFP pipeline (PL-22, T-0295).
+#
+#   bento test ./examples/ingestion/hsl-hfp-mqtt/...
+#
+# The file is named after the config it tests: Bento pairs `<name>_bento_test.yaml` with
+# `<name>.yaml` in the same folder, which is why the tests are not in a `tests/` subfolder.
+
+tests:
+  - name: one journey frame becomes one Vehicle entity
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":787,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+    output_batches:
+      - - json_equals: [
+            {
+              "@context": [
+                "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld",
+                "https://smartdatamodels.org/context.jsonld"
+              ],
+              "id": "urn:ngsi-ld:Vehicle:hel.fi:transport:22-787",
+              "type": "Vehicle",
+              "location": {
+                "type": "GeoProperty",
+                "value": {
+                  "type": "Point",
+                  "coordinates": [
+                    24.901,
+                    60.191
+                  ]
+                },
+                "observedAt": "2026-09-06T21:00:01.000Z"
+              },
+              "speed": {
+                "type": "Property",
+                "value": 8.3,
+                "unitCode": "MTS",
+                "observedAt": "2026-09-06T21:00:01.000Z"
+              },
+              "heading": {
+                "type": "Property",
+                "value": 126,
+                "unitCode": "DD",
+                "observedAt": "2026-09-06T21:00:01.000Z"
+              },
+              "route": {
+                "type": "Property",
+                "value": "2550",
+                "observedAt": "2026-09-06T21:00:01.000Z"
+              },
+              "vehicleType": {
+                "type": "Property",
+                "value": "bus"
+              },
+              "fleetVehicleId": {
+                "type": "Property",
+                "value": "22-787"
+              }
+            }
+          ]
+
+  - name: a frame that is not a position report is dropped
+    target_processors: '/pipeline/processors'
+    input_batch:
+      - content: '{"DUE":{"oper":22,"veh":787,"ttarr":"2026-09-06T21:02:00Z"}}'
+    output_batches: []
+
+  # The cap is what the demo promises: thirty buses, the same thirty, however many the feed
+  # carries. The last frame repeats a bus that was already admitted, and it stays admitted.
+  - name: a stream of thirty-four buses yields exactly the first thirty
+    target_processors: '/pipeline/processors'
+    # The reconciler injects this from the project's Organization (PF-44); the demo
+    # instance is hel.fi, so the golden ids below are the ones that runner would mint.
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+    input_batch:
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":701,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":702,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":703,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":704,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":705,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":706,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":707,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":708,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":709,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":710,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":711,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":712,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":713,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":714,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":715,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":716,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":717,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":718,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":719,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":720,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":721,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":722,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":723,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":724,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":725,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":726,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":727,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":728,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":729,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":730,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":731,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":732,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":733,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":734,"tst":"2026-09-06T21:00:01.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+      - content: '{"VP":{"desi":"550","dir":"1","oper":22,"veh":701,"tst":"2026-09-06T21:00:09.000Z","spd":8.3,"hdg":126,"lat":60.191,"long":24.901,"route":"2550","occu":0,"loc":"GPS"}}'
+    output_batches:
+      - - bloblang: |
+            this.length() == 30 &&
+              this.map_each(e -> e.id).unique().length() == 30 &&
+              this.any(e -> e.id == "urn:ngsi-ld:Vehicle:hel.fi:transport:22-701") &&
+              this.all(e -> e.id.re_match("^urn:ngsi-ld:Vehicle:hel\\.fi:transport:[0-9]+-[0-9]+$"))

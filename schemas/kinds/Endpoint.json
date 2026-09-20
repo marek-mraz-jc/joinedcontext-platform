@@ -1,0 +1,771 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Audience": {
+      "description": "Target audience access control setting for an endpoint (EP-14).",
+      "oneOf": [
+        {
+          "description": "Restricted to explicitly listed projects within the organization.",
+          "enum": [
+            "project-list"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible to any authenticated member or service account of the organization.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible publicly without authentication under the synthetic public role grant.",
+          "enum": [
+            "public"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Build": {
+      "additionalProperties": false,
+      "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
+      "properties": {
+        "builtAt": {
+          "description": "When the build lane published it.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler deploys this and nothing else (AP-72).",
+          "type": "string"
+        },
+        "sdkVersion": {
+          "description": "The version of the app SDK the artifact was built against.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtAt",
+        "commit",
+        "digest",
+        "sdkVersion"
+      ],
+      "type": "object"
+    },
+    "Caching": {
+      "additionalProperties": false,
+      "description": "HTTP caching configuration for endpoint responses.",
+      "properties": {
+        "maxAgeSeconds": {
+          "description": "Maximum cache age in seconds.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxAgeSeconds"
+      ],
+      "type": "object"
+    },
+    "CkanPublication": {
+      "additionalProperties": false,
+      "description": "Publication of one Endpoint as one CKAN dataset (EP-62…EP-65).",
+      "properties": {
+        "datastore": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DataStore"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The optional row mirror (EP-65)."
+        },
+        "instanceRef": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Ref"
+            }
+          ],
+          "description": "The `CkanInstance` this Endpoint publishes to."
+        },
+        "name": {
+          "description": "The CKAN dataset name; the Endpoint's own name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "organization": {
+          "description": "The CKAN organization slug; the instance's default when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "instanceRef"
+      ],
+      "type": "object"
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "Status condition entry.",
+      "properties": {
+        "lastTransitionTime": {
+          "description": "Last transition timestamp.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable reason code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Status value (\"True\", \"False\", \"Unknown\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of condition (e.g. Reconciled, Ready).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "type"
+      ],
+      "type": "object"
+    },
+    "DataStore": {
+      "additionalProperties": false,
+      "description": "The optional row mirror in the CKAN DataStore (EP-65).",
+      "properties": {
+        "refresh": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DataStoreRefresh"
+            }
+          ],
+          "default": "onChange",
+          "description": "How the mirror is kept current."
+        },
+        "representation": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Representation"
+            }
+          ],
+          "description": "The tabular representation the rows are read through; it must be enabled (EP-44)."
+        }
+      },
+      "required": [
+        "representation"
+      ],
+      "type": "object"
+    },
+    "DataStoreRefresh": {
+      "description": "How often the DataStore mirror is refreshed (EP-65).",
+      "oneOf": [
+        {
+          "description": "Driven by the Endpoint's own subscription: one upsert per changed entity (the default).",
+          "enum": [
+            "onChange"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reloaded whenever the Endpoint is reconciled, for a space without a subscription.",
+          "enum": [
+            "onReconcile"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "EndpointSlug": {
+      "description": "Cryptographically random endpoint slug with at least 128 bits of entropy (lowercase RFC 4648 base32 without padding, >=26 chars, EP-02)",
+      "pattern": "^[a-z2-7]{26,}$",
+      "type": "string"
+    },
+    "EndpointSpec": {
+      "additionalProperties": false,
+      "description": "Desired specification of an [`Endpoint`][crate::kinds::Endpoint] resource (EP-01..EP-28).",
+      "properties": {
+        "allowedProjects": {
+          "description": "Whitelist of project slugs permitted when audience is `project-list` (EP-14, EP-15).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "audience": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Audience"
+            }
+          ],
+          "description": "Audience access scope (EP-14)."
+        },
+        "caching": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Caching"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional response caching configuration."
+        },
+        "contextSpaceRef": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Ref"
+            }
+          ],
+          "description": "Reference to the underlying ContextSpace."
+        },
+        "enabledRepresentations": {
+          "description": "Set of enabled representation formats (EP-05).",
+          "items": {
+            "$ref": "#/definitions/Representation"
+          },
+          "type": "array"
+        },
+        "fileLimits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FileLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional ceiling on one `file.*` download (EP-44)."
+        },
+        "policyRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Urn"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional NGSI-LD Policy URN attached to this endpoint."
+        },
+        "projection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Projection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional publication narrowing applied to every representation (EP-61)."
+        },
+        "projectionRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The named subset of the space's model this Endpoint reads (MP-02): a `ModelProjection` of the same space, intersected with the caller's grants by the gateway, so it narrows and never widens."
+        },
+        "publish": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Publication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where this Endpoint is published beside its own surface: an open-data catalogue so far (EP-62)."
+        },
+        "rateLimits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional rate limiting configuration (EP-20)."
+        },
+        "slug": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EndpointSlug"
+            }
+          ],
+          "description": "Unguessable opaque slug with >= 128 bits of entropy (EP-02)."
+        },
+        "viewMappingRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A `Mapping` whose target model this Endpoint serves instead of the space's own (EP-54, DM-51).\n\nThe gateway translates every entity through the Mapping's compiled IR and rewrites `attrs`, `q` and `geoQ` back through its inverse. An Endpoint that carries one is read only: a mapping is invertible per slot, not per entity, so a write in the target model has no source entity to reconstruct."
+        }
+      },
+      "required": [
+        "audience",
+        "contextSpaceRef",
+        "enabledRepresentations",
+        "slug"
+      ],
+      "type": "object"
+    },
+    "FileLimits": {
+      "additionalProperties": false,
+      "description": "How much of a `file.*` representation one download may return (EP-44).\n\nThe gateway pages through the broker and stops at the first row that would cross either bound, so a caller gets a refusal rather than a file that is silently short. An absent field leaves the gateway's own ceiling in charge.",
+      "properties": {
+        "maxFileBytes": {
+          "description": "Bytes a single download may return.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxFileRows": {
+          "description": "Rows a single download may return.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MultiLanguageMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Multi-language map keyed by ISO 639-1 two-letter lowercase language codes",
+      "propertyNames": {
+        "pattern": "^[a-z]{2}$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "ObjectMeta": {
+      "additionalProperties": false,
+      "description": "Metadata envelope attached to every platform resource (MF-02).",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value annotations for provenance and ownership (MF-08).",
+          "type": "object"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable description: one string, or the legacy map per locale (UI-50, PF-24)."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value labels for filtering (MF-10).",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name (DNS-1123 label).",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Resource namespace (\"org\" or project slug).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable title: one string, or the legacy map per locale (UI-50, PF-24)."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Phase": {
+      "description": "Lifecycle phase enumeration.",
+      "oneOf": [
+        {
+          "description": "Resource manifest is in draft state.",
+          "enum": [
+            "Draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is pending review or approval.",
+          "enum": [
+            "Pending"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource deployment is in progress.",
+          "enum": [
+            "Deploying"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is live and active in cluster.",
+          "enum": [
+            "Live"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reconciliation error.",
+          "enum": [
+            "Error"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The platform holds something the repository does not declare, or no longer holds what it does (CC-21, UI-25). Configuration cannot reach this phase — every component reads it from the repository (CC-72) — so it is a space whose seed entities the broker answers differently, and the two resolutions of UI-26 are what a person does about it.",
+          "enum": [
+            "Drifted"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Projection": {
+      "additionalProperties": false,
+      "description": "What this Endpoint never serves, whatever the Policy set allows (EP-61).\n\nA publication decision, not an authorization one: the gateway intersects this list with the caller's policy projection, so an Endpoint can subtract from a grant and never add to it. The same space can therefore be published twice with different amounts of detail without writing a second Policy, and because the subtraction happens where every representation reads its entities, a hidden attribute is missing from the CSV, the GeoJSON, the MCP tool result and the schema surface alike (EP-06, EP-07, EP-47).",
+      "properties": {
+        "hiddenAttributes": {
+          "description": "Attribute names this endpoint removes from every representation.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "Publication": {
+      "additionalProperties": false,
+      "description": "Where an Endpoint is published beside its own surface (EP-62).",
+      "properties": {
+        "ckan": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CkanPublication"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Publication to an open-data catalogue."
+        }
+      },
+      "type": "object"
+    },
+    "RateLimits": {
+      "additionalProperties": false,
+      "description": "Token-bucket rate limiting configuration per endpoint (EP-20).",
+      "properties": {
+        "burst": {
+          "description": "Optional maximum burst capacity above steady rate.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestsPerMinute": {
+          "description": "Maximum allowed requests per minute.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "requestsPerMinute"
+      ],
+      "type": "object"
+    },
+    "Ref": {
+      "anyOf": [
+        {
+          "description": "Bare string resource name.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            }
+          ],
+          "description": "Typed reference with kind, name, and optional namespace."
+        }
+      ],
+      "description": "Reference to another resource, either bare name or typed reference (MF-07)."
+    },
+    "Representation": {
+      "description": "Supported representation formats served under an endpoint (EP-05, Architecture/04).\n\nNote: `schema` (EP-46) and `access` (EP-55) are not variants: they are unconditional surfaces on every endpoint and cannot be toggled off.",
+      "oneOf": [
+        {
+          "description": "Canonical NGSI-LD representation (`/ngsi-ld/v1/`).",
+          "enum": [
+            "ngsi-ld"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Direct Model Context Protocol streamable HTTP interface (`/mcp`).",
+          "enum": [
+            "mcp"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "GeoJSON feature collection (`/file.geojson`).",
+          "enum": [
+            "geojson"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Flat tabular CSV (`/file.csv`).",
+          "enum": [
+            "csv"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Flat tabular Excel spreadsheet (`/file.xlsx`).",
+          "enum": [
+            "xlsx"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "JSON array of entities (`/file.json`).",
+          "enum": [
+            "json"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Zipped multi-representation export bundle (`/file.zip`).",
+          "enum": [
+            "zip"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "OGC API - Features Part 1 collections and items (`/ogc/features/`).",
+          "enum": [
+            "ogc-features"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`).",
+          "enum": [
+            "sta"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "additionalProperties": false,
+      "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Build"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the build lane published for an `App`, and the only place its artifact is named (AP-13a). Written back by the build lane in the commit that publishes the artifact; an App without it renders no pod, and no other principal may set it (AP-73)."
+        },
+        "conditions": {
+          "description": "Reconciler condition transitions.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        },
+        "observedRevision": {
+          "description": "Git commit revision observed during reconciliation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    },
+    "Text": {
+      "anyOf": [
+        {
+          "description": "The form every new manifest writes.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            }
+          ],
+          "description": "The legacy `{locale: text}` map."
+        }
+      ],
+      "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
+    },
+    "TypedRef": {
+      "additionalProperties": false,
+      "description": "Structured typed resource reference (MF-07).",
+      "properties": {
+        "kind": {
+          "description": "Target resource kind.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Target resource name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Target resource namespace (defaults to caller namespace if omitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    },
+    "Urn": {
+      "description": "NGSI-LD entity URN conforming to ADR 001 / PF-42: urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}",
+      "pattern": "^urn:ngsi-ld:[A-Z][A-Za-z0-9]{1,63}:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+:[a-z0-9][a-z0-9-]{0,62}:[A-Za-z0-9._~-]{1,128}$",
+      "type": "string"
+    }
+  },
+  "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
+  "properties": {
+    "apiVersion": {
+      "description": "API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Resource kind name (must match [`Kind::KIND`]).",
+      "type": "string"
+    },
+    "metadata": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ObjectMeta"
+        }
+      ],
+      "description": "Metadata identifying and labeling the resource."
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/EndpointSpec"
+        }
+      ],
+      "description": "Desired spec state."
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Server-computed status. Stripped during export and serialization."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ResourceEnvelope_for_EndpointSpec",
+  "type": "object"
+}

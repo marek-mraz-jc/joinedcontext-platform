@@ -1,0 +1,1183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AppClass": {
+      "description": "How an app is built and served (AP-01).",
+      "oneOf": [
+        {
+          "description": "A built front end served from the Portal static host, acting with the user's token (AP-07, AP-14).",
+          "enum": [
+            "static"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A backend running in the instance namespace with its own service account (AP-08, AP-15).",
+          "enum": [
+            "service"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Backend and front end in one image.",
+          "enum": [
+            "fullstack"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AppLifecycle": {
+      "description": "Lifecycle state of an app (AP-18, AP-19, AP-20).",
+      "oneOf": [
+        {
+          "description": "Being written; not deployed.",
+          "enum": [
+            "draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bound to a sandbox space, reachable by the author and reviewers only (AP-19).",
+          "enum": [
+            "preview"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bound to the real space and reachable by its `visibility` audience (AP-18).",
+          "enum": [
+            "published"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Withdrawn; kept for the record.",
+          "enum": [
+            "retired"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AppLimits": {
+      "additionalProperties": false,
+      "description": "Per-app runtime limits enforced on its own endpoint (AP-17).",
+      "properties": {
+        "maxFileRows": {
+          "description": "Rows a single file representation download may return.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestsPerMinute": {
+          "description": "Requests per minute allowed on the app endpoint.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppSource": {
+      "additionalProperties": false,
+      "description": "Where the app's source lives; exactly one member is set (AP-02).",
+      "properties": {
+        "git": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GitSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A repository of the same forge (AP-02)."
+        },
+        "path": {
+          "description": "Path beside the manifest in the org repository.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppSpec": {
+      "additionalProperties": false,
+      "description": "Desired specification of an [`App`][crate::kinds::App] resource (AP-01..AP-20).",
+      "properties": {
+        "build": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Toolchain versions CI builds with (AP-11).",
+          "type": "object"
+        },
+        "csp": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContentSecurityPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Content Security Policy of the served app (AP-12)."
+        },
+        "dataNeeds": {
+          "description": "What the app needs to read or write; the reconciler renders its Endpoint and Policies from this (AP-04, AP-05).",
+          "items": {
+            "$ref": "#/definitions/DataNeed"
+          },
+          "type": "array"
+        },
+        "embeddable": {
+          "default": false,
+          "description": "Whether the Portal may embed the app in a frame (AP-12).",
+          "type": "boolean"
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppClass"
+            }
+          ],
+          "description": "How the app is built and served; `spec.kind` in the manifest (AP-01)."
+        },
+        "lifecycle": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppLifecycle"
+            }
+          ],
+          "default": "draft",
+          "description": "Lifecycle state; a manifest without one is a draft (AP-18)."
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Per-app rate limits (AP-17)."
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppSource"
+            }
+          ],
+          "description": "Where the source lives (AP-02)."
+        },
+        "visibility": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppVisibility"
+            }
+          ],
+          "description": "Who may reach the published app (AP-18)."
+        }
+      },
+      "required": [
+        "build",
+        "dataNeeds",
+        "kind",
+        "source",
+        "visibility"
+      ],
+      "type": "object"
+    },
+    "AppVisibility": {
+      "description": "Who may reach a published app (AP-18).",
+      "oneOf": [
+        {
+          "description": "Only the author.",
+          "enum": [
+            "private"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Members of the owning project.",
+          "enum": [
+            "project"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Anyone in the organization.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Everyone, unauthenticated.",
+          "enum": [
+            "public"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Build": {
+      "additionalProperties": false,
+      "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
+      "properties": {
+        "builtAt": {
+          "description": "When the build lane published it.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "commit": {
+          "description": "The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler deploys this and nothing else (AP-72).",
+          "type": "string"
+        },
+        "sdkVersion": {
+          "description": "The version of the app SDK the artifact was built against.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtAt",
+        "commit",
+        "digest",
+        "sdkVersion"
+      ],
+      "type": "object"
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "Status condition entry.",
+      "properties": {
+        "lastTransitionTime": {
+          "description": "Last transition timestamp.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "Human-readable message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Machine-readable reason code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Status value (\"True\", \"False\", \"Unknown\").",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of condition (e.g. Reconciled, Ready).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "type"
+      ],
+      "type": "object"
+    },
+    "ContentSecurityPolicy": {
+      "additionalProperties": false,
+      "description": "Content Security Policy of a served app (AP-12).",
+      "properties": {
+        "connectSrc": {
+          "description": "`connect-src`; only `self` and https origins, never `*` (AP-12).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frameAncestors": {
+          "description": "`frame-ancestors`; defaults to `none` (AP-12).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "DataNeed": {
+      "additionalProperties": false,
+      "description": "One declared data need, the input the reconciler renders a Policy from (AP-04, AP-05).",
+      "properties": {
+        "attrs": {
+          "description": "Attributes the app needs; empty means every readable attribute of those types.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contextSpaceRef": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Ref"
+            }
+          ],
+          "description": "The context space the app reads."
+        },
+        "geoQ": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GeoConstraint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Geographic narrowing."
+        },
+        "operations": {
+          "description": "CIM 009 clause 4.20 operation names the app performs (R8).",
+          "items": {
+            "$ref": "#/definitions/OperationRef"
+          },
+          "type": "array"
+        },
+        "q": {
+          "description": "NGSI-LD query narrowing the readable set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "representations": {
+          "description": "Representations of the rendered endpoint this need contributes (AP-05, EP-08).",
+          "items": {
+            "$ref": "#/definitions/Representation"
+          },
+          "type": "array"
+        },
+        "scopeQ": {
+          "description": "Scope query narrowing the readable set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "temporalQ": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TemporalConstraint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Temporal narrowing."
+        },
+        "types": {
+          "description": "NGSI-LD entity types the app needs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "contextSpaceRef",
+        "operations",
+        "types"
+      ],
+      "type": "object"
+    },
+    "GeoConstraint": {
+      "additionalProperties": false,
+      "description": "Geographic narrowing of a data need, e.g. `{ within: { scopeRef: /geo/SK/BB } }` (AP-05).",
+      "properties": {
+        "within": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GeoWithin"
+            }
+          ],
+          "description": "Scope tree the app may read inside."
+        }
+      },
+      "required": [
+        "within"
+      ],
+      "type": "object"
+    },
+    "GeoWithin": {
+      "additionalProperties": false,
+      "description": "The scope a [`GeoConstraint`] confines the app to (ADR 005).",
+      "properties": {
+        "scopeRef": {
+          "description": "Absolute scope string, e.g. `/geo/SK/BB`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scopeRef"
+      ],
+      "type": "object"
+    },
+    "GitSource": {
+      "additionalProperties": false,
+      "description": "A source repository on the organization's own forge (AP-02).",
+      "properties": {
+        "path": {
+          "description": "Subdirectory holding the app.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "description": "Branch, tag or commit.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Clone URL on the organization's forge; `https://` only.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "url"
+      ],
+      "type": "object"
+    },
+    "MultiLanguageMap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Multi-language map keyed by ISO 639-1 two-letter lowercase language codes",
+      "propertyNames": {
+        "pattern": "^[a-z]{2}$",
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "ObjectMeta": {
+      "additionalProperties": false,
+      "description": "Metadata envelope attached to every platform resource (MF-02).",
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value annotations for provenance and ownership (MF-08).",
+          "type": "object"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable description: one string, or the legacy map per locale (UI-50, PF-24)."
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Key-value labels for filtering (MF-10).",
+          "type": "object"
+        },
+        "name": {
+          "description": "Resource name (DNS-1123 label).",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Resource namespace (\"org\" or project slug).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Text"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-readable title: one string, or the legacy map per locale (UI-50, PF-24)."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "Operation": {
+      "description": "Table 4.20-1: every named distributed API operation in ETSI GS CIM 009 (R8).\n\nClosed enum ensures no proprietary verbs (`upsertEntity`, `read`, `write`) are accepted, satisfying the strict R8 CIM 009 vocabulary guarantee.",
+      "oneOf": [
+        {
+          "description": "Create entity (`POST /entities`).",
+          "enum": [
+            "createEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update entity (`PATCH /entities/{id}`).",
+          "enum": [
+            "updateEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Append entity attributes (`POST /entities/{id}/attrs`).",
+          "enum": [
+            "appendAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update entity attributes (`PATCH /entities/{id}/attrs`).",
+          "enum": [
+            "updateAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete entity attributes (`DELETE /entities/{id}/attrs/{attr}`).",
+          "enum": [
+            "deleteAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete entity (`DELETE /entities/{id}`).",
+          "enum": [
+            "deleteEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch create entities (`POST /entityOperations/create`).",
+          "enum": [
+            "createBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch upsert entities (`POST /entityOperations/upsert`).",
+          "enum": [
+            "upsertBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch update entities (`POST /entityOperations/update`).",
+          "enum": [
+            "updateBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch delete entities (`POST /entityOperations/delete`).",
+          "enum": [
+            "deleteBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Upsert temporal entity attributes (`POST /temporal/entities/{id}/attrs`).",
+          "enum": [
+            "upsertTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Append temporal entity attributes (`POST /temporal/entities/{id}/attrs`).",
+          "enum": [
+            "appendAttrsTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete temporal entity attributes (`DELETE /temporal/entities/{id}/attrs/{attr}`).",
+          "enum": [
+            "deleteAttrsTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update temporal attribute instance (`PATCH /temporal/entities/{id}/attrs/{attr}/{instance}`).",
+          "enum": [
+            "updateAttrInstanceTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete temporal attribute instance (`DELETE /temporal/entities/{id}/attrs/{attr}/{instance}`).",
+          "enum": [
+            "deleteAttrInstanceTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete temporal entity (`DELETE /temporal/entities/{id}`).",
+          "enum": [
+            "deleteTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Merge entity (`PATCH /entities/{id}`).",
+          "enum": [
+            "mergeEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Replace entity (`PUT /entities/{id}`).",
+          "enum": [
+            "replaceEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Replace entity attributes (`PATCH /entities/{id}/attrs`).",
+          "enum": [
+            "replaceAttrs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch merge entities (`POST /entityOperations/merge`).",
+          "enum": [
+            "mergeBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Purge entity permanently (`DELETE /entities/{id}?purge=true`).",
+          "enum": [
+            "purgeEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve single entity (`GET /entities/{id}`).",
+          "enum": [
+            "retrieveEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Query entities (`GET /entities` or `POST /entityOperations/query`).",
+          "enum": [
+            "queryEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Batch query entities (`POST /entityOperations/query`).",
+          "enum": [
+            "queryBatch"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve temporal entity (`GET /temporal/entities/{id}`).",
+          "enum": [
+            "retrieveTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Query temporal entities (`GET /temporal/entities`).",
+          "enum": [
+            "queryTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve entity types list (`GET /types`).",
+          "enum": [
+            "retrieveEntityTypes"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve entity type details (`GET /types/{type}`).",
+          "enum": [
+            "retrieveEntityTypeDetails"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve entity type info (`GET /types/{type}/info`).",
+          "enum": [
+            "retrieveEntityTypeInfo"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve attribute types list (`GET /attributes`).",
+          "enum": [
+            "retrieveAttrTypes"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve attribute type details (`GET /attributes/{attr}`).",
+          "enum": [
+            "retrieveAttrTypeDetails"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve attribute type info (`GET /attributes/{attr}/info`).",
+          "enum": [
+            "retrieveAttrTypeInfo"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create context subscription (`POST /subscriptions`).",
+          "enum": [
+            "createSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update context subscription (`PATCH /subscriptions/{id}`).",
+          "enum": [
+            "updateSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve context subscription (`GET /subscriptions/{id}`).",
+          "enum": [
+            "retrieveSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Query context subscriptions (`GET /subscriptions`).",
+          "enum": [
+            "querySubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete context subscription (`DELETE /subscriptions/{id}`).",
+          "enum": [
+            "deleteSubscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve context entity map (`GET /entityMaps/{id}`).",
+          "enum": [
+            "retrieveEntityMap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Update context entity map (`PATCH /entityMaps/{id}`).",
+          "enum": [
+            "updateEntityMap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete context entity map (`DELETE /entityMaps/{id}`).",
+          "enum": [
+            "deleteEntityMap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create entity map query on entities.",
+          "enum": [
+            "createEntityMapQueryEntity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create entity map query on temporal entities.",
+          "enum": [
+            "createEntityMapQueryTemporal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve context source identity (`GET /csourceIdentity`).",
+          "enum": [
+            "retrieveContextSourceIdentity"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "OperationGroup": {
+      "description": "Table 4.20-2: the five distributed operation group names (R8).",
+      "oneOf": [
+        {
+          "description": "Consumption, subscription, and entity map operations.",
+          "enum": [
+            "federationOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Association operations without entity map support.",
+          "enum": [
+            "associationOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Entity and attribute update operations.",
+          "enum": [
+            "updateOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Retrieve and query entity operations.",
+          "enum": [
+            "retrieveOps"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Full redirection operations.",
+          "enum": [
+            "redirectionOps"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "OperationRef": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Operation"
+            }
+          ],
+          "description": "Individual named operation from CIM 009 Table 4.20-1."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/OperationGroup"
+            }
+          ],
+          "description": "Operation group from CIM 009 Table 4.20-2."
+        }
+      ],
+      "description": "Reference to a CIM 009 operation or operation group (R8).\n\nClosed enum ensures no proprietary verbs (`read`, `write`, `upsertEntity`) are permitted, satisfying the strict R8 CIM 009 vocabulary guarantee."
+    },
+    "Phase": {
+      "description": "Lifecycle phase enumeration.",
+      "oneOf": [
+        {
+          "description": "Resource manifest is in draft state.",
+          "enum": [
+            "Draft"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is pending review or approval.",
+          "enum": [
+            "Pending"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource deployment is in progress.",
+          "enum": [
+            "Deploying"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Resource is live and active in cluster.",
+          "enum": [
+            "Live"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Reconciliation error.",
+          "enum": [
+            "Error"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The platform holds something the repository does not declare, or no longer holds what it does (CC-21, UI-25). Configuration cannot reach this phase — every component reads it from the repository (CC-72) — so it is a space whose seed entities the broker answers differently, and the two resolutions of UI-26 are what a person does about it.",
+          "enum": [
+            "Drifted"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Ref": {
+      "anyOf": [
+        {
+          "description": "Bare string resource name.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            }
+          ],
+          "description": "Typed reference with kind, name, and optional namespace."
+        }
+      ],
+      "description": "Reference to another resource, either bare name or typed reference (MF-07)."
+    },
+    "Representation": {
+      "description": "Supported representation formats served under an endpoint (EP-05, Architecture/04).\n\nNote: `schema` (EP-46) and `access` (EP-55) are not variants: they are unconditional surfaces on every endpoint and cannot be toggled off.",
+      "oneOf": [
+        {
+          "description": "Canonical NGSI-LD representation (`/ngsi-ld/v1/`).",
+          "enum": [
+            "ngsi-ld"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Direct Model Context Protocol streamable HTTP interface (`/mcp`).",
+          "enum": [
+            "mcp"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "GeoJSON feature collection (`/file.geojson`).",
+          "enum": [
+            "geojson"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Flat tabular CSV (`/file.csv`).",
+          "enum": [
+            "csv"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Flat tabular Excel spreadsheet (`/file.xlsx`).",
+          "enum": [
+            "xlsx"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "JSON array of entities (`/file.json`).",
+          "enum": [
+            "json"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Zipped multi-representation export bundle (`/file.zip`).",
+          "enum": [
+            "zip"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "OGC API - Features Part 1 collections and items (`/ogc/features/`).",
+          "enum": [
+            "ogc-features"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`).",
+          "enum": [
+            "sta"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Status": {
+      "additionalProperties": false,
+      "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
+      "properties": {
+        "build": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Build"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the build lane published for an `App`, and the only place its artifact is named (AP-13a). Written back by the build lane in the commit that publishes the artifact; an App without it renders no pod, and no other principal may set it (AP-73)."
+        },
+        "conditions": {
+          "description": "Reconciler condition transitions.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        },
+        "observedRevision": {
+          "description": "Git commit revision observed during reconciliation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Phase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    },
+    "TemporalConstraint": {
+      "additionalProperties": false,
+      "description": "Temporal narrowing of a data need, e.g. `{ window: P1D }` (AP-05).",
+      "properties": {
+        "window": {
+          "description": "ISO 8601 duration reaching back from now.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "window"
+      ],
+      "type": "object"
+    },
+    "Text": {
+      "anyOf": [
+        {
+          "description": "The form every new manifest writes.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MultiLanguageMap"
+            }
+          ],
+          "description": "The legacy `{locale: text}` map."
+        }
+      ],
+      "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
+    },
+    "TypedRef": {
+      "additionalProperties": false,
+      "description": "Structured typed resource reference (MF-07).",
+      "properties": {
+        "kind": {
+          "description": "Target resource kind.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Target resource name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Target resource namespace (defaults to caller namespace if omitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
+  "properties": {
+    "apiVersion": {
+      "description": "API version: [`API_VERSION`], or a version [`serves`] accepts for this kind.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Resource kind name (must match [`Kind::KIND`]).",
+      "type": "string"
+    },
+    "metadata": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ObjectMeta"
+        }
+      ],
+      "description": "Metadata identifying and labeling the resource."
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AppSpec"
+        }
+      ],
+      "description": "Desired spec state."
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Status"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Server-computed status. Stripped during export and serialization."
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "title": "ResourceEnvelope_for_AppSpec",
+  "type": "object"
+}

@@ -1,0 +1,26 @@
+# The surface the pipeline writes into and the public reads from (EP-01, EP-05, EP-14), and the
+# open-data catalogue it is published to (EP-62).
+#
+# The entities carry no geometry, so the geographic representations are not enabled: an
+# `/ogc/features/` collection of rows without a place would answer every bbox query with
+# nothing, and an endpoint that offers a surface it cannot fill is worse than one that does not
+# offer it (EP-05).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ep-hri-population
+  namespace: helsinki
+  title:
+    fi: Väestö postinumeroalueittain
+    en: Population by postal code
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: statistics }
+  slug: qedxosyniewu7qyy536rkxdgvn
+  audience: public
+  enabledRepresentations: [ngsi-ld, csv, xlsx, json, mcp]
+  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      organization: city-of-helsinki
+      name: population-by-postal-code
+      datastore: { representation: csv, refresh: onChange }

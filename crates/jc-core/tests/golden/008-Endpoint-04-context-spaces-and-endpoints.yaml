@@ -1,0 +1,29 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: air-quality-public
+  namespace: bb-ovzdusie
+spec:
+  contextSpaceRef: ovzdusie
+  slug: zt4qm7ge2xdv6ksb3ncf5arw2y  # Random base32 >= 128-bit
+  audience: public        # project-list | organization | public
+  allowedProjects: []     # Populated when audience: project-list
+  policyRef: urn:ngsi-ld:Policy:banskabystrica.sk:ovzdusie:public-air-quality
+  enabledRepresentations:
+    - ngsi-ld
+    - mcp
+    - geojson
+    - csv
+    - ogc-features
+    - sta
+  rateLimits:
+    requestsPerMinute: 600
+    burst: 50
+  fileLimits:            # Ceiling of one file.* download (EP-44)
+    maxFileRows: 50000
+    maxFileBytes: 33554432
+  caching:
+    maxAgeSeconds: 60
+  projection:            # Never served here, whatever the Policy allows (EP-61)
+    hiddenAttributes:
+      - calibrationOffset

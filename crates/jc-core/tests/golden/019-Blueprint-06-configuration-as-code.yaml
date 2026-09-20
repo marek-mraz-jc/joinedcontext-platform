@@ -1,0 +1,26 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: threshold-alert
+  namespace: org
+  title: { en: "Threshold alert", sk: "Notifikácia prekročenia limitu" }
+spec:
+  version: 1.2.0                  # SemVer; an upgrade never rewrites instances (CC-26)
+  category: alerting              # gallery grouping (CC-30)
+  riskClass: green                # green | yellow | red, the merge lane (CC-59, CC-63)
+  allowedRoles: [domain-editor, approver, org-admin]   # who sees it (CC-59)
+  parameterSchema:                # JSON Schema draft-07, the complete user surface (CC-24)
+    type: object
+    required: [entityType, thresholdValue]
+    properties:
+      entityType: { type: string, title: "Entity type", enum: [AirQualityObserved] }
+      thresholdValue: { type: number, title: "Threshold" }
+  templates:                      # each renders exactly one manifest (CC-23)
+    - name: subscription
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: "alert-{{ entityType | lower }}"
+        spec:
+          q: "airQualityIndex > {{ thresholdValue }}"

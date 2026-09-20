@@ -1,0 +1,7 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: ContextSpace
+metadata:
+  name: air-quality
+  namespace: helsinki
+spec:
+  isSandbox: false
