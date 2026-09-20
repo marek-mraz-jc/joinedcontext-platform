@@ -1890,7 +1890,7 @@ async fn file_geojson(
         Err(problem) => return *problem,
     };
 
-    match geojson::feature_collection(&entities) {
+    match geojson::feature_collection(&entities, accept_language(request.headers())) {
         Ok(collection) => {
             // The byte ceiling is the endpoint's own, measured on what would be sent (EP-44).
             if serde_json::to_vec(&collection)
@@ -2818,7 +2818,16 @@ async fn ogc_items(
         };
 
     let timestamp = crate::pdp::now().to_rfc3339();
-    let page = ogc::items(base, name, &entities, limit, offset, raw_query, &timestamp);
+    let page = ogc::items(
+        base,
+        name,
+        &entities,
+        limit,
+        offset,
+        raw_query,
+        &timestamp,
+        accept_language(request.headers()),
+    );
     let mut response = typed_json_response(&page, ogc::GEOJSON);
     response
         .headers_mut()
@@ -2857,7 +2866,7 @@ async fn ogc_item(
     let Some(feature) = entities
         .as_array()
         .and_then(|list| list.first())
-        .and_then(|entity| ogc::feature(base, name, entity))
+        .and_then(|entity| ogc::feature(base, name, entity, accept_language(request.headers())))
     else {
         return ProblemDetails::not_found().into_response();
     };
@@ -2922,6 +2931,13 @@ async fn ogc_sample(
             extent.bbox.is_some().then_some((name, extent))
         })
         .collect())
+}
+
+/// The language the caller asked for, as they wrote it (EP-37, EP-45).
+fn accept_language(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
 }
 
 /// The endpoint's title and description in the caller's language (EP-32).

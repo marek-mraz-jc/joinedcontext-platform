@@ -62,7 +62,15 @@ async fn every_answer_says_it_belongs_to_one_caller() {
     let vary = response.headers()[header::VARY]
         .to_str()
         .expect("a readable Vary");
-    for named in ["Authorization", "Accept", "NGSILD-Results-Restricted"] {
+    // EP-37: `Accept-Language` joined them when a LanguageProperty started answering in the
+    // caller's language — a cache keyed without it would hand a Slovak label to an English
+    // reader.
+    for named in [
+        "Authorization",
+        "Accept",
+        "Accept-Language",
+        "NGSILD-Results-Restricted",
+    ] {
         assert!(vary.contains(named), "Vary does not name {named}: {vary}");
     }
 }

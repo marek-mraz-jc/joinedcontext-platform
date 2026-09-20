@@ -78,10 +78,14 @@ fn keep_out_of_shared_caches(headers: &mut axum::http::HeaderMap) {
             false => HeaderValue::from_static("private, no-store"),
         },
     );
-    // `Authorization` is what the answer differs by; the two request headers a caller may narrow
-    // themselves with are named so a cache keyed on them cannot mix them either.
+    // `Authorization` is what the answer differs by; the request headers a caller may narrow
+    // or shape the answer with are named so a cache keyed on them cannot mix them either.
+    // `Accept-Language` is one of them since EP-37: it picks the text of a LanguageProperty in
+    // a GeoJSON feature and the title of the OGC landing page.
     headers.insert(
         axum::http::header::VARY,
-        HeaderValue::from_static("Authorization, Accept, NGSILD-Results-Restricted"),
+        HeaderValue::from_static(
+            "Authorization, Accept, Accept-Language, NGSILD-Results-Restricted",
+        ),
     );
 }
