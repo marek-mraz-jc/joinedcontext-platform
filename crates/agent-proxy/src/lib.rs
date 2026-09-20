@@ -18,10 +18,58 @@ pub struct ProxyState {
     pub runs: runs::RunResolver,
     pub credentials: inject::CredentialManager,
     pub limits: limits::LimitManager,
+    /// The client every credentialed upstream is called with: the gateway with a minted endpoint
+    /// token, the forge with the forge token, the model with the model key, the Portal with this
+    /// proxy's own. Built by [`no_redirect_client`], so none of those credentials can be carried
+    /// to a path or a host the proxy never addressed (AG-52, T-1695).
     pub http: reqwest::Client,
-    /// The client the fetch route uses. It follows no redirect of its own: every hop is checked
-    /// against the run's allow-list first, which `reqwest`'s policy cannot do (AG-65).
+    /// The client the fetch and packages routes use. It follows no redirect of its own: every hop
+    /// is checked against the run's allow-list first, which `reqwest`'s policy cannot do (AG-65).
     pub egress: reqwest::Client,
+}
+
+impl ProxyState {
+    /// The proxy's state with the clients it is entitled to, which is the only way one is built.
+    ///
+    /// The choice of client is a security property (see [`no_redirect_client`]), so it is made
+    /// here and not at each call site: a deployment and a test then run the same wiring, and a
+    /// suite cannot prove a redirect refused against a client a deployment does not use (T-1695).
+    pub fn new(
+        config: Arc<config::Config>,
+        runs: runs::RunResolver,
+        credentials: inject::CredentialManager,
+        limits: limits::LimitManager,
+    ) -> Self {
+        Self {
+            config,
+            runs,
+            credentials,
+            limits,
+            // No deadline: a long generation is not a hung model provider.
+            http: no_redirect_client(None),
+            egress: no_redirect_client(Some(std::time::Duration::from_secs(30))),
+        }
+    }
+}
+
+/// A client that follows no redirect, which is the only kind this proxy builds.
+///
+/// `reqwest`'s default policy follows up to ten hops and decides for itself what to carry along.
+/// Neither half is acceptable here. A request this proxy makes carries a credential the workspace
+/// must never hold — a minted endpoint token, the forge token, the model key, the OIDC client
+/// secret in a form body — or is the run's egress, whose every hop belongs to the profile's
+/// allow-list. A redirect is how an upstream would move either one somewhere nobody reviewed, so
+/// the hop is answered by this proxy, never by the HTTP client (AG-52, AG-65, T-1695).
+/// `None` is a client with no deadline of its own, which a model call needs: a long generation is
+/// not a hung upstream.
+pub fn no_redirect_client(timeout: Option<std::time::Duration>) -> reqwest::Client {
+    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    match timeout {
+        Some(timeout) => builder.timeout(timeout),
+        None => builder,
+    }
+    .build()
+    .unwrap_or_default()
 }
 
 pub fn router(state: Arc<ProxyState>) -> Router {

@@ -25,30 +25,30 @@ pub async fn handler(
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
 
-    let host_lower = host.to_lowercase();
-    if !run
-        .allowed_hosts
-        .iter()
-        .any(|h| h.eq_ignore_ascii_case(&host_lower))
-    {
-        return jc_core::ProblemDetails::forbidden()
-            .with_detail(format!(
-                "host '{host}' not present in profile allow-list (AG-50)"
-            ))
-            .into_response();
-    }
-
-    // The host is allow-listed; the path must stay a path on it (T-1301).
+    // The path must stay a path on the host it is appended to (T-1301).
     if super::escapes(&rest) {
         return jc_core::ProblemDetails::forbidden()
             .with_detail("path traversal not permitted")
             .into_response();
     }
-    let target_url = format!("https://{host}/{rest}");
-    let upstream_resp = match state.http.get(&target_url).send().await {
-        Ok(r) => r,
-        Err(e) => return jc_core::ProblemDetails::internal_opaque(&e.to_string()).into_response(),
+
+    // https, a host the profile names, and no credential in the URL — the fetch route's rules,
+    // because they are the same rules: a registry is an outside host a run was allowed to read.
+    let target = match super::fetch::checked(&format!("https://{host}/{rest}"), &run.allowed_hosts)
+    {
+        Ok(url) => url,
+        Err(problem) => return *problem,
     };
+
+    // A registry answers a download with a redirect to its CDN, so the hops are followed — each
+    // one checked against the same allow-list as the first URL. `state.http` used to carry this
+    // request and followed whatever the registry named, to any host on the internet, which is a
+    // redirect away from an allow-list that had already been passed (AG-50, T-1695).
+    let (upstream_resp, reached) =
+        match super::fetch::follow(&state, &target, &run.allowed_hosts).await {
+            Ok(reached) => reached,
+            Err(problem) => return *problem,
+        };
 
     let status =
         StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -69,9 +69,9 @@ pub async fn handler(
     log_request(&AuditEntry {
         run_id: &run.id,
         user: &run.created_by,
-        upstream: &host,
+        upstream: &reached,
         method: "GET",
-        path: &rest,
+        path: target.path(),
         status: status.as_u16(),
         bytes: resp_bytes.len(),
         duration_ms: start.elapsed().as_millis(),

@@ -30,6 +30,52 @@ pub(crate) async fn portal_bearer(
     })
 }
 
+/// The refusal an upstream's redirect earns, or `None` when the answer is not a redirect.
+///
+/// The proxy's upstream client follows nothing by itself (`no_redirect_client`), so a `3xx` from
+/// the gateway, the forge or the model provider arrives here instead of being chased with the
+/// credential still attached. It is answered rather than relayed for two reasons: `Location` names
+/// an address inside the cluster, which is not the workspace's business, and a run that received a
+/// bare `302` would have nothing it could act on. An upstream that wants this proxy somewhere else
+/// is a misconfiguration or an attack, and both belong in the operator's log (AG-52, T-1695).
+pub(crate) fn refused_redirect(
+    status: axum::http::StatusCode,
+    location: Option<&str>,
+    upstream: &str,
+) -> Option<axum::response::Response> {
+    use axum::response::IntoResponse;
+    if !status.is_redirection() {
+        return None;
+    }
+    tracing::warn!(
+        %upstream,
+        status = status.as_u16(),
+        location = location.unwrap_or("(none)"),
+        "an upstream answered a credentialed request with a redirect; it was not followed"
+    );
+    Some(
+        jc_core::ProblemDetails::new(
+            502,
+            "upstream-redirect",
+            format!(
+                "the {upstream} answered with a redirect, which this proxy does not follow: a \
+                 request that carries a credential is made to the address the platform \
+                 configured and to no other. Nothing was sent on. Ask an operator to check that \
+                 upstream's address (AG-52)."
+            ),
+        )
+        .into_response(),
+    )
+}
+
+/// The `Location` of an upstream answer, for the operator's log and nothing else.
+pub(crate) fn location_of(response: &reqwest::Response) -> Option<&str> {
+    response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+}
+
 /// Whether a path a workspace sends would leave the base it is appended to once the outbound URL
 /// is parsed. axum has decoded the path once; the URL parser follows WHATWG, which reads `%2e%2e`
 /// as a `..` segment and a backslash as a slash in an http(s) URL, so nothing still encoded, no

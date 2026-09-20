@@ -87,10 +87,9 @@ pub enum RunError {
 impl RunResolver {
     pub fn new(portal_base: Url, credentials: crate::inject::CredentialManager) -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_default(),
+            // The lookup presents this proxy's own Portal token; a redirect would carry it to
+            // whatever the Portal named (T-1695).
+            http: crate::no_redirect_client(Some(Duration::from_secs(5))),
             portal_base,
             credentials: Some(credentials),
             cache: Arc::new(RwLock::new(HashMap::new())),
@@ -104,7 +103,7 @@ impl RunResolver {
             (Instant::now() + Duration::from_secs(3600), Arc::new(run)),
         );
         Self {
-            http: reqwest::Client::new(),
+            http: crate::no_redirect_client(Some(Duration::from_secs(5))),
             portal_base: Url::parse("http://portal").unwrap(),
             credentials: None,
             cache: Arc::new(RwLock::new(map)),
@@ -142,8 +141,7 @@ impl RunResolver {
 
     async fn fetch(&self, run_id: &str) -> Result<Arc<RunContext>, RunError> {
         let now = Instant::now();
-        let mut url = self.portal_base.clone();
-        url.set_path(&format!("internal/agent-runs/{run_id}"));
+        let url = self.lookup_url(run_id)?;
 
         let mut req = self.http.get(url);
         if let Some(credentials) = &self.credentials {
@@ -179,6 +177,26 @@ impl RunResolver {
         );
 
         Ok(arc)
+    }
+
+    /// Where the Portal holds one run, with the id as one path segment and nothing else.
+    ///
+    /// The id arrives in a header a workspace writes. `Url::set_path` takes what it is given as a
+    /// path, so an id shaped like one (`../../…`, `%2e%2e/…`) used to steer this lookup — which
+    /// carries this proxy's own Portal token — at another Portal route entirely (T-1695). The id
+    /// is checked at the door by `auth::run_id_is_well_formed`; here it is appended as a single
+    /// percent-encoded segment, so no shape of it can be read as a path however this resolver is
+    /// called.
+    fn lookup_url(&self, run_id: &str) -> Result<Url, RunError> {
+        let mut url = self.portal_base.clone();
+        url.set_path("");
+        url.path_segments_mut()
+            .map_err(|_| RunError::Transport("the Portal base cannot hold a path".to_owned()))?
+            .clear()
+            .push("internal")
+            .push("agent-runs")
+            .push(run_id);
+        Ok(url)
     }
 
     fn check_status(run: &RunContext) -> Result<(), RunError> {

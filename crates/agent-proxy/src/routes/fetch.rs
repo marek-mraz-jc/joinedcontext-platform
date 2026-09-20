@@ -180,13 +180,13 @@ pub async fn handler(
 /// plain HTTP would put the request on the wire in the clear, a host off the list is a host the
 /// operator never reviewed, and a URL carrying a credential is one the agent should not be
 /// handing to anybody.
-fn checked(raw: &str, allowed: &[String]) -> Result<Url, Box<Response>> {
+pub(crate) fn checked(raw: &str, allowed: &[String]) -> Result<Url, Box<Response>> {
     let url = Url::parse(raw)
         .map_err(|e| Box::new(bad_request(format!("'{raw}' is not a URL: {e}")).into_response()))?;
     if url.scheme() != "https" {
         return Err(Box::new(
             forbidden(format!(
-                "scheme '{}' is refused; the fetch route is https only (AG-65)",
+                "scheme '{}' is refused; an outside host is reached over https only (AG-65)",
                 url.scheme()
             ))
             .into_response(),
@@ -229,7 +229,7 @@ fn checked(raw: &str, allowed: &[String]) -> Result<Url, Box<Response>> {
 ///
 /// `reqwest`'s own policy cannot see the allow-list, and a redirect is exactly how a host on the
 /// list would hand the run to one that is not.
-async fn follow(
+pub(crate) async fn follow(
     state: &ProxyState,
     target: &Url,
     allowed: &[String],
@@ -376,6 +376,37 @@ mod tests {
             assert!(
                 next_hop(&from, location, &allowed()).is_err(),
                 "{location} was followed"
+            );
+        }
+    }
+
+    /// T-1695: the packages route follows a registry's redirect through the same check. A
+    /// registry answers a download with a hop to its CDN, and that CDN is a host the profile
+    /// named or it is not reached — `state.http` used to chase it wherever the registry pointed.
+    #[test]
+    fn a_registry_hands_a_download_on_only_to_a_host_the_profile_named() {
+        let allowed = vec!["crates.io".to_owned(), "static.crates.io".to_owned()];
+        let from =
+            Url::parse("https://crates.io/api/v1/crates/serde/1.0.0/download").expect("a URL");
+        assert_eq!(
+            next_hop(
+                &from,
+                "https://static.crates.io/crates/serde/serde-1.0.0.crate",
+                &allowed
+            )
+            .map(|url| url.to_string())
+            .unwrap_or_default(),
+            "https://static.crates.io/crates/serde/serde-1.0.0.crate",
+        );
+        for location in [
+            "https://cdn.evil.test/serde-1.0.0.crate",
+            "https://crates.io.evil.test/serde-1.0.0.crate",
+            "http://static.crates.io/serde-1.0.0.crate",
+            "https://static.crates.io/x?token=abcdef",
+        ] {
+            assert!(
+                next_hop(&from, location, &allowed).is_err(),
+                "{location} was followed",
             );
         }
     }
