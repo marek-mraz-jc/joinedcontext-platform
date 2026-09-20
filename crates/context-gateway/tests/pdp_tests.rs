@@ -177,6 +177,97 @@ operations: [retrieveOps]
     }
 }
 
+/// GW34: every one of the five groups grants exactly its members, through the PDP.
+///
+/// The expansion itself is held against Table 4.20-2 in `jc-core`'s `policy_tests`; what this
+/// asks is the question a person asks of a grant — "so what may this caller actually do?" — of
+/// all five groups at once, including the operations just outside each one. A group that leaked
+/// one operation would be a silent widening of every policy that names it.
+#[test]
+fn every_operation_group_grants_its_members_and_nothing_beside_them() {
+    use jc_core::kinds::policy::OperationGroup;
+
+    // Every operation the vocabulary has, so "outside the group" means outside all of it.
+    const EVERY: &[Operation] = &[
+        Operation::CreateEntity,
+        Operation::UpdateEntity,
+        Operation::AppendAttrs,
+        Operation::UpdateAttrs,
+        Operation::DeleteAttrs,
+        Operation::DeleteEntity,
+        Operation::CreateBatch,
+        Operation::UpsertBatch,
+        Operation::UpdateBatch,
+        Operation::DeleteBatch,
+        Operation::UpsertTemporal,
+        Operation::AppendAttrsTemporal,
+        Operation::DeleteAttrsTemporal,
+        Operation::UpdateAttrInstanceTemporal,
+        Operation::DeleteAttrInstanceTemporal,
+        Operation::DeleteTemporal,
+        Operation::MergeEntity,
+        Operation::ReplaceEntity,
+        Operation::ReplaceAttrs,
+        Operation::MergeBatch,
+        Operation::PurgeEntity,
+        Operation::RetrieveEntity,
+        Operation::QueryEntity,
+        Operation::QueryBatch,
+        Operation::RetrieveTemporal,
+        Operation::QueryTemporal,
+        Operation::RetrieveEntityTypes,
+        Operation::RetrieveEntityTypeDetails,
+        Operation::RetrieveEntityTypeInfo,
+        Operation::RetrieveAttrTypes,
+        Operation::RetrieveAttrTypeDetails,
+        Operation::RetrieveAttrTypeInfo,
+        Operation::CreateSubscription,
+        Operation::UpdateSubscription,
+        Operation::RetrieveSubscription,
+        Operation::QuerySubscription,
+        Operation::DeleteSubscription,
+        Operation::RetrieveEntityMap,
+        Operation::UpdateEntityMap,
+        Operation::DeleteEntityMap,
+        Operation::CreateEntityMapQueryEntity,
+        Operation::CreateEntityMapQueryTemporal,
+        Operation::RetrieveContextSourceIdentity,
+    ];
+
+    for group in [
+        OperationGroup::FederationOps,
+        OperationGroup::AssociationOps,
+        OperationGroup::UpdateOps,
+        OperationGroup::RetrieveOps,
+        OperationGroup::RedirectionOps,
+    ] {
+        let grant = policy(&format!(
+            r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: {{ kind: role, id: public }}
+operations: [{group}]
+"#
+        ));
+        let members = group.operations();
+        for operation in EVERY {
+            let denied = evaluate(
+                &Subject::anonymous(),
+                *operation,
+                &Request::default(),
+                "ovzdusie",
+                std::slice::from_ref(&grant),
+                now(),
+            )
+            .is_deny();
+            assert_eq!(
+                denied,
+                !members.contains(operation),
+                "{group} and {operation}: the PDP and Table 4.20-2 disagree"
+            );
+        }
+    }
+}
+
 /// GW4: a prohibition is evaluated first and ends the evaluation, whatever the caller's
 /// other grants say.
 #[test]

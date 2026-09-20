@@ -1,4 +1,6 @@
-use jc_core::kinds::policy::{Operation, OperationRef, ScopeDefinitionSpec, Validity};
+use jc_core::kinds::policy::{
+    Operation, OperationGroup, OperationRef, ScopeDefinitionSpec, Validity,
+};
 use jc_core::kinds::{Policy, ScopeDefinition};
 use regex::Regex;
 
@@ -350,4 +352,154 @@ fn effect_defaults_to_permission_and_round_trips() {
             .is_err(),
         "only the two documented effects parse"
     );
+}
+
+/// GW34: each Table 4.20-2 group stands for exactly the operations the table lists for it.
+///
+/// The member lists are written out here by wire name rather than read from
+/// `OperationGroup::operations()`, because a test that asks the code what it does can only
+/// agree with itself: this is the table, and the code is checked against it. A group that
+/// gained a member would widen every grant that names it without a line of policy changing.
+#[test]
+fn each_operation_group_expands_to_exactly_its_table_members_gw34() {
+    // Table 4.20-2, in the order the table has them.
+    let table: [(OperationGroup, bool, &[&str]); 5] = [
+        (
+            OperationGroup::FederationOps,
+            false,
+            &[
+                "retrieveEntity",
+                "queryEntity",
+                "queryBatch",
+                "retrieveEntityTypes",
+                "retrieveEntityTypeDetails",
+                "retrieveEntityTypeInfo",
+                "retrieveAttrTypes",
+                "retrieveAttrTypeDetails",
+                "retrieveAttrTypeInfo",
+                "createSubscription",
+                "updateSubscription",
+                "retrieveSubscription",
+                "querySubscription",
+                "deleteSubscription",
+                "retrieveEntityMap",
+                "updateEntityMap",
+                "deleteEntityMap",
+                "createEntityMapQueryEntity",
+            ],
+        ),
+        (
+            OperationGroup::AssociationOps,
+            false,
+            &[
+                "retrieveEntity",
+                "queryEntity",
+                "queryBatch",
+                "retrieveEntityTypes",
+                "retrieveEntityTypeDetails",
+                "retrieveEntityTypeInfo",
+                "retrieveAttrTypes",
+                "retrieveAttrTypeDetails",
+                "retrieveAttrTypeInfo",
+                "createSubscription",
+                "updateSubscription",
+                "retrieveSubscription",
+                "querySubscription",
+                "deleteSubscription",
+            ],
+        ),
+        (
+            OperationGroup::UpdateOps,
+            true,
+            &[
+                "updateEntity",
+                "updateAttrs",
+                "replaceEntity",
+                "replaceAttrs",
+            ],
+        ),
+        (
+            OperationGroup::RetrieveOps,
+            false,
+            &["retrieveEntity", "queryEntity"],
+        ),
+        (
+            OperationGroup::RedirectionOps,
+            true,
+            &[
+                "createEntity",
+                "updateEntity",
+                "appendAttrs",
+                "updateAttrs",
+                "deleteAttrs",
+                "deleteEntity",
+                "mergeEntity",
+                "replaceEntity",
+                "replaceAttrs",
+                "retrieveEntity",
+                "queryEntity",
+                "purgeEntity",
+                "retrieveEntityTypes",
+                "retrieveEntityTypeDetails",
+                "retrieveEntityTypeInfo",
+                "retrieveAttrTypes",
+                "retrieveAttrTypeDetails",
+                "retrieveAttrTypeInfo",
+                "retrieveEntityMap",
+                "updateEntityMap",
+                "deleteEntityMap",
+                "createEntityMapQueryEntity",
+            ],
+        ),
+    ];
+
+    for (group, writes, members) in table {
+        let expanded: Vec<&str> = group.operations().iter().map(Operation::as_str).collect();
+        assert_eq!(
+            expanded,
+            members.to_vec(),
+            "{group} expands to something other than its Table 4.20-2 members"
+        );
+        assert_eq!(
+            group.includes_write(),
+            writes,
+            "{group} is marked the wrong way round for whether it can change context data"
+        );
+        // A group is a shorthand, never a widening: nothing it stands for may be an operation
+        // the table does not list for it (GW-18).
+        for operation in group.operations() {
+            assert!(
+                members.contains(&operation.as_str()),
+                "{group} grants {operation}, which Table 4.20-2 does not list for it"
+            );
+        }
+    }
+
+    // `associationOps` is `federationOps` without the four EntityMap operations, and the write
+    // groups are the only ones that can change data.
+    assert_eq!(
+        OperationGroup::FederationOps.operations().len(),
+        OperationGroup::AssociationOps.operations().len() + 4
+    );
+    assert!(!OperationGroup::RetrieveOps.includes_write());
+}
+
+/// GW34: a name that is neither an operation nor a group is refused, not ignored.
+#[test]
+fn a_policy_naming_an_unknown_operation_group_is_refused_gw34() {
+    for unknown in [
+        "retrieveOp",
+        "readOps",
+        "RetrieveOps",
+        "retrieveops",
+        "allOps",
+    ] {
+        let yaml = GOLDEN_POLICY.replace("    - queryEntity", &format!("    - {unknown}"));
+        let error = Policy::from_yaml(&yaml).expect_err("an unknown operation name is refused");
+        // The message names what was wrong, so a person can fix the manifest.
+        assert!(
+            format!("{error}").contains("operations") || format!("{error}").contains(unknown),
+            "the refusal of {unknown} says nothing a person can act on: {error}"
+        );
+    }
 }
