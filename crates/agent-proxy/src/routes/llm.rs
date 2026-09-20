@@ -118,7 +118,7 @@ pub async fn handler(
 
     let upstream_resp = match client_req.send().await {
         Ok(r) => r,
-        Err(e) => return jc_core::ProblemDetails::internal_opaque(&e.to_string()).into_response(),
+        Err(e) => return super::upstream_unavailable(super::MODEL, &e),
     };
 
     let status =

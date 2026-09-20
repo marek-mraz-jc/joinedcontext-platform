@@ -47,7 +47,7 @@ pub async fn handler(
     let target_url = format!("https://{host}/{rest}");
     let upstream_resp = match state.http.get(&target_url).send().await {
         Ok(r) => r,
-        Err(e) => return jc_core::ProblemDetails::internal_opaque(&e.to_string()).into_response(),
+        Err(e) => return super::upstream_unavailable(super::REGISTRY, &e),
     };
 
     let status =

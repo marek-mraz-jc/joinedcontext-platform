@@ -1986,3 +1986,373 @@ async fn a_route_takes_the_method_it_declares_and_no_other() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// T-2362, T-2363, T-2364: what a body the proxy cannot read, an accounting kind and an upstream
+// outage are allowed to do.
+// ---------------------------------------------------------------------------------------------
+
+/// The whole body of a response as text, for the assertions that are about what is *not* in it.
+async fn text_of(response: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// AG-64: a body the proxy cannot read as an object is a body it cannot pin to the run's branch,
+/// so it is refused rather than forwarded with the platform's forge token and no branch at all.
+#[tokio::test]
+async fn a_forge_body_that_is_not_an_object_is_refused_rather_than_forwarded_unpinned() {
+    let forge = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("PUT"))
+        .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+        .mount(&forge)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+        .mount(&forge)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&forge)
+        .await;
+    let state = test_state_with_forge(sample_run(true, "building"), &forge.uri());
+
+    let inside = "contents/projects/helsinki/apps/bikes/src/main.rs";
+    for (verb, rest) in [
+        ("PUT", inside),
+        ("POST", inside),
+        ("DELETE", inside),
+        ("POST", "branches"),
+        ("POST", "pulls"),
+    ] {
+        for body in ["not json", "[1,2,3]", "\"a string\"", "42"] {
+            let response = router(state.clone())
+                .oneshot(ticketed(
+                    verb,
+                    &format!("/v1/forge/{rest}"),
+                    Body::from(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{verb} {rest} with {body}"
+            );
+        }
+    }
+    assert!(
+        forge
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the forge was reached with a body the proxy could not pin"
+    );
+}
+
+/// AG-22, AG-25: every `contents/` write carries the run's branch, its authorship and the
+/// trailer naming the person who proposed the run. Gitea creates with POST as well as updating
+/// with PUT, so all three verbs are pinned, not only the two.
+#[tokio::test]
+async fn every_contents_write_carries_the_runs_branch_and_its_author() {
+    for verb in ["POST", "PUT", "DELETE"] {
+        let forge = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method(verb))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .mount(&forge)
+            .await;
+        let state = test_state_with_forge(sample_run(true, "building"), &forge.uri());
+
+        let response = router(state)
+            .oneshot(ticketed(
+                verb,
+                "/v1/forge/contents/projects/helsinki/apps/bikes/src/main.rs",
+                Body::from(r#"{"content":"aGk=","message":"add main"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "{verb}");
+
+        let calls = forge.received_requests().await.unwrap_or_default();
+        assert_eq!(calls.len(), 1, "{verb}");
+        let sent: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("a JSON body");
+        assert_eq!(
+            sent.get("branch").and_then(serde_json::Value::as_str),
+            Some("agent/app-bikes/e3b0c442-98fc-1c14-9afb-4c7b2756a120"),
+            "{verb} was not pinned to the run's branch"
+        );
+        assert_eq!(
+            sent.pointer("/author/name")
+                .and_then(serde_json::Value::as_str),
+            Some("agent:app-builder@helsinki"),
+            "{verb} carried no author"
+        );
+        assert!(
+            sent.get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("Co-Proposed-By: demo.steward@hel.fi")),
+            "{verb} carried no proposer trailer: {sent}"
+        );
+    }
+}
+
+/// AG-64: a `DELETE` that carries everything in its query has no body to insert into, and the
+/// branch is still what the run is allowed to write on.
+#[tokio::test]
+async fn a_contents_write_with_an_empty_body_is_still_pinned_to_the_runs_branch() {
+    let forge = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&forge)
+        .await;
+    let state = test_state_with_forge(sample_run(true, "building"), &forge.uri());
+
+    let response = router(state)
+        .oneshot(ticketed(
+            "DELETE",
+            "/v1/forge/contents/projects/helsinki/apps/bikes/src/main.rs",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let calls = forge.received_requests().await.unwrap_or_default();
+    assert_eq!(calls.len(), 1);
+    let sent: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("a JSON body");
+    assert_eq!(
+        sent.get("branch").and_then(serde_json::Value::as_str),
+        Some("agent/app-bikes/e3b0c442-98fc-1c14-9afb-4c7b2756a120")
+    );
+}
+
+/// AG-64: the branch a run may create is its own, and an unreadable body does not excuse the
+/// check. A pull request is opened from the run's branch whatever the body asked for.
+#[tokio::test]
+async fn a_run_creates_its_own_branch_and_opens_a_pull_request_from_it() {
+    let forge = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+        .mount(&forge)
+        .await;
+    let state = test_state_with_forge(sample_run(true, "building"), &forge.uri());
+
+    let refused = router(state.clone())
+        .oneshot(ticketed(
+            "POST",
+            "/v1/forge/branches",
+            Body::from(r#"{"new_branch_name":"main"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert!(forge
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
+
+    let opened = router(state)
+        .oneshot(ticketed(
+            "POST",
+            "/v1/forge/pulls",
+            Body::from(r#"{"head":"main","base":"main","title":"take everything"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(opened.status(), StatusCode::CREATED);
+    let calls = forge.received_requests().await.unwrap_or_default();
+    assert_eq!(calls.len(), 1);
+    let sent: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("a JSON body");
+    assert_eq!(
+        sent.get("head").and_then(serde_json::Value::as_str),
+        Some("agent/app-bikes/e3b0c442-98fc-1c14-9afb-4c7b2756a120"),
+        "the head was taken from the body instead of the run"
+    );
+}
+
+/// AG-25, AG-41: `usage` is the proxy's own accounting channel, posted by `routes::llm` after
+/// every model call and applied by the Portal to the run's tokens and step count. A workspace
+/// that could post it would be writing the record its own budget is read from.
+#[tokio::test]
+async fn a_workspace_cannot_write_the_proxys_own_accounting_kinds() {
+    let portal = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&portal)
+        .await;
+    let state = test_state_with_portal(sample_run(true, "building"), &portal.uri());
+
+    for kind in ["usage", "USAGE", "Usage"] {
+        let sent = format!(r#"{{"kind":"{kind}","payload":{{"tokensThisStep":-999999}}}}"#);
+        let response = router(state.clone())
+            .oneshot(ticketed("POST", "/v1/runs/events", Body::from(sent)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "kind '{kind}'");
+    }
+    assert!(
+        portal
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the Portal was asked to record usage a workspace typed"
+    );
+}
+
+/// The kinds the run owns still go through: its output and its navigation are its own to send.
+#[tokio::test]
+async fn the_kinds_a_run_owns_still_reach_the_portal() {
+    let portal = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&portal)
+        .await;
+    let state = test_state_with_portal(sample_run(true, "building"), &portal.uri());
+
+    for kind in ["preview", "navigate", "message"] {
+        let sent = format!(r#"{{"kind":"{kind}","payload":{{"text":"hello"}}}}"#);
+        let response = router(state.clone())
+            .oneshot(ticketed("POST", "/v1/runs/events", Body::from(sent)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "kind '{kind}'");
+    }
+    assert_eq!(
+        portal.received_requests().await.unwrap_or_default().len(),
+        3
+    );
+}
+
+/// AG-35, AG-40, AG-64: an upstream that cannot be reached is an outage the run is told about,
+/// not a map of the cluster it is told. The workspace's NetworkPolicy lets it reach kube-dns and
+/// this proxy and nothing else, precisely so it cannot learn where the Portal, the gateway, the
+/// forge and the model provider live; a transport error string hands it all four on every outage.
+#[tokio::test]
+async fn an_unreachable_upstream_names_no_internal_address() {
+    const GATEWAY: &str = "http://context-gateway.invalid:8080";
+    const MODEL: &str = "http://anthropic.invalid:8443";
+    const FORGE: &str = "http://gitea-http.invalid:3000";
+    const PORTAL: &str = "http://portal-internal.invalid:8080";
+    const SLUG: &str = "scsd2eehkx42n53z2zyd6vshfh7s7irf";
+
+    let state = test_state_with_all(
+        sample_run(true, "building"),
+        GATEWAY,
+        MODEL,
+        FORGE,
+        Some(PORTAL),
+    );
+
+    for (verb, uri, body) in [
+        ("GET", "/v1/data/ngsi-ld/v1/entities", ""),
+        ("GET", "/v1/runs/inbox", ""),
+        (
+            "POST",
+            "/v1/runs/events",
+            r#"{"kind":"message","payload":{}}"#,
+        ),
+        (
+            "POST",
+            "/v1/mcp",
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        ),
+        ("GET", "/v1/diagnostics/pipeline/bikes", ""),
+        (
+            "PUT",
+            "/v1/forge/contents/projects/helsinki/apps/bikes/src/main.rs",
+            r#"{"content":"aGk=","message":"add main"}"#,
+        ),
+        (
+            "POST",
+            "/v1/llm/v1/chat/completions",
+            r#"{"model":"claude-3-7","messages":[]}"#,
+        ),
+    ] {
+        let response = router(state.clone())
+            .oneshot(ticketed(verb, uri, Body::from(body)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_GATEWAY,
+            "{verb} {uri} did not answer 502"
+        );
+        let seen = text_of(response).await;
+        for hidden in [
+            "context-gateway.invalid",
+            "anthropic.invalid",
+            "gitea-http.invalid",
+            "portal-internal.invalid",
+            ":8080",
+            ":8443",
+            ":3000",
+            "/api/endpoint/",
+            "/internal/agent-runs",
+            "/api/v1/repos/",
+            SLUG,
+        ] {
+            assert!(
+                !seen.contains(hidden),
+                "{verb} {uri} handed the workspace '{hidden}': {seen}"
+            );
+        }
+        assert!(
+            seen.contains("upstream-unavailable") && seen.contains("requestId"),
+            "{verb} {uri} gave the run no correlation id to quote: {seen}"
+        );
+    }
+}
+
+/// The package registry is the host the run itself named, so the refusal is the same shape as
+/// every other one rather than a raw `reqwest` string.
+#[tokio::test]
+async fn an_unreachable_package_registry_answers_the_same_problem_document() {
+    let state = test_state(sample_run(false, "building"));
+    let response = router(state)
+        .oneshot(ticketed(
+            "GET",
+            "/v1/packages/crates.io/api/v1/crates/serde/1.0.0/download",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    // crates.io is reachable from a build machine and not from CI; either way the answer is the
+    // registry's own or the proxy's problem document, never a transport error string.
+    if response.status() == StatusCode::BAD_GATEWAY {
+        let seen = text_of(response).await;
+        assert!(seen.contains("upstream-unavailable"), "{seen}");
+        assert!(!seen.contains("error sending request"), "{seen}");
+    }
+}
+
+/// A correlation id is minted per refusal, so two outages are two lines in the log.
+#[tokio::test]
+async fn two_outages_carry_two_correlation_ids() {
+    let state = test_state_with_gateway(sample_run(false, "building"), "http://nowhere.invalid:1");
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let response = router(state.clone())
+            .oneshot(ticketed(
+                "GET",
+                "/v1/data/ngsi-ld/v1/entities",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value =
+            serde_json::from_str(&text_of(response).await).expect("a problem document");
+        ids.push(
+            body.get("requestId")
+                .and_then(serde_json::Value::as_str)
+                .expect("a correlation id")
+                .to_owned(),
+        );
+    }
+    assert_ne!(ids[0], ids[1], "both outages were logged under one id");
+}

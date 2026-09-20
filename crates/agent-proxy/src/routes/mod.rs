@@ -30,6 +30,55 @@ pub(crate) async fn portal_bearer(
     })
 }
 
+/// The names a run is allowed to learn for the things behind this proxy.
+///
+/// A role, never an address: the workspace is the untrusted side and its NetworkPolicy lets it
+/// reach kube-dns and this proxy and nothing else, precisely so it cannot learn the cluster's
+/// shape (AG-35, AG-40).
+pub(crate) const PORTAL: &str = "the Portal";
+pub(crate) const GATEWAY: &str = "the context gateway";
+pub(crate) const FORGE: &str = "the git forge";
+pub(crate) const MODEL: &str = "the model provider";
+pub(crate) const REGISTRY: &str = "the package registry";
+
+/// A correlation id: what the run is told, and what an operator greps the proxy's log for.
+fn correlation_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+        });
+    format!(
+        "{nanos:x}{:04x}",
+        NEXT.fetch_add(1, Ordering::Relaxed) & 0xffff
+    )
+}
+
+/// The answer a workspace gets when an upstream cannot be reached (AG-64, T-2364).
+///
+/// A `reqwest` transport error carries the whole internal URL it failed on: scheme, cluster
+/// hostname, port and internal path. Handing that to the workspace draws it the map its
+/// NetworkPolicy exists to withhold, and it does so on every outage. So the error goes to the
+/// log beside a correlation id, and the run is told which upstream is down by role, with the
+/// same id to quote. `502`, not `500`: the proxy is well, the thing behind it is not, and the
+/// run may retry.
+pub(crate) fn upstream_unavailable(
+    upstream: &str,
+    error: &dyn std::fmt::Display,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let request_id = correlation_id();
+    tracing::warn!(%upstream, %request_id, error = %error, "an upstream could not be reached");
+    jc_core::ProblemDetails::new(502, "upstream-unavailable", "Upstream Unavailable")
+        .with_detail(format!(
+            "{upstream} could not be reached; the proxy may be retried"
+        ))
+        .with_extension("requestId", serde_json::Value::String(request_id))
+        .into_response()
+}
+
 /// Whether a path a workspace sends would leave the base it is appended to once the outbound URL
 /// is parsed. axum has decoded the path once; the URL parser follows WHATWG, which reads `%2e%2e`
 /// as a `..` segment and a backslash as a slash in an http(s) URL, so nothing still encoded, no
