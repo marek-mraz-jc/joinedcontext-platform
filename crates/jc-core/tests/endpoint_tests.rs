@@ -271,3 +271,56 @@ fn a_hidden_attribute_list_must_name_real_attributes_once() {
         );
     }
 }
+
+/// EP-61, T-2334: the gateway serves the identity members and the broker-set timestamps whatever
+/// the projection says, so a list naming one of them would be a narrowing the steward believes in
+/// and the gateway never applies. It is refused when the manifest is validated, with the member in
+/// the message, rather than accepted and ignored.
+#[test]
+fn a_hidden_attribute_the_gateway_always_serves_is_refused() {
+    let with_projection = |name: &str| {
+        GOLDEN.replace(
+            "  caching:\n    maxAgeSeconds: 60\n",
+            &format!(
+                "  caching:\n    maxAgeSeconds: 60\n  projection:\n    hiddenAttributes:\n      - \"{name}\"\n"
+            ),
+        )
+    };
+
+    for name in [
+        "id",
+        "type",
+        "@context",
+        "@id",
+        "@type",
+        "scope",
+        "createdAt",
+        "modifiedAt",
+        "deletedAt",
+        "expiresAt",
+    ] {
+        let endpoint = Endpoint::from_yaml(&with_projection(name)).expect("valid YAML");
+        let error = endpoint
+            .validate()
+            .expect_err(&format!("`{name}` is served whatever the projection says"));
+        let message = error.to_string();
+        assert!(
+            message.contains(name),
+            "the steward has to be told which entry is the problem: {message}"
+        );
+    }
+
+    // An attribute that only resembles one of them is an ordinary attribute and may be hidden.
+    for name in [
+        "identifier",
+        "typeOfMeasurement",
+        "scopeNote",
+        "created_at",
+        "CreatedAt",
+    ] {
+        let endpoint = Endpoint::from_yaml(&with_projection(name)).expect("valid YAML");
+        endpoint
+            .validate()
+            .unwrap_or_else(|error| panic!("`{name}` is an ordinary attribute: {error}"));
+    }
+}
