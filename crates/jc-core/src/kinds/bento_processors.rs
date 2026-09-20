@@ -1,7 +1,7 @@
 //! The processors a pipeline step may name (PL-52). Generated from `bento list --format json-full`
 //! of ghcr.io/warpstreamlabs/bento:v1.21.1 by joinedcontext-portal/ui/scripts/bento-processors.mjs;
-//! `command`, `subprocess` and `wasm` are left out on purpose. Change the pin and rerun the
-//! script, never edit by hand.
+//! `command`, `file`, `subprocess` and `wasm` are left out on purpose. Change the pin and
+//! rerun the script, never edit by hand.
 
 /// Every processor name a `processor:` step accepts.
 pub const PROCESSORS: &[&str] = &[
@@ -24,7 +24,6 @@ pub const PROCESSORS: &[&str] = &[
     "decompress",
     "dedupe",
     "elasticsearch",
-    "file",
     "for_each",
     "gcp_bigquery_select",
     "grok",
