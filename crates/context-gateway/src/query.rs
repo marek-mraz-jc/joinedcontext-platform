@@ -447,14 +447,20 @@ pub fn decode(raw: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
+            // The two digits are read out of the bytes, never out of the string: `i` walks
+            // bytes, and slicing the string by a byte index panics when the pair cuts a
+            // multi-byte character in half (T-2338).
             b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                match std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .map_err(|_| ())
+                    .and_then(|pair| u8::from_str_radix(pair, 16).map_err(|_| ()))
+                {
                     Ok(byte) => {
                         out.push(byte);
                         i += 3;
                     }
                     // Not an escape after all: a literal `%` is what the caller sent.
-                    Err(_) => {
+                    Err(()) => {
                         out.push(b'%');
                         i += 1;
                     }
