@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 /// The file at the repository root that pins the Model Tools version (DM-19).
 pub const SETTINGS_FILE: &str = "platform-settings.yaml";
 
-/// Environment variable read when `--url` is absent.
+/// Where Model Tools is, when `--url` names no address: `JC_MODEL_TOOLS_URL`. Without either,
+/// a command that needs the generators says so rather than guessing a service name (DM-18).
 pub const URL_ENV: &str = "JC_MODEL_TOOLS_URL";
 
 /// The DM-02 committed set: the answer field, and the manifest path that field is written to.

@@ -902,6 +902,10 @@ impl Connection {
 
     /// The gateway to work against, or `None` when this run is repository-only.
     ///
+    /// `JC_GATEWAY_URL` is the Context Gateway this run writes through, and `JC_TOKEN_FILE`
+    /// the file holding the reconciler's ServiceAccount token — a path to a secret, projected
+    /// by the deployment and never a value in the environment.
+    ///
     /// The flags win over the environment, which is what a Job's `JC_GATEWAY_URL` and the
     /// projected `JC_TOKEN_FILE` carry; a gateway named without a token is an error rather
     /// than an anonymous call, because an anonymous call to a space surface is a refusal with

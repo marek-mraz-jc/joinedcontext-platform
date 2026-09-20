@@ -1,4 +1,22 @@
 //! `jc-functions`: reads its configuration, keeps the realm's keys current and serves `/invoke`.
+//!
+//! Everything it needs comes from the environment, and the four it cannot invent are a startup
+//! failure rather than a default (SDK-21, OPS-27):
+//!
+//! - `JC_FUNCTIONS_BIND` — the address to listen on, default `0.0.0.0:8080`.
+//! - `JC_OIDC_ISSUER` — the realm every presented token must be issued by. Required.
+//! - `JC_OIDC_JWKS_URL` — that realm's signing keys, fetched now and kept current in the
+//!   background. It is named separately because the issuer is the address a browser uses and a
+//!   pod cannot dial its own cluster's ingress hostname. Required.
+//! - `JC_FUNCTIONS_CALLER` — the one client whose token may invoke a function, which is the
+//!   Portal (SDK-23). Required.
+//! - `JC_FUNCTIONS_AUDIENCE` — the audience that token must carry, default `jc-functions`.
+//! - `JC_GATEWAY_URL` — the Context Gateway a function's context call is forwarded to, scheme
+//!   and authority only; a path or a query is refused at startup, because the endpoint the
+//!   permission is checked against and the URL that is fetched would then differ. Required.
+//!
+//! None of them is a secret: the runtime holds no credential of its own, and every call it
+//! makes carries the caller's token.
 
 use std::sync::Arc;
 

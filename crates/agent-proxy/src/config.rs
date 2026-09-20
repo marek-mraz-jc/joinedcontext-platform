@@ -9,22 +9,55 @@ use url::Url;
 
 #[derive(Clone)]
 pub struct Config {
+    /// The address to listen on (`JC_PROXY_BIND`, default `0.0.0.0:8080`).
     pub bind: SocketAddr,
+    /// The Portal as the proxy reaches it inside the cluster (`JC_PORTAL_BASE`, default
+    /// `http://portal:8080`), where it reads a run's plan and posts its callbacks.
     pub portal_base: Url,
+    /// The Context Gateway as the proxy reaches it inside the cluster (`JC_GATEWAY_BASE`,
+    /// default `http://context-gateway:8080`), the only address a run's context call is
+    /// forwarded to.
     pub gateway_base: Url,
+    /// The forge as the proxy reaches it inside the cluster (`JC_FORGE_BASE`, default
+    /// `http://gitea-http:3000`), where a run's branch and its merge request are written.
     pub forge_base: Url,
+    /// The configuration repository a run proposes its change to (`JC_FORGE_REPO`, default
+    /// `joinedcontext/configuration`), as `owner/name`.
     pub forge_repo: String,
+    /// The realm every token the proxy mints and verifies is issued by (`JC_OIDC_ISSUER`,
+    /// default `http://keycloak:8080/realms/joinedcontext`).
     pub oidc_issuer: Url,
+    /// The proxy's own Keycloak client (`JC_OIDC_CLIENT_ID`, default `agent-proxy`), whose
+    /// token the Portal's internal listener accepts (AG-52).
     pub oidc_client_id: String,
+    /// That client's secret, read from the file named by `JC_OIDC_CLIENT_SECRET_FILE` or,
+    /// when no file is named, from `JC_OIDC_CLIENT_SECRET` itself. A secret: it comes from a
+    /// `secretRef` the deployment mounts, it is redacted in `Debug`, and an empty value is a
+    /// startup failure rather than a proxy that presents no credential (see
+    /// `Config::require_secrets`).
     pub oidc_client_secret: String,
+    /// The forge token the proxy writes a run's branch with, read from the file named by
+    /// `JC_FORGE_TOKEN_FILE` or from `JC_FORGE_TOKEN`. A secret, on the same terms as
+    /// `oidc_client_secret`.
     pub forge_token: String,
+    /// The model API the proxy forwards a run's completions to (`JC_MODEL_BASE`, default
+    /// `https://api.anthropic.com`).
     pub model_base: Url,
+    /// The key for that API, read from the file named by `JC_MODEL_KEY_FILE` or from
+    /// `JC_MODEL_KEY`. A secret, on the same terms as `oidc_client_secret`: it is the one
+    /// credential a run never holds, which is why the run talks to this proxy at all.
     pub model_key: String,
+    /// Which provider's protocol `model_base` speaks (`JC_MODEL_PROVIDER`, default
+    /// `anthropic`).
     pub model_provider: String,
     /// Where the realm's token endpoint is, for the same reason the gateway needs one
     /// (`JC_OIDC_TOKEN_URL`, T-2272): the issuer is the address a browser uses, and a pod cannot
     /// dial its own cluster's ingress hostname. The issuer's own endpoint when none is named.
     pub oidc_token_url: Option<String>,
+    /// Whether a caller must arrive through the mesh with a Linkerd identity
+    /// (`JC_REQUIRE_MESH_IDENTITY`, the string `true` to require it; default off). The
+    /// deployment turns it on where every client is meshed; an unmeshed call is then refused
+    /// rather than served on the strength of a NetworkPolicy alone.
     pub require_mesh_identity: bool,
 }
 
