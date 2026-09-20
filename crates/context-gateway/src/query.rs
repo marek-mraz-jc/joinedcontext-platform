@@ -390,6 +390,12 @@ fn kept(params: &[(String, String)]) -> Vec<(String, String)> {
             |(name, value)| match (name.as_str(), value.parse::<u64>()) {
                 // One request cannot make the shared broker read an unbounded history (GW26).
                 ("lastN", Ok(n)) if n > LAST_N_CAP => (name.clone(), LAST_N_CAP.to_string()),
+                // Nor walk the graph as far as it likes: the same depth the tool schema
+                // publishes, and the depth the answer narrowing walks an inlined entity to
+                // (AG-25, T-1859).
+                ("joinLevel", Ok(n)) if n > JOIN_LEVEL_CAP => {
+                    (name.clone(), JOIN_LEVEL_CAP.to_string())
+                }
                 _ => (name.clone(), value.clone()),
             },
         )
@@ -398,6 +404,13 @@ fn kept(params: &[(String, String)]) -> Vec<(String, String)> {
 
 /// The most instances per attribute a temporal read asks the broker for (GW26).
 pub(crate) const LAST_N_CAP: u64 = 1_000;
+
+/// The deepest chain of linked entities one read walks (AG-25, CIM 009 clause 6.3.11).
+///
+/// The same bound the MCP tool schema publishes, so the two surfaces cost the broker the
+/// same, and the same depth the answer narrowing judges an inlined entity to: a level the
+/// gateway would not look at is a level it cannot narrow.
+pub(crate) const JOIN_LEVEL_CAP: u64 = 3;
 
 fn render(params: &[(String, String)]) -> String {
     params
