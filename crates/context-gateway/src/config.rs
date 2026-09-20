@@ -41,7 +41,13 @@ pub struct Config {
     /// `JC_OIDC_CLIENT_SECRET`): the identity it presents when it calls the Portal's internal
     /// listener (PF-46, AG-52). Absent means it presents none and that listener refuses it, which
     /// is what an instance without previews looks like.
-    pub oidc_client: Option<(String, String)>,
+    ///
+    /// The secret is a [`jc_core::Secret`], so the derived `Debug` above cannot print it: this
+    /// struct is the one a `tracing::debug!(?config)` during a startup problem would reach, and a
+    /// client secret in the cluster's logs is forbidden outright (CC-06, OPS-12, T-2273). The
+    /// client *id* is not a secret and stays readable, because a log that cannot say which client
+    /// was refused is no use to an operator.
+    pub oidc_client: Option<(String, jc_core::Secret)>,
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
@@ -137,7 +143,7 @@ impl Config {
                     .ok()
                     .filter(|value| !value.trim().is_empty()),
             ) {
-                (Some(id), Some(secret)) => Some((id, secret)),
+                (Some(id), Some(secret)) => Some((id, jc_core::Secret::new(secret))),
                 _ => None,
             },
             public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
@@ -206,6 +212,65 @@ fn token_endpoint(named: Option<&str>, issuer: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configuration carrying the gateway's own client and its secret.
+    fn config_with_a_client_secret() -> Config {
+        Config {
+            bind: "0.0.0.0:8080".parse().expect("a socket address"),
+            broker_url: "http://broker:1026".to_owned(),
+            repo_dir: None,
+            previews_url: Some("http://portal:8081/internal/previews".to_owned()),
+            previews_dir: PathBuf::from("/tmp/jc-previews"),
+            org_domain: "hel.fi".to_owned(),
+            oidc_issuer: Some("https://idm.example/realms/dev".to_owned()),
+            oidc_jwks_url: Some(
+                "http://keycloak/realms/dev/protocol/openid-connect/certs".to_owned(),
+            ),
+            oidc_token_url: None,
+            oidc_client: Some((
+                "context-gateway".to_owned(),
+                jc_core::Secret::new("Kx7-the-realms-client-secret-9fQ"),
+            )),
+            public_url: None,
+            egress_url: None,
+            egress_ca_bundle: None,
+            egress_private_hosts: Vec::new(),
+        }
+    }
+
+    /// T-2273, SEC-GAP-03, OPS-12: the gateway's configuration is the struct a
+    /// `tracing::debug!(?config)` while chasing a startup problem would reach, and it holds the
+    /// realm client secret. The property is the absence of the value, not the presence of the word
+    /// "redacted": this test fails on a derived `Debug` over a plain `String`.
+    #[test]
+    fn debugging_the_configuration_prints_the_client_id_and_never_the_secret() {
+        let config = config_with_a_client_secret();
+        for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(
+                !rendered.contains("Kx7"),
+                "the client secret reached a formatted configuration: {rendered}",
+            );
+            assert!(
+                !rendered.contains("realms-client-secret"),
+                "part of the client secret reached a formatted configuration: {rendered}",
+            );
+            assert!(
+                rendered.contains("context-gateway"),
+                "the client id belongs in the log, so an operator can see which client was \
+                 refused: {rendered}",
+            );
+        }
+    }
+
+    /// And the value is still there for the one caller that needs it (`main.rs`, the previews
+    /// poller's workload token), so the redaction costs nothing but the explicit ask.
+    #[test]
+    fn the_secret_is_still_readable_by_asking_for_it() {
+        let config = config_with_a_client_secret();
+        let (id, secret) = config.oidc_client.as_ref().expect("a client is configured");
+        assert_eq!(id, "context-gateway");
+        assert_eq!(secret.expose(), "Kx7-the-realms-client-secret-9fQ");
+    }
 
     /// On `dev` the issuer is `https://idm.<node>.sslip.io/realms/dev`, the address a browser uses.
     /// The gateway pod cannot dial its own cluster's ingress hostname, so the poller asked and got

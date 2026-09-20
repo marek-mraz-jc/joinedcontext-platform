@@ -1671,6 +1671,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "thiserror 2.0.20",
+ "zeroize",
 ]
 
 [[package]]
