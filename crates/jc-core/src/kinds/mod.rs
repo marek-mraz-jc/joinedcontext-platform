@@ -87,7 +87,7 @@ pub use subscription::{
 };
 pub use sync::{
     BundleFile, BundleItem, BundleOrigin, BundleSchemas, BundleSpec, ConflictPolicy, GitOrigin,
-    PlatformApiOrigin, Schedule, SyncMode, SyncOrigin, SyncSourceSpec,
+    PlatformApiOrigin, Schedule, SyncMode, SyncOrigin, SyncSourceSpec, WebhookAuth,
 };
 pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};
 

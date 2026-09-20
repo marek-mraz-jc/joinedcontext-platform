@@ -464,7 +464,11 @@ fn the_envelope_counts_what_the_proposal_carries() {
 fn a_webhook_source_runs_when_it_is_asked_for_and_never_on_a_tick() {
     let dirs = dirs("asked");
     let remote = Fake::at("9f1c0de", &[("space.yaml", SANDBOX)]);
-    let manifest = source(json!({ "schedule": { "webhook": true } }));
+    let manifest = source(json!({
+        "schedule": { "webhook": true },
+        // A webhook-driven source carries the secret the route authorises it with (MF-44).
+        "webhook": { "secretRef": { "name": "region-hook" } },
+    }));
 
     // However long the timer runs, `poll` proposes nothing and the remote is never touched:
     // there is no interval to beat and there never will be.
@@ -497,7 +501,11 @@ fn a_webhook_source_runs_when_it_is_asked_for_and_never_on_a_tick() {
 fn an_asked_for_run_is_still_refused_by_the_switch_and_by_a_reviewer() {
     let dirs = dirs("asked-stopped");
     let remote = Fake::at("9f1c0de", &[("space.yaml", SANDBOX)]);
-    let manifest = source(json!({ "schedule": { "webhook": true } }));
+    let manifest = source(json!({
+        "schedule": { "webhook": true },
+        // A webhook-driven source carries the secret the route authorises it with (MF-44).
+        "webhook": { "secretRef": { "name": "region-hook" } },
+    }));
 
     let paused = State {
         paused: true,
@@ -534,7 +542,11 @@ fn an_asked_for_run_of_an_unmoved_source_is_one_call_and_no_checkout() {
         observed_revision: Some("9f1c0de".to_owned()),
         ..State::default()
     };
-    let manifest = source(json!({ "schedule": { "webhook": true } }));
+    let manifest = source(json!({
+        "schedule": { "webhook": true },
+        // A webhook-driven source carries the secret the route authorises it with (MF-44).
+        "webhook": { "secretRef": { "name": "region-hook" } },
+    }));
 
     let outcome = sync::poll_now(&manifest, &state, HOUR, &dirs.0, &dirs.1, &remote)
         .expect("the asked-for run is judged");

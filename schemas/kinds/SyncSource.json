@@ -516,6 +516,17 @@
             }
           ],
           "description": "Where the resources come from (MF-27)."
+        },
+        "webhook": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WebhookAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What authorises a run through the webhook route (MF-44). Required by, and only meaningful with, `schedule: { webhook: true }`."
         }
       },
       "required": [
@@ -542,6 +553,35 @@
         }
       ],
       "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
+    },
+    "WebhookAuth": {
+      "additionalProperties": false,
+      "description": "The inbound credential of a webhook-driven [`SyncSourceSpec`] (MF-44).\n\nThe signature the origin sends covers the request body and not the path it posts to, so one secret shared between sources would let the origin of any one of them force a run of every other, in projects it has no binding in. Each source therefore carries its own, by reference like every other credential (MF-24): what a department is handed opens their door and nothing else.",
+      "properties": {
+        "previousSecretRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The secret being retired, accepted alongside the current one so that moving the origin's own hook to the new value is a separate step from writing it here — without a window, every rotation is an outage and nobody rotates (T-0982)."
+        },
+        "secretRef": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            }
+          ],
+          "description": "The secret the origin signs the request body with, HMAC-SHA256."
+        }
+      },
+      "required": [
+        "secretRef"
+      ],
+      "type": "object"
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",

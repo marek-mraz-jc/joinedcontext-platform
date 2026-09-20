@@ -2,7 +2,9 @@
 
 use jc_core::envelope::SecretRef;
 use jc_core::error::Error;
-use jc_core::kinds::sync::{BundleItem, ConflictPolicy, Schedule, SyncMode, SyncOrigin};
+use jc_core::kinds::sync::{
+    BundleItem, ConflictPolicy, Schedule, SyncMode, SyncOrigin, WebhookAuth,
+};
 use jc_core::kinds::{Bundle, SyncSource};
 
 /// Verbatim from docs/Architecture/06-configuration-as-code.md section 6.
@@ -110,11 +112,14 @@ fn schedule_interval_table_and_webhook() {
     let too_fast = sync_with_schedule(Schedule::interval("30s"));
     assert!(too_fast.spec.validate().is_err());
 
-    // `webhook: true` is a schedule, `webhook: false` is not.
-    assert!(sync_with_schedule(Schedule::webhook())
+    // `webhook: true` is a schedule, `webhook: false` is not. A webhook schedule also needs the
+    // credential the route authorises it with, which is the case below (MF-44).
+    let mut driven = sync_with_schedule(Schedule::webhook());
+    driven.spec.webhook = Some(hook("region-hook"));
+    driven
         .spec
         .validate()
-        .is_ok());
+        .expect("a webhook source with its own secret validates");
     assert_eq!(Schedule::webhook().interval_seconds(), None);
     let err = sync_with_schedule(Schedule {
         interval: None,
@@ -393,4 +398,145 @@ fn a_bundle_without_a_readme_serialises_without_the_member() {
     let serialized = bundle.to_yaml().expect("serialize");
     assert!(!serialized.contains("readme"), "{serialized}");
     assert!(!serialized.contains("schemas"), "{serialized}");
+}
+
+/// A reference to the secret `name`, as a webhook block carries it.
+fn hook(name: &str) -> WebhookAuth {
+    WebhookAuth {
+        secret_ref: SecretRef {
+            name: name.to_owned(),
+            key: None,
+            env_var: None,
+        },
+        previous_secret_ref: None,
+    }
+}
+
+/// MF-44: the webhook route authorises a run against the source's own secret, so the schedule and
+/// the credential come together — a webhook schedule with no secret is a door with no lock, and a
+/// secret with no webhook schedule is a lock on no door. Both are refused where they are written,
+/// rather than found later as a source that never runs or a credential nobody uses.
+#[test]
+fn a_webhook_schedule_and_its_own_secret_come_together() {
+    let mut driven = sync_with_schedule(Schedule::webhook());
+    let err = driven
+        .spec
+        .validate()
+        .expect_err("a webhook schedule with no secret is refused");
+    assert!(
+        matches!(&err, Error::Invalid { field, .. } if field == "spec.webhook"),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("secretRef"),
+        "the refusal does not say what to write: {err}"
+    );
+
+    driven.spec.webhook = Some(hook("region-hook"));
+    driven.spec.validate().expect("the pair validates");
+
+    // The retiring secret is the rotation window and is validated the same way.
+    let mut rotating = driven.clone();
+    rotating.spec.webhook = Some(WebhookAuth {
+        previous_secret_ref: Some(SecretRef {
+            name: "region-hook-old".to_owned(),
+            key: None,
+            env_var: None,
+        }),
+        ..hook("region-hook")
+    });
+    rotating
+        .spec
+        .validate()
+        .expect("a rotation window validates");
+
+    // A polled source carries no webhook block: it is not reachable through that route at all.
+    let mut polled = sync_with_schedule(Schedule::interval("30m"));
+    polled.spec.webhook = Some(hook("region-hook"));
+    let err = polled
+        .spec
+        .validate()
+        .expect_err("a secret on a polled source is refused");
+    assert!(
+        matches!(&err, Error::Invalid { field, .. } if field == "spec.webhook"),
+        "{err}"
+    );
+    assert!(sync_with_schedule(Schedule::interval("30m"))
+        .spec
+        .validate()
+        .is_ok());
+}
+
+/// MF-24, T-2238: the webhook secret is named, never written. A token pasted into the name box is
+/// refused by the same check every other `secretRef` gets, and the refusal never repeats it.
+#[test]
+fn a_credential_pasted_into_the_webhook_block_is_refused_without_being_repeated() {
+    for (block, field) in [
+        (
+            hook("glpat-AAAAAAAAAAAAAAAAAAAA"),
+            "spec.webhook.secretRef.name",
+        ),
+        (
+            WebhookAuth {
+                previous_secret_ref: Some(SecretRef {
+                    name: "xoxb-1111111111-2222222222".to_owned(),
+                    key: None,
+                    env_var: None,
+                }),
+                ..hook("region-hook")
+            },
+            "spec.webhook.previousSecretRef.name",
+        ),
+    ] {
+        let pasted = block
+            .previous_secret_ref
+            .as_ref()
+            .map_or_else(|| block.secret_ref.name.clone(), |r| r.name.clone());
+        let mut driven = sync_with_schedule(Schedule::webhook());
+        driven.spec.webhook = Some(block);
+        let err = driven
+            .spec
+            .validate()
+            .expect_err("a credential in the name box is refused");
+        assert!(
+            matches!(&err, Error::Invalid { field: f, .. } if f == field),
+            "{err}"
+        );
+        assert!(
+            !err.to_string().contains(&pasted),
+            "the refusal repeats what was pasted: {err}"
+        );
+    }
+}
+
+/// The whole manifest a webhook-driven source is written as, from YAML and back (MF-44).
+#[test]
+fn a_webhook_driven_source_roundtrips_through_yaml() {
+    let yaml = GOLDEN_SYNC
+        .replace("schedule: { interval: 30m }", "schedule: { webhook: true }")
+        .replace(
+            "  mode: mirror\n",
+            "  webhook:\n    secretRef: { name: region-hook }\n    previousSecretRef: { name: region-hook-old }\n  mode: mirror\n",
+        );
+    let sync = SyncSource::from_yaml(&yaml).expect("valid YAML");
+    sync.validate().expect("validates");
+    let block = sync.spec.webhook.as_ref().expect("a webhook block");
+    assert_eq!(block.secret_ref.name, "region-hook");
+    assert_eq!(
+        block
+            .previous_secret_ref
+            .as_ref()
+            .expect("the retiring one")
+            .name,
+        "region-hook-old"
+    );
+
+    let serialized = sync.to_yaml().expect("serialize");
+    assert_eq!(sync, SyncSource::from_yaml(&serialized).expect("re-import"));
+    // A polled source serializes without the block at all, so nothing new appears in every file.
+    let polled = SyncSource::from_yaml(GOLDEN_SYNC).expect("valid YAML");
+    assert!(
+        !polled.to_yaml().expect("serialize").contains("webhook"),
+        "a polled source grew a webhook member"
+    );
 }
