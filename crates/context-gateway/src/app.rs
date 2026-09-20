@@ -234,6 +234,9 @@ impl Gateway {
 
 /// The router: two probes and the endpoint surface.
 pub fn router(gateway: Arc<Gateway>) -> Router {
+    // The outermost layer resolves the endpoint of a path itself, to write the `describedby`
+    // link no handler can then forget (EP-50).
+    let gateway_for_scrub = Arc::clone(&gateway);
     // The recorder belongs to the surface rather than to `main`: without it every
     // `metrics::` call in the process is a no-op, and a test that builds a router would
     // measure nothing while looking like it measured zero (OPS-16).
@@ -299,7 +302,8 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .fallback(missing)
         // Outside every handler, so nothing the gateway concluded for itself — the tenant,
         // and the narrowing signal nobody asked for — leaves in a header (SP-05, R22).
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            gateway_for_scrub,
             crate::middleware::response::scrub,
         ))
         .layer(axum::middleware::from_fn(telemetry::record))
