@@ -24,7 +24,11 @@ const REFUSED: &str = "invalid run credentials";
 const RUN_ID_MAX: usize = 64;
 
 /// Whether a string is shaped like a run id: ASCII letters, digits and hyphens, and at most
-/// [`RUN_ID_MAX`] of them.
+/// `RUN_ID_MAX` (64) of them.
+///
+/// The bound is named here rather than linked: `RUN_ID_MAX` is private, and a public item's
+/// documentation may not link to one (`cargo doc -D warnings`). The ceiling is an internal
+/// limit, not part of what this crate offers, so it stays private.
 ///
 /// The id arrives in a header the workspace writes and is spent in three places that all read a
 /// name: the Portal lookup path, the `agent-run-<id>` mesh identity, and the audit line. A
