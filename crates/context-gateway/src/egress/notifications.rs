@@ -32,6 +32,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The path under an endpoint that a rewritten notification endpoint points at.
 pub const EGRESS_PATH: &str = "/egress/notifications";
@@ -285,6 +286,10 @@ fn host_of(url: &str) -> Option<(String, u16)> {
     let (host, port) = match authority.strip_prefix('[') {
         Some(rest) => {
             let (host, after) = rest.split_once(']')?;
+            // An IPv6 zone identifier (`fe80::1%25eth0`, RFC 6874) names an interface of the
+            // host that dials, not a different address: without cutting it the address parses
+            // as nothing and a link-local target is read as a name (T-1698).
+            let host = host.split_once('%').map_or(host, |(address, _)| address);
             (host, after.strip_prefix(':'))
         }
         None => match authority.rsplit_once(':') {
@@ -607,6 +612,14 @@ async fn read(
     ))
 }
 
+/// How long one delivery may take before the gateway gives up on the subscriber (R46, T-1699).
+///
+/// A subscription names a host this platform dials by itself, so a subscriber that accepts the
+/// connection and never answers holds a gateway task and a connection for as long as it likes —
+/// one subscription per held task is a cheap way to spend the shared enforcement point. The
+/// broker retries what it was not able to deliver, so giving up is the safe direction.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Sends the projected notification to the endpoint the subscriber asked for.
 ///
 /// The broker's own headers are relayed, so the `receiverInfo` a secured subscription
@@ -635,15 +648,24 @@ async fn dispatch(
 
     // The gateway's own client, aimed at the subscriber: one connection pool for every
     // delivery, and the trust anchors the deployment configured (R46).
-    match broker
-        .aimed_at(origin)
-        .send(Method::POST, &path, headers, Body::from(body))
-        .await
-    {
-        Ok(answer) => answer,
-        Err(error) => {
+    let subscriber = broker.aimed_at(origin);
+    let sent = subscriber.send(Method::POST, &path, headers, Body::from(body));
+    match tokio::time::timeout(DELIVERY_TIMEOUT, sent).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(error)) => {
             tracing::warn!(%error, "a notification could not be delivered");
             ProblemDetails::from(error).into_response()
+        }
+        Err(_) => {
+            // The address is never in the line: a stored notification endpoint can carry a
+            // credential in its path or query (MF-31).
+            tracing::warn!(
+                seconds = DELIVERY_TIMEOUT.as_secs(),
+                "a subscriber did not answer a notification in time"
+            );
+            ProblemDetails::new(504, "delivery-timeout", "Gateway Timeout")
+                .with_detail("the subscriber did not answer the notification in time")
+                .into_response()
         }
     }
 }
