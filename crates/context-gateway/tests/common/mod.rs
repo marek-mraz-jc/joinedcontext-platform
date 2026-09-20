@@ -58,6 +58,12 @@ impl Realm {
         }
     }
 
+    /// The key material this realm publishes, which is exactly what an attacker holds: the
+    /// JWKS is world readable, so every forgery below is built from it and from nothing else.
+    pub fn published_jwks(&self) -> &JwkSet {
+        &self.jwks
+    }
+
     /// A verifier that trusts this realm and nothing else.
     pub fn verifier(&self) -> Verifier {
         let verifier = Verifier::new(ISSUER);
