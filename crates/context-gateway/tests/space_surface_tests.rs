@@ -18,6 +18,8 @@ use tower::ServiceExt;
 
 const OPEN: &str = "ovzdusie";
 const CLOSED: &str = "uctovnictvo";
+/// A space a caller may discover whose endpoint carries no MCP representation.
+const NO_MCP: &str = "doprava";
 
 fn policy(yaml: &str) -> PolicySpec {
     serde_norway::from_str(yaml).expect("the policy spec parses")
@@ -56,6 +58,27 @@ information:
 "#,
         )],
     )
+}
+
+/// The same grant as [`open_space`], on a space whose endpoint serves NGSI-LD alone.
+fn plain_space() -> Space {
+    let mut plain = space(
+        NO_MCP,
+        vec![policy(
+            r#"contextSpaceRef: doprava
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+    propertyNames: [pm10, location]
+"#,
+        )],
+    );
+    let endpoint = Arc::make_mut(&mut plain.endpoint);
+    endpoint.representations = vec![Representation::NgsiLd];
+    plain
 }
 
 fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
@@ -100,7 +123,7 @@ fn gateway(broker: &str) -> axum::Router {
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
-        .serve_spaces([open_space(), closed_space()])
+        .serve_spaces([open_space(), closed_space(), plain_space()])
         .authenticate(
             Arc::new(realm.verifier()),
             context_gateway::auth::accounts::ServiceAccounts::new(),
@@ -267,7 +290,7 @@ async fn the_catalog_lists_only_what_the_caller_may_discover() {
         .collect();
     assert_eq!(
         names,
-        vec![OPEN],
+        vec![NO_MCP, OPEN],
         "the closed space is absent, not listed as denied"
     );
 }
@@ -395,4 +418,133 @@ async fn the_answer_carries_no_tenant_and_no_unasked_narrowing_signal() {
             "the answer was not actually narrowed, so this test proves nothing"
         );
     }
+}
+
+// ==============================================================================
+// Every child a record advertises is a child the gateway serves (T-2379, SP-04, SP-10)
+// ==============================================================================
+
+/// Every path the three renderings of one space name, as a path on this host.
+///
+/// The HTML's `href`s, the JSON-LD's `dcat:endpointURL`s and the Turtle's `dcat:endpointURL`
+/// triples, each stripped of the public host, minus the record's own IRI — a document that
+/// links to itself is not advertising a child.
+async fn advertised_children(space: &str) -> Vec<(&'static str, String)> {
+    let own = format!("{HOST}/cs/{space}");
+    let mut found = Vec::new();
+
+    let (_, _, html) = call(get_with(&format!("/cs/{space}"), Some("text/html"))).await;
+    for piece in html.split("href=\"").skip(1) {
+        let url = piece.split('"').next().unwrap_or_default();
+        if url.starts_with(&own) && url != own {
+            found.push(("html", url[HOST.len()..].to_owned()));
+        }
+    }
+
+    let (_, _, json) = call(get_with(&format!("/cs/{space}"), None)).await;
+    let record: Value = serde_json::from_str(&json).expect("json-ld");
+    for service in record["dcat:service"].as_array().into_iter().flatten() {
+        if let Some(url) = service["dcat:endpointURL"].as_str() {
+            if url.starts_with(&own) && url != own {
+                found.push(("json-ld", url[HOST.len()..].to_owned()));
+            }
+        }
+    }
+
+    let (_, _, turtle) = call(get_with(&format!("/cs/{space}"), Some("text/turtle"))).await;
+    for line in turtle
+        .lines()
+        .filter(|line| line.contains("dcat:endpointURL"))
+    {
+        let url = line
+            .split('<')
+            .nth(1)
+            .and_then(|rest| rest.split('>').next())
+            .unwrap_or_default();
+        if url.starts_with(&own) && url != own {
+            found.push(("turtle", url[HOST.len()..].to_owned()));
+        }
+    }
+
+    assert!(!found.is_empty(), "no rendering advertised any child");
+    found
+}
+
+/// The one path under a service root that proves the gateway routes it.
+///
+/// Deliberately a short table and not a guess: a root this does not know is treated as dead,
+/// so a child added to a record without a route cannot slip through by ending in a slash.
+fn operation_under(path: &str) -> Option<String> {
+    path.ends_with("/ngsi-ld/v1/")
+        .then(|| format!("{path}entities?type=AirQualityObserved"))
+}
+
+/// SP-10: the space record is the entry point a person, a program or an agent is handed, so a
+/// child it names has to answer. The check drives the gateway's own router rather than a second
+/// list of paths: whatever a rendering advertises is requested, and `404` — the answer
+/// `app.rs`'s fallback gives a path nothing routes — fails the case.
+#[tokio::test]
+async fn every_child_a_record_advertises_is_routed() {
+    let mut dead = Vec::new();
+    for (rendering, path) in advertised_children(OPEN).await {
+        // A POST-only child answers 405 to this GET, which is a route answering; only the
+        // fallback's 404 means the gateway does not know the path at all.
+        let (status, _, _) = call(get_with(&path, None)).await;
+        if status != StatusCode::NOT_FOUND {
+            continue;
+        }
+        // `dcat:endpointURL` names the root of a service, and a root is not a document: the
+        // NGSI-LD base has no resource of its own and `app.rs` maps only the operations under
+        // it, by design ("an unmapped path is not an NGSI-LD operation"). Such a root counts as
+        // served when one operation under it is routed. A root with no such proof is dead, which
+        // is what `schema/` and `dump/` were.
+        if let Some(under) = operation_under(&path) {
+            let (answered, _, _) = call(get_with(&under, None)).await;
+            if answered != StatusCode::NOT_FOUND {
+                continue;
+            }
+        }
+        dead.push(format!("{rendering} advertises {path}, which answers 404"));
+    }
+    assert!(dead.is_empty(), "{}", dead.join("\n"));
+}
+
+/// The three renderings are one document in three shapes. A child in the page and not in the
+/// DCAT-AP record is a catalogue that harvests less than a browser sees, and the drift that
+/// made T-2379 possible is exactly a second literal list.
+#[tokio::test]
+async fn the_three_renderings_advertise_the_same_children() {
+    let advertised = advertised_children(OPEN).await;
+    let of = |rendering: &str| -> std::collections::BTreeSet<String> {
+        advertised
+            .iter()
+            .filter(|(kind, _)| *kind == rendering)
+            .map(|(_, path)| path.clone())
+            .collect()
+    };
+    let (html, json_ld, turtle) = (of("html"), of("json-ld"), of("turtle"));
+    assert_eq!(html, json_ld, "the page and the DCAT-AP record disagree");
+    assert_eq!(
+        json_ld, turtle,
+        "the DCAT-AP record and the Turtle disagree"
+    );
+    assert!(
+        html.contains(&format!("/cs/{OPEN}/ngsi-ld/v1/")),
+        "the data surface is always a child: {html:?}"
+    );
+}
+
+/// SP-04's `mcp` child belongs to a space whose endpoint carries the representation. A space
+/// without it must not be handed a door it does not open, in any of the three renderings.
+#[tokio::test]
+async fn a_space_without_the_mcp_representation_advertises_no_mcp_child() {
+    let paths: Vec<String> = advertised_children(NO_MCP)
+        .await
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    assert!(
+        !paths.iter().any(|path| path.ends_with("/mcp")),
+        "{paths:?}"
+    );
 }

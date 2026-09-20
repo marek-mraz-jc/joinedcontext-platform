@@ -93,38 +93,67 @@ pub fn dataset(space: &Space, base: &str) -> Value {
     record
 }
 
-/// The data services and distributions of a space, which are exactly its children (SP-04).
-fn services(space: &Space, iri: &str) -> Value {
-    let mut services = vec![json!({
-        "@id": format!("{iri}/ngsi-ld/v1/"),
-        "@type": "dcat:DataService",
-        "dct:title": "NGSI-LD API",
-        "dct:conformsTo": "https://www.etsi.org/deliver/etsi_gs/CIM/001_099/009/",
-        "dcat:endpointURL": format!("{iri}/ngsi-ld/v1/"),
-        "dcat:servesDataset": iri,
-    })];
+/// One child of a space: the path under `/cs/{space}`, how a catalogue names it, and the
+/// standard it speaks.
+pub struct Child {
+    /// The path under the space root, exactly as a record writes it.
+    pub path: &'static str,
+    /// The title a person reads in the catalogue and on the page.
+    pub title: &'static str,
+    /// The standard the child conforms to, for `dct:conformsTo`.
+    pub conforms_to: &'static str,
+}
+
+/// The children of a space, and the one place the three renderings read them from (SP-04, SP-10).
+///
+/// SP-04 permits a space five children — `ngsi-ld/v1/`, `mcp`, `schema/`, `dump/` and, on a
+/// private space, `.well-known/oauth-protected-resource`. This list is the subset `app.rs`
+/// routes, because the record is the entry point a person, a program or an agent is handed
+/// (SP-10) and a child it names that answers 404 is a wrong answer, not a missing feature. The
+/// schema artifacts and the dated dumps are served on the Endpoint today (EP-46…EP-52, SP-13);
+/// when a space-level route for them exists, it is added here and every rendering grows with it.
+///
+/// The page, the DCAT-AP record and the Turtle all map over this, which is what stops the three
+/// from drifting apart — three literal lists were how `schema/`, `dump/` and `access` came to be
+/// advertised by two of them and served by none (T-2379).
+pub fn children(space: &Space) -> Vec<Child> {
+    let mut children = vec![Child {
+        path: "ngsi-ld/v1/",
+        title: "NGSI-LD API",
+        conforms_to: "https://www.etsi.org/deliver/etsi_gs/CIM/001_099/009/",
+    }];
     if space
         .endpoint
         .representations
         .contains(&jc_core::kinds::Representation::Mcp)
     {
-        services.push(json!({
-            "@id": format!("{iri}/mcp"),
-            "@type": "dcat:DataService",
-            "dct:title": "Model Context Protocol",
-            "dct:conformsTo": "https://modelcontextprotocol.io/specification",
-            "dcat:endpointURL": format!("{iri}/mcp"),
-            "dcat:servesDataset": iri,
-        }));
+        children.push(Child {
+            path: "mcp",
+            title: "Model Context Protocol",
+            conforms_to: "https://modelcontextprotocol.io/specification",
+        });
     }
-    services.push(json!({
-        "@id": format!("{iri}/schema/"),
-        "@type": "dcat:DataService",
-        "dct:title": "Schema artifacts",
-        "dcat:endpointURL": format!("{iri}/schema/"),
-        "dcat:servesDataset": iri,
-    }));
-    Value::Array(services)
+    children
+}
+
+/// The data services and distributions of a space, which are exactly its children (SP-04).
+fn services(space: &Space, iri: &str) -> Value {
+    Value::Array(
+        children(space)
+            .into_iter()
+            .map(|child| {
+                let url = format!("{iri}/{}", child.path);
+                json!({
+                    "@id": url,
+                    "@type": "dcat:DataService",
+                    "dct:title": child.title,
+                    "dct:conformsTo": child.conforms_to,
+                    "dcat:endpointURL": url,
+                    "dcat:servesDataset": iri,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The catalog of the spaces a caller may discover (SP-11).
@@ -167,13 +196,25 @@ pub fn dataset_turtle(space: &Space, base: &str) -> String {
             literal(&plain(&space.description, ""))
         ));
     }
-    out.push_str(&format!(
-        ";\n    dcat:service <{iri}/ngsi-ld/v1/> .\n\n\
-         <{iri}/ngsi-ld/v1/> a dcat:DataService ;\n\
-         \x20   dct:title \"NGSI-LD API\" ;\n\
-         \x20   dcat:endpointURL <{iri}/ngsi-ld/v1/> ;\n\
-         \x20   dcat:servesDataset <{iri}> .\n"
-    ));
+    let children = children(space);
+    let services = children
+        .iter()
+        .map(|child| format!("<{iri}/{}>", child.path))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(";\n    dcat:service {services} .\n"));
+    for child in &children {
+        out.push_str(&format!(
+            "\n<{iri}/{path}> a dcat:DataService ;\n\
+             \x20   dct:title {title} ;\n\
+             \x20   dct:conformsTo <{conforms}> ;\n\
+             \x20   dcat:endpointURL <{iri}/{path}> ;\n\
+             \x20   dcat:servesDataset <{iri}> .\n",
+            path = child.path,
+            title = literal(child.title),
+            conforms = child.conforms_to,
+        ));
+    }
     out
 }
 
@@ -182,9 +223,15 @@ pub fn dataset_html(space: &Space, base: &str) -> String {
     let iri = format!("{base}/cs/{}", space.name());
     let title = escape(&plain(&space.title, space.name()));
     let description = escape(&plain(&space.description, ""));
-    let children = ["ngsi-ld/v1/", "mcp", "schema/", "dump/", "access"]
-        .iter()
-        .map(|child| format!("<li><a href=\"{iri}/{child}\">{child}</a></li>"))
+    let children = children(space)
+        .into_iter()
+        .map(|child| {
+            format!(
+                "<li><a href=\"{iri}/{path}\">{title}</a> <code>{path}</code></li>",
+                path = child.path,
+                title = escape(child.title),
+            )
+        })
         .collect::<Vec<_>>()
         .join("");
     format!(
