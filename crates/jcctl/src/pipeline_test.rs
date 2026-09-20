@@ -74,6 +74,12 @@ pub enum HarnessError {
     NotABentoProcessor(ComputeKind),
 }
 
+/// The mapping that marks step `at` as the one being run, for a message that has not failed yet.
+/// `root` is left alone, so the message travels untouched — the same shape as `jc_input` above.
+fn step_marker(at: usize) -> String {
+    format!("meta jc_step = if errored() {{ meta(\"jc_step\").or(\"\") }} else {{ \"{at}\" }}")
+}
+
 /// The Bento stream config that tests `spec` on `sample`, posting every message to `capture_url`.
 pub fn harness(
     spec: &PipelineSpec,
@@ -146,7 +152,11 @@ pub fn harness(
     }
     processors.push(json!({ "mapping": "meta jc_input = content().string()" }));
     // Every step in order, in either shape (PL-54): a processor step as the runner runs it.
-    for step in spec.steps() {
+    // Before each one the harness stamps that step's index, unless the message has already
+    // failed — a failed message runs through the rest of the chain, so the number that survives
+    // is the step the failure happened at rather than the last step to run (PL-43, PL-56).
+    for (at, step) in spec.steps().into_iter().enumerate() {
+        processors.push(json!({ "mapping": step_marker(at) }));
         match step {
             Step::Processor(step) => processors.push(json!(step.processor)),
             Step::Compute(compute) => match compute.kind {
@@ -169,7 +179,8 @@ pub fn harness(
         "root = {}\n",
         "root.input = meta(\"jc_input\")\n",
         "root.output = if $failed { null } else { $out }\n",
-        "root.error = if $failed { meta(\"jc_fetch_error\").or(error()) } else { null }"
+        "root.error = if $failed { meta(\"jc_fetch_error\").or(error()) } else { null }\n",
+        "root.step = if $failed { meta(\"jc_step\").or(null) } else { null }"
     )}));
     // The envelope replaces the failed message, so the flag must not follow it to the output.
     processors.push(json!({ "catch": [] }));
@@ -220,6 +231,10 @@ pub struct Captured {
     /// The processor error, when it failed.
     #[serde(default)]
     pub error: Option<String>,
+    /// The step it failed at, as the harness stamped it: an index into `spec.steps` as text,
+    /// because Bento metadata is text. Absent when the message did not fail.
+    #[serde(default)]
+    pub step: Option<String>,
 }
 
 /// The input stage of the trace: what the runner read and the first message as data.
@@ -250,6 +265,10 @@ pub struct Validation {
 pub struct TestError {
     /// `lint` (the runner refused the harness), `mapping` (a processor failed) or `runner`.
     pub stage: String,
+    /// The step of `spec.steps` the message failed at (PL-52), for a `mapping` error. A `lint`
+    /// error belongs to the document and a `runner` error to the stream, so both leave it None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<usize>,
     /// The Bloblang line the runner named, when it named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
@@ -285,6 +304,7 @@ pub fn trace(captured: &[Captured]) -> TestTrace {
         if let Some(error) = &message.error {
             trace.errors.push(TestError {
                 stage: "mapping".into(),
+                step: message.step.as_deref().and_then(|at| at.parse().ok()),
                 line: line_of(error),
                 message: error.clone(),
             });
@@ -312,6 +332,7 @@ pub fn lint_errors(refusal: &str) -> Vec<TestError> {
     if lines.is_empty() {
         return vec![TestError {
             stage: "lint".into(),
+            step: None,
             line: None,
             message: "the runner refused the harness".into(),
         }];
@@ -320,6 +341,7 @@ pub fn lint_errors(refusal: &str) -> Vec<TestError> {
         .into_iter()
         .map(|line| TestError {
             stage: "lint".into(),
+            step: None,
             line: line_of(line),
             message: line.to_owned(),
         })
@@ -418,11 +440,13 @@ mod tests {
         assert!(processors[1]["mapping"]
             .as_str()
             .is_some_and(|m| m.contains("meta jc_input")));
-        assert_eq!(processors[2]["mapping"], "root.id = this.station_id");
+        // Then the step's own marker, then the step (PL-56).
+        assert_eq!(processors[2]["mapping"], step_marker(0));
+        assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
         assert!(
             processors
                 .iter()
-                .take(3)
+                .take(4)
                 .all(|p| p.get("unarchive").is_none()),
             "nothing splits the page before the mapping: {processors:?}"
         );
@@ -594,16 +618,19 @@ mod tests {
                     json!({ "id": "urn:ngsi-ld:AirQualityObserved:hel.fi:aq:01", "type": "AirQualityObserved" }),
                 ),
                 error: None,
+                step: None,
             },
             Captured {
                 input: Some(r#"{"station_id":"02"}"#.into()),
                 output: Some(json!({ "id": "station-02", "type": "AirQualityObserved" })),
                 error: None,
+                step: None,
             },
             Captured {
                 input: Some("garbage".into()),
                 output: None,
                 error: Some("failed assignment (line 2): expected number, got string".into()),
+                step: Some("2".into()),
             },
         ];
         let trace = trace(&captured);
@@ -632,10 +659,112 @@ mod tests {
             trace.errors,
             vec![TestError {
                 stage: "mapping".into(),
+                step: Some(2),
                 line: Some(2),
                 message: "failed assignment (line 2): expected number, got string".into()
             }]
         );
+    }
+
+    #[test]
+    fn the_step_a_message_failed_at_is_the_one_stamped_before_it_ran() {
+        // The marker only writes when the message has not failed, so a step behind the failure
+        // cannot take the blame for it — which is the whole reason the guard is there.
+        let marker = step_marker(3);
+        assert!(marker.starts_with("meta jc_step = if errored() {"));
+        assert!(marker.contains("meta(\"jc_step\").or(\"\")"));
+        assert!(marker.ends_with("else { \"3\" }"));
+        assert!(
+            !marker.contains("root"),
+            "the message travels untouched: {marker}"
+        );
+
+        // Every step has its own marker, and the envelope carries the number back.
+        let second: PipelineSpec = serde_json::from_value(json!({
+            "class": "resident",
+            "sources": [{ "dataSourceRef": { "kind": "DataSource", "name": "shmu-csv" } }],
+            "steps": [
+                { "processor": { "jq": { "query": ".id" } } },
+                { "kind": "bloblang", "bloblang": "root.id = this.id" },
+                { "processor": { "log": { "message": "seen" } } }
+            ],
+            "outputs": [{ "targetEndpoint": "urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-all" }]
+        }))
+        .expect("a v1alpha2 spec");
+        let config = harness(
+            &second,
+            &Sample {
+                text: Some("{}".into()),
+                url: None,
+                format: SampleFormat::Json,
+            },
+            "http://portal:9090/internal/pipeline-tests/abc",
+        )
+        .expect("a harness");
+        let processors = config["pipeline"]["processors"]
+            .as_array()
+            .expect("processors");
+        let markers: Vec<&str> = processors
+            .iter()
+            .filter_map(|p| p["mapping"].as_str())
+            .filter(|m| m.starts_with("meta jc_step ="))
+            .collect();
+        assert_eq!(
+            markers,
+            vec![step_marker(0), step_marker(1), step_marker(2)]
+        );
+        let envelope = processors
+            .iter()
+            .filter_map(|p| p["mapping"].as_str())
+            .find(|m| m.contains("root.step"))
+            .expect("the envelope carries the step");
+        assert!(envelope
+            .contains("root.step = if $failed { meta(\"jc_step\").or(null) } else { null }"));
+
+        // A pipeline with no step stamps nothing: there is no step to blame, and the envelope
+        // reads metadata that was never written, which `.or(null)` answers as no step.
+        let bare = harness(
+            &spec(None),
+            &Sample {
+                text: Some("{}".into()),
+                url: None,
+                format: SampleFormat::Json,
+            },
+            "http://p",
+        )
+        .expect("a harness");
+        assert!(!bare["pipeline"]["processors"]
+            .as_array()
+            .expect("processors")
+            .iter()
+            .any(|p| p["mapping"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("meta jc_step ="))));
+    }
+
+    #[test]
+    fn only_a_mapping_error_names_a_step_and_an_unreadable_one_names_none() {
+        let failed = |step: Option<&str>| {
+            trace(&[Captured {
+                input: Some("{}".into()),
+                output: None,
+                error: Some("failed assignment: no".into()),
+                step: step.map(str::to_owned),
+            }])
+            .errors
+        };
+        assert_eq!(failed(Some("0"))[0].step, Some(0));
+        assert_eq!(failed(Some("12"))[0].step, Some(12));
+        // Metadata is text: anything that is not an index is no step at all, never a panic and
+        // never a wrong step painted red.
+        for bad in ["", "x", "-1", "1.5", "18446744073709551616"] {
+            assert_eq!(failed(Some(bad))[0].step, None, "{bad}");
+        }
+        assert_eq!(failed(None)[0].step, None);
+        // A lint error belongs to the document and a runner error to the stream.
+        assert!(lint_errors("line 3 char 1: no")
+            .iter()
+            .all(|e| e.step.is_none()));
     }
 
     #[test]
@@ -693,8 +822,10 @@ mod tests {
         let processors = config["pipeline"]["processors"]
             .as_array()
             .expect("processors");
-        assert_eq!(processors[2]["mapping"], "root.id = this.station_id");
-        assert_eq!(processors[3]["log"]["message"], "seen");
+        assert_eq!(processors[2]["mapping"], step_marker(0));
+        assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
+        assert_eq!(processors[4]["mapping"], step_marker(1));
+        assert_eq!(processors[5]["log"]["message"], "seen");
 
         let mut wasm = second.clone();
         wasm.steps = vec![Step::Compute(
