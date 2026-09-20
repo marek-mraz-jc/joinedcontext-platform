@@ -32,6 +32,14 @@ use std::time::{Duration, Instant};
 /// address that ever appeared.
 const IDLE_EVICTION: Duration = Duration::from_secs(300);
 
+/// The map has to be at least this large before a sweep is worth its scan.
+const SWEEP_SIZE: usize = 1_024;
+
+/// And a sweep runs at most this often. Without it, a gateway with more live callers than
+/// `SWEEP_SIZE` pays a full scan under the lock on every single request, which is the busiest
+/// case there is (T-2356).
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
 /// What the limiter decided, and everything the response headers need (EP-20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decision {
@@ -47,16 +55,44 @@ pub struct Decision {
 }
 
 /// One caller's bucket.
+///
+/// It carries the rate and the capacity of the endpoint it belongs to, because the sweep has to
+/// judge each bucket by its own limits: one endpoint's `burst` says nothing about whether
+/// another's bucket has refilled, and deciding with the limits of whichever request happened to
+/// trigger the sweep would drop a bucket that is still drained — which hands that caller a fresh
+/// burst it had not earned (T-2356).
 #[derive(Debug, Clone, Copy)]
 struct Bucket {
     tokens: f64,
     last: Instant,
+    /// Tokens a second, from `requestsPerMinute`.
+    rate: f64,
+    /// The bucket size, from `burst`.
+    capacity: f64,
+}
+
+impl Bucket {
+    /// The tokens this bucket holds at `now`, which is the stored value plus what has refilled
+    /// since it was last touched. The refill is computed on read and never written back, so it
+    /// is the only honest way to ask whether a bucket is full.
+    fn tokens_at(&self, now: Instant) -> f64 {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        (self.tokens + elapsed * self.rate).min(self.capacity)
+    }
+}
+
+/// The buckets of every caller of every endpoint, and when they were last swept (EP-20).
+#[derive(Debug, Default)]
+struct Buckets {
+    by_caller: HashMap<(String, String), Bucket>,
+    /// `None` until the first sweep.
+    swept: Option<Instant>,
 }
 
 /// The buckets of every caller of every endpoint (EP-20).
 #[derive(Debug, Default)]
 pub struct RateLimiter {
-    buckets: Mutex<HashMap<(String, String), Bucket>>,
+    buckets: Mutex<Buckets>,
 }
 
 impl RateLimiter {
@@ -78,17 +114,24 @@ impl RateLimiter {
             // refusing every request afterwards would be a worse failure than continuing.
             Err(poisoned) => poisoned.into_inner(),
         };
-        evict_idle(&mut buckets, capacity, now);
+        evict_idle(&mut buckets, now);
 
         let bucket = buckets
+            .by_caller
             .entry((slug.to_owned(), caller.to_owned()))
             .or_insert(Bucket {
                 tokens: capacity,
                 last: now,
+                rate,
+                capacity,
             });
-        let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
-        bucket.tokens = (bucket.tokens + elapsed * rate).min(capacity);
+        bucket.tokens = bucket.tokens_at(now);
         bucket.last = now;
+        // The manifest may have changed its limits since this bucket was made; the bucket
+        // follows it, and the tokens it holds are capped by the new size.
+        bucket.rate = rate;
+        bucket.capacity = capacity;
+        bucket.tokens = bucket.tokens.min(capacity);
 
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
@@ -115,8 +158,8 @@ impl RateLimiter {
     /// How many buckets are held, which is what an eviction test looks at.
     pub fn len(&self) -> usize {
         match self.buckets.lock() {
-            Ok(guard) => guard.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
+            Ok(guard) => guard.by_caller.len(),
+            Err(poisoned) => poisoned.into_inner().by_caller.len(),
         }
     }
 
@@ -128,12 +171,29 @@ impl RateLimiter {
 
 /// Drops buckets that have been idle long enough to be full again: they would hand out a
 /// full burst anyway, so remembering them changes nothing but the memory.
-fn evict_idle(buckets: &mut HashMap<(String, String), Bucket>, capacity: f64, now: Instant) {
-    if buckets.len() < 1024 {
+///
+/// Fullness is the refilled value, not the stored one (T-2356). `tokens` is what was left at the
+/// last touch and every allowed call subtracts one before storing, so a stored value is below the
+/// capacity for every bucket that has ever been checked — which is why the earlier `tokens <
+/// capacity` clause kept all of them and the map grew with every address that ever appeared.
+///
+/// A bucket that has not refilled is kept however idle it is: dropping it would give its caller a
+/// fresh burst, and a caller must never buy one by waiting for somebody else's traffic to trigger
+/// a sweep.
+fn evict_idle(buckets: &mut Buckets, now: Instant) {
+    if buckets.by_caller.len() < SWEEP_SIZE {
         return;
     }
-    buckets.retain(|_, bucket| {
-        now.saturating_duration_since(bucket.last) < IDLE_EVICTION || bucket.tokens < capacity
+    if buckets
+        .swept
+        .is_some_and(|swept| now.saturating_duration_since(swept) < SWEEP_INTERVAL)
+    {
+        return;
+    }
+    buckets.swept = Some(now);
+    buckets.by_caller.retain(|_, bucket| {
+        now.saturating_duration_since(bucket.last) < IDLE_EVICTION
+            || bucket.tokens_at(now) < bucket.capacity
     });
 }
 

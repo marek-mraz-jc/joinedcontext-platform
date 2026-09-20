@@ -1054,3 +1054,90 @@ status:
     assert_eq!(build["commit"], "8c56954a1f0e");
     assert_eq!(build["sdkVersion"], "0.4.1");
 }
+
+/// DS-09, T-2355: two `DataAgreement` manifests claiming one `spec.agreementId` are a finding,
+/// and both are named.
+///
+/// The gateway serves neither of them, because keeping one would let whoever may write a manifest
+/// in any project take another project's agreement id by choosing a namespace that sorts after it.
+/// Both parties then lose their transfer tokens with nothing to read anywhere, which is why
+/// `jcctl validate` has to say which manifests collided rather than leave an operator to find it.
+#[test]
+fn two_agreements_claiming_one_id_are_a_finding() {
+    let dir = unique_temp_dir("contested-agreement-id");
+    std::fs::write(
+        dir.join("org.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata: { name: my-city, namespace: org }
+spec:
+  domain: banskabystrica.sk
+  locales: ["sk"]
+  defaultLocale: sk
+"#,
+    )
+    .unwrap();
+
+    let agreement = |project: &str, name: &str, id: &str| {
+        format!(
+            r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataAgreement
+metadata: {{ name: {name}, namespace: {project} }}
+spec:
+  role: provider
+  offerRef: {{ kind: DataOffer, name: air-quality }}
+  remoteParticipant: did:web:helsinki.fi
+  agreementId: "{id}"
+  state: finalized
+  validity: {{ from: 2026-01-01T00:00:00Z, to: 2027-01-01T00:00:00Z }}
+"#
+        )
+    };
+    for project in ["aaa", "zzz"] {
+        let folder = dir.join("projects").join(project).join("dataspace");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("air-quality.yaml"),
+            agreement(project, "air-quality", "urn:uuid:9a1f-air-quality"),
+        )
+        .unwrap();
+    }
+    let alone = dir.join("projects/aaa/dataspace");
+    std::fs::write(
+        alone.join("noise.yaml"),
+        agreement("aaa", "noise", "urn:uuid:0000-noise"),
+    )
+    .unwrap();
+
+    let repo = Repository::load(&dir).expect("loads");
+    let contested = repo.contested_agreement_ids();
+    assert_eq!(
+        contested.len(),
+        2,
+        "one entry per claiming manifest, and the uncontested one is not among them: {contested:?}"
+    );
+    for (id, _, why) in contested {
+        assert_eq!(id.name, "air-quality");
+        assert!(
+            why.contains("aaa/air-quality") && why.contains("zzz/air-quality"),
+            "the finding names every claimant: {why}"
+        );
+        assert!(
+            why.contains("urn:uuid:9a1f-air-quality"),
+            "and the id they claim: {why}"
+        );
+    }
+    assert!(
+        !contested.iter().any(|(id, _, _)| id.name == "noise"),
+        "an agreement nobody else claims is not contested"
+    );
+
+    let report = jcctl::commands::validate::run(&dir);
+    let named: Vec<&str> = report
+        .findings
+        .iter()
+        .map(|finding| finding.message.as_str())
+        .filter(|message| message.contains("agreementId"))
+        .collect();
+    assert_eq!(named.len(), 2, "validate refuses the repository: {named:?}");
+}

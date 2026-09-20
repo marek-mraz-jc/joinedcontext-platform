@@ -138,8 +138,81 @@ fn an_area_inside_a_hole_is_not_within() {
         box_of(0.5, 0.5, 3.0, 3.0).within(&grant),
         "an area beside the hole is"
     );
-    // An area that ENCLOSES the hole is judged contained today, and a read is then answered from
-    // inside the carve-out: T-2327 holds that case and its red test, which is not on main.
+}
+
+/// GW11: a grant with a hole is a carve-out, and an area that encloses the hole is not inside the
+/// grant.
+///
+/// Every vertex of such an area is inside the grant and no edge of it crosses the hole, because the
+/// area surrounds the hole rather than cutting it — which is why the vertex-and-crossing test said
+/// yes. `geo::intersect` reads that as "the caller asked for less than it was given" and forwards
+/// the caller's own area with nothing to filter against, so every entity in the carve-out comes
+/// out (T-2327).
+#[test]
+fn an_area_straddling_a_hole_is_not_within() {
+    let grant = polygon(&[
+        &[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ],
+        &[(4.0, 4.0), (6.0, 4.0), (6.0, 6.0), (4.0, 6.0), (4.0, 4.0)],
+    ]);
+
+    assert!(
+        !box_of(3.0, 3.0, 7.0, 7.0).within(&grant),
+        "an area enclosing the whole carve-out is not inside the grant"
+    );
+    assert!(
+        !box_of(0.5, 0.5, 9.5, 9.5).within(&grant),
+        "nor is an area that covers the carve-out and most of the grant"
+    );
+    assert!(
+        !box_of(5.0, 5.0, 9.0, 9.0).within(&grant),
+        "nor one that covers a corner of it"
+    );
+    assert!(
+        box_of(0.5, 0.5, 3.5, 3.5).within(&grant),
+        "an area beside the carve-out is still inside the grant"
+    );
+}
+
+/// One hole is enough, and so is the second of several: a grant may carve out more than one area
+/// and every one of them has to be missed.
+#[test]
+fn every_hole_of_a_grant_is_a_carve_out() {
+    let grant = polygon(&[
+        &[
+            (0.0, 0.0),
+            (20.0, 0.0),
+            (20.0, 20.0),
+            (0.0, 20.0),
+            (0.0, 0.0),
+        ],
+        &[(2.0, 2.0), (4.0, 2.0), (4.0, 4.0), (2.0, 4.0), (2.0, 2.0)],
+        &[
+            (14.0, 14.0),
+            (16.0, 14.0),
+            (16.0, 16.0),
+            (14.0, 16.0),
+            (14.0, 14.0),
+        ],
+    ]);
+
+    assert!(
+        !box_of(1.0, 1.0, 5.0, 5.0).within(&grant),
+        "the first carve-out is enclosed"
+    );
+    assert!(
+        !box_of(13.0, 13.0, 17.0, 17.0).within(&grant),
+        "the second one is"
+    );
+    assert!(
+        box_of(6.0, 6.0, 12.0, 12.0).within(&grant),
+        "an area that misses both is inside the grant"
+    );
 }
 
 /// A polygon that is not an area contains nothing, so a grant drawn as a line can never say the

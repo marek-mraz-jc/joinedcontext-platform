@@ -191,3 +191,47 @@ fn an_entity_without_a_location_or_an_unreadable_area_is_not_admitted() {
         "an area nobody can read admits nothing"
     );
 }
+
+/// A grant whose polygon has a hole, and a caller area that encloses that hole (GW11, T-2327).
+///
+/// This is the leak the carve-out exists to prevent: the caller's own area was forwarded whole,
+/// with nothing to filter against, so the broker answered from inside the hole and the gateway
+/// passed it on. The grant is forwarded now and applied here as well, and `Polygon::contains`
+/// excludes the hole, so the carve-out holds on the way back.
+#[test]
+fn a_read_enclosing_a_carve_out_is_filtered_against_the_grant() {
+    // The district with the protected site in the middle of it cut out.
+    let grant = "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],\
+         [19.20,48.76],[19.10,48.76],[19.10,48.70]],[[19.14,48.72],[19.16,48.72],[19.16,48.74],\
+         [19.14,48.74],[19.14,48.72]]]";
+    let asked = within(&[
+        (19.13, 48.71),
+        (19.17, 48.71),
+        (19.17, 48.75),
+        (19.13, 48.75),
+        (19.13, 48.71),
+    ]);
+
+    let outcome = intersect(Some(&asked), &[grant]);
+    assert_eq!(
+        outcome.geo_q.as_deref(),
+        Some(grant),
+        "the grant is what the broker may answer from, not the area drawn around the carve-out"
+    );
+    assert!(outcome.restricted, "the caller was narrowed (R22)");
+
+    let areas = Areas::of(&outcome.grants, outcome.caller.as_deref())
+        .expect("a grant with a carve-out always needs the answer filtered");
+    assert!(
+        !areas.admits(&station(19.15, 48.73)),
+        "a station inside the carve-out is not readable"
+    );
+    assert!(
+        areas.admits(&station(19.135, 48.73)),
+        "a station between the carve-out and the edge of what was asked for is"
+    );
+    assert!(
+        !areas.admits(&station(19.11, 48.73)),
+        "and one outside the area asked for is not, as for any other grant"
+    );
+}

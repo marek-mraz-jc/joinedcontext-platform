@@ -250,21 +250,18 @@ fn the_project_comes_from_the_namespace_the_manifest_declares() {
     assert_eq!(served.project, "kosice");
 }
 
-/// Two agreements, two projects, the same Dataspace Protocol id. The identifier is unique by
-/// construction in DSP, so this is a repository somebody wrote wrong — and what matters is
-/// that the outcome is deterministic rather than a function of which file was read first,
-/// because the winner decides which project a token under that id reaches.
+/// Two agreements, two projects, the same Dataspace Protocol id: the gateway serves neither
+/// (DS-09, DS-12, T-2355).
 ///
-/// It is: the loader walks resources in sorted `ResourceId` order, so the last namespace in
-/// that order is the one left in the table. The agreement that loses is gone entirely.
-///
-/// That outcome is a finding, not a property worth keeping: whoever can write a manifest in
-/// any project can take another project's agreement id by choosing a namespace that sorts
-/// after it, and with it the project a transfer token under that id may be used in. **T-2323**
-/// holds the fix — a contested id serves nothing and the collision is reported — and replaces
-/// this case. It is asserted as it stands today so that the change is visible when it lands.
+/// The identifier is unique by construction in DSP, so this is a repository somebody wrote wrong —
+/// or wrote deliberately. Keeping either of them would decide, by nothing but the order the loader
+/// walks in, which project's endpoints a transfer token under that id reaches: whoever may write a
+/// manifest in any project could take another project's agreement id by choosing a namespace that
+/// sorts after it, and with it the DID the id belongs to. Serving neither is the only outcome that
+/// cannot be used that way, and `jcctl validate` names the collision so the repository is fixed
+/// rather than left half-served (`loader_tests::two_agreements_claiming_one_id_are_a_finding`).
 #[test]
-fn two_projects_claiming_one_agreement_id_resolve_the_same_way_every_time() {
+fn two_projects_claiming_one_agreement_id_serve_neither() {
     let files = [
         File {
             project: "aaa",
@@ -279,25 +276,72 @@ fn two_projects_claiming_one_agreement_id_resolve_the_same_way_every_time() {
     ];
 
     let first = table(&files);
-    let second = table(&files);
-    assert_eq!(first.len(), 1, "one id is one entry");
-    assert_eq!(second.len(), 1);
-
-    let winner = first
-        .serving(AGREEMENT, now())
-        .expect("it is served")
-        .project
-        .clone();
-    let again = second
-        .serving(AGREEMENT, now())
-        .expect("it is served")
-        .project
-        .clone();
-    assert_eq!(winner, again, "the same repository builds the same table");
-    assert_eq!(
-        winner, "zzz",
-        "the last namespace in sorted order is the one that stands"
+    let again = table(&files);
+    assert!(
+        first.serving(AGREEMENT, now()).is_none(),
+        "a contested id serves nothing, whichever namespace sorts last",
     );
+    assert!(first.is_empty(), "and neither claimant is in the table");
+    assert_eq!(
+        first.len(),
+        again.len(),
+        "the same repository builds the same table"
+    );
+}
+
+/// The rule is about the id, not about the project boundary: two manifests of one project
+/// claiming one id are contested in exactly the same way, and the file names do not decide it.
+#[test]
+fn one_project_claiming_an_id_twice_serves_neither() {
+    let other = "urn:uuid:0000-noise";
+    let table = table(&[
+        File {
+            project: PROJECT,
+            name: "air-quality",
+            body: &one("air-quality", AGREEMENT),
+        },
+        File {
+            project: PROJECT,
+            name: "air-quality-copy",
+            body: &one("air-quality-copy", AGREEMENT),
+        },
+        File {
+            project: PROJECT,
+            name: "noise",
+            body: &one("noise", other),
+        },
+    ]);
+
+    assert!(table.serving(AGREEMENT, now()).is_none());
+    assert!(
+        table.serving(other, now()).is_some(),
+        "an uncontested agreement beside them is served as before",
+    );
+    assert_eq!(table.len(), 1);
+}
+
+/// A manifest the gateway cannot read never contests an id: it is not in the table to begin with,
+/// and letting it take a working agreement down would make a broken manifest in any project a way
+/// to turn another project's transfer tokens off.
+#[test]
+fn an_unreadable_claimant_does_not_contest_the_id() {
+    let table = table(&[
+        File {
+            project: "aaa",
+            name: "broken",
+            body: &agreement_yaml("broken", "aaa", AGREEMENT, "  somethingElse: true\n"),
+        },
+        File {
+            project: "zzz",
+            name: "air-quality",
+            body: &agreement_yaml("air-quality", "zzz", AGREEMENT, ""),
+        },
+    ]);
+
+    let served = table
+        .serving(AGREEMENT, now())
+        .expect("the one agreement that parses and validates is served");
+    assert_eq!(served.project, "zzz");
 }
 
 /// The table is replaced whole by the reconcile that replaces the endpoint table, so the one
