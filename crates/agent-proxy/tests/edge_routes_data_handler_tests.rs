@@ -24,6 +24,32 @@ fn with_gateway(allows_write: bool, gateway: &str) -> axum::Router {
     )
 }
 
+/// A proxy whose Portal answers `404` to every run lookup, which is what "no such run" is.
+///
+/// The default harness points the Portal at a name that resolves nowhere, so a run id the proxy
+/// does not hold used to fail in transport — a failure of the platform's, which answers `503` and
+/// not `401` since T-2418. A case about an unknown run id has to ask a Portal that is there.
+fn with_portal_answering_no_such_run(gateway: &str, portal: &MockServer) -> axum::Router {
+    app(
+        sample_run(false),
+        Bases {
+            gateway: gateway.to_owned(),
+            portal: portal.uri(),
+            ..Bases::default()
+        },
+    )
+}
+
+/// A Portal that holds no run at all.
+async fn portal_holding_nothing() -> MockServer {
+    let portal = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&portal)
+        .await;
+    portal
+}
+
 /// AG-22, AG-64: no credential, no request to the gateway — the refusal happens in the proxy.
 #[tokio::test]
 async fn a_request_without_credentials_is_refused_before_the_gateway_is_asked() {
@@ -55,13 +81,15 @@ async fn a_request_without_credentials_is_refused_before_the_gateway_is_asked() 
 /// oracle for which run ids are live (T-2285).
 #[tokio::test]
 async fn an_unknown_run_and_a_wrong_ticket_are_refused_with_the_same_sentence() {
+    let portal = portal_holding_nothing().await;
     let mut details = Vec::new();
     for (run, ticket) in [
         (RUN_ID, "not-the-ticket"),
         ("11111111-2222-3333-4444-555555555555", TICKET),
         ("11111111-2222-3333-4444-555555555555", "not-the-ticket"),
     ] {
-        let proxy = with_gateway(false, "http://context-gateway.invalid:8080");
+        let proxy =
+            with_portal_answering_no_such_run("http://context-gateway.invalid:8080", &portal);
         let response = proxy
             .oneshot(
                 axum::http::Request::builder()
@@ -92,6 +120,7 @@ async fn the_bearer_form_of_the_ticket_is_accepted_and_one_for_another_run_is_no
         .mount(&gateway)
         .await;
 
+    let portal = portal_holding_nothing().await;
     for (bearer, expected) in [
         (format!("Bearer jcr_{RUN_ID}.{TICKET}"), StatusCode::OK),
         (
@@ -101,7 +130,7 @@ async fn the_bearer_form_of_the_ticket_is_accepted_and_one_for_another_run_is_no
         (format!("Bearer jcr_{RUN_ID}."), StatusCode::UNAUTHORIZED),
         (format!("Bearer {TICKET}"), StatusCode::UNAUTHORIZED),
     ] {
-        let proxy = with_gateway(false, &gateway.uri());
+        let proxy = with_portal_answering_no_such_run(&gateway.uri(), &portal);
         let response = proxy
             .oneshot(
                 axum::http::Request::builder()

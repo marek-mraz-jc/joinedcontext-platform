@@ -59,10 +59,15 @@ async fn a_read_without_credentials_is_refused_before_the_portal_is_asked() {
 }
 
 /// AG-22: a ticket of another run reads no diagnostics.
+///
+/// The Portal answers `404` here rather than resolving nowhere: an id no run holds is a refusal of
+/// the caller's (`401`), and a Portal that cannot be reached is a failure of the platform's
+/// (`503`, T-2418). This case is about the first.
 #[tokio::test]
 async fn a_ticket_of_another_run_reads_no_diagnostics() {
+    let portal = portal_answering(404, "").await;
     for (run, ticket) in [(RUN_ID, "another-runs-ticket"), ("nobody", TICKET)] {
-        let response = proxy("http://portal.invalid:8080", 100, 1_048_576)
+        let response = proxy(&portal.uri(), 100, 1_048_576)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/v1/diagnostics/pipeline/hsl-bikes")

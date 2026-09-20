@@ -27,6 +27,22 @@ fn proxy(forge: &str) -> axum::Router {
     )
 }
 
+/// The same proxy, asking a Portal that holds no run and answers `404` to every lookup.
+///
+/// `Bases::default()` points the Portal at a name that resolves nowhere, which since T-2418 is a
+/// failure of the platform's (`503`) rather than a bad credential (`401`). A case about a run id
+/// nobody holds has to ask a Portal that is there.
+fn proxy_asking(forge: &str, portal: &MockServer) -> axum::Router {
+    app(
+        sample_run(true),
+        Bases {
+            forge: forge.to_owned(),
+            portal: portal.uri(),
+            ..Bases::default()
+        },
+    )
+}
+
 async fn forge_answering(status: u16, body: &str) -> MockServer {
     let forge = MockServer::start().await;
     for verb in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
@@ -71,8 +87,9 @@ async fn a_write_without_credentials_is_refused_before_the_forge_is_asked() {
 /// AG-22: a ticket of another run writes nothing.
 #[tokio::test]
 async fn a_ticket_of_another_run_writes_nothing() {
+    let portal = MockServer::start().await;
     for (run, ticket) in [(RUN_ID, "another-runs-ticket"), ("nobody", TICKET)] {
-        let response = proxy("http://gitea.invalid:3000")
+        let response = proxy_asking("http://gitea.invalid:3000", &portal)
             .oneshot(
                 axum::http::Request::builder()
                     .method("PUT")

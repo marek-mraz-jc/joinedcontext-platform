@@ -1,7 +1,7 @@
 //! Run ticket authentication and service mesh identity verification.
 
 use crate::config::Config;
-use crate::runs::{RunContext, RunResolver};
+use crate::runs::{RunContext, RunError, RunResolver};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::http::HeaderMap;
 use std::sync::Arc;
@@ -18,6 +18,24 @@ pub const TICKET_BEARER_PREFIX: &str = "jcr_";
 /// The one sentence every refused credential is answered with, so no pair of answers tells a caller
 /// which run ids exist (T-2285, EP-26, R20).
 const REFUSED: &str = "invalid run credentials";
+
+/// What a caller is told when this platform could not judge their credential at all (AG-52).
+///
+/// It is not `REFUSED`: the person on the other side of an assistant run reads this sentence, and
+/// telling them their credentials are wrong for a fault they have no part in sends them looking
+/// for something they cannot find. Saying it costs nothing either — a failure to reach the Portal
+/// is answered whether the run id exists or not, so it tells a prober nothing about which ids are
+/// live, which is what T-2285's one wording protects.
+const UNREADABLE: &str =
+    "the run's context could not be read; this is a fault of the platform, not of your credentials";
+
+/// `503` with the sentence above, and no detail of the cause: the cause is in the operator's log.
+fn unreadable() -> Box<jc_core::ProblemDetails> {
+    Box::new(
+        jc_core::ProblemDetails::new(503, "service-unavailable", "Service Unavailable")
+            .with_detail(UNREADABLE),
+    )
+}
 
 /// The longest run id this proxy will carry. A minted one is a 36-character UUID; the room above
 /// that is for a longer identifier the Portal may mint one day, not for a payload.
@@ -96,16 +114,31 @@ pub async fn authenticate(
     // no ticket at all could read from the wording which ids are live, and a run id is a workspace's
     // branch name and its mesh identity (T-2285, EP-26, R20). Which of the two it was belongs in the
     // log, where an operator reads it and a caller cannot.
-    let run = resolver.resolve(run_id).await.map_err(|_| {
-        tracing::warn!(run = %run_id, "no active run holds this id");
-        Box::new(jc_core::ProblemDetails::unauthorized().with_detail(REFUSED))
+    let run = resolver.resolve(run_id).await.map_err(|err| match err {
+        // The Portal was not reached, refused this proxy's own token, or answered something this
+        // proxy could not read. Nothing about the presented credential was judged, so answering
+        // `401` blamed the caller for a failure of ours (T-2418). `reason` is the transport or
+        // status message: it never carries a token, because the credential manager reports the
+        // status of the grant and not the grant.
+        RunError::Transport(reason) => {
+            tracing::error!(run = %run_id, %reason, "the run's context could not be read from the Portal");
+            unreadable()
+        }
+        // Both of these are facts about the caller's own credential: an id no run holds, and a run
+        // of theirs that has finished. They answer alike, because telling them apart is the oracle
+        // for live run ids that T-2285 closed.
+        RunError::NotFound(_) | RunError::NotActive(_) => {
+            tracing::warn!(run = %run_id, "no active run holds this id");
+            Box::new(jc_core::ProblemDetails::unauthorized().with_detail(REFUSED))
+        }
     })?;
 
     let parsed_hash = PasswordHash::new(&run.ticket_hash).map_err(|_| {
-        // The stored hash is unusable, which is this platform's fault and not the caller's — but it
-        // is not the caller's business either, so they are told what everybody else is told.
+        // The stored hash is unusable, so no ticket can be verified against it. That is this
+        // platform's fault and the caller is told so (T-2418); which run's hash it was stays in
+        // the log, where an operator reads it and a caller cannot.
         tracing::error!(run = %run_id, "the stored ticket hash is not a PHC string");
-        Box::new(jc_core::ProblemDetails::unauthorized().with_detail(REFUSED))
+        unreadable()
     })?;
 
     if Argon2::default()
