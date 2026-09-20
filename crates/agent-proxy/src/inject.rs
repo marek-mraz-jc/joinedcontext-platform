@@ -21,10 +21,10 @@ impl CredentialManager {
     pub fn new(config: Arc<Config>) -> Self {
         Self {
             config,
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_default(),
+            // The grant carries the OIDC client secret in its form body. A redirect would put
+            // that body on the wire to whatever the realm named, so this client follows none
+            // (T-1695).
+            http: crate::no_redirect_client(Some(Duration::from_secs(5))),
             endpoint_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }

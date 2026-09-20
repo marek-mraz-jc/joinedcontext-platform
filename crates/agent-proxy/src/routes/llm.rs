@@ -123,6 +123,11 @@ pub async fn handler(
 
     let status =
         StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Some(refusal) =
+        super::refused_redirect(status, super::location_of(&upstream_resp), "model provider")
+    {
+        return refusal;
+    }
     let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
 
     // Extract token usage

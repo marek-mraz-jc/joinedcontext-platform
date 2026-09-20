@@ -19,6 +19,27 @@ pub const TICKET_BEARER_PREFIX: &str = "jcr_";
 /// which run ids exist (T-2285, EP-26, R20).
 const REFUSED: &str = "invalid run credentials";
 
+/// The longest run id this proxy will carry. A minted one is a 36-character UUID; the room above
+/// that is for a longer identifier the Portal may mint one day, not for a payload.
+const RUN_ID_MAX: usize = 64;
+
+/// Whether a string is shaped like a run id: ASCII letters, digits and hyphens, and at most
+/// [`RUN_ID_MAX`] of them.
+///
+/// The id arrives in a header the workspace writes and is spent in three places that all read a
+/// name: the Portal lookup path, the `agent-run-<id>` mesh identity, and the audit line. A
+/// separator, a percent sign or a space in it belongs to none of those, so it is refused at the
+/// door rather than encoded at each use — the Portal is then never asked about a string that
+/// cannot be a run, and no shape of one can be read as a path, a second header or a log line
+/// (T-1695, AG-52).
+pub fn run_id_is_well_formed(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id.len() <= RUN_ID_MAX
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
 /// The run and ticket a request presents, in either of the two forms.
 fn credentials(headers: &HeaderMap) -> Option<(String, String)> {
     let header = |name: &str| {
@@ -52,6 +73,18 @@ pub async fn authenticate(
         ))
     })?;
     let (run_id, ticket) = (run_id.as_str(), ticket.as_str());
+
+    // A run id that is not a name is refused before anybody is asked about it, and answered with
+    // the same sentence as every other bad credential (T-1695).
+    if !run_id_is_well_formed(run_id) {
+        tracing::warn!(
+            length = run_id.len(),
+            "a presented run id is not shaped like a run id"
+        );
+        return Err(Box::new(
+            jc_core::ProblemDetails::unauthorized().with_detail(REFUSED),
+        ));
+    }
 
     // One sentence for every way a presented credential can be wrong. An id the resolver does not
     // know and a ticket that does not verify used to answer differently ("invalid or inactive run"
@@ -109,4 +142,37 @@ fn is_runs_own_workload(client_id: &str, run_id: &str) -> bool {
             .split('.')
             .next()
             .is_some_and(|account| account == format!("agent-run-{run_id}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_id_is_well_formed;
+
+    /// T-1695: a run id is a name, so nothing that is a path, a second header or a query gets in.
+    #[test]
+    fn only_a_name_is_a_run_id() {
+        for id in ["e3b0c442-98fc-1c14-9afb-4c7b2756a120", "r", "AGENT-RUN-1"] {
+            assert!(run_id_is_well_formed(id), "{id:?} is a run id");
+        }
+        for id in [
+            "",
+            "..",
+            "../../admin",
+            "..%2f..%2fadmin",
+            "%2e%2e/admin",
+            "a/b",
+            "a\\b",
+            "a b",
+            "a?b=1",
+            "a#b",
+            "a:b",
+            "a.b",
+            "a_b",
+            "héllo",
+            &"a".repeat(65),
+        ] {
+            assert!(!run_id_is_well_formed(id), "{id:?} passed as a run id");
+        }
+        assert!(run_id_is_well_formed(&"a".repeat(64)), "64 is the ceiling");
+    }
 }

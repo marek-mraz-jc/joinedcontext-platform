@@ -170,6 +170,13 @@ async fn forward(
 
     let status =
         StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Some(refusal) = super::refused_redirect(
+        status,
+        super::location_of(&upstream_resp),
+        "context gateway",
+    ) {
+        return refusal;
+    }
     let mut resp_builder = Response::builder().status(status);
 
     for (k, v) in upstream_resp.headers().iter() {

@@ -582,6 +582,16 @@ async fn serve_ngsi_ld(
             .into_response();
     }
 
+    // AG-85, T-2299: `geoproperty` and `geometryProperty` each choose the attribute a
+    // decision is taken on, so each is judged against the grants that were just read rather
+    // than forwarded. Before the broker is asked, and on this one path, so the NGSI-LD
+    // surface and the MCP tool refuse in the same words.
+    if let Some(why) = query::geo_refusal(&params, &constraints) {
+        return ProblemDetails::bad_request()
+            .with_detail(why)
+            .into_response();
+    }
+
     // The caller asked for a period no grant reaches. The request was well formed and its
     // answer is genuinely nothing, so it is answered here: forwarding it without a
     // temporal window would ask the broker for everything (GW26).

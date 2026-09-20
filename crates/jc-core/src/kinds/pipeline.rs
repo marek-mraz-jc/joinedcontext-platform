@@ -637,6 +637,188 @@ fn validate_source(src: &PipelineSource) -> Result<()> {
 }
 
 /// One compute step (PL-33, PL-34, PL-41).
+/// Every string a processor step's configuration holds, however deeply nested.
+///
+/// A processor carries Bloblang in two places: a `mapping` or `mutation` body, and the
+/// `${! … }` interpolation any field may hold. Both are strings, so both are scanned with the
+/// same eye as an inline mapping.
+fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => found.push(text.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                config_strings(item, found);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for field in fields.values() {
+                config_strings(field, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The names an author's mapping may read out of the runner (PL-57, PF-84).
+///
+/// `JC_ORG_DOMAIN` is the organisation's domain, a variable of the runner's process;
+/// `JC_SPACE`, `JC_SPACE_2`, … are the space segment of each output, which the renderer writes
+/// into the stream before it reaches the runner; `JC_SOURCE_SPACE` is the space an indicator
+/// pipeline records its provenance from. None of the four names a credential, and everything
+/// else in that environment does.
+fn is_injected_env(name: &str) -> bool {
+    name == "JC_ORG_DOMAIN"
+        || name == "JC_SOURCE_SPACE"
+        || name == "JC_SPACE"
+        || name
+            .strip_prefix("JC_SPACE_")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The Bloblang functions that read the runner's host rather than the message (PL-16, PL-50).
+const HOST_FUNCTIONS: &[&str] = &["file", "file_json", "file_rel", "hostname", "env"];
+
+/// Refuses a mapping that reads the runner's environment or its filesystem (PL-16, PL-50, PL-18).
+///
+/// A project's runner holds every pipeline of that project in one process: the `pipeline-secrets`
+/// environment with each source's credential under its own `envVar`, the runner's own
+/// `JC_CLIENT_SECRET` for the gateway, and the `/data` volume every file source reads. A
+/// `DataSource` cannot name any of that — `${VAR}` has to name an entry of its own
+/// `spec.secrets` — and a mapping must not be the second door into it: `env("…")` reads only
+/// what the reconciler injects for it, and `file(…)` reads nothing at all, because whatever a
+/// mapping reads it writes to the pipeline's own target.
+fn validate_author_bloblang(field: &'static str, mapping: &str) -> Result<()> {
+    for (function, argument) in host_calls(mapping) {
+        if function == "env" {
+            match argument.as_deref() {
+                Some(name) if is_injected_env(name) => continue,
+                Some(name) => {
+                    return Err(Error::Name {
+                        field,
+                        value: format!("env(\"{name}\")"),
+                        reason: "a mapping reads only the variables the platform injects for \
+                                 it: JC_ORG_DOMAIN, JC_SOURCE_SPACE and the JC_SPACE of each \
+                                 output. The rest of the runner's environment is the project's \
+                                 credentials (PL-16, PL-50)",
+                    });
+                }
+                None => {
+                    return Err(Error::Name {
+                        field,
+                        value: "env(…)".to_owned(),
+                        reason: "the name a mapping reads with env() is a literal string, so \
+                                 what it reads can be checked before it runs (PL-16, PL-50)",
+                    });
+                }
+            }
+        }
+        return Err(Error::Name {
+            field,
+            value: format!("{function}(…)"),
+            reason: "a mapping reads the message, never the runner it runs on: the runner's \
+                     files volume and its host carry the whole project's data and credentials \
+                     (PL-16, PL-18, PL-50)",
+        });
+    }
+    Ok(())
+}
+
+/// Every call an author's mapping makes to one of [`HOST_FUNCTIONS`], with its first argument
+/// when that argument is a plain string literal.
+///
+/// The scan walks the text rather than matching it, so a `#` comment and the inside of a string
+/// are not mistaken for code — a mapping that *mentions* `file(` in a comment is not a mapping
+/// that calls it — and a name is only a call when a `(` follows it and no `.` precedes it, which
+/// leaves Bloblang's methods (`this.foo.format(…)`) alone.
+fn host_calls(mapping: &str) -> Vec<(String, Option<String>)> {
+    let bytes = mapping.as_bytes();
+    let mut calls = Vec::new();
+    let mut i = 0;
+    let mut previous_was_dot = false;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        match byte {
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                previous_was_dot = false;
+            }
+            b'"' | b'\'' => {
+                i = skip_string(bytes, i).unwrap_or(bytes.len());
+                previous_was_dot = false;
+            }
+            b'.' => {
+                previous_was_dot = true;
+                i += 1;
+            }
+            b if b.is_ascii_alphabetic() || b == b'_' => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let name = &mapping[start..i];
+                let mut after = i;
+                while after < bytes.len() && (bytes[after] == b' ' || bytes[after] == b'\t') {
+                    after += 1;
+                }
+                let is_call = bytes.get(after) == Some(&b'(');
+                if is_call && !previous_was_dot && HOST_FUNCTIONS.contains(&name) {
+                    calls.push((name.to_owned(), literal_argument(mapping, after + 1)));
+                }
+                previous_was_dot = false;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            _ => {
+                previous_was_dot = false;
+                i += 1;
+            }
+        }
+    }
+    calls
+}
+
+/// The index just past the string literal starting at `open`, or `None` when it is never closed.
+fn skip_string(bytes: &[u8], open: usize) -> Option<usize> {
+    let quote = bytes[open];
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if quote == b'"' => i += 2,
+            b if b == quote => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The first argument of a call opening at `from`, when it is one plain string literal and
+/// nothing else: `env("JC_SPACE")` yields the name, `env(this.pick)` and `env("A" + "B")`
+/// yield `None`, so a name that cannot be read here is refused rather than allowed.
+fn literal_argument(mapping: &str, from: usize) -> Option<String> {
+    let bytes = mapping.as_bytes();
+    let mut i = from;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'"') && bytes.get(i) != Some(&b'\'') {
+        return None;
+    }
+    let end = skip_string(bytes, i)?;
+    let mut after = end;
+    while after < bytes.len() && (bytes[after] == b' ' || bytes[after] == b'\t') {
+        after += 1;
+    }
+    if bytes.get(after) != Some(&b')') {
+        return None;
+    }
+    let raw = &mapping[i + 1..end - 1];
+    if raw.contains('\\') {
+        return None;
+    }
+    Some(raw.to_owned())
+}
+
 fn validate_compute(c: &Compute) -> Result<()> {
     if let Some(ref mapping) = c.bloblang {
         if c.kind != ComputeKind::Bloblang {
@@ -653,6 +835,7 @@ fn validate_compute(c: &Compute) -> Result<()> {
                 reason: "bloblang must not be empty; leave the field out to keep the mapping in bento.yaml",
             });
         }
+        validate_author_bloblang("spec.compute.bloblang", mapping)?;
     }
     match c.kind {
         ComputeKind::Wasm => {
@@ -775,6 +958,15 @@ impl PipelineSpec {
                                 super::bento_processors::PROCESSORS.join(", ")
                             ),
                         });
+                    }
+                    // A `mapping` body and a `${! … }` interpolation are Bloblang too, and a
+                    // step that reads the runner is the same escape wherever it is written.
+                    let mut texts = Vec::new();
+                    for config in step.processor.values() {
+                        config_strings(config, &mut texts);
+                    }
+                    for text in &texts {
+                        validate_author_bloblang("spec.steps.processor", text)?;
                     }
                 }
             }
