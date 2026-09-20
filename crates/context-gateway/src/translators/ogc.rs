@@ -480,6 +480,16 @@ pub fn bbox(raw: &str) -> Result<Vec<(String, String)>, ParamError> {
         .map(|part| part.trim().parse::<f64>())
         .collect();
     let numbers = numbers.map_err(|_| ParamError::new("bbox", "every value must be a number"))?;
+    // `nan` and `inf` parse, and every comparison with `NaN` is false, so the corner check below
+    // lets them through; `serde_json` then writes `null` where a coordinate belongs and the broker
+    // gets a `geoQ` it cannot honour. A filter that is ignored returns the rows the caller asked
+    // not to see, so a value that is not a place is refused here (T-2339).
+    if !numbers.iter().all(|value| value.is_finite()) {
+        return Err(ParamError::new(
+            "bbox",
+            "every value must be a finite number",
+        ));
+    }
     let (minx, miny, maxx, maxy) = match numbers.len() {
         4 => (numbers[0], numbers[1], numbers[2], numbers[3]),
         6 => (numbers[0], numbers[1], numbers[3], numbers[4]),
@@ -521,15 +531,22 @@ pub fn datetime(raw: &str) -> Result<Vec<(String, String)>, ParamError> {
             ("timeAt".to_owned(), at.to_owned()),
         ]
     };
-    let instant = |value: &str| -> Result<String, ParamError> {
-        chrono::DateTime::parse_from_rfc3339(value)
-            .map(|_| value.to_owned())
-            .map_err(|_| ParamError::new("datetime", format!("{value} is not an RFC 3339 instant")))
-    };
+    // The text as the caller wrote it, and the moment it names. Both are needed: the broker is
+    // given the caller's own spelling, and the two ends of an interval are compared as moments —
+    // comparing the strings would call `2026-01-02T00:00:00+05:00` later than `2026-01-01T23:00:00Z`
+    // when it is an hour earlier, and refuse an interval that is perfectly ordered (T-2347).
+    let instant =
+        |value: &str| -> Result<(String, chrono::DateTime<chrono::FixedOffset>), ParamError> {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map(|moment| (value.to_owned(), moment))
+                .map_err(|_| {
+                    ParamError::new("datetime", format!("{value} is not an RFC 3339 instant"))
+                })
+        };
 
     match raw.split_once('/') {
         None => {
-            let at = instant(raw)?;
+            let (at, _) = instant(raw)?;
             let mut params = pair("between", &at);
             params.push(("endTimeAt".to_owned(), at));
             Ok(params)
@@ -538,11 +555,11 @@ pub fn datetime(raw: &str) -> Result<Vec<(String, String)>, ParamError> {
             "datetime",
             "an interval open at both ends selects everything; omit the parameter instead",
         )),
-        Some((start, "..")) | Some((start, "")) => Ok(pair("after", &instant(start)?)),
-        Some(("..", end)) | Some(("", end)) => Ok(pair("before", &instant(end)?)),
+        Some((start, "..")) | Some((start, "")) => Ok(pair("after", &instant(start)?.0)),
+        Some(("..", end)) | Some(("", end)) => Ok(pair("before", &instant(end)?.0)),
         Some((start, end)) => {
-            let (start, end) = (instant(start)?, instant(end)?);
-            if start > end {
+            let ((start, from), (end, to)) = (instant(start)?, instant(end)?);
+            if from > to {
                 return Err(ParamError::new(
                     "datetime",
                     "the interval ends before it starts",
