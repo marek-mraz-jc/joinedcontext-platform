@@ -103,6 +103,29 @@ impl Artifact {
         }
     }
 
+    /// The name this artifact is asked for by on the agent surface (`format`), which is the
+    /// same word in the MCP tool, in the `schema://` resource URI and in the summary's
+    /// catalogue, so an agent never has to translate one spelling into another (EP-46, AG-84).
+    pub fn format_name(self) -> &'static str {
+        match self {
+            Artifact::JsonSchema => "json-schema",
+            Artifact::Context => "context",
+            Artifact::Shacl => "shacl",
+            Artifact::Owl => "owl",
+            Artifact::Rdf => "rdf",
+            Artifact::LinkMl => "linkml",
+            Artifact::Markdown => "markdown",
+        }
+    }
+
+    /// The artifact one [`Self::format_name`] names, or `None` for a word this surface does
+    /// not serve. Exact names only: the path aliases of [`artifact_of`] are the REST route's.
+    pub fn from_format(name: &str) -> Option<Artifact> {
+        Artifact::ALL
+            .into_iter()
+            .find(|artifact| artifact.format_name() == name)
+    }
+
     /// The seven documents an endpoint publishes about one major (EP-46).
     pub const ALL: [Artifact; 7] = [
         Artifact::LinkMl,
@@ -207,12 +230,29 @@ impl Visible {
     /// The same surface narrowed to one entity type, or `None` when the caller may not read it
     /// (EP-47): a type nobody granted is refused exactly as an unknown one is.
     pub fn only(&self, entity_type: &str) -> Option<Visible> {
-        if !self.covers_type(entity_type) {
-            return None;
+        self.only_each([entity_type]).ok()
+    }
+
+    /// The same narrowed to several entity types at once, so an agent loads the two classes it
+    /// needs in one read rather than one document per class (EP-47).
+    ///
+    /// The first name the caller may not read is given back instead of a narrowed surface, and
+    /// a name nobody granted is that same refusal as an unknown one: a list cannot be used to
+    /// ask which of its names exists (SP-20).
+    pub fn only_each<'a>(
+        &self,
+        wanted: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Visible, &'a str> {
+        let mut types = BTreeSet::new();
+        for entity_type in wanted {
+            if !self.covers_type(entity_type) {
+                return Err(entity_type);
+            }
+            types.insert(entity_type.to_owned());
         }
         let mut narrowed = self.clone();
-        narrowed.types = BTreeSet::from([entity_type.to_owned()]);
-        Some(narrowed)
+        narrowed.types = types;
+        Ok(narrowed)
     }
 
     /// Whether the model may describe this entity type at all.
@@ -334,8 +374,7 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> S
     let mut models = Vec::new();
     for model in &endpoint.models {
         let mut redacted = Vec::new();
-        let schema = json_schema(std::slice::from_ref(&model), visible, &mut redacted);
-        let context = context(std::slice::from_ref(&model), visible, &mut Vec::new());
+        json_schema(std::slice::from_ref(&model), visible, &mut redacted);
 
         let types: Vec<&String> = model
             .classes
@@ -354,7 +393,7 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> S
             "version": model.major,
             "semver": model.version,
             "types": types,
-            "artifacts": artifacts(std::slice::from_ref(&model), visible, &schema, &context, &digest),
+            "artifacts": artifacts(std::slice::from_ref(&model), visible, &digest),
         });
         if anything_redacted {
             described["redacted"] = json!(true);
@@ -367,43 +406,45 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> S
 
 /// The seven documents one model publishes, each described by the projection a caller would
 /// actually fetch rather than by the file on disk (EP-46, EP-48).
-fn artifacts(
-    models: &[&Model],
-    visible: &Visible,
-    schema: &Value,
-    context: &Value,
-    digest: &impl Fn(&[u8]) -> String,
-) -> Value {
+fn artifacts(models: &[&Model], visible: &Visible, digest: &impl Fn(&[u8]) -> String) -> Value {
     let mut described = Map::new();
-    for wanted in Artifact::ALL {
-        let entry = match wanted {
-            Artifact::JsonSchema => descriptor(schema, JSON_SCHEMA, digest),
-            Artifact::Context => descriptor(context, JSON_LD, digest),
-            other => text_descriptor(&render(models, other, visible), other.media_type(), digest),
-        };
-        described.insert(wanted.file_name().to_owned(), entry);
+    for (wanted, bytes, sha256) in measured(models, visible, digest) {
+        described.insert(
+            wanted.file_name().to_owned(),
+            json!({ "type": wanted.media_type(), "bytes": bytes, "sha256": sha256 }),
+        );
     }
     Value::Object(described)
 }
 
-/// One entry of the index's `artifacts` map.
-fn descriptor(document: &Value, media_type: &str, digest: impl Fn(&[u8]) -> String) -> Value {
-    let body = serde_json::to_vec(document).unwrap_or_default();
-    json!({
-        "type": media_type,
-        "bytes": body.len(),
-        "sha256": digest(&body),
-    })
-}
-
-/// The same, for a rendered text document: the digest is of the bytes the caller receives, so
-/// the index and the `ETag` of the document agree.
-fn text_descriptor(body: &str, media_type: &str, digest: &impl Fn(&[u8]) -> String) -> Value {
-    json!({
-        "type": media_type,
-        "bytes": body.len(),
-        "sha256": digest(body.as_bytes()),
-    })
+/// The size and digest of every artifact of one model major, in the order an agent should
+/// read them (LinkML first, [`Artifact::ALL`]).
+///
+/// Measured on the document a caller would actually fetch for these models rather than on a
+/// file on disk, so the catalogue, the `ETag` and the rendered answer agree (EP-46, EP-48).
+/// The unit is whatever `models` holds: one model for the index's per-model entry, every
+/// model of one major for the document `/schema/v{major}/…` renders.
+pub fn measured(
+    models: &[&Model],
+    visible: &Visible,
+    digest: &impl Fn(&[u8]) -> String,
+) -> Vec<(Artifact, usize, String)> {
+    Artifact::ALL
+        .into_iter()
+        .map(|wanted| {
+            let body = match wanted {
+                Artifact::JsonSchema => {
+                    serde_json::to_vec(&json_schema(models, visible, &mut Vec::new()))
+                        .unwrap_or_default()
+                }
+                Artifact::Context => serde_json::to_vec(&context(models, visible, &mut Vec::new()))
+                    .unwrap_or_default(),
+                other => render(models, other, visible).into_bytes(),
+            };
+            let sha256 = digest(&body);
+            (wanted, body.len(), sha256)
+        })
+        .collect()
 }
 
 /// The JSON Schema of every model of one major, projected to the grant (EP-47, DM-03).
