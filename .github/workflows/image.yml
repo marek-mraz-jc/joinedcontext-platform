@@ -8,7 +8,12 @@ on:
 # Read-only by default: only a job that publishes may hold the permissions that push an image
 # under the project's name and mint its signing identity (T-0851).
 permissions: { contents: read }
-concurrency: { group: "image-${{ github.ref }}", cancel-in-progress: true }
+# NOT cancel-in-progress, unlike the test lanes: this lane's output is an artifact, not a
+# verdict, and `dev-apply` deploys it. With merges a few minutes apart, cancelling killed five
+# builds in a row on 2026-09-20 and `:main` stayed on the one commit that happened to be
+# followed by a quiet five minutes, which is not how `dev` trails `main` by an hour (T-2318).
+# Queued per ref, so each run publishes its own `:sha` and moves `:main` in order.
+concurrency: { group: "image-${{ github.ref }}", cancel-in-progress: false }
 jobs:
   build:
     runs-on: ubuntu-latest
