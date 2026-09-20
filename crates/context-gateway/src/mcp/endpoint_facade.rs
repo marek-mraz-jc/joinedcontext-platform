@@ -70,6 +70,13 @@ const TYPE_SELECTION: &str = "^[A-Za-z][A-Za-z0-9_\\-,;|()]*$";
 /// An NGSI-LD entity id, which on this platform is always the URN of ADR 001.
 const ENTITY_URN: &str = "^urn:ngsi-ld:[^\\s]+$";
 
+/// An NGSI-LD attribute name: a term of the model, or the IRI a term expands to.
+///
+/// Wider than [`TYPE_NAME`], because an attribute may be sent expanded, and narrow enough that
+/// no separator of a query string — `&`, `=`, `;`, `%`, a newline — can ride inside one and
+/// arrive at the broker as a second parameter (AG-21, T-2299).
+const ATTR_NAME: &str = "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$";
+
 /// One tool of the catalogue of Architecture/07 section 2.
 struct Tool {
     name: &'static str,
@@ -479,12 +486,10 @@ struct ReadArg {
 
 /// The entity selectors of the shared table (Architecture/07 §2, "The shared read parameter table").
 ///
-/// Two CIM 009 parameters are deliberately absent, because the REST surface does not forward them
-/// either and neither is a harmless passthrough (T-2299): `geoproperty` moves a geo filter to
-/// another GeoProperty, so a grant's own area would be tested against an attribute it was never
-/// written for, and `geometryProperty` copies an attribute's value into a GeoJSON `geometry`, which
-/// is a way past the attribute projection. Both come back on both surfaces at once, with the rule
-/// that keeps them narrow; publishing them here before then would be an argument that widens a read.
+/// Two CIM 009 parameters of this table are not arguments here, because neither surface serves
+/// them yet: `accept`, which changes the shape the answer narrowing reads, and `context`, which
+/// needs the `@context` allow-list no Endpoint manifest carries today (T-2299). Both are refused
+/// as unknown arguments until they arrive on the two surfaces together, with their rules.
 const SELECTOR_ARGS: &[ReadArg] = &[
     ReadArg {
         name: "type",
@@ -579,6 +584,20 @@ const SELECTOR_ARGS: &[ReadArg] = &[
             json!({
                 "type": "string", "maxLength": 8192,
                 "description": "GeoJSON coordinates of the reference geometry",
+            })
+        },
+    },
+    ReadArg {
+        // Judged against the grants, never forwarded on its own: an area a grant draws is
+        // drawn on `location`, so a geo query moved to another GeoProperty is refused by name
+        // rather than answered inside that area (T-2299, AG-85).
+        name: "geoproperty",
+        wire: "geoproperty",
+        shape: Shape::Text,
+        schema: || {
+            json!({
+                "type": "string", "maxLength": 256, "pattern": ATTR_NAME,
+                "description": "The GeoProperty the geo query applies to; location when absent, and only where the grant draws no area of its own",
             })
         },
     },
@@ -817,6 +836,20 @@ const REPRESENTATION_ARGS: &[ReadArg] = &[
                 "type": "array", "maxItems": 8,
                 "items": { "type": "string", "enum": ["keyValues", "concise", "sysAttrs", "normalized", "temporalValues", "aggregatedValues"] },
                 "description": "NGSI-LD options; sysAttrs adds the system members REST adds",
+            })
+        },
+    },
+    ReadArg {
+        // The value the broker copies into a GeoJSON `geometry` is no longer that attribute,
+        // so the answer narrowing cannot cut it: the attribute has to be one the grant covers
+        // before the request is sent (T-2299, AG-85).
+        name: "geometryProperty",
+        wire: "geometryProperty",
+        shape: Shape::Text,
+        schema: || {
+            json!({
+                "type": "string", "maxLength": 256, "pattern": ATTR_NAME,
+                "description": "The GeoProperty that becomes the geometry of a GeoJSON answer; only an attribute this endpoint serves you",
             })
         },
     },
