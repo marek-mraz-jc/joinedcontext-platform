@@ -12,15 +12,25 @@ use std::sync::Arc;
 
 const ORIGIN_SLUG: &str = "zt4qm7ge2xdv6ksb3ncf5arw2y";
 
+/// The space manifest, with the `{space}` segment pinned when `pin` names one (PF-84).
+fn space(pin: Option<&str>) -> String {
+    let pinned = pin
+        .map(|pin| format!("  urnSegment: {pin}\n"))
+        .unwrap_or_default();
+    format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: air\n  namespace: helsinki\nspec:\n  isSandbox: false\n{pinned}")
+}
+
+/// The endpoint manifest on `slug`.
+fn endpoint(slug: &str) -> String {
+    format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: public-air\n  namespace: helsinki\nspec:\n  contextSpaceRef: air\n  slug: {slug}\n  audience: public\n  enabledRepresentations: [\"ngsi-ld\"]\n")
+}
+
 fn files() -> BTreeMap<String, String> {
     BTreeMap::from([
-        (
-            "space.yaml".to_owned(),
-            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: air\n  namespace: helsinki\nspec:\n  isSandbox: false\n".to_owned(),
-        ),
+        ("space.yaml".to_owned(), space(None)),
         (
             "endpoints/public-air.yaml".to_owned(),
-            format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: public-air\n  namespace: helsinki\nspec:\n  contextSpaceRef: air\n  slug: {ORIGIN_SLUG}\n  audience: public\n  enabledRepresentations: [\"ngsi-ld\"]\n"),
+            endpoint(ORIGIN_SLUG),
         ),
     ])
 }
@@ -35,14 +45,31 @@ fn scratch(test: &str) -> PathBuf {
     dir
 }
 
-/// `main` holds the same space and endpoint the preview was branched from.
-fn main_repo(test: &str) -> PathBuf {
-    let dir = scratch(&format!("{test}-main"));
-    for (path, text) in files() {
+/// A repository directory holding `of`.
+fn repo_of(test: &str, of: BTreeMap<String, String>) -> PathBuf {
+    let dir = scratch(test);
+    for (path, text) in of {
         let path = dir.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
+    dir
+}
+
+/// `main` holds the same space and endpoint the preview was branched from.
+fn main_repo(test: &str) -> PathBuf {
+    repo_of(&format!("{test}-main"), files())
+}
+
+/// The preview of `ws-air-`, written under a previews directory of its own.
+fn previews_of(test: &str, of: BTreeMap<String, String>) -> PathBuf {
+    let dir = scratch(test);
+    Mirror::new(&dir)
+        .apply(vec![Preview {
+            prefix: "ws-air-".to_owned(),
+            files: of,
+        }])
+        .unwrap();
     dir
 }
 
@@ -185,4 +212,63 @@ fn a_preview_that_does_not_render_leaves_main_serving() {
     let (endpoints, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].slug, ORIGIN_SLUG);
+}
+
+// -------------------------------------------------------------------------------------------------
+// T-1709 "a copy or a preview as a way around review": the two collisions the minting alone does
+// not rule out. A slug in a manifest is any 26 base32 characters somebody wrote, and PF-84 lets a
+// space pin its `{space}` segment, so both names a preview renders can already be taken. The rule
+// the gateway holds is that main wins: a preview answers beside main, never in its place (PF-83).
+// -------------------------------------------------------------------------------------------------
+
+/// PF-83: `main` already serves the slug this preview renders, so the preview's Endpoint is left
+/// out and the caller of that slug keeps reaching main's tenant.
+#[test]
+fn a_preview_never_takes_over_a_slug_main_already_serves() {
+    let minted = jcctl::loader::preview_slug("ws-air-", ORIGIN_SLUG);
+    let mut theirs = files();
+    theirs.insert("endpoints/public-air.yaml".to_owned(), endpoint(&minted));
+    let main = repo_of("slug-taken-main", theirs);
+    let previews = previews_of("slug-taken-previews", files());
+
+    let (endpoints, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
+    let on_the_slug: Vec<_> = endpoints.iter().filter(|e| e.slug == minted).collect();
+    assert_eq!(
+        on_the_slug.len(),
+        1,
+        "two records answer one slug: {endpoints:?}"
+    );
+    assert_eq!(
+        on_the_slug[0].space, "helsinki-air",
+        "the slug still names main's tenant, not the preview's"
+    );
+    assert_eq!(on_the_slug[0].project, "helsinki");
+}
+
+/// PF-83: `main` pins the very segment this preview renders, so neither the preview's space nor
+/// any Endpoint of it answers on main's tenant — a preview that could would read and write the
+/// data of the project it was copied from.
+#[test]
+fn a_preview_never_answers_on_a_space_main_already_serves() {
+    const TAKEN: &str = "ws-air-helsinki-air";
+    let mut theirs = files();
+    theirs.insert("space.yaml".to_owned(), space(Some(TAKEN)));
+    let main = repo_of("space-taken-main", theirs);
+    let previews = previews_of("space-taken-previews", files());
+
+    let (endpoints, spaces, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
+    let on_the_space: Vec<_> = spaces.iter().filter(|s| s.name() == TAKEN).collect();
+    assert_eq!(on_the_space.len(), 1, "two spaces on one segment");
+    assert_eq!(
+        on_the_space[0].endpoint.project, "helsinki",
+        "the space is main's, not the preview's"
+    );
+    let taken_over: Vec<_> = endpoints
+        .iter()
+        .filter(|e| e.space == TAKEN && e.slug != ORIGIN_SLUG)
+        .collect();
+    assert!(
+        taken_over.is_empty(),
+        "a preview Endpoint answers on main's tenant: {taken_over:?}"
+    );
 }

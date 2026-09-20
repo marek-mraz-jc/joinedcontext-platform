@@ -70,6 +70,13 @@ const TYPE_SELECTION: &str = "^[A-Za-z][A-Za-z0-9_\\-,;|()]*$";
 /// An NGSI-LD entity id, which on this platform is always the URN of ADR 001.
 const ENTITY_URN: &str = "^urn:ngsi-ld:[^\\s]+$";
 
+/// An NGSI-LD attribute name: a term of the model, or the IRI a term expands to.
+///
+/// Wider than [`TYPE_NAME`], because an attribute may be sent expanded, and narrow enough that
+/// no separator of a query string — `&`, `=`, `;`, `%`, a newline — can ride inside one and
+/// arrive at the broker as a second parameter (AG-21, T-2299).
+const ATTR_NAME: &str = "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$";
+
 /// One tool of the catalogue of Architecture/07 section 2.
 struct Tool {
     name: &'static str,
@@ -274,7 +281,10 @@ const TOOLS: &[Tool] = &[
             Operation::RetrieveEntityTypes,
         ],
         description:
-            "Inspect the data model of this context space, narrowed to the caller's grant.",
+            "Inspect the data model of this context space, narrowed to the caller's grant. \
+             Read linkml first: it carries the classes, their slots and their descriptions in \
+             one small document. The default `summary` lists every artifact with its size and \
+             digest and says which to read.",
         schema: || {
             json!({
                 "type": "object",
@@ -285,9 +295,20 @@ const TOOLS: &[Tool] = &[
                             "summary", "json-schema", "context",
                             "linkml", "shacl", "owl", "rdf", "markdown",
                         ],
-                        "description": "summary lists the models and their artifacts; the others render one, the text formalisms as {format, mediaType, document}",
+                        "description": "summary (the default) lists the models and every artifact with its format, size and digest, linkml first; the others render one, the text formalisms as {format, mediaType, document}",
                     },
-                    "entityType": type_schema(),
+                    "entityType": {
+                        "oneOf": [
+                            type_schema(),
+                            {
+                                "type": "array",
+                                "items": type_schema(),
+                                "minItems": 1,
+                                "maxItems": 64,
+                            },
+                        ],
+                        "description": "One entity type, or the list of the classes you need",
+                    },
                     "version": { "type": "integer", "minimum": 1, "description": "Model major version" },
                 },
                 "additionalProperties": false,
@@ -465,12 +486,10 @@ struct ReadArg {
 
 /// The entity selectors of the shared table (Architecture/07 §2, "The shared read parameter table").
 ///
-/// Two CIM 009 parameters are deliberately absent, because the REST surface does not forward them
-/// either and neither is a harmless passthrough (T-2299): `geoproperty` moves a geo filter to
-/// another GeoProperty, so a grant's own area would be tested against an attribute it was never
-/// written for, and `geometryProperty` copies an attribute's value into a GeoJSON `geometry`, which
-/// is a way past the attribute projection. Both come back on both surfaces at once, with the rule
-/// that keeps them narrow; publishing them here before then would be an argument that widens a read.
+/// Two CIM 009 parameters of this table are not arguments here, because neither surface serves
+/// them yet: `accept`, which changes the shape the answer narrowing reads, and `context`, which
+/// needs the `@context` allow-list no Endpoint manifest carries today (T-2299). Both are refused
+/// as unknown arguments until they arrive on the two surfaces together, with their rules.
 const SELECTOR_ARGS: &[ReadArg] = &[
     ReadArg {
         name: "type",
@@ -565,6 +584,20 @@ const SELECTOR_ARGS: &[ReadArg] = &[
             json!({
                 "type": "string", "maxLength": 8192,
                 "description": "GeoJSON coordinates of the reference geometry",
+            })
+        },
+    },
+    ReadArg {
+        // Judged against the grants, never forwarded on its own: an area a grant draws is
+        // drawn on `location`, so a geo query moved to another GeoProperty is refused by name
+        // rather than answered inside that area (T-2299, AG-85).
+        name: "geoproperty",
+        wire: "geoproperty",
+        shape: Shape::Text,
+        schema: || {
+            json!({
+                "type": "string", "maxLength": 256, "pattern": ATTR_NAME,
+                "description": "The GeoProperty the geo query applies to; location when absent, and only where the grant draws no area of its own",
             })
         },
     },
@@ -803,6 +836,20 @@ const REPRESENTATION_ARGS: &[ReadArg] = &[
                 "type": "array", "maxItems": 8,
                 "items": { "type": "string", "enum": ["keyValues", "concise", "sysAttrs", "normalized", "temporalValues", "aggregatedValues"] },
                 "description": "NGSI-LD options; sysAttrs adds the system members REST adds",
+            })
+        },
+    },
+    ReadArg {
+        // The value the broker copies into a GeoJSON `geometry` is no longer that attribute,
+        // so the answer narrowing cannot cut it: the attribute has to be one the grant covers
+        // before the request is sent (T-2299, AG-85).
+        name: "geometryProperty",
+        wire: "geometryProperty",
+        shape: Shape::Text,
+        schema: || {
+            json!({
+                "type": "string", "maxLength": 256, "pattern": ATTR_NAME,
+                "description": "The GeoProperty that becomes the geometry of a GeoJSON answer; only an attribute this endpoint serves you",
             })
         },
     },
@@ -1540,13 +1587,15 @@ fn resources(endpoint: &Endpoint, subject: &Subject) -> Value {
         "mimeType": "application/json",
     }));
 
+    // Every formalism the schema surface renders, in reading order, so a client that attaches
+    // resources rather than calling tools reaches the same documents (EP-46, T-1858).
     for model in &endpoint.models {
-        for artifact in ["json-schema", "context"] {
+        for artifact in schema::Artifact::ALL {
             listed.push(json!({
-                "uri": format!("schema://{}/v{}/{}", endpoint.slug, model.major, artifact),
-                "name": format!("{} v{} {}", model.name, model.major, artifact),
+                "uri": schema_uri(&endpoint.slug, model.major, artifact),
+                "name": format!("{} v{} {}", model.name, model.major, artifact.format_name()),
                 "description": "A rendered schema artifact of this space's data model.",
-                "mimeType": "application/json",
+                "mimeType": artifact.media_type(),
             }));
         }
     }
@@ -1679,10 +1728,14 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
         }
         let (version, artifact) = path.split_once('/')?;
         let major = version.strip_prefix('v')?.parse().ok()?;
-        return matches!(artifact, "json-schema" | "context").then(|| Resource::Schema {
-            major,
-            format: artifact.to_owned(),
-        });
+        // The `format` name the summary publishes, and the REST file name for the same
+        // document: one artifact, whichever spelling the client copied (EP-52).
+        return schema::Artifact::from_format(artifact)
+            .or_else(|| schema::artifact_of(artifact, ""))
+            .map(|artifact| Resource::Schema {
+                major,
+                format: artifact.format_name().to_owned(),
+            });
     }
     None
 }
@@ -1858,17 +1911,99 @@ fn output_schema(tool: &Tool) -> Value {
     })
 }
 
-/// The artifact one `format` name renders, for the five formalisms that are text rather than
-/// JSON. The REST route names them by file name or path segment; here the name is the format.
-fn text_formalism(format: &str) -> Option<schema::Artifact> {
-    match format {
-        "linkml" => Some(schema::Artifact::LinkMl),
-        "shacl" => Some(schema::Artifact::Shacl),
-        "owl" => Some(schema::Artifact::Owl),
-        "rdf" => Some(schema::Artifact::Rdf),
-        "markdown" => Some(schema::Artifact::Markdown),
-        _ => None,
+/// The largest document one tool answer carries (T-1858).
+///
+/// An MCP answer is read into a model's context window, so a schema of several megabytes
+/// costs the caller its whole window and is of no use to it. A document over this is refused
+/// with the way to narrow it rather than cut: half a SHACL file is not SHACL, and a model
+/// that silently lost its last classes is the one leak a schema surface must not have.
+const DOCUMENT_BOUND: usize = 1024 * 1024;
+
+/// The formalism an agent is told to read before the others.
+///
+/// LinkML carries the classes, the slots, their ranges and their descriptions in one small
+/// YAML document; the Turtle renderings say the same in more bytes, and the JSON Schema says
+/// less about the meaning of a slot.
+const RECOMMENDED: schema::Artifact = schema::Artifact::LinkMl;
+
+/// The entity types a `describe_schema` call narrows to: one name, or the list of classes an
+/// agent needs (T-1858). Absent means every type the caller may be described.
+fn narrowed_to<'a>(
+    visible: &schema::Visible,
+    argument: Option<&'a Value>,
+) -> Result<schema::Visible, String> {
+    let wanted: Vec<&'a str> = match argument {
+        None => return Ok(visible.clone()),
+        Some(Value::String(one)) => vec![one.as_str()],
+        Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
+        Some(_) => return Err("`entityType` is one entity type or a list of them".to_owned()),
+    };
+    visible.only_each(wanted).map_err(|unknown| {
+        format!("`{unknown}` is not an entity type this endpoint describes for you")
+    })
+}
+
+/// The catalogue of what this endpoint describes, as an agent reads it (EP-46, T-1858).
+///
+/// The models and their digests are the ones the REST index publishes, so the two doors
+/// cannot disagree about what exists; what is added here is the reading order. `recommended`
+/// names the one formalism to load first, and every artifact is listed with the `format` that
+/// asks for it, its media type, its size, the digest of the very bytes a fetch returns, and
+/// the `schema://` URI that attaches it as a resource.
+///
+/// The artifacts are listed per model major rather than per model, because the major is what
+/// a fetch addresses: two models of one major render into one document, and a digest taken
+/// per model would then be the digest of nothing a caller can ask for.
+fn schema_summary(endpoint: &Endpoint, visible: &schema::Visible) -> Value {
+    // The very digest function the REST index is built with: the two doors publish one
+    // catalogue of one set of documents, so a client may cache on either (EP-46, SP-16).
+    let digest = |body: &[u8]| sha256_hex(body);
+    let mut document = schema::index(endpoint, visible, digest);
+
+    let mut majors: Vec<u32> = endpoint.models.iter().map(|model| model.major).collect();
+    majors.sort_unstable();
+    majors.dedup();
+
+    let mut listed = Vec::new();
+    for major in majors {
+        let models: Vec<&Model> = endpoint
+            .models
+            .iter()
+            .filter(|model| model.major == major)
+            .collect();
+        for (artifact, bytes, sha256) in schema::measured(&models, visible, &digest) {
+            listed.push(json!({
+                "format": artifact.format_name(),
+                "mediaType": artifact.media_type(),
+                "version": major,
+                "bytes": bytes,
+                "sha256": sha256,
+                "uri": schema_uri(&endpoint.slug, major, artifact),
+            }));
+        }
     }
+
+    // The per-model copy of the same digests, under a second name and in file-name spelling,
+    // would only be a second thing to keep true.
+    if let Some(models) = document["models"].as_array_mut() {
+        for model in models {
+            if let Value::Object(described) = model {
+                described.remove("artifacts");
+            }
+        }
+    }
+    document["recommended"] = json!(RECOMMENDED.format_name());
+    document["recommendedBecause"] = json!(
+        "LinkML carries the classes, their slots, ranges and descriptions in one small \
+         document; read it first and ask for another formalism only when a tool needs it."
+    );
+    document["artifacts"] = Value::Array(listed);
+    document
+}
+
+/// The `resources/read` URI of one artifact of one major.
+fn schema_uri(slug: &str, major: u32, artifact: schema::Artifact) -> String {
+    format!("schema://{slug}/v{major}/{}", artifact.format_name())
 }
 
 /// The data model, in the formalism asked for and narrowed to the caller's grant (EP-47).
@@ -1881,22 +2016,14 @@ fn describe_schema(
     subject: &Subject,
     arguments: &Map<String, Value>,
 ) -> Result<Value, String> {
-    let mut visible = schema::visible(subject, endpoint, crate::pdp::now());
-    if let Some(wanted) = arguments.get("entityType").and_then(Value::as_str) {
-        visible = visible.only(wanted).ok_or_else(|| {
-            format!("`{wanted}` is not an entity type this endpoint describes for you")
-        })?;
-    }
+    let visible = schema::visible(subject, endpoint, crate::pdp::now());
+    let visible = narrowed_to(&visible, arguments.get("entityType"))?;
     let format = arguments
         .get("format")
         .and_then(Value::as_str)
         .unwrap_or("summary");
     if format == "summary" {
-        return Ok(schema::index(endpoint, &visible, |body| {
-            serde_json::to_vec(body)
-                .map(|bytes| sha256_hex(&bytes))
-                .unwrap_or_default()
-        }));
+        return Ok(schema_summary(endpoint, &visible));
     }
 
     let major = arguments.get("version").and_then(Value::as_u64);
@@ -1909,24 +2036,47 @@ fn describe_schema(
         return Err("this endpoint publishes no model of that version".to_owned());
     }
 
+    let Some(artifact) = schema::Artifact::from_format(format) else {
+        return Err(format!(
+            "`{format}` is not a formalism this endpoint renders: it serves summary, \
+             json-schema, context, linkml, shacl, owl, rdf and markdown"
+        ));
+    };
+
     let mut redacted = Vec::new();
-    match format {
-        "json-schema" => Ok(schema::json_schema(&models, &visible, &mut redacted)),
-        "context" => Ok(schema::context(&models, &visible, &mut redacted)),
-        // The five text formalisms, rendered from the projected schema the way the REST route
-        // renders them; `Accept` plays no part here, the name of the format decides.
-        other => match text_formalism(other) {
-            Some(artifact) => Ok(json!({
-                "format": other,
-                "mediaType": artifact.media_type(),
-                "document": schema::render(&models, artifact, &visible),
-            })),
-            None => Err(format!(
-                "`{other}` is not a formalism this endpoint renders: it serves summary, \
-                 json-schema, context, linkml, shacl, owl, rdf and markdown"
-            )),
-        },
+    let rendered = match artifact {
+        // The two JSON formalisms answer as the object they are; the five text ones as
+        // `{format, mediaType, document}`, rendered the way the REST route renders them.
+        // `Accept` plays no part here, the name of the format decides.
+        schema::Artifact::JsonSchema => schema::json_schema(&models, &visible, &mut redacted),
+        schema::Artifact::Context => schema::context(&models, &visible, &mut redacted),
+        other => json!({
+            "format": format,
+            "mediaType": other.media_type(),
+            "document": schema::render(&models, other, &visible),
+        }),
+    };
+    within_bound(format, &rendered)?;
+    Ok(rendered)
+}
+
+/// A document too large for one answer is refused with the way to make it smaller, never cut
+/// down to the bound (T-1858).
+fn within_bound(format: &str, rendered: &Value) -> Result<(), String> {
+    let bytes = match rendered.get("document").and_then(Value::as_str) {
+        Some(document) => document.len(),
+        None => serde_json::to_vec(rendered)
+            .map(|body| body.len())
+            .unwrap_or(0),
+    };
+    if bytes <= DOCUMENT_BOUND {
+        return Ok(());
     }
+    Err(format!(
+        "the {format} document of this model is {bytes} bytes, over the {DOCUMENT_BOUND} one \
+         answer carries: ask for the classes you need with `entityType` (one name or a list \
+         of them), or for one model major with `version`"
+    ))
 }
 
 /// What an agent is told about a refusal: the status, and the problem document's own words

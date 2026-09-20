@@ -147,12 +147,20 @@ fn scan(text: &str) -> Result<Vec<Token>, ParamError> {
             }
             '\'' => {
                 let (text, next) = quoted(&bytes, at)?;
+                // The value is written into the NGSI-LD `q` between double quotes, so a value
+                // carrying one would close that string early and the rest of it would become
+                // structure. The `q` is then unbalanced, the evaluator drops the caller's filter
+                // whole (`conjoin`, `is_balanced`) and the answer carries the rows the filter was
+                // meant to remove. A `400` naming the value is the honest answer (T-2348).
+                if text.contains('"') {
+                    return Err(refuse("a value may not contain a double quote"));
+                }
                 tokens.push(Token::Text(text));
                 at = next;
             }
             '"' => {
                 let (name, next) = double_quoted(&bytes, at)?;
-                tokens.push(Token::Word(name));
+                tokens.push(Token::Word(identifier(name)?));
                 at = next;
             }
             '<' | '>' | '=' | '!' => {
@@ -190,6 +198,23 @@ fn quoted(chars: &[char], at: usize) -> Result<(String, usize), ParamError> {
         i += 1;
     }
     Err(refuse("a quoted value is never closed"))
+}
+
+/// The characters an attribute name may carry into the NGSI-LD `q` (T-2348).
+///
+/// A double-quoted identifier is CQL2's escape hatch for a name that is not a bare word, and what
+/// it carries is written into the `q` unquoted: `"a)|(b" > 5` became `a)|(b>5`, which is not a
+/// balanced filter, so `conjoin` dropped the caller's whole filter and the caller got the rows it
+/// asked not to see. The set below is exactly what `word` accepts for a bare name, which is what
+/// an NGSI-LD attribute name may be made of anyway (CIM 009 4.9).
+fn identifier(name: String) -> Result<String, ParamError> {
+    let usable = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | ':' | '-');
+    if name.is_empty() || !name.chars().all(usable) {
+        return Err(refuse(format!(
+            "{name} is not an attribute name: a name is made of letters, digits, `_`, `.`, `:` and `-`"
+        )));
+    }
+    Ok(name)
 }
 
 /// A `"..."` identifier, which CQL2 allows for a name that is not a bare word.

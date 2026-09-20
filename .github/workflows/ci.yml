@@ -21,6 +21,16 @@ jobs:
       # not first in the image build (T-0616).
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --lib --bins --locked
+      # The rustdoc of a jc-core field is the JSON Schema `description` the Portal ships, the
+      # OpenAPI document publishes and every MCP tool list hands a model, so a broken
+      # intra-doc link is a broken sentence in four places (T-2145, UI-02). One crate, no
+      # dependencies: seconds, which is why it belongs in the fast lane and the workspace-wide
+      # doc build stays in ci-full.
+      - run: cargo doc -p jc-core --no-deps --locked
+        env: { RUSTDOCFLAGS: "-D warnings" }
+      # And the contract those descriptions make: every field has one, and none of them is a
+      # credential. `--lib --bins` above does not run an integration test (T-2145).
+      - run: cargo test -p jc-core --test kind_documentation_tests --locked
   model-tools:
     # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
     # than after it, so the fast lane stays as long as its slowest job and no longer.

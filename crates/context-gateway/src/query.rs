@@ -254,6 +254,47 @@ fn compact(name: &str) -> String {
     }
 }
 
+/// The GeoProperty a grant's own area is drawn on.
+///
+/// A `Policy` writes its spatial constraint as `georel`, `geometry` and `coordinates` and names
+/// no property, so the area means what CIM 009 clause 4.10 means by default: `location`.
+const GRANTED_GEOPROPERTY: &str = "location";
+
+/// Why the caller's `geoproperty` or `geometryProperty` cannot be served as sent (AG-85, T-2299).
+///
+/// Both parameters move the attribute a decision is taken on, and the words of a grant were
+/// written for the attribute the grant names, so neither can ride through the way a window or a
+/// format does. The refusal names the parameter, because a request for a member the caller may
+/// not read is a bad request and not an empty answer: an attribute's existence is not the secret
+/// here, its value is (CIM 009 clause 5.5.2).
+pub fn geo_refusal(params: &[(String, String)], constraints: &Constraints) -> Option<String> {
+    if let Some(property) = first(params, "geoproperty") {
+        // A grant that draws no area constrains no GeoProperty, so the caller's own pair of
+        // property and area goes upstream together and narrows only itself.
+        if !constraints.geo_areas.is_empty() && compact(property) != GRANTED_GEOPROPERTY {
+            return Some(format!(
+                "geoproperty: the area this endpoint grants you is drawn on \
+                 `{GRANTED_GEOPROPERTY}`, so a geo query on another GeoProperty cannot be \
+                 answered inside it (CIM 009 clause 5.5.2). Send the geo query without \
+                 `geoproperty`, or ask for a grant drawn on the property you need"
+            ));
+        }
+    }
+    if let Some(property) = first(params, "geometryProperty") {
+        let name = compact(property);
+        let served = constraints.served.is_empty() || constraints.served.contains(&name);
+        if !served || constraints.hidden.contains(&name) {
+            return Some(
+                "geometryProperty: the GeoJSON geometry is that attribute's own value, and \
+                 this endpoint does not serve you the attribute you named. Ask for one of the \
+                 attributes the answer already carries"
+                    .to_owned(),
+            );
+        }
+    }
+    None
+}
+
 /// The query string of a write: the caller's harmless parameters and nothing else.
 ///
 /// A write is bounded by the write guard, which reads the payload; narrowing parameters
@@ -318,6 +359,19 @@ pub fn upstream(
         .flatten()
     {
         out.extend(split_compound(compound));
+    }
+
+    // The two parameters that choose an attribute rather than a window (T-2299, AG-85). They
+    // are forwarded only after [`geo_refusal`] has passed them: `geoproperty` rides with the
+    // geo compound and never alone, because alone it selects nothing and would only offer a
+    // grant's own area a second property to be tested against.
+    if let Some(property) = first(params, "geoproperty") {
+        if constraints.geo_q.is_some() {
+            out.push(("geoproperty".to_owned(), property.to_owned()));
+        }
+    }
+    if let Some(property) = first(params, "geometryProperty") {
+        out.push(("geometryProperty".to_owned(), property.to_owned()));
     }
 
     if !selects(constraints) && !fallback_types.is_empty() {

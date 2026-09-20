@@ -48,8 +48,9 @@ pub fn load(
 }
 
 /// [`load`], plus every preview under `previews` rendered with its prefix (CC-78). A preview
-/// that does not render is left out with the reason in the log; a slug or a space `main`
-/// already serves is never taken over by one.
+/// that does not render is left out with the reason in the log; a slug or a tenant `main`
+/// already serves is never taken over by one, so a preview answers beside `main` and never in
+/// its place (PF-83, T-1709).
 #[allow(clippy::type_complexity)]
 pub fn load_with_previews(
     dir: &Path,
@@ -77,11 +78,20 @@ pub fn load_with_previews(
             }
         };
         let slugs: BTreeSet<String> = endpoints.iter().map(|e| e.slug.clone()).collect();
-        let segments: BTreeSet<String> = spaces.iter().map(|s| s.endpoint.space.clone()).collect();
+        // Every tenant already answered for, whether a space manifest names it or an endpoint
+        // alone reaches it: a preview record on one of them would read and write data of the
+        // project the copy came from, which is the one thing a preview may never do (PF-83).
+        let segments: BTreeSet<String> = spaces
+            .iter()
+            .map(|s| s.endpoint.space.clone())
+            .chain(endpoints.iter().map(|e| e.space.clone()))
+            .collect();
         endpoints.extend(
             endpoints_with_models(&repo, Some(&root))
                 .into_iter()
-                .filter(|endpoint| !slugs.contains(&endpoint.slug)),
+                .filter(|endpoint| {
+                    !slugs.contains(&endpoint.slug) && !segments.contains(&endpoint.space)
+                }),
         );
         spaces.extend(
             spaces_of(&repo, Some(&root))
