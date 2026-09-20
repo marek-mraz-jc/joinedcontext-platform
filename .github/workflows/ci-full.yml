@@ -19,6 +19,23 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo doc --workspace --no-deps
         env: { RUSTDOCFLAGS: "-D warnings" }
+  readme:
+    # Every command the README tells a newcomer to type is run here (T-2144, TS-19). A
+    # renamed crate, a moved script or a flag that no longer exists then fails a lane rather
+    # than somebody's first hour. Only the Build and Test sections run; "Run locally" starts
+    # a server and is read by eye.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.12" }
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: the extractor reads what it is meant to read
+        run: python3 scripts/ci/check-readme-commands.py --selftest
+      - run: python3 scripts/ci/check-readme-commands.py
   supply-chain:
     runs-on: ubuntu-latest
     timeout-minutes: 15
