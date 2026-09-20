@@ -518,6 +518,56 @@ async fn a_broker_that_does_not_answer_is_a_502_that_names_neither_host_nor_port
 }
 
 #[tokio::test]
+async fn a_path_that_is_not_absolute_never_becomes_another_authority() {
+    // T-2337: `self.base` ends at the authority, so a path without a leading `/` is parsed as
+    // more authority — `@evil.example/x` makes the broker's address the userinfo of another host
+    // and the hop leaves the upstream GW20 fixed at start-up. No caller writes one today; the
+    // refusal is what keeps that true when one is rewritten.
+    let (base, log) = upstream(200, "[]", Vec::new()).await;
+    let broker = Broker::new(base);
+
+    // Not `""`: an empty path is the broker's own root (`an_empty_path_addresses_the_root_…`),
+    // it carries no authority to be mistaken for one.
+    for hostile in [
+        "@evil.example/x",
+        "%2f@evil/x",
+        "ngsi-ld/v1/entities",
+        "evil.example",
+    ] {
+        let refused = broker
+            .send(Method::GET, hostile, HeaderMap::new(), Body::empty())
+            .await
+            .expect_err("a path that is not absolute is refused");
+        assert!(
+            matches!(refused, ProxyError::Uri(_)),
+            "{hostile}: {refused}"
+        );
+    }
+    assert!(
+        log.lock().expect("the log").is_empty(),
+        "nothing was forwarded"
+    );
+}
+
+#[tokio::test]
+async fn the_refusal_of_a_relative_path_is_a_502_that_names_no_host() {
+    let error = Broker::new("http://broker.jc-context-broker.svc.cluster.local:1026")
+        .send(
+            Method::GET,
+            "@evil.example/x",
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await
+        .expect_err("a path that is not absolute is refused");
+    let problem = ProblemDetails::from(error);
+    assert_eq!(problem.status, 502);
+    let said = serde_json::to_string(&problem).expect("the body");
+    assert!(!said.contains("cluster.local"), "{said}");
+    assert!(!said.contains("evil.example"), "{said}");
+}
+
+#[tokio::test]
 async fn an_unusable_upstream_uri_is_also_a_502_that_says_nothing_about_the_upstream() {
     let error = Broker::new("http://broker.jc-context-broker.svc.cluster.local:1026")
         .send(

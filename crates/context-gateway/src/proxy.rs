@@ -141,6 +141,13 @@ impl Broker {
     ///
     /// `path_and_query` is absolute and already percent-encoded, as it came off the wire:
     /// re-encoding it would corrupt the URN in an entity path.
+    ///
+    /// Absolute is checked, not assumed (T-2337, GW20). `self.base` ends at the authority with no
+    /// trailing slash, so a path that does not begin with `/` is glued onto that authority and the
+    /// URI parser reads what follows as more of it: `@evil.example/x` makes the broker's own
+    /// address the userinfo of `evil.example`, and the hop leaves the upstream the deployment
+    /// configured. Every caller passes a leading slash today; the check is what keeps that true
+    /// when one of them is rewritten.
     pub async fn send(
         &self,
         method: Method,
@@ -148,6 +155,13 @@ impl Broker {
         headers: HeaderMap,
         body: Body,
     ) -> Result<Response<Body>, ProxyError> {
+        // An empty path is the broker's root and has no authority to confuse; every other
+        // relative one does.
+        if !path_and_query.is_empty() && !path_and_query.starts_with('/') {
+            return Err(ProxyError::Uri(
+                "the forwarded path is not absolute".to_owned(),
+            ));
+        }
         let uri: Uri = format!("{}{path_and_query}", self.base)
             .parse()
             .map_err(|e: axum::http::uri::InvalidUri| ProxyError::Uri(e.to_string()))?;

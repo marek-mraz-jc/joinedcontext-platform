@@ -155,6 +155,13 @@ pub fn was_projected(before: &Map<String, Value>, after: &Map<String, Value>) ->
 /// is free to answer an entity of any type it likes. The broker is not the authority on what a
 /// caller may read, so the type of what came back is judged here (T-2130).
 pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
+    // Only an object is an entity. An array, a string or a number carries no type and no id to
+    // judge, so under a grant that narrows neither — an ordinary attribute grant — both halves
+    // below would say yes to it, and `project_entity_to` leaves anything but an object alone:
+    // a nested array would reach the caller with every attribute it carries (T-2335, T-2131).
+    if !entity.is_object() {
+        return false;
+    }
     type_granted(entity, &constraints.types) && id_permitted(entity, &constraints.id_patterns)
 }
 

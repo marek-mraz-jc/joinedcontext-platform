@@ -1,4 +1,5 @@
-use context_gateway::pdp::projection::{project, project_entity, ungranted};
+use context_gateway::pdp::evaluator::Constraints;
+use context_gateway::pdp::projection::{permitted, project, project_entity, ungranted};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -123,4 +124,46 @@ fn an_endpoint_can_hide_an_attribute_the_grant_allows() {
     assert!(everything.get("operatorPhone").is_none());
     assert_eq!(everything["pm25"]["value"], json!(12.0));
     assert_eq!(everything["type"], json!("AirQualityObserved"));
+}
+
+/// T-2335, T-2131: only an object is an entity. Under a grant that narrows neither the type nor
+/// the id, `type_granted` and `id_permitted` both say yes to any value, and `project_entity_to`
+/// returns early on anything that is not an object — so an element that is not an entity would
+/// reach the caller with every attribute it carries.
+#[test]
+fn nothing_but_an_object_is_an_entity_a_read_may_serve() {
+    let wide = Constraints {
+        tenant: "ovzdusie".to_owned(),
+        ..Constraints::default()
+    };
+    assert!(wide.types.is_empty() && wide.id_patterns.is_empty());
+    assert!(permitted(&station(), &wide), "an entity is still served");
+
+    for not_an_entity in [
+        json!([station()]),
+        json!([]),
+        json!("urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-01"),
+        json!(7),
+        json!(true),
+        json!(null),
+    ] {
+        assert!(
+            !permitted(&not_an_entity, &wide),
+            "{not_an_entity} was served as an entity"
+        );
+    }
+}
+
+/// The same under a grant that does narrow the type, which is what every Policy writes: an
+/// `EntitySelector` requires `type` (`jc-core/src/kinds/policy.rs:525`), so this is the shape the
+/// read path really sees and the one the guard above is the second line behind.
+#[test]
+fn a_type_grant_already_refuses_what_carries_no_type() {
+    let narrowed = Constraints {
+        tenant: "ovzdusie".to_owned(),
+        types: granted(&["AirQualityObserved"]),
+        ..Constraints::default()
+    };
+    assert!(permitted(&station(), &narrowed));
+    assert!(!permitted(&json!([station()]), &narrowed));
 }
