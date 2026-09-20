@@ -1871,14 +1871,33 @@ async fn file_geojson(
     };
 
     let params = query::parse(request.uri().query().unwrap_or_default());
-    let (entities, restricted) =
-        match query_entities(&gateway, &endpoint, &subject, &params, &mut request).await {
-            Ok(answer) => answer,
-            Err(problem) => return *problem,
-        };
+    // A download is the whole dataset, paged out of the broker and held to this endpoint's
+    // ceilings, exactly like `file.csv` (EP-44, T-1700). One broker query instead would answer
+    // a page and call it a file: a truncated FeatureCollection is indistinguishable from a
+    // complete one, and the caller acts on half the data.
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    let (entities, restricted) = match paged_entities(
+        &gateway,
+        &endpoint,
+        &subject,
+        &params,
+        &mut request,
+        &limits,
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(problem) => return *problem,
+    };
 
     match geojson::feature_collection(&entities) {
         Ok(collection) => {
+            // The byte ceiling is the endpoint's own, measured on what would be sent (EP-44).
+            if serde_json::to_vec(&collection)
+                .is_ok_and(|bytes| bytes.len() as u64 > limits.max_bytes)
+            {
+                return too_large();
+            }
             let mut response = json_response(&collection);
             response.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
