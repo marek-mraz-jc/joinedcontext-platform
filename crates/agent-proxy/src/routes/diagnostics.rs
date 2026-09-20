@@ -156,7 +156,19 @@ pub async fn handler(
                 .map_or(text.len(), |(i, _)| i);
             (s, redact(&text[..cut]))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, redact(&e.to_string())),
+        Err(e) => {
+            log_request(&AuditEntry {
+                run_id: &run.id,
+                user: &run.created_by,
+                upstream: "portal",
+                method: "GET",
+                path: &path,
+                status: 502,
+                bytes: 0,
+                duration_ms: start.elapsed().as_millis(),
+            });
+            return super::upstream_unavailable(super::PORTAL, &e);
+        }
     };
 
     log_request(&AuditEntry {
