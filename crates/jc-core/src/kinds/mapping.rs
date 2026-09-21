@@ -155,8 +155,8 @@ impl MappingTest {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_relative_path("spec.tests.input", &self.input)?;
-        validate_relative_path("spec.tests.expect", &self.expect)
+        names::validate_relative_path("spec.tests.input", &self.input)?;
+        names::validate_relative_path("spec.tests.expect", &self.expect)
     }
 }
 
@@ -190,10 +190,10 @@ impl MappingArtifacts {
     /// Validates that each named artifact is a relative path (DM-52).
     pub fn validate(&self) -> Result<()> {
         if let Some(path) = &self.bloblang {
-            validate_relative_path("spec.artifacts.bloblang", path)?;
+            names::validate_relative_path("spec.artifacts.bloblang", path)?;
         }
         if let Some(path) = &self.gateway_ir {
-            validate_relative_path("spec.artifacts.gatewayIr", path)?;
+            names::validate_relative_path("spec.artifacts.gatewayIr", path)?;
         }
         Ok(())
     }
@@ -375,17 +375,4 @@ impl MappingSpec {
     pub fn compiled_bloblang_path(&self, name: &str) -> String {
         format!("generated/{name}.blobl")
     }
-}
-
-/// Rejects absolute paths and `..` traversal; a mapping's examples stay inside its directory.
-fn validate_relative_path(field: &'static str, path: &str) -> Result<()> {
-    let trimmed = path.strip_prefix("./").unwrap_or(path);
-    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
-        return Err(Error::Name {
-            field,
-            value: path.to_string(),
-            reason: "path must be relative and must not contain a `..` segment",
-        });
-    }
-    Ok(())
 }

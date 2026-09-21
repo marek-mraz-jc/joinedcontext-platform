@@ -126,7 +126,7 @@ pub struct GitSource {
 impl AppSource {
     fn validate(&self) -> Result<()> {
         match (&self.path, &self.git) {
-            (Some(path), None) => validate_relative_path("source.path", path),
+            (Some(path), None) => names::validate_relative_path("source.path", path),
             (None, Some(git)) => {
                 if !git.url.starts_with("https://") {
                     return Err(Error::Name {
@@ -143,7 +143,7 @@ impl AppSource {
                     });
                 }
                 match &git.path {
-                    Some(p) => validate_relative_path("source.git.path", p),
+                    Some(p) => names::validate_relative_path("source.git.path", p),
                     None => Ok(()),
                 }
             }
@@ -255,7 +255,7 @@ impl DataNeed {
 
     fn validate(&self) -> Result<()> {
         names::validate_space_name(self.context_space_ref.name())
-            .map_err(|e| rename(e, "dataNeeds.contextSpaceRef"))?;
+            .map_err(|e| names::rename(e, "dataNeeds.contextSpaceRef"))?;
         if let Some(kind) = self.context_space_ref.kind() {
             if kind != "ContextSpace" {
                 return Err(Error::Kind {
@@ -274,7 +274,8 @@ impl DataNeed {
         }
         let mut seen = BTreeSet::new();
         for entity_type in &self.types {
-            names::validate_entity_type(entity_type).map_err(|e| rename(e, "dataNeeds.types"))?;
+            names::validate_entity_type(entity_type)
+                .map_err(|e| names::rename(e, "dataNeeds.types"))?;
             if !seen.insert(entity_type) {
                 return Err(Error::Name {
                     field: "dataNeeds.types",
@@ -537,28 +538,4 @@ impl fmt::Display for AppLifecycle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// Rewrites the `field` of an [`Error::Name`] so the caller sees the manifest path.
-fn rename(err: Error, field: &'static str) -> Error {
-    match err {
-        Error::Name { reason, value, .. } => Error::Name {
-            field,
-            value,
-            reason,
-        },
-        other => other,
-    }
-}
-
-fn validate_relative_path(field: &'static str, path: &str) -> Result<()> {
-    let trimmed = path.strip_prefix("./").unwrap_or(path);
-    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
-        return Err(Error::Name {
-            field,
-            value: path.to_string(),
-            reason: "path must be relative and must not contain a `..` segment",
-        });
-    }
-    Ok(())
 }

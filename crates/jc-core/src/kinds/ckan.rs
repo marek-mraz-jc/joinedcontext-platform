@@ -139,7 +139,7 @@ impl CkanPublication {
 
     fn validate(&self, enabled: &[Representation]) -> Result<()> {
         names::validate_dns1123_label(self.instance_ref.name())
-            .map_err(|e| rename(e, "publish.ckan.instanceRef"))?;
+            .map_err(|e| names::rename(e, "publish.ckan.instanceRef"))?;
         if let Some(kind) = self.instance_ref.kind() {
             if kind != CkanInstanceSpec::KIND {
                 return Err(Error::Kind {
@@ -252,17 +252,5 @@ fn validate_license(value: &str) -> Result<()> {
 impl fmt::Display for DataStoreRefresh {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
-    }
-}
-
-/// Rewrites the `field` of an [`Error::Name`] so the caller sees the manifest path.
-fn rename(err: Error, field: &'static str) -> Error {
-    match err {
-        Error::Name { reason, value, .. } => Error::Name {
-            field,
-            value,
-            reason,
-        },
-        other => other,
     }
 }
