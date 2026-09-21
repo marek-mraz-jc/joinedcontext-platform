@@ -222,6 +222,22 @@ pub(crate) fn checked(raw: &str, allowed: &[String]) -> Result<Url, Box<Response
             .into_response(),
         ));
     }
+    // An address written into the URL is never resolved, so the resolver never sees it: a
+    // private one is refused here, even when a profile lists it (T-1304).
+    let literal = match url.host() {
+        Some(url::Host::Ipv4(ip)) => Some(std::net::IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::V6(ip)),
+        _ => None,
+    };
+    if let Some(ip) = literal.filter(|ip| !crate::public_dns::is_public(*ip)) {
+        return Err(Box::new(
+            forbidden(format!(
+                "'{ip}' is a private, loopback or link-local address; the fetch route reaches \
+                 public hosts only (AG-65)"
+            ))
+            .into_response(),
+        ));
+    }
     Ok(url)
 }
 
@@ -238,7 +254,13 @@ pub(crate) async fn follow(
     for _ in 0..=MAX_REDIRECTS {
         let host = url.host_str().unwrap_or_default().to_owned();
         let response = outbound(&state.egress, &url).send().await.map_err(|e| {
-            jc_core::ProblemDetails::new(502, "upstream-unavailable", e.to_string()).into_response()
+            // A listed host whose DNS answers with a private address is refused, not reported
+            // as an upstream that could not be reached (T-1304).
+            match crate::public_dns::refused(&e) {
+                Some(private) => forbidden(private.to_string()).into_response(),
+                None => jc_core::ProblemDetails::new(502, "upstream-unavailable", e.to_string())
+                    .into_response(),
+            }
         })?;
         if !response.status().is_redirection() {
             return Ok((response, host));
