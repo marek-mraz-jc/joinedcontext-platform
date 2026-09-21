@@ -595,6 +595,12 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
                 "{id} references version {} of DataModel `{}`, which is at {} (MP-01)",
                 wanted.version, wanted.name, spec.version
             ),
+            // The spec's own rules keep `linkml` inside the model's folder: an invalid one is
+            // never opened (CC-08).
+            Some((spec, _)) if spec.validate().is_err() => format!(
+                "{id} references DataModel `{}`, whose spec does not validate",
+                wanted.name
+            ),
             Some((spec, model_path)) => {
                 let linkml = repo_dir
                     .join(&model_path)

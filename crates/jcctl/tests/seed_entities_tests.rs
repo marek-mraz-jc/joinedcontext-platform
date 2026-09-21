@@ -389,3 +389,42 @@ fn a_space_without_a_seed_folder_and_a_project_without_spaces_seed_nothing() {
     );
     assert!(seed_entities(&root).expect("nothing").is_empty());
 }
+
+/// CC-72: a seed folder that is a link out of the checkout is not read: the repository is the
+/// whole of what `apply` writes.
+#[test]
+fn a_symlinked_seed_directory_pointing_outside_the_repo_is_not_followed() {
+    let outside = checkout("seed-outside-target", &[("x.json", &air("outside"))]);
+    let root = checkout(
+        "seed-outside-link",
+        &[("projects/p/spaces/s/entities/.keep", "")],
+    );
+    std::os::unix::fs::symlink(&outside, root.join("projects/p/spaces/s").join(SEED))
+        .expect("the link");
+    let read = seed_entities(&root);
+    assert!(
+        !matches!(&read, Ok(found) if found.iter().any(|e| e.id.ends_with(":outside"))),
+        "an entity from outside the checkout was seeded: {read:?}"
+    );
+}
+
+/// CC-72: a seed file that is a link out of the checkout is refused by name, not read.
+#[test]
+fn a_symlinked_seed_file_pointing_outside_the_repo_is_refused() {
+    let outside = checkout("seed-outside-file", &[("x.json", &air("outside"))]);
+    let root = checkout(
+        "seed-outside-file-link",
+        &[(&format!("projects/p/spaces/s/{SEED}/own.json"), &air("own"))],
+    );
+    std::os::unix::fs::symlink(
+        outside.join("x.json"),
+        root.join("projects/p/spaces/s")
+            .join(SEED)
+            .join("linked.json"),
+    )
+    .expect("the link");
+    match seed_entities(&root) {
+        Err(SeedError::Outside { path }) => assert!(path.ends_with("linked.json"), "{path}"),
+        other => panic!("a linked seed file was not refused: {other:?}"),
+    }
+}

@@ -69,6 +69,13 @@ pub enum SeedError {
         /// The second.
         second: String,
     },
+    /// A seed folder or file resolves outside the checkout, so it is refused rather than read:
+    /// the repository is the whole of what `apply` writes (CC-08).
+    #[error("{path}: leads outside the repository")]
+    Outside {
+        /// The folder or file, as found in the checkout.
+        path: String,
+    },
 }
 
 /// Every seed entity of a repository checkout, in path order.
@@ -79,8 +86,12 @@ pub fn seed_entities(repo_dir: &Path) -> Result<Vec<SeedEntity>, SeedError> {
     let mut found: Vec<SeedEntity> = Vec::new();
     let mut seen: BTreeMap<(String, String), PathBuf> = BTreeMap::new();
 
-    for (project, space, dir) in seed_dirs(repo_dir)? {
-        for file in json_files(&dir)? {
+    let root = repo_dir.canonicalize().map_err(|e| SeedError::Unreadable {
+        path: repo_dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for (project, space, dir) in seed_dirs(&root, repo_dir)? {
+        for file in json_files(&root, &dir)? {
             for body in entities_in(&file)? {
                 let id = entity_id(&body, &file)?;
                 let key = (space.clone(), id.clone());
@@ -161,14 +172,15 @@ fn same(declared: &Value, live: &Value) -> bool {
 }
 
 /// `(project, space, path)` of every seed folder in the checkout, in path order.
-fn seed_dirs(repo_dir: &Path) -> Result<Vec<(String, String, PathBuf)>, SeedError> {
+fn seed_dirs(root: &Path, repo_dir: &Path) -> Result<Vec<(String, String, PathBuf)>, SeedError> {
     let projects = repo_dir.join("projects");
     let mut dirs = Vec::new();
-    for project in subdirectories(&projects)? {
+    for project in subdirectories(root, &projects)? {
         let name = file_name(&project);
-        for space in subdirectories(&project.join("spaces"))? {
+        for space in subdirectories(root, &project.join("spaces"))? {
             let seed = space.join(SEED_DIR);
             if seed.is_dir() {
+                inside(root, &seed)?;
                 dirs.push((name.clone(), file_name(&space), seed));
             }
         }
@@ -177,20 +189,24 @@ fn seed_dirs(repo_dir: &Path) -> Result<Vec<(String, String, PathBuf)>, SeedErro
 }
 
 /// The directories directly inside `parent`, sorted. A missing parent is none of them.
-fn subdirectories(parent: &Path) -> Result<Vec<PathBuf>, SeedError> {
+fn subdirectories(root: &Path, parent: &Path) -> Result<Vec<PathBuf>, SeedError> {
     if !parent.is_dir() {
         return Ok(Vec::new());
     }
+    inside(root, parent)?;
     let mut found: Vec<PathBuf> = read_dir(parent)?
         .into_iter()
         .filter(|path| path.is_dir())
         .collect();
     found.sort();
+    for dir in &found {
+        inside(root, dir)?;
+    }
     Ok(found)
 }
 
 /// The `.json` files directly inside a seed folder, sorted.
-fn json_files(dir: &Path) -> Result<Vec<PathBuf>, SeedError> {
+fn json_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, SeedError> {
     let mut found: Vec<PathBuf> = read_dir(dir)?
         .into_iter()
         .filter(|path| {
@@ -201,7 +217,26 @@ fn json_files(dir: &Path) -> Result<Vec<PathBuf>, SeedError> {
         })
         .collect();
     found.sort();
+    for file in &found {
+        inside(root, file)?;
+    }
     Ok(found)
+}
+
+/// Refuses a folder or file whose resolved target is not under the canonical checkout `root`:
+/// a link, of a folder or of a file, never carries the walk out of the repository (CC-08).
+fn inside(root: &Path, path: &Path) -> Result<(), SeedError> {
+    let resolved = path.canonicalize().map_err(|e| SeedError::Unreadable {
+        path: path.display().to_string(),
+        message: e.to_string(),
+    })?;
+    if resolved.starts_with(root) {
+        Ok(())
+    } else {
+        Err(SeedError::Outside {
+            path: path.display().to_string(),
+        })
+    }
 }
 
 fn read_dir(path: &Path) -> Result<Vec<PathBuf>, SeedError> {
