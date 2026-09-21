@@ -207,6 +207,18 @@ impl ModelProjectionSpec {
         }
     }
 
+    /// [`check_against`](Self::check_against) the classes of a LinkML source: the one check
+    /// `jcctl validate` and the Portal's write path both run, so the two cannot disagree about
+    /// what is stale (MP-01, T-2376).
+    pub fn check_against_linkml(&self, linkml: &str) -> Result<()> {
+        let classes = linkml_classes(linkml).map_err(|reason| Error::Name {
+            field: "spec.dataModelRef",
+            value: reason,
+            reason: "the referenced model's LinkML source does not parse (MP-01)",
+        })?;
+        self.check_against(&classes)
+    }
+
     /// The projection two projections make together on one Endpoint: the classes in both,
     /// each with the slots in both, the filters conjoined (MP-02). Never wider than either.
     pub fn intersect(&self, other: &Self) -> Self {
@@ -259,4 +271,36 @@ impl ModelProjectionSpec {
             namespace: None,
         }
     }
+}
+
+/// The classes of a LinkML schema with the slots each one carries: its `slots` list and its
+/// `attributes` keys, plus the `id` and `type` every entity has (MP-01).
+// ponytail: no `is_a` inheritance; slots inherited from a parent class need listing again on
+// the child until a projection of an inherited slot is wanted.
+pub fn linkml_classes(
+    linkml: &str,
+) -> std::result::Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let schema: serde_norway::Value =
+        serde_norway::from_str(linkml).map_err(|err| err.to_string())?;
+    let mut classes = BTreeMap::new();
+    let Some(declared) = schema.get("classes").and_then(|c| c.as_mapping()) else {
+        return Ok(classes);
+    };
+    for (name, class) in declared {
+        let Some(name) = name.as_str() else { continue };
+        let mut slots: BTreeSet<String> = ["id", "type"].map(str::to_owned).into();
+        if let Some(listed) = class.get("slots").and_then(|s| s.as_sequence()) {
+            slots.extend(listed.iter().filter_map(|s| s.as_str()).map(str::to_owned));
+        }
+        if let Some(attributes) = class.get("attributes").and_then(|a| a.as_mapping()) {
+            slots.extend(
+                attributes
+                    .keys()
+                    .filter_map(|k| k.as_str())
+                    .map(str::to_owned),
+            );
+        }
+        classes.insert(name.to_owned(), slots);
+    }
+    Ok(classes)
 }
