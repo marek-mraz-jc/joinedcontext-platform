@@ -508,3 +508,286 @@ fn a_created_organization_takes_the_instance_title() {
     assert_eq!(organization["name"], json!("mesto-banska-bystrica"));
     assert_eq!(organization["title"], json!("Mesto Banská Bystrica"));
 }
+
+// --- T-2526: the edge cases of `targets` and `token` (EP-62…EP-67, CC-06) --------------------
+
+use age::secrecy::ExposeSecret as _;
+use common::sops::{sops_file, Node};
+use jcctl::commands::publish_ckan::AGE_KEY_FILE_ENV;
+
+/// The API token the SOPS cases encrypt; a test that finds it in an error has found a leak.
+const SEALED_TOKEN: &str = "ckan-api-token-sealed-4f1c";
+
+/// `repo(test)` whose instance reads its token from `envVar: {variable}`, so no two tests share
+/// one process-wide variable, plus a SOPS file holding `entries` and the key file that opens it.
+fn sealed_repo(
+    test: &str,
+    variable: &str,
+    entries: &[(&str, Node)],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = repo(test);
+    common::write(
+        &dir,
+        "projects/ovzdusie/ckan/open-data.yaml",
+        &INSTANCE.replace("CKAN_OPEN_DATA_TOKEN", variable),
+    );
+    let identity = age::x25519::Identity::generate();
+    common::write(
+        &dir,
+        "secrets/ckan.enc.yaml",
+        &sops_file(entries, &identity.to_public()),
+    );
+    let key_dir = common::temp_dir(&format!("{test}-age"));
+    let key_file = key_dir.join("keys.txt");
+    std::fs::write(
+        &key_file,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .expect("the key file");
+    (dir, key_file)
+}
+
+fn instance_of(dir: &Path) -> jc_core::kinds::CkanInstanceSpec {
+    let repo = Repository::load(dir).expect("the repository loads");
+    targets(&repo, "ovzdusie").expect("the walk")[0]
+        .instance
+        .clone()
+}
+
+/// EP-67, CC-06: no error of the token path repeats the token, whichever source failed.
+#[test]
+fn the_resolved_token_never_appears_in_an_error() {
+    let (dir, key_file) = sealed_repo(
+        "token-no-echo",
+        "JCCTL_T2526_NO_ECHO",
+        &[("ckan-open-data", Node::Keys(&[("otherKey", SEALED_TOKEN)]))],
+    );
+    let error = token(
+        &instance_of(&dir),
+        &dir,
+        TokenSource {
+            env: None,
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect_err("the reference names a key the secret does not hold");
+    assert!(matches!(error, Error::Token { .. }), "{error}");
+    assert!(!error.to_string().contains(SEALED_TOKEN), "{error}");
+    assert!(!format!("{error:?}").contains(SEALED_TOKEN), "{error:?}");
+}
+
+/// EP-67: an empty secret is not a token, and publishing with it would be anonymous.
+#[test]
+fn an_empty_secret_from_sops_is_refused_rather_than_published_as_a_blank_token() {
+    let (dir, key_file) = sealed_repo(
+        "token-empty",
+        "JCCTL_T2526_EMPTY",
+        &[("ckan-open-data", Node::Keys(&[("apiToken", "")]))],
+    );
+    let error = token(
+        &instance_of(&dir),
+        &dir,
+        TokenSource {
+            env: None,
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect_err("empty");
+    assert!(error.to_string().contains("empty"), "{error}");
+}
+
+/// CC-06: with no variable set, the repository's own encrypted secret is the token.
+#[test]
+fn a_token_decrypted_from_the_repositorys_sops_files_is_used() {
+    let (dir, key_file) = sealed_repo(
+        "token-sops",
+        "JCCTL_T2526_SOPS",
+        &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
+    );
+    let value = token(
+        &instance_of(&dir),
+        &dir,
+        TokenSource {
+            env: None,
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect("decrypted");
+    assert_eq!(value.expose(), SEALED_TOKEN);
+}
+
+/// EP-67: the variable named on the command line wins over the reference's own `envVar` and
+/// over the repository's secret.
+#[test]
+fn env_var_named_on_the_command_line_wins_over_the_references_own_env_var() {
+    let (dir, key_file) = sealed_repo(
+        "token-order",
+        "JCCTL_T2526_REFERENCE",
+        &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
+    );
+    std::env::set_var("JCCTL_T2526_REFERENCE", "from-the-reference");
+    std::env::set_var("JCCTL_T2526_FLAG", "from-the-flag");
+    let instance = instance_of(&dir);
+    let flagged = token(
+        &instance,
+        &dir,
+        TokenSource {
+            env: Some("JCCTL_T2526_FLAG"),
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect("the flag");
+    assert_eq!(flagged.expose(), "from-the-flag");
+    let referenced = token(
+        &instance,
+        &dir,
+        TokenSource {
+            env: None,
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect("the reference's variable");
+    assert_eq!(referenced.expose(), "from-the-reference");
+    std::env::remove_var("JCCTL_T2526_REFERENCE");
+    std::env::remove_var("JCCTL_T2526_FLAG");
+}
+
+/// EP-67: a variable the operator named explicitly and left empty is an error naming it; it
+/// never quietly falls through to another source the operator did not choose.
+#[test]
+fn an_explicitly_named_variable_that_is_empty_stops_with_its_name() {
+    let (dir, key_file) = sealed_repo(
+        "token-explicit-empty",
+        "JCCTL_T2526_EXPLICIT_REF",
+        &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
+    );
+    std::env::set_var("JCCTL_T2526_BLANK", "   ");
+    let error = token(
+        &instance_of(&dir),
+        &dir,
+        TokenSource {
+            env: Some("JCCTL_T2526_BLANK"),
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect_err("blank");
+    assert!(error.to_string().contains("JCCTL_T2526_BLANK"), "{error}");
+    std::env::remove_var("JCCTL_T2526_BLANK");
+}
+
+/// EP-67: an unset reference variable is not a token; the walk goes on to the repository.
+#[test]
+fn an_unset_reference_variable_falls_through_to_the_repository() {
+    let (dir, key_file) = sealed_repo(
+        "token-fallthrough",
+        "JCCTL_T2526_NEVER_SET",
+        &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
+    );
+    let value = token(
+        &instance_of(&dir),
+        &dir,
+        TokenSource {
+            env: None,
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect("the repository");
+    assert_eq!(value.expose(), SEALED_TOKEN);
+}
+
+/// EP-67: no source at all says how to give one, and names the age variable.
+#[test]
+fn no_age_key_file_and_no_env_source_is_refused_naming_how_to_supply_one() {
+    let dir = repo("token-no-source");
+    common::write(
+        &dir,
+        "projects/ovzdusie/ckan/open-data.yaml",
+        &INSTANCE.replace("CKAN_OPEN_DATA_TOKEN", "JCCTL_T2526_NO_SOURCE"),
+    );
+    std::env::remove_var(AGE_KEY_FILE_ENV);
+    let error = token(&instance_of(&dir), &dir, TokenSource::default()).expect_err("no source");
+    let message = error.to_string();
+    assert!(message.contains("--api-token-env"), "{message}");
+    assert!(message.contains(AGE_KEY_FILE_ENV), "{message}");
+}
+
+/// EP-62: an instance reference into a namespace that holds none is an error naming it.
+#[test]
+fn an_instance_ref_naming_a_missing_namespace_is_refused_by_name() {
+    let dir = repo("instance-namespace");
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/air-public.yaml",
+        &endpoint(
+            "air-public",
+            "zt4qm7ge2xdv6ksb3ncf5arw2y",
+            "[ngsi-ld, csv]",
+            "  publish:\n    ckan:\n      instanceRef: { kind: CkanInstance, name: open-data, namespace: doprava }\n      name: kvalita-ovzdusia\n",
+        ),
+    );
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let error = targets(&repo, "ovzdusie").expect_err("no instance in doprava");
+    assert!(matches!(error, Error::UnknownInstance { .. }), "{error}");
+    assert!(error.to_string().contains("doprava"), "{error}");
+}
+
+/// EP-67: an instance on plain HTTP never becomes a target: the token would travel in the clear.
+#[test]
+fn an_instance_on_plain_http_never_becomes_a_target() {
+    let dir = repo("instance-http");
+    common::write(
+        &dir,
+        "projects/ovzdusie/ckan/open-data.yaml",
+        &INSTANCE.replace(
+            "https://data.banskabystrica.sk",
+            "http://data.banskabystrica.sk",
+        ),
+    );
+    let walked = Repository::load(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|repo| targets(&repo, "ovzdusie").map_err(|e| e.to_string()));
+    let error = walked.expect_err("refused at load or by the walk");
+    assert!(error.contains("https://"), "{error}");
+}
+
+/// PF-28: a title with neither the space's language nor English takes its first entry.
+#[test]
+fn a_title_map_missing_every_requested_language_falls_back_to_english_then_the_first_entry() {
+    let english = slovak_repo(
+        "title-en",
+        "{ en: \"City of Banská Bystrica\", de: \"Stadt\" }",
+    );
+    let repo = Repository::load(&english).expect("the repository loads");
+    assert_eq!(
+        targets(&repo, "ovzdusie").expect("the walk")[0]
+            .instance_title
+            .as_deref(),
+        Some("City of Banská Bystrica")
+    );
+    let first = slovak_repo("title-first", "{ de: \"Stadt Banská Bystrica\" }");
+    let repo = Repository::load(&first).expect("the repository loads");
+    assert_eq!(
+        targets(&repo, "ovzdusie").expect("the walk")[0]
+            .instance_title
+            .as_deref(),
+        Some("Stadt Banská Bystrica")
+    );
+}
+
+/// EP-63: a blank default locale is no locale.
+#[test]
+fn an_empty_default_locale_leaves_language_open() {
+    let dir = repo("blank-locale");
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ovzdusie\n  namespace: ovzdusie\nspec:\n  isSandbox: false\n  defaultLocale: \"  \"\n",
+    );
+    let walked = Repository::load(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|repo| targets(&repo, "ovzdusie").map_err(|e| e.to_string()));
+    // A blank locale is either refused as a manifest or read as none; never as a language.
+    if let Ok(found) = walked {
+        assert!(found.iter().all(|t| t.language.is_none()), "{found:?}");
+    }
+}
