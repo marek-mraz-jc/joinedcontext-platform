@@ -225,12 +225,14 @@ fn texts<'a>(
     endpoint: &'a Endpoint,
     space: Option<&'a Space>,
 ) -> (&'a BTreeMap<String, String>, &'a BTreeMap<String, String>) {
-    let title = if endpoint.title.is_empty() {
+    // A map of blank entries is no title either, so the space's stands in for it (T-2496).
+    let blank = |map: &BTreeMap<String, String>| map.values().all(|text| text.trim().is_empty());
+    let title = if blank(&endpoint.title) {
         space.map(|s| &s.title).unwrap_or(&EMPTY)
     } else {
         &endpoint.title
     };
-    let description = if endpoint.description.is_empty() {
+    let description = if blank(&endpoint.description) {
         space.map(|s| &s.description).unwrap_or(&EMPTY)
     } else {
         &endpoint.description
@@ -279,7 +281,7 @@ pub fn dataset_turtle(
     index: &Value,
     base: &str,
 ) -> String {
-    let iri = iri(endpoint, base);
+    let iri = iri_ref(&iri(endpoint, base));
     let title = plain(texts(endpoint, space).0, &endpoint.space);
     let mut out = String::from(
         "@prefix dcat: <http://www.w3.org/ns/dcat#> .\n\
@@ -297,11 +299,20 @@ pub fn dataset_turtle(
         out.push_str(&format!(";\n    odrl:hasPolicy <{iri}/access> "));
     }
 
-    let mut distributions = representation_distributions(endpoint, &iri);
-    distributions.extend(schema_distributions(index, &iri));
+    let base_iri = self::iri(endpoint, base);
+    let mut distributions = representation_distributions(endpoint, &base_iri);
+    distributions.extend(schema_distributions(index, &base_iri));
+    // One access URL is one distribution, however many index entries name it (T-2496).
+    let mut seen = std::collections::BTreeSet::new();
+    distributions.retain(|distribution| {
+        distribution
+            .get("dcat:accessURL")
+            .and_then(Value::as_str)
+            .is_some_and(|url| seen.insert(url.to_owned()))
+    });
     for distribution in &distributions {
         if let Some(url) = distribution.get("dcat:accessURL").and_then(Value::as_str) {
-            out.push_str(&format!(";\n    dcat:distribution <{url}> "));
+            out.push_str(&format!(";\n    dcat:distribution <{}> ", iri_ref(url)));
         }
     }
     out.push_str(".\n\n");
@@ -310,6 +321,7 @@ pub fn dataset_turtle(
         let Some(url) = distribution.get("dcat:accessURL").and_then(Value::as_str) else {
             continue;
         };
+        let url = iri_ref(url);
         out.push_str(&format!(
             "<{url}> a dcat:Distribution ;\n    dcat:accessURL <{url}> "
         ));
@@ -317,7 +329,7 @@ pub fn dataset_turtle(
             out.push_str(&format!(";\n    dcat:mediaType {} ", literal(media_type)));
         }
         if let Some(standard) = distribution.get("dct:conformsTo").and_then(Value::as_str) {
-            out.push_str(&format!(";\n    dct:conformsTo <{standard}> "));
+            out.push_str(&format!(";\n    dct:conformsTo <{}> ", iri_ref(standard)));
         }
         if let Some(sha256) = distribution
             .get("spdx:checksum")
@@ -327,6 +339,24 @@ pub fn dataset_turtle(
             out.push_str(&format!(";\n    spdx:checksum {} ", literal(sha256)));
         }
         out.push_str(".\n");
+    }
+    out
+}
+
+/// `text` inside `<…>`: what Turtle's IRIREF forbids (controls, space, `<>"{}|^` and backslash,
+/// backtick) is percent-encoded, so a name out of the schema index cannot close the IRI and write
+/// a statement of its own (T-2496).
+fn iri_ref(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c <= ' ' || "<>\"{}|^`\\".contains(c) {
+            let mut bytes = [0u8; 4];
+            for byte in c.encode_utf8(&mut bytes).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
     }
     out
 }
