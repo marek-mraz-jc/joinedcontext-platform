@@ -531,6 +531,39 @@ pub struct EntitySelector {
     pub id_pattern: Option<String>,
 }
 
+impl EntitySelector {
+    /// The rules every selector keeps, in a Policy and a ContextSourceRegistration alike: a
+    /// valid type, `id` or `idPattern` but not both, and a pattern anchored at both ends that
+    /// compiles (R24, R33). An unanchored pattern matches ids nobody meant to grant or register.
+    pub fn validate(&self) -> Result<()> {
+        names::validate_entity_type(&self.entity_type)?;
+        if self.id.is_some() && self.id_pattern.is_some() {
+            return Err(Error::Name {
+                field: "entities.idPattern",
+                value: self.id_pattern.clone().unwrap_or_default(),
+                reason: "id and idPattern are mutually exclusive on an entity selector",
+            });
+        }
+        if let Some(pattern) = &self.id_pattern {
+            if !pattern.starts_with('^') || !pattern.ends_with('$') {
+                return Err(Error::Name {
+                    field: "entities.idPattern",
+                    value: pattern.clone(),
+                    reason: "idPattern must be anchored with `^` and `$` (R24, R33)",
+                });
+            }
+            if regex::Regex::new(pattern).is_err() {
+                return Err(Error::Name {
+                    field: "entities.idPattern",
+                    value: pattern.clone(),
+                    reason: "idPattern failed to compile as a valid regex",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Whether a policy grants access or takes it away (GW4, GW8).
 ///
 /// A prohibition subtracts from a grant that stays in force. It is not how a resource is
@@ -682,32 +715,7 @@ impl PolicySpec {
 
         for info in &self.information {
             for entity in &info.entities {
-                names::validate_entity_type(&entity.entity_type)?;
-
-                if entity.id.is_some() && entity.id_pattern.is_some() {
-                    return Err(Error::Name {
-                        field: "entities.idPattern",
-                        value: entity.id_pattern.clone().unwrap_or_default(),
-                        reason: "id and idPattern are mutually exclusive on an entity selector",
-                    });
-                }
-
-                if let Some(ref pat) = entity.id_pattern {
-                    if !pat.starts_with('^') || !pat.ends_with('$') {
-                        return Err(Error::Name {
-                            field: "entities.idPattern",
-                            value: pat.clone(),
-                            reason: "idPattern must be anchored with `^` and `$` (R24, R33)",
-                        });
-                    }
-                    if regex::Regex::new(pat).is_err() {
-                        return Err(Error::Name {
-                            field: "entities.idPattern",
-                            value: pat.clone(),
-                            reason: "idPattern failed to compile as a valid regex",
-                        });
-                    }
-                }
+                entity.validate()?;
             }
 
             let mut seen_props = std::collections::BTreeSet::new();

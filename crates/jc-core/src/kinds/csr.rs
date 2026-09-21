@@ -199,6 +199,12 @@ impl ContextSourceRegistrationSpec {
                     reason: "an information entry selects at least one entity type",
                 });
             }
+            // A registration claims ids for its hub the way a policy grants them, so its
+            // selectors keep the same rules: an unanchored idPattern would route ids of other
+            // members to this one (CC-13, R24).
+            for entity in &info.entities {
+                entity.validate()?;
+            }
         }
         crate::kinds::validate_mirror_schedule(self.schedule.as_ref())?;
         self.federation.validate()

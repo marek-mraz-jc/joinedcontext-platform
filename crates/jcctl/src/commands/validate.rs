@@ -182,6 +182,15 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (location, message) in federation_topology(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in bindings_to_undeclared_groups(&repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -431,6 +440,122 @@ fn dangling_data_sources(repo: &Repository) -> Vec<(String, Location, String)> {
         }
     }
     dangling
+}
+
+/// The federation topology the registrations declare, checked as a whole (CC-13). Per project:
+/// a registration names a hub space and an Endpoint the project declares (no dangling peer),
+/// a hub is served by an Endpoint of its own (what it registers reaches somebody), and no
+/// space reaches itself through registrations (a loop the broker would forward round forever).
+/// Each selector's own rules (an anchored `idPattern`, R24) are the kind's, checked above.
+fn federation_topology(repo: &Repository) -> Vec<(Location, String)> {
+    use jc_core::kinds::ContextSourceRegistrationSpec;
+
+    let space_of = |spec: &serde_json::Value| -> Option<String> {
+        match spec.get("contextSpaceRef")? {
+            serde_json::Value::String(name) => Some(name.clone()),
+            serde_json::Value::Object(map) => map.get("name")?.as_str().map(str::to_owned),
+            _ => None,
+        }
+    };
+    // Per project: its spaces, each Endpoint's space, and the registrations.
+    let mut spaces: BTreeSet<(Option<String>, String)> = BTreeSet::new();
+    let mut endpoints: BTreeMap<(Option<String>, String), String> = BTreeMap::new();
+    let mut registrations = Vec::new();
+    for (id, resource) in repo.iter() {
+        let spec = &resource.manifest.spec;
+        match id.kind.as_str() {
+            "ContextSpace" => {
+                spaces.insert((id.namespace.clone(), id.name.clone()));
+            }
+            "Endpoint" => {
+                if let Some(space) = space_of(spec) {
+                    endpoints.insert((id.namespace.clone(), id.name.clone()), space);
+                }
+            }
+            "ContextSourceRegistration" => {
+                // A registration the typed parse refused is already a finding above.
+                if let Ok(csr) =
+                    serde_json::from_value::<ContextSourceRegistrationSpec>(spec.clone())
+                {
+                    let location = (resource.path.clone(), resource.document, resource.line);
+                    registrations.push((id.to_string(), id.namespace.clone(), csr, location));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    // hub -> member spaces, per project, for the loop check.
+    let mut edges: BTreeMap<(Option<String>, String), BTreeSet<String>> = BTreeMap::new();
+    let mut first_of_hub: BTreeMap<(Option<String>, String), (String, Location)> = BTreeMap::new();
+    for (id, project, csr, location) in &registrations {
+        let hub = csr.context_space_ref.name().to_owned();
+        if !spaces.contains(&(project.clone(), hub.clone())) {
+            found.push((
+                location.clone(),
+                format!("{id} registers into space `{hub}`, which no ContextSpace of this project declares (CC-13)"),
+            ));
+        }
+        first_of_hub
+            .entry((project.clone(), hub.clone()))
+            .or_insert_with(|| (id.clone(), location.clone()));
+        let Some(member) = &csr.endpoint_ref else {
+            continue;
+        };
+        match endpoints.get(&(project.clone(), member.name().to_owned())) {
+            None => found.push((
+                location.clone(),
+                format!(
+                    "{id} registers Endpoint `{}`, which no manifest of this project declares: a dangling peer (CC-13)",
+                    member.name()
+                ),
+            )),
+            Some(space) => {
+                edges
+                    .entry((project.clone(), hub.clone()))
+                    .or_default()
+                    .insert(space.clone());
+            }
+        }
+    }
+
+    // Reachability: a hub nobody can read makes every registration into it a dead end.
+    for ((project, hub), (id, location)) in &first_of_hub {
+        let served = endpoints
+            .iter()
+            .any(|((namespace, _), space)| namespace == project && space == hub);
+        if !served {
+            found.push((
+                location.clone(),
+                format!("{id}: space `{hub}` holds registrations and no Endpoint of this project serves it, so what they register reaches nobody (CC-13)"),
+            ));
+        }
+    }
+
+    // Loops: a hub reaching itself through its members, once per hub on the cycle.
+    for ((project, hub), (id, location)) in &first_of_hub {
+        let mut seen = BTreeSet::new();
+        let mut stack: Vec<String> = edges
+            .get(&(project.clone(), hub.clone()))
+            .map(|m| m.iter().cloned().collect())
+            .unwrap_or_default();
+        while let Some(space) = stack.pop() {
+            if &space == hub {
+                found.push((
+                    location.clone(),
+                    format!("{id}: space `{hub}` reaches itself through its registrations, a federation loop (CC-13)"),
+                ));
+                break;
+            }
+            if seen.insert(space.clone()) {
+                if let Some(next) = edges.get(&(project.clone(), space)) {
+                    stack.extend(next.iter().cloned());
+                }
+            }
+        }
+    }
+    found
 }
 
 /// Every `ModelProjection` that names a class or a slot the referenced DataModel version does
