@@ -124,6 +124,11 @@ pub struct CkanPublication {
     /// The optional row mirror (EP-65).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datastore: Option<DataStore>,
+    /// The CKAN licence id the organization chose, such as `cc-by` for CC-BY 4.0. Used when the
+    /// Endpoint's DCAT-AP record names no `dct:license`, which is the one term the record does
+    /// not carry (EP-62, EP-63).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
 }
 
 impl CkanPublication {
@@ -148,6 +153,9 @@ impl CkanPublication {
         }
         if let Some(name) = &self.name {
             validate_dataset_name(name)?;
+        }
+        if let Some(license) = &self.license {
+            validate_license(license)?;
         }
         if let Some(datastore) = &self.datastore {
             // A mirror of a representation the Endpoint does not serve would have nothing to
@@ -220,6 +228,25 @@ fn validate_organization(value: &str) -> Result<()> {
 
 fn validate_dataset_name(value: &str) -> Result<()> {
     validate_slug("publish.ckan.name", value)
+}
+
+/// A licence register id: what CKAN stores in `license_id`. An IRI is not one — it belongs in
+/// the record's `dct:license`, which the publisher maps to the `license_url` extra.
+fn validate_license(value: &str) -> Result<()> {
+    let ok = !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    if !ok {
+        return Err(Error::Name {
+            field: "publish.ckan.license",
+            value: value.to_string(),
+            reason: "a CKAN licence id is 1 to 100 characters of letters, digits, `-`, `_` and \
+                     `.`, such as `cc-by` for CC-BY 4.0",
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Display for DataStoreRefresh {

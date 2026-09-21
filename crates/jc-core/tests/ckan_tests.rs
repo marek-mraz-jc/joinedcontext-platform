@@ -223,3 +223,60 @@ fn an_endpoint_without_a_publish_block_publishes_nowhere() {
 
     assert!(spec.publish.is_none());
 }
+
+/// EP-62, T-2465: the licence the organization chose travels in the publication block, as the
+/// register id CKAN stores, and comes back out of it unchanged.
+#[test]
+fn a_publication_names_its_licence_and_the_licence_round_trips() {
+    let spec = endpoint(
+        r#"publish:
+  ckan:
+    instanceRef: { kind: CkanInstance, name: open-data }
+    license: cc-by
+"#,
+    )
+    .expect("the endpoint validates");
+    let publication = spec
+        .publish
+        .as_ref()
+        .and_then(|p| p.ckan.as_ref())
+        .expect("a CKAN publication");
+    assert_eq!(publication.license.as_deref(), Some("cc-by"));
+
+    let written = serde_json::to_value(publication).expect("serializes");
+    assert_eq!(written["license"], "cc-by");
+    let back: jc_core::kinds::ckan::CkanPublication =
+        serde_json::from_value(written).expect("reads back");
+    assert_eq!(&back, publication);
+}
+
+/// EP-62: a licence is a register id, not a sentence or an address — an IRI belongs in the
+/// record's `dct:license`, and CKAN refuses an id it cannot store.
+#[test]
+fn a_licence_that_is_not_a_register_id_is_refused() {
+    for bad in [
+        "",
+        "CC BY 4.0",
+        "https://creativecommons.org/licenses/by/4.0/",
+        "cc-by;drop",
+    ] {
+        let err = endpoint(&format!(
+            "publish:\n  ckan:\n    instanceRef: open-data\n    license: {bad:?}\n"
+        ))
+        .expect_err(bad);
+        assert!(
+            err.to_string().contains("publish.ckan.license"),
+            "{bad:?}: the refusal names the field: {err}"
+        );
+    }
+    endpoint("publish:\n  ckan:\n    instanceRef: open-data\n    license: CC-BY-4.0\n")
+        .expect("a register of its own may spell ids in capitals");
+}
+
+/// deny_unknown_fields: a misspelt member is refused rather than silently ignored.
+#[test]
+fn an_unknown_member_of_the_publication_is_refused() {
+    let err = endpoint("publish:\n  ckan:\n    instanceRef: open-data\n    licence: cc-by\n")
+        .expect_err("licence is not the member's name");
+    assert!(err.to_string().contains("licence"), "{err}");
+}

@@ -26,6 +26,10 @@ pub struct Settings {
     pub host: String,
     /// Title the CKAN organization is created with; the slug itself when absent.
     pub organization_title: Option<String>,
+    /// The language the dataset's title and notes are taken in, from a record that carries
+    /// several: the Endpoint space's `defaultLocale`. English, then the first, when absent or
+    /// not in the record (EP-63).
+    pub language: Option<String>,
 }
 
 impl Settings {
@@ -34,7 +38,14 @@ impl Settings {
         Self {
             host: host.into(),
             organization_title: None,
+            language: None,
         }
+    }
+
+    /// The language the dataset is written in (EP-63).
+    pub fn in_language(mut self, language: impl Into<String>) -> Self {
+        self.language = Some(language.into());
+        self
     }
 
     /// The organization title from the instance branding (Deployment/12).
@@ -128,17 +139,18 @@ pub fn package(
     let organization = organization(publication, instance)?;
     let name = publication.dataset_name(&endpoint.metadata.name);
     let url = settings.endpoint_url(spec.slug.as_str());
+    let language = settings.language.as_deref();
 
     let mut payload = json!({
         "name": name,
         "owner_org": organization,
-        "title": text(record.get("dct:title")).unwrap_or_else(|| name.to_owned()),
+        "title": text_in(record.get("dct:title"), language).unwrap_or_else(|| name.to_owned()),
         "url": format!("{url}/"),
         "private": spec.audience != Audience::Public,
         "resources": resources(&spec.enabled_representations, &url, record),
         "extras": extras(record, &url),
     });
-    if let Some(notes) = text(record.get("dct:description")) {
+    if let Some(notes) = text_in(record.get("dct:description"), language) {
         payload["notes"] = json!(notes);
     }
     if let Some(license) = text(record.get("dct:license")) {
@@ -148,6 +160,11 @@ pub fn package(
         } else {
             payload["license_id"] = json!(license);
         }
+    } else if let Some(license) = &publication.license {
+        // The one term the record does not carry: the licence the organization chose, named
+        // in the publication block (EP-62). A record that names one wins, so the dataset and
+        // the Endpoint's own description never disagree (EP-63).
+        payload["license_id"] = json!(license);
     }
     let tags = tags(record);
     if !tags.is_empty() {
@@ -439,6 +456,23 @@ fn organization(
 /// One string out of a JSON-LD value: a plain string, a language map, or `@value`.
 fn text(value: Option<&Value>) -> Option<String> {
     value.and_then(text_of)
+}
+
+/// [`text`] in `language` when the record carries it, which is how a Slovak body's dataset
+/// keeps its Slovak title rather than the English one beside it (EP-63).
+fn text_in(value: Option<&Value>, language: Option<&str>) -> Option<String> {
+    let value = value?;
+    if let (Some(language), Value::Array(items)) = (language, value) {
+        let chosen = items.iter().find_map(|item| {
+            (item.get("@language")?.as_str()? == language)
+                .then(|| item.get("@value")?.as_str())
+                .flatten()
+        });
+        if let Some(text) = chosen {
+            return Some(text.to_owned());
+        }
+    }
+    text_of(value)
 }
 
 fn text_of(value: &Value) -> Option<String> {

@@ -430,3 +430,81 @@ fn the_token_is_read_from_the_named_environment_and_never_echoed() {
     assert!(!message.contains("flag-token-value"), "{message}");
     assert!(!message.contains("injected-token-value"), "{message}");
 }
+
+// --- the language of the space and the title of the instance (T-2465) ------------------------
+
+/// The demo repository with a Slovak space and an instance that names itself in two languages.
+fn slovak_repo(test: &str, instance_title: &str) -> std::path::PathBuf {
+    let dir = repo(test);
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ovzdusie\n  namespace: ovzdusie\nspec:\n  isSandbox: false\n  defaultLocale: sk\n",
+    );
+    common::write(
+        &dir,
+        "projects/ovzdusie/ckan/open-data.yaml",
+        &INSTANCE.replacen(
+            "  namespace: ovzdusie\n",
+            &format!("  namespace: ovzdusie\n  title: {instance_title}\n"),
+            1,
+        ),
+    );
+    dir
+}
+
+/// EP-63: the walk reads the language off the Endpoint's space, so the dataset of a Slovak
+/// body carries its Slovak title and not the English one listed beside it.
+#[test]
+fn a_slovak_space_publishes_its_dataset_under_the_slovak_title() {
+    let dir = slovak_repo("slovak-title", "Mesto Banská Bystrica");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    assert!(found.iter().all(|t| t.language.as_deref() == Some("sk")));
+
+    let record = json!({
+        "@type": "dcat:Dataset",
+        "dct:title": [
+            { "@value": "Air quality", "@language": "en" },
+            { "@value": "Kvalita ovzdušia", "@language": "sk" }
+        ]
+    });
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+    publish_one(&mut api, &found[0], &record, None, &settings()).expect("the run");
+    let dataset = api.package("kvalita-ovzdusia").expect("the dataset");
+    assert_eq!(dataset["title"], json!("Kvalita ovzdušia"));
+}
+
+/// A space that names no locale leaves the language open, and the English title stands.
+#[test]
+fn a_space_without_a_locale_leaves_the_language_open() {
+    let dir = repo("no-locale");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    assert!(found.iter().all(|t| t.language.is_none()));
+    assert!(found.iter().all(|t| t.instance_title.is_none()));
+}
+
+/// An organization CKAN does not have yet is created with the instance's own title, in the
+/// space's language, before the installation's branding name (which on dev names another city).
+#[test]
+fn a_created_organization_takes_the_instance_title() {
+    let dir = slovak_repo(
+        "instance-title",
+        "{ sk: \"Mesto Banská Bystrica\", en: \"City of Banská Bystrica\" }",
+    );
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    assert_eq!(
+        found[0].instance_title.as_deref(),
+        Some("Mesto Banská Bystrica")
+    );
+
+    let mut api = InMemoryCkan::new();
+    let branded = Settings::new("data.example.org").titled("Helsinki Region Context");
+    publish_one(&mut api, &found[0], &record("air-public"), None, &branded).expect("the run");
+    assert_eq!(api.actions(), vec!["organization_create", "package_create"]);
+    let (_, organization) = api.calls().next().expect("the organization call");
+    assert_eq!(organization["name"], json!("mesto-banska-bystrica"));
+    assert_eq!(organization["title"], json!("Mesto Banská Bystrica"));
+}
