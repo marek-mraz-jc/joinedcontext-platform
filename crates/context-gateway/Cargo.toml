@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum"] }
+jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum", "logs"] }
 jcctl = { path = "../jcctl", version = "0.1.0" }
 arc-swap = "1"
 # base64url for the opaque OGC page cursor (EP-36); already in the tree via jsonwebtoken
@@ -27,7 +27,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 jsonwebtoken = "9"
 # sha256 for the schema surface's strong ETags; jsonwebtoken already links it
 ring = "0.17"

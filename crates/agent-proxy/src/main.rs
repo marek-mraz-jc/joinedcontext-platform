@@ -8,11 +8,8 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // OPS-15: JSON lines on stdout, nothing on disk.
+    jc_core::logs::init("info")?;
 
     // A binary compiled with the suites' stub token would answer an empty client secret with a
     // made-up token; it is never a proxy anyone may run (T-1480).
