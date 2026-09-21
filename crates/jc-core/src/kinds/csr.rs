@@ -150,11 +150,25 @@ impl ContextSourceRegistrationSpec {
             // http is allowed: a member broker on the same cluster is reached over the mesh,
             // which carries its own mTLS, and forcing https there would mean a certificate for
             // a Service name nothing outside the cluster can resolve.
-            if !(url.starts_with("https://") || url.starts_with("http://")) {
+            let Some(rest) = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+            else {
                 return Err(Error::Name {
                     field: "spec.endpoint",
                     value: url.clone(),
                     reason: "an external source is an http or https base URL",
+                });
+            };
+            // A user or password in the address is a credential committed to Git and written
+            // into the broker (MF-24). The address is not repeated: it carries the secret.
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            if authority.contains('@') {
+                return Err(Error::Name {
+                    field: "spec.endpoint",
+                    value: String::new(),
+                    reason: "the address carries a user or password; a credential is a \
+                             secretRef, never part of the manifest (MF-24)",
                 });
             }
         }
@@ -208,6 +222,11 @@ impl ContextSourceRegistrationSpec {
                 Some(&self.context_space_ref),
             ),
             ("spec.endpointRef.namespace", self.endpoint_ref.as_ref()),
+            // The account a forward would act as is the hub's project's too (T-2550).
+            (
+                "spec.federation.serviceAccountRef.namespace",
+                self.federation.service_account_ref.as_ref(),
+            ),
         ] {
             let Some(namespace) = reference.and_then(Ref::namespace) else {
                 continue;
