@@ -322,7 +322,8 @@ pub fn trace(captured: &[Captured]) -> TestTrace {
     trace
 }
 
-/// The runner's refusal of the harness as lint errors, one per line that names a problem.
+/// The runner's refusal of the harness as lint errors, one per line that names a problem: a
+/// project's `bento.yaml` is linted here, by the runner, before it is proposed (PL-21, PL-43).
 pub fn lint_errors(refusal: &str) -> Vec<TestError> {
     let lines: Vec<&str> = refusal
         .lines()
@@ -767,6 +768,7 @@ mod tests {
             .all(|e| e.step.is_none()));
     }
 
+    /// PL-21: the runner's lint of a project's `bento.yaml` reaches the author line by line.
     #[test]
     fn a_refusal_becomes_lint_errors_with_their_lines() {
         let errors = lint_errors("stream 'pipeline-test-x' failed to create:\n  line 12 char 3: expected string, got number\n");

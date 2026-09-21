@@ -75,7 +75,7 @@ jobs:
           # and commit the result beside the source (DM-01, DM-02).
           cargo run -q -p jcctl -- model diff --repo-dir examples/datamodels --url http://127.0.0.1:8080
   pipelines:
-    # PL-22: the shipped ingestion examples are linted and run against their golden fixtures.
+    # PL-21, PL-22: the shipped ingestion examples are linted and run against their golden fixtures.
     # Bento is pinned by version and verified by checksum, the way an image is pinned by digest.
     runs-on: ubuntu-latest
     timeout-minutes: 5
