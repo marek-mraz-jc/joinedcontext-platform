@@ -184,12 +184,22 @@ fn find(repository: &Repository, project: &str, name: &str) -> Option<RawManifes
         .cloned()
 }
 
+/// A scratch directory of this run alone. The process, a nanosecond clock and a counter name it:
+/// two runs of one source in the same second shared `{source}-{now}`, and whichever finished
+/// first removed it under the other (T-2240).
 fn workspace_for(source: &str, now: u64) -> PathBuf {
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let stem: String = source
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    std::env::temp_dir().join(format!("jcctl-sync-{stem}-{now}"))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or_default();
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("jcctl-sync-{stem}-{now}-{pid}-{nanos}-{run}"))
 }
 
 fn read_state(path: Option<&Path>) -> Result<State, Error> {
@@ -242,4 +252,23 @@ fn write_state(path: Option<&Path>, state: &State) -> Result<(), Error> {
         path: path.display().to_string(),
         reason: error.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_for;
+
+    /// TS-12, T-2240: two runs of one source in the same second (the CLI beside a test, two
+    /// terminals, a retry) each get their own scratch directory. A shared one was removed under
+    /// the run still using it, which exited 1 before the run reached its answer.
+    #[test]
+    fn two_runs_of_one_source_in_the_same_second_get_their_own_workspace() {
+        let first = workspace_for("ovzdusie/regional", 1_758_450_000);
+        let second = workspace_for("ovzdusie/regional", 1_758_450_000);
+        assert_ne!(first, second);
+        assert!(first
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("jcctl-sync-ovzdusie-regional-")));
+    }
 }
