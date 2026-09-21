@@ -98,10 +98,36 @@ async fn main() -> ExitCode {
 
     // Where the broker delivers a notification, which is not where a caller's token is
     // audience-bound: the public URL when the deployment names no egress URL (R46).
+    // The Portal's internal listener answers a workload it can name (PF-46, AG-52): the
+    // gateway's own client, audience-bound to that listener. Without a client configured the
+    // pollers send no token and the Portal refuses them, which says so in the log rather
+    // than relying on the port's NetworkPolicy.
+    let token = match (config.token_url(), config.oidc_client.as_ref()) {
+        (Some(token_url), Some((id, secret))) => Some(std::sync::Arc::new(
+            context_gateway::previews::WorkloadToken::new(
+                token_url,
+                id.clone(),
+                secret.expose().to_owned(),
+            ),
+        )),
+        _ => None,
+    };
+    // PF-41, T-2572: under `enforce` a write waits for the Organization's verified domain, which
+    // the Portal keeps; `report` asks nobody and refuses nothing.
+    let domain_gate = Arc::new(context_gateway::domain_gate::DomainGate::new(
+        config.domain_verification,
+    ));
+    if let (context_gateway::domain_gate::Mode::Enforce, Some(url)) = (
+        config.domain_verification,
+        config.domain_verifications_url.clone(),
+    ) {
+        tokio::spawn(Arc::clone(&domain_gate).follow(url, token.clone()));
+    }
     let gateway = Arc::new(
         gateway
             .deliver_through(config.egress_url.clone())
-            .deliver_privately_to(config.egress_private_hosts.clone()),
+            .deliver_privately_to(config.egress_private_hosts.clone())
+            .gate_writes_on(domain_gate),
     );
     // The repository is a cache of the enforcement point's decisions, so it is followed
     // rather than read once: a revoked Policy or ServiceAccount stops granting within a
@@ -110,30 +136,18 @@ async fn main() -> ExitCode {
         let reaper = context_gateway::pdp::reaper::Reaper::new(Arc::clone(&gateway), dir);
         // Workspace previews ride the same reload: the poller writes, the reaper loads
         // (Architecture/06 §7.2).
+        // Workspace previews ride the same reload: the poller writes, the reaper loads
+        // (Architecture/06 §7.2).
         let reaper = match config.previews_url.clone() {
             Some(url) => {
                 let mirror = context_gateway::previews::Mirror::new(config.previews_dir.clone());
-                // The Portal's internal listener answers a workload it can name (PF-46, AG-52):
-                // the gateway's own client, audience-bound to that listener. Without a client
-                // configured the poller sends no token and the Portal refuses it, which says so
-                // in the log rather than relying on the port's NetworkPolicy.
-                let token = match (config.token_url(), config.oidc_client.as_ref()) {
-                    (Some(token_url), Some((id, secret))) => Some(std::sync::Arc::new(
-                        context_gateway::previews::WorkloadToken::new(
-                            token_url,
-                            id.clone(),
-                            secret.expose().to_owned(),
-                        ),
-                    )),
-                    _ => {
-                        tracing::warn!(
-                            "previews are listed without a workload token: set JC_OIDC_ISSUER, \
-                             JC_OIDC_CLIENT_ID and JC_OIDC_CLIENT_SECRET"
-                        );
-                        None
-                    }
-                };
-                tokio::spawn(mirror.follow(url, token));
+                if token.is_none() {
+                    tracing::warn!(
+                        "previews are listed without a workload token: set JC_OIDC_ISSUER, \
+                         JC_OIDC_CLIENT_ID and JC_OIDC_CLIENT_SECRET"
+                    );
+                }
+                tokio::spawn(mirror.follow(url, token.clone()));
                 reaper.with_previews(config.previews_dir.clone())
             }
             None => reaper,

@@ -63,6 +63,12 @@ pub struct Config {
     /// Hosts inside the platform's own networks a notification may still be delivered to
     /// (`JC_GATEWAY_EGRESS_PRIVATE_HOSTS`, comma-separated); empty refuses them all (T-1302).
     pub egress_private_hosts: Vec<String>,
+    /// `report` or `enforce` (`JC_GATEWAY_DOMAIN_VERIFICATION`, default `report`): whether a
+    /// write waits for the Organization's verified domain (PF-41, Architecture/03 §3).
+    pub domain_verification: crate::domain_gate::Mode,
+    /// The Portal's list of domain states (`JC_GATEWAY_DOMAIN_VERIFICATIONS_URL`, its internal
+    /// listener's `/internal/domain-verifications`); required under `enforce`.
+    pub domain_verifications_url: Option<String>,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -118,7 +124,29 @@ impl Config {
             });
         }
 
+        let domain_verification = crate::domain_gate::Mode::parse(
+            std::env::var("JC_GATEWAY_DOMAIN_VERIFICATION")
+                .ok()
+                .as_deref(),
+        )
+        .map_err(|reason| ConfigError::Invalid {
+            name: "JC_GATEWAY_DOMAIN_VERIFICATION",
+            reason,
+        })?;
+        let domain_verifications_url = std::env::var("JC_GATEWAY_DOMAIN_VERIFICATIONS_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty());
+        // `enforce` with nowhere to learn the state would refuse every write forever and look
+        // like a broken platform; it is a configuration that does not run.
+        if domain_verification == crate::domain_gate::Mode::Enforce
+            && domain_verifications_url.is_none()
+        {
+            return Err(ConfigError::Missing("JC_GATEWAY_DOMAIN_VERIFICATIONS_URL"));
+        }
+
         Ok(Self {
+            domain_verification,
+            domain_verifications_url,
             bind,
             broker_url,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
@@ -235,6 +263,8 @@ mod tests {
             egress_url: None,
             egress_ca_bundle: None,
             egress_private_hosts: Vec::new(),
+            domain_verification: crate::domain_gate::Mode::Report,
+            domain_verifications_url: None,
         }
     }
 
