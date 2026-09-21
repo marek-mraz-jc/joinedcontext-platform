@@ -18,8 +18,9 @@ use crate::publish::ckan::{self, CkanApi, Outcome, PublishError, Settings};
 use crate::publish::ckan_datastore::{self as datastore, MirrorError};
 use crate::secrets::{identities_from_file, SecretStore, SecretValue};
 use jc_core::envelope::{Kind, Ref};
+use jc_core::i18n::Text;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
-use jc_core::kinds::{EndpointSpec, Representation};
+use jc_core::kinds::{ContextSpaceSpec, EndpointSpec, Representation};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -52,12 +53,31 @@ pub struct Target {
     pub instance_name: String,
     /// The instance itself.
     pub instance: CkanInstanceSpec,
+    /// The `defaultLocale` of the Endpoint's space: the language its dataset is written in
+    /// (EP-63). `None` when the space names none or is not in the repository.
+    pub language: Option<String>,
+    /// The instance's `metadata.title` in that language: what an organization this run has
+    /// to create is called, before the installation's branding name.
+    pub instance_title: Option<String>,
 }
 
 impl Target {
     /// The CKAN dataset name this Endpoint publishes as.
     pub fn dataset_name(&self) -> &str {
         self.publication.dataset_name(&self.id.name)
+    }
+
+    /// `settings` for this Endpoint: its space's language, and its instance's title for an
+    /// organization CKAN does not have yet.
+    fn settings(&self, settings: &Settings) -> Settings {
+        let mut own = settings.clone();
+        if let Some(language) = &self.language {
+            own = own.in_language(language.clone());
+        }
+        if let Some(title) = &self.instance_title {
+            own = own.titled(title.clone());
+        }
+        own
     }
 }
 
@@ -198,21 +218,28 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
             Some(namespace),
             publication.instance_ref.name(),
         );
-        let Some(instance) = repo.get(&instance_id) else {
+        let Some(instance_manifest) = repo.get(&instance_id) else {
             return Err(Error::UnknownInstance {
                 endpoint: Box::new(id.clone()),
                 instance: Box::new(instance_id),
             });
         };
-        let instance: CkanInstanceSpec = serde_json::from_value(instance.manifest.spec.clone())
-            .map_err(|e| Error::Instance {
-                instance: Box::new(instance_id.clone()),
-                message: e.to_string(),
+        let instance: CkanInstanceSpec =
+            serde_json::from_value(instance_manifest.manifest.spec.clone()).map_err(|e| {
+                Error::Instance {
+                    instance: Box::new(instance_id.clone()),
+                    message: e.to_string(),
+                }
             })?;
         instance.validate().map_err(|e| Error::Instance {
             instance: Box::new(instance_id.clone()),
             message: e.to_string(),
         })?;
+        let language = space_language(repo, id, &spec);
+        let instance_title = title_in(
+            &instance_manifest.manifest.metadata.rest,
+            language.as_deref(),
+        );
         targets.push(Target {
             id: id.clone(),
             manifest: resource.manifest.clone(),
@@ -220,9 +247,42 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
             publication,
             instance_name: instance_id.name,
             instance,
+            language,
+            instance_title,
         });
     }
     Ok(targets)
+}
+
+/// The `defaultLocale` of the space an Endpoint serves, looked up in the Endpoint's project.
+fn space_language(repo: &Repository, endpoint: &ResourceId, spec: &EndpointSpec) -> Option<String> {
+    let namespace = match &spec.context_space_ref {
+        Ref::Typed(typed) => typed
+            .namespace
+            .clone()
+            .or_else(|| endpoint.namespace.clone()),
+        Ref::Name(_) => endpoint.namespace.clone(),
+    };
+    let space = ResourceId::new(
+        endpoint.group.clone(),
+        ContextSpaceSpec::KIND,
+        namespace,
+        spec.context_space_ref.name(),
+    );
+    let space: ContextSpaceSpec =
+        serde_json::from_value(repo.get(&space)?.manifest.spec.clone()).ok()?;
+    space
+        .default_locale
+        .filter(|locale| !locale.trim().is_empty())
+}
+
+/// A manifest's `metadata.title`, a plain string or the legacy language map, in `language`
+/// when the map has it, else English, else its first entry (PF-28).
+fn title_in(metadata: &serde_json::Map<String, Value>, language: Option<&str>) -> Option<String> {
+    let title: Text = serde_json::from_value(metadata.get("title")?.clone()).ok()?;
+    let preferred: Vec<String> = language.map(str::to_owned).into_iter().collect();
+    let text = title.resolve(&preferred, "en").trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 /// Where the API token of an instance is read from, in the order tried.
@@ -364,7 +424,8 @@ pub fn publish_one(
     rows: Option<&str>,
     settings: &Settings,
 ) -> Result<Line, Error> {
-    let outcome = ckan::publish(api, &target.manifest, &target.instance, record, settings)?;
+    let settings = target.settings(settings);
+    let outcome = ckan::publish(api, &target.manifest, &target.instance, record, &settings)?;
     let mirror = match (&target.publication.datastore, rows) {
         (Some(_), Some(text)) => Some(mirror(api, target, text)?),
         (Some(_), None) => {

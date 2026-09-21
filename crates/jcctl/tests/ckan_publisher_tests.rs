@@ -655,3 +655,130 @@ fn a_narrowed_audience_flips_the_dataset_to_private() {
         json!(true)
     );
 }
+
+// --- licence and language (T-2465) -----------------------------------------------------------
+
+/// A record the way the gateway writes one today: titles in two languages, no licence.
+fn bilingual_record() -> Value {
+    json!({
+        "@type": "dcat:Dataset",
+        "dct:title": [
+            { "@value": "Air quality in Banská Bystrica", "@language": "en" },
+            { "@value": "Kvalita ovzdušia v Banskej Bystrici", "@language": "sk" }
+        ],
+        "dct:description": [
+            { "@value": "Readings of the city's stations.", "@language": "en" },
+            { "@value": "Merania staníc mesta.", "@language": "sk" }
+        ]
+    })
+}
+
+const LICENSED: &str = r#"  publish:
+    ckan:
+      instanceRef: { kind: CkanInstance, name: open-data }
+      license: cc-by
+"#;
+
+/// EP-62: the licence named in the publication block becomes the dataset's `license_id`
+/// when the record names none, which is what the gateway's record does today.
+#[test]
+fn a_publication_with_a_licence_sets_the_license_id() {
+    let dataset = package(
+        &endpoint("[csv]", LICENSED),
+        &instance(),
+        &bilingual_record(),
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert_eq!(dataset["license_id"], json!("cc-by"));
+
+    // And nothing when neither says one: no licence is invented (Architecture/21 §2).
+    let unlicensed = package(
+        &endpoint(
+            "[csv]",
+            "  publish:\n    ckan:\n      instanceRef: open-data\n",
+        ),
+        &instance(),
+        &bilingual_record(),
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert!(unlicensed.get("license_id").is_none(), "{unlicensed}");
+}
+
+/// EP-63: a licence the record carries is the Endpoint's own statement and wins over the
+/// block, so the dataset and the record never disagree.
+#[test]
+fn the_records_own_licence_wins_over_the_publication_block() {
+    let mut with_licence = bilingual_record();
+    with_licence["dct:license"] = json!("odc-by");
+    let dataset = package(
+        &endpoint("[csv]", LICENSED),
+        &instance(),
+        &with_licence,
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert_eq!(dataset["license_id"], json!("odc-by"));
+}
+
+/// EP-63: a Slovak space's dataset takes the Slovak title and notes, not the English ones
+/// the record lists first.
+#[test]
+fn the_space_language_picks_the_title_and_the_notes() {
+    let dataset = package(
+        &endpoint("[csv]", LICENSED),
+        &instance(),
+        &bilingual_record(),
+        &settings().in_language("sk"),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert_eq!(
+        dataset["title"],
+        json!("Kvalita ovzdušia v Banskej Bystrici")
+    );
+    assert_eq!(dataset["notes"], json!("Merania staníc mesta."));
+
+    // Without a language, and with one the record does not carry, English is the answer.
+    for settings in [settings(), settings().in_language("de")] {
+        let dataset = package(
+            &endpoint("[csv]", LICENSED),
+            &instance(),
+            &bilingual_record(),
+            &settings,
+        )
+        .expect("the endpoint publishes")
+        .expect("a dataset");
+        assert_eq!(dataset["title"], json!("Air quality in Banská Bystrica"));
+    }
+}
+
+/// CC-18: a licence and a language change nothing on a second run.
+#[test]
+fn a_licensed_slovak_dataset_is_unchanged_on_the_second_run() {
+    let mut api = ckan();
+    let settings = settings().in_language("sk");
+    let target = endpoint("[csv]", LICENSED);
+    let first = publish(
+        &mut api,
+        &target,
+        &instance(),
+        &bilingual_record(),
+        &settings,
+    )
+    .expect("the first run");
+    assert_eq!(first, Outcome::Created);
+    let second = publish(
+        &mut api,
+        &target,
+        &instance(),
+        &bilingual_record(),
+        &settings,
+    )
+    .expect("the second run");
+    assert_eq!(second, Outcome::Unchanged);
+}
