@@ -518,3 +518,215 @@ fn the_same_repository_renders_byte_identical_output() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- T-2523: the edge cases of `render` and `routed_apps` (AP-26…AP-29) ---
+
+/// An App manifest of `name` in `project` with `spec` lines as given.
+fn app(dir: &std::path::Path, project: &str, name: &str, spec: &str) {
+    write(
+        dir,
+        &format!("projects/{project}/apps/{name}/app.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: {name}\n  namespace: {project}\nspec:\n{spec}"
+        ),
+    );
+}
+
+fn unauth(document: &Value, name: &str) -> Value {
+    find(document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"]["unauth_action"]
+        .clone()
+}
+
+/// AP-26: one name is one route and one upstream, however many manifests carry it.
+#[test]
+fn two_apps_of_one_name_render_one_route_and_one_upstream() {
+    let dir = demo_repo("apisix-same-name");
+    app(
+        &dir,
+        "ovzdusie",
+        "board",
+        "  kind: service\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
+    );
+    app(
+        &dir,
+        "doprava",
+        "board",
+        "  kind: service\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
+    );
+    let document = document(&dir);
+    let count = |section: &str, id: &str| {
+        document[section]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter(|item| item["id"] == id)
+            .count()
+    };
+    assert_eq!(count("routes", "app-board"), 1);
+    assert_eq!(count("upstreams", "upstream-app-board"), 1);
+}
+
+/// AP-26: only the exact word `public` lets an anonymous request through; every other value,
+/// or none, asks for a login.
+#[test]
+fn an_app_visibility_that_is_not_exactly_public_requires_login() {
+    let dir = demo_repo("apisix-visibility-words");
+    for (name, visibility) in [
+        ("upper", "  visibility: Public\n"),
+        ("spaced", "  visibility: \" public\"\n"),
+        ("unknown", "  visibility: everyone\n"),
+        ("absent", ""),
+        ("listed", "  visibility: [public]\n"),
+    ] {
+        app(
+            &dir,
+            "ovzdusie",
+            name,
+            &format!(
+                "  kind: static\n  source: {{ path: apps/{name} }}\n  build: {{}}\n{visibility}"
+            ),
+        );
+    }
+    let document = document(&dir);
+    for name in ["upper", "spaced", "unknown", "absent", "listed"] {
+        assert_eq!(unauth(&document, name), "auth", "{name}");
+    }
+}
+
+/// AP-14: an app whose kind is unknown or missing is served by the Portal, never given a pod
+/// upstream of its own.
+#[test]
+fn an_app_of_unknown_or_missing_kind_is_served_by_the_portal() {
+    let dir = demo_repo("apisix-kinds");
+    app(
+        &dir,
+        "ovzdusie",
+        "odd",
+        "  kind: lambda\n  source: { path: apps/odd }\n  build: {}\n",
+    );
+    app(
+        &dir,
+        "ovzdusie",
+        "bare",
+        "  source: { path: apps/bare }\n  build: {}\n",
+    );
+    let document = document(&dir);
+    for name in ["odd", "bare"] {
+        assert_eq!(
+            find(&document, "routes", &format!("app-{name}"))["upstream_id"],
+            "upstream-portal",
+            "{name}"
+        );
+        assert!(
+            !has(&document, "upstreams", &format!("upstream-app-{name}")),
+            "{name}"
+        );
+    }
+}
+
+/// AP-26: an installation with no apps renders the Portal and the shared surface, and no route
+/// of an app.
+#[test]
+fn zero_app_manifests_still_renders_the_baseline_routes() {
+    let dir = demo_repo("apisix-no-apps");
+    let document = document(&dir);
+    let routes = document["routes"].as_array().expect("routes");
+    assert!(!routes.is_empty());
+    assert!(
+        routes
+            .iter()
+            .all(|r| !r["id"].as_str().unwrap_or_default().starts_with("app-")),
+        "{routes:?}"
+    );
+    assert!(
+        rendered(&dir).ends_with(END_MARKER)
+            || rendered(&dir).ends_with(&format!("{END_MARKER}\n"))
+    );
+}
+
+/// AP-29: every app's login is its own: cookie, callback and logout never name another app.
+#[test]
+fn two_apps_never_share_a_cookie_callback_or_logout() {
+    let dir = repo_with_three_apps("apisix-own-session");
+    let document = document(&dir);
+    let names = ["air-quality-today", "air-quality-map", "hsl-transport"];
+    let mut cookies = std::collections::BTreeSet::new();
+    for name in names {
+        let oidc = &find(&document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"];
+        let text = oidc.to_string();
+        for other in names.iter().filter(|other| **other != name) {
+            assert!(
+                !text.contains(&format!("/apps/{other}/")),
+                "{name} names {other}: {text}"
+            );
+        }
+        cookies.insert(
+            text.split("jc_edge_app_")
+                .nth(1)
+                .map(|rest| rest.chars().take_while(|c| *c != '"').collect::<String>()),
+        );
+    }
+    assert_eq!(cookies.len(), names.len());
+}
+
+/// AP-26: the browser origins the edge answers are the installation's subdomains and nothing
+/// that only looks like one.
+#[test]
+fn the_cors_origin_pattern_admits_subdomains_only() {
+    let dir = demo_repo("apisix-cors");
+    let text = rendered(&dir);
+    let pattern = text
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("- ")
+                .filter(|l| l.contains("https://.+"))
+        })
+        .map(|l| {
+            l.trim_matches(|c| c == '\'' || c == '"')
+                .replace("\\\\", "\\")
+        })
+        .unwrap_or_else(|| panic!("no origin pattern in the render"));
+    let origin = regex::Regex::new(&pattern).expect("the pattern compiles");
+    assert!(origin.is_match("https://portal.city.example.com"));
+    for foreign in [
+        "https://city.example.com.evil.org",
+        "https://evil-cityXexample.com",
+        "https://portalXcity.example.com.attacker.net",
+        "http://portal.city.example.com",
+        "https://city.example.com",
+    ] {
+        assert!(!origin.is_match(foreign), "{foreign} admitted by {pattern}");
+    }
+}
+
+/// AP-28: the forgeable headers are stripped on an app route of every kind and visibility,
+/// including one the repository could only half describe.
+#[test]
+fn an_app_of_unknown_kind_still_strips_every_forgeable_header() {
+    let dir = demo_repo("apisix-odd-strip");
+    app(
+        &dir,
+        "ovzdusie",
+        "odd",
+        "  kind: lambda\n  source: { path: apps/odd }\n  build: {}\n  visibility: public\n",
+    );
+    let document = document(&dir);
+    let strip = plugins_of(&document, "app-odd")["serverless-pre-function"].to_string();
+    for header in FORGEABLE_HEADERS {
+        assert!(strip.contains(header), "{header} is not stripped: {strip}");
+    }
+}
+
+/// AP-26: an App name the loader accepts never escapes the `/apps/` prefix of its route.
+#[test]
+fn every_app_route_stays_under_its_own_apps_prefix() {
+    let dir = repo_with_three_apps("apisix-prefix");
+    let document = document(&dir);
+    for route in document["routes"].as_array().expect("routes") {
+        let id = route["id"].as_str().unwrap_or_default();
+        if let Some(name) = id.strip_prefix("app-") {
+            assert_eq!(route["uri"], format!("/apps/{name}/*"), "{id}");
+        }
+    }
+}
