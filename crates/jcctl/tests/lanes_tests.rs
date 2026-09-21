@@ -312,3 +312,54 @@ fn the_demo_repository_on_a_fresh_platform_is_red_because_it_publishes() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const AGENT_PROFILE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: AgentProfile
+metadata:
+  name: analyst
+  namespace: ovzdusie
+spec: {}
+"#;
+
+fn touching(path: &str) -> ResourceChange {
+    let mut update = change(Action::Update, AGENT_PROFILE);
+    update.diff = vec![jcctl::FieldDiff {
+        path: path.to_owned(),
+        declared: Some(json!(1)),
+        live: Some(json!(2)),
+    }];
+    update
+}
+
+/// CC-70, AG-47: an update touching an agent profile's egress or limits is red, in either
+/// direction, because the lane reads the path and not the value.
+#[test]
+fn an_agent_profile_update_touching_egress_or_limits_is_red() {
+    for path in [
+        "spec.egress",
+        "spec.egress.hosts",
+        "spec.limits.maxSteps",
+        "spec.limits",
+    ] {
+        let verdict = lane_of(&touching(path));
+        assert_eq!(verdict.lane, Lane::Red, "{path}");
+        assert!(
+            verdict.reason.contains("AG-47"),
+            "{path}: {}",
+            verdict.reason
+        );
+    }
+}
+
+/// CC-63, AG-47: any other agent profile change is yellow, a create included, never green.
+#[test]
+fn any_other_agent_profile_change_is_yellow() {
+    for change in [
+        touching("spec.tools"),
+        touching("spec.model.name"),
+        change(Action::Create, AGENT_PROFILE),
+        change(Action::Update, AGENT_PROFILE),
+    ] {
+        assert_eq!(lane_of(&change).lane, Lane::Yellow, "{:?}", change.diff);
+    }
+}

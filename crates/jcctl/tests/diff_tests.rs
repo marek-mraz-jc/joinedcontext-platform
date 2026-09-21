@@ -227,3 +227,30 @@ spec:
         }]
     );
 }
+
+/// CC-17: only the members the platform writes are stripped, directly under `metadata` and
+/// `spec`; a `createdAt` deeper in the spec is the manifest's own, and a change to it is drift.
+#[test]
+fn a_nested_member_named_like_a_server_managed_one_is_still_compared() {
+    let grid = |shown: bool| {
+        manifest(&format!(
+            r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Grid
+metadata:
+  name: stations
+  namespace: ovzdusie
+spec:
+  columns:
+    show:
+      createdAt: {shown}
+      status: {shown}
+"#
+        ))
+    };
+    let found = diff(&grid(true), &grid(false));
+    let paths: Vec<&str> = found.iter().map(|d| d.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        ["spec.columns.show.createdAt", "spec.columns.show.status"]
+    );
+}
