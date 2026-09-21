@@ -1,4 +1,6 @@
-//! T-0303: what `jcctl apply` does to a broker's registrations (MF-36, SP-09, CC-18).
+//! T-0303: what `jcctl apply` does to a broker's registrations (MF-36, SP-09, CC-18). A city
+//! joins or leaves a federation through these manifests alone (CC-14): `apply` registers,
+//! `remove` withdraws, and no broker-specific step sits beside either.
 //!
 //! The reconciler's whole job is the third run: after create and update, an apply over an
 //! unchanged repository has to make no writing call at all. Everything else here holds that
@@ -306,6 +308,8 @@ fn no_identity_and_no_credential_reaches_the_broker() {
     assert!(!forwards_caller_identity(&spec(LOCAL)));
 }
 
+/// CC-14: leaving a federation is the registration manifest leaving the repository; the next
+/// apply withdraws it from the broker once and a repeat finds nothing left to do.
 #[test]
 fn a_registration_the_repository_dropped_is_deleted_once() {
     let mut broker = InMemoryBroker::new();
@@ -356,4 +360,125 @@ fn a_registration_that_claims_nothing_never_reaches_the_broker() {
         Err(CsrError::Spec(_))
     ));
     assert!(broker.calls().is_empty(), "writes: {:?}", broker.calls());
+}
+
+// --- T-2528: the edge cases of `information`, the claim a registration makes (MF-36, SP-09) ---
+
+/// The `information` the broker is told for `EXTERNAL` with its claim replaced by `claim`.
+fn told(claim: &str) -> serde_json::Value {
+    let yaml = EXTERNAL.replace(
+        "  information:\n    - entities: [{ type: Vehicle }]\n",
+        &format!("  information:\n{claim}"),
+    );
+    registration(&manifest(&yaml), &no_endpoints()).expect("builds")["information"].clone()
+}
+
+/// SP-09: the broker is told exactly what the manifest claims, and nothing the spec did not set.
+#[test]
+fn the_entities_array_never_carries_a_field_the_spec_did_not_set() {
+    assert_eq!(
+        told("    - entities: [{ type: Vehicle }]\n"),
+        json!([{ "entities": [{ "type": "Vehicle" }] }])
+    );
+}
+
+/// SP-09: a claim of one exact entity names it by id, as a string.
+#[test]
+fn an_exact_entity_id_selector_is_carried_as_a_string() {
+    let id = "urn:ngsi-ld:Vehicle:zvolen.sk:doprava:bus-12";
+    assert_eq!(
+        told(&format!(
+            "    - entities: [{{ type: Vehicle, id: \"{id}\" }}]\n"
+        )),
+        json!([{ "entities": [{ "type": "Vehicle", "id": id }] }])
+    );
+}
+
+/// SP-09: relationships the source serves are claimed like its properties.
+#[test]
+fn relationship_names_are_carried_when_declared() {
+    assert_eq!(
+        told("    - entities: [{ type: Vehicle }]\n      relationshipNames: [refRoute, refStop]\n"),
+        json!([{ "entities": [{ "type": "Vehicle" }], "relationshipNames": ["refRoute", "refStop"] }])
+    );
+}
+
+/// SP-09: an id and a pattern together are both carried; the broker narrows by both.
+#[test]
+fn an_entity_selector_with_both_id_and_idpattern_carries_both() {
+    let id = "urn:ngsi-ld:Vehicle:zvolen.sk:doprava:bus-12";
+    let body = told(&format!(
+        "    - entities: [{{ type: Vehicle, id: \"{id}\", idPattern: \"^urn:ngsi-ld:Vehicle:zvolen.sk:.*$\" }}]\n"
+    ));
+    assert_eq!(body[0]["entities"][0]["id"], json!(id));
+    assert_eq!(
+        body[0]["entities"][0]["idPattern"],
+        json!("^urn:ngsi-ld:Vehicle:zvolen.sk:.*$")
+    );
+}
+
+/// SP-09: an entry that names no attribute omits both lists rather than claiming empty ones.
+#[test]
+fn an_information_entry_with_no_property_or_relationship_names_omits_both_keys() {
+    let body = told("    - entities: [{ type: Vehicle }]\n      propertyNames: []\n      relationshipNames: []\n");
+    let entry = body[0].as_object().expect("an entry");
+    assert!(!entry.contains_key("propertyNames"), "{body}");
+    assert!(!entry.contains_key("relationshipNames"), "{body}");
+}
+
+/// SP-09: several entries are carried in the order the manifest declares them.
+#[test]
+fn multiple_information_entries_are_carried_in_declared_order() {
+    let body = told(
+        "    - entities: [{ type: Vehicle }]\n    - entities: [{ type: BusStop }]\n    - entities: [{ type: Route }]\n",
+    );
+    let types: Vec<_> = body
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|entry| entry["entities"][0]["type"].clone())
+        .collect();
+    assert_eq!(
+        types,
+        vec![json!("Vehicle"), json!("BusStop"), json!("Route")]
+    );
+}
+
+/// SP-09: every selector of one entry is carried.
+#[test]
+fn multiple_entity_selectors_in_one_entry_are_all_carried() {
+    assert_eq!(
+        told("    - entities: [{ type: Vehicle }, { type: BusStop }]\n      propertyNames: [location]\n"),
+        json!([{ "entities": [{ "type": "Vehicle" }, { "type": "BusStop" }], "propertyNames": ["location"] }])
+    );
+}
+
+/// SP-09: a name with a dot or an at sign is the attribute's own name and is not rewritten.
+#[test]
+fn a_property_name_containing_a_dot_or_at_sign_is_carried_unescaped() {
+    assert_eq!(
+        told("    - entities: [{ type: Vehicle }]\n      propertyNames: [\"speed.value\", \"@context\"]\n")[0]
+            ["propertyNames"],
+        json!(["speed.value", "@context"])
+    );
+}
+
+/// MF-36: an empty claim never reaches the broker; the existing guard names why.
+#[test]
+fn an_empty_information_list_never_becomes_a_registration() {
+    let yaml = EXTERNAL.replace(
+        "  information:\n    - entities: [{ type: Vehicle }]\n",
+        "  information: []\n",
+    );
+    assert!(registration(&manifest(&yaml), &no_endpoints()).is_err());
+}
+
+/// MF-36: an entry that selects no entity claims nothing and is refused like an empty list.
+#[test]
+fn an_information_entry_with_an_empty_entities_list_is_refused() {
+    let yaml = EXTERNAL.replace(
+        "  information:\n    - entities: [{ type: Vehicle }]\n",
+        "  information:\n    - entities: []\n      propertyNames: [speed]\n",
+    );
+    assert!(registration(&manifest(&yaml), &no_endpoints()).is_err());
 }

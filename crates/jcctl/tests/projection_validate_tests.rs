@@ -189,3 +189,39 @@ fn a_projection_of_a_model_nobody_declares_is_refused() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// CC-08: a model whose `linkml` climbs out of its folder is not opened to check a projection;
+/// the projection is refused because the model's spec does not validate.
+#[test]
+fn a_model_source_outside_the_repository_is_not_read_for_a_projection() {
+    let dir = repo_with("outside", PROJECTION);
+    let outside = temp_repo("outside-source");
+    let model = "projects/helsinki/spaces/fleet/datamodels";
+    std::fs::rename(
+        dir.join(model).join("fleet.linkml.yaml"),
+        outside.join("fleet.linkml.yaml"),
+    )
+    .expect("move the source out");
+    let manifest = std::fs::read_to_string(dir.join(model).join("fleet.yaml")).expect("model");
+    write(
+        &dir,
+        &format!("{model}/fleet.yaml"),
+        &manifest.replace(
+            "linkml: ./fleet.linkml.yaml",
+            &format!(
+                "linkml: ../../../../../../../../..{}/fleet.linkml.yaml",
+                outside.display()
+            ),
+        ),
+    );
+    let report = validate::run(&dir);
+    assert!(
+        report.findings.iter().any(
+            |f| f.path == Path::new(PROJECTION_PATH) && f.message.contains("does not validate")
+        ),
+        "{:?}",
+        report.findings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&outside);
+}

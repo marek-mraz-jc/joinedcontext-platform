@@ -85,3 +85,4 @@ pub fn load(dir: &Path) -> Repository {
 pub fn manifest(yaml: &str) -> RawManifest {
     serde_norway::from_str(yaml).expect("manifest parses")
 }
+pub mod sops;

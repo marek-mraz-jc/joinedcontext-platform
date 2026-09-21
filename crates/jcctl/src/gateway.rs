@@ -124,6 +124,13 @@ impl Gateway {
             })
     }
 
+    /// What the gateway answered, as an error repeats it: the token redacted first, so an
+    /// answer that echoes the Authorization header (a proxy's error page) never carries it
+    /// into a log, whole or cut at the snippet's edge (CC-06).
+    fn said(&self, body: &str) -> String {
+        snippet(&body.replace(self.token.expose(), "[redacted]"))
+    }
+
     fn unavailable(&self, error: &reqwest::Error) -> BrokerError {
         BrokerError::Unavailable {
             url: self.base.to_string(),
@@ -169,7 +176,7 @@ impl Broker for Gateway {
             return Err(BrokerError::Refused {
                 space: space.to_owned(),
                 status: status.as_u16(),
-                message: snippet(&body),
+                message: self.said(&body),
             });
         }
         serde_json::from_str(&body)
@@ -177,7 +184,7 @@ impl Broker for Gateway {
             .map_err(|e| BrokerError::Refused {
                 space: space.to_owned(),
                 status: status.as_u16(),
-                message: format!("the answer is not an entity ({e}): {}", snippet(&body)),
+                message: format!("the answer is not an entity ({e}): {}", self.said(&body)),
             })
     }
 
@@ -209,7 +216,7 @@ impl Broker for Gateway {
                 Some(errors) => Err(BrokerError::Refused {
                     space: space.to_owned(),
                     status: status.as_u16(),
-                    message: snippet(&errors.to_string()),
+                    message: self.said(&errors.to_string()),
                 }),
             };
         }
@@ -219,7 +226,28 @@ impl Broker for Gateway {
         Err(BrokerError::Refused {
             space: space.to_owned(),
             status: status.as_u16(),
-            message: snippet(&body),
+            message: self.said(&body),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CC-06 (T-2549): the token leaves an echoed answer before the answer is cut, so not even
+    /// the part of it that would fall inside the snippet survives.
+    #[test]
+    fn an_echoed_token_is_redacted_before_the_snippet_is_cut() {
+        let token = "eyJhbGciOiJSUzI1NiJ9.t2549-token";
+        let gateway =
+            Gateway::new("http://gw:9090", SecretValue::new(token.to_owned())).expect("a client");
+        for pad in [0, SNIPPET - 20, SNIPPET - 1, SNIPPET] {
+            let body = format!("{}Bearer {token} and again {token}", "x".repeat(pad));
+            let said = gateway.said(&body);
+            assert!(!said.contains("eyJhbGciOi"), "{pad}: {said}");
+            assert!(said.chars().count() <= SNIPPET + 1, "{pad}: {said}");
+        }
+        assert_eq!(gateway.said("  no such space  "), "no such space");
     }
 }

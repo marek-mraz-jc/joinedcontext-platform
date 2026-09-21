@@ -111,6 +111,10 @@ pub enum DerivedError {
     /// A temporal window this renderer cannot turn into seconds.
     #[error("{0} is not a duration of days, hours, minutes or seconds (PL-31)")]
     BadWindow(String),
+    /// An attribute name of the query holds the list separator, so the gateway would read it as
+    /// two names.
+    #[error("spec.source.query.attrs names {0:?}, and a comma separates attribute names, so it would be read as two")]
+    BadAttribute(String),
 }
 
 /// Renders the derived half of one pipeline.
@@ -189,16 +193,29 @@ fn query_source(
         Runtime::Resident => (spec.period.clone().unwrap_or_default(), 0),
     };
 
+    // Every value below comes from a manifest a project member proposes, and the URL is a Bento
+    // config string: each value goes in as one encoded component, so it can neither end its
+    // parameter (`&`) or the query (`#`), nor hand the runner a `${VAR}` it substitutes at load
+    // or a `${! … }` it interpolates per message (PL-14, T-2542).
     let mut params: Vec<String> = Vec::new();
     if let Some(entity_type) = &query.entity_type {
-        params.push(format!("type={entity_type}"));
+        params.push(format!("type={}", component(entity_type)));
     }
     if !query.attrs.is_empty() {
-        params.push(format!("attrs={}", query.attrs.join(",")));
+        // The list separator is the comma, so a name holding one would read as two.
+        if let Some(name) = query.attrs.iter().find(|name| name.contains(',')) {
+            return Err(DerivedError::BadAttribute(name.clone()));
+        }
+        let attrs: Vec<String> = query.attrs.iter().map(|name| component(name)).collect();
+        params.push(format!("attrs={}", attrs.join(",")));
     }
     if !query.ids.is_empty() {
         // PL-42: the ticked entities, and nothing else the type holds.
-        let ids: Vec<String> = query.ids.iter().map(ToString::to_string).collect();
+        let ids: Vec<String> = query
+            .ids
+            .iter()
+            .map(|id| component(&id.to_string()))
+            .collect();
         params.push(format!("id={}", ids.join(",")));
     }
     for (name, value) in [
@@ -207,7 +224,7 @@ fn query_source(
         ("geoQ", &query.geo_q),
     ] {
         if let Some(value) = value {
-            params.push(format!("{name}={value}"));
+            params.push(format!("{name}={}", component(value)));
         }
     }
 
@@ -241,6 +258,24 @@ fn query_source(
         }
     });
     Ok((input, fetch))
+}
+
+/// One query-string component: RFC 3986's unreserved characters and `:` (which a query may carry
+/// as it is, and every URN is made of) left alone, every other byte percent-encoded, so the
+/// gateway decodes exactly the value the manifest wrote.
+fn component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b':') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+    encoded
 }
 
 /// The CIM 009 subscription that makes the gateway deliver to this runner.

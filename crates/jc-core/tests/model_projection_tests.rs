@@ -189,3 +189,39 @@ spec:
         "projectionRef names a ModelProjection"
     );
 }
+
+/// T-2376 (MP-01): the check the Portal's write path and `jcctl validate` share names every
+/// class and slot the model does not have, at once, from the LinkML source itself.
+#[test]
+fn a_projection_is_checked_against_the_linkml_source_every_stale_name_at_once() {
+    use jc_core::kinds::model_projection::linkml_classes;
+    use jc_core::kinds::ModelProjectionSpec;
+
+    let linkml = "id: https://hel.fi/models/air\nname: air\nslots:\n  pm10: { range: float }\nclasses:\n  AirQualityObserved:\n    slots: [pm10]\n    attributes:\n      no2: { range: float }\n";
+    let classes = linkml_classes(linkml).expect("parses");
+    assert_eq!(
+        classes["AirQualityObserved"],
+        ["id", "type", "pm10", "no2"].map(str::to_owned).into()
+    );
+
+    let projection =
+        |yaml: &str| -> ModelProjectionSpec { serde_norway::from_str(yaml).expect("a projection") };
+    let fine = projection("contextSpaceRef: air\ndataModelRef: { kind: DataModel, name: air, version: '1' }\nclasses:\n  - { name: AirQualityObserved, slots: [pm10, no2] }\n");
+    fine.check_against_linkml(linkml)
+        .expect("every name is in the model");
+
+    let stale = projection("contextSpaceRef: air\ndataModelRef: { kind: DataModel, name: air, version: '1' }\nclasses:\n  - { name: AirQualityObserved, slots: [pm10, so2] }\n  - { name: NoiseLevel }\n  - { name: Parking }\n");
+    let said = stale
+        .check_against_linkml(linkml)
+        .expect_err("three stale names")
+        .to_string();
+    for name in ["AirQualityObserved.so2", "NoiseLevel", "Parking"] {
+        assert!(said.contains(name), "{name}: {said}");
+    }
+
+    let broken = fine
+        .check_against_linkml("classes: [unclosed")
+        .expect_err("not LinkML")
+        .to_string();
+    assert!(broken.contains("spec.dataModelRef"), "{broken}");
+}

@@ -327,6 +327,33 @@ async fn a_forged_tenant_header_never_reaches_the_broker() {
     assert!(!hop.forged, "the client\'s tenant claim reached the broker");
 }
 
+/// OPS-17: the W3C Trace Context a caller (or APISIX in front of it) sends reaches the broker
+/// as it was, so one trace spans the edge, the gateway and the broker. The gateway relays it and
+/// starts no trace of its own. Both surfaces forward through `ngsi_ld_request`, so one proves
+/// the path for both.
+#[tokio::test]
+async fn the_trace_context_reaches_the_broker_unchanged() {
+    const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const STATE: &str = "congo=t61rcWkgMzE";
+    let broker = BrokerStub::start(vec![json!([])]).await;
+    let request = Request::builder()
+        .uri(format!(
+            "/cs/{OPEN}/ngsi-ld/v1/entities?type=AirQualityObserved"
+        ))
+        .header("traceparent", PARENT)
+        .header("tracestate", STATE)
+        .body(Body::empty())
+        .expect("a request");
+    let response = gateway(&broker.url)
+        .oneshot(request)
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let hops = broker.hops();
+    let hop = hops.first().expect("the broker was called");
+    assert_eq!(hop.trace, (PARENT.to_owned(), STATE.to_owned()));
+}
+
 /// The space surface refuses an operation the space's policy set does not grant, through
 /// the same PDP the endpoint surface uses (EP-06, EP-07).
 #[tokio::test]

@@ -637,6 +637,75 @@ fn validate_source(src: &PipelineSource) -> Result<()> {
 }
 
 /// One compute step (PL-33, PL-34, PL-41).
+/// The runner's processors no pipeline may run, at the top of a step or nested inside one:
+/// `command` and `subprocess` run a program in the shared runner, `file` reads, writes and
+/// deletes its files, and `wasm` is the compute kind (PL-34). `bento_processors::PROCESSORS`
+/// leaves the same four out.
+const REFUSED_PROCESSORS: &[&str] = &["command", "file", "subprocess", "wasm"];
+
+/// Checks one processor configuration the way a pipeline step is checked (PL-16, PL-50, PL-52):
+/// one processor name besides an optional `label`, a name the platform's list holds, no refused
+/// processor nested anywhere inside it (`try`, `branch`, `switch` and the others carry
+/// processors of their own), and every string through the Bloblang host check. The Portal runs
+/// the processors of an author's `bento.yaml` through it before a stream is rendered.
+pub fn validate_processor(field: &'static str, processor: &serde_json::Value) -> Result<()> {
+    let refused = |reason: String| Error::Invalid {
+        field: field.to_owned(),
+        reason,
+    };
+    let Some(config) = processor.as_object() else {
+        return Err(refused(
+            "a processor is a map of its name to its configuration".to_owned(),
+        ));
+    };
+    let mut names = config.keys().filter(|key| *key != "label");
+    let (Some(name), None) = (names.next(), names.next()) else {
+        return Err(Error::Name {
+            field,
+            value: config.keys().cloned().collect::<Vec<_>>().join(", "),
+            reason: "a processor step names exactly one processor (PL-52)",
+        });
+    };
+    if !super::bento_processors::PROCESSORS.contains(&name.as_str()) {
+        return Err(refused(format!(
+            "unknown processor `{name}`; accepted processors are: {}",
+            super::bento_processors::PROCESSORS.join(", ")
+        )));
+    }
+    if let Some(nested) = nested_refused(&config[name]) {
+        return Err(refused(format!(
+            "processor `{nested}` inside `{name}` runs a program or opens the runner's files, \
+             which no pipeline step may do (PL-52)"
+        )));
+    }
+    // A `mapping` body and a `${! … }` interpolation are Bloblang too, and a step that reads
+    // the runner is the same escape wherever it is written.
+    let mut texts = Vec::new();
+    config_strings(&config[name], &mut texts);
+    for text in &texts {
+        validate_author_bloblang(field, text)?;
+    }
+    Ok(())
+}
+
+/// The first refused processor anywhere inside a configuration: a key of that name whose value
+/// is a configuration map (or empty). A field that only shares the name, such as `redis`'s
+/// `command: get`, holds a string and is not one.
+fn nested_refused(value: &serde_json::Value) -> Option<&'static str> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().find_map(nested_refused),
+        serde_json::Value::Object(fields) => fields.iter().find_map(|(key, inner)| {
+            REFUSED_PROCESSORS
+                .iter()
+                .find(|refused| **refused == key.as_str())
+                .filter(|_| inner.is_object() || inner.is_null())
+                .copied()
+                .or_else(|| nested_refused(inner))
+        }),
+        _ => None,
+    }
+}
+
 /// Every string a processor step's configuration holds, however deeply nested.
 ///
 /// A processor carries Bloblang in two places: a `mapping` or `mutation` body, and the
@@ -951,24 +1020,10 @@ impl PipelineSpec {
                             reason: "a processor step names exactly one processor (PL-52)",
                         });
                     };
-                    if !super::bento_processors::PROCESSORS.contains(&name.as_str()) {
-                        return Err(Error::Invalid {
-                            field: "spec.steps.processor".to_owned(),
-                            reason: format!(
-                                "unknown processor `{name}`; accepted processors are: {}",
-                                super::bento_processors::PROCESSORS.join(", ")
-                            ),
-                        });
-                    }
-                    // A `mapping` body and a `${! … }` interpolation are Bloblang too, and a
-                    // step that reads the runner is the same escape wherever it is written.
-                    let mut texts = Vec::new();
-                    for config in step.processor.values() {
-                        config_strings(config, &mut texts);
-                    }
-                    for text in &texts {
-                        validate_author_bloblang("spec.steps.processor", text)?;
-                    }
+                    validate_processor(
+                        "spec.steps.processor",
+                        &serde_json::json!({ name: step.processor[name] }),
+                    )?;
                 }
             }
         }

@@ -408,3 +408,119 @@ fn export_reads_a_link_that_stays_inside_the_checkout() {
         "{natives:?}"
     );
 }
+
+// --- T-2524: the edge cases of `redact`, through `adopt` and `literal_credentials` (MF-17) ---
+
+/// A live endpoint whose spec is `spec`, cleaned the way `adopt` cleans one.
+fn adopted(spec: serde_json::Value) -> (RawManifest, Vec<String>) {
+    let mut endpoint = manifest(LIVE_ENDPOINT);
+    endpoint.spec = spec;
+    export::adopt(&endpoint)
+}
+
+/// MF-17: a credential inside an object inside a list is found; the list itself stays.
+#[test]
+fn a_credential_inside_an_array_element_object_is_redacted_and_named() {
+    let (clean, dropped) = adopted(serde_json::json!({
+        "upstreams": [
+            { "url": "https://a.example.sk", "token": "tok-first" },
+            { "url": "https://b.example.sk" }
+        ]
+    }));
+    assert_eq!(dropped, vec!["token"]);
+    assert!(!clean.spec.to_string().contains("tok-first"));
+    assert_eq!(clean.spec["upstreams"].as_array().map(Vec::len), Some(2));
+}
+
+/// MF-17: the match ignores case, so `PASSWORD` and `ClientSecret` go like `password` does.
+#[test]
+fn a_credential_key_in_upper_case_is_still_redacted() {
+    let (clean, dropped) = adopted(serde_json::json!({
+        "PASSWORD": "hunter2",
+        "ClientSecret": "cs-9f1",
+        "ACCESSKEY": "AKIA-1"
+    }));
+    let mut dropped = dropped;
+    dropped.sort();
+    assert_eq!(dropped, vec!["ACCESSKEY", "ClientSecret", "PASSWORD"]);
+    assert_eq!(clean.spec, serde_json::json!({}));
+}
+
+/// MF-17: one pass finds every credential, however deep.
+#[test]
+fn nested_credentials_several_levels_deep_are_all_redacted_in_one_pass() {
+    let spec = serde_json::json!({
+        "a": { "b": { "c": { "d": { "secret": "s-4" }, "dsn": "postgres://u:p@db/x" } } },
+        "passphrase": "p-0"
+    });
+    let mut found = export::literal_credentials(&spec);
+    found.sort();
+    assert_eq!(found, vec!["dsn", "passphrase", "secret"]);
+    let (clean, _) = adopted(spec);
+    for value in ["s-4", "postgres://", "p-0"] {
+        assert!(!clean.spec.to_string().contains(value), "{value} survived");
+    }
+}
+
+/// MF-17: an empty password is still a literal member of that name, and goes.
+#[test]
+fn a_credential_value_that_is_an_empty_string_is_still_redacted() {
+    let (clean, dropped) = adopted(serde_json::json!({ "password": "", "slug": "s" }));
+    assert_eq!(dropped, vec!["password"]);
+    assert_eq!(clean.spec, serde_json::json!({ "slug": "s" }));
+}
+
+/// MF-17: `credentials` holding references is a declaration, and a declaration stays.
+#[test]
+fn a_credential_named_field_holding_an_object_or_secretref_is_not_redacted() {
+    let spec = serde_json::json!({
+        "secret": { "secretRef": { "name": "writer", "key": "password" } },
+        "credentials": [{ "secretRef": { "name": "reader" } }]
+    });
+    assert!(export::literal_credentials(&spec).is_empty());
+    let (clean, dropped) = adopted(spec.clone());
+    assert!(dropped.is_empty());
+    assert_eq!(clean.spec, spec);
+}
+
+/// MF-17: only a member that IS a credential name goes; one that contains the word stays.
+#[test]
+fn a_key_that_only_contains_a_credential_word_is_not_redacted() {
+    let spec = serde_json::json!({
+        "tokenEndpoint": "https://kc.example.sk/token",
+        "passwordPolicy": "strong",
+        "secretRefName": "writer",
+        "dsnTemplate": "postgres://{host}/db"
+    });
+    assert!(export::literal_credentials(&spec).is_empty());
+}
+
+/// MF-17: the list is matched exactly, so a key with spaces around it is not one of its names.
+#[test]
+fn a_credential_key_with_leading_or_trailing_whitespace_is_not_matched() {
+    let spec = serde_json::json!({ " password": "x", "token ": "y" });
+    assert!(export::literal_credentials(&spec).is_empty());
+}
+
+/// MF-17: two credentials side by side are both dropped and both named.
+#[test]
+fn two_sibling_credential_fields_are_both_redacted_and_both_named() {
+    let (clean, mut dropped) = adopted(serde_json::json!({
+        "upstream": { "token": "t-1", "privateKey": "-----BEGIN KEY-----", "url": "https://u" }
+    }));
+    dropped.sort();
+    assert_eq!(dropped, vec!["privateKey", "token"]);
+    assert_eq!(
+        clean.spec,
+        serde_json::json!({ "upstream": { "url": "https://u" } })
+    );
+}
+
+/// MF-17: nothing to clean reports nothing.
+#[test]
+fn an_empty_spec_object_redacts_nothing_and_reports_no_drops() {
+    let (clean, dropped) = adopted(serde_json::json!({}));
+    assert!(dropped.is_empty());
+    assert_eq!(clean.spec, serde_json::json!({}));
+    assert!(export::literal_credentials(&serde_json::json!(null)).is_empty());
+}

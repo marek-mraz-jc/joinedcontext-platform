@@ -518,3 +518,80 @@ fn the_same_repository_renders_byte_identical_output() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Findings of `validate` that name the App `name`.
+fn clashes(dir: &std::path::Path, name: &str) -> Vec<String> {
+    jcctl::commands::validate::run(dir)
+        .findings
+        .into_iter()
+        .map(|f| f.message)
+        .filter(|m| m.contains("AP-14a") && m.contains(&format!("App {name} ")))
+        .collect()
+}
+
+/// AP-14a: `/apps/{name}/` is one address for the whole organization, so a second project's
+/// App of the same name is refused by `validate`, not silently merged into the first one's
+/// route with the visibility of whichever sorts first.
+#[test]
+fn two_projects_declaring_one_app_name_is_a_validate_finding() {
+    let dir = repo_with_three_apps("apisix-name-clash");
+    write(
+        &dir,
+        "projects/doprava/project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    assert!(clashes(&dir, "hsl-transport").is_empty());
+
+    // A project-only app in ovzdusie under the name doprava's public app already holds.
+    write(
+        &dir,
+        "projects/ovzdusie/apps/hsl-transport/app.yaml",
+        &STATIC_APP.replace("air-quality-map", "hsl-transport"),
+    );
+    let found = clashes(&dir, "hsl-transport");
+    assert_eq!(found.len(), 2, "each manifest is located: {found:?}");
+    for message in &found {
+        assert!(
+            message.contains("doprava and ovzdusie"),
+            "names both: {message}"
+        );
+    }
+    assert!(clashes(&dir, "air-quality-map").is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AP-14a: a third claimant is named too, and a name only one project uses stays clean.
+#[test]
+fn three_projects_on_one_app_name_are_all_named_and_other_apps_are_untouched() {
+    let dir = repo_with_three_apps("apisix-name-clash-three");
+    for project in ["doprava", "kultura"] {
+        write(
+            &dir,
+            &format!("projects/{project}/project.yaml"),
+            &PROJECT.replace("ovzdusie", project),
+        );
+    }
+    for project in ["ovzdusie", "kultura"] {
+        write(
+            &dir,
+            &format!("projects/{project}/apps/hsl-transport/app.yaml"),
+            &STATIC_APP
+                .replace("air-quality-map", "hsl-transport")
+                .replace("namespace: ovzdusie", &format!("namespace: {project}")),
+        );
+    }
+    let found = clashes(&dir, "hsl-transport");
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|m| m.contains("doprava and kultura and ovzdusie")),
+        "{found:?}"
+    );
+    for name in ["air-quality-today", "air-quality-map"] {
+        assert!(clashes(&dir, name).is_empty(), "{name}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

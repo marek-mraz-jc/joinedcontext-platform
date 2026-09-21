@@ -239,3 +239,179 @@ fn the_kind_is_in_the_catalogue_with_its_repository_path() {
         Some("http://json-schema.org/draft-07/schema#")
     );
 }
+
+/// What `validate` says about `yaml`: `Ok(())` or the refusal's text.
+fn verdict(yaml: &str) -> Result<(), String> {
+    Registration::from_yaml(yaml)
+        .expect("parses")
+        .validate()
+        .map_err(|err| err.to_string())
+}
+
+/// T-2501 (MF-36, PF-48): each manifest below breaks one rule, and the refusal names the field
+/// a person has to change. Cases 1, 2, 5, 6, 7, 8, 9 and 11.
+#[test]
+fn every_broken_rule_is_refused_by_the_field_it_breaks() {
+    let cases: [(&str, String, &str); 10] = [
+        (
+            "a space of another project, with no endpointRef to catch it first",
+            EXTERNAL.replace(
+                "contextSpaceRef: hub",
+                "contextSpaceRef: { kind: ContextSpace, name: hub, namespace: espoo }",
+            ),
+            "spec.contextSpaceRef.namespace",
+        ),
+        (
+            "caller identity with a ServiceAccount of an empty name",
+            EXTERNAL.replace(
+                "    identity: caller\n",
+                "    identity: caller\n    serviceAccountRef: \"\"\n",
+            ),
+            "spec.federation.serviceAccountRef",
+        ),
+        (
+            "an operation of whitespace",
+            LOCAL.replace(
+                "  federation:",
+                "  operations: [retrieveEntity, \"  \"]\n  federation:",
+            ),
+            "spec.operations",
+        ),
+        (
+            "an information entry that selects no type",
+            LOCAL
+                .replace(
+                    "        - type: Vehicle\n      propertyNames: [location, speed, occupancy]",
+                    "        []",
+                )
+                .replace("    - entities:\n        []", "    - entities: []"),
+            "spec.information.entities",
+        ),
+        (
+            "an endpointRef to another kind",
+            LOCAL.replace(
+                "{ kind: Endpoint, name: transport-internal }",
+                "{ kind: ContextSpace, name: transport-internal }",
+            ),
+            "spec.endpointRef.kind",
+        ),
+        (
+            "a serviceAccountRef to another kind",
+            LOCAL.replace(
+                "{ kind: ServiceAccount, name: hub-reader }",
+                "{ kind: Group, name: hub-reader }",
+            ),
+            "spec.federation.serviceAccountRef.kind",
+        ),
+        (
+            "an address that is not http(s)",
+            EXTERNAL.replace(
+                "https://regional.example/ngsi-ld/v1",
+                "ftp://regional.example/ngsi-ld/v1",
+            ),
+            "spec.endpoint",
+        ),
+        (
+            "a mirror schedule driven by a webhook",
+            EXTERNAL.replace(
+                "  mode: exclusive",
+                "  mode: exclusive\n  schedule: { webhook: true }",
+            ),
+            "spec.schedule.webhook",
+        ),
+        (
+            "a mirror schedule with an interval nobody can parse",
+            EXTERNAL.replace(
+                "  mode: exclusive",
+                "  mode: exclusive\n  schedule: { interval: soon }",
+            ),
+            "spec.schedule.interval",
+        ),
+        (
+            "a mirror schedule with no interval",
+            EXTERNAL.replace("  mode: exclusive", "  mode: exclusive\n  schedule: {}"),
+            "spec.schedule",
+        ),
+    ];
+    for (what, yaml, field) in cases {
+        let said = verdict(&yaml).expect_err(what);
+        assert!(said.contains(field), "{what}: {said}");
+    }
+}
+
+/// Case 3: a ServiceAccount identity with no account is refused: a hub that fell back to the
+/// caller's token would be a widening nobody wrote down.
+#[test]
+fn service_account_identity_with_no_ref_is_refused_before_any_forward_is_attempted() {
+    let yaml = LOCAL.replace(
+        "    serviceAccountRef: { kind: ServiceAccount, name: hub-reader }\n",
+        "",
+    );
+    let said = verdict(&yaml).expect_err("no account to forward as");
+    assert!(said.contains("spec.federation.serviceAccountRef"), "{said}");
+}
+
+/// Case 10: an endpointRef without a namespace is the registration's own project.
+#[test]
+fn an_endpoint_ref_with_no_namespace_defaults_to_the_registrations_own_project() {
+    verdict(LOCAL).expect("valid");
+    let parsed = Registration::from_yaml(LOCAL).expect("parses");
+    assert_eq!(
+        parsed
+            .spec
+            .endpoint_ref
+            .as_ref()
+            .and_then(|r| r.namespace()),
+        None
+    );
+    parsed
+        .spec
+        .validate_scope(Some("helsinki"))
+        .expect("its own project");
+}
+
+/// T-2550 (PF-48): the account a hub forwards as belongs to the hub's project, like the space
+/// and the member. Another project's account would be one steward borrowing another's identity.
+#[test]
+fn a_service_account_of_another_project_is_refused() {
+    let yaml = LOCAL.replace(
+        "{ kind: ServiceAccount, name: hub-reader }",
+        "{ kind: ServiceAccount, name: hub-reader, namespace: espoo }",
+    );
+    let said = verdict(&yaml).expect_err("another project's account");
+    assert!(
+        said.contains("spec.federation.serviceAccountRef.namespace"),
+        "{said}"
+    );
+    assert!(said.contains("espoo"), "{said}");
+
+    let own = LOCAL.replace(
+        "{ kind: ServiceAccount, name: hub-reader }",
+        "{ kind: ServiceAccount, name: hub-reader, namespace: helsinki }",
+    );
+    verdict(&own).expect("the hub's own project");
+}
+
+/// T-2550 (MF-24): an address with a user and password in it is a credential committed to Git
+/// and written into the broker. It is refused, and the refusal does not repeat it.
+#[test]
+fn a_credential_in_the_endpoint_address_is_refused_and_not_repeated() {
+    for address in [
+        "https://svc-user:s3cret-pass@regional.example/ngsi-ld/v1",
+        "http://s3cret-pass@broker.members.svc:8080",
+    ] {
+        let yaml = EXTERNAL.replace("https://regional.example/ngsi-ld/v1", address);
+        let said = verdict(&yaml).expect_err(address);
+        assert!(said.contains("spec.endpoint"), "{said}");
+        assert!(
+            !said.contains("s3cret-pass"),
+            "the secret is repeated: {said}"
+        );
+    }
+    // An `@` in the path is not a credential.
+    let path = EXTERNAL.replace(
+        "https://regional.example/ngsi-ld/v1",
+        "https://regional.example/ngsi-ld/v1/@context",
+    );
+    verdict(&path).expect("an @ after the host");
+}
