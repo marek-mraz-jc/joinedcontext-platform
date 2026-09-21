@@ -70,7 +70,8 @@ pub fn no_redirect_client(timeout: Option<std::time::Duration>) -> reqwest::Clie
         None => builder,
     }
     .build()
-    .unwrap_or_default()
+    // A default client would follow redirects: refusing to start beats running without the rule.
+    .expect("the no-redirect HTTP client builds")
 }
 
 /// The client of the fetch and packages routes: no redirect of its own, a 30 s deadline, and a
@@ -82,7 +83,9 @@ pub fn egress_client() -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(30))
         .dns_resolver(Arc::new(public_dns::PublicOnly))
         .build()
-        .unwrap_or_default()
+        // A default client would resolve private addresses and follow redirects: refusing to
+        // start beats running without the guard (T-1304).
+        .expect("the egress HTTP client builds")
 }
 
 pub fn router(state: Arc<ProxyState>) -> Router {
