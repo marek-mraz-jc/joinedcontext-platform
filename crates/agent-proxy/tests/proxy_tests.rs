@@ -115,11 +115,7 @@ fn test_state_with_all(
     let limits = LimitManager::default();
     let http = reqwest::Client::new();
     // No redirect of its own: the fetch route checks every hop against the run's allow-list.
-    let egress = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    let egress = agent_proxy::egress_client();
 
     Arc::new(ProxyState {
         config: config_arc,
@@ -810,6 +806,46 @@ mod fetch {
         let said = String::from_utf8_lossy(&body);
         assert!(said.contains("egress allow-list"), "{said}");
         assert!(said.contains("AG-50"), "{said}");
+    }
+
+    async fn refusal(resp: axum::http::Response<Body>) -> String {
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
+    /// T-1304, AG-65: a host on the allow-list whose DNS answers with a private address reaches
+    /// nothing. `localhost` is that rebinding in miniature: a listed name that resolves to
+    /// 127.0.0.1. The answer is the refusal, not a 502 for an upstream that did not answer.
+    #[tokio::test]
+    async fn fetch_rejects_private_ip_resolution() {
+        let state = test_state(run_with_egress(&["localhost"], 1024));
+        let said = refusal(fetch(state, "https://localhost:1/metadata").await).await;
+        assert!(said.contains("resolves only to private"), "{said}");
+        assert!(said.contains("AG-65"), "{said}");
+    }
+
+    /// T-1304: an address written into the URL is never resolved, so it is judged as written,
+    /// even when a profile lists it.
+    #[tokio::test]
+    async fn fetch_rejects_a_private_address_written_into_the_url() {
+        for (listed, url) in [
+            (
+                "169.254.169.254",
+                "https://169.254.169.254/latest/meta-data/",
+            ),
+            ("10.43.0.10", "https://10.43.0.10/"),
+            ("[::1]", "https://[::1]/"),
+        ] {
+            let state = test_state(run_with_egress(&[listed], 1024));
+            let said = refusal(fetch(state, url).await).await;
+            assert!(
+                said.contains("private, loopback or link-local"),
+                "{url}: {said}"
+            );
+        }
     }
 
     #[tokio::test]

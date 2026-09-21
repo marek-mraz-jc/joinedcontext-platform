@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config;
 pub mod inject;
 pub mod limits;
+pub mod public_dns;
 pub mod routes;
 pub mod runs;
 
@@ -47,7 +48,7 @@ impl ProxyState {
             limits,
             // No deadline: a long generation is not a hung model provider.
             http: no_redirect_client(None),
-            egress: no_redirect_client(Some(std::time::Duration::from_secs(30))),
+            egress: egress_client(),
         }
     }
 }
@@ -69,7 +70,22 @@ pub fn no_redirect_client(timeout: Option<std::time::Duration>) -> reqwest::Clie
         None => builder,
     }
     .build()
-    .unwrap_or_default()
+    // A default client would follow redirects: refusing to start beats running without the rule.
+    .expect("the no-redirect HTTP client builds")
+}
+
+/// The client of the fetch and packages routes: no redirect of its own, a 30 s deadline, and a
+/// resolver that returns public addresses only, so a listed host whose DNS answers with a
+/// private, loopback or link-local address reaches nothing (AG-65, T-1304).
+pub fn egress_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .dns_resolver(Arc::new(public_dns::PublicOnly))
+        .build()
+        // A default client would resolve private addresses and follow redirects: refusing to
+        // start beats running without the guard (T-1304).
+        .expect("the egress HTTP client builds")
 }
 
 pub fn router(state: Arc<ProxyState>) -> Router {
