@@ -134,6 +134,37 @@ impl Gateway {
     }
 }
 
+/// A 207 read as CIM 009 6.17's batch report. Success only when the report says so in a way a
+/// client can check: an `errors` list that is empty, or, with no `errors` at all, a `success`
+/// list naming every entity sent. A body that is not JSON, an `errors` that is not a list, or a
+/// report that accounts for fewer entities than were sent says nothing readable about which
+/// landed, so it is a refusal of this run rather than a success (CC-18, T-2539).
+fn multi_status(space: &str, sent: usize, body: &str) -> Result<(), BrokerError> {
+    let refused = |message: String| BrokerError::Refused {
+        space: space.to_owned(),
+        status: StatusCode::MULTI_STATUS.as_u16(),
+        message,
+    };
+    let unreadable = || {
+        refused(format!(
+            "the broker answered 207 with a report that does not say which entities landed: {}",
+            snippet(body)
+        ))
+    };
+    let report = serde_json::from_str::<Value>(body).map_err(|_| unreadable())?;
+    match report.get("errors") {
+        Some(Value::Array(errors)) if errors.is_empty() => Ok(()),
+        Some(Value::Array(errors)) => {
+            Err(refused(snippet(&Value::Array(errors.clone()).to_string())))
+        }
+        Some(_) => Err(unreadable()),
+        None => match report.get("success").and_then(Value::as_array) {
+            Some(landed) if landed.len() == sent => Ok(()),
+            _ => Err(unreadable()),
+        },
+    }
+}
+
 /// The first `SNIPPET` characters of an answer that is not what was expected.
 fn snippet(body: &str) -> String {
     let trimmed = body.trim();
@@ -200,18 +231,7 @@ impl Broker for Gateway {
         // 201 and 204 are "all of them"; 207 is per-entity, and an entity the broker refused
         // is a failure of this run even though the others landed (CIM 009 6.17).
         if status == StatusCode::MULTI_STATUS {
-            let refused = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|report| report.get("errors").cloned())
-                .filter(|errors| errors.as_array().is_some_and(|list| !list.is_empty()));
-            return match refused {
-                None => Ok(()),
-                Some(errors) => Err(BrokerError::Refused {
-                    space: space.to_owned(),
-                    status: status.as_u16(),
-                    message: snippet(&errors.to_string()),
-                }),
-            };
+            return multi_status(space, entities.len(), &body);
         }
         if status.is_success() {
             return Ok(());
