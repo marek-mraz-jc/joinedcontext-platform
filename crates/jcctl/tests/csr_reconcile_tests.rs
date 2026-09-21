@@ -403,17 +403,21 @@ fn relationship_names_are_carried_when_declared() {
     );
 }
 
-/// SP-09: an id and a pattern together are both carried; the broker narrows by both.
+/// SP-09, R24 (T-1569): an id and a pattern together are refused before the broker is told
+/// anything; one selector names one entity or one anchored pattern, never both.
 #[test]
-fn an_entity_selector_with_both_id_and_idpattern_carries_both() {
+fn an_entity_selector_with_both_id_and_idpattern_is_refused() {
     let id = "urn:ngsi-ld:Vehicle:zvolen.sk:doprava:bus-12";
-    let body = told(&format!(
-        "    - entities: [{{ type: Vehicle, id: \"{id}\", idPattern: \"^urn:ngsi-ld:Vehicle:zvolen.sk:.*$\" }}]\n"
-    ));
-    assert_eq!(body[0]["entities"][0]["id"], json!(id));
-    assert_eq!(
-        body[0]["entities"][0]["idPattern"],
-        json!("^urn:ngsi-ld:Vehicle:zvolen.sk:.*$")
+    let yaml = EXTERNAL.replace(
+        "  information:\n    - entities: [{ type: Vehicle }]\n",
+        &format!(
+            "  information:\n    - entities: [{{ type: Vehicle, id: \"{id}\", idPattern: \"^urn:ngsi-ld:Vehicle:zvolen.sk:.*$\" }}]\n"
+        ),
+    );
+    let refused = registration(&manifest(&yaml), &no_endpoints()).expect_err("refused");
+    assert!(
+        matches!(&refused, CsrError::Spec(why) if why.contains("mutually exclusive")),
+        "{refused:?}"
     );
 }
 
