@@ -190,6 +190,26 @@ fn a_projection_of_a_model_nobody_declares_is_refused() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// T-2527, MP-01: a model whose LinkML source is not there is a finding naming the path tried.
+#[test]
+fn a_linkml_source_that_cannot_be_read_is_reported_with_the_path_it_tried() {
+    let dir = repo_with("linkml-gone", PROJECTION);
+    let linkml = dir.join("projects/helsinki/spaces/fleet/datamodels/fleet.linkml.yaml");
+    let _ = std::fs::remove_file(&linkml);
+    let report = validate::run(&dir);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.message.contains("cannot be read"))
+        .unwrap_or_else(|| panic!("{:?}", report.findings));
+    assert!(
+        finding.message.contains("fleet.linkml.yaml"),
+        "{}",
+        finding.message
+    );
+    assert_eq!(finding.path, PathBuf::from(PROJECTION_PATH));
+}
+
 /// CC-08: a model whose `linkml` climbs out of its folder is not opened to check a projection;
 /// the projection is refused because the model's spec does not validate.
 #[test]

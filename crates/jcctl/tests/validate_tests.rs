@@ -361,6 +361,210 @@ spec:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// --- T-2527: the edge cases of `run` and its reference checks (PL-39, PF-49, PF-68, PF-69) ---
+
+/// A pipeline of `project` whose source is `reference` (YAML), at `projects/{project}/…`.
+fn pipeline(dir: &Path, project: &str, reference: &str) {
+    write(
+        dir,
+        &format!("projects/{project}/pipelines/ingest.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata:\n  name: ingest\n  namespace: {project}\nspec:\n  source:\n    dataSourceRef: {reference}\n"
+        ),
+    );
+}
+
+/// A DataSource named `name` in `project`.
+fn data_source(dir: &Path, project: &str, name: &str) {
+    write(
+        dir,
+        &format!("projects/{project}/datasources/{name}.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: DataSource\nmetadata:\n  name: {name}\n  namespace: {project}\nspec:\n  type: http\n  http:\n    url: https://opendata.banskabystrica.sk/aq.json\n"
+        ),
+    );
+}
+
+fn with_pl39(report: &validate::Report) -> Vec<&str> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("PL-39"))
+        .map(|f| f.message.as_str())
+        .collect()
+}
+
+/// PL-39: a connection belongs to the team holding its credentials, so a typed reference is
+/// looked up in the pipeline's own project, whatever namespace it names.
+#[test]
+fn a_typed_data_source_ref_is_scoped_to_the_pipelines_own_project() {
+    let dir = valid_repo("pl39-foreign");
+    write(&dir, "projects/doprava/project.yaml", "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: doprava\n  namespace: org\nspec:\n  organizationRef: banskabystrica\n");
+    data_source(&dir, "doprava", "aq-feed");
+    pipeline(
+        &dir,
+        "ovzdusie",
+        "{ kind: DataSource, name: aq-feed, namespace: doprava }",
+    );
+    let report = validate::run(&dir);
+    let found = with_pl39(&report);
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(found[0].contains("aq-feed"), "{}", found[0]);
+}
+
+/// PL-39: a reference to a DataSource of the same project is not a finding, bare or typed.
+#[test]
+fn a_data_source_of_the_same_project_resolves_bare_or_typed() {
+    for (n, reference) in ["aq-feed", "{ kind: DataSource, name: aq-feed }"]
+        .iter()
+        .enumerate()
+    {
+        let dir = valid_repo(&format!("pl39-same-{n}"));
+        data_source(&dir, "ovzdusie", "aq-feed");
+        pipeline(&dir, "ovzdusie", reference);
+        let report = validate::run(&dir);
+        assert!(
+            with_pl39(&report).is_empty(),
+            "{reference}: {:?}",
+            report.findings
+        );
+    }
+}
+
+/// PL-39: a reference to a DataSource nobody declares is a finding at the pipeline, naming it.
+#[test]
+fn a_pipeline_referencing_no_such_data_source_is_reported_at_the_pipeline() {
+    let dir = valid_repo("pl39-missing");
+    pipeline(&dir, "ovzdusie", "no-such-feed");
+    let report = validate::run(&dir);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.message.contains("PL-39"))
+        .unwrap_or_else(|| panic!("{:?}", report.findings));
+    assert!(
+        finding.message.contains("no-such-feed"),
+        "{}",
+        finding.message
+    );
+    assert_eq!(
+        finding.path,
+        PathBuf::from("projects/ovzdusie/pipelines/ingest.yaml")
+    );
+}
+
+/// PL-39: a reference that is neither a name nor an object is the kind's finding, not a panic
+/// and not a second finding.
+#[test]
+fn a_data_source_ref_of_the_wrong_shape_is_one_finding_and_no_panic() {
+    let dir = valid_repo("pl39-shape");
+    pipeline(&dir, "ovzdusie", "42");
+    let report = validate::run(&dir);
+    assert!(with_pl39(&report).is_empty(), "{:?}", report.findings);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.path == Path::new("projects/ovzdusie/pipelines/ingest.yaml")),
+        "{:?}",
+        report.findings
+    );
+}
+
+/// PF-49: a binding naming a role nobody declares is reported at the binding's own file.
+#[test]
+fn a_role_binding_naming_a_missing_role_is_reported_at_the_binding() {
+    let dir = valid_repo("missing-role");
+    write(
+        &dir,
+        ROLE_BINDING_PATH,
+        &ROLE_BINDING.replace("role: pipeline-developer", "role: no-such-role"),
+    );
+    let report = validate::run(&dir);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.message.contains("no-such-role"))
+        .unwrap_or_else(|| panic!("{:?}", report.findings));
+    assert_eq!(finding.path, PathBuf::from(ROLE_BINDING_PATH));
+}
+
+/// PF-68: one role name in `users/` and in a project is refused at the project's role.
+#[test]
+fn a_role_name_declared_twice_is_reported_at_the_project_role() {
+    let dir = valid_repo("role-clash");
+    let project_role = "projects/ovzdusie/roles/pipeline-developer.yaml";
+    write(
+        &dir,
+        project_role,
+        &ROLE.replace("namespace: org", "namespace: ovzdusie"),
+    );
+    let report = validate::run(&dir);
+    let clash: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("pipeline-developer"))
+        .collect();
+    assert!(!clash.is_empty(), "{:?}", report.findings);
+    assert!(
+        clash
+            .iter()
+            .any(|f| f.path == Path::new(project_role) || f.path == Path::new("users")),
+        "{clash:?}"
+    );
+}
+
+/// PF-49: a repository without roles and bindings has no role finding, and no `users/` folder
+/// is needed for that.
+#[test]
+fn no_role_or_rolebinding_manifest_means_no_role_finding() {
+    let dir = valid_repo("no-roles");
+    std::fs::remove_dir_all(dir.join("users")).expect("remove users");
+    let report = validate::run(&dir);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| !f.message.to_lowercase().contains("role")),
+        "{:?}",
+        report.findings
+    );
+}
+
+/// CC-12: a repository that does not load is exactly one finding, the one that stopped it.
+#[test]
+fn a_repository_that_fails_to_load_yields_exactly_one_finding() {
+    let dir = valid_repo("unloadable");
+    write(
+        &dir,
+        "projects/ovzdusie/broken.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: [\n",
+    );
+    pipeline(&dir, "ovzdusie", "no-such-feed");
+    let report = validate::run(&dir);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert_eq!(report.checked, 0);
+}
+
+/// CC-12: every class of finding is reported in one run, none stops the others.
+#[test]
+fn run_reports_every_class_of_finding_at_once() {
+    let dir = valid_repo("everything");
+    pipeline(&dir, "ovzdusie", "no-such-feed");
+    write(
+        &dir,
+        ROLE_BINDING_PATH,
+        &ROLE_BINDING.replace("{ group: air-quality-team }", "{ group: nobody-declared }"),
+    );
+    std::fs::create_dir_all(dir.join("projects/orphan"))
+        .expect("a project folder with no manifest");
+    let report = validate::run(&dir);
+    let said = |needle: &str| report.findings.iter().any(|f| f.message.contains(needle));
+    assert!(said("PL-39"), "{:?}", report.findings);
+    assert!(said("nobody-declared"), "{:?}", report.findings);
+    assert!(said("orphan"), "{:?}", report.findings);
+}
+
 mod federation_topology {
     //! CC-13: `jcctl validate` checks the federation topology the registrations declare.
     use super::*;
