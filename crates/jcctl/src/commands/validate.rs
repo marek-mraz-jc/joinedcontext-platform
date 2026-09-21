@@ -9,7 +9,7 @@
 use crate::loader::{LoadError, Repository};
 use jc_core::kinds::{DataModelSpec, ModelProjectionSpec};
 use jc_core::registry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -436,7 +436,10 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
                     .parent()
                     .map(|dir| dir.join(&spec.linkml))
                     .unwrap_or_else(|| repo_dir.join(&spec.linkml));
-                match linkml_classes(&linkml) {
+                let classes = std::fs::read_to_string(&linkml)
+                    .map_err(|err| err.to_string())
+                    .and_then(|text| jc_core::kinds::model_projection::linkml_classes(&text));
+                match classes {
                     Err(err) => format!(
                         "{id}: the LinkML source of DataModel `{}` cannot be read at `{}`: {err}",
                         wanted.name,
@@ -455,37 +458,6 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
         ));
     }
     stale
-}
-
-/// The classes of a LinkML schema with the slots each one carries: its `slots` list and its
-/// `attributes` keys, plus the `id` and `type` every entity has.
-// ponytail: no `is_a` inheritance; slots inherited from a parent class need listing again on
-// the child until a projection of an inherited slot is wanted.
-fn linkml_classes(path: &Path) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
-    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let schema: serde_norway::Value =
-        serde_norway::from_str(&text).map_err(|err| err.to_string())?;
-    let mut classes = BTreeMap::new();
-    let Some(declared) = schema.get("classes").and_then(|c| c.as_mapping()) else {
-        return Ok(classes);
-    };
-    for (name, class) in declared {
-        let Some(name) = name.as_str() else { continue };
-        let mut slots: BTreeSet<String> = ["id", "type"].map(str::to_owned).into();
-        if let Some(listed) = class.get("slots").and_then(|s| s.as_sequence()) {
-            slots.extend(listed.iter().filter_map(|s| s.as_str()).map(str::to_owned));
-        }
-        if let Some(attributes) = class.get("attributes").and_then(|a| a.as_mapping()) {
-            slots.extend(
-                attributes
-                    .keys()
-                    .filter_map(|k| k.as_str())
-                    .map(str::to_owned),
-            );
-        }
-        classes.insert(name.to_owned(), slots);
-    }
-    Ok(classes)
 }
 
 /// Turns the error that stopped the walk into a finding, keeping whatever location it
