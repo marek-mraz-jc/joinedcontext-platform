@@ -220,3 +220,172 @@ fn the_source_file_of_every_entity_is_kept_for_the_message() {
         Path::new(&root).join("projects/p/spaces/s/entities/seed/one.json")
     );
 }
+
+// --- T-2529: the edge cases of `seed_entities` (CC-72, CC-04, CC-07, CC-69) ---
+
+const SEED: &str = "entities/seed";
+
+/// CC-72: a space is written through `/cs/{space}`, which names no project, so one id in two
+/// projects' spaces of the same name is one entity twice: refused, never last-one-wins.
+#[test]
+fn one_id_in_same_named_spaces_of_two_projects_is_refused_as_the_duplicate_it_is() {
+    let root = checkout(
+        "seed-two-projects",
+        &[
+            (
+                &format!("projects/a/spaces/ovzdusie/{SEED}/x.json"),
+                &air("1"),
+            ),
+            (
+                &format!("projects/b/spaces/ovzdusie/{SEED}/x.json"),
+                &air("1"),
+            ),
+        ],
+    );
+    let error = seed_entities(&root).expect_err("one entity seeded twice");
+    assert!(matches!(error, SeedError::Duplicate { .. }), "{error:?}");
+}
+
+/// CC-72: an id or a type that is present but not a string is no id or no type.
+#[test]
+fn an_id_or_type_that_is_not_a_string_is_refused_by_name() {
+    for (file, contents, expected) in [
+        (
+            "numeric-id.json",
+            r#"{"id":7,"type":"AirQualityObserved"}"#,
+            "declares no id",
+        ),
+        (
+            "empty-id.json",
+            r#"{"id":"","type":"AirQualityObserved"}"#,
+            "declares an empty id",
+        ),
+        (
+            "object-type.json",
+            r#"{"id":"urn:ngsi-ld:X:bb.sk:s:1","type":{"a":1}}"#,
+            "declares no type",
+        ),
+    ] {
+        let root = checkout(
+            &format!("seed-typed-{}", file.trim_end_matches(".json")),
+            &[(&format!("projects/p/spaces/s/{SEED}/{file}"), contents)],
+        );
+        let said = seed_entities(&root).expect_err(file).to_string();
+        assert!(
+            said.contains(file) && said.contains(expected),
+            "{file}: {said}"
+        );
+    }
+}
+
+/// CC-72: a file that is not UTF-8 is an error naming it, not a panic.
+#[test]
+fn a_binary_json_file_is_reported_by_name_not_a_panic() {
+    let root = checkout("seed-binary", &[("projects/p/spaces/s/entities/.keep", "")]);
+    let file = root
+        .join("projects/p/spaces/s")
+        .join(SEED)
+        .join("blob.json");
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("the folder");
+    std::fs::write(&file, [0xff_u8, 0xfe, 0x00, 0x7b]).expect("the blob");
+    let said = seed_entities(&root).expect_err("not text").to_string();
+    assert!(said.contains("blob.json"), "{said}");
+}
+
+/// CC-72: an empty list seeds nothing and is not an error.
+#[test]
+fn a_seed_file_with_an_empty_json_array_yields_no_entities_and_no_error() {
+    let root = checkout(
+        "seed-empty-array",
+        &[(&format!("projects/p/spaces/s/{SEED}/none.json"), "[]")],
+    );
+    assert!(seed_entities(&root).expect("no entities").is_empty());
+}
+
+/// CC-72: only `.json` files are seed files; a README or an editor's backup beside them is not.
+#[test]
+fn a_non_json_extension_file_in_the_seed_folder_is_ignored() {
+    let root = checkout(
+        "seed-other-files",
+        &[
+            (
+                &format!("projects/p/spaces/s/{SEED}/README.md"),
+                "# not an entity",
+            ),
+            (&format!("projects/p/spaces/s/{SEED}/x.json~"), "{ broken"),
+            (&format!("projects/p/spaces/s/{SEED}/x.JSON"), &air("upper")),
+        ],
+    );
+    let found = seed_entities(&root).expect("the json file only");
+    assert_eq!(found.len(), 1);
+    assert!(found[0].id.ends_with(":upper"));
+}
+
+/// CC-72: a folder inside the seed folder is not part of it.
+#[test]
+fn a_nested_directory_under_seed_is_not_recursed_into() {
+    let root = checkout(
+        "seed-nested",
+        &[
+            (&format!("projects/p/spaces/s/{SEED}/top.json"), &air("top")),
+            (
+                &format!("projects/p/spaces/s/{SEED}/old/stale.json"),
+                &air("stale"),
+            ),
+        ],
+    );
+    let found = seed_entities(&root).expect("the top file only");
+    assert_eq!(
+        found
+            .iter()
+            .map(|e| e.id.rsplit(':').next().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["top"]
+    );
+}
+
+/// CC-72: a seed folder the process may not read is an error naming the folder.
+#[test]
+fn an_unreadable_seed_directory_is_reported_by_path_not_a_panic() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = checkout(
+        "seed-locked",
+        &[(&format!("projects/p/spaces/s/{SEED}/x.json"), &air("1"))],
+    );
+    let folder = root.join("projects/p/spaces/s").join(SEED);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).expect("lock");
+    let read = seed_entities(&root);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+    // Root reads through any mode; everyone else gets the error, and it names the folder.
+    if let Err(error) = read {
+        assert!(matches!(error, SeedError::Unreadable { .. }), "{error:?}");
+        assert!(error.to_string().contains("entities/seed"), "{error}");
+    }
+}
+
+/// CC-04: an id is the entity's name, never a path: slashes and dots in it stay as written.
+#[test]
+fn an_entity_id_containing_path_segments_is_kept_as_an_opaque_string() {
+    let id = "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:../../etc/passwd";
+    let body = json!({ "id": id, "type": "AirQualityObserved" }).to_string();
+    let root = checkout(
+        "seed-path-id",
+        &[(&format!("projects/p/spaces/s/{SEED}/x.json"), &body)],
+    );
+    let found = seed_entities(&root).expect("an opaque id");
+    assert_eq!(found[0].id, id);
+    assert_eq!(found[0].body["id"], Value::String(id.to_owned()));
+}
+
+/// CC-72: an empty checkout directory for a space seeds nothing.
+#[test]
+fn a_space_without_a_seed_folder_and_a_project_without_spaces_seed_nothing() {
+    let root = checkout(
+        "seed-bare",
+        &[
+            ("projects/p/project.yaml", "kind: Project"),
+            ("projects/q/spaces/s/space.yaml", "kind: ContextSpace"),
+        ],
+    );
+    assert!(seed_entities(&root).expect("nothing").is_empty());
+}
