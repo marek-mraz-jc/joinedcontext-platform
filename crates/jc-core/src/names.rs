@@ -197,3 +197,63 @@ pub fn looks_like_a_credential(value: &str) -> bool {
     // A PEM block or a JWT: three dot-separated base64url segments starting with a JSON header.
     lowered.starts_with("-----begin") || (value.starts_with("eyJ") && value.split('.').count() == 3)
 }
+
+/// A validator's name error, reported against the manifest field the caller checked rather than
+/// the one the shared validator named.
+pub(crate) fn rename(err: Error, field: &'static str) -> Error {
+    match err {
+        Error::Name { reason, value, .. } => Error::Name {
+            field,
+            value,
+            reason,
+        },
+        other => other,
+    }
+}
+
+/// A path beside a manifest: relative, not empty (a leading `./` is allowed and does not count),
+/// with no `..` segment, so it cannot name a file outside the repository.
+pub(crate) fn validate_relative_path(field: &'static str, path: &str) -> Result<()> {
+    let trimmed = path.strip_prefix("./").unwrap_or(path);
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
+        return Err(Error::Name {
+            field,
+            value: path.to_string(),
+            reason: "path must be relative and must not contain a `..` segment",
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-1479: one rule for a path beside a manifest, reported against the caller's field.
+    #[test]
+    fn a_path_beside_a_manifest_stays_inside_the_repository() {
+        for path in ["../x", "a/../../b", "/etc/passwd", "", "./"] {
+            match validate_relative_path("spec.tests.input", path) {
+                Err(Error::Name { field, value, .. }) => {
+                    assert_eq!((field, value.as_str()), ("spec.tests.input", path));
+                }
+                other => panic!("`{path}` passed: {other:?}"),
+            }
+        }
+        for path in ["tests/in.json", "./tests/in.json", "a/b..c/d"] {
+            assert!(validate_relative_path("linkml", path).is_ok(), "{path}");
+        }
+        let refused = validate_dns1123_label("Not A Label").expect_err("refused");
+        let renamed = rename(refused, "spec.target");
+        assert!(
+            matches!(
+                renamed,
+                Error::Name {
+                    field: "spec.target",
+                    ..
+                }
+            ),
+            "{renamed:?}"
+        );
+    }
+}

@@ -127,7 +127,7 @@ impl SyncOrigin {
                 });
             }
             if let Some(ref p) = o.path {
-                validate_relative_path("source.git.path", p)?;
+                names::validate_relative_path("source.git.path", p)?;
             }
         }
         if let Some(o) = &self.bundle {
@@ -136,11 +136,11 @@ impl SyncOrigin {
         if let Some(o) = &self.platform_api {
             validate_remote_url("source.platformApi.baseUrl", &o.base_url, false)?;
             names::validate_dns1123_label(&o.project)
-                .map_err(|e| rename(e, "source.platformApi.project"))?;
+                .map_err(|e| names::rename(e, "source.platformApi.project"))?;
         }
         if let Some(sec) = self.secret_ref() {
             names::validate_dns1123_label(&sec.name)
-                .map_err(|e| rename(e, "source.secretRef.name"))?;
+                .map_err(|e| names::rename(e, "source.secretRef.name"))?;
         }
         Ok(())
     }
@@ -389,11 +389,11 @@ impl BundleItem {
                 reason: "unknown manifest kind",
             });
         }
-        names::validate_dns1123_label(&self.name).map_err(|e| rename(e, "items.name"))?;
+        names::validate_dns1123_label(&self.name).map_err(|e| names::rename(e, "items.name"))?;
         if let Some(ref ns) = self.namespace {
-            names::validate_namespace(ns).map_err(|e| rename(e, "items.namespace"))?;
+            names::validate_namespace(ns).map_err(|e| names::rename(e, "items.namespace"))?;
         }
-        validate_relative_path("items.path", &self.path)
+        names::validate_relative_path("items.path", &self.path)
     }
 }
 
@@ -519,7 +519,7 @@ impl BundleSpec {
         }
 
         for file in &self.native_files {
-            validate_relative_path("nativeFiles", file)?;
+            names::validate_relative_path("nativeFiles", file)?;
         }
         Ok(())
     }
@@ -541,18 +541,6 @@ impl fmt::Display for SyncMode {
     }
 }
 
-/// Rewrites the `field` of a [`Error::Name`] so the caller sees the manifest path, not the helper's.
-fn rename(err: Error, field: &'static str) -> Error {
-    match err {
-        Error::Name { reason, value, .. } => Error::Name {
-            field,
-            value,
-            reason,
-        },
-        other => other,
-    }
-}
-
 /// Rejects `http://` and anything that is not a URL we are willing to fetch (MF-31, MF-32).
 fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Result<()> {
     let ok = url.starts_with("https://")
@@ -566,17 +554,6 @@ fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Resul
             } else {
                 "url must be https:// — plaintext http is refused"
             },
-        });
-    }
-    Ok(())
-}
-
-fn validate_relative_path(field: &'static str, path: &str) -> Result<()> {
-    if path.is_empty() || path.starts_with('/') || path.split('/').any(|seg| seg == "..") {
-        return Err(Error::Name {
-            field,
-            value: path.to_string(),
-            reason: "path must be relative and must not contain a `..` segment",
         });
     }
     Ok(())

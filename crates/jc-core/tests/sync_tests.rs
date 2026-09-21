@@ -211,9 +211,17 @@ fn inline_credentials_do_not_deserialize_mf31() {
     assert!(SyncSource::from_yaml(&inline_spec).is_err());
 }
 
+/// MF-31, T-1479: the SyncSource holds its paths to the one rule every kind shares: `./` alone
+/// is as empty as `""` (its own copy of the check used to let `./` through).
 #[test]
 fn git_path_must_stay_inside_the_repository() {
-    for path in ["/etc/passwd", "../../secrets", "models/../../../etc", ""] {
+    for path in [
+        "/etc/passwd",
+        "../../secrets",
+        "models/../../../etc",
+        "",
+        "./",
+    ] {
         let yaml = GOLDEN_SYNC.replace("path: models/transport", &format!("path: \"{path}\""));
         let sync = SyncSource::from_yaml(&yaml).expect("parses");
         let err = sync

@@ -20,31 +20,6 @@ static COMMIT_RE: LazyLock<Regex> =
 static SHA256_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9a-f]{64}$").expect("valid regex"));
 
-/// Rewrites the `field` of an [`Error::Name`] so the caller sees the manifest path.
-fn rename(err: Error, field: &'static str) -> Error {
-    match err {
-        Error::Name { reason, value, .. } => Error::Name {
-            field,
-            value,
-            reason,
-        },
-        other => other,
-    }
-}
-
-/// Rejects absolute paths and `..` traversal; every path in a manifest stays inside its directory.
-fn validate_relative_path(path: &str, field: &'static str) -> Result<()> {
-    let trimmed = path.strip_prefix("./").unwrap_or(path);
-    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.split('/').any(|seg| seg == "..") {
-        return Err(Error::Name {
-            field,
-            value: path.to_string(),
-            reason: "path must be relative and must not contain a `..` segment",
-        });
-    }
-    Ok(())
-}
-
 /// Semantic version string conforming to `major.minor.patch` (DM-22).
 ///
 /// Pre-release identifiers and build metadata are not used by the platform and are rejected.
@@ -293,7 +268,7 @@ impl DataModelSource {
                     reason: "repository must be an https:// URL",
                 });
             }
-            validate_relative_path(path, "source.path")?;
+            names::validate_relative_path("source.path", path)?;
             if !COMMIT_RE.is_match(commit) {
                 return Err(Error::Name {
                     field: "source.commit",
@@ -402,9 +377,9 @@ impl DataModelSpec {
     /// Validates the space reference, paths, lifecycle invariants and provenance.
     pub fn validate(&self) -> Result<()> {
         names::validate_dns1123_label(&self.context_space_ref)
-            .map_err(|e| rename(e, "contextSpaceRef"))?;
+            .map_err(|e| names::rename(e, "contextSpaceRef"))?;
 
-        validate_relative_path(&self.linkml, "linkml")?;
+        names::validate_relative_path("linkml", &self.linkml)?;
         if !self.linkml.ends_with(".linkml.yaml") {
             return Err(Error::Name {
                 field: "linkml",
@@ -414,12 +389,12 @@ impl DataModelSpec {
         }
 
         for class in &self.classes {
-            names::validate_entity_type(class).map_err(|e| rename(e, "classes"))?;
+            names::validate_entity_type(class).map_err(|e| names::rename(e, "classes"))?;
         }
 
         for (field, path) in self.artifacts.entries() {
             match path {
-                Some(p) => validate_relative_path(p, field)?,
+                Some(p) => names::validate_relative_path(field, p)?,
                 None if self.lifecycle == DataModelLifecycle::Published => {
                     return Err(Error::Name {
                         field,

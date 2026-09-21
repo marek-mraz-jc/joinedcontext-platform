@@ -9,6 +9,12 @@ repository.workspace = true
 name = "jc-agent-proxy"
 path = "src/main.rs"
 
+[features]
+# The stub endpoint token the suites run on. Only this crate's own dev-dependency below turns it
+# on, so the image (`cargo build --release --workspace`) never compiles it, and a binary built
+# with it anyway refuses to start (T-1480).
+test-stub = []
+
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum"] }
 argon2 = "0.5"
@@ -33,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
+agent-proxy = { path = ".", features = ["test-stub"] }
 # `password_hash::rand_core::OsRng` only exists with getrandom on; the tests hash a ticket.
 rand_core = { version = "0.6", features = ["getrandom"] }
 tower = { version = "0.5", features = ["util"] }
