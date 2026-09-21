@@ -425,3 +425,200 @@ fn an_example_the_peer_does_not_publish_is_not_invented() {
         Some("partner-air/context.jsonld")
     );
 }
+
+// --- T-2530: the edge cases of `one`, one catalogue entry (DM-48, DM-49) ---
+
+/// `Peer::air()` whose catalogue lists `models` instead of its one model.
+fn peer_listing(models: Value) -> Peer {
+    let mut peer = Peer::air();
+    peer.documents.insert(
+        format!("{BASE}/schema/index.json"),
+        serde_json::to_vec(&json!({ "models": models })).expect("serializes"),
+    );
+    peer
+}
+
+/// The artifacts of `Peer::air()`'s one model, as its catalogue declares them.
+fn air_artifacts() -> Value {
+    json!({
+        LINKML: descriptor(LINKML_BODY),
+        CONTEXT: descriptor(CONTEXT_BODY),
+        EXAMPLE: descriptor(EXAMPLE_BODY),
+    })
+}
+
+/// DM-48: a peer name that is a label on its own can still make a mirror name that is not one;
+/// that is refused, and the flag names the reference to rename.
+#[test]
+fn a_combined_reference_peer_name_that_is_not_a_label_is_skipped_and_names_the_reference() {
+    let dir = repo_dir("long-name");
+    let long = "a".repeat(60);
+    let peer = peer_listing(json!([
+        { "name": long, "version": 1, "semver": "1.2.0", "artifacts": air_artifacts() }
+    ]));
+    let mirror = run(&dir, &peer);
+    assert!(mirror.models.is_empty());
+    assert!(
+        mirror.flags[0].contains("reference `partner`"),
+        "{:?}",
+        mirror.flags
+    );
+    assert_eq!(
+        peer.asked.borrow().len(),
+        1,
+        "nothing fetched past the catalogue"
+    );
+}
+
+/// DM-48: an entry without a name, a semver or a served major version is skipped with a flag
+/// and nothing of it is fetched.
+#[test]
+fn an_entry_missing_its_name_semver_or_major_is_skipped_with_a_flag() {
+    for (missing, entry) in [
+        (
+            "without a name",
+            json!({ "version": 1, "semver": "1.2.0", "artifacts": air_artifacts() }),
+        ),
+        (
+            "without a semver",
+            json!({ "name": "air", "version": 1, "artifacts": air_artifacts() }),
+        ),
+        (
+            "without a served major version",
+            json!({ "name": "air", "semver": "1.2.0", "artifacts": air_artifacts() }),
+        ),
+        (
+            "without a served major version",
+            json!({ "name": "air", "version": "1", "semver": "1.2.0", "artifacts": air_artifacts() }),
+        ),
+        (
+            "without a served major version",
+            json!({ "name": "air", "version": -1, "semver": "1.2.0", "artifacts": air_artifacts() }),
+        ),
+    ] {
+        let dir = repo_dir("missing-member");
+        let peer = peer_listing(json!([entry]));
+        let mirror = run(&dir, &peer);
+        assert!(mirror.models.is_empty(), "{entry}");
+        assert!(
+            mirror.flags[0].contains(missing),
+            "{entry}: {:?}",
+            mirror.flags
+        );
+        assert_eq!(peer.asked.borrow().len(), 1, "{entry}");
+    }
+}
+
+/// DM-49: a document the catalogue lists but the peer does not serve is skipped by URL.
+#[test]
+fn a_404_on_a_required_artifact_is_skipped_with_a_flag_naming_the_url() {
+    let dir = repo_dir("context-404");
+    let url = format!("{BASE}/schema/v1/{CONTEXT}");
+    let peer = Peer::air().without(&url);
+    let mirror = run(&dir, &peer);
+    assert!(mirror.models.is_empty());
+    assert!(mirror.flags[0].contains(&url), "{:?}", mirror.flags);
+    assert!(mirror.flags[0].contains("404"), "{:?}", mirror.flags);
+}
+
+/// DM-49: a context that does not match its digest is refused like the LinkML is.
+#[test]
+fn a_context_that_does_not_match_its_digest_is_refused() {
+    let dir = repo_dir("context-digest");
+    let mut peer = Peer::air();
+    peer.documents.insert(
+        format!("{BASE}/schema/v1/{CONTEXT}"),
+        br#"{"@context":{"pm10":"https://evil.example/pm10"}}"#.to_vec(),
+    );
+    let mirror = run(&dir, &peer);
+    assert!(mirror.models.is_empty());
+    assert!(
+        mirror.flags[0].contains("does not match the digest"),
+        "{:?}",
+        mirror.flags
+    );
+}
+
+/// DM-48: types the peer lists as anything but strings are dropped, not a failure.
+#[test]
+fn an_entrys_types_array_with_non_string_entries_drops_them_without_panicking() {
+    let dir = repo_dir("types");
+    let peer = peer_listing(json!([{
+        "name": "air", "version": 1, "semver": "1.2.0",
+        "types": ["AirQualityObserved", 7, null, { "name": "X" }],
+        "artifacts": air_artifacts(),
+    }]));
+    let mirror = run(&dir, &peer);
+    assert!(mirror.flags.is_empty(), "{:?}", mirror.flags);
+    assert_eq!(
+        mirror.models[0].manifest.spec["classes"],
+        json!(["AirQualityObserved"])
+    );
+}
+
+/// DM-49: a peer that cannot be reached stops the run; a mirror is not half a catalogue.
+#[test]
+fn a_peer_fetch_transport_error_propagates_and_stops_the_whole_run() {
+    struct Down;
+    impl SchemaApi for Down {
+        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, FetchError> {
+            Err(FetchError::Unavailable("connection reset".to_owned()))
+        }
+    }
+    let dir = repo_dir("down");
+    let error = foreign_models::mirror(
+        &reference(),
+        BASE,
+        "2026-09-07T08:00:00Z",
+        &load(&dir),
+        &Down,
+    )
+    .expect_err("the peer is down");
+    assert!(matches!(error, MirrorError::Fetch(_)), "{error}");
+}
+
+/// DM-48: an entry whose assembled DataModel fails validation is skipped with the reason, and
+/// none of its documents is written.
+#[test]
+fn a_spec_that_fails_datamodel_validation_after_assembly_is_skipped_with_the_validation_error() {
+    let dir = repo_dir("bad-semver");
+    let peer = peer_listing(json!([
+        { "name": "air", "version": 1, "semver": "not-a-version", "artifacts": air_artifacts() }
+    ]));
+    let mirror = run(&dir, &peer);
+    assert!(mirror.models.is_empty());
+    assert!(
+        mirror.flags[0].contains("does not mirror into a DataModel"),
+        "{:?}",
+        mirror.flags
+    );
+}
+
+/// DM-48: one broken entry does not take the others of the catalogue down with it.
+#[test]
+fn a_broken_entry_does_not_stop_the_good_one_beside_it() {
+    let dir = repo_dir("one-of-two");
+    let peer = peer_listing(json!([
+        { "name": "../x", "version": 1, "semver": "1.2.0" },
+        { "name": "air", "version": 1, "semver": "1.2.0", "types": ["AirQualityObserved"], "artifacts": air_artifacts() }
+    ]));
+    let mirror = run(&dir, &peer);
+    assert_eq!(mirror.models.len(), 1);
+    assert_eq!(mirror.flags.len(), 1);
+}
+
+/// DM-49: a created or an unchanged mirror carries no previous digest and no mapping to review.
+#[test]
+fn previous_sha256_and_affected_mappings_are_empty_on_created_and_unchanged_outcomes() {
+    let dir = repo_dir("outcomes");
+    let created = run(&dir, &Peer::air());
+    assert_eq!(created.models[0].outcome, Outcome::Created);
+    assert_eq!(created.models[0].previous_sha256, None);
+    assert!(created.models[0].affected_mappings.is_empty());
+
+    existing_mirror(&dir, &sha256(LINKML_BODY));
+    let unchanged = run(&dir, &Peer::air());
+    assert_eq!(unchanged.models[0].outcome, Outcome::Unchanged);
+    assert_eq!(unchanged.models[0].previous_sha256, None);
+    assert!(unchanged.models[0].affected_mappings.is_empty());
+}
