@@ -9,7 +9,7 @@
 use crate::loader::{LoadError, Repository};
 use jc_core::kinds::{DataModelSpec, ModelProjectionSpec};
 use jc_core::registry;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
