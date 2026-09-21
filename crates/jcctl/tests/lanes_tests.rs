@@ -174,6 +174,26 @@ fn identity_access_and_lane_policy_are_red_even_when_they_only_add() {
     );
 }
 
+const ENVIRONMENT: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Environment
+metadata:
+  name: production
+  namespace: org
+spec:
+  secrets: { backend: openbao }
+"#;
+
+/// CC-75: an overlay changes the hosts and the digests one environment runs, so every change
+/// to one is red, the same lane the Portal gives it; the reason names the rule.
+#[test]
+fn a_change_to_an_environment_overlay_is_red() {
+    for action in [Action::Create, Action::Update] {
+        let verdict = lane_of(&change(action, ENVIRONMENT));
+        assert_eq!(verdict.lane, Lane::Red, "{action:?}");
+        assert!(verdict.reason.contains("CC-75"), "{}", verdict.reason);
+    }
+}
+
 #[test]
 fn a_proposal_takes_the_strictest_lane_of_its_parts() {
     let proposal = set(vec![

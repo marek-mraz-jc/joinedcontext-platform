@@ -81,6 +81,12 @@ pub fn lane_of(change: &ResourceChange) -> LaneVerdict {
             reason: "a deletion is always red (CC-63, CC-19)",
         };
     }
+    if change.id.kind == "Environment" {
+        return LaneVerdict {
+            lane: Lane::Red,
+            reason: "an Environment overlay changes hosts and digests (CC-75)",
+        };
+    }
     if ALWAYS_RED.contains(&change.id.kind.as_str()) {
         return LaneVerdict {
             lane: Lane::Red,
