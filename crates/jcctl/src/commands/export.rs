@@ -236,14 +236,16 @@ fn strip_system_metadata(metadata: &mut Map<String, Value>) {
 
 /// Drops every literal credential from a spec, naming what went (MF-17).
 ///
-/// Only a scalar is dropped: a member called `credentials` holding a list of `secretRef`
-/// entries is a declaration, and removing it would be removing the configuration rather
-/// than the secret.
+/// Only a scalar is dropped, and every scalar is: a string, and a number or a boolean too,
+/// because YAML reads `password: 123456` or `pin: 0042` unquoted as a number and it is still
+/// a secret typed into a manifest (T-2540). A member called `credentials` holding a list of
+/// `secretRef` entries is a declaration, and removing it would be removing the configuration
+/// rather than the secret; `null` is an absent value, not a credential.
 fn redact(spec: &mut Value, dropped: &mut Vec<String>) {
     match spec {
         Value::Object(members) => {
             members.retain(|name, value| {
-                let literal = value.is_string()
+                let literal = (value.is_string() || value.is_number() || value.is_boolean())
                     && CREDENTIAL_MEMBERS.contains(&name.to_ascii_lowercase().as_str());
                 if literal {
                     dropped.push(name.clone());
