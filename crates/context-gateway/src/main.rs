@@ -22,12 +22,11 @@ fn broker_of(config: &Config) -> Result<Broker, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "context_gateway=info,tower_http=info".into()),
-        )
-        .init();
+    // OPS-15: JSON lines on stdout, nothing on disk.
+    if let Err(error) = jc_core::logs::init("context_gateway=info,tower_http=info") {
+        eprintln!("logging is not set up: {error}");
+        return ExitCode::FAILURE;
+    }
 
     let config = match Config::from_env() {
         Ok(config) => config,

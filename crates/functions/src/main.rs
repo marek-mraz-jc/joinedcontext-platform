@@ -33,11 +33,8 @@ fn required(name: &str) -> Result<String, String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    // OPS-15: JSON lines on stdout, nothing on disk.
+    jc_core::logs::init("info")?;
 
     let bind = std::env::var("JC_FUNCTIONS_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
     let issuer = required("JC_OIDC_ISSUER")?;
