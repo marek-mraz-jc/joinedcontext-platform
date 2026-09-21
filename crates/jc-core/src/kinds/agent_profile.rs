@@ -14,8 +14,9 @@ use std::sync::LazyLock;
 
 static DIGEST_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^sha256:[0-9a-f]{64}$").expect("valid regex"));
-static DURATION_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$").expect("valid regex"));
+static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^PT(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)S)?$").expect("valid regex")
+});
 static DNS_HOST_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
         .expect("valid regex")
@@ -391,7 +392,7 @@ impl AgentProfileSpec {
         let wall_clock_secs = parse_iso_duration(&self.limits.wall_clock).ok_or(Error::Name {
             field: "limits.wallClock",
             value: self.limits.wall_clock.clone(),
-            reason: "wallClock must be a valid ISO 8601 duration matching ^PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?$",
+            reason: "wallClock must be a valid ISO 8601 duration matching ^PT(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)S)?$",
         })?;
 
         if wall_clock_secs == 0 || wall_clock_secs > 3600 {
@@ -479,10 +480,20 @@ impl AgentProfileSpec {
 }
 
 /// Parses an ISO 8601 duration in format `PT[#H][#M][#S]` into total seconds.
+///
+/// `None` for anything else: a bare `PT`, a unit out of order, a digit that is not ASCII, and a
+/// total past `u64` — which used to read as `0` or wrap into a small, accepted number (T-1481).
 pub fn parse_iso_duration(raw: &str) -> Option<u64> {
     let caps = DURATION_RE.captures(raw)?;
-    let h: u64 = caps.get(1).map_or(0, |m| m.as_str().parse().unwrap_or(0));
-    let m: u64 = caps.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(0));
-    let s: u64 = caps.get(3).map_or(0, |m| m.as_str().parse().unwrap_or(0));
-    Some(h * 3600 + m * 60 + s)
+    if raw == "PT" {
+        return None;
+    }
+    let part = |index: usize, unit: u64| -> Option<u64> {
+        caps.get(index)
+            .map_or(Some(0), |m| m.as_str().parse::<u64>().ok())?
+            .checked_mul(unit)
+    };
+    part(1, 3600)?
+        .checked_add(part(2, 60)?)?
+        .checked_add(part(3, 1)?)
 }

@@ -15,6 +15,7 @@ use jc_core::annotations::GENERATED_BY;
 use jc_core::kinds::ServiceAccountSpec;
 use jc_core::API_VERSION;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// The tool the generated manifests name as their origin (MF-08).
 pub const GENERATOR: &str = "jcctl/service-accounts";
@@ -54,8 +55,22 @@ pub fn owner_policies(manifest: &RawManifest, org_domain: &str) -> Vec<RawManife
 
 /// `sa-{account}-{role}-{space}`: stable across runs, so a second `apply` is a no-op, and
 /// unique per binding, so two roles of one account do not collide.
+///
+/// Each part is a DNS label of up to 63 characters, so the three together need not be one. A
+/// name past 63 keeps its first 52 characters and ends in 10 hex digits of the whole name's
+/// SHA-256 (MF-02, T-1482): still stable, still one per binding, and a name that fitted before
+/// is unchanged.
 fn policy_name(account: &str, role: &str, space: &str) -> String {
-    format!("sa-{account}-{role}-{space}")
+    const MAX: usize = 63;
+    const SUFFIX: usize = 10;
+    let full = format!("sa-{account}-{role}-{space}");
+    if full.len() <= MAX {
+        return full;
+    }
+    // The parts are ASCII DNS labels, so byte offsets are character offsets.
+    let prefix = full[..MAX - SUFFIX - 1].trim_end_matches('-');
+    let digest = format!("{:x}", Sha256::digest(full.as_bytes()));
+    format!("{prefix}-{}", &digest[..SUFFIX])
 }
 
 fn annotations() -> serde_json::Map<String, Value> {

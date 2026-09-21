@@ -173,3 +173,37 @@ spec:
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// MF-02, T-1482: an account, a role and a space of 63 characters each are each a valid name, so
+/// the Policy compiled from them must be one too: at most 63 characters, a DNS-1123 label, the
+/// same on every run, and different for a second binding that differs only past the cut.
+#[test]
+fn a_long_account_role_and_space_still_give_a_valid_policy_name() {
+    let account = "a".repeat(63);
+    let long = |role: &str, space: &str| {
+        SERVICE_ACCOUNT
+            .replace("vendorx-parking-push", &account)
+            .replace("space-writer", role)
+            .replace("contextSpace: ovzdusie", &format!("contextSpace: {space}"))
+    };
+    let role = format!("{}-x", "r".repeat(60));
+    let space = format!("{}-1", "s".repeat(61));
+    let name_of = |yaml: &str| {
+        let policies = owner_policies(&manifest(yaml), "banskabystrica.sk");
+        assert_eq!(policies.len(), 1, "one binding, one policy");
+        policies[0].metadata.name.clone()
+    };
+
+    let name = name_of(&long(&role, &space));
+    assert!(name.len() <= 63, "{name} is {} characters", name.len());
+    jc_core::names::validate_dns1123_label(&name).unwrap_or_else(|err| panic!("{name}: {err}"));
+    assert!(name.starts_with("sa-aaaa"), "{name}");
+    assert_eq!(name, name_of(&long(&role, &space)), "stable across runs");
+
+    let other_space = format!("{}-2", "s".repeat(61));
+    assert_ne!(
+        name,
+        name_of(&long(&role, &other_space)),
+        "two bindings that differ past the cut keep two names",
+    );
+}
