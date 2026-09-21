@@ -40,8 +40,9 @@ impl CredentialManager {
             }
         }
 
-        // Only reachable in tests: `Config::require_secrets` makes an empty secret a startup
-        // failure, so a deployed proxy never mints a stub token.
+        // The suites' stub: compiled only with `test-stub`, which the image never builds with, and
+        // a binary that has it refuses to start (see `main`), T-1480.
+        #[cfg(feature = "test-stub")]
         if self.config.oidc_client_secret.is_empty() {
             return Ok(format!("mock-token-for-{endpoint_slug}"));
         }

@@ -14,6 +14,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    // A binary compiled with the suites' stub token would answer an empty client secret with a
+    // made-up token; it is never a proxy anyone may run (T-1480).
+    if cfg!(feature = "test-stub") {
+        return Err(
+            "jc-agent-proxy was built with the test-stub feature and does not start".into(),
+        );
+    }
     let config = Config::from_env()?;
     config.require_secrets()?;
     tracing::info!(bind = %config.bind, "starting jc-agent-proxy daemon");

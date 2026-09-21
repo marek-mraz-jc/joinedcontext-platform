@@ -98,6 +98,7 @@ dependencies = [
 name = "agent-proxy"
 version = "0.1.0"
 dependencies = [
+ "agent-proxy",
  "argon2",
  "axum",
  "bytes",
