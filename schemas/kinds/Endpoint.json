@@ -97,6 +97,13 @@
           ],
           "description": "The `CkanInstance` this Endpoint publishes to."
         },
+        "license": {
+          "description": "The CKAN licence id the organization chose, such as `cc-by` for CC-BY 4.0. Used when the Endpoint's DCAT-AP record names no `dct:license`, which is the one term the record does not carry (EP-62, EP-63).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "description": "The CKAN dataset name; the Endpoint's own name when absent.",
           "type": [
