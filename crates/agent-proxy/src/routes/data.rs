@@ -110,7 +110,18 @@ async fn forward(
 
     let token = match state.credentials.get_endpoint_token(&slug).await {
         Ok(t) => t,
-        Err(e) => return jc_core::ProblemDetails::internal_opaque(&e).into_response(),
+        Err(error) => {
+            // The credential manager's message names the realm, the client and the token URL.
+            // A run learns that the proxy has no token for the endpoint and nothing else, the
+            // same answer `portal_bearer` gives for the Portal (AG-52, T-2271).
+            tracing::warn!(%error, slug = %slug, "no token for the endpoint");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                jc_core::ProblemDetails::new(503, "upstream-unavailable", "Upstream Unavailable")
+                    .with_detail("the proxy could not obtain a token for this endpoint"),
+            )
+                .into_response();
+        }
     };
 
     // The query string travels with the path: `type`, `attrs`, `q`, `limit`, `offset` and
@@ -165,7 +176,7 @@ async fn forward(
 
     let upstream_resp = match client_req.send().await {
         Ok(r) => r,
-        Err(e) => return jc_core::ProblemDetails::internal_opaque(&e.to_string()).into_response(),
+        Err(e) => return super::upstream_unavailable(super::GATEWAY, &e),
     };
 
     let status =

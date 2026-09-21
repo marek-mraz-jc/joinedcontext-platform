@@ -17,6 +17,18 @@ use std::time::Instant;
 /// AG-46). Counted on the bytes that arrived, before anything is parsed from them.
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 
+/// The kinds this proxy reports on the Portal's event channel itself, which a workspace
+/// therefore may not post (AG-25, AG-41, T-2363).
+///
+/// `routes::llm` posts `{"kind":"usage","payload":{"tokensThisStep": n}}` after every model call
+/// and the Portal applies it to the run's token and step record. A workspace that could post the
+/// same kind would be writing the record its own budget is read from and its steps are counted
+/// with, with any number in it, a negative one included. `preview` and `navigate` stay the run's
+/// own to send: the first is its output and the second is validated. Matched without case,
+/// because the Portal matches the kind exactly and `USAGE` would sail past a `==` here and land
+/// as `USAGE` there the day the Portal stops caring about case.
+const PROXY_OWN_KINDS: [&str; 1] = ["usage"];
+
 /// One event payload with every secret-shaped run replaced.
 ///
 /// The redaction is textual, so it runs over the serialized payload and the result is parsed
@@ -74,6 +86,18 @@ pub async fn handler(
         }
     };
 
+    if PROXY_OWN_KINDS
+        .iter()
+        .any(|own| own.eq_ignore_ascii_case(&body.kind))
+    {
+        return jc_core::ProblemDetails::forbidden()
+            .with_detail(format!(
+                "`{}` is the proxy's own accounting channel and cannot be posted by a workspace",
+                body.kind
+            ))
+            .into_response();
+    }
+
     if let Err(msg) = state
         .limits
         .check_rpm(&run.id, run.requests_per_minute)
@@ -120,10 +144,19 @@ pub async fn handler(
             let b = r.bytes().await.unwrap_or_default();
             (s, b)
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            bytes::Bytes::from(e.to_string()),
-        ),
+        Err(e) => {
+            log_request(&AuditEntry {
+                run_id: &run.id,
+                user: &run.created_by,
+                upstream: "portal",
+                method: "POST",
+                path: "internal/agent-runs/events",
+                status: 502,
+                bytes: 0,
+                duration_ms: start.elapsed().as_millis(),
+            });
+            return super::upstream_unavailable(super::PORTAL, &e);
+        }
     };
 
     log_request(&AuditEntry {

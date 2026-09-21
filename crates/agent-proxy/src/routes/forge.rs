@@ -9,6 +9,38 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::time::Instant;
 
+/// The methods a `contents/` write uses: Gitea creates with POST, updates with PUT and removes
+/// with DELETE, and all three take `branch`, `author`, `committer` and `message`.
+const CONTENT_WRITES: [Method; 3] = [Method::POST, Method::PUT, Method::DELETE];
+
+/// The request body as a JSON object, or the refusal to send back (AG-64, T-2362).
+///
+/// Four forge operations do not forward the body as it arrived: a `contents/` write gains the
+/// run's branch, its author, its committer and the `Co-Proposed-By` trailer, a new branch is
+/// checked against the run's own, and a pull request has its `head` forced to it. A body this
+/// proxy cannot read as an object is a body it cannot pin to the run, so it stops here rather
+/// than reaching the forge with the platform's token and no branch at all, on whichever ref
+/// Gitea calls default. An empty body is an empty object: a `DELETE` that carries everything in
+/// its query is still pinned, because the fields are inserted into what it then has.
+fn object_body(bytes: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, Box<Response>> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(serde_json::Map::new());
+    }
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        Ok(_) => Err(Box::new(
+            jc_core::ProblemDetails::new(400, "invalid-body", "Bad Request")
+                .with_detail("this forge operation takes a JSON object as its body")
+                .into_response(),
+        )),
+        Err(error) => Err(Box::new(
+            jc_core::ProblemDetails::new(400, "invalid-body", "Bad Request")
+                .with_detail(format!("the body is not JSON: {error}"))
+                .into_response(),
+        )),
+    }
+}
+
 pub async fn handler(
     State(state): State<ProxyState>,
     method: Method,
@@ -27,7 +59,9 @@ pub async fn handler(
         Err(refusal) => return *refusal,
     };
 
-    let mut body_val = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
+    // The body is only read where an operation rewrites or checks it; a read forwards what
+    // arrived, untouched.
+    let mut pinned: Option<serde_json::Map<String, serde_json::Value>> = None;
 
     if let Some(file_path) = rest.strip_prefix("contents/") {
         // Nothing encoded, no backslash, no dot or empty segment (T-0817, `super::escapes`).
@@ -36,52 +70,55 @@ pub async fn handler(
                 .with_detail("file path outside assigned application directory")
                 .into_response();
         }
-        if matches!(method, Method::PUT | Method::DELETE) {
-            if let Some(ref mut obj) = body_val {
-                if let Some(map) = obj.as_object_mut() {
-                    map.insert("branch".to_string(), serde_json::json!(run.branch));
-                    map.insert(
-                        "author".to_string(),
-                        serde_json::json!({
-                            "name": format!("agent:app-builder@{}", run.project),
-                            "email": format!("agent-builder@{}.local", run.project)
-                        }),
-                    );
-                    map.insert(
-                        "committer".to_string(),
-                        serde_json::json!({
-                            "name": format!("agent:app-builder@{}", run.project),
-                            "email": format!("agent-builder@{}.local", run.project)
-                        }),
-                    );
-                    let msg = map
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("agent commit");
-                    let trailer = format!("\n\nCo-Proposed-By: {}", run.created_by);
-                    if !msg.contains("Co-Proposed-By:") {
-                        map.insert(
-                            "message".to_string(),
-                            serde_json::json!(format!("{msg}{trailer}")),
-                        );
-                    }
-                }
+        if CONTENT_WRITES.contains(&method) {
+            let mut map = match object_body(&body_bytes) {
+                Ok(map) => map,
+                Err(refusal) => return *refusal,
+            };
+            map.insert("branch".to_string(), serde_json::json!(run.branch));
+            map.insert(
+                "author".to_string(),
+                serde_json::json!({
+                    "name": format!("agent:app-builder@{}", run.project),
+                    "email": format!("agent-builder@{}.local", run.project)
+                }),
+            );
+            map.insert(
+                "committer".to_string(),
+                serde_json::json!({
+                    "name": format!("agent:app-builder@{}", run.project),
+                    "email": format!("agent-builder@{}.local", run.project)
+                }),
+            );
+            let msg = map
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("agent commit");
+            let trailer = format!("\n\nCo-Proposed-By: {}", run.created_by);
+            if !msg.contains("Co-Proposed-By:") {
+                let message = format!("{msg}{trailer}");
+                map.insert("message".to_string(), serde_json::json!(message));
             }
+            pinned = Some(map);
         }
     } else if rest == "branches" && method == Method::POST {
-        if let Some(ref map) = body_val {
-            if map.get("new_branch_name").and_then(|n| n.as_str()) != Some(&run.branch) {
-                return jc_core::ProblemDetails::forbidden()
-                    .with_detail("cannot create branches other than run assigned branch")
-                    .into_response();
-            }
+        let map = match object_body(&body_bytes) {
+            Ok(map) => map,
+            Err(refusal) => return *refusal,
+        };
+        if map.get("new_branch_name").and_then(|n| n.as_str()) != Some(run.branch.as_str()) {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail("cannot create branches other than run assigned branch")
+                .into_response();
         }
+        pinned = Some(map);
     } else if rest == "pulls" && method == Method::POST {
-        if let Some(ref mut map) = body_val {
-            if let Some(obj) = map.as_object_mut() {
-                obj.insert("head".to_string(), serde_json::json!(run.branch));
-            }
-        }
+        let mut map = match object_body(&body_bytes) {
+            Ok(map) => map,
+            Err(refusal) => return *refusal,
+        };
+        map.insert("head".to_string(), serde_json::json!(run.branch));
+        pinned = Some(map);
     } else if (rest.starts_with("pulls/") || rest.starts_with("commits/")) && method == Method::GET
     {
         // Read-only inspection allowed
@@ -118,15 +155,15 @@ pub async fn handler(
         .header("Authorization", format!("token {forge_token}"))
         .header("Accept", "application/json");
 
-    if let Some(val) = body_val {
-        client_req = client_req.json(&val);
+    if let Some(map) = pinned {
+        client_req = client_req.json(&serde_json::Value::Object(map));
     } else if !body_bytes.is_empty() {
         client_req = client_req.body(body_bytes);
     }
 
     let upstream_resp = match client_req.send().await {
         Ok(r) => r,
-        Err(e) => return jc_core::ProblemDetails::internal_opaque(&e.to_string()).into_response(),
+        Err(e) => return super::upstream_unavailable(super::FORGE, &e),
     };
 
     let status =
