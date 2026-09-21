@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Every action a lane runs is a commit, and only a job that publishes may publish (T-0851).
 
+Two rules keep a pull request from a fork out of the repository's credentials (T-1714):
+`pull_request_target` runs a fork's change with this repository's secrets and a write token, so
+no workflow uses it; and every workflow names its `permissions:` at the top, so a job nobody
+scoped gets read access instead of the repository default.
+
 A tag is a reference somebody else owns: whoever moves one runs code in these workflows, and
 `image.yml` carries `packages: write` and `id-token: write` — the two permissions that push an
 image under the project's name and mint the identity that signs it. A workflow-level grant hands
@@ -22,7 +27,11 @@ PUBLISHES = ("packages: write", "id-token: write")
 
 def problems(path: Path):
     lines = path.read_text().splitlines()
+    if not any(line.startswith("permissions:") for line in lines):
+        yield f"{path.name}: no top-level `permissions:`; every job would get the repository default"
     for number, line in enumerate(lines, 1):
+        if "pull_request_target" in line.split("#", 1)[0]:
+            yield f"{path.name}:{number}: pull_request_target runs a fork's change with this repository's secrets"
         used = USES.match(line)
         # A local `./…` call is this repository at the commit already checked out; there is no
         # third-party tag in it to move.
