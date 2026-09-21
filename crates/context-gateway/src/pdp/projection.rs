@@ -9,7 +9,7 @@
 //! constraint set names it.
 
 use super::evaluator::Constraints;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// The members every entity keeps, whatever the grants say: without them the answer is
@@ -200,11 +200,6 @@ pub fn ungranted<'a>(entity: &'a Value, granted: &BTreeSet<String>) -> Vec<&'a s
         .map(String::as_str)
         .filter(|name| !STRUCTURAL.contains(name) && !granted.contains(*name))
         .collect()
-}
-
-/// Whether the answer was narrowed, so the response can say so (R22).
-pub fn was_projected(before: &Map<String, Value>, after: &Map<String, Value>) -> bool {
-    before.len() != after.len()
 }
 
 /// Whether an entity may be returned at all, given the types and the anchored id patterns of
