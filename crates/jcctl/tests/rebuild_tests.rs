@@ -160,3 +160,192 @@ fn a_space_filter_rebuilds_only_that_space() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// --- T-2525: the edge cases of `rebuild` (DM-44, PF-29) ---
+
+const MODELS: &str = "projects/ovzdusie/spaces/ovzdusie/datamodels";
+
+/// `repo(name)` with the model's manifest replaced by `MODEL` edited with `edit`.
+fn repo_with_model(name: &str, edit: impl Fn(&str) -> String) -> PathBuf {
+    let dir = repo(name);
+    common::write(&dir, &format!("{MODELS}/air-quality.yaml"), &edit(MODEL));
+    dir
+}
+
+/// A file outside the repository, the one a climbing path would reach.
+fn outside_secret(name: &str) -> PathBuf {
+    let dir = temp_dir(name);
+    std::fs::write(dir.join("outside.txt"), "outside-the-repository").expect("the file");
+    dir
+}
+
+/// No object of the store holds the bytes of the file outside.
+fn store_holds_nothing_from_outside(out: &Path) -> bool {
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .flat_map(|e| {
+                        if e.path().is_dir() {
+                            walk(&e.path())
+                        } else {
+                            vec![e.path()]
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    walk(out).iter().all(|file| {
+        !std::fs::read_to_string(file)
+            .unwrap_or_default()
+            .contains("outside-the-repository")
+    })
+}
+
+/// PF-29: a declared file that is a link out of the repository is not read into the store.
+#[test]
+fn a_declared_file_that_links_outside_the_repository_is_not_read() {
+    let outside = outside_secret("rebuild-link");
+    let dir = repo("rebuild-link-repo");
+    let schema = dir.join(MODELS).join("json-schema/air-quality.v1.json");
+    std::fs::remove_file(&schema).expect("the schema file");
+    std::os::unix::fs::symlink(outside.join("outside.txt"), &schema).expect("the link");
+    let out = temp_dir("rebuild-link-out");
+    let _ = artifacts::rebuild(&dir, &options(&out));
+    assert!(store_holds_nothing_from_outside(&out));
+}
+
+/// DM-22: whatever the version says, the store prefix is `v` and a number, and nothing panics.
+#[test]
+fn a_version_without_a_numeric_major_never_panics_and_prefixes_a_number() {
+    for (n, (version, major)) in [
+        ("1", "v1"),
+        ("one.two.three", "v0"),
+        ("", "v0"),
+        ("99999999999999999999.0.0", "v0"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = repo_with_model(&format!("rebuild-version-{n}"), |m| {
+            m.replace("version: 1.2.0", &format!("version: \"{version}\""))
+        });
+        let out = temp_dir(&format!("rebuild-version-out-{n}"));
+        if let Ok(report) = artifacts::rebuild(&dir, &options(&out)) {
+            let prefix = format!("schemas/banskabystrica/ovzdusie/ovzdusie/air-quality/{major}/");
+            assert!(
+                report.written.iter().any(|k| k.starts_with(&prefix)),
+                "{version}: {:?}",
+                report.written
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// PF-29: two projects with a model of one name keep two prefixes.
+#[test]
+fn two_models_of_one_name_in_two_projects_do_not_collide_in_the_store() {
+    let dir = repo("rebuild-two-projects");
+    common::write(
+        &dir,
+        "projects/doprava/project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    common::write(
+        &dir,
+        "projects/doprava/spaces/doprava/space.yaml",
+        &SPACE.replace("ovzdusie", "doprava"),
+    );
+    let other = "projects/doprava/spaces/doprava/datamodels";
+    common::write(
+        &dir,
+        &format!("{other}/air-quality.yaml"),
+        &MODEL.replace("ovzdusie", "doprava"),
+    );
+    common::write(
+        &dir,
+        &format!("{other}/air-quality.linkml.yaml"),
+        "id: https://example.org/other\n",
+    );
+    let out = temp_dir("rebuild-two-projects-out");
+    let report = artifacts::rebuild(&dir, &options(&out)).expect("the rebuild runs");
+    let ours =
+        out.join("schemas/banskabystrica/ovzdusie/ovzdusie/air-quality/v1/air-quality.linkml.yaml");
+    let theirs =
+        out.join("schemas/banskabystrica/doprava/doprava/air-quality/v1/air-quality.linkml.yaml");
+    assert_eq!(std::fs::read_to_string(ours).expect("ours"), LINKML);
+    assert_eq!(
+        std::fs::read_to_string(theirs).expect("theirs"),
+        "id: https://example.org/other\n"
+    );
+    assert!(report
+        .written
+        .iter()
+        .any(|k| k.starts_with("schemas/banskabystrica/doprava/")));
+}
+
+/// PF-29: a repository without an Organization names the store by the project.
+#[test]
+fn a_missing_organization_manifest_falls_back_to_the_project_name() {
+    let dir = repo("rebuild-no-org");
+    for entry in std::fs::read_dir(&dir).expect("the checkout").flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        if text.contains("kind: Organization") {
+            std::fs::remove_file(entry.path()).expect("remove the organization");
+        }
+    }
+    let out = temp_dir("rebuild-no-org-out");
+    if let Ok(report) = artifacts::rebuild(&dir, &options(&out)) {
+        assert!(
+            report
+                .written
+                .iter()
+                .all(|k| k.split('/').nth(1) == Some("ovzdusie")),
+            "{:?}",
+            report.written
+        );
+    }
+}
+
+/// DM-44: a filter naming no space writes nothing and says nothing is missing.
+#[test]
+fn a_space_filter_that_matches_nothing_writes_an_empty_report() {
+    let dir = repo("rebuild-no-match");
+    let out = temp_dir("rebuild-no-match-out");
+    let mut options = options(&out);
+    options.space = Some("no-such-space".to_owned());
+    let report = artifacts::rebuild(&dir, &options).expect("the rebuild runs");
+    assert_eq!(report, artifacts::Report::default());
+}
+
+/// DM-44: a store that cannot be written is an error naming where.
+#[test]
+fn an_out_dir_that_cannot_be_written_reports_a_file_error_naming_the_path() {
+    let dir = repo("rebuild-readonly");
+    let blocker = temp_dir("rebuild-readonly-out").join("store");
+    std::fs::write(&blocker, "a file where the store's folder should be").expect("the blocker");
+    let error = artifacts::rebuild(&dir, &options(&blocker)).expect_err("not a folder");
+    match error {
+        artifacts::Error::File { path, .. } => assert!(path.contains("store"), "{path}"),
+        other => panic!("expected a file error, got {other}"),
+    }
+}
+
+/// DM-44: a field neither declared on top nor under `artifacts` is neither written nor missing.
+#[test]
+fn a_field_the_manifest_does_not_declare_is_neither_written_nor_missing() {
+    let dir = repo_with_model("rebuild-undeclared", |m| {
+        m.replace("    context: ./context/air-quality.jsonld\n", "")
+    });
+    let out = temp_dir("rebuild-undeclared-out");
+    let report = artifacts::rebuild(&dir, &options(&out)).expect("the rebuild runs");
+    assert!(report.missing.is_empty(), "{:?}", report.missing);
+    assert!(
+        report.written.iter().all(|k| !k.contains("jsonld")),
+        "{:?}",
+        report.written
+    );
+}
