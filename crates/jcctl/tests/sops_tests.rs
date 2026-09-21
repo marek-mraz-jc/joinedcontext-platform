@@ -401,3 +401,281 @@ fn no_plaintext_reaches_a_log_line() {
     assert_eq!(value.len(), "s3cr3t-value".len());
     assert!(!value.is_empty());
 }
+
+// ---- T-2537: the edge cases of read_file, identities_from_file and decrypt_document ----
+
+/// The file `repository` wrote, rewritten by `edit`, loaded with `identity`.
+fn load_edited(
+    test_name: &str,
+    entries: &[(&str, Node)],
+    edit: impl Fn(&str) -> String,
+) -> Result<SecretStore, SopsError> {
+    let (dir, identity) = repository(test_name, entries);
+    let file = dir.join("secrets.enc.yaml");
+    let text = std::fs::read_to_string(&file).expect("the file");
+    std::fs::write(&file, edit(&text)).expect("rewrite");
+    load(&dir, &identity)
+}
+
+/// The literal stored under `name: ` on one line of a written file.
+fn literal_of<'a>(text: &'a str, name: &str) -> &'a str {
+    text.lines()
+        .find_map(|line| line.trim_start().strip_prefix(&format!("{name}: ")))
+        .expect("the literal")
+}
+
+/// One age stanza wrapping the data key for `recipient`, as `sops_file` writes it.
+fn stanza(recipient: &age::x25519::Recipient) -> String {
+    let armored = age::encrypt_and_armor(recipient, &DATA_KEY).expect("wrap data key");
+    let indented: String = armored
+        .lines()
+        .map(|line| format!("            {line}\n"))
+        .collect();
+    format!("        - recipient: {recipient}\n          enc: |\n{indented}")
+}
+
+/// CC-06: a member that is not base64 is named by its member, and its value is not repeated.
+#[test]
+fn an_iv_tag_or_data_member_that_is_not_valid_base64_is_refused_naming_the_member_never_the_value()
+{
+    for (member, said) in [("data", "ciphertext"), ("iv", "iv"), ("tag", "tag")] {
+        let refused = load_edited(
+            "bad-base64",
+            &[("token", Node::Value("s3cr3t-value"))],
+            |text| {
+                let literal = literal_of(text, "token");
+                let body = literal
+                    .trim_start_matches("ENC[AES256_GCM,")
+                    .trim_end_matches(']');
+                let broken: Vec<String> = body
+                    .split(',')
+                    .map(|part| match part.split_once(':') {
+                        Some((name, _)) if name == member => format!("{name}:!!not~base64!!"),
+                        _ => part.to_owned(),
+                    })
+                    .collect();
+                text.replace(literal, &format!("ENC[AES256_GCM,{}]", broken.join(",")))
+            },
+        );
+        let Err(error @ SopsError::Value { .. }) = refused else {
+            panic!("{member}: {refused:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("the {said} is not base64")),
+            "{message}"
+        );
+        assert!(message.contains("`token`"), "{message}");
+        assert!(!message.contains("not~base64"), "{message}");
+    }
+}
+
+/// CC-06: a literal without one of its three members is not an encrypted value, and nothing
+/// panics on the missing part.
+#[test]
+fn an_enc_literal_missing_a_member_is_not_encrypted_not_a_panic() {
+    for member in ["data", "iv", "tag"] {
+        let refused = load_edited(
+            "missing-member",
+            &[("token", Node::Value("s3cr3t-value"))],
+            |text| {
+                let literal = literal_of(text, "token");
+                let body = literal
+                    .trim_start_matches("ENC[AES256_GCM,")
+                    .trim_end_matches(']');
+                let kept: Vec<&str> = body
+                    .split(',')
+                    .filter(|part| !part.starts_with(&format!("{member}:")))
+                    .collect();
+                text.replace(literal, &format!("ENC[AES256_GCM,{}]", kept.join(",")))
+            },
+        );
+        assert!(
+            matches!(refused, Err(SopsError::NotEncrypted { ref field, .. }) if field == "token"),
+            "{member}: {refused:?}"
+        );
+    }
+}
+
+/// CC-06: a member the format does not have, or a cipher other than AES-256-GCM, is refused
+/// rather than ignored.
+#[test]
+fn an_enc_literal_with_an_unknown_member_name_is_refused() {
+    for rewrite in [",type:str]", ",type:str,extra:AAAA]", ",type:str,]"] {
+        let refused = load_edited(
+            "unknown-member",
+            &[("token", Node::Value("s3cr3t-value"))],
+            |text| text.replacen(",type:str]", rewrite, 1),
+        );
+        if rewrite == ",type:str]" {
+            assert!(refused.is_ok(), "the unchanged file loads: {refused:?}");
+        } else {
+            assert!(
+                matches!(refused, Err(SopsError::NotEncrypted { .. })),
+                "{rewrite}: {refused:?}"
+            );
+        }
+    }
+    let other_cipher = load_edited(
+        "other-cipher",
+        &[("token", Node::Value("s3cr3t-value"))],
+        |text| text.replacen("ENC[AES256_GCM,", "ENC[AES128_GCM,", 1),
+    );
+    assert!(
+        matches!(other_cipher, Err(SopsError::NotEncrypted { .. })),
+        "{other_cipher:?}"
+    );
+}
+
+/// CC-06: the data key is taken from the first stanza this identity opens, wherever it
+/// stands among the file's recipients.
+#[test]
+fn two_age_stanzas_where_only_the_second_matches_still_decrypts() {
+    let stranger = age::x25519::Identity::generate();
+    let store = load_edited(
+        "second-stanza",
+        &[("token", Node::Value("s3cr3t-value"))],
+        |text| {
+            text.replacen(
+                "    age:\n",
+                &format!("    age:\n{}", stanza(&stranger.to_public())),
+                1,
+            )
+        },
+    )
+    .expect("the second stanza opens");
+    assert_eq!(
+        store
+            .resolve(&reference("token", None))
+            .expect("resolves")
+            .expose(),
+        "s3cr3t-value"
+    );
+}
+
+/// CC-06: a file encrypted for no age recipient says so, rather than blaming the key.
+#[test]
+fn metadata_with_no_age_stanzas_is_no_age_recipients_not_no_matching_identity() {
+    let refused = load_edited(
+        "no-stanza",
+        &[("token", Node::Value("s3cr3t-value"))],
+        |text| {
+            let start = text.find("    age:\n").expect("age block");
+            let end = text.find("    lastmodified").expect("lastmodified");
+            format!("{}    age: []\n{}", &text[..start], &text[end..])
+        },
+    );
+    assert!(
+        matches!(refused, Err(SopsError::NoAgeRecipients { .. })),
+        "{refused:?}"
+    );
+}
+
+/// CC-06: a key that is not a string, at the top or inside a keyed secret, is a shape the
+/// store does not read.
+#[test]
+fn a_non_string_yaml_key_at_the_top_level_is_unsupported_shape_not_a_panic() {
+    for key in ["42", "true", "~", "[a, b]"] {
+        let refused = load_edited(
+            "non-string-key",
+            &[("token", Node::Value("s3cr3t-value"))],
+            |text| format!("{key}: ENC[AES256_GCM,data:AA==,iv:AA==,tag:AA==,type:str]\n{text}"),
+        );
+        assert!(
+            matches!(refused, Err(SopsError::UnsupportedShape { .. })),
+            "{key}: {refused:?}"
+        );
+    }
+    let nested = load_edited(
+        "non-string-nested-key",
+        &[("creds", Node::Keys(PARKING))],
+        |text| {
+            text.replacen(
+                "creds:\n",
+                "creds:\n    7: ENC[AES256_GCM,data:AA==,iv:AA==,tag:AA==,type:str]\n",
+                1,
+            )
+        },
+    );
+    assert!(
+        matches!(nested, Err(SopsError::UnsupportedShape { .. })),
+        "{nested:?}"
+    );
+}
+
+/// CC-06: a list, a number or a mapping two levels deep is not a secret the store can hand out.
+#[test]
+fn a_secrets_file_holding_a_yaml_list_value_is_unsupported_shape() {
+    for value in ["[a, b]", "42", "\n    inner:\n        deeper: x", "null"] {
+        let refused = load_edited(
+            "list-value",
+            &[("token", Node::Value("s3cr3t-value"))],
+            |text| format!("odd: {value}\n{text}"),
+        );
+        assert!(
+            matches!(refused, Err(SopsError::UnsupportedShape { .. })),
+            "{value}: {refused:?}"
+        );
+    }
+}
+
+/// CC-06: a file with valid metadata and no secret is an empty store, not an error.
+#[test]
+fn a_secrets_file_with_zero_secrets_but_valid_sops_metadata_loads_as_an_empty_store() {
+    let (dir, identity) = repository("zero-secrets", &[]);
+    let store = load(&dir, &identity).expect("an empty file loads");
+    assert!(store.is_empty());
+    assert_eq!(store.names().count(), 0);
+}
+
+/// CC-06: one named file resolves as the directory walk resolves it.
+#[test]
+fn load_file_resolves_a_single_named_file_the_same_as_load_dir() {
+    let (dir, identity) = parking_repo("load-file");
+    let from_dir = load(&dir, &identity).expect("dir");
+    let from_file = SecretStore::load_file(
+        &dir.join("secrets.enc.yaml"),
+        std::slice::from_ref(&identity),
+    )
+    .expect("file");
+    assert_eq!(
+        from_dir.names().collect::<Vec<_>>(),
+        from_file.names().collect::<Vec<_>>()
+    );
+    for (name, key) in [
+        ("parking-mqtt-creds", Some("password")),
+        ("parking-mqtt-creds", Some("username")),
+        ("portal-session-key", None),
+    ] {
+        assert_eq!(
+            from_dir
+                .resolve(&reference(name, key))
+                .expect("dir")
+                .expose(),
+            from_file
+                .resolve(&reference(name, key))
+                .expect("file")
+                .expose()
+        );
+    }
+}
+
+/// OPS-37: a path that cannot be read is an I/O error naming the path; the identity file too.
+#[test]
+fn read_file_on_an_unreadable_path_returns_an_io_error_not_a_panic() {
+    let dir = temp_dir("unreadable");
+    let identity = age::x25519::Identity::generate();
+    for path in [dir.join("absent.enc.yaml"), dir.clone()] {
+        let refused = SecretStore::load_file(&path, std::slice::from_ref(&identity));
+        assert!(
+            matches!(refused, Err(SopsError::Io { .. })),
+            "{}: {refused:?}",
+            path.display()
+        );
+        assert!(
+            matches!(identities_from_file(&path), Err(SopsError::Io { .. })),
+            "{}",
+            path.display()
+        );
+    }
+}

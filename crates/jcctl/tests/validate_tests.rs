@@ -564,3 +564,121 @@ fn run_reports_every_class_of_finding_at_once() {
     assert!(said("nobody-declared"), "{:?}", report.findings);
     assert!(said("orphan"), "{:?}", report.findings);
 }
+
+mod federation_topology {
+    //! CC-13: `jcctl validate` checks the federation topology the registrations declare.
+    use super::*;
+
+    fn space(dir: &Path, name: &str) {
+        write(
+            dir,
+            &format!("projects/ovzdusie/spaces/{name}/space.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  isSandbox: false\n"),
+        );
+    }
+
+    fn endpoint(dir: &Path, name: &str, space: &str, slug: &str) {
+        write(
+            dir,
+            &format!("projects/ovzdusie/spaces/{space}/endpoints/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: {space}\n  slug: {slug}\n  audience: organization\n  enabledRepresentations: [\"ngsi-ld\"]\n"),
+        );
+    }
+
+    fn registration(dir: &Path, name: &str, hub: &str, member: &str, id_pattern: Option<&str>) {
+        let pattern = id_pattern
+            .map(|p| format!("\n          idPattern: \"{p}\""))
+            .unwrap_or_default();
+        write(
+            dir,
+            &format!("projects/ovzdusie/spaces/{hub}/registrations/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSourceRegistration\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: {hub}\n  endpointRef: {{ kind: Endpoint, name: {member} }}\n  information:\n    - entities:\n        - type: Vehicle{pattern}\n  federation:\n    identity: caller\n"),
+        );
+    }
+
+    /// A hub, served by its own Endpoint, over one member space.
+    fn hub_repo(test: &str) -> PathBuf {
+        let dir = valid_repo(test);
+        space(&dir, "hub");
+        space(&dir, "transport");
+        endpoint(&dir, "hub-read", "hub", "a2bcdefghijklmnopqrstuvwxy");
+        endpoint(
+            &dir,
+            "transport-read",
+            "transport",
+            "b2bcdefghijklmnopqrstuvwxy",
+        );
+        registration(&dir, "transport", "hub", "transport-read", None);
+        dir
+    }
+
+    fn messages(dir: &Path) -> Vec<String> {
+        validate::run(dir)
+            .findings
+            .into_iter()
+            .map(|f| f.message)
+            .collect()
+    }
+
+    /// CC-13: a hub over a member, served by its own Endpoint, is a topology with no finding.
+    #[test]
+    fn a_served_hub_over_a_declared_member_is_clean() {
+        let dir = hub_repo("cc13-clean");
+        assert_eq!(messages(&dir), Vec::<String>::new());
+    }
+
+    /// A test name, what breaks the topology, and the words its finding carries.
+    type Breakage = (&'static str, fn(&Path), &'static str);
+
+    /// CC-13: every broken edge is named where it is declared, one finding each.
+    #[test]
+    fn every_broken_edge_of_the_topology_is_a_finding() {
+        let cases: [Breakage; 5] = [
+            (
+                "cc13-dangling",
+                |dir| registration(dir, "ghost", "hub", "no-such-endpoint", None),
+                "a dangling peer",
+            ),
+            (
+                "cc13-no-hub",
+                |dir| registration(dir, "lost", "nowhere", "transport-read", None),
+                "which no ContextSpace of this project declares",
+            ),
+            (
+                "cc13-unserved",
+                |dir| {
+                    space(dir, "silent");
+                    registration(dir, "unread", "silent", "transport-read", None);
+                },
+                "no Endpoint of this project serves it",
+            ),
+            (
+                "cc13-loop",
+                |dir| registration(dir, "back", "transport", "hub-read", None),
+                "a federation loop",
+            ),
+            (
+                "cc13-unanchored",
+                |dir| {
+                    registration(
+                        dir,
+                        "wide",
+                        "hub",
+                        "transport-read",
+                        Some("urn:ngsi-ld:Vehicle:.*"),
+                    )
+                },
+                "anchored",
+            ),
+        ];
+        for (test, break_it, expected) in cases {
+            let dir = hub_repo(test);
+            break_it(&dir);
+            let said = messages(&dir);
+            assert!(
+                said.iter().any(|m| m.contains(expected)),
+                "{test}: {said:?}"
+            );
+        }
+    }
+}

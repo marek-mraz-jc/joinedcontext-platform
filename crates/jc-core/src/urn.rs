@@ -1,4 +1,5 @@
-//! Deterministic NGSI-LD entity URN specification (ADR 001, PF-10, PF-42).
+//! Deterministic NGSI-LD entity URN specification (ADR 001, PF-10, PF-12, PF-42): the four
+//! segments before the local id are names, never random UUIDs, so an `idPattern` prefix routes.
 
 use crate::error::{Error, Result, UrnError};
 use crate::names;

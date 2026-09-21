@@ -455,3 +455,261 @@ spec:
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- T-2536: the edge cases of `roles::input`, the permission gate's view of a change ----
+
+/// The gate input for one name-status listing over a fresh head and base checkout.
+fn gate(test_name: &str, name_status: &str) -> Result<roles::GateInput, RolesError> {
+    let (head, base) = merge_request(test_name);
+    roles::input(&head, &base, name_status, "jana", None, &[])
+}
+
+/// What the gate saw: `(action, kind, name, project)` per change.
+fn seen(input: &roles::GateInput) -> Vec<(&'static str, String, String, Option<String>)> {
+    input
+        .changes
+        .iter()
+        .map(|c| (c.action, c.kind.clone(), c.name.clone(), c.project.clone()))
+        .collect()
+}
+
+/// A checkout path outside both trees, holding a manifest the gate must never read.
+fn outside_manifest(test_name: &str) -> std::path::PathBuf {
+    let outside = temp_dir(test_name);
+    write(&outside, "endpoint.yaml", PUBLIC_ENDPOINT);
+    outside.join("endpoint.yaml")
+}
+
+/// PF-52, CC-41: a path that climbs out of the checkout is refused, never read.
+#[test]
+fn a_path_containing_dot_dot_segments_does_not_read_a_file_outside_repo_dir_or_base_dir() {
+    let target = outside_manifest("roles-dotdot-target");
+    let climb = format!("../../../../../../../..{}", target.display());
+    for status in ["A", "M", "D"] {
+        let refused = gate("roles-dotdot", &format!("{status}\t{climb}\n"));
+        assert!(
+            matches!(refused, Err(RolesError::ChangePath { .. })),
+            "{status}: {refused:?}"
+        );
+    }
+}
+
+/// PF-52, CC-41: an absolute path does not replace the checkout it is joined to.
+#[test]
+fn an_absolute_path_in_the_name_status_line_does_not_replace_repo_dir() {
+    let target = outside_manifest("roles-absolute-target");
+    for status in ["A", "D"] {
+        let refused = gate(
+            "roles-absolute",
+            &format!("{status}\t{}\n", target.display()),
+        );
+        assert!(
+            matches!(refused, Err(RolesError::ChangePath { .. })),
+            "{status}: {refused:?}"
+        );
+    }
+}
+
+/// PF-52: git quotes a path with a byte outside printable ASCII (`core.quotePath`); the gate
+/// reads the file it names instead of passing it as not a manifest.
+#[test]
+fn a_path_git_quotes_is_read_as_the_file_it_names() {
+    let (head, base) = merge_request("roles-quoted");
+    write(
+        &head,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/verejn\u{fd}.yaml",
+        PUBLIC_ENDPOINT,
+    );
+    write(
+        &head,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/a\tb.yaml",
+        PUBLIC_ENDPOINT,
+    );
+    let listing = "A\t\"projects/ovzdusie/spaces/ovzdusie/endpoints/verejn\\303\\275.yaml\"\n\
+                   A\t\"projects/ovzdusie/spaces/ovzdusie/endpoints/a\\tb.yaml\"\n";
+    let input = roles::input(&head, &base, listing, "jana", None, &[]).expect("input");
+    assert_eq!(input.changes.len(), 2, "{:?}", seen(&input));
+    assert!(input.changes.iter().all(|c| c.kind == "Endpoint"));
+
+    for broken in [
+        "A\t\"projects/x.yaml",
+        "A\t\"projects/\\q.yaml\"",
+        "A\t\"a\\3\"",
+    ] {
+        let refused = roles::input(&head, &base, broken, "jana", None, &[]);
+        assert!(
+            matches!(refused, Err(RolesError::ChangePath { .. })),
+            "{broken}: {refused:?}"
+        );
+    }
+}
+
+/// PF-52: a YAML file that is not a manifest is skipped by name: the loader refuses it in
+/// `jcctl validate`, which runs before the gate (MF-09), so the gate has nothing to weigh.
+#[test]
+fn a_file_that_does_not_parse_as_a_manifest_is_reported_not_silently_skipped_or_the_skip_is_named()
+{
+    let (head, base) = merge_request("roles-not-manifest");
+    write(&head, "projects/ovzdusie/notes.yaml", "just: [text\n");
+    let input = roles::input(
+        &head,
+        &base,
+        "A\tprojects/ovzdusie/notes.yaml\n",
+        "jana",
+        None,
+        &[],
+    )
+    .expect("input");
+    assert!(input.changes.is_empty(), "{:?}", seen(&input));
+}
+
+/// PF-52: the manifest's own namespace names the project; the path only stands in when the
+/// manifest has none (or is at organization level).
+#[test]
+fn the_project_field_prefers_the_manifests_own_namespace_over_the_path_derived_one() {
+    let (head, base) = merge_request("roles-namespace");
+    write(
+        &head,
+        "projects/doprava/spaces/ovzdusie/endpoints/air.yaml",
+        PUBLIC_ENDPOINT,
+    );
+    let input = roles::input(
+        &head,
+        &base,
+        "A\tprojects/doprava/spaces/ovzdusie/endpoints/air.yaml\n",
+        "jana",
+        None,
+        &[],
+    )
+    .expect("input");
+    assert_eq!(input.changes[0].project.as_deref(), Some("ovzdusie"));
+}
+
+/// PF-52, CC-41: a rename proposes the new manifest and deletes the old one, so moving a
+/// resource out of a project needs the right to delete it there.
+#[test]
+fn a_rename_line_with_three_columns_uses_the_new_path_not_the_old() {
+    let (head, base) = merge_request("roles-rename");
+    write(
+        &head,
+        "projects/ovzdusie/pipelines/aq2/pipeline.yaml",
+        &PIPELINE.replace("name: aq", "name: aq2"),
+    );
+    let input = roles::input(
+        &head,
+        &base,
+        "R087\tprojects/ovzdusie/pipelines/aq/pipeline.yaml\tprojects/ovzdusie/pipelines/aq2/pipeline.yaml\n",
+        "jana",
+        None,
+        &[],
+    )
+    .expect("input");
+    let changes = seen(&input);
+    assert_eq!(
+        changes
+            .iter()
+            .map(|c| (c.0, c.2.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("propose", "aq2"), ("delete", "aq")],
+        "{changes:?}"
+    );
+    assert_eq!(
+        input.changes[0].path,
+        "projects/ovzdusie/pipelines/aq2/pipeline.yaml"
+    );
+}
+
+/// PF-52: a line without a tab, a blank line and a status alone are not changes.
+#[test]
+fn a_line_with_no_tab_at_all_is_skipped_rather_than_erroring() {
+    for listing in ["", "\n", "A projects/x.yaml\n", "M\n", "garbage"] {
+        let input = gate("roles-no-tab", listing).expect("input");
+        assert!(input.changes.is_empty(), "{listing:?}");
+    }
+}
+
+/// PF-52: added and modified files are read from the head, deleted ones from the base.
+#[test]
+fn a_status_of_m_or_a_reads_from_repo_dir_and_d_reads_from_base_dir() {
+    let endpoint = "projects/ovzdusie/spaces/ovzdusie/endpoints/air.yaml";
+    let pipeline = "projects/ovzdusie/pipelines/aq/pipeline.yaml";
+    for (listing, expected) in [
+        (format!("A\t{endpoint}\n"), vec![("propose", "Endpoint")]),
+        (format!("M\t{endpoint}\n"), vec![("propose", "Endpoint")]),
+        (format!("T\t{endpoint}\n"), vec![("propose", "Endpoint")]),
+        (format!("D\t{pipeline}\n"), vec![("delete", "Pipeline")]),
+        // The endpoint is only in the head and the pipeline only in the base.
+        (format!("D\t{endpoint}\nA\t{pipeline}\n"), vec![]),
+    ] {
+        let input = gate("roles-sides", &listing).expect("input");
+        let got: Vec<(&str, &str)> = input
+            .changes
+            .iter()
+            .map(|c| (c.action, c.kind.as_str()))
+            .collect();
+        assert_eq!(got, expected, "{listing}");
+    }
+}
+
+/// PF-52: a path that is not on the side it is read from is not a change to weigh.
+#[test]
+fn a_path_that_no_longer_exists_at_the_expected_side_is_skipped_not_erred() {
+    let input = gate(
+        "roles-missing",
+        "M\tprojects/ovzdusie/gone.yaml\nD\tprojects/ovzdusie/gone.yaml\n",
+    )
+    .expect("input");
+    assert!(input.changes.is_empty(), "{:?}", seen(&input));
+}
+
+/// PF-52: a LinkML source is the authoring source of a model, not a manifest.
+#[test]
+fn a_linkml_yaml_file_in_the_diff_is_skipped_like_the_loader_skips_it() {
+    let (head, base) = merge_request("roles-linkml");
+    write(
+        &head,
+        "projects/ovzdusie/spaces/ovzdusie/datamodels/x.linkml.yaml",
+        PUBLIC_ENDPOINT,
+    );
+    let input = roles::input(
+        &head,
+        &base,
+        "A\tprojects/ovzdusie/spaces/ovzdusie/datamodels/x.linkml.yaml\n",
+        "jana",
+        None,
+        &[],
+    )
+    .expect("input");
+    assert!(input.changes.is_empty(), "{:?}", seen(&input));
+}
+
+/// PF-52: every document of a multi-document file is its own change.
+#[test]
+fn a_multi_document_yaml_file_contributes_one_change_per_document() {
+    let (head, base) = merge_request("roles-multi");
+    write(
+        &head,
+        "projects/ovzdusie/two.yaml",
+        &format!(
+            "{PUBLIC_ENDPOINT}---\n{}",
+            PUBLIC_ENDPOINT.replace("name: air", "name: water")
+        ),
+    );
+    let input = roles::input(
+        &head,
+        &base,
+        "A\tprojects/ovzdusie/two.yaml\n",
+        "jana",
+        None,
+        &[],
+    )
+    .expect("input");
+    assert_eq!(
+        input
+            .changes
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["air", "water"]
+    );
+}

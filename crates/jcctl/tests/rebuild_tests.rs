@@ -349,3 +349,66 @@ fn a_field_the_manifest_does_not_declare_is_neither_written_nor_missing() {
         report.written
     );
 }
+
+/// PF-29: a declared path that climbs out of the manifest's folder never brings a file of the
+/// host into the store, for every field `rebuild` reads.
+#[test]
+fn an_artifact_path_climbing_out_is_refused_for_every_declared_field() {
+    let outside = outside_secret("rebuild-outside");
+    let climb = format!(
+        "../../../../../../../../..{}/outside.txt",
+        outside.display()
+    );
+    for (n, (from, to)) in [
+        (
+            "linkml: ./air-quality.linkml.yaml",
+            format!("linkml: {climb}"),
+        ),
+        (
+            "jsonSchema: ./json-schema/air-quality.v1.json",
+            format!("jsonSchema: {climb}"),
+        ),
+        (
+            "context: ./context/air-quality.jsonld",
+            format!("context: {climb}"),
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = repo_with_model(&format!("rebuild-climb-{n}"), |m| m.replace(from, to));
+        let out = temp_dir(&format!("rebuild-climb-out-{n}"));
+        let result = artifacts::rebuild(&dir, &options(&out));
+        assert!(result.is_err(), "{from}: {result:?}");
+        assert!(store_holds_nothing_from_outside(&out), "{from}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let dir = repo("rebuild-climb-mapping");
+    common::write(
+        &dir,
+        &format!("{MODELS}/mappings/sensors-to-air.yaml"),
+        &MAPPING.replace(
+            "bloblang: ./generated/sensors-to-air.blobl",
+            &format!("bloblang: {climb}"),
+        ),
+    );
+    let out = temp_dir("rebuild-climb-mapping-out");
+    assert!(artifacts::rebuild(&dir, &options(&out)).is_err());
+    assert!(store_holds_nothing_from_outside(&out));
+}
+
+/// PF-29: an absolute path does not replace the manifest's folder.
+#[test]
+fn an_absolute_artifact_path_is_refused_at_load() {
+    let outside = outside_secret("rebuild-absolute");
+    let absolute = outside.join("outside.txt");
+    let dir = repo_with_model("rebuild-absolute-repo", |m| {
+        m.replace(
+            "linkml: ./air-quality.linkml.yaml",
+            &format!("linkml: {}", absolute.display()),
+        )
+    });
+    let out = temp_dir("rebuild-absolute-out");
+    assert!(artifacts::rebuild(&dir, &options(&out)).is_err());
+    assert!(store_holds_nothing_from_outside(&out));
+}

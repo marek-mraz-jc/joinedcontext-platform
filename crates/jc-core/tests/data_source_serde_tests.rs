@@ -383,6 +383,7 @@ fn runner_kafka_with_valid_interpolation_and_secrets_validates() {
     assert_eq!(refs[0].env_var.as_deref(), Some("DS_KAFKA_PASSWORD"));
 }
 
+/// MF-24: a field `kinds/bento_inputs.rs` (`SECRET_FIELDS`) marks secret refuses a literal value.
 #[test]
 fn runner_kafka_with_literal_password_is_refused() {
     let literal = KAFKA.replace("${DS_KAFKA_PASSWORD}", "plaintext_pass");
@@ -503,6 +504,8 @@ fn a_literal_password_inside_a_connection_string_is_refused() {
     }
 }
 
+/// PL-50: a runner input `kinds/bento_inputs.rs` (`INPUTS`) does not list is refused, and the
+/// refusal names every input it does list.
 #[test]
 fn unknown_type_nope_is_refused_and_names_accepted_types() {
     let nope = KAFKA.replace("type: kafka", "type: nope");
@@ -515,6 +518,8 @@ fn unknown_type_nope_is_refused_and_names_accepted_types() {
     );
 }
 
+/// PL-50: the inputs `kinds/bento_inputs.rs` marks as file readers (`FILE_READERS`) read only
+/// under `/data`.
 #[test]
 fn file_reader_paths_must_start_with_data_and_have_no_dotdot() {
     let csv_bad_path = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -558,6 +563,7 @@ fn typed_mqtt_with_input_and_runner_with_tls_are_refused() {
     assert!(err.to_string().contains("spec.tls"), "{err}");
 }
 
+/// PL-50: `kinds/bento_inputs.rs` (`TERMINATING`) decides which runner inputs end on their own.
 #[test]
 fn terminates_distinguishes_terminating_and_continuous_inputs() {
     let mut ds: DataSourceSpec = serde_norway::from_str(

@@ -1528,14 +1528,26 @@ async fn protected_resource(
 /// Sent for every unauthenticated call that is not on a public MCP instance, whether the
 /// slug resolves or not, so the answer is the same for an endpoint that needs a login and
 /// for one that does not exist (R20).
+///
+/// The slug is the caller's text inside a quoted-string, so only a slug shaped like one is named
+/// there: a quote, a backslash or a dot segment would reshape the challenge or the URL a client
+/// resolves, and such a slug never resolves anyway (T-2509). It gets the same 401 with no
+/// challenge.
 fn unauthorized(gateway: &Gateway, slug: &str) -> Response<Body> {
+    let mut response = ProblemDetails::new(401, "unauthorized", "Unauthorized")
+        .with_detail("this endpoint needs an access token; its authorization server is named by the resource metadata")
+        .into_response();
+    let shaped = (1..=128).contains(&slug.len())
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !shaped {
+        return response;
+    }
     let metadata = format!(
         "{}/api/endpoint/{slug}/.well-known/oauth-protected-resource",
         gateway.base_url()
     );
-    let mut response = ProblemDetails::new(401, "unauthorized", "Unauthorized")
-        .with_detail("this endpoint needs an access token; its authorization server is named by the resource metadata")
-        .into_response();
     if let Ok(challenge) =
         HeaderValue::from_str(&format!("Bearer resource_metadata=\"{metadata}\""))
     {

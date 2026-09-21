@@ -516,3 +516,254 @@ spec:
         })
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// T-2535: the source query of a derived pipeline, value by value (PL-26, PL-27, PL-42, PL-14).
+//
+// A query source renders into the URL the runner fetches. Every value of it comes from a
+// manifest a project member proposes, so each has to arrive at the gateway as exactly the one
+// parameter it was written as: never a second parameter, never the end of the query string, and
+// never text the runner expands on its own (`${VAR}` at config load, `${! … }` per message).
+// ---------------------------------------------------------------------------------------------
+
+/// A scheduled pipeline whose source query is `query`, indented under `source:`.
+fn with_query(query: &str) -> PipelineSpec {
+    pipeline(&format!(
+        r#"  class: scheduled
+  schedule: "10 0 * * *"
+  source:
+    endpointRef: {{ kind: Endpoint, name: air-quality-internal }}
+    query:
+{query}
+  compute:
+    kind: wasm
+    module: ./compute
+    function: process
+  output:
+    type: AirQualityIndexDaily
+    mode: upsert
+"#
+    ))
+}
+
+/// The URL the fetch processor carries, as rendered.
+fn fetch_url(query: &str) -> String {
+    let derived = render(&with_query(query), &context()).expect("the pipeline renders");
+    derived.processors[0]["http"]["url"]
+        .as_str()
+        .expect("the fetch carries a url")
+        .to_owned()
+}
+
+/// The query parameters as the gateway will read them, in order.
+fn parameters(url: &str) -> Vec<(String, String)> {
+    reqwest::Url::parse(url)
+        .expect("the fetch url parses")
+        .query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect()
+}
+
+fn values_of(url: &str, name: &str) -> Vec<String> {
+    parameters(url)
+        .into_iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value)
+        .collect()
+}
+
+/// PL-42: a `q` holding `&id=…` stays the `q` it was written as and widens nothing.
+#[test]
+fn a_q_value_containing_an_ampersand_does_not_add_or_override_a_query_parameter() {
+    let q = r#"pm10>50&id=urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:other"#;
+    let url = fetch_url(&format!(
+        "      type: AirQualityObserved\n      ids: [\"urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:mine\"]\n      q: '{q}'"
+    ));
+    assert_eq!(values_of(&url, "q"), vec![q.to_owned()], "{url}");
+    assert_eq!(
+        values_of(&url, "id"),
+        vec!["urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:mine".to_owned()],
+        "{url}"
+    );
+}
+
+/// The type is a name, never a query fragment: jc-core refuses `&` and `=` in it
+/// (`kinds/pipeline.rs` `validate_source` → `names::validate_entity_type`), so it cannot reach
+/// the renderer at all.
+#[test]
+fn an_entity_type_containing_an_ampersand_or_equals_sign_is_encoded_or_refused() {
+    for entity_type in ["Air&limit=1", "Air=x"] {
+        let yaml = format!(
+            r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Pipeline
+metadata:
+  name: district-air-index
+  namespace: ovzdusie
+spec:
+  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived
+  class: scheduled
+  schedule: "10 0 * * *"
+  source:
+    endpointRef: {{ kind: Endpoint, name: air-quality-internal }}
+    query: {{ type: "{entity_type}" }}
+  compute: {{ kind: wasm, module: ./compute, function: process }}
+  output: {{ type: AirQualityIndexDaily, mode: upsert }}
+"#
+        );
+        let refused = Pipeline::from_yaml(&yaml)
+            .map_err(|e| e.to_string())
+            .and_then(|manifest| manifest.validate().map_err(|e| e.to_string()));
+        assert!(refused.is_err(), "{entity_type} was accepted");
+    }
+}
+
+/// A `#` in `geoQ` is data, not the start of a fragment that silently drops what follows.
+#[test]
+fn a_geoq_value_containing_a_hash_does_not_truncate_the_query_string() {
+    let url = fetch_url("      type: AirQualityObserved\n      geoQ: 'georel=near;maxDistance==100#x&coordinates=[1,2]'");
+    assert_eq!(
+        values_of(&url, "geoQ"),
+        vec!["georel=near;maxDistance==100#x&coordinates=[1,2]".to_owned()],
+        "{url}"
+    );
+    assert_eq!(values_of(&url, "limit"), vec!["1000".to_owned()], "{url}");
+}
+
+/// The page size is the platform's, whatever a value holds.
+#[test]
+fn the_fixed_limit_parameter_cannot_be_overridden_by_a_query_value() {
+    for field in ["q", "scopeQ", "geoQ"] {
+        let url = fetch_url(&format!(
+            "      type: AirQualityObserved\n      {field}: 'a&limit=100000'"
+        ));
+        assert_eq!(
+            values_of(&url, "limit"),
+            vec!["1000".to_owned()],
+            "{field}: {url}"
+        );
+        assert_eq!(
+            values_of(&url, field),
+            vec!["a&limit=100000".to_owned()],
+            "{field}: {url}"
+        );
+    }
+}
+
+/// PL-42: the ids are PF-42 URNs, which jc-core parses before they reach the renderer, so none
+/// can carry a separator; the list is exactly the ids, comma-joined.
+#[test]
+fn ids_are_joined_without_letting_one_id_break_out_of_the_list() {
+    let url = fetch_url(
+        "      type: AirQualityObserved\n      ids:\n        - urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a\n        - urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:b",
+    );
+    assert_eq!(
+        values_of(&url, "id"),
+        vec!["urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a,urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:b".to_owned()],
+        "{url}"
+    );
+    for smuggled in [
+        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a&limit=1",
+        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a,b",
+    ] {
+        let yaml = format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata: {{ name: p, namespace: ovzdusie }}\nspec:\n  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived\n  class: scheduled\n  schedule: \"10 0 * * *\"\n  source:\n    endpointRef: {{ kind: Endpoint, name: air-quality-internal }}\n    query: {{ type: AirQualityObserved, ids: [\"{smuggled}\"] }}\n  compute: {{ kind: wasm, module: ./compute, function: process }}\n  output: {{ type: AirQualityIndexDaily, mode: upsert }}\n"
+        );
+        let refused = Pipeline::from_yaml(&yaml)
+            .map_err(|e| e.to_string())
+            .and_then(|manifest| manifest.validate().map_err(|e| e.to_string()));
+        assert!(refused.is_err(), "{smuggled} was accepted as one id");
+    }
+}
+
+/// An attribute name holding a comma would read as two at the gateway, which splits the decoded
+/// list on it, so it is refused by name rather than rendered.
+#[test]
+fn an_attrs_entry_containing_a_comma_is_not_confused_with_the_list_separator() {
+    let refused = render(
+        &with_query("      type: AirQualityObserved\n      attrs: ['pm10,pm25', no2]"),
+        &context(),
+    );
+    assert_eq!(
+        refused,
+        Err(DerivedError::BadAttribute("pm10,pm25".to_owned()))
+    );
+    let url = fetch_url("      type: AirQualityObserved\n      attrs: [pm10, 'no2 (µg)']");
+    assert_eq!(
+        values_of(&url, "attrs"),
+        vec!["pm10,no2 (µg)".to_owned()],
+        "{url}"
+    );
+}
+
+/// A value reaches the gateway exactly as written: non-ASCII text and a literal `%41` included.
+#[test]
+fn a_q_value_with_unicode_or_percent_sequences_round_trips_unchanged() {
+    for q in ["name==\"Žilina\"", "code==\"%41\"", "a b"] {
+        let url = fetch_url(&format!("      type: AirQualityObserved\n      q: '{q}'"));
+        assert_eq!(values_of(&url, "q"), vec![q.to_owned()], "{url}");
+    }
+}
+
+#[test]
+fn an_empty_query_with_only_a_type_produces_just_type_and_limit() {
+    let url = fetch_url("      type: AirQualityObserved");
+    assert_eq!(
+        parameters(&url),
+        vec![
+            ("type".to_owned(), "AirQualityObserved".to_owned()),
+            ("limit".to_owned(), "1000".to_owned()),
+        ]
+    );
+}
+
+/// A window of nothing asks for nothing: `window_seconds` refuses a total of zero, and a
+/// negative duration does not parse (ISO 8601 has no sign here).
+#[test]
+fn a_temporal_window_of_zero_or_negative_seconds_is_refused_or_clamped() {
+    for window in ["P0D", "PT0S", "-P1D", "P", "PT"] {
+        let refused = render(
+            &with_query(&format!(
+                "      type: AirQualityObserved\n      temporalQ: {{ window: '{window}' }}"
+            )),
+            &context(),
+        );
+        assert!(
+            matches!(refused, Err(DerivedError::BadWindow(ref w)) if w == window),
+            "{window}: {refused:?}"
+        );
+    }
+}
+
+/// PL-14: the token is a reference the runner fills in its own header, and nothing a manifest
+/// writes can make the runner expand a variable or an interpolation into the URL it sends: a
+/// `${VAR}` is substituted when Bento loads the config and a `${! … }` on every message, so either
+/// would put the runner's credentials into a query string the gateway logs.
+#[test]
+fn the_service_account_token_placeholder_never_becomes_a_literal_value_in_rendered_config() {
+    for field in ["q", "scopeQ", "geoQ"] {
+        for value in [
+            "${SERVICE_ACCOUNT_TOKEN}",
+            "${! env(\"JC_CLIENT_SECRET\") }",
+        ] {
+            let url = fetch_url(&format!(
+                "      type: AirQualityObserved\n      {field}: '{value}'"
+            ));
+            let written = url
+                .split_once('?')
+                .map(|(_, query)| query)
+                .unwrap_or_default();
+            // The one interpolation the renderer writes itself is the temporal instant, and this
+            // query has none.
+            assert!(!written.contains("${"), "{field}: {url}");
+        }
+    }
+    let url =
+        fetch_url("      type: AirQualityObserved\n      attrs: ['${SERVICE_ACCOUNT_TOKEN}']");
+    assert!(!url.contains("${"), "{url}");
+    let derived =
+        render(&with_query("      type: AirQualityObserved"), &context()).expect("renders");
+    assert_eq!(
+        derived.processors[0]["http"]["headers"]["Authorization"],
+        "Bearer ${SERVICE_ACCOUNT_TOKEN}"
+    );
+}

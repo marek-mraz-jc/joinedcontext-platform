@@ -218,3 +218,61 @@ fn a_processor_that_runs_a_program_or_opens_a_file_is_not_a_step() {
     // in the documentation uses, and a refusal of it would make this suite pass for nothing.
     accepted(&with_processor("mapping: 'root = this'"));
 }
+
+/// PL-52 (T-2557): a processor that holds processors does not carry a refused one inside it,
+/// however deep, and a field that only shares a refused name (`redis`'s `command`) is not one.
+#[test]
+fn a_refused_processor_nested_inside_another_is_refused() {
+    for nested in [
+        "try: [ { command: { name: sh } } ]",
+        "catch: [ { subprocess: { name: sh } } ]",
+        "branch: { processors: [ { file: { path: /data/x, codec: all-bytes } } ] }",
+        "switch: [ { check: 'true', processors: [ { wasm: { module_path: /x.wasm } } ] } ]",
+        "for_each: [ { try: [ { command: { name: sh } } ] } ]",
+        "workflow: { branches: { a: { processors: [ { subprocess: { name: sh } } ] } } }",
+        "retry: { processors: [ { label: x, command: { name: sh } } ] }",
+    ] {
+        let message = refusal(&with_processor(nested));
+        assert!(message.contains("processor `"), "{nested}: {message}");
+    }
+    accepted(&with_processor(
+        "branch: { processors: [ { redis: { url: 'redis://cache:6379', command: get, args_mapping: 'root = [ this.id ]' } } ] }",
+    ));
+    accepted(&with_processor("try: [ { mapping: 'root = this' } ]"));
+}
+
+/// PL-16 (T-2557): the host check reads a nested processor's Bloblang as it reads a step's own.
+#[test]
+fn a_nested_mapping_that_reads_the_runners_environment_is_refused() {
+    let message = refusal(&with_processor(
+        "try: [ { mapping: 'root.x = env(\"JC_CLIENT_SECRET\")' } ]",
+    ));
+    assert!(message.contains("JC_CLIENT_SECRET"), "{message}");
+}
+
+/// PL-52 (T-2557): the check a `bento.yaml` processor goes through is the one a step goes
+/// through, exported for the renderer that reads `bento.yaml`.
+#[test]
+fn the_exported_processor_check_refuses_what_a_step_refuses() {
+    use jc_core::kinds::pipeline::validate_processor;
+    for refused in [
+        serde_json::json!({ "command": { "name": "sh" } }),
+        serde_json::json!({ "try": [ { "subprocess": { "name": "sh" } } ] }),
+        serde_json::json!({ "mapping": "root = env(\"MQTT_PASSWORD\")" }),
+        serde_json::json!({ "mapping": "root = this", "bloblang": "root = this" }),
+        serde_json::json!({ "label": "only-a-label" }),
+        serde_json::json!("mapping"),
+    ] {
+        assert!(
+            validate_processor("pipeline.processors", &refused).is_err(),
+            "{refused}"
+        );
+    }
+    for fine in [
+        serde_json::json!({ "mapping": "root = this" }),
+        serde_json::json!({ "label": "enrich", "mapping": "root.d = env(\"JC_ORG_DOMAIN\")" }),
+        serde_json::json!({ "redis": { "url": "redis://c:6379", "command": "get" } }),
+    ] {
+        validate_processor("pipeline.processors", &fine).expect("accepted");
+    }
+}

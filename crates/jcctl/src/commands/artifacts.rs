@@ -8,7 +8,7 @@
 //! an operator sees what `jcctl model generate` still has to produce.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -49,12 +49,27 @@ pub enum Error {
         /// What the filesystem said.
         reason: String,
     },
+    /// A declared artifact path leads out of the repository, so its file is never read (PF-29,
+    /// CC-08).
+    #[error("{name}: {field} `{path}` leads outside the repository")]
+    Outside {
+        /// The manifest declaring it.
+        name: String,
+        /// The spec member, `linkml` or `artifacts.x`.
+        field: String,
+        /// The path as written.
+        path: String,
+    },
 }
 
 /// Re-renders every artifact the repository declares into the store's layout (DM-44).
 pub fn rebuild(repo_dir: &Path, options: &Options) -> Result<Report, Error> {
     let repository =
         Repository::load(repo_dir).map_err(|error| Error::Repository(error.to_string()))?;
+    let root = repo_dir.canonicalize().map_err(|e| Error::File {
+        path: repo_dir.display().to_string(),
+        reason: e.to_string(),
+    })?;
     let mut report = Report::default();
     let revision = options.revision.as_deref().unwrap_or("unknown");
 
@@ -101,7 +116,20 @@ pub fn rebuild(repo_dir: &Path, options: &Options) -> Result<Report, Error> {
         let mut index = BTreeMap::new();
         for (field, relative) in files {
             let path = source_dir.join(&relative);
-            let Ok(body) = std::fs::read(&path) else {
+            // Checked on the path as written and again on what it resolves to: an absolute path
+            // or a `..` climbs out by name, a link out of the checkout by its target (CC-08).
+            let climbs = Path::new(&relative)
+                .components()
+                .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
+            let resolved = path.canonicalize();
+            if climbs || resolved.as_ref().is_ok_and(|p| !p.starts_with(&root)) {
+                return Err(Error::Outside {
+                    name: manifest.metadata.name.clone(),
+                    field,
+                    path: relative,
+                });
+            }
+            let Ok(body) = resolved.and_then(std::fs::read) else {
                 report
                     .missing
                     .push(format!("{}/{field}", manifest.metadata.name));

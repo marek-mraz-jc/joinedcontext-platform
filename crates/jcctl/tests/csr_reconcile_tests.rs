@@ -1,4 +1,6 @@
-//! T-0303: what `jcctl apply` does to a broker's registrations (MF-36, SP-09, CC-18).
+//! T-0303: what `jcctl apply` does to a broker's registrations (MF-36, SP-09, CC-18). A city
+//! joins or leaves a federation through these manifests alone (CC-14): `apply` registers,
+//! `remove` withdraws, and no broker-specific step sits beside either.
 //!
 //! The reconciler's whole job is the third run: after create and update, an apply over an
 //! unchanged repository has to make no writing call at all. Everything else here holds that
@@ -306,6 +308,8 @@ fn no_identity_and_no_credential_reaches_the_broker() {
     assert!(!forwards_caller_identity(&spec(LOCAL)));
 }
 
+/// CC-14: leaving a federation is the registration manifest leaving the repository; the next
+/// apply withdraws it from the broker once and a repeat finds nothing left to do.
 #[test]
 fn a_registration_the_repository_dropped_is_deleted_once() {
     let mut broker = InMemoryBroker::new();

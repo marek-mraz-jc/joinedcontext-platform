@@ -1455,4 +1455,409 @@ mod tests {
         let refused = named.open().expect_err("a gateway needs an identity");
         assert!(refused.contains("--token-file"), "{refused}");
     }
+
+    /// The fields of a parsed `publish ckan` call, for comparing two parses (T-2534).
+    fn ckan(args: &[&str]) -> Option<(PathBuf, String, String, bool)> {
+        publish_ckan_options(args).map(|o| (o.repo_dir, o.project, o.host, o.withdraw))
+    }
+
+    const CKAN_BASE: [&str; 6] = [
+        "--repo-dir",
+        "/r",
+        "--project",
+        "air",
+        "--host",
+        "ckan.example.org",
+    ];
+
+    fn ckan_ok(host: &str, withdraw: bool) -> Option<(PathBuf, String, String, bool)> {
+        Some((
+            PathBuf::from("/r"),
+            "air".to_owned(),
+            host.to_owned(),
+            withdraw,
+        ))
+    }
+
+    /// EP-62, CC-18: a flag written last with no value is an incomplete call, not a flag
+    /// that silently keeps an earlier value.
+    #[test]
+    fn a_flag_missing_its_value_at_the_end_of_argv_returns_none() {
+        for flag in [
+            "--repo-dir",
+            "--repo",
+            "--project",
+            "--host",
+            "--organization-title",
+            "--api-token-env",
+            "--age-key-file",
+        ] {
+            let mut args = CKAN_BASE.to_vec();
+            args.push(flag);
+            assert!(ckan(&args).is_none(), "{flag}");
+        }
+    }
+
+    /// EP-62: a host that is empty, or nothing but a scheme and slashes, names no CKAN.
+    #[test]
+    fn an_empty_host_value_is_refused_as_incomplete() {
+        for host in ["", "https://", "http://", "/", "https:///"] {
+            let args = ["--repo-dir", "/r", "--project", "air", "--host", host];
+            assert!(ckan(&args).is_none(), "{host:?}");
+        }
+    }
+
+    /// EP-62: a URL pasted in place of a host still names the host.
+    #[test]
+    fn a_host_given_as_a_full_https_or_http_url_is_reduced_to_the_bare_host() {
+        for host in ["https://ckan.example.org", "http://ckan.example.org"] {
+            let args = ["--repo-dir", "/r", "--project", "air", "--host", host];
+            assert_eq!(ckan(&args), ckan_ok("ckan.example.org", false), "{host}");
+        }
+    }
+
+    /// EP-62: a scheme and any number of trailing slashes go together.
+    #[test]
+    fn a_host_with_a_trailing_slash_and_a_scheme_strips_both() {
+        for host in [
+            "https://ckan.example.org/",
+            "http://ckan.example.org//",
+            "ckan.example.org/",
+        ] {
+            let args = ["--repo-dir", "/r", "--project", "air", "--host", host];
+            assert_eq!(ckan(&args), ckan_ok("ckan.example.org", false), "{host}");
+        }
+    }
+
+    /// EP-62: each of repo dir, project and host is required and must not be empty.
+    #[test]
+    fn repo_dir_project_and_host_are_all_required() {
+        for missing in 0..3 {
+            let args: Vec<&str> = CKAN_BASE
+                .chunks(2)
+                .enumerate()
+                .filter(|(i, _)| *i != missing)
+                .flat_map(|(_, pair)| pair.iter().copied())
+                .collect();
+            assert!(ckan(&args).is_none(), "without {}", CKAN_BASE[missing * 2]);
+            let mut emptied = CKAN_BASE;
+            emptied[missing * 2 + 1] = "";
+            assert!(ckan(&emptied).is_none(), "empty {}", CKAN_BASE[missing * 2]);
+        }
+        assert_eq!(ckan(&CKAN_BASE), ckan_ok("ckan.example.org", false));
+    }
+
+    /// EP-62: `--repo` is the same flag as `--repo-dir`.
+    #[test]
+    fn repo_is_accepted_as_an_alias_for_repo_dir() {
+        let mut args = CKAN_BASE;
+        args[0] = "--repo";
+        assert_eq!(ckan(&args), ckan(&CKAN_BASE));
+    }
+
+    /// EP-62: a flag the command does not know is refused, wherever it stands.
+    #[test]
+    fn an_unknown_flag_returns_none() {
+        for unknown in ["--dry-run", "--hosts", "-h", "ckan.example.org", "--HOST"] {
+            let mut args = CKAN_BASE.to_vec();
+            args.push(unknown);
+            assert!(ckan(&args).is_none(), "{unknown}");
+            args.insert(0, unknown);
+            args.pop();
+            assert!(ckan(&args).is_none(), "{unknown} first");
+        }
+    }
+
+    /// EP-62: `--withdraw` takes no value, so the flag after it is still read as a flag.
+    #[test]
+    fn withdraw_is_a_bare_flag_that_does_not_consume_the_next_argument() {
+        let args = [
+            "--withdraw",
+            "--repo-dir",
+            "/r",
+            "--project",
+            "air",
+            "--host",
+            "ckan.example.org",
+        ];
+        assert_eq!(ckan(&args), ckan_ok("ckan.example.org", true));
+        let mut last = CKAN_BASE.to_vec();
+        last.push("--withdraw");
+        assert_eq!(ckan(&last), ckan_ok("ckan.example.org", true));
+    }
+
+    /// EP-62: the order of the flags does not change what they mean.
+    #[test]
+    fn flags_in_any_order_parse_the_same() {
+        let pairs: Vec<[&str; 2]> = CKAN_BASE.chunks(2).map(|p| [p[0], p[1]]).collect();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let args: Vec<&str> = order.iter().flat_map(|i| pairs[*i]).collect();
+            assert_eq!(ckan(&args), ckan_ok("ckan.example.org", false), "{order:?}");
+        }
+    }
+
+    /// EP-62: a flag given twice keeps the last value, as the shell reader would expect.
+    #[test]
+    fn duplicate_host_flags_the_last_one_wins() {
+        let mut args = CKAN_BASE.to_vec();
+        args.extend(["--host", "https://open.example.org/"]);
+        assert_eq!(ckan(&args), ckan_ok("open.example.org", false));
+    }
+
+    /// A fresh directory for one `apply` case (T-2533).
+    fn apply_dir(name: &str) -> PathBuf {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let dir =
+            std::env::temp_dir().join(format!("jcctl-main-{name}-{}-{now}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        dir
+    }
+
+    fn put(root: &Path, relative: &str, text: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
+        std::fs::write(path, text).expect("a file");
+    }
+
+    const APPLY_TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.t2533-reconciler-token";
+
+    /// A repository with one project, one space and one seed entity in it.
+    fn seeded_repository(name: &str) -> PathBuf {
+        let root = apply_dir(name);
+        put(
+            &root,
+            "org.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  name: bb\n  namespace: org\nspec:\n  domain: bb.sk\n  locales: [\"sk\"]\n  defaultLocale: sk\n",
+        );
+        put(
+            &root,
+            "projects/air/project.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: air\n  namespace: org\nspec:\n  organizationRef: bb\n",
+        );
+        put(
+            &root,
+            "projects/air/spaces/air/space.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: air\n  namespace: air\nspec:\n  isSandbox: false\n",
+        );
+        put(
+            &root,
+            "projects/air/spaces/air/entities/seed/stations.json",
+            r#"[{"id":"urn:ngsi-ld:AirQualityObserved:bb.sk:air:1","type":"AirQualityObserved","index":{"type":"Property","value":1}}]"#,
+        );
+        root
+    }
+
+    /// A gateway named on the command line, with its token in a file beside the repository.
+    fn gateway_connection(url: &str, dir: &Path) -> Connection {
+        let token = dir.join("token");
+        std::fs::write(&token, format!("{APPLY_TOKEN}\n")).expect("the token file");
+        Connection {
+            gateway_url: Some(url.to_owned()),
+            token_file: Some(token.display().to_string()),
+        }
+    }
+
+    /// A gateway that answers every GET and every POST with one fixed status and body, and
+    /// counts what it was asked.
+    fn fixed_gateway(
+        get: (u16, &'static str),
+        post: (u16, &'static str),
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener.local_addr().expect("an address").port();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = std::sync::Arc::clone(&calls);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut raw = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                while let Ok(read) = stream.read(&mut buffer) {
+                    raw.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&raw);
+                    let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                        if read == 0 {
+                            break;
+                        }
+                        continue;
+                    };
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (n, v) = l.split_once(':')?;
+                            n.eq_ignore_ascii_case("content-length")
+                                .then(|| v.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if body.len() >= length || read == 0 {
+                        break;
+                    }
+                }
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let text = String::from_utf8_lossy(&raw);
+                let (status, body) = if text.starts_with("POST") { post } else { get };
+                let body = body.replace("{authorization}", &format!("Bearer {APPLY_TOKEN}"));
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), calls)
+    }
+
+    const CONFIRMED: commands::apply::Options = commands::apply::Options {
+        prune: true,
+        confirm_deletions: true,
+    };
+
+    /// CC-18, CC-20: a repository that does not load is a failed run, not an empty one.
+    #[test]
+    fn a_repository_that_fails_to_load_exits_failure() {
+        let broken = apply_dir("broken");
+        put(
+            &broken,
+            "org.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: NoSuchKind\nmetadata:\n  name: x\n",
+        );
+        for dir in [broken, apply_dir("gone").join("not-there")] {
+            assert_eq!(
+                apply(&dir, CONFIRMED, Connection::default()),
+                ExitCode::FAILURE,
+                "{}",
+                dir.display()
+            );
+        }
+    }
+
+    /// CC-18: nothing declared is nothing to do, and that is a success.
+    #[test]
+    fn an_empty_repository_applies_zero_resources_and_exits_success() {
+        let empty = apply_dir("empty");
+        assert_eq!(
+            apply(&empty, CONFIRMED, Connection::default()),
+            ExitCode::SUCCESS
+        );
+    }
+
+    /// CC-72: with no gateway the seed is left alone, and the manifests decide the exit.
+    #[test]
+    fn a_run_with_no_gateway_applies_manifests_and_exits_by_the_manifest_report_alone() {
+        let repo = seeded_repository("no-gateway");
+        for options in [
+            CONFIRMED,
+            commands::apply::Options {
+                prune: true,
+                confirm_deletions: false,
+            },
+        ] {
+            assert_eq!(
+                apply(&repo, options, Connection::default()),
+                ExitCode::SUCCESS
+            );
+        }
+    }
+
+    /// CC-72: a gateway that cannot be reached, or named without a readable token, fails the
+    /// run instead of passing it with the seed silently left out.
+    #[test]
+    fn an_unreachable_gateway_fails_the_run() {
+        let repo = seeded_repository("unreachable");
+        let closed = gateway_connection("http://127.0.0.1:1", &repo);
+        assert_eq!(apply(&repo, CONFIRMED, closed), ExitCode::FAILURE);
+        let no_token = Connection {
+            gateway_url: Some("http://127.0.0.1:1".to_owned()),
+            token_file: Some(repo.join("no-token-here").display().to_string()),
+        };
+        assert_eq!(apply(&repo, CONFIRMED, no_token), ExitCode::FAILURE);
+    }
+
+    /// CC-18, CC-72: the manifests applied, the seed write was refused: the run failed.
+    #[test]
+    fn seed_replay_failure_after_a_successful_manifest_apply_still_exits_failure() {
+        let (url, calls) =
+            fixed_gateway((404, ""), (403, r#"{"title":"no Policy grants create"}"#));
+        let repo = seeded_repository("seed-refused");
+        let connection = gateway_connection(&url, &repo);
+        assert_eq!(apply(&repo, CONFIRMED, connection), ExitCode::FAILURE);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// CC-18: a seed the gateway already holds as declared is written again by nobody, and the
+    /// run passes.
+    #[test]
+    fn every_resource_and_seed_unchanged_exits_success() {
+        let (url, calls) = fixed_gateway(
+            (
+                200,
+                r#"{"id":"urn:ngsi-ld:AirQualityObserved:bb.sk:air:1","type":"AirQualityObserved","index":{"type":"Property","value":1}}"#,
+            ),
+            (500, ""),
+        );
+        let repo = seeded_repository("unchanged");
+        let connection = gateway_connection(&url, &repo);
+        assert_eq!(apply(&repo, CONFIRMED, connection), ExitCode::SUCCESS);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "no write"
+        );
+    }
+
+    /// CC-04: a 401 fails the run on the first answer; nothing retries a token the gateway
+    /// does not accept.
+    #[test]
+    fn a_gateway_that_answers_401_is_a_named_failure_not_a_retry_loop() {
+        let (url, calls) = fixed_gateway((401, r#"{"title":"token expired"}"#), (401, ""));
+        let repo = seeded_repository("unauthorized");
+        let connection = gateway_connection(&url, &repo);
+        assert_eq!(apply(&repo, CONFIRMED, connection), ExitCode::FAILURE);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let gateway = gateway_connection(&url, &repo)
+            .open()
+            .expect("opens")
+            .expect("a gateway");
+        let said = commands::seed::apply(&repo, &gateway)
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            said.contains("401") && said.contains("token expired"),
+            "{said}"
+        );
+    }
+
+    /// CC-06: what `apply` prints on a refusal is the error's text; it never carries the
+    /// reconciler's token, not even when the gateway's answer repeats the header it was sent.
+    #[test]
+    fn the_printed_outcome_lines_never_contain_the_reconciler_token_even_on_a_gateway_refusal() {
+        for (get, post) in [
+            ((401, r#"{"detail":"rejected {authorization}"}"#), (500, "")),
+            ((404, ""), (403, "denied for {authorization}")),
+        ] {
+            let (url, _) = fixed_gateway(get, post);
+            let repo = seeded_repository("echo");
+            let gateway = gateway_connection(&url, &repo)
+                .open()
+                .expect("opens")
+                .expect("a gateway");
+            let said = commands::seed::apply(&repo, &gateway)
+                .expect_err("refused")
+                .to_string();
+            assert!(!said.contains(APPLY_TOKEN), "{said}");
+        }
+    }
 }

@@ -129,7 +129,13 @@ fn the_command_prints_the_change_and_exits_two_when_a_proposal_is_open() {
         .expect("jcctl runs");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(2), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // TS-12, T-2240: an exit other than 2 says why, not only that it happened.
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
     assert!(stdout.contains("\"kind\": \"Change\""), "{stdout}");
 
     let _ = std::fs::remove_dir_all(&repo);

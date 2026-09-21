@@ -76,6 +76,12 @@ pub enum RolesError {
         /// Where the binding applies, in words.
         scope: String,
     },
+    /// A line of the change list names no path inside the checkout: absolute, climbing out
+    /// with `..`, or quoted the way git quotes and broken (PF-52).
+    ChangePath {
+        /// The path column as the list gave it.
+        path: String,
+    },
     /// A file could not be read or written.
     Io(std::io::Error),
 }
@@ -112,6 +118,11 @@ impl fmt::Display for RolesError {
                      at {scope}; a project role is bound inside its own project alone (PF-69)"
                 )
             }
+            Self::ChangePath { path } => write!(
+                f,
+                "the change list names {path:?}, which is not a path inside the repository; \
+                 the gate reads only what `git diff --name-status` lists"
+            ),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -429,9 +440,107 @@ fn project_of(path: &str) -> Option<String> {
     }
 }
 
+/// A path column of `git diff --name-status`, unquoted the way git quotes a name with a byte
+/// outside printable ASCII (`core.quotePath`: `"…"` with C escapes and three-digit octal
+/// bytes), and held inside the checkout: empty, absolute, `.` and `..` are refused (PF-52).
+fn change_path(column: &str) -> Result<String, RolesError> {
+    let refused = || RolesError::ChangePath {
+        path: column.to_owned(),
+    };
+    let path = match column.strip_prefix('"') {
+        None => column.to_owned(),
+        Some(quoted) => {
+            let raw = quoted.strip_suffix('"').ok_or_else(refused)?.as_bytes();
+            let mut bytes = Vec::with_capacity(raw.len());
+            let mut at = 0;
+            while let Some(&byte) = raw.get(at) {
+                if byte == b'"' {
+                    return Err(refused());
+                }
+                if byte != b'\\' {
+                    bytes.push(byte);
+                    at += 1;
+                    continue;
+                }
+                let (unescaped, width) = match raw.get(at + 1).copied().ok_or_else(refused)? {
+                    b'a' => (0x07, 2),
+                    b'b' => (0x08, 2),
+                    b't' => (b'\t', 2),
+                    b'n' => (b'\n', 2),
+                    b'v' => (0x0B, 2),
+                    b'f' => (0x0C, 2),
+                    b'r' => (b'\r', 2),
+                    b'"' => (b'"', 2),
+                    b'\\' => (b'\\', 2),
+                    b'0'..=b'3' => {
+                        let digits = raw.get(at + 1..at + 4).ok_or_else(refused)?;
+                        if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                            return Err(refused());
+                        }
+                        // The first digit is at most 3, so the byte cannot overflow.
+                        (digits.iter().fold(0_u8, |n, d| n * 8 + (d - b'0')), 4)
+                    }
+                    _ => return Err(refused()),
+                };
+                bytes.push(unescaped);
+                at += width;
+            }
+            String::from_utf8(bytes).map_err(|_| refused())?
+        }
+    };
+    let plain = Path::new(&path)
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)));
+    if path.is_empty() || !plain {
+        return Err(refused());
+    }
+    Ok(path)
+}
+
+/// Every manifest document of one changed file, read from `dir`; a file that is not YAML, is
+/// a LinkML source, is not on that side, or does not parse as a manifest adds nothing (the
+/// loader refuses the last in `jcctl validate`, which runs before the gate).
+fn changes_of(
+    dir: &Path,
+    path: &str,
+    action: &'static str,
+    changes: &mut Vec<Change>,
+) -> Result<(), RolesError> {
+    if !(path.ends_with(".yaml") || path.ends_with(".yml")) || path.ends_with(".linkml.yaml") {
+        return Ok(());
+    }
+    let text = match std::fs::read_to_string(dir.join(path)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for document in crate::loader::parse_yaml_documents(&text) {
+        let Ok(manifest) = serde_norway::from_str::<RawManifest>(&document.content) else {
+            continue;
+        };
+        changes.push(Change {
+            path: path.to_owned(),
+            action,
+            kind: manifest.kind.clone(),
+            name: manifest.metadata.name.clone(),
+            project: manifest
+                .metadata
+                .namespace
+                .clone()
+                .filter(|ns| ns != "org")
+                .or_else(|| project_of(path)),
+            manifest: serde_json::to_value(&manifest).expect("manifest serializes"),
+        });
+    }
+    Ok(())
+}
+
 /// Builds the gate input from a `git diff --name-status` listing: added and modified
 /// manifests are read from `repo_dir`, deleted ones from `base_dir` (the base revision,
-/// e.g. `git archive origin/main | tar -x -C base`). Files that are not manifests are skipped.
+/// e.g. `git archive origin/main | tar -x -C base`). A rename is both: the new manifest is
+/// proposed and the old one deleted, so moving a resource needs the right to remove it where
+/// it was. Files that are not manifests are skipped; a path that leaves the checkout is an
+/// error (PF-52).
 pub fn input(
     repo_dir: &Path,
     base_dir: &Path,
@@ -443,41 +552,22 @@ pub fn input(
     let mut changes = Vec::new();
     for line in name_status.lines() {
         let mut cols = line.split('\t');
-        let (Some(status), Some(path)) = (cols.next(), cols.next()) else {
+        let (Some(status), Some(first)) = (cols.next(), cols.next()) else {
             continue;
         };
-        // A rename lists old and new: the new path is the manifest that lives on.
-        let path = cols.next().unwrap_or(path);
-        if !(path.ends_with(".yaml") || path.ends_with(".yml")) || path.ends_with(".linkml.yaml") {
-            continue;
-        }
-        let (action, file) = if status.starts_with('D') {
-            ("delete", base_dir.join(path))
-        } else {
-            ("propose", repo_dir.join(path))
-        };
-        let text = match std::fs::read_to_string(&file) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
-        };
-        for document in crate::loader::parse_yaml_documents(&text) {
-            let Ok(manifest) = serde_norway::from_str::<RawManifest>(&document.content) else {
-                continue;
-            };
-            changes.push(Change {
-                path: path.to_owned(),
-                action,
-                kind: manifest.kind.clone(),
-                name: manifest.metadata.name.clone(),
-                project: manifest
-                    .metadata
-                    .namespace
-                    .clone()
-                    .filter(|ns| ns != "org")
-                    .or_else(|| project_of(path)),
-                manifest: serde_json::to_value(&manifest).expect("manifest serializes"),
-            });
+        let first = change_path(first)?;
+        match cols.next() {
+            // A rename or a copy lists the old path, then the new one.
+            Some(second) => {
+                changes_of(repo_dir, &change_path(second)?, "propose", &mut changes)?;
+                if status.starts_with('R') {
+                    changes_of(base_dir, &first, "delete", &mut changes)?;
+                }
+            }
+            None if status.starts_with('D') => {
+                changes_of(base_dir, &first, "delete", &mut changes)?;
+            }
+            None => changes_of(repo_dir, &first, "propose", &mut changes)?,
         }
     }
     Ok(GateInput {

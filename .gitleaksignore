@@ -1,2 +1,4 @@
 # Test fixtures that look like secrets to the scanner (T-0606): the redaction test of the diagnostics door.
 eca854de1779b6244cb6f54359621c9873dfc96d:crates/agent-proxy/src/routes/diagnostics.rs:generic-api-key:180
+# Fake JWT in the Turtle redaction test (T-2492): the test proves it never reaches the document.
+30547a948788426d939a22b6d18c5dba21c138a7:crates/context-gateway/tests/edge_endpoint_surface_dataset_turtle_tests.rs:generic-api-key:316

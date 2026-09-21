@@ -271,9 +271,13 @@ pub(crate) fn localized(map: &BTreeMap<String, String>, fallback: &str) -> Value
 }
 
 /// One string out of a language map, for the serializations that carry no language tag.
+///
+/// A blank entry counts as none, so `{en: ""}` falls back like an empty map (T-2496).
 pub(crate) fn plain(map: &BTreeMap<String, String>, fallback: &str) -> String {
+    let written = |text: &&String| !text.trim().is_empty();
     map.get("en")
-        .or_else(|| map.values().next())
+        .filter(written)
+        .or_else(|| map.values().find(written))
         .cloned()
         .unwrap_or_else(|| fallback.to_owned())
 }

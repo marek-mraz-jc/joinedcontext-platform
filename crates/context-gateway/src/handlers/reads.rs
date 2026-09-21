@@ -26,6 +26,7 @@ use serde_json::Value;
 /// file rather than an error.
 async fn dataset_types(
     gateway: &Gateway,
+    slug: &str,
     headers: &HeaderMap,
 ) -> Result<Vec<String>, Box<Response<Body>>> {
     let answer = gateway
@@ -41,7 +42,7 @@ async fn dataset_types(
 
     let (parts, body) = answer.into_parts();
     if !parts.status.is_success() {
-        return Err(Box::new(Response::from_parts(parts, body)));
+        return Err(broker_failed(slug, parts.status, body).await);
     }
     let bytes = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -73,6 +74,7 @@ pub(crate) async fn query_entities(
     params: &[(String, String)],
     request: &mut Request,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
+    let slug = endpoint.slug.as_str();
     let verdict = gateway.pdp.decide(
         subject,
         Operation::QueryEntity,
@@ -95,7 +97,7 @@ pub(crate) async fn query_entities(
     let fallback = if query::selects(&constraints) {
         Vec::new()
     } else {
-        let types = dataset_types(gateway, request.headers()).await?;
+        let types = dataset_types(gateway, slug, request.headers()).await?;
         // A space holding nothing is an empty file, not a `400` and not a second broker call.
         if types.is_empty() {
             return Ok((Value::Array(Vec::new()), constraints.restricted));
@@ -120,7 +122,7 @@ pub(crate) async fn query_entities(
 
     let (parts, body) = answer.into_parts();
     if !parts.status.is_success() {
-        return Err(Box::new(Response::from_parts(parts, body)));
+        return Err(broker_failed(slug, parts.status, body).await);
     }
     let bytes = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -221,6 +223,44 @@ pub(crate) async fn query_temporal(
     Ok((entity, constraints.restricted))
 }
 
+/// The gateway's own answer to a broker that failed a read behind one of its representations
+/// (T-2340, EP-26, R22).
+///
+/// A download, an OGC page and a SensorThings collection are the gateway's documents, and what a
+/// failing broker prints is whatever it was holding: a DSN with its password, a host inside the
+/// cluster, a source path, the tenant. None of it reaches the caller, most of whom need no token
+/// to ask; the operator reads it in the log beside the endpoint's slug. A `400` is the broker
+/// refusing the query this request became and a `404` is a miss; a `5xx` keeps its status, as on
+/// the NGSI-LD surface (T-2260). Any other refusal (the gateway's own credentials, its rate at
+/// the broker) is the gateway failing rather than the caller, so it is a `502`.
+async fn broker_failed(slug: &str, status: StatusCode, body: Body) -> Box<Response<Body>> {
+    let held = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .unwrap_or_default();
+    tracing::warn!(
+        slug,
+        status = status.as_u16(),
+        broker = %String::from_utf8_lossy(&held),
+        "the broker failed a read behind a representation; its own explanation is not passed on"
+    );
+    let problem = match status {
+        StatusCode::BAD_REQUEST => ProblemDetails::bad_request()
+            .with_detail("the context broker refused the query this request asks for"),
+        StatusCode::NOT_FOUND => ProblemDetails::not_found(),
+        failed => ProblemDetails::new(
+            if failed.is_server_error() {
+                failed.as_u16()
+            } else {
+                StatusCode::BAD_GATEWAY.as_u16()
+            },
+            "broker-failure",
+            "The context broker could not answer",
+        )
+        .with_detail("the context broker behind this endpoint failed to answer this request"),
+    };
+    Box::new(problem.into_response())
+}
+
 /// The answer is bigger than this endpoint allows one download to be (EP-44).
 pub(crate) fn too_large() -> Response<Body> {
     let mut response = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
@@ -244,6 +284,7 @@ pub(crate) async fn paged_entities(
     request: &mut Request,
     limits: &tabular::Limits,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
+    let slug = endpoint.slug.as_str();
     let verdict = gateway.pdp.decide(
         subject,
         Operation::QueryEntity,
@@ -274,7 +315,7 @@ pub(crate) async fn paged_entities(
     let fallback = if query::selects(&constraints) {
         Vec::new()
     } else {
-        let types = dataset_types(gateway, request.headers()).await?;
+        let types = dataset_types(gateway, slug, request.headers()).await?;
         if types.is_empty() {
             return Ok((Value::Array(Vec::new()), constraints.restricted));
         }
@@ -301,7 +342,7 @@ pub(crate) async fn paged_entities(
 
         let (parts, body) = answer.into_parts();
         if !parts.status.is_success() {
-            return Err(Box::new(Response::from_parts(parts, body)));
+            return Err(broker_failed(slug, parts.status, body).await);
         }
         let bytes = axum::body::to_bytes(body, MAX_BODY)
             .await

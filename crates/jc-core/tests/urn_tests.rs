@@ -43,6 +43,7 @@ fn upper_case_prefix_parses_and_is_normalised_to_lower_case() {
     );
 }
 
+/// PF-12: a random UUID is not an entity identity; the id keeps its routable prefix.
 #[test]
 fn legacy_uuid_id_without_four_segments_is_rejected() {
     // The classic NGSI-LD form `urn:ngsi-ld:{Type}:{uuid}` has two NSS segments, not four (R34).
@@ -58,6 +59,7 @@ fn legacy_uuid_id_without_four_segments_is_rejected() {
     ));
 }
 
+/// PF-12: randomness is allowed in the last segment only, after the prefix a registration matches.
 #[test]
 fn a_uuid_is_allowed_as_the_local_id() {
     // Architecture/03 section 3 bans random UUIDs only OUTSIDE the final segment.
@@ -67,6 +69,7 @@ fn a_uuid_is_allowed_as_the_local_id() {
     assert_eq!(urn.local_id(), "550e8400-e29b-41d4-a716-446655440000");
 }
 
+/// PF-12: a UUID never stands in for a prefix segment.
 #[test]
 fn a_uuid_in_the_org_domain_segment_is_rejected() {
     let err = "urn:ngsi-ld:AirQualityObserved:550e8400-e29b-41d4-a716-446655440000:ovzdusie:s1"
