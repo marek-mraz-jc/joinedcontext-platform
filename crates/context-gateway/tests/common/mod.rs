@@ -133,6 +133,8 @@ pub struct Hop {
     /// The request body, for the POST forms of the two query operations: CIM 009 puts their
     /// selector in the body, so a test that cannot read it cannot see what was asked (AG-84).
     pub body: Vec<u8>,
+    /// The W3C Trace Context the gateway relayed: `traceparent` and `tracestate` (OPS-17).
+    pub trace: (String, String),
 }
 
 /// A broker on a real socket, because the gateway forwards over HTTP and what these tests
@@ -192,6 +194,18 @@ impl BrokerStub {
                             .unwrap_or_default()
                             .to_owned(),
                         body,
+                        trace: (
+                            headers
+                                .get("traceparent")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned(),
+                            headers
+                                .get("tracestate")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_owned(),
+                        ),
                     });
                     let pages = served.lock().expect("no poisoned lock");
 
