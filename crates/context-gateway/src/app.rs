@@ -113,6 +113,8 @@ pub struct Gateway {
     pub rate_limiter: RateLimiter,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
+    /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
+    pub domain_gate: Arc<crate::domain_gate::DomainGate>,
 }
 
 impl Gateway {
@@ -132,6 +134,9 @@ impl Gateway {
             private_hosts: Vec::new(),
             rate_limiter: RateLimiter::new(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
+            domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
+                crate::domain_gate::Mode::Report,
+            )),
         }
     }
 
@@ -157,6 +162,13 @@ impl Gateway {
     /// public edge, where it would arrive indistinguishable from any request off the internet.
     pub fn deliver_through(mut self, egress_url: Option<String>) -> Self {
         self.egress_url = egress_url;
+        self
+    }
+
+    /// Refuses writes by this gate (PF-41, Architecture/03 §3): `report` refuses nothing,
+    /// `enforce` refuses a write unless the Organization's domain is verified.
+    pub fn gate_writes_on(mut self, gate: Arc<crate::domain_gate::DomainGate>) -> Self {
+        self.domain_gate = gate;
         self
     }
 
@@ -578,6 +590,17 @@ async fn serve_ngsi_ld(
     let Verdict::Rewrite(constraints) = verdict else {
         return refused(operation, &path);
     };
+
+    // PF-41, T-2572: under `domainVerification: enforce` a write waits for the Organization's
+    // verified domain. After the decision, so a caller who may not write at all learns only
+    // that; before the body is read, so nothing of a refused write reaches the broker. Every
+    // NGSI-LD door comes through here, the MCP write tools included. Reads are never refused.
+    if operation.is_write() {
+        if let Some(refusal) = gateway.domain_gate.refusal(&gateway.org_domain) {
+            tracing::info!(slug = %endpoint.slug, %operation, "write refused: the domain is not verified");
+            return refusal.into_response();
+        }
+    }
 
     // PF-48: a registration asking for `caller` identity needs the caller's own token
     // rewritten for the member's audience, which is an RFC 8693 exchange this platform does
