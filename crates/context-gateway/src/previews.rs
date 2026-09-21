@@ -140,6 +140,9 @@ impl Mirror {
             .expect("a client with a timeout builds");
         let mut ticker = tokio::time::interval(INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The tag of the list last written: the Portal answers `304` while it still holds, so an
+        // idle instance moves no manifests every ten seconds (CC-78).
+        let mut etag: Option<String> = None;
         loop {
             ticker.tick().await;
             let mut request = client.get(&url);
@@ -152,8 +155,29 @@ impl Mirror {
                     }
                 }
             }
-            let listed = match request.send().await {
-                Ok(response) if response.status().is_success() => response.json::<List>().await,
+            if let Some(tag) = etag.as_deref() {
+                request = request.header(reqwest::header::IF_NONE_MATCH, tag);
+            }
+            let (listed, tag) = match request.send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::NOT_MODIFIED => {
+                    // A preview directory that went missing is written again only by a full list.
+                    if self
+                        .seen
+                        .keys()
+                        .any(|prefix| !self.dir.join(prefix).is_dir())
+                    {
+                        etag = None;
+                    }
+                    continue;
+                }
+                Ok(response) if response.status().is_success() => {
+                    let tag = response
+                        .headers()
+                        .get(reqwest::header::ETAG)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    (response.json::<List>().await, tag)
+                }
                 Ok(response) => {
                     tracing::warn!(status = %response.status(), "the Portal did not list the previews");
                     continue;
@@ -163,12 +187,14 @@ impl Mirror {
                     continue;
                 }
             };
+            etag = None;
             match listed {
-                Ok(list) => {
-                    if let Err(error) = self.apply(list.items) {
-                        tracing::warn!(%error, dir = %self.dir.display(), "the previews were not written");
+                Ok(list) => match self.apply(list.items) {
+                    Ok(()) => etag = tag,
+                    Err(error) => {
+                        tracing::warn!(%error, dir = %self.dir.display(), "the previews were not written")
                     }
-                }
+                },
                 Err(error) => tracing::warn!(%error, "the preview list is not readable"),
             }
         }
