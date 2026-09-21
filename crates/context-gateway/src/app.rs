@@ -30,7 +30,7 @@ use crate::pdp::{conditional, write_guard};
 use crate::pdp::{geo, projection, temporal, vocabulary, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, SlugResolver, Space};
-use crate::translators::view_mapping;
+use crate::translators::{geojson, view_mapping};
 use crate::{egress, mcp, middleware::tenancy, operations, query, telemetry};
 use arc_swap::ArcSwap;
 use axum::body::Body;
@@ -815,6 +815,27 @@ async fn serve_ngsi_ld(
             Err(problem) => return problem.into_response(),
         },
     };
+    // CIM 009 6.3.15: GeoJSON is rendered here, after the projection, from the JSON the broker
+    // is asked for: the broker's own Feature is not an entity the grants can judge, and judged
+    // as one it was the 404 of a type nobody granted (T-2583).
+    let geojson = matches!(
+        operation,
+        Operation::RetrieveEntity | Operation::QueryEntity
+    ) && parts
+        .headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains(geojson::MEDIA_TYPE));
+    let lang = parts
+        .headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if geojson {
+        parts
+            .headers
+            .insert(ACCEPT, HeaderValue::from_static("application/json"));
+    }
     let target = format!("/ngsi-ld/v1{path}?{sent_query}");
     let answer = match gateway
         .broker
@@ -835,9 +856,55 @@ async fn serve_ngsi_ld(
         }
     };
     let projected = project_answer(answer, operation, &judged).await;
-    match &endpoint.view_mapping {
+    let answer = match &endpoint.view_mapping {
         None => projected,
         Some(mapping) => translated(projected, mapping).await,
+    };
+    if geojson {
+        as_geojson(answer, operation, lang.as_deref()).await
+    } else {
+        answer
+    }
+}
+
+/// A projected NGSI-LD answer as GeoJSON (CIM 009 6.3.15, T-2583): one entity is a `Feature`, a
+/// query a `FeatureCollection`. A refusal or a miss is left as it is, so the status is the one
+/// the JSON read would have answered.
+async fn as_geojson(
+    answer: Response<Body>,
+    operation: Operation,
+    lang: Option<&str>,
+) -> Response<Body> {
+    let (mut parts, body) = answer.into_parts();
+    if !parts.status.is_success() {
+        return Response::from_parts(parts, body);
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+        tracing::error!("the broker's answer is larger than the gateway can render as GeoJSON");
+        return ProblemDetails::internal().into_response();
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&bytes) else {
+        tracing::error!("the projected answer is not JSON and cannot be rendered as GeoJSON");
+        return ProblemDetails::internal().into_response();
+    };
+    let rendered = match (operation, &payload) {
+        (Operation::QueryEntity, Value::Array(entities)) => serde_json::json!({
+            "type": "FeatureCollection",
+            "features": entities.iter().map(|entity| geojson::ngsi_feature(entity, lang)).collect::<Vec<_>>(),
+        }),
+        _ => geojson::ngsi_feature(&payload, lang),
+    };
+    parts.headers.remove(CONTENT_LENGTH);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(geojson::MEDIA_TYPE),
+    );
+    match serde_json::to_vec(&rendered) {
+        Ok(bytes) => Response::from_parts(parts, Body::from(bytes)),
+        Err(error) => {
+            tracing::error!(%error, "the GeoJSON answer does not serialize");
+            ProblemDetails::internal().into_response()
+        }
     }
 }
 

@@ -66,6 +66,26 @@ pub fn feature(entity: &Value, lang: Option<&str>) -> Option<Value> {
     Some(Value::Object(feature))
 }
 
+/// One entity as CIM 009 6.3.15 renders it for `Accept: application/geo+json` on the NGSI-LD
+/// surface: a `Feature` always, with a `null` geometry when the entity has none, because there
+/// the caller asked for this entity and not for a map layer (T-2583).
+// ponytail: the default `location` only; `geometryProperty` when a caller asks for another.
+pub fn ngsi_feature(entity: &Value, lang: Option<&str>) -> Value {
+    feature(entity, lang).unwrap_or_else(|| {
+        let mut feature = Map::new();
+        feature.insert("type".to_owned(), json!("Feature"));
+        if let Some(id) = entity.get("id").or_else(|| entity.get("@id")) {
+            feature.insert("id".to_owned(), id.clone());
+        }
+        feature.insert("geometry".to_owned(), Value::Null);
+        feature.insert(
+            "properties".to_owned(),
+            Value::Object(properties(entity, lang)),
+        );
+        Value::Object(feature)
+    })
+}
+
 /// The entity's own geometry: `location`, in either the normalized or the concise form.
 fn geometry_of(entity: &Value) -> Option<Value> {
     let location = entity.get(PRIMARY)?;
