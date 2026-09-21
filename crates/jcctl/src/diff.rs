@@ -98,9 +98,12 @@ fn diff_object(
     out: &mut Vec<FieldDiff>,
 ) {
     let owns = |name: &str| managed.is_none_or(|names| names.iter().any(|n| n == name));
+    // The platform writes these members directly under `metadata` and `spec` only; deeper down,
+    // a `createdAt` is the manifest's own (a grid column's `show.createdAt`) and is compared.
+    let top = path == "metadata" || path == "spec";
 
     for (name, value) in declared {
-        if SERVER_MANAGED.contains(&name.as_str()) || !owns(name) {
+        if (top && SERVER_MANAGED.contains(&name.as_str())) || !owns(name) {
             continue;
         }
         match live.get(name) {

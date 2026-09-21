@@ -160,3 +160,22 @@ fn a_space_filter_rebuilds_only_that_space() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// DM-44: a repository that declares no Organization still rebuilds, under the project's name
+/// where the organization would stand, rather than failing or writing to an empty segment.
+#[test]
+fn a_repository_without_an_organization_writes_under_the_project_name() {
+    let dir = repo("rebuild-no-org");
+    std::fs::remove_file(dir.join("org.yaml")).expect("the organization manifest");
+    let out = temp_dir("rebuild-no-org-out");
+
+    artifacts::rebuild(&dir, &options(&out)).expect("the rebuild runs");
+
+    assert!(out
+        .join("schemas/ovzdusie/ovzdusie/ovzdusie/air-quality/v1/air-quality.v1.json")
+        .is_file());
+    assert!(!out.join("schemas/banskabystrica").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&out);
+}

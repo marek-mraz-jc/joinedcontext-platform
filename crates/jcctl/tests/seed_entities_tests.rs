@@ -220,3 +220,23 @@ fn the_source_file_of_every_entity_is_kept_for_the_message() {
         Path::new(&root).join("projects/p/spaces/s/entities/seed/one.json")
     );
 }
+
+/// CC-72: one file seeding the same id twice is refused like two files doing it, and names the
+/// file, not an order the reader has to guess.
+#[test]
+fn one_file_seeding_one_id_twice_is_refused_naming_that_file() {
+    let twice = format!("[{},{}]", air("1"), air("1"));
+    let root = checkout(
+        "seed-duplicate-one-file",
+        &[("projects/p/spaces/ovzdusie/entities/seed/a.json", &twice)],
+    );
+    let error = seed_entities(&root).expect_err("the same id twice is ambiguous");
+    let SeedError::Duplicate {
+        id, first, second, ..
+    } = &error
+    else {
+        panic!("a duplicate, not {error}");
+    };
+    assert!(id.ends_with(":ovzdusie:1"), "{id}");
+    assert!(first.ends_with("a.json") && first == second, "{error}");
+}
