@@ -200,6 +200,15 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (location, message) in app_names_claimed_twice(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (directory, message) in projects_without_a_manifest(repo_dir, &repo) {
         report.findings.push(Finding {
             path: directory,
@@ -309,6 +318,37 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
         }
     }
     findings
+}
+
+/// Every `App` whose name another project's `App` also declares (AP-14a): `/apps/{name}/` and
+/// the pod `app-{name}` are one address for the organization, so the edge cannot serve both.
+fn app_names_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
+    let mut projects: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (id, _) in repo.iter().filter(|(id, _)| id.kind == "App") {
+        projects
+            .entry(id.name.as_str())
+            .or_default()
+            .insert(id.namespace.as_deref().unwrap_or_default());
+    }
+    repo.iter()
+        .filter(|(id, _)| id.kind == "App")
+        .filter_map(|(id, resource)| {
+            let claimants = projects.get(id.name.as_str())?;
+            (claimants.len() > 1).then(|| {
+                let names: Vec<&str> = claimants.iter().copied().collect();
+                (
+                    (resource.path.clone(), resource.document, resource.line),
+                    format!(
+                        "App {} is declared by projects {}; /apps/{}/ is one address for the \
+                         whole organization, rename all but one (AP-14a)",
+                        id.name,
+                        names.join(" and "),
+                        id.name
+                    ),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Every directory under `projects/` that declares no `Project` (MF-01, PF-05).
