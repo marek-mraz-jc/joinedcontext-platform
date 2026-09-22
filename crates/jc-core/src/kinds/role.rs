@@ -28,6 +28,10 @@ pub enum Verb {
 }
 
 /// A constraint on one spec field; exactly one of `in`, `notIn`, `equals` is given.
+///
+/// The one exception is [`BUILD_FIELD`] with no operator, on a rule of `App` with `propose`
+/// alone: it names the rule as the writer of that field, and a rule carrying it authorizes
+/// nothing else (AP-73).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Constraint {
@@ -44,7 +48,16 @@ pub struct Constraint {
     pub equals: Option<String>,
 }
 
+/// The one `status` field a role may write: the build lane's `status.build` of an App (AP-73).
+pub const BUILD_FIELD: &str = "status.build";
+
 impl Rule {
+    /// Whether this is the build lane's rule: `propose` on `App` constrained to `status.build`,
+    /// which writes that field and authorizes no other proposal (AP-73).
+    pub fn writes_status_only(&self) -> bool {
+        self.constraints.iter().any(|c| c.field == BUILD_FIELD)
+    }
+
     /// Whether the rule grants `verb` on `kind`. `propose` implies `read`, because nobody
     /// proposes a change to what they may not see; `approve` and `delete` imply nothing, so a
     /// role that only approves reads nothing by that rule alone (PF-59). The implication lives
@@ -161,7 +174,11 @@ impl RoleSpec {
                 });
             }
             for constraint in &rule.constraints {
-                constraint.validate()?;
+                if constraint.field.starts_with("status.") {
+                    constraint.validate_status(rule)?;
+                } else {
+                    constraint.validate()?;
+                }
             }
         }
         Ok(())
@@ -169,6 +186,32 @@ impl RoleSpec {
 }
 
 impl Constraint {
+    /// `{ field: status.build }` alone, on a rule of `App` with `propose` alone (AP-73).
+    fn validate_status(&self, rule: &Rule) -> Result<()> {
+        if self.field != BUILD_FIELD {
+            return Err(Error::Name {
+                field: "spec.rules[].constraints[].field",
+                value: self.field.clone(),
+                reason: "the one status field a role writes is `status.build` (AP-73)",
+            });
+        }
+        if !self.one_of.is_empty() || !self.not_in.is_empty() || self.equals.is_some() {
+            return Err(Error::Name {
+                field: "spec.rules[].constraints[]",
+                value: self.field.clone(),
+                reason: "`status.build` names its writer and carries no `in`, `notIn` or `equals` (AP-73)",
+            });
+        }
+        if rule.kinds != ["App"] || rule.verbs != [Verb::Propose] || rule.constraints.len() != 1 {
+            return Err(Error::Name {
+                field: "spec.rules[]",
+                value: self.field.clone(),
+                reason: "a rule constrained to `status.build` is `propose` on `App` alone, with no other constraint (AP-73)",
+            });
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         if self.field.trim().is_empty() || !self.field.starts_with("spec.") {
             return Err(Error::Name {
