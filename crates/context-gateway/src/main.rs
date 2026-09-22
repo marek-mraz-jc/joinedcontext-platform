@@ -46,6 +46,13 @@ async fn main() -> ExitCode {
         }
     };
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone());
+    let checkouts = config
+        .projects_dir
+        .clone()
+        .map(|projects| store::Checkouts {
+            projects,
+            assembly: config.assembly_dir.clone(),
+        });
     let (endpoints, spaces, accounts, federations, agreements) = match &config.repo_dir {
         None => (
             Vec::new(),
@@ -54,7 +61,7 @@ async fn main() -> ExitCode {
             context_gateway::federation::Federations::new(),
             context_gateway::auth::dataspace_token::Agreements::new(),
         ),
-        Some(dir) => match store::load(dir) {
+        Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
             Ok(loaded) => {
                 tracing::info!(
                     endpoints = loaded.0.len(),
@@ -134,8 +141,10 @@ async fn main() -> ExitCode {
     // second, without a restart (R48, EP-19, OPS-45).
     if let Some(dir) = config.repo_dir.clone() {
         let reaper = context_gateway::pdp::reaper::Reaper::new(Arc::clone(&gateway), dir);
-        // Workspace previews ride the same reload: the poller writes, the reaper loads
-        // (Architecture/06 §7.2).
+        let reaper = match checkouts {
+            Some(checkouts) => reaper.with_checkouts(checkouts),
+            None => reaper,
+        };
         // Workspace previews ride the same reload: the poller writes, the reaper loads
         // (Architecture/06 §7.2).
         let reaper = match config.previews_url.clone() {

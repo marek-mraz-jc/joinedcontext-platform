@@ -31,6 +31,7 @@ pub const INTERVAL: Duration = Duration::from_secs(1);
 pub struct Reaper {
     gateway: Arc<Gateway>,
     dir: PathBuf,
+    checkouts: Option<store::Checkouts>,
     previews: Option<PathBuf>,
     seen: Option<Fingerprint>,
 }
@@ -52,15 +53,24 @@ impl Reaper {
             seen: fingerprint(&dir),
             gateway,
             dir,
+            checkouts: None,
             previews: None,
         }
     }
 
+    /// Follows the project checkouts of a layout 2 organization too: a project added to or
+    /// removed from the registry, and a project checkout moving to another commit, reload the
+    /// tables like a change of the organization does (CC-86).
+    pub fn with_checkouts(mut self, checkouts: store::Checkouts) -> Self {
+        self.checkouts = Some(checkouts);
+        self.seen = self.fingerprint();
+        self
+    }
+
     /// Follows the workspace previews under `dir` too (Architecture/06 §7.2).
     pub fn with_previews(mut self, dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
-        self.seen = combined(&self.dir, Some(&dir));
-        self.previews = Some(dir);
+        self.previews = Some(dir.into());
+        self.seen = self.fingerprint();
         self
     }
 
@@ -69,7 +79,7 @@ impl Reaper {
     /// Returns whether anything was swapped, which is what the tests assert on and what
     /// the log line reports.
     pub fn tick(&mut self) -> bool {
-        let current = combined(&self.dir, self.previews.as_deref());
+        let current = self.fingerprint();
         if current.is_none() {
             // The directory went away: keep serving, say so once per tick.
             tracing::warn!(dir = %self.dir.display(), "the manifest repository is unreadable");
@@ -78,7 +88,11 @@ impl Reaper {
         if current == self.seen {
             return false;
         }
-        match store::load_with_previews(&self.dir, self.previews.as_deref()) {
+        match store::load_with_previews(
+            &self.dir,
+            self.checkouts.as_ref(),
+            self.previews.as_deref(),
+        ) {
             Ok((endpoints, spaces, accounts, federations, agreements)) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
@@ -117,6 +131,18 @@ impl Reaper {
         }
     }
 
+    /// The organization's fingerprint, then the project checkouts', then the previews'.
+    fn fingerprint(&self) -> Option<Fingerprint> {
+        let projects = self.checkouts.as_ref().map(|c| c.projects.as_path());
+        let mut all = fingerprint(&self.dir)?;
+        for more in [projects, self.previews.as_deref()] {
+            if let Some(more) = more.and_then(fingerprint) {
+                all.extend(more);
+            }
+        }
+        Some(all)
+    }
+
     /// Polls until the process ends. Started once, next to the server.
     pub async fn run(mut self) {
         let mut ticker = tokio::time::interval(INTERVAL);
@@ -129,17 +155,8 @@ impl Reaper {
 }
 
 /// The manifest files under `dir` with their sizes and modification times, or `None` when
-/// the directory cannot be read at all.
-/// The repository's fingerprint with the previews' after it; previews that cannot be read
-/// count as none, so the repository alone still reloads.
-fn combined(dir: &Path, previews: Option<&Path>) -> Option<Fingerprint> {
-    let mut all = fingerprint(dir)?;
-    if let Some(more) = previews.and_then(fingerprint) {
-        all.extend(more);
-    }
-    Some(all)
-}
-
+/// the directory cannot be read at all. Checkouts or previews that cannot be read count as
+/// none, so the organization alone still reloads.
 fn fingerprint(dir: &Path) -> Option<Fingerprint> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
