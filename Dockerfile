@@ -25,6 +25,16 @@ COPY . .
 RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace \
  && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions
 
+# `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
+# for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
+# own image, built as `--target checkouts`, so git never enters the gateway's.
+FROM debian:bookworm-slim AS checkouts
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* && useradd --uid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
+COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/jcctl", "checkouts"]
+
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/context-gateway /usr/local/bin/context-gateway
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl

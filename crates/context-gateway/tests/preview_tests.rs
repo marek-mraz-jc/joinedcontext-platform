@@ -110,7 +110,7 @@ fn a_running_preview_answers_on_its_own_slug_beside_main() {
         }])
         .unwrap();
 
-    let (endpoints, spaces, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
+    let (endpoints, spaces, ..) = store::load_with_previews(&main, None, Some(&previews)).unwrap();
     let minted = jcctl::loader::preview_slug("ws-air-", ORIGIN_SLUG);
     let origin = endpoints
         .iter()
@@ -209,7 +209,7 @@ fn a_preview_that_does_not_render_leaves_main_serving() {
             files: broken,
         }])
         .unwrap();
-    let (endpoints, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
+    let (endpoints, ..) = store::load_with_previews(&main, None, Some(&previews)).unwrap();
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].slug, ORIGIN_SLUG);
 }
@@ -231,7 +231,7 @@ fn a_preview_never_takes_over_a_slug_main_already_serves() {
     let main = repo_of("slug-taken-main", theirs);
     let previews = previews_of("slug-taken-previews", files());
 
-    let (endpoints, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
+    let (endpoints, ..) = store::load_with_previews(&main, None, Some(&previews)).unwrap();
     let on_the_slug: Vec<_> = endpoints.iter().filter(|e| e.slug == minted).collect();
     assert_eq!(
         on_the_slug.len(),
@@ -256,7 +256,7 @@ fn a_preview_never_answers_on_a_space_main_already_serves() {
     let main = repo_of("space-taken-main", theirs);
     let previews = previews_of("space-taken-previews", files());
 
-    let (endpoints, spaces, ..) = store::load_with_previews(&main, Some(&previews)).unwrap();
+    let (endpoints, spaces, ..) = store::load_with_previews(&main, None, Some(&previews)).unwrap();
     let on_the_space: Vec<_> = spaces.iter().filter(|s| s.name() == TAKEN).collect();
     assert_eq!(on_the_space.len(), 1, "two spaces on one segment");
     assert_eq!(

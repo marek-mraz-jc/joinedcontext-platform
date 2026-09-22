@@ -434,6 +434,36 @@ pub struct BundleSpec {
     /// The schemas a complete export carries beside its manifests (MF-41).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schemas: Option<BundleSchemas>,
+    /// The git bundles of a git-native export, one per repository (MF-45): the project's and
+    /// one per application of it. An import verifies each by its head commit (MF-46).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<BundleRepository>,
+}
+
+/// One repository of a git-native export (MF-45).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BundleRepository {
+    /// The repository's name, and the name it is created under at the target.
+    pub name: String,
+    /// What the repository is.
+    pub role: BundleRole,
+    /// The `git bundle` file, relative to the index.
+    pub file: String,
+    /// The commit the repository's default branch ends at, 40 lowercase hexadecimal characters.
+    pub head: String,
+}
+
+/// What a repository of a git-native export is (MF-45, PF-85).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BundleRole {
+    /// An organization repository.
+    Organization,
+    /// A project repository.
+    Project,
+    /// The repository of one application (AP-72).
+    Application,
 }
 
 /// One file of a bundle and the checksum a transfer is verified against (MF-42).
@@ -492,12 +522,33 @@ impl BundleSpec {
         if let Some(ref url) = self.source_instance {
             validate_remote_url("sourceInstance", url, false)?;
         }
-        if self.items.is_empty() {
+        if self.items.is_empty() && self.repositories.is_empty() {
             return Err(Error::Name {
                 field: "items",
                 value: String::new(),
-                reason: "a bundle must list at least one resource",
+                reason: "a bundle must list at least one resource, or one repository (MF-45)",
             });
+        }
+        let mut names_seen: Vec<&str> = Vec::with_capacity(self.repositories.len());
+        for repository in &self.repositories {
+            names::validate_dns1123_label(&repository.name)
+                .map_err(|e| names::rename(e, "repositories.name"))?;
+            if names_seen.contains(&repository.name.as_str()) {
+                return Err(Error::Name {
+                    field: "repositories.name",
+                    value: repository.name.clone(),
+                    reason: "a repository is listed once (MF-45)",
+                });
+            }
+            names_seen.push(&repository.name);
+            names::validate_relative_path("repositories.file", &repository.file)?;
+            if repository.head.len() != 40 || !HEX_RE.is_match(&repository.head) {
+                return Err(Error::Name {
+                    field: "repositories.head",
+                    value: repository.head.clone(),
+                    reason: "a head is a full commit id, 40 lowercase hexadecimal characters",
+                });
+            }
         }
 
         let mut seen: Vec<(&str, Option<&str>, &str)> = Vec::with_capacity(self.items.len());
@@ -520,6 +571,10 @@ impl BundleSpec {
 
         for file in &self.native_files {
             names::validate_relative_path("nativeFiles", file)?;
+        }
+        // An import reads and writes where these point, so none leaves the bundle (MF-42).
+        for file in &self.files {
+            names::validate_relative_path("files.path", &file.path)?;
         }
         Ok(())
     }

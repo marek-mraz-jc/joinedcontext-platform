@@ -19,53 +19,115 @@ use jc_core::kinds::{
 use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// The tables the gateway serves, in the order [`load`] returns them.
+pub type Tables = (
+    Vec<Endpoint>,
+    Vec<Space>,
+    ServiceAccounts,
+    Federations,
+    Agreements,
+);
+
+/// Where a layout 2 organization's projects are read and assembled (CC-86, ADR-N-029).
+///
+/// `projects` holds one checkout per registry slug at its pinned ref, which the deployment
+/// mounts; the gateway reads them and never the forge, so it holds no forge credential.
+/// `assembly` is a scratch directory the pod owns, outside both, where the render is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkouts {
+    /// The project checkouts, one directory per slug (`JC_GATEWAY_PROJECTS_DIR`).
+    pub projects: PathBuf,
+    /// Where the organization is assembled (`JC_GATEWAY_ASSEMBLY_DIR`).
+    pub assembly: PathBuf,
+}
 
 /// Loads the endpoint table and the identity table from the repository under `dir`
 /// (CC-08, PF-46).
-#[allow(clippy::type_complexity)]
-pub fn load(
-    dir: &Path,
-) -> Result<
-    (
-        Vec<Endpoint>,
-        Vec<Space>,
-        ServiceAccounts,
-        Federations,
-        Agreements,
-    ),
-    jcctl::LoadError,
-> {
+pub fn load(dir: &Path) -> Result<Tables, jcctl::LoadError> {
     let repo = Repository::load(dir)?;
-    Ok((
-        endpoints_with_models(&repo, Some(dir)),
-        spaces_of(&repo, Some(dir)),
-        accounts_of(&repo),
-        federations_of(&repo),
-        agreements_of(&repo),
-    ))
+    Ok(tables(&repo, dir))
 }
 
-/// [`load`], plus every preview under `previews` rendered with its prefix (CC-78). A preview
+/// [`load`] of the organization checked out at `dir`: a layout 1 repository as it is, a
+/// layout 2 one assembled with the project checkouts of `checkouts` at their refs (CC-86). A
+/// project whose checkout is missing keeps the render the last assembly gave it; a name two
+/// projects claim refuses the whole load, so the tables that are serving keep serving.
+pub fn load_from(
+    dir: &Path,
+    checkouts: Option<&Checkouts>,
+) -> Result<Tables, jcctl::assemble::AssembleError> {
+    use jcctl::assemble::{assemble, layout_at, AssembleError, Directories};
+    if layout_at(dir, jc_core::project::RepositoryRole::Organization)? == 1 {
+        return Ok(load(dir)?);
+    }
+    let Some(checkouts) = checkouts else {
+        return Err(AssembleError::Refused {
+            path: jc_core::project::LAYOUT_FILE.to_owned(),
+            message: "the organization is layout 2 and no project checkouts were given \
+                      (JC_GATEWAY_PROJECTS_DIR)"
+                .to_owned(),
+        });
+    };
+    let listing = std::fs::read_dir(&checkouts.projects).map_err(|source| AssembleError::Io {
+        path: checkouts.projects.clone(),
+        source,
+    })?;
+    let directories = listing
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let slug = entry.file_name().into_string().ok()?;
+            (!slug.starts_with('.')).then(|| (slug, entry.path()))
+        })
+        .collect();
+    let environment = std::env::var("JC_ENVIRONMENT")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let assembly = assemble(
+        dir,
+        &Directories(directories),
+        &checkouts.assembly,
+        environment.as_deref(),
+    )?;
+    for entry in assembly
+        .entries
+        .iter()
+        .filter(|entry| entry.error.is_some())
+    {
+        tracing::warn!(
+            project = %entry.slug,
+            git_ref = %entry.git_ref,
+            error = entry.error.as_deref().unwrap_or_default(),
+            kept = entry.rendered,
+            "a registered project has no checkout"
+        );
+    }
+    Ok(tables(&assembly.repository, &checkouts.assembly))
+}
+
+fn tables(repo: &Repository, root: &Path) -> Tables {
+    (
+        endpoints_with_models(repo, Some(root)),
+        spaces_of(repo, Some(root)),
+        accounts_of(repo),
+        federations_of(repo),
+        agreements_of(repo),
+    )
+}
+
+/// [`load_from`], plus every preview under `previews` rendered with its prefix (CC-78). A preview
 /// that does not render is left out with the reason in the log; a slug or a tenant `main`
 /// already serves is never taken over by one, so a preview answers beside `main` and never in
 /// its place (PF-83, T-1709).
-#[allow(clippy::type_complexity)]
 pub fn load_with_previews(
     dir: &Path,
+    checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
-) -> Result<
-    (
-        Vec<Endpoint>,
-        Vec<Space>,
-        ServiceAccounts,
-        Federations,
-        Agreements,
-    ),
-    jcctl::LoadError,
-> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements) = load(dir)?;
+) -> Result<Tables, jcctl::assemble::AssembleError> {
+    let (mut endpoints, mut spaces, accounts, federations, agreements) = load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
         .filter(|value| !value.trim().is_empty());

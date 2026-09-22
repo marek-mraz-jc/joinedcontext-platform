@@ -88,8 +88,9 @@ pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
 };
 pub use sync::{
-    BundleFile, BundleItem, BundleOrigin, BundleSchemas, BundleSpec, ConflictPolicy, GitOrigin,
-    PlatformApiOrigin, Schedule, SyncMode, SyncOrigin, SyncSourceSpec, WebhookAuth,
+    BundleFile, BundleItem, BundleOrigin, BundleRepository, BundleRole, BundleSchemas, BundleSpec,
+    ConflictPolicy, GitOrigin, PlatformApiOrigin, Schedule, SyncMode, SyncOrigin, SyncSourceSpec,
+    WebhookAuth,
 };
 pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};
 

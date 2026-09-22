@@ -18,6 +18,12 @@ pub struct Config {
     /// The manifest repository the endpoint table is built from
     /// (`JC_GATEWAY_REPO_DIR`); absent means an empty table until one is loaded.
     pub repo_dir: Option<PathBuf>,
+    /// The project checkouts of a layout 2 organization, one directory per registry slug at
+    /// its pinned ref (`JC_GATEWAY_PROJECTS_DIR`); a layout 1 repository needs none (CC-86).
+    pub projects_dir: Option<PathBuf>,
+    /// Where a layout 2 organization is assembled (`JC_GATEWAY_ASSEMBLY_DIR`, default
+    /// `/tmp/jc-assembly`), a scratch directory the pod owns.
+    pub assembly_dir: PathBuf,
     /// The Portal's list of running workspace previews (`JC_GATEWAY_PREVIEWS_URL`, its
     /// internal listener's `/internal/previews`); absent serves `main` alone (CC-78).
     pub previews_url: Option<String>,
@@ -150,6 +156,14 @@ impl Config {
             bind,
             broker_url,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
+            projects_dir: std::env::var("JC_GATEWAY_PROJECTS_DIR")
+                .ok()
+                .filter(|dir| !dir.trim().is_empty())
+                .map(PathBuf::from),
+            assembly_dir: std::env::var("JC_GATEWAY_ASSEMBLY_DIR")
+                .ok()
+                .filter(|dir| !dir.trim().is_empty())
+                .map_or_else(|| PathBuf::from("/tmp/jc-assembly"), PathBuf::from),
             previews_url: std::env::var("JC_GATEWAY_PREVIEWS_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
@@ -247,6 +261,8 @@ mod tests {
             bind: "0.0.0.0:8080".parse().expect("a socket address"),
             broker_url: "http://broker:1026".to_owned(),
             repo_dir: None,
+            projects_dir: None,
+            assembly_dir: PathBuf::from("/tmp/jc-assembly"),
             previews_url: Some("http://portal:8081/internal/previews".to_owned()),
             previews_dir: PathBuf::from("/tmp/jc-previews"),
             org_domain: "hel.fi".to_owned(),
