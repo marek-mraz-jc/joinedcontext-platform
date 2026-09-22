@@ -135,19 +135,34 @@ pub async fn handler(
             .into_response();
     }
 
+    // The run's one repository: its project's own in layout 2, the configuration repository
+    // otherwise. Never a name the request carries, so a run reaches no other (AG-86).
+    let repository = match &run.repository {
+        Some(name) => {
+            if name.is_empty() || name.contains(['/', '.', '%', '\\']) {
+                return jc_core::ProblemDetails::forbidden()
+                    .with_detail("the run names no repository this door reaches")
+                    .into_response();
+            }
+            let owner = state
+                .config
+                .forge_repo
+                .split_once('/')
+                .map_or(state.config.forge_repo.as_str(), |(owner, _)| owner);
+            format!("{owner}/{name}")
+        }
+        None => state.config.forge_repo.clone(),
+    };
     let target_url = format!(
         "{}/api/v1/repos/{}/{}",
         state.config.forge_base.as_str().trim_end_matches('/'),
-        state.config.forge_repo,
+        repository,
         rest.trim_start_matches('/')
     );
     // The URL the forge will see, after its parser had its say, is inside the application
     // directory or the request stops here (T-0817).
     if rest.starts_with("contents/") {
-        let inside = format!(
-            "/api/v1/repos/{}/contents/{}",
-            state.config.forge_repo, run.path_prefix
-        );
+        let inside = format!("/api/v1/repos/{repository}/contents/{}", run.path_prefix);
         if !reqwest::Url::parse(&target_url).is_ok_and(|url| url.path().starts_with(&inside)) {
             return jc_core::ProblemDetails::forbidden()
                 .with_detail("file path outside assigned application directory")

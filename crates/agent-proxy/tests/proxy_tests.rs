@@ -29,6 +29,7 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
         allows_write,
         branch: "agent/app-bikes/e3b0c442-98fc-1c14-9afb-4c7b2756a120".to_string(),
         path_prefix: "projects/helsinki/apps/bikes/".to_string(),
+        repository: None,
         status: status.to_string(),
         ticket_hash: test_hash("secret-ticket-123"),
         max_tokens: 1000,

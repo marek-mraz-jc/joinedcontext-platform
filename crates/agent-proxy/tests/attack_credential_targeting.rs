@@ -55,6 +55,7 @@ fn sample_run(status: &str) -> RunContext {
         allows_write: true,
         branch: format!("agent/app-bikes/{RUN}"),
         path_prefix: "projects/helsinki/apps/bikes/".to_owned(),
+        repository: None,
         status: status.to_owned(),
         ticket_hash: test_hash(TICKET),
         max_tokens: 100_000,

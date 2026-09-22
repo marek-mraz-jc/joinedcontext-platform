@@ -19,7 +19,13 @@ pub struct RunContext {
     pub endpoint_slugs: Vec<String>,
     pub allows_write: bool,
     pub branch: String,
+    /// The folder the run writes, as its repository spells it.
     pub path_prefix: String,
+    /// The project's own repository in layout 2, in the configuration repository's owner: the
+    /// one repository the forge route reaches for this run (AG-86, CC-87). Absent, the
+    /// configuration repository.
+    #[serde(default)]
+    pub repository: Option<String>,
     pub status: String,
     pub ticket_hash: String,
     pub max_tokens: u64,

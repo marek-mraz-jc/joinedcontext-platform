@@ -435,3 +435,105 @@ async fn a_body_past_the_ceiling_is_refused() {
         .unwrap_or_default()
         .is_empty());
 }
+
+/// A run of `helsinki` in layout 2: its folder at the root of the project's own repository.
+fn project_repository_proxy(forge: &str, repository: &str) -> axum::Router {
+    app(
+        agent_proxy::runs::RunContext {
+            repository: Some(repository.to_owned()),
+            path_prefix: "apps/bikes/".to_owned(),
+            ..sample_run(true)
+        },
+        Bases {
+            forge: forge.to_owned(),
+            ..Bases::default()
+        },
+    )
+}
+
+/// Every path the forge was asked for.
+async fn paths_asked(forge: &MockServer) -> Vec<String> {
+    forge
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect()
+}
+
+/// AG-86, CC-87: in layout 2 a run's write and its reads reach its project's repository, in the
+/// configuration repository's owner, and nothing of the configuration repository.
+#[tokio::test]
+async fn a_run_of_layout_two_reaches_its_project_repository_alone() {
+    let forge = forge_answering(200, "{}").await;
+    let proxy = project_repository_proxy(&forge.uri(), "helsinki");
+    for (verb, uri, body) in [
+        (
+            "PUT",
+            "/v1/forge/contents/apps/bikes/src/main.rs",
+            r#"{"content":"eA==","message":"add"}"#,
+        ),
+        ("GET", "/v1/forge/pulls/7", ""),
+    ] {
+        let response = proxy
+            .clone()
+            .oneshot(authed(verb, uri).body(Body::from(body)).expect("a request"))
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::OK, "{verb} {uri}");
+    }
+    let asked = paths_asked(&forge).await;
+    assert_eq!(
+        asked,
+        [
+            "/api/v1/repos/joinedcontext/helsinki/contents/apps/bikes/src/main.rs",
+            "/api/v1/repos/joinedcontext/helsinki/pulls/7",
+        ],
+        "{asked:?}"
+    );
+}
+
+/// AG-86: the folder is the one of the project's repository, so the configuration repository's
+/// spelling of it, or another project's, is outside and refused before the forge is asked.
+#[tokio::test]
+async fn a_run_of_layout_two_writes_nothing_outside_its_folder() {
+    let forge = forge_answering(200, "{}").await;
+    let proxy = project_repository_proxy(&forge.uri(), "helsinki");
+    for path in [
+        "projects/helsinki/apps/bikes/src/main.rs",
+        "projects/espoo/apps/bikes/src/main.rs",
+        "project.yaml",
+    ] {
+        let response = proxy
+            .clone()
+            .oneshot(
+                authed("PUT", &format!("/v1/forge/contents/{path}"))
+                    .body(Body::from(r#"{"content":"eA==","message":"add"}"#))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    assert!(paths_asked(&forge).await.is_empty());
+}
+
+/// AG-86: a repository name that would climb out of the owner, or name a path, is no repository
+/// this door reaches.
+#[tokio::test]
+async fn a_repository_name_that_is_a_path_is_refused() {
+    let forge = forge_answering(200, "{}").await;
+    for name in ["../configuration", "other/helsinki", "", "helsinki%2F.."] {
+        let response = project_repository_proxy(&forge.uri(), name)
+            .oneshot(
+                authed("GET", "/v1/forge/pulls/7")
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{name:?}");
+    }
+    assert!(paths_asked(&forge).await.is_empty());
+}
