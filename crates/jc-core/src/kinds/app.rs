@@ -156,7 +156,9 @@ impl AppSource {
     }
 }
 
-/// Toolchain versions CI builds the app with, e.g. `{ rust: "1.90", node: "22" }` (AP-01, AP-11).
+/// Toolchain versions the build lane builds the app with, e.g. `{ rust: "1.90", node: "22" }`
+/// (AP-01, AP-11). On a `static` App an empty map, `build: {}`, is no build step: the repository
+/// tree is the bundle, `index.html` at its root (AP-83).
 ///
 /// Kept as a map rather than a fixed set of fields: the build image, not this crate, decides
 /// which toolchains exist.
@@ -165,12 +167,22 @@ impl AppSource {
 pub struct AppBuild(pub BTreeMap<String, String>);
 
 impl AppBuild {
-    fn validate(&self) -> Result<()> {
-        if self.0.is_empty() {
+    fn validate(&self, class: AppClass) -> Result<()> {
+        if self.0.is_empty() && class != AppClass::Static {
             return Err(Error::Name {
                 field: "build",
                 value: String::new(),
-                reason: "build must pin at least one toolchain version (AP-11)",
+                reason: "a service or fullstack app pins at least one toolchain version; \
+                         only a static app may have no build step (AP-11, AP-83)",
+            });
+        }
+        // A static bundle is HTML, CSS and JavaScript: nothing in it is compiled from Rust.
+        if class == AppClass::Static && self.0.contains_key("rust") {
+            return Err(Error::Name {
+                field: "build",
+                value: "rust".to_owned(),
+                reason: "a static app is built by node or by no build step (`build: {}`), \
+                         never by rust; a Rust backend is a fullstack app (AP-83)",
             });
         }
         for (toolchain, version) in &self.0 {
@@ -420,7 +432,7 @@ pub struct AppSpec {
     pub class: AppClass,
     /// Where the source lives (AP-02).
     pub source: AppSource,
-    /// Toolchain versions CI builds with (AP-11).
+    /// Toolchain versions the build lane builds with; `{}` on a static app is no build step (AP-11, AP-83).
     pub build: AppBuild,
     /// Who may reach the published app (AP-18).
     pub visibility: AppVisibility,
@@ -499,7 +511,7 @@ impl AppSpec {
     /// Validates source, build, data needs, limits and CSP.
     pub fn validate(&self) -> Result<()> {
         self.source.validate()?;
-        self.build.validate()?;
+        self.build.validate(self.class)?;
 
         if self.data_needs.is_empty() {
             return Err(Error::Name {

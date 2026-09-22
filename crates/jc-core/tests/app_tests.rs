@@ -460,6 +460,8 @@ fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ship
 
     let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
     app.spec.class = AppClass::Static;
+    // A static bundle is never built by rust (AP-83).
+    app.spec.build.0.remove("rust");
     app.spec.visibility = AppVisibility::Project;
     app.spec.lifecycle = AppLifecycle::Published;
     match app.validate().expect_err("a folder the lane cannot build") {
@@ -515,4 +517,82 @@ fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ship
         jc_core::registry::validate_yaml("App", &yaml),
         Some(Err(_))
     ));
+}
+
+/// A plain-HTML application: `static` with `build: {}`, published from its own repository.
+const PLAIN_HTML: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: helsinki-events
+  namespace: helsinki
+  title: { en: "Events", fi: "Tapahtumat" }
+spec:
+  kind: static
+  source:
+    git:
+      url: https://forge.example/joinedcontext/helsinki_events.git
+      ref: 0123456789abcdef0123456789abcdef01234567
+  build: {}
+  visibility: organization
+  lifecycle: published
+  dataNeeds:
+    - contextSpaceRef: { kind: ContextSpace, name: helsinki }
+      types: [Event]
+      operations: [queryEntity, retrieveEntity]
+"#;
+
+/// AP-83: `build: {}` on a static App is no build step, and the manifest round-trips and passes
+/// the registry `jcctl validate` calls.
+#[test]
+fn a_static_app_with_an_empty_build_is_a_plain_html_app_ap83() {
+    let app = App::from_yaml(PLAIN_HTML).expect("parses");
+    app.validate()
+        .expect("no build step is valid on a static app");
+    assert!(app.spec.build.0.is_empty());
+
+    let yaml = app.to_yaml().expect("serializes");
+    assert_eq!(App::from_yaml(&yaml).expect("round-trips"), app);
+    assert!(
+        matches!(
+            jc_core::registry::validate_yaml("App", PLAIN_HTML),
+            Some(Ok(_))
+        ),
+        "what jcctl validate says of the example"
+    );
+}
+
+/// AP-83, AP-11: only a static App may skip the build, and a static App is never built by rust.
+#[test]
+fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
+    for class in ["service", "fullstack"] {
+        let yaml = PLAIN_HTML.replace("  kind: static", &format!("  kind: {class}"));
+        let app = App::from_yaml(&yaml).expect("parses");
+        match app.validate().expect_err("a backend needs a toolchain") {
+            Error::Name { field, .. } => assert_eq!(field, "build", "{class}"),
+            other => panic!("{class}: unexpected error {other:?}"),
+        }
+    }
+
+    let rust = PLAIN_HTML.replace("  build: {}", r#"  build: { rust: "1.90", node: "22" }"#);
+    let app = App::from_yaml(&rust).expect("parses");
+    match app
+        .validate()
+        .expect_err("a static bundle is not compiled from Rust")
+    {
+        Error::Name {
+            field,
+            value,
+            reason,
+        } => {
+            assert_eq!((field, value.as_str()), ("build", "rust"));
+            assert!(reason.contains("fullstack"), "{reason}");
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+
+    let node = PLAIN_HTML.replace("  build: {}", r#"  build: { node: "22" }"#);
+    App::from_yaml(&node)
+        .expect("parses")
+        .validate()
+        .expect("a Vite build stays valid");
 }

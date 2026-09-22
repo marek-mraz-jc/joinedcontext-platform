@@ -119,7 +119,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Toolchain versions CI builds with (AP-11).",
+          "description": "Toolchain versions the build lane builds with; `{}` on a static app is no build step (AP-11, AP-83).",
           "type": "object"
         },
         "csp": {
