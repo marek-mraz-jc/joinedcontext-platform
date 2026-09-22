@@ -70,6 +70,13 @@ pub async fn handler(
                 .with_detail("file path outside assigned application directory")
                 .into_response();
         }
+        // A workflow is the Portal's, never a run's: a run that wrote one could rewrite what the
+        // forge runs and reach the lane's secret before anybody reviewed it (AP-100, ADR-N-028).
+        if file_path.split('/').any(|segment| segment == ".gitea") {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail("a run never writes under .gitea/: the build is the Portal's (AP-100)")
+                .into_response();
+        }
         if CONTENT_WRITES.contains(&method) {
             let mut map = match object_body(&body_bytes) {
                 Ok(map) => map,
