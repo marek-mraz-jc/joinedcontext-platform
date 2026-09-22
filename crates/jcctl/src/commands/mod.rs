@@ -4,6 +4,7 @@ pub mod apply;
 pub mod artifacts;
 pub mod drift;
 pub mod export;
+pub mod git_bundle;
 pub mod import;
 pub mod migrate;
 pub mod plan;

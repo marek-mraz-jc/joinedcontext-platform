@@ -426,6 +426,7 @@ fn index_of(project: &str, revision: &str, exported_by: &str, bundle: &Bundle) -
         files,
         readme: None,
         schemas: None,
+        repositories: Vec::new(),
     };
     serde_json::json!({
         "apiVersion": jc_core::API_VERSION,

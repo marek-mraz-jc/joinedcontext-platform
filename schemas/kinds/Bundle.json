@@ -82,6 +82,65 @@
       ],
       "type": "object"
     },
+    "BundleRepository": {
+      "additionalProperties": false,
+      "description": "One repository of a git-native export (MF-45).",
+      "properties": {
+        "file": {
+          "description": "The `git bundle` file, relative to the index.",
+          "type": "string"
+        },
+        "head": {
+          "description": "The commit the repository's default branch ends at, 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The repository's name, and the name it is created under at the target.",
+          "type": "string"
+        },
+        "role": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BundleRole"
+            }
+          ],
+          "description": "What the repository is."
+        }
+      },
+      "required": [
+        "file",
+        "head",
+        "name",
+        "role"
+      ],
+      "type": "object"
+    },
+    "BundleRole": {
+      "description": "What a repository of a git-native export is (MF-45, PF-85).",
+      "oneOf": [
+        {
+          "description": "An organization repository.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A project repository.",
+          "enum": [
+            "project"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The repository of one application (AP-72).",
+          "enum": [
+            "application"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "BundleSchemas": {
       "additionalProperties": false,
       "description": "The schemas of a complete export: one per kind in the bundle, and the LinkML source and JSON Schema of every `DataModel` it holds (MF-41).",
@@ -146,6 +205,13 @@
             "string",
             "null"
           ]
+        },
+        "repositories": {
+          "description": "The git bundles of a git-native export, one per repository (MF-45): the project's and one per application of it. An import verifies each by its head commit (MF-46).",
+          "items": {
+            "$ref": "#/definitions/BundleRepository"
+          },
+          "type": "array"
         },
         "schemas": {
           "anyOf": [
