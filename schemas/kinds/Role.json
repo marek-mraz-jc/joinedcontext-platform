@@ -75,7 +75,7 @@
     },
     "Constraint": {
       "additionalProperties": false,
-      "description": "A constraint on one spec field; exactly one of `in`, `notIn`, `equals` is given.",
+      "description": "A constraint on one spec field; exactly one of `in`, `notIn`, `equals` is given.\n\nThe one exception is [`BUILD_FIELD`] with no operator, on a rule of `App` with `propose` alone: it names the rule as the writer of that field, and a rule carrying it authorizes nothing else (AP-73).",
       "properties": {
         "equals": {
           "description": "The value must equal this.",
