@@ -48,6 +48,7 @@ fn run_with(ticket_hash: String) -> RunContext {
         allows_write: false,
         branch: format!("agent/app-assistant/{RUN}"),
         path_prefix: "projects/helsinki/apps/assistant/".to_owned(),
+        repository: None,
         status: "building".to_owned(),
         ticket_hash,
         max_tokens: 1_000,

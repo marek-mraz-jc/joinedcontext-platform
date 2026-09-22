@@ -40,6 +40,7 @@ pub fn sample_run(allows_write: bool) -> RunContext {
         allows_write,
         branch: format!("agent/app-bikes/{RUN_ID}"),
         path_prefix: "projects/helsinki/apps/bikes/".to_owned(),
+        repository: None,
         status: "building".to_owned(),
         ticket_hash: ticket_hash(TICKET),
         max_tokens: 1000,
