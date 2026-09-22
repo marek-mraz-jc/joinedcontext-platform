@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,6 +28,7 @@ fn main() -> ExitCode {
             )),
             None => usage(),
         },
+        ["migrate", "--repo-dir", dir, "--out-dir", out] => migrate(Path::new(dir), Path::new(out)),
         ["validate", "--project", dir, rest @ ..] => match project_options(rest) {
             Some((slug, org_domain, values)) => validate(jcctl::commands::validate::run_project(
                 Path::new(dir),
@@ -379,6 +380,26 @@ fn project_options(args: &[&str]) -> Option<ProjectOptions> {
         rest = tail;
     }
     rest.is_empty().then_some((slug, org_domain, values))
+}
+
+/// Layout 1 to layout 2 (CC-85): prints each repository it wrote and the commit it ends at.
+fn migrate(dir: &Path, out: &Path) -> ExitCode {
+    match jcctl::commands::migrate::run(dir, out) {
+        Ok(migration) => {
+            println!(
+                "organization repository: {}",
+                migration.organization.display()
+            );
+            for (slug, path, head) in &migration.projects {
+                println!("project {slug}: {} at {head}", path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn validate(report: jcctl::commands::validate::Report) -> ExitCode {

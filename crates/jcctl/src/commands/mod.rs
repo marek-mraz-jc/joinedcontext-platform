@@ -5,6 +5,7 @@ pub mod artifacts;
 pub mod drift;
 pub mod export;
 pub mod import;
+pub mod migrate;
 pub mod plan;
 pub mod publish_ckan;
 pub mod seed;
