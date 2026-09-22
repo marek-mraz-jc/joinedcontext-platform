@@ -451,7 +451,7 @@ fn an_image_or_module_annotation_on_an_app_is_refused() {
     }
 }
 
-/// AP-80: a published static App names its repository. One naming a folder of the configuration
+/// AP-87: a published static App names its repository. One naming a folder of the configuration
 /// repository is refused with the field and the way out; the same App with `source.git`, the
 /// bundle the Portal image ships, and every other lifecycle or class are accepted.
 #[test]
@@ -466,7 +466,7 @@ fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ship
         Error::Name { field, reason, .. } => {
             assert_eq!(field, "spec.source");
             assert!(
-                reason.contains("retire") && reason.contains("AP-80"),
+                reason.contains("retire") && reason.contains("AP-87"),
                 "{reason}"
             );
         }
@@ -507,7 +507,7 @@ fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ship
     fullstack.spec.class = AppClass::Fullstack;
     assert!(
         fullstack.validate().is_ok(),
-        "the lane of AP-80 is the static one"
+        "the lane of AP-87 is the static one"
     );
     // `jcctl validate` and the Portal's write doors reach the rule by the kind's name.
     let yaml = app.to_yaml().expect("the manifest serializes");

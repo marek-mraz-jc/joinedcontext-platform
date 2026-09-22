@@ -464,7 +464,7 @@ impl Kind for AppSpec {
         // The build lane builds a repository at a commit and nothing else, so a published
         // static App naming a folder of the configuration repository is an App it cannot build,
         // and it answers 404 to its whole audience. Only a bundle the Portal image ships is
-        // served without the lane (AP-80); the Portal checks that it holds that bundle.
+        // served without the lane (AP-87); the Portal checks that it holds that bundle.
         if self.class == AppClass::Static
             && self.lifecycle == AppLifecycle::Published
             && self.source.git.is_none()
@@ -479,14 +479,14 @@ impl Kind for AppSpec {
                 value: "path".to_owned(),
                 reason: "a published static App names spec.source.git: the build lane builds a \
                          repository at a commit, not a folder of the configuration repository; \
-                         retire the App, or publish it again from its own repository (AP-80)",
+                         retire the App, or publish it again from its own repository (AP-87)",
             });
         }
         self.validate()
     }
 }
 
-/// Marks an App whose bundle the Portal image ships, served without the build lane (AP-80).
+/// Marks an App whose bundle the Portal image ships, served without the build lane (AP-87).
 pub const SHIPPED_WITH_ANNOTATION: &str = "joinedcontext.com/shipped-with";
 /// The one value [`SHIPPED_WITH_ANNOTATION`] takes.
 pub const SHIPPED_WITH_PORTAL: &str = "portal";
