@@ -324,3 +324,60 @@ fn a_hidden_attribute_the_gateway_always_serves_is_refused() {
             .unwrap_or_else(|error| panic!("`{name}` is an ordinary attribute: {error}"));
     }
 }
+
+/// AP-96, AP-97: an Endpoint's caller role and named roles parse, validate, round-trip, and
+/// name the roles the reconciler's Policies use; absent, they are not written at all.
+#[test]
+fn an_endpoint_with_a_caller_role_and_named_roles_parses_validates_and_names_them() {
+    let text = GOLDEN.replace(
+        "  audience: public\n",
+        "  audience: public\n  callerRole: true\n  roles:\n    - name: editor\n      subjects: [{ user: jana@hel.fi }, { group: alert-editors }]\n",
+    );
+    let endpoint = Endpoint::from_yaml(&text).expect("the roles parse");
+    endpoint.validate().expect("the roles validate");
+    assert!(endpoint.spec.caller_role);
+    assert_eq!(
+        endpoint.spec.roles[0].subjects[1].group.as_deref(),
+        Some("alert-editors")
+    );
+    assert_eq!(
+        endpoint,
+        Endpoint::from_yaml(&endpoint.to_yaml().expect("serialize")).expect("re-import")
+    );
+
+    let plain = Endpoint::from_yaml(GOLDEN).expect("golden");
+    assert!(!plain.spec.caller_role && plain.spec.roles.is_empty());
+    let written = plain.to_yaml().expect("serialize");
+    assert!(
+        !written.contains("callerRole") && !written.contains("roles:"),
+        "{written}"
+    );
+
+    assert_eq!(
+        jc_core::kinds::endpoint_role("helsinki", "app-alerts", None),
+        "endpoint:helsinki/app-alerts"
+    );
+    assert_eq!(
+        jc_core::kinds::endpoint_role("helsinki", "app-alerts", Some("editor")),
+        "endpoint:helsinki/app-alerts/editor"
+    );
+    assert!(jc_core::kinds::endpoint_role("a", "b", None)
+        .starts_with(jc_core::kinds::ENDPOINT_ROLE_PREFIX));
+}
+
+/// AP-96: an Endpoint role follows the App role rules: a slug, declared once, and members that
+/// are one lower-case address or one group each.
+#[test]
+fn an_endpoint_role_with_a_bad_name_a_twin_or_a_bad_member_is_refused() {
+    for roles in [
+        "    - name: Editor\n      subjects: [{ user: jana@hel.fi }]\n",
+        "    - name: editor\n      subjects: [{ user: jana@hel.fi }]\n    - name: editor\n      subjects: [{ group: x }]\n",
+        "    - name: editor\n      subjects: []\n",
+        "    - name: editor\n      subjects: [{ user: JANA@hel.fi }]\n",
+        "    - name: editor\n      subjects: [{ user: jana@hel.fi, group: x }]\n",
+    ] {
+        let text = GOLDEN.replace("  audience: public\n", &format!("  audience: public\n  roles:\n{roles}"));
+        let endpoint = Endpoint::from_yaml(&text).expect("the shape parses");
+        assert!(endpoint.validate().is_err(), "{roles}");
+    }
+}

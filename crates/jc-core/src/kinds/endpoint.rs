@@ -287,6 +287,39 @@ pub struct EndpointSpec {
     /// model has no source entity to reconstruct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_mapping_ref: Option<TypedRef>,
+    /// Every caller this Endpoint admits holds the role [`endpoint_role`] names for it, on
+    /// requests through this Endpoint alone (AP-96, AP-97). The App reconciler sets it, so an
+    /// App's grants never reach another surface of the space.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub caller_role: bool,
+    /// Roles a caller this Endpoint admits holds when a subject matches them, on requests
+    /// through it alone (AP-96, AP-97).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<EndpointRole>,
+}
+
+/// One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EndpointRole {
+    /// The role's name, `[a-z][a-z0-9-]{0,31}`; the caller holds [`endpoint_role`] of it.
+    pub name: String,
+    /// Who holds it: `user` by e-mail, `group` by name, never a wildcard.
+    pub subjects: Vec<crate::kinds::role::Subject>,
+}
+
+/// What every role an Endpoint gives starts with. The gateway drops a role of this prefix that
+/// a token or an account asserts, so nothing outside the Endpoint can hold one (AP-97).
+pub const ENDPOINT_ROLE_PREFIX: &str = "endpoint:";
+
+/// The role a caller holds on the Endpoint `endpoint` of `project`: its caller role for `None`,
+/// the named role for `Some` (AP-96, AP-97). The reconciler assigns Policies to these names and
+/// the gateway gives them, so both read this one function.
+pub fn endpoint_role(project: &str, endpoint: &str, role: Option<&str>) -> String {
+    match role {
+        None => format!("{ENDPOINT_ROLE_PREFIX}{project}/{endpoint}"),
+        Some(role) => format!("{ENDPOINT_ROLE_PREFIX}{project}/{endpoint}/{role}"),
+    }
 }
 
 impl Kind for EndpointSpec {
@@ -418,6 +451,19 @@ impl EndpointSpec {
                     got: policy.entity_type().to_string(),
                 });
             }
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for role in &self.roles {
+            crate::kinds::app::validate_role_name("roles[].name", &role.name)?;
+            if !seen.insert(role.name.as_str()) {
+                return Err(Error::Name {
+                    field: "roles[].name",
+                    value: role.name.clone(),
+                    reason: "a role is declared once (AP-96)",
+                });
+            }
+            crate::kinds::app::validate_subjects("roles[].subjects", &role.subjects)?;
         }
 
         Ok(())

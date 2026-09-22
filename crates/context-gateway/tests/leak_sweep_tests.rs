@@ -162,6 +162,7 @@ fn endpoint() -> Endpoint {
         json!({ "type": "object", "properties": p })
     };
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),
         description: Default::default(),
@@ -811,6 +812,7 @@ async fn no_surface_of_the_space_leaks() {
         let published = endpoint();
         let space = context_gateway::resolver::Space {
             endpoint: Arc::new(Endpoint {
+                roles: Default::default(),
                 slug: "fleet".to_owned(),
                 base_path: "/cs/fleet".to_owned(),
                 ..published

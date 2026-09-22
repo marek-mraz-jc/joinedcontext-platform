@@ -80,6 +80,7 @@ fn air_quality() -> Model {
 /// fixture this file needs: a record only advertises what the manifest enabled.
 fn endpoint(slug: &str, space: &str, representations: Vec<Representation>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: slug.to_owned(),
         title: Default::default(),
         description: Default::default(),
@@ -116,6 +117,7 @@ fn every_representation() -> Vec<Representation> {
 fn space(name: &str, representations: Vec<Representation>) -> Space {
     Space {
         endpoint: Arc::new(Endpoint {
+            roles: Default::default(),
             base_path: format!("/cs/{name}"),
             ..endpoint(name, name, representations)
         }),
@@ -453,6 +455,7 @@ async fn file_json_is_not_served_by_an_endpoint_that_does_not_enable_it() {
 async fn a_json_download_past_the_endpoints_byte_limit_is_refused_whole() {
     let broker = BrokerStub::start(vec![json!([station()]), json!([])]).await;
     let limited = Endpoint {
+        roles: Default::default(),
         file_limits: Some(
             serde_norway::from_str("maxFileBytes: 32").expect("the file limits parse"),
         ),

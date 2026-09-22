@@ -127,6 +127,7 @@ fn policy_granting(names: &str) -> PolicySpec {
 
 fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -156,6 +157,7 @@ fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
 /// The same endpoint under a grant whose whitelist is the whole of the narrowing.
 fn endpoint_granting(names: &str) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         policies: vec![policy_granting(names)],
         ..endpoint(false, &[])
     }
@@ -746,6 +748,7 @@ async fn a_tool_result_carries_the_same_warning() {
     let (upstream, _) = broker().await;
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([Endpoint {
+            roles: Default::default(),
             representations: vec![Representation::NgsiLd, Representation::Mcp],
             ..endpoint(true, &[])
         }]),

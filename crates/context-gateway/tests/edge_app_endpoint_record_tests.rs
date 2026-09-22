@@ -79,6 +79,7 @@ fn air_quality() -> Model {
 
 fn endpoint(slug: &str, audience: Audience) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: slug.to_owned(),
         title: Default::default(),
         description: Default::default(),
@@ -121,6 +122,7 @@ fn markup_titled() -> Endpoint {
         "</p><a href=\"javascript:alert(3)\">x</a>".to_owned(),
     );
     Endpoint {
+        roles: Default::default(),
         title,
         description,
         ..endpoint(MARKUP, Audience::Public)

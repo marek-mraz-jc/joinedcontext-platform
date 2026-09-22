@@ -1,0 +1,28 @@
+# An App with two roles and a role-gated write (ADR-N-027, AP-90…AP-99): the viewers of the
+# helsinki operations group read the alerts, and only the editors may write the steward's note.
+apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: alerts
+  namespace: helsinki
+  title: { en: "Alerts", sk: "Upozornenia" }
+spec:
+  kind: static
+  source: { git: { url: "https://git.example.org/helsinki/helsinki_alerts.git", ref: "3f2c9a1b7d4e5f60718293a4b5c6d7e8f9012345" } }
+  build: { node: "22" }
+  visibility: roles
+  roles:
+    - { name: viewer, title: { en: "Viewer", sk: "Čitateľ" }, description: "Reads the alerts" }
+    - { name: editor, title: { en: "Editor" }, description: "Writes the steward's note" }
+  access:
+    - { role: viewer, subjects: [{ group: helsinki-operations }] }
+    - { role: editor, subjects: [{ user: jana.kovacova@hel.fi }, { group: alert-editors }] }
+  dataNeeds:
+    - contextSpaceRef: { kind: ContextSpace, name: helsinki }
+      types: [Alert]
+      operations: [queryEntity, retrieveEntity]
+    - contextSpaceRef: { kind: ContextSpace, name: helsinki }
+      types: [Alert]
+      attrs: [stewardNote]
+      operations: [updateAttrs]
+      roles: [editor]

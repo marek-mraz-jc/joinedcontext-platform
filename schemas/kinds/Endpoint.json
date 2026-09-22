@@ -211,6 +211,28 @@
         }
       ]
     },
+    "EndpointRole": {
+      "additionalProperties": false,
+      "description": "One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).",
+      "properties": {
+        "name": {
+          "description": "The role's name, `[a-z][a-z0-9-]{0,31}`; the caller holds [`endpoint_role`] of it.",
+          "type": "string"
+        },
+        "subjects": {
+          "description": "Who holds it: `user` by e-mail, `group` by name, never a wildcard.",
+          "items": {
+            "$ref": "#/definitions/Subject"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "subjects"
+      ],
+      "type": "object"
+    },
     "EndpointSlug": {
       "description": "Cryptographically random endpoint slug with at least 128 bits of entropy (lowercase RFC 4648 base32 without padding, >=26 chars, EP-02)",
       "pattern": "^[a-z2-7]{26,}$",
@@ -245,6 +267,10 @@
             }
           ],
           "description": "Optional response caching configuration."
+        },
+        "callerRole": {
+          "description": "Every caller this Endpoint admits holds the role [`endpoint_role`] names for it, on requests through this Endpoint alone (AP-96, AP-97). The App reconciler sets it, so an App's grants never reach another surface of the space.",
+          "type": "boolean"
         },
         "contextSpaceRef": {
           "allOf": [
@@ -326,6 +352,13 @@
             }
           ],
           "description": "Optional rate limiting configuration (EP-20)."
+        },
+        "roles": {
+          "description": "Roles a caller this Endpoint admits holds when a subject matches them, on requests through it alone (AP-96, AP-97).",
+          "items": {
+            "$ref": "#/definitions/EndpointRole"
+          },
+          "type": "array"
         },
         "slug": {
           "allOf": [
@@ -676,6 +709,27 @@
             }
           ],
           "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    },
+    "Subject": {
+      "additionalProperties": false,
+      "description": "One human or group a binding names; exactly one of `user`, `group` (PF-49).",
+      "properties": {
+        "group": {
+          "description": "A group of the identity provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "The user's identifier in the identity provider (username or e-mail).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"

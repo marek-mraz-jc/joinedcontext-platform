@@ -112,6 +112,7 @@ fn endpoint() -> Endpoint {
     let parsed = ResourceEnvelope::<ModelProjectionSpec>::from_yaml(VIEW).expect("parses");
     parsed.validate().expect("valid");
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

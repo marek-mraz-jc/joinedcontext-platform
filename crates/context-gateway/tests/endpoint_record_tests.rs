@@ -63,6 +63,7 @@ fn air_quality() -> Model {
 /// The demo endpoint: three representations, one model, the public grant of DEMO step 4.
 fn endpoint(audience: Audience) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

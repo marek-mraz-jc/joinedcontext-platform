@@ -198,6 +198,7 @@ fn policy() -> PolicySpec {
 
 fn endpoint() -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -237,6 +238,7 @@ fn whole_space_endpoint() -> Endpoint {
     ))
     .expect("the policy spec parses");
     Endpoint {
+        roles: Default::default(),
         projection: None,
         policies: vec![policy],
         ..endpoint()
@@ -257,6 +259,7 @@ fn stranger_endpoint() -> Endpoint {
     ))
     .expect("the policy spec parses");
     Endpoint {
+        roles: Default::default(),
         projection: None,
         hidden_attributes: Default::default(),
         policies: vec![policy],

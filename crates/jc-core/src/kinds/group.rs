@@ -79,7 +79,7 @@ impl GroupSpec {
 
 /// `local@domain.tld`, checked no further: the identity provider owns what an address is, and a
 /// rule of our own would refuse addresses Keycloak accepts.
-fn is_address(value: &str) -> bool {
+pub(crate) fn is_address(value: &str) -> bool {
     let Some((local, domain)) = value.split_once('@') else {
         return false;
     };

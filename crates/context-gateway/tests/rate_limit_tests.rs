@@ -23,6 +23,7 @@ fn limits(per_minute: u32, burst: Option<u32>) -> RateLimits {
 
 fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -300,6 +301,7 @@ information:
     .expect("the policy spec parses");
     let space = Space {
         endpoint: Arc::new(Endpoint {
+            roles: Default::default(),
             space: SPACE.to_owned(),
             slug: SPACE.to_owned(),
             project: SPACE.to_owned(),

@@ -682,3 +682,144 @@ mod federation_topology {
         }
     }
 }
+
+// --- T-2591: the roles of an App (AP-91, AP-98, PF-64) ---
+
+const ROLES_APP_PATH: &str = "projects/ovzdusie/apps/alerts/app.yaml";
+
+/// An App of ovzdusie whose editors are `members` and whose note write is gated by `gate`.
+fn roles_app(members: &str, gate: &str) -> String {
+    format!(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: alerts
+  namespace: ovzdusie
+spec:
+  kind: static
+  source: {{ path: ./src }}
+  build: {{ node: "22" }}
+  visibility: roles
+  roles:
+    - {{ name: editor, description: "Writes the note" }}
+  access:
+    - {{ role: editor, subjects: [{members}] }}
+  dataNeeds:
+    - contextSpaceRef: {{ kind: ContextSpace, name: ovzdusie }}
+      types: [Alert]
+      operations: [queryEntity, updateAttrs]
+{gate}"#
+    )
+}
+
+fn messages(findings: &[validate::Finding]) -> Vec<&str> {
+    findings.iter().map(|f| f.message.as_str()).collect()
+}
+
+/// AP-91, PF-64: an App role's group names a Group manifest, as a binding's does; a declared
+/// group and an address of the organization pass.
+#[test]
+fn an_app_role_naming_an_undeclared_group_is_refused_and_a_declared_one_is_not() {
+    let dir = valid_repo("app-role-groups");
+    let gate = "      roles: [editor]\n";
+    write(
+        &dir,
+        ROLES_APP_PATH,
+        &roles_app(
+            "{ group: air-quality-team }, { user: jana@banskabystrica.sk }",
+            gate,
+        ),
+    );
+    let report = validate::run(&dir);
+    assert_eq!(
+        report.findings,
+        vec![],
+        "a declared group and an address of the organization"
+    );
+
+    write(
+        &dir,
+        ROLES_APP_PATH,
+        &roles_app("{ group: nobody-declared }", gate),
+    );
+    let report = validate::run(&dir);
+    let found = messages(&report.findings);
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("group `nobody-declared`") && m.contains("PF-64")),
+        "{found:?}"
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.path.ends_with(ROLES_APP_PATH)),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AP-91, PF-41: a role member outside the organization's domain is refused; a subdomain of it
+/// is the organization's.
+#[test]
+fn an_app_role_member_outside_the_organizations_domain_is_refused() {
+    let dir = valid_repo("app-role-domain");
+    let gate = "      roles: [editor]\n";
+    for (member, outside) in [
+        ("jana@mesto.banskabystrica.sk", false),
+        ("jana@example.org", true),
+        ("jana@banskabystrica.sk.evil.org", true),
+        ("jana@notbanskabystrica.sk", true),
+    ] {
+        write(
+            &dir,
+            ROLES_APP_PATH,
+            &roles_app(&format!("{{ user: {member} }}"), gate),
+        );
+        let report = validate::run(&dir);
+        let found = messages(&report.findings);
+        let said = found
+            .iter()
+            .any(|m| m.contains(member) && m.contains("AP-91"));
+        assert_eq!(said, outside, "{member}: {found:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AP-98: a write every person who can open the app may make is valid and is said as a warning,
+/// naming the app, the operation and the type; gating it by a role silences it.
+#[test]
+fn a_write_open_to_everyone_is_a_warning_and_a_role_gated_one_is_not() {
+    let dir = valid_repo("app-role-writes");
+    write(
+        &dir,
+        ROLES_APP_PATH,
+        &roles_app("{ group: air-quality-team }", ""),
+    );
+    let report = validate::run(&dir);
+    assert_eq!(report.findings, vec![]);
+    let warned = messages(&report.warnings);
+    assert!(
+        warned.iter().any(
+            |m| m.contains("everyone who can open alerts can updateAttrs Alert")
+                && m.contains("AP-98")
+        ),
+        "{warned:?}"
+    );
+
+    write(
+        &dir,
+        ROLES_APP_PATH,
+        &roles_app("{ group: air-quality-team }", "      roles: [editor]\n"),
+    );
+    let report = validate::run(&dir);
+    assert!(
+        !messages(&report.warnings)
+            .iter()
+            .any(|m| m.contains("AP-98")),
+        "{:?}",
+        report.warnings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
