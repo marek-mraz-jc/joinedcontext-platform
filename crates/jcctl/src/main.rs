@@ -10,17 +10,33 @@ use jcctl::commands;
 use jcctl::loader::Repository;
 use jcctl::model;
 use jcctl::platform::InMemory;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path>\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
     match words.as_slice() {
-        ["validate", "--repo-dir", dir] => validate(Path::new(dir)),
+        ["validate", "--repo-dir", dir, rest @ ..] => match project_dirs(rest) {
+            Some(dirs) => validate(jcctl::commands::validate::run_assembled(
+                Path::new(dir),
+                &jcctl::assemble::Directories(dirs),
+            )),
+            None => usage(),
+        },
+        ["validate", "--project", dir, rest @ ..] => match project_options(rest) {
+            Some((slug, org_domain, values)) => validate(jcctl::commands::validate::run_project(
+                Path::new(dir),
+                slug.as_deref(),
+                &org_domain,
+                &values,
+            )),
+            None => usage(),
+        },
         ["plan", "--repo-dir", dir, rest @ ..] => match plan_options(rest) {
             Some((live, as_json)) => plan(Path::new(dir), live, as_json),
             None => usage(),
@@ -330,8 +346,42 @@ fn usage() -> ExitCode {
 ///
 /// Exit code 1 covers both an invalid manifest and an unreadable repository: API/03
 /// section 3 gives `validate` no separate code for a bad manifest.
-fn validate(dir: &Path) -> ExitCode {
-    let report = jcctl::commands::validate::run(dir);
+/// `--project-dir slug=path`, any number of times: the checkout of each registered project of
+/// a layout 2 organization (CC-86).
+fn project_dirs(args: &[&str]) -> Option<BTreeMap<String, PathBuf>> {
+    let mut dirs = BTreeMap::new();
+    let mut rest = args;
+    while let ["--project-dir", pair, tail @ ..] = rest {
+        let (slug, dir) = pair.split_once('=')?;
+        dirs.insert(slug.to_owned(), PathBuf::from(dir));
+        rest = tail;
+    }
+    rest.is_empty().then_some(dirs)
+}
+
+/// `--slug`, `--org-domain` and `--param name=value` of `validate --project`, in any order. A
+/// value is read as YAML, so `12` is a number and `true` a boolean (CC-88).
+type ProjectOptions = (Option<String>, String, BTreeMap<String, serde_json::Value>);
+
+fn project_options(args: &[&str]) -> Option<ProjectOptions> {
+    let (mut slug, mut org_domain, mut values) = (None, "example.org".to_owned(), BTreeMap::new());
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--slug" => slug = Some((*value).to_owned()),
+            "--org-domain" => org_domain = (*value).to_owned(),
+            "--param" => {
+                let (name, raw) = value.split_once('=')?;
+                values.insert(name.to_owned(), serde_norway::from_str(raw).ok()?);
+            }
+            _ => return None,
+        }
+        rest = tail;
+    }
+    rest.is_empty().then_some((slug, org_domain, values))
+}
+
+fn validate(report: jcctl::commands::validate::Report) -> ExitCode {
     for finding in &report.findings {
         eprintln!("{finding}");
     }

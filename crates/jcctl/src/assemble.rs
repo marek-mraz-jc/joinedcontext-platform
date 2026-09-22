@@ -350,9 +350,16 @@ fn render_manifests(
         }
         let mut manifest: serde_json::Value = serde_norway::from_str(&chunk.content)
             .map_err(|err| refused(at(chunk.document_index), err))?;
+        // The project's own file is where the defaults are written out, so it is not a literal.
+        let literals =
+            if manifest.get("kind").and_then(serde_json::Value::as_str) == Some("Project") {
+                Vec::new()
+            } else {
+                parameters.literals(&manifest)
+            };
         for LiteralParameter {
             path, placeholder, ..
-        } in parameters.literals(&manifest)
+        } in literals
         {
             findings.push(Finding {
                 slug: slug.to_owned(),
