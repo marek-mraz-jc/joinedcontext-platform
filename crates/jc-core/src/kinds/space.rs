@@ -2,9 +2,12 @@
 
 use crate::envelope::{Kind, ObjectMeta, Ref, Scope};
 use crate::error::{Error, Result};
+use crate::kinds::SemVer;
 use crate::names;
+use crate::project::{Parameter, ProjectRepository};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Desired specification of a [`Project`][crate::kinds::Project] resource (PF-05, PF-17).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -12,9 +15,23 @@ use serde::{Deserialize, Serialize};
 pub struct ProjectSpec {
     /// Reference to the parent Organization.
     pub organization_ref: Ref,
-    /// Optional resource quotas for this Project (PF-17).
+    /// Optional resource quotas for this Project (PF-17); the project file's, never a registry
+    /// entry's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<Quotas>,
+    /// Where the project's configuration lives. Its presence makes this manifest a registry
+    /// entry, `projects/{slug}.yaml` of the organization repository (PF-86).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<ProjectRepository>,
+    /// The tag, branch or commit of `repository` this deployment runs; a registry entry only.
+    #[serde(default, rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// The project's version, released as the tag `v{version}`; the project file only (CC-88).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<SemVer>,
+    /// Declarations in the project file, this deployment's values in a registry entry (CC-88).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, Parameter>,
 }
 
 impl Kind for ProjectSpec {
@@ -44,8 +61,63 @@ impl ProjectSpec {
         if let Some(ref q) = self.quotas {
             q.validate()?;
         }
-        Ok(())
+        let entry = self.is_registry_entry();
+        let belongs = |field: &str, place: &str| Error::Invalid {
+            field: field.to_owned(),
+            reason: format!("belongs to {place}"),
+        };
+        match (&self.repository, &self.git_ref) {
+            (Some(repository), Some(git_ref)) => {
+                repository.validate()?;
+                validate_git_ref(git_ref)?;
+            }
+            (Some(_), None) => {
+                return Err(Error::Invalid {
+                    field: "spec.ref".to_owned(),
+                    reason: "a registry entry pins the tag, branch or commit it runs".to_owned(),
+                })
+            }
+            (None, Some(_)) => {
+                return Err(belongs(
+                    "spec.ref",
+                    "a registry entry, beside spec.repository",
+                ))
+            }
+            (None, None) => {}
+        }
+        if entry && self.version.is_some() {
+            return Err(belongs("spec.version", "the project's own project.yaml"));
+        }
+        if entry && self.quotas.is_some() {
+            return Err(belongs("spec.quotas", "the project's own project.yaml"));
+        }
+        crate::project::validate_parameters(&self.parameters, entry)
     }
+
+    /// Whether this is a registry entry of the organization repository rather than the project
+    /// file of a project repository (PF-86).
+    pub fn is_registry_entry(&self) -> bool {
+        self.repository.is_some()
+    }
+}
+
+/// A ref is handed to git: no option, no range, no whitespace (PF-86).
+fn validate_git_ref(git_ref: &str) -> Result<()> {
+    let refused = git_ref.is_empty()
+        || git_ref.len() > 255
+        || git_ref.starts_with('-')
+        || git_ref.starts_with('/')
+        || git_ref.contains("..")
+        || git_ref
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c));
+    if refused {
+        return Err(Error::Invalid {
+            field: "spec.ref".to_owned(),
+            reason: "must be a tag, a branch or a commit as git names them".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Structural resource quotas per project (PF-17).
