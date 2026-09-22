@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
 permissions: { contents: read }
-concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
+# On main a run is never cancelled: merges land minutes apart, and each one used to cancel the
+# run before it, so main went without a finished run. One run finishes, the newest push waits
+# behind it (GitHub keeps one pending run per group). Branches still cancel.
+concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: "${{ github.ref != 'refs/heads/main' }}" }
 jobs:
   rust:
     runs-on: ubuntu-latest
