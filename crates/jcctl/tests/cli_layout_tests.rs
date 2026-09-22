@@ -114,3 +114,36 @@ fn validate_takes_an_organization_or_one_project() {
     assert!(!without.status.success());
     assert!(String::from_utf8_lossy(&without.stderr).contains("audience"));
 }
+
+/// CC-90, PF-88: a project repository carries its CI workflow under `.gitea/`, and the files of
+/// a dot-directory are the forge's, not manifests: the project validates alone and in the
+/// organization, as the loader of layout 1 already skips them.
+#[test]
+fn the_ci_workflow_of_a_project_repository_is_not_a_manifest() {
+    let (org, project) = layout_2("cli-workflow");
+    write(
+        &project,
+        ".gitea/workflows/validate.yml",
+        "name: validate\non:\n  pull_request:\njobs:\n  validate:\n    runs-on: node-22\n    \
+         steps:\n      - run: jcctl validate --project .\n",
+    );
+    let alone = jcctl(&["validate", "--project", &text(&project)]);
+    assert!(
+        alone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alone.stderr)
+    );
+    let pair = format!("ovzdusie={}", text(&project));
+    let organization = jcctl(&[
+        "validate",
+        "--repo-dir",
+        &text(&org),
+        "--project-dir",
+        &pair,
+    ]);
+    assert!(
+        organization.status.success(),
+        "{}",
+        String::from_utf8_lossy(&organization.stderr)
+    );
+}

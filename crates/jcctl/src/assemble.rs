@@ -311,6 +311,14 @@ fn mount_project(
         }
         let path = item.path();
         let rel = path.strip_prefix(target).unwrap_or(path).to_path_buf();
+        // A dot-directory holds the forge's files (`.gitea/workflows/`, CC-90) and `.jc/`,
+        // never a manifest: copied as they are, as the loader skips them (CC-08).
+        if rel.parent().is_some_and(|dir| {
+            dir.components()
+                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+        }) {
+            continue;
+        }
         let name = item.file_name().to_string_lossy();
         let text = std::fs::read_to_string(path).map_err(io(path))?;
         if name == "bento.yaml" || name.ends_with(".blobl") {
