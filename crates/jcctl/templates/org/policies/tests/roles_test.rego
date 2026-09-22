@@ -144,3 +144,17 @@ test_org_admin_approves_both if {
 		with data.roles as publishing_roles
 		with data.bindings as publishing_bindings
 }
+
+# AP-73, T-2636: the build lane's rule writes status.build through the Portal alone; its
+# operator-less constraint holds for no merge request, so it grants no App change here.
+build_lane_roles := {"build-lane": {"rules": [{"kinds": ["App"], "verbs": ["propose"], "constraints": [{"field": "status.build"}]}]}}
+
+build_lane_bindings := [{"name": "build-lane", "subjects": [{"user": "service-account-jc-build-lane"}], "role": "build-lane", "scope": {"organization": "banskabystrica"}}]
+
+app_change := {"path": "projects/ovzdusie/apps/air/app.yaml", "action": "propose", "kind": "App", "name": "air", "project": "ovzdusie", "manifest": {"kind": "App", "spec": {"kind": "static"}, "status": {"build": {"digest": "sha256:0"}}}}
+
+test_the_build_lane_rule_grants_no_app_change if {
+	count(deny) == 1 with input as {"author": "service-account-jc-build-lane", "groups": [], "changes": [app_change]}
+		with data.roles as build_lane_roles
+		with data.bindings as build_lane_bindings
+}

@@ -269,3 +269,56 @@ fn the_registry_knows_where_a_role_lives_in_either_place() {
         "users/assignments/analysts.yaml"
     );
 }
+
+const BUILD_LANE: &str = "\
+apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata: { name: build-lane, namespace: org }
+spec:
+  rules:
+    - kinds: [App]
+      verbs: [propose]
+      constraints:
+        - { field: status.build }
+";
+
+fn build_lane(replace: &str, with: &str) -> Result<Role, Error> {
+    let manifest = Role::from_yaml(&BUILD_LANE.replace(replace, with))
+        .map_err(|e| Error::Parse(e.to_string()))?;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+/// AP-73, T-2636: the build lane's role names `status.build` with no operator, on `propose` of
+/// `App` alone; any other status field, an operator, another kind, verb or constraint is refused.
+#[test]
+fn the_build_lanes_role_writes_status_build_and_nothing_beside_it() {
+    let lane = build_lane("", "").expect("the build lane's role validates");
+    assert!(lane.spec.rules[0].writes_status_only());
+
+    for (replace, with, says) in [
+        ("status.build }", "status.phase }", "status.build"),
+        ("status.build }", "status.build, equals: x }", "carries no"),
+        ("kinds: [App]", "kinds: [App, Pipeline]", "alone"),
+        ("kinds: [App]", "kinds: [Pipeline]", "alone"),
+        ("verbs: [propose]", "verbs: [propose, approve]", "alone"),
+        (
+            "- { field: status.build }",
+            "- { field: status.build }\n        - { field: spec.kind, equals: static }",
+            "alone",
+        ),
+    ] {
+        let err = build_lane(replace, with).expect_err(with);
+        assert!(err.to_string().contains(says), "{with}: {err}");
+    }
+
+    let editor = role("", "").expect("the golden role");
+    assert!(
+        editor
+            .spec
+            .rules
+            .iter()
+            .all(|rule| !rule.writes_status_only()),
+        "a spec constraint is no status writer"
+    );
+}
