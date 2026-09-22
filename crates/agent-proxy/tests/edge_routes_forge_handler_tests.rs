@@ -187,6 +187,49 @@ async fn a_file_outside_the_runs_application_directory_is_refused() {
     );
 }
 
+/// AP-100: a run reads and writes no workflow, wherever it would sit: the build is the Portal's,
+/// so a run cannot rewrite what the forge runs, and nothing of such a request reaches the forge.
+#[tokio::test]
+async fn a_run_never_touches_a_workflow() {
+    let forge = forge_answering(200, "{}").await;
+    for (verb, file) in [
+        ("PUT", format!("{INSIDE}/.gitea/workflows/build.yml")),
+        ("POST", format!("{INSIDE}/.gitea/actions/x.yml")),
+        ("DELETE", format!("{INSIDE}/src/.gitea/workflows/build.yml")),
+        ("PUT", ".gitea/workflows/build.yml".to_owned()),
+    ] {
+        let response = proxy(&forge.uri())
+            .oneshot(
+                authed(verb, &format!("/v1/forge/contents/{file}"))
+                    .body(Body::from(r#"{"content":"eA==","message":"build"}"#))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{verb} {file}");
+    }
+    let nested = proxy(&forge.uri())
+        .oneshot(
+            authed(
+                "PUT",
+                &format!("/v1/forge/contents/{INSIDE}/.gitea/workflows/build.yml"),
+            )
+            .body(Body::from(r#"{"content":"eA==","message":"build"}"#))
+            .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert!(body_of(nested).await.contains("AP-100"));
+    assert!(
+        forge
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "nothing reached the forge"
+    );
+}
+
 /// AG-64: a write inside the run's directory carries the run's branch, the agent as author and
 /// committer, and the person who proposed it — none of which the workspace can set for itself.
 #[tokio::test]
