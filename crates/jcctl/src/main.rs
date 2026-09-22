@@ -14,10 +14,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]...\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]...\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let (args, _render) = match assembled(args) {
+        Ok(assembled) => assembled,
+        Err(code) => return code,
+    };
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
     match words.as_slice() {
@@ -354,6 +358,83 @@ fn usage() -> ExitCode {
 ///
 /// Exit code 1 covers both an invalid manifest and an unreadable repository: API/03
 /// section 3 gives `validate` no separate code for a bad manifest.
+/// A directory removed when the command that rendered into it is done.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `plan`, `apply` and `drift` of a layout 2 organization run on its assembled render (CC-86):
+/// the `--project-dir slug=path` pairs are taken out of the arguments, the organization is
+/// assembled into a scratch directory, and `--repo-dir` names that directory from then on.
+fn assembled(mut args: Vec<String>) -> Result<(Vec<String>, Option<Scratch>), ExitCode> {
+    let reconciles = matches!(
+        args.first().map(String::as_str),
+        Some("plan" | "apply" | "drift")
+    ) && args.get(1).map(String::as_str) == Some("--repo-dir");
+    if !reconciles || args.len() < 3 {
+        return Ok((args, None));
+    }
+    let mut dirs = BTreeMap::new();
+    let mut index = 3;
+    while index < args.len() {
+        if args[index] == "--project-dir" && index + 1 < args.len() {
+            let Some((slug, dir)) = args[index + 1].split_once('=') else {
+                return Err(usage());
+            };
+            dirs.insert(slug.to_owned(), PathBuf::from(dir));
+            args.drain(index..index + 2);
+        } else {
+            index += 1;
+        }
+    }
+    let org = PathBuf::from(&args[2]);
+    let layout =
+        match jcctl::assemble::layout_at(&org, jc_core::project::RepositoryRole::Organization) {
+            Ok(layout) => layout,
+            Err(err) => {
+                eprintln!("{err}");
+                return Err(ExitCode::FAILURE);
+            }
+        };
+    if layout == 1 {
+        return if dirs.is_empty() {
+            Ok((args, None))
+        } else {
+            eprintln!("--project-dir is for a layout 2 organization; this one is layout 1");
+            Err(ExitCode::FAILURE)
+        };
+    }
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("jcctl-render-{}", std::process::id())));
+    let render = scratch.0.join("render");
+    match jcctl::assemble::assemble(&org, &jcctl::assemble::Directories(dirs), &render, None) {
+        Ok(assembly) => {
+            for entry in assembly
+                .entries
+                .iter()
+                .filter(|entry| entry.error.is_some())
+            {
+                eprintln!(
+                    "warning: project {} at {}: {}",
+                    entry.slug,
+                    entry.git_ref,
+                    entry.error.as_deref().unwrap_or_default()
+                );
+            }
+            args[2] = render.to_string_lossy().into_owned();
+            Ok((args, Some(scratch)))
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
 /// `--project-dir slug=path`, any number of times: the checkout of each registered project of
 /// a layout 2 organization (CC-86).
 fn project_dirs(args: &[&str]) -> Option<BTreeMap<String, PathBuf>> {
