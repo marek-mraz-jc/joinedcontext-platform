@@ -16,6 +16,7 @@ pub mod kpi;
 #[cfg(feature = "logs")]
 pub mod logs;
 pub mod names;
+pub mod project;
 pub mod registry;
 pub mod secret;
 pub mod urn;

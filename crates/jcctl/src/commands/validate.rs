@@ -6,6 +6,7 @@
 //! it then runs the cross-field invariants a schema cannot express. Finally each manifest
 //! must sit at the path its kind prescribes (MF-06).
 
+use crate::assemble::{assemble, AssembleError, Assembly, Directories, Resolver};
 use crate::loader::{LoadError, Repository};
 use jc_core::kinds::{DataModelSpec, ModelProjectionSpec};
 use jc_core::registry;
@@ -65,6 +66,185 @@ impl Report {
 /// symlink out of the tree) yields the one finding that stopped the walk: the loader
 /// refuses to build a half-repository it would then validate against itself.
 pub fn run(repo_dir: &Path) -> Report {
+    check(repo_dir, true)
+}
+
+/// Validates an organization of either layout (CC-86): layout 1 where it is, layout 2 as the
+/// render the organization repository and the project checkouts `resolver` names assemble to.
+/// A project that cannot be checked out, a literal where a parameter exists and a mapping
+/// reading an undeclared one are findings like any other (CC-83, CC-88).
+pub fn run_assembled(org_dir: &Path, resolver: &dyn Resolver) -> Report {
+    let into = scratch("validate");
+    let report = match assemble(org_dir, resolver, &into.join("render"), None) {
+        Ok(assembly) if assembly.layout == 1 => run(org_dir),
+        Ok(assembly) => {
+            let mut report = check(&into.join("render"), true);
+            let mut found = assembly_findings(&assembly, |path| path.to_path_buf());
+            found.append(&mut report.findings);
+            report.findings = found;
+            report
+        }
+        Err(err) => refused(err),
+    };
+    let _ = std::fs::remove_dir_all(&into);
+    report
+}
+
+/// Validates one project repository alone, without its organization (CC-90): the checks
+/// every manifest carries by itself, with the parameters at their defaults over `values`, and
+/// none of the checks that read the organization's groups, bindings or domain. `slug` is the
+/// project's name in the render, by default its `project.yaml` name. Findings name paths of
+/// the project repository.
+pub fn run_project(
+    project_dir: &Path,
+    slug: Option<&str>,
+    org_domain: &str,
+    values: &BTreeMap<String, serde_json::Value>,
+) -> Report {
+    let into = scratch("validate-project");
+    let report = match stage_project(project_dir, slug, org_domain, values, &into) {
+        Ok(slug) => {
+            let prefix = PathBuf::from("projects").join(&slug);
+            let resolver = Directories(BTreeMap::from([(slug.clone(), project_dir.to_path_buf())]));
+            match assemble(&into.join("org"), &resolver, &into.join("render"), None) {
+                Ok(assembly) => {
+                    let local =
+                        |path: &Path| path.strip_prefix(&prefix).unwrap_or(path).to_path_buf();
+                    let mut report = check(&into.join("render"), false);
+                    for finding in report.findings.iter_mut().chain(report.warnings.iter_mut()) {
+                        finding.path = local(&finding.path);
+                    }
+                    let mut found = assembly_findings(&assembly, |path| path.to_path_buf());
+                    found.append(&mut report.findings);
+                    report.findings = found;
+                    report
+                }
+                Err(err) => refused(err),
+            }
+        }
+        Err(message) => Report {
+            checked: 0,
+            findings: vec![Finding {
+                path: PathBuf::from(jc_core::project::PROJECT_FILE),
+                document: 1,
+                line: 1,
+                message,
+            }],
+            warnings: Vec::new(),
+        },
+    };
+    let _ = std::fs::remove_dir_all(&into);
+    report
+}
+
+/// The organization `run_project` checks a project in: the Organization its `project.yaml`
+/// names and one registry entry pointing at the project, with `values`. Returns the slug.
+fn stage_project(
+    project_dir: &Path,
+    slug: Option<&str>,
+    org_domain: &str,
+    values: &BTreeMap<String, serde_json::Value>,
+    into: &Path,
+) -> Result<String, String> {
+    let file = project_dir.join(jc_core::project::PROJECT_FILE);
+    let text =
+        std::fs::read_to_string(&file).map_err(|err| format!("{}: {err}", file.display()))?;
+    let own = jc_core::kinds::Project::from_yaml(&text).map_err(|err| err.to_string())?;
+    let slug = match slug {
+        Some(slug) => slug.to_owned(),
+        None if own.metadata.name != jc_core::project::PROJECT_PLACEHOLDER => {
+            own.metadata.name.clone()
+        }
+        None => {
+            return Err(format!(
+                "names itself `{}`; give the slug to check it under with --slug",
+                jc_core::project::PROJECT_PLACEHOLDER
+            ))
+        }
+    };
+    let organization = own.spec.organization_ref.name().to_owned();
+    let org = serde_json::json!({
+        "apiVersion": jc_core::API_VERSION,
+        "kind": "Organization",
+        "metadata": { "name": organization, "namespace": "org" },
+        "spec": { "domain": org_domain, "locales": ["en"], "defaultLocale": "en" },
+    });
+    let entry = serde_json::json!({
+        "apiVersion": jc_core::API_VERSION,
+        "kind": "Project",
+        "metadata": { "name": slug, "namespace": "org" },
+        "spec": {
+            "organizationRef": organization,
+            "repository": { "name": slug },
+            "ref": "HEAD",
+            "parameters": values,
+        },
+    });
+    let write = |rel: &str, body: String| {
+        let path = into.join("org").join(rel);
+        std::fs::create_dir_all(path.parent().expect("a relative path has a parent"))
+            .and_then(|()| std::fs::write(&path, body))
+            .map_err(|err| format!("{}: {err}", path.display()))
+    };
+    let yaml =
+        |value: &serde_json::Value| serde_norway::to_string(value).map_err(|e| e.to_string());
+    write("org.yaml", yaml(&org)?)?;
+    write(jc_core::project::LAYOUT_FILE, "2\n".to_owned())?;
+    write(&format!("projects/{slug}.yaml"), yaml(&entry)?)?;
+    Ok(slug)
+}
+
+fn assembly_findings(assembly: &Assembly, path: impl Fn(&Path) -> PathBuf) -> Vec<Finding> {
+    let unfetched = assembly.entries.iter().filter_map(|entry| {
+        let error = entry.error.as_ref()?;
+        Some(Finding {
+            path: PathBuf::from(format!("projects/{}.yaml", entry.slug)),
+            document: 1,
+            line: 1,
+            message: format!(
+                "the ref `{}` could not be checked out: {error}",
+                entry.git_ref
+            ),
+        })
+    });
+    let found = assembly.findings.iter().map(|finding| Finding {
+        path: path(&finding.path),
+        document: 1,
+        line: 1,
+        message: format!("project `{}`: {}", finding.slug, finding.message),
+    });
+    unfetched.chain(found).collect()
+}
+
+fn refused(err: AssembleError) -> Report {
+    let finding = match err {
+        AssembleError::Load(err) => finding_of(err),
+        other => Finding {
+            path: PathBuf::new(),
+            document: 1,
+            line: 1,
+            message: other.to_string(),
+        },
+    };
+    Report {
+        checked: 0,
+        findings: vec![finding],
+        warnings: Vec::new(),
+    }
+}
+
+/// A directory of its own for one run, under the system's temporary directory.
+fn scratch(what: &str) -> PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("jcctl-{what}-{}-{now}", std::process::id()))
+}
+
+/// `organization` is false for a project checked alone: its groups, bindings and domain are
+/// the organization's, which the check does not have.
+fn check(repo_dir: &Path, organization: bool) -> Report {
     let repo = match Repository::load(repo_dir) {
         Ok(repo) => repo,
         Err(err) => {
@@ -82,7 +262,7 @@ pub fn run(repo_dir: &Path) -> Report {
         warnings: Vec::new(),
     };
 
-    for (id, path, text) in repo.literal_domains() {
+    for (id, path, text) in repo.literal_domains().iter().filter(|_| organization) {
         let where_from = repo.get(id);
         report.warnings.push(Finding {
             path: path.clone(),
@@ -191,7 +371,10 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
-    for (location, message) in bindings_to_undeclared_groups(&repo) {
+    for (location, message) in bindings_to_undeclared_groups(&repo)
+        .into_iter()
+        .filter(|_| organization)
+    {
         report.findings.push(Finding {
             path: location.0,
             document: location.1,
@@ -200,7 +383,10 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
-    for (location, message) in roles_that_do_not_resolve(&repo) {
+    for (location, message) in roles_that_do_not_resolve(&repo)
+        .into_iter()
+        .filter(|_| organization)
+    {
         report.findings.push(Finding {
             path: location.0,
             document: location.1,
@@ -209,7 +395,10 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
-    for (location, message) in app_members_outside_the_domain(&repo) {
+    for (location, message) in app_members_outside_the_domain(&repo)
+        .into_iter()
+        .filter(|_| organization)
+    {
         report.findings.push(Finding {
             path: location.0,
             document: location.1,

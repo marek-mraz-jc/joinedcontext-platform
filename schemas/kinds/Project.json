@@ -141,6 +141,127 @@
       ],
       "type": "object"
     },
+    "Parameter": {
+      "anyOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ParameterDeclaration"
+            }
+          ],
+          "description": "What the project file declares: a type, and optionally a default, a description and the allowed values."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ParameterValue"
+            }
+          ],
+          "description": "What a registry entry sets for this deployment."
+        }
+      ],
+      "description": "A parameter entry of `spec.parameters`: a declaration in the project file, a value in a registry entry (CC-88)."
+    },
+    "ParameterDeclaration": {
+      "additionalProperties": false,
+      "description": "The declaration of one deployment knob (CC-88), a subset of JSON Schema draft-07.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ParameterValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value when the registry entry sets none."
+        },
+        "description": {
+          "description": "What the knob does, for the parameter form.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enum": {
+          "description": "The only values allowed; empty allows every value of the type.",
+          "items": {
+            "$ref": "#/definitions/ParameterValue"
+          },
+          "type": "array"
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ParameterType"
+            }
+          ],
+          "description": "What the value is; `secret` takes the name of a secret, never its value."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "ParameterType": {
+      "description": "The type of a parameter (CC-88).",
+      "oneOf": [
+        {
+          "description": "Text.",
+          "enum": [
+            "string"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A whole number.",
+          "enum": [
+            "integer"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Any number.",
+          "enum": [
+            "number"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`true` or `false`.",
+          "enum": [
+            "boolean"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The name of a secret in the store, set per deployment; renders as a `secretRef` name.",
+          "enum": [
+            "secret"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ParameterValue": {
+      "anyOf": [
+        {
+          "description": "`true` or `false`.",
+          "type": "boolean"
+        },
+        {
+          "description": "A number, whole or not.",
+          "type": "number"
+        },
+        {
+          "description": "Text, or a secret's name.",
+          "type": "string"
+        }
+      ],
+      "description": "One scalar a parameter takes."
+    },
     "Phase": {
       "description": "Lifecycle phase enumeration.",
       "oneOf": [
@@ -188,6 +309,38 @@
         }
       ]
     },
+    "ProjectRepository": {
+      "additionalProperties": false,
+      "description": "Where a registry entry's project comes from (PF-86, CC-89).",
+      "properties": {
+        "name": {
+          "description": "A repository of the organization in the local forge.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secretRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The credential that reads `url`; a local repository needs none."
+        },
+        "url": {
+          "description": "A git repository outside the forge, mirrored read-only at the pinned ref (CC-89).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ProjectSpec": {
       "additionalProperties": false,
       "description": "Desired specification of a [`Project`][crate::kinds::Project] resource (PF-05, PF-17).",
@@ -200,6 +353,13 @@
           ],
           "description": "Reference to the parent Organization."
         },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Parameter"
+          },
+          "description": "Declarations in the project file, this deployment's values in a registry entry (CC-88).",
+          "type": "object"
+        },
         "quotas": {
           "anyOf": [
             {
@@ -209,7 +369,36 @@
               "type": "null"
             }
           ],
-          "description": "Optional resource quotas for this Project (PF-17)."
+          "description": "Optional resource quotas for this Project (PF-17); the project file's, never a registry entry's."
+        },
+        "ref": {
+          "description": "The tag, branch or commit of `repository` this deployment runs; a registry entry only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectRepository"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the project's configuration lives. Its presence makes this manifest a registry entry, `projects/{slug}.yaml` of the organization repository (PF-86)."
+        },
+        "version": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SemVer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The project's version, released as the tag `v{version}`; the project file only (CC-88)."
         }
       },
       "required": [
@@ -312,6 +501,39 @@
         }
       ],
       "description": "Reference to another resource, either bare name or typed reference (MF-07)."
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "Reference to a credential stored in SOPS or OpenBao (PF-36).\n\n`deny_unknown_fields` is a security control: it rejects inline `value:` or `password:` fields at parse time, enforcing that secrets never appear in Git or manifest files.",
+      "properties": {
+        "envVar": {
+          "description": "Optional environment variable name for injection into runners.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Optional key within secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Secret name in secret store.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "SemVer": {
+      "description": "Semantic version string conforming to major.minor.patch (DM-22)",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "type": "string"
     },
     "Status": {
       "additionalProperties": false,

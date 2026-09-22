@@ -526,6 +526,16 @@ fn resolve_endpoint_refs(
 /// Links are followed, but anything resolving outside the root is refused rather than read:
 /// both the manifest loader and the secret store walk the repository this way, so the
 /// containment rule has one implementation, not one per caller.
+/// YAML the repository holds that is not a manifest: the authoring source of a data model, a
+/// Bento stream, the instance settings (Architecture/06 section 1), and an encrypted secrets
+/// file, whose values the secret store decrypts and no walk reads (CC-06).
+pub(crate) fn is_native_yaml(file_name: &str) -> bool {
+    file_name.ends_with(".linkml.yaml")
+        || file_name == "bento.yaml"
+        || file_name == crate::model::SETTINGS_FILE
+        || crate::secrets::sops::is_encrypted_file(file_name)
+}
+
 pub(crate) fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadError> {
     let canonical_root = root.canonicalize().map_err(|source| LoadError::Io {
         path: root.to_path_buf(),
@@ -763,15 +773,7 @@ impl Repository {
                 continue;
             }
 
-            // YAML the repository holds that is not a manifest: the authoring source of a
-            // data model, a Bento stream, the instance settings (Architecture/06 section 1),
-            // and an encrypted secrets file, whose values the secret store decrypts and this
-            // walk never reads (CC-06).
-            if file_name.ends_with(".linkml.yaml")
-                || file_name == "bento.yaml"
-                || file_name == crate::model::SETTINGS_FILE
-                || crate::secrets::sops::is_encrypted_file(file_name)
-            {
+            if is_native_yaml(file_name) {
                 continue;
             }
 
