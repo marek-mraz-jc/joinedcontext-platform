@@ -226,9 +226,9 @@ pub fn assemble(
     })
 }
 
-/// Every registry entry, by slug (PF-86). The layout 2 organization repository holds files
-/// under `projects/` and no project directories.
-fn read_registry(org_root: &Path) -> Result<BTreeMap<String, Project>, AssembleError> {
+/// Every registry entry of the organization checked out at `org_root`, by slug (PF-86). The
+/// layout 2 organization repository holds files under `projects/` and no project directories.
+pub fn read_registry(org_root: &Path) -> Result<BTreeMap<String, Project>, AssembleError> {
     let mut registry = BTreeMap::new();
     let dir = org_root.join("projects");
     let listing = match std::fs::read_dir(&dir) {

@@ -73,6 +73,35 @@ jobs:
       - if: steps.has.outputs.df != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
+      # The checkouts sidecar (T-2646): the same build stage, so the layers above are reused and
+      # jcctl is the binary of this commit; signed, attested and gated like the platform image.
+      - if: steps.has.outputs.df != ''
+        id: checkouts
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ steps.has.outputs.df }}
+          target: checkouts
+          push: true
+          tags: ghcr.io/${{ github.repository }}/checkouts:${{ github.sha }},ghcr.io/${{ github.repository }}/checkouts:main
+          cache-from: type=gha
+          provenance: true
+          sbom: true
+      - if: steps.has.outputs.df != ''
+        run: cosign sign --yes ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}
+      - if: steps.has.outputs.df != ''
+        run: echo "checkouts digest ${{ steps.checkouts.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.has.outputs.df != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}"
+          format: cyclonedx
+          output: checkouts.cdx.json
+      - if: steps.has.outputs.df != ''
+        run: cosign attest --yes --type cyclonedx --predicate checkouts.cdx.json ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}
+      - if: steps.has.outputs.df != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
   model-tools:
     # The one non-Rust runtime component (Architecture/11 §6.5, DM-18) is its own image: a
     # Python image carrying LinkML has nothing in common with the distroless Rust one, and the
