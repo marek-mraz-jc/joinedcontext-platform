@@ -475,3 +475,186 @@ fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<(),
     }
     Ok(())
 }
+
+/// The HTTP basic credential a repository is read with: a user name and a password or token.
+pub type Basic = (String, jc_core::Secret);
+
+/// How [`GitCheckouts`] reads one registry entry's repository (CC-89).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// The local forge's read-only token: a repository of the forge, by name.
+    Forge,
+    /// The entry's own `secretRef`: a repository outside the forge.
+    SecretRef(jc_core::SecretRef),
+    /// Nothing: a public repository outside the forge.
+    Anonymous,
+}
+
+/// Checkouts fetched with git at each entry's ref, for the daemons that assemble (CC-86).
+///
+/// Each repository is mirrored under `cache` and each ref is checked out into a directory of
+/// its own commit, so a render never reads a half-fetched tree. Credentials reach git through
+/// its environment, never through its arguments or a URL, and git never prompts.
+pub struct GitCheckouts<'a> {
+    /// Where mirrors and checkouts are kept between runs.
+    pub cache: PathBuf,
+    /// The organization in the local forge, `https://forge.example/git/{org}`; a repository
+    /// `name` is `{forge}/{name}.git`.
+    pub forge: String,
+    /// The local forge's read-only credential, for the forge's own repositories only.
+    pub forge_credential: Option<Basic>,
+    /// Resolves an external repository's `secretRef` to the credential it names.
+    pub secrets: &'a dyn Fn(&jc_core::SecretRef) -> Result<Basic, String>,
+}
+
+impl GitCheckouts<'_> {
+    /// Which credential an entry is read with: the forge's for a repository of the forge, and
+    /// for one outside it the entry's own `secretRef` or none, never the forge's (CC-89).
+    pub fn credential(entry: &ProjectSpec) -> Result<Credential, String> {
+        let repository = entry
+            .repository
+            .as_ref()
+            .ok_or("a registry entry names a repository")?;
+        Ok(match (&repository.name, &repository.url) {
+            (Some(_), None) => Credential::Forge,
+            (None, Some(_)) => match &repository.secret_ref {
+                Some(secret) => Credential::SecretRef(secret.clone()),
+                None => Credential::Anonymous,
+            },
+            _ => return Err("a repository names either a forge repository or a url".into()),
+        })
+    }
+
+    fn url(&self, entry: &ProjectSpec) -> Result<String, String> {
+        let repository = entry
+            .repository
+            .as_ref()
+            .ok_or("a registry entry names a repository")?;
+        match (&repository.name, &repository.url) {
+            (Some(name), None) => Ok(format!("{}/{name}.git", self.forge.trim_end_matches('/'))),
+            (None, Some(url)) => Ok(url.clone()),
+            _ => Err("a repository names either a forge repository or a url".into()),
+        }
+    }
+
+    fn git(&self, credential: Option<&Basic>, args: &[&str]) -> Result<String, String> {
+        use base64::Engine as _;
+        let mut command = std::process::Command::new("git");
+        command
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        if let Some((user, secret)) = credential {
+            let pair = format!("{user}:{}", secret.expose());
+            let header = format!(
+                "Authorization: Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(pair)
+            );
+            command
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env("GIT_CONFIG_VALUE_0", header);
+        }
+        let output = command
+            .output()
+            .map_err(|err| format!("git does not run: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git {}: {}",
+                args.first().copied().unwrap_or_default(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+}
+
+impl Resolver for GitCheckouts<'_> {
+    fn checkout(&self, slug: &str, entry: &ProjectSpec) -> Result<PathBuf, String> {
+        let url = self.url(entry)?;
+        let resolved;
+        let credential = match Self::credential(entry)? {
+            Credential::Forge => self.forge_credential.as_ref(),
+            Credential::SecretRef(secret) => {
+                resolved = (self.secrets)(&secret)?;
+                Some(&resolved)
+            }
+            Credential::Anonymous => None,
+        };
+        let git_ref = entry
+            .git_ref
+            .as_deref()
+            .ok_or("a registry entry pins a ref")?;
+        std::fs::create_dir_all(&self.cache).map_err(|err| err.to_string())?;
+        let mirror = self.cache.join(format!("{slug}.git"));
+        let mirror_arg = mirror.to_string_lossy().into_owned();
+        if mirror.is_dir() {
+            self.git(
+                credential,
+                &[
+                    "--git-dir",
+                    &mirror_arg,
+                    "remote",
+                    "set-url",
+                    "origin",
+                    &url,
+                ],
+            )?;
+            self.git(
+                credential,
+                &["--git-dir", &mirror_arg, "remote", "update", "--prune"],
+            )?;
+        } else {
+            self.git(
+                credential,
+                &["clone", "--mirror", "--quiet", &url, &mirror_arg],
+            )?;
+        }
+        let commit = self
+            .git(
+                None,
+                &[
+                    "--git-dir",
+                    &mirror_arg,
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{git_ref}^{{commit}}"),
+                ],
+            )
+            .map_err(|_| format!("the ref `{git_ref}` names no commit of {url}"))?;
+        let tree = self.cache.join(format!("{slug}.tree-{commit}"));
+        if !tree.is_dir() {
+            let partial = self.cache.join(format!(".{slug}.tree-{commit}.partial"));
+            let _ = std::fs::remove_dir_all(&partial);
+            std::fs::create_dir_all(&partial).map_err(|err| err.to_string())?;
+            let partial_arg = partial.to_string_lossy().into_owned();
+            self.git(
+                None,
+                &[
+                    "--git-dir",
+                    &mirror_arg,
+                    "--work-tree",
+                    &partial_arg,
+                    "checkout",
+                    "--force",
+                    &commit,
+                    "--",
+                    ".",
+                ],
+            )?;
+            std::fs::rename(&partial, &tree).map_err(|err| err.to_string())?;
+        }
+        // The checkouts of other commits of this project are no longer read.
+        let prefix = format!("{slug}.tree-");
+        if let Ok(listing) = std::fs::read_dir(&self.cache) {
+            for item in listing.flatten() {
+                let name = item.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && item.path() != tree {
+                    let _ = std::fs::remove_dir_all(item.path());
+                }
+            }
+        }
+        Ok(tree)
+    }
+}
