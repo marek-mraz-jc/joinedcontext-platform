@@ -372,6 +372,7 @@ const SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 /// The public grant: two readable attributes out of the three the broker returns.
 fn endpoint(representations: Vec<Representation>, file_limits: Option<FileLimits>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

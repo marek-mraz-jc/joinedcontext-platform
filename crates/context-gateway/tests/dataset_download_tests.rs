@@ -31,6 +31,7 @@ const SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
 /// what they read. This is the shape that produced the `400`.
 fn unrestricted_endpoint() -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

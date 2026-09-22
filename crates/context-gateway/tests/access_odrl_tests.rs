@@ -27,6 +27,7 @@ fn policy(yaml: &str) -> PolicySpec {
 /// One public grant with every residual dimension in it, and one prohibition over it.
 fn endpoint() -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

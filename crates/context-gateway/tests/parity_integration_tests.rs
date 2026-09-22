@@ -70,6 +70,7 @@ fn endpoint(
         .map(|name| format!("      - {name}\n"))
         .collect::<String>();
     Endpoint {
+        roles: Default::default(),
         slug: slug.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

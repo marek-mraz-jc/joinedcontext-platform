@@ -51,6 +51,7 @@ information:
 
 fn endpoint(slug: &str, audience: Audience) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: slug.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

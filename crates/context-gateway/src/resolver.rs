@@ -15,9 +15,61 @@ use jc_core::kinds::{Audience, FileLimits, PolicySpec, RateLimits, Representatio
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// The roles an Endpoint gives the callers it admits, on requests through it alone (AP-96, AP-97).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EndpointRoles {
+    /// Held by every caller the endpoint admits, when the manifest sets `callerRole`.
+    pub caller: Option<String>,
+    /// Each role's full name, [`jc_core::kinds::endpoint_role`], and who holds it.
+    pub named: Vec<(String, Vec<jc_core::kinds::Subject>)>,
+}
+
+impl EndpointRoles {
+    /// The roles an Endpoint's manifest gives, under the names the reconciler's Policies use.
+    pub fn of(project: &str, endpoint: &str, spec: &jc_core::kinds::EndpointSpec) -> Self {
+        Self {
+            caller: spec
+                .caller_role
+                .then(|| jc_core::kinds::endpoint_role(project, endpoint, None)),
+            named: spec
+                .roles
+                .iter()
+                .map(|role| {
+                    (
+                        jc_core::kinds::endpoint_role(project, endpoint, Some(&role.name)),
+                        role.subjects.clone(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The roles this endpoint gives a caller who signed in as `user` (the token's
+    /// `preferred_username`, the e-mail in this realm) with `groups`.
+    pub fn held_by<'a>(
+        &'a self,
+        user: Option<&'a str>,
+        groups: &'a BTreeSet<String>,
+    ) -> impl Iterator<Item = &'a str> + 'a {
+        let named = self.named.iter().filter_map(move |(role, subjects)| {
+            subjects
+                .iter()
+                .any(|subject| match (&subject.user, &subject.group) {
+                    (Some(wanted), None) => user.is_some_and(|u| u.eq_ignore_ascii_case(wanted)),
+                    (None, Some(wanted)) => groups.contains(wanted),
+                    _ => false,
+                })
+                .then_some(role.as_str())
+        });
+        self.caller.as_deref().into_iter().chain(named)
+    }
+}
+
 /// Everything the gateway needs about one endpoint, resolved in a single lookup.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Endpoint {
+    /// The roles this endpoint gives the callers it admits (AP-96, AP-97).
+    pub roles: EndpointRoles,
     /// The opaque slug the client uses; the key of the table.
     pub slug: String,
     /// The context space behind it, which becomes the pinned `NGSILD-Tenant` (EP-22).

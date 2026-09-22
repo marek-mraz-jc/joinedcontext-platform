@@ -2,6 +2,28 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AppAccess": {
+      "additionalProperties": false,
+      "description": "Who holds one role of an App (AP-91).",
+      "properties": {
+        "role": {
+          "description": "A role of `spec.roles`.",
+          "type": "string"
+        },
+        "subjects": {
+          "description": "`user` by e-mail, `group` by the name of a `Group` manifest (PF-62, PF-64).",
+          "items": {
+            "$ref": "#/definitions/Subject"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "role",
+        "subjects"
+      ],
+      "type": "object"
+    },
     "AppClass": {
       "description": "How an app is built and served (AP-01).",
       "oneOf": [
@@ -86,6 +108,34 @@
       },
       "type": "object"
     },
+    "AppRole": {
+      "additionalProperties": false,
+      "description": "One role a person can hold in an App (AP-90).",
+      "properties": {
+        "description": {
+          "description": "What a person holding it may do, for whoever adds a member.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "`[a-z][a-z0-9-]{0,31}`, unique in the App.",
+          "type": "string"
+        },
+        "title": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The role's name per locale, as the App page and the `403` page show it.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "AppSource": {
       "additionalProperties": false,
       "description": "Where the app's source lives; exactly one member is set (AP-02).",
@@ -115,6 +165,13 @@
       "additionalProperties": false,
       "description": "Desired specification of an [`App`][crate::kinds::App] resource (AP-01..AP-20).",
       "properties": {
+        "access": {
+          "description": "Who holds each role (AP-91).",
+          "items": {
+            "$ref": "#/definitions/AppAccess"
+          },
+          "type": "array"
+        },
         "build": {
           "additionalProperties": {
             "type": "string"
@@ -173,6 +230,13 @@
           ],
           "description": "Per-app rate limits (AP-17)."
         },
+        "roles": {
+          "description": "The roles a person can hold in the app (AP-90).",
+          "items": {
+            "$ref": "#/definitions/AppRole"
+          },
+          "type": "array"
+        },
         "source": {
           "allOf": [
             {
@@ -227,6 +291,13 @@
           "description": "Everyone, unauthenticated.",
           "enum": [
             "public"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only a signed-in person holding one of the app's roles (AP-93, AP-94).",
+          "enum": [
+            "roles"
           ],
           "type": "string"
         }
@@ -372,6 +443,13 @@
           "description": "Representations of the rendered endpoint this need contributes (AP-05, EP-08).",
           "items": {
             "$ref": "#/definitions/Representation"
+          },
+          "type": "array"
+        },
+        "roles": {
+          "description": "The app roles this need is granted to; empty means every caller the endpoint admits (AP-96).",
+          "items": {
+            "type": "string"
           },
           "type": "array"
         },
@@ -1072,6 +1150,27 @@
             }
           ],
           "description": "Current lifecycle phase."
+        }
+      },
+      "type": "object"
+    },
+    "Subject": {
+      "additionalProperties": false,
+      "description": "One human or group a binding names; exactly one of `user`, `group` (PF-49).",
+      "properties": {
+        "group": {
+          "description": "A group of the identity provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user": {
+          "description": "The user's identifier in the identity provider (username or e-mail).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"

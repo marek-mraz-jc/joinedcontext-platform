@@ -209,6 +209,24 @@ pub fn run(repo_dir: &Path) -> Report {
         });
     }
 
+    for (location, message) in app_members_outside_the_domain(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
+    for (location, message) in app_writes_open_to_everyone(&repo) {
+        report.warnings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in app_names_claimed_twice(&repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -298,21 +316,22 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
 
     let mut findings = Vec::new();
     for (id, resource) in repo.iter() {
-        if id.kind != "RoleBinding" {
-            continue;
-        }
-        let named = resource
-            .manifest
-            .spec
-            .get("subjects")
-            .and_then(|subjects| subjects.as_array())
-            .map(|subjects| {
-                subjects
-                    .iter()
-                    .filter_map(|subject| subject.get("group").and_then(|g| g.as_str()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        // A RoleBinding's subjects, and the members of every role an App declares (AP-91).
+        let subjects: Vec<&serde_json::Value> = match id.kind.as_str() {
+            "RoleBinding" => resource
+                .manifest
+                .spec
+                .get("subjects")
+                .and_then(|subjects| subjects.as_array())
+                .map(|subjects| subjects.iter().collect())
+                .unwrap_or_default(),
+            "App" => app_subjects(&resource.manifest.spec).collect(),
+            _ => continue,
+        };
+        let named: Vec<&str> = subjects
+            .iter()
+            .filter_map(|subject| subject.get("group").and_then(|g| g.as_str()))
+            .collect();
         for group in named {
             if declared.contains(group) {
                 continue;
@@ -327,6 +346,89 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
         }
     }
     findings
+}
+
+/// The subjects of every role an App's `spec.access` lists (AP-91).
+fn app_subjects(spec: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    spec.get("access")
+        .and_then(|access| access.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("subjects").and_then(|s| s.as_array()))
+        .flatten()
+}
+
+/// Every App role member whose e-mail is outside the organization's domain (AP-91, PF-41): a
+/// role is a grant inside the organization, and an address of another domain is a person
+/// nobody here verified.
+fn app_members_outside_the_domain(repo: &Repository) -> Vec<(Location, String)> {
+    let Some(domain) = repo.org_domain().map(str::to_ascii_lowercase) else {
+        return Vec::new();
+    };
+    let mut findings = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "App" {
+            continue;
+        }
+        for user in app_subjects(&resource.manifest.spec)
+            .filter_map(|subject| subject.get("user").and_then(|u| u.as_str()))
+        {
+            let host = user
+                .rsplit_once('@')
+                .map(|(_, host)| host.to_ascii_lowercase());
+            let inside =
+                host.is_some_and(|host| host == domain || host.ends_with(&format!(".{domain}")));
+            if !inside {
+                findings.push((
+                    (resource.path.clone(), resource.document, resource.line),
+                    format!(
+                        "{id} gives a role to `{user}`, outside the organization's domain \
+                         `{domain}`: a role member is a person of this organization (AP-91, PF-41)"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// Every App data need that writes and names no role: everyone who can open the app can make
+/// that write, which is allowed and is said (AP-98).
+fn app_writes_open_to_everyone(repo: &Repository) -> Vec<(Location, String)> {
+    let mut warnings = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "App" {
+            continue;
+        }
+        let Ok(spec) =
+            serde_json::from_value::<jc_core::kinds::AppSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        for need in spec
+            .data_needs
+            .iter()
+            .filter(|n| n.has_write() && n.roles.is_empty())
+        {
+            let operations: Vec<&str> = need
+                .operations
+                .iter()
+                .filter(|o| o.is_write())
+                .map(|o| o.as_str())
+                .collect();
+            warnings.push((
+                (resource.path.clone(), resource.document, resource.line),
+                format!(
+                    "everyone who can open {} can {} {}; name the roles that may in \
+                     dataNeeds[].roles (AP-98)",
+                    id.name,
+                    operations.join(", "),
+                    need.types.join(", ")
+                ),
+            ));
+        }
+    }
+    warnings
 }
 
 /// Every `App` whose name another project's `App` also declares (AP-14a): `/apps/{name}/` and

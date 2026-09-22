@@ -145,6 +145,7 @@ fn policy(condition: Option<&str>) -> PolicySpec {
 
 fn endpoint(condition: Option<&str>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -432,6 +433,7 @@ async fn through(
 ) -> (StatusCode, Vec<Call>) {
     let (upstream, calls) = broker(stored).await;
     let endpoint = Endpoint {
+        roles: Default::default(),
         policies,
         ..endpoint(None)
     };

@@ -46,6 +46,7 @@ information:
 
 fn endpoint(hidden: &[&str]) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),
         description: Default::default(),

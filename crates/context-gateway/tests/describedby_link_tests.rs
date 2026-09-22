@@ -69,6 +69,7 @@ fn policy(yaml: &str) -> PolicySpec {
 /// A public endpoint serving every representation, over two model majors.
 fn endpoint(models: Vec<Model>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),
         description: Default::default(),

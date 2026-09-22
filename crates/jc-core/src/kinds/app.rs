@@ -26,6 +26,11 @@ static DURATION_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static ATTR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9_]{0,63}$").expect("valid regex"));
+static ROLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9-]{0,31}$").expect("valid regex"));
+
+/// The most roles one App declares (AP-90).
+pub const MAX_APP_ROLES: usize = 16;
 
 /// How an app is built and served (AP-01).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -51,6 +56,8 @@ pub enum AppVisibility {
     Organization,
     /// Everyone, unauthenticated.
     Public,
+    /// Only a signed-in person holding one of the app's roles (AP-93, AP-94).
+    Roles,
 }
 
 /// Lifecycle state of an app (AP-18, AP-19, AP-20).
@@ -257,6 +264,103 @@ pub struct DataNeed {
     /// Representations of the rendered endpoint this need contributes (AP-05, EP-08).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub representations: Vec<Representation>,
+    /// The app roles this need is granted to; empty means every caller the endpoint admits (AP-96).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+}
+
+/// One role a person can hold in an App (AP-90).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppRole {
+    /// `[a-z][a-z0-9-]{0,31}`, unique in the App.
+    pub name: String,
+    /// The role's name per locale, as the App page and the `403` page show it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub title: BTreeMap<String, String>,
+    /// What a person holding it may do, for whoever adds a member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Who holds one role of an App (AP-91).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppAccess {
+    /// A role of `spec.roles`.
+    pub role: String,
+    /// `user` by e-mail, `group` by the name of a `Group` manifest (PF-62, PF-64).
+    pub subjects: Vec<crate::kinds::role::Subject>,
+}
+
+/// A role name as an App or an Endpoint declares it (AP-90, AP-96).
+pub(crate) fn validate_role_name(field: &'static str, name: &str) -> Result<()> {
+    if ROLE_RE.is_match(name) {
+        return Ok(());
+    }
+    Err(Error::Name {
+        field,
+        value: name.to_owned(),
+        reason: "a role name is a lower-case letter, then up to 31 lower-case letters, digits or `-` (AP-90)",
+    })
+}
+
+/// The people and groups a role names: each exactly one of a lower-case e-mail and a group
+/// name, none twice, at least one (AP-91).
+pub(crate) fn validate_subjects(
+    field: &'static str,
+    subjects: &[crate::kinds::role::Subject],
+) -> Result<()> {
+    if subjects.is_empty() {
+        return Err(Error::Name {
+            field,
+            value: String::new(),
+            reason: "a role names at least one user or group (AP-91)",
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for subject in subjects {
+        let named = match (subject.user.as_deref(), subject.group.as_deref()) {
+            (Some(user), None) => {
+                let ok = crate::kinds::group::is_address(user)
+                    && user.trim() == user
+                    && user.to_lowercase() == user
+                    && !user.contains('*');
+                if !ok {
+                    return Err(Error::Name {
+                        field,
+                        value: user.to_owned(),
+                        reason: "a user is a lower-case e-mail address, the name Keycloak carries (AP-91)",
+                    });
+                }
+                ("user", user)
+            }
+            (None, Some(group)) => {
+                names::validate_dns1123_label(group).map_err(|_| Error::Name {
+                    field,
+                    value: group.to_owned(),
+                    reason:
+                        "a group is the name of a Group manifest of users/groups/ (AP-91, PF-64)",
+                })?;
+                ("group", group)
+            }
+            _ => {
+                return Err(Error::Name {
+                    field,
+                    value: String::new(),
+                    reason: "a subject names exactly one of `user` and `group` (AP-91)",
+                })
+            }
+        };
+        if !seen.insert(named) {
+            return Err(Error::Name {
+                field,
+                value: named.1.to_owned(),
+                reason: "the same subject is listed twice",
+            });
+        }
+    }
+    Ok(())
 }
 
 impl DataNeed {
@@ -450,6 +554,12 @@ pub struct AppSpec {
     /// Whether the Portal may embed the app in a frame (AP-12).
     #[serde(default)]
     pub embeddable: bool,
+    /// The roles a person can hold in the app (AP-90).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<AppRole>,
+    /// Who holds each role (AP-91).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access: Vec<AppAccess>,
 }
 
 impl Kind for AppSpec {
@@ -532,6 +642,8 @@ impl AppSpec {
             csp.validate()?;
         }
 
+        self.validate_roles()?;
+
         if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {
             return Err(Error::Name {
                 field: "visibility",
@@ -540,6 +652,73 @@ impl AppSpec {
             });
         }
 
+        Ok(())
+    }
+
+    /// Roles, their members, the roles data needs name, and `visibility: roles` (AP-90, AP-91,
+    /// AP-94, AP-96).
+    fn validate_roles(&self) -> Result<()> {
+        if self.roles.len() > MAX_APP_ROLES {
+            return Err(Error::Name {
+                field: "roles",
+                value: self.roles.len().to_string(),
+                reason: "an app declares at most 16 roles (AP-90)",
+            });
+        }
+        let mut declared = BTreeSet::new();
+        for role in &self.roles {
+            validate_role_name("roles[].name", &role.name)?;
+            if !declared.insert(role.name.as_str()) {
+                return Err(Error::Name {
+                    field: "roles[].name",
+                    value: role.name.clone(),
+                    reason: "a role is declared once (AP-90)",
+                });
+            }
+        }
+        let undeclared = |field: &'static str, role: &str| Error::Name {
+            field,
+            value: role.to_owned(),
+            reason: "names a role spec.roles does not declare (AP-91, AP-96)",
+        };
+        let mut granted = BTreeSet::new();
+        for access in &self.access {
+            if !declared.contains(access.role.as_str()) {
+                return Err(undeclared("access[].role", &access.role));
+            }
+            if !granted.insert(access.role.as_str()) {
+                return Err(Error::Name {
+                    field: "access[].role",
+                    value: access.role.clone(),
+                    reason: "list a role's subjects in one entry (AP-91)",
+                });
+            }
+            validate_subjects("access[].subjects", &access.subjects)?;
+        }
+        for need in &self.data_needs {
+            for role in &need.roles {
+                if !declared.contains(role.as_str()) {
+                    return Err(undeclared("dataNeeds[].roles", role));
+                }
+            }
+        }
+        if self.visibility == AppVisibility::Roles {
+            if self.roles.is_empty() {
+                return Err(Error::Name {
+                    field: "visibility",
+                    value: "roles".to_owned(),
+                    reason: "visibility: roles admits a person holding a role, and the app declares none (AP-94)",
+                });
+            }
+            if self.class != AppClass::Static {
+                return Err(Error::Name {
+                    field: "visibility",
+                    value: "roles".to_owned(),
+                    reason: "visibility: roles is enforced by the static host, and a service or \
+                             fullstack app's requests never pass it (AP-94)",
+                });
+            }
+        }
         Ok(())
     }
 

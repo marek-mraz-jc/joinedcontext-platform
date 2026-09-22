@@ -79,6 +79,7 @@ fn air_quality(with_artifacts: bool) -> Model {
 /// The public grant of DEMO step 4: three attributes of one type, and nothing else.
 fn endpoint(models: Vec<Model>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -113,6 +114,7 @@ information:
 /// every slot of both survives the projection and nothing is left out.
 fn keeping_nothing_back(models: Vec<Model>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         policies: vec![policy(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

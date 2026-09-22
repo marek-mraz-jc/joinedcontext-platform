@@ -32,6 +32,7 @@ fn limits(per_minute: u32, burst: Option<u32>) -> RateLimits {
 
 fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

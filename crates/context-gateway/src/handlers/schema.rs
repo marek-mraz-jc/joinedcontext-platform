@@ -675,6 +675,7 @@ mod visible_tests {
 
     fn endpoint(policies: Vec<PolicySpec>) -> Endpoint {
         Endpoint {
+            roles: Default::default(),
             slug: "s".to_owned(),
             title: std::collections::BTreeMap::new(),
             description: std::collections::BTreeMap::new(),

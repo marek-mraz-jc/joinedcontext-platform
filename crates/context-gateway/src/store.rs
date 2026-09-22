@@ -10,7 +10,7 @@
 use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::auth::dataspace_token::{agreements_of, Agreements};
 use crate::federation::{federations_of, Federations};
-use crate::resolver::{Endpoint, Model, Space};
+use crate::resolver::{Endpoint, EndpointRoles, Model, Space};
 use crate::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
@@ -173,6 +173,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             }
         });
         endpoints.push(Endpoint {
+            roles: EndpointRoles::of(&project, &id.name, &spec),
             slug: spec.slug.to_string(),
             title: language_map(&resource.manifest.metadata.rest, "title"),
             description: language_map(&resource.manifest.metadata.rest, "description"),
@@ -294,6 +295,7 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
         let segment = repo.space_segment(&project, &id.name);
         spaces.push(Space {
             endpoint: Arc::new(Endpoint {
+                roles: Default::default(),
                 slug: segment.clone(),
                 // The canonical surface is the space itself, so its record reads the
                 // space's own title and description below.

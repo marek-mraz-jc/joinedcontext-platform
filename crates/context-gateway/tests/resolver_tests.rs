@@ -7,6 +7,7 @@ const SLUG: &str = "zt4qm7ge2xdv6ksb3ncf5arw2y";
 
 fn endpoint(slug: &str, space: &str) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: slug.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -55,6 +56,7 @@ fn the_audience_decides_who_may_use_the_endpoint() {
     assert!(public.admits(Some("bb-doprava")));
 
     let organization = Endpoint {
+        roles: Default::default(),
         audience: Audience::Organization,
         ..endpoint(SLUG, "ovzdusie")
     };
@@ -65,6 +67,7 @@ fn the_audience_decides_who_may_use_the_endpoint() {
     assert!(organization.admits(Some("bb-doprava")));
 
     let listed = Endpoint {
+        roles: Default::default(),
         audience: Audience::ProjectList,
         allowed_projects: vec!["bb-doprava".to_owned()],
         ..endpoint(SLUG, "ovzdusie")

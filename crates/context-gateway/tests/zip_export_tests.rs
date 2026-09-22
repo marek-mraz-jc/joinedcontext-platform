@@ -27,6 +27,7 @@ const SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
 
 fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),

@@ -84,6 +84,7 @@ fn endpoint() -> Endpoint {
         json!({ "type": "object", "properties": members })
     };
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),
         description: Default::default(),
@@ -138,6 +139,7 @@ fn big_endpoint() -> Endpoint {
     )
     .expect("the policy parses");
     Endpoint {
+        roles: Default::default(),
         slug: BIG_SLUG.to_owned(),
         space: "wide".to_owned(),
         base_path: format!("/api/endpoint/{BIG_SLUG}"),

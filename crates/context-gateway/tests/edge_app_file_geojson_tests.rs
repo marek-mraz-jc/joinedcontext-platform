@@ -32,6 +32,7 @@ operations: [queryEntity, retrieveEntity]
 /// The dev seed's public endpoint: anonymous callers read, nothing narrows what they read.
 fn endpoint() -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -53,6 +54,7 @@ fn endpoint() -> Endpoint {
 
 fn with_policy(yaml: &str) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         policies: vec![serde_norway::from_str(yaml).expect("the policy parses")],
         ..endpoint()
     }

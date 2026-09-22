@@ -249,6 +249,7 @@ fn policy() -> PolicySpec {
 
 fn endpoint(hidden: &[&str]) -> Endpoint {
     Endpoint {
+        roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),
         description: std::collections::BTreeMap::new(),
@@ -293,6 +294,7 @@ fn gateway_with(
             // The sinks listen on this address; the installation would name its own (T-1302).
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
+                roles: Default::default(),
                 policies: vec![policy],
                 ..endpoint(hidden)
             }]),
@@ -1111,6 +1113,7 @@ async fn deliver_projected(
             )
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
+                roles: Default::default(),
                 projection: Some(Arc::new(projection.spec)),
                 ..endpoint(hidden)
             }]),

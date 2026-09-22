@@ -1350,6 +1350,33 @@ pub(crate) fn authenticate(
     endpoint: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<Subject, Box<ProblemDetails>> {
+    let mut subject = identify(gateway, endpoint, headers)?;
+    with_endpoint_roles(&mut subject, endpoint);
+    Ok(subject)
+}
+
+/// The roles an Endpoint gives exist on requests through it alone (AP-97). One that a token or
+/// an account asserts is dropped whatever its source, so no realm role, no ServiceAccount
+/// template and no other endpoint can carry an application's grant; then this endpoint's own
+/// are added for the caller it admitted.
+fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint) {
+    subject
+        .roles
+        .retain(|role| !role.starts_with(jc_core::kinds::ENDPOINT_ROLE_PREFIX));
+    let held: Vec<String> = endpoint
+        .roles
+        .held_by(subject.user.as_deref(), &subject.groups)
+        .map(str::to_owned)
+        .collect();
+    subject.roles.extend(held);
+}
+
+/// Who is calling, before the endpoint's own roles (PF-45, PF-46).
+fn identify(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    headers: &HeaderMap,
+) -> Result<Subject, Box<ProblemDetails>> {
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());

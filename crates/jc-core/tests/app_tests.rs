@@ -596,3 +596,193 @@ fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
         .validate()
         .expect("a Vite build stays valid");
 }
+
+/// An App with two roles and a role-gated write, the shape of docs Architecture/16 §12 and of
+/// the T-2598 sample (ADR-N-027), kept where a reader of the examples finds it.
+const ROLES: &str = include_str!("../../../examples/apps/alerts/app.yaml");
+
+/// The field and value of a refusal, which is what a person reads.
+fn refused(app: &App) -> (&'static str, String) {
+    match app.validate().expect_err("the app is refused") {
+        Error::Name { field, value, .. } => (field, value),
+        other => panic!("expected a named field, got {other:?}"),
+    }
+}
+
+fn roles_app() -> App {
+    App::from_yaml(ROLES).expect("the roles example parses")
+}
+
+/// AP-90, AP-91, AP-96: roles, their members and a role-gated data need parse, validate and
+/// survive a round trip unchanged.
+#[test]
+fn an_app_with_roles_members_and_a_role_gated_write_parses_validates_and_roundtrips() {
+    let app = roles_app();
+    app.validate().expect("the roles example validates");
+    assert_eq!(app.spec.visibility, AppVisibility::Roles);
+    assert_eq!(app.spec.roles.len(), 2);
+    assert_eq!(app.spec.roles[0].title["sk"], "Čitateľ");
+    assert_eq!(
+        app.spec.access[1].subjects[0].user.as_deref(),
+        Some("jana.kovacova@hel.fi")
+    );
+    assert_eq!(app.spec.data_needs[1].roles, ["editor"]);
+    assert!(
+        app.spec.data_needs[0].roles.is_empty(),
+        "absent means every caller"
+    );
+
+    let serialized = app.to_yaml().expect("serialize");
+    assert!(
+        !serialized.contains("roles: []"),
+        "an empty list is not written: {serialized}"
+    );
+    assert_eq!(app, App::from_yaml(&serialized).expect("re-import"));
+    // The golden app has no roles and still validates: the fields are optional.
+    App::from_yaml(GOLDEN)
+        .expect("golden")
+        .validate()
+        .expect("no roles is fine");
+}
+
+/// AP-90: a role name is a short lower-case slug, declared once, and an app has at most 16.
+#[test]
+fn a_role_name_that_is_not_a_slug_or_is_declared_twice_or_one_too_many_is_refused() {
+    for bad in [
+        "Editor",
+        "1editor",
+        "editor_2",
+        "",
+        "a-very-long-role-name-over-32-chars",
+    ] {
+        let mut app = roles_app();
+        app.spec.roles[0].name = bad.to_owned();
+        app.spec.access.retain(|a| a.role != "viewer");
+        assert_eq!(refused(&app), ("roles[].name", bad.to_owned()), "{bad}");
+    }
+
+    let mut twice = roles_app();
+    twice.spec.roles[1].name = "viewer".to_owned();
+    twice.spec.access.retain(|a| a.role != "editor");
+    twice.spec.data_needs[1].roles.clear();
+    assert_eq!(refused(&twice), ("roles[].name", "viewer".to_owned()));
+
+    let mut many = roles_app();
+    let template = many.spec.roles[0].clone();
+    many.spec.roles = (0..17)
+        .map(|i| jc_core::kinds::AppRole {
+            name: format!("role-{i}"),
+            ..template.clone()
+        })
+        .collect();
+    many.spec.access.clear();
+    many.spec.data_needs[1].roles = vec!["role-0".to_owned()];
+    assert_eq!(refused(&many), ("roles", "17".to_owned()));
+}
+
+/// AP-91, AP-96: `access` and `dataNeeds[].roles` name only declared roles, and a role's
+/// members are listed in one entry.
+#[test]
+fn access_or_a_data_need_naming_an_undeclared_role_is_refused() {
+    let mut access = roles_app();
+    access.spec.access[0].role = "admin".to_owned();
+    assert_eq!(refused(&access), ("access[].role", "admin".to_owned()));
+
+    let mut split = roles_app();
+    split.spec.access[1].role = "viewer".to_owned();
+    assert_eq!(refused(&split), ("access[].role", "viewer".to_owned()));
+
+    let mut need = roles_app();
+    need.spec.data_needs[1].roles = vec!["admin".to_owned()];
+    assert_eq!(refused(&need), ("dataNeeds[].roles", "admin".to_owned()));
+}
+
+/// AP-91: a member is exactly one of a lower-case e-mail and a group name, never a wildcard,
+/// never twice, and a role lists at least one.
+#[test]
+fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
+    use jc_core::kinds::Subject;
+    let user = |u: &str| Subject {
+        user: Some(u.to_owned()),
+        group: None,
+    };
+    let group = |g: &str| Subject {
+        user: None,
+        group: Some(g.to_owned()),
+    };
+    for (subjects, value) in [
+        (vec![user("Jana.Kovacova@hel.fi")], "Jana.Kovacova@hel.fi"),
+        (vec![user("jana.kovacova")], "jana.kovacova"),
+        (vec![user("*@hel.fi")], "*@hel.fi"),
+        (vec![user(" jana@hel.fi")], " jana@hel.fi"),
+        (vec![group("Alert Editors")], "Alert Editors"),
+        (vec![group("*")], "*"),
+        (
+            vec![Subject {
+                user: Some("jana@hel.fi".into()),
+                group: Some("x".into()),
+            }],
+            "",
+        ),
+        (vec![Subject::default()], ""),
+        (vec![], ""),
+        (
+            vec![user("jana@hel.fi"), user("jana@hel.fi")],
+            "jana@hel.fi",
+        ),
+    ] {
+        let mut app = roles_app();
+        app.spec.access[1].subjects = subjects.clone();
+        assert_eq!(
+            refused(&app),
+            ("access[].subjects", value.to_owned()),
+            "{subjects:?}"
+        );
+    }
+}
+
+/// AP-94: `visibility: roles` needs a role to admit anybody, and only the static host enforces
+/// it, so a service or fullstack app may not say it.
+#[test]
+fn visibility_roles_without_roles_or_on_a_pod_served_app_is_refused() {
+    let mut none = roles_app();
+    none.spec.roles.clear();
+    none.spec.access.clear();
+    none.spec.data_needs[1].roles.clear();
+    assert_eq!(refused(&none), ("visibility", "roles".to_owned()));
+
+    for class in [AppClass::Service, AppClass::Fullstack] {
+        let mut app = roles_app();
+        app.spec.class = class;
+        app.spec.build = jc_core::kinds::AppBuild(
+            [
+                ("rust".to_owned(), "1.90".to_owned()),
+                ("node".to_owned(), "22".to_owned()),
+            ]
+            .into(),
+        );
+        assert_eq!(refused(&app), ("visibility", "roles".to_owned()), "{class}");
+        // The roles themselves are fine on such an app: its data grants still follow them.
+        app.spec.visibility = AppVisibility::Organization;
+        app.validate().expect("roles without visibility: roles");
+    }
+}
+
+/// AP-90, AP-16: a role carries nothing but its name, title and description.
+#[test]
+fn an_unknown_field_in_a_role_or_an_access_entry_is_refused_at_parse_time() {
+    for (from, to) in [
+        (
+            "description: \"Reads the alerts\" }",
+            "description: \"Reads the alerts\", secretRef: x }",
+        ),
+        (
+            "{ role: viewer, subjects:",
+            "{ role: viewer, everyone: true, subjects:",
+        ),
+    ] {
+        let text = ROLES.replacen(from, to, 1);
+        assert_ne!(text, ROLES, "{from}");
+        assert!(App::from_yaml(&text).is_err(), "{to}");
+    }
+}

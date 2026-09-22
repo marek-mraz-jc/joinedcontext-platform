@@ -32,8 +32,9 @@ pub use agent_profile::{
     AgentTool, AgentWorkspace, ModelProvider, DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use app::{
-    AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,
-    ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource, TemporalConstraint,
+    AppAccess, AppBuild, AppClass, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
+    AppVisibility, ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource,
+    TemporalConstraint,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
@@ -54,8 +55,9 @@ pub use dataspace::{
     DataOfferSpec, DataSpaceParticipantSpec, Did,
 };
 pub use endpoint::{
-    Audience, Caching, EndpointRef, EndpointSlug, EndpointSpec, FileLimits, Projection, RateLimits,
-    Representation, SharedSpaceReferenceSpec,
+    endpoint_role, Audience, Caching, EndpointRef, EndpointRole, EndpointSlug, EndpointSpec,
+    FileLimits, Projection, RateLimits, Representation, SharedSpaceReferenceSpec,
+    ENDPOINT_ROLE_PREFIX,
 };
 pub use environment::{EnvironmentSpec, SecretBackend};
 pub use group::{GroupSpec, Member};
