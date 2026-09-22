@@ -450,3 +450,69 @@ fn an_image_or_module_annotation_on_an_app_is_refused() {
         assert!(format!("{refused}").contains("status.build"), "{refused}");
     }
 }
+
+/// AP-87: a published static App names its repository. One naming a folder of the configuration
+/// repository is refused with the field and the way out; the same App with `source.git`, the
+/// bundle the Portal image ships, and every other lifecycle or class are accepted.
+#[test]
+fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ships_it() {
+    use jc_core::kinds::app::{GitSource, SHIPPED_WITH_ANNOTATION};
+
+    let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
+    app.spec.class = AppClass::Static;
+    app.spec.visibility = AppVisibility::Project;
+    app.spec.lifecycle = AppLifecycle::Published;
+    match app.validate().expect_err("a folder the lane cannot build") {
+        Error::Name { field, reason, .. } => {
+            assert_eq!(field, "spec.source");
+            assert!(
+                reason.contains("retire") && reason.contains("AP-87"),
+                "{reason}"
+            );
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
+
+    let mut shipped = app.clone();
+    shipped
+        .metadata
+        .annotations
+        .insert(SHIPPED_WITH_ANNOTATION.to_owned(), "portal".to_owned());
+    assert!(shipped.validate().is_ok(), "the bundle the image ships");
+    shipped
+        .metadata
+        .annotations
+        .insert(SHIPPED_WITH_ANNOTATION.to_owned(), "gitea".to_owned());
+    assert!(shipped.validate().is_err(), "only `portal` ships a bundle");
+
+    let mut in_git = app.clone();
+    in_git.spec.source.path = None;
+    in_git.spec.source.git = Some(GitSource {
+        url: "https://forge.example/joinedcontext/helsinki_bikes.git".to_owned(),
+        git_ref: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        path: None,
+    });
+    assert!(in_git.validate().is_ok(), "its own repository");
+
+    for lifecycle in [
+        AppLifecycle::Draft,
+        AppLifecycle::Preview,
+        AppLifecycle::Retired,
+    ] {
+        let mut other = app.clone();
+        other.spec.lifecycle = lifecycle;
+        assert!(other.validate().is_ok(), "{lifecycle} is not served");
+    }
+    let mut fullstack = app.clone();
+    fullstack.spec.class = AppClass::Fullstack;
+    assert!(
+        fullstack.validate().is_ok(),
+        "the lane of AP-87 is the static one"
+    );
+    // `jcctl validate` and the Portal's write doors reach the rule by the kind's name.
+    let yaml = app.to_yaml().expect("the manifest serializes");
+    assert!(matches!(
+        jc_core::registry::validate_yaml("App", &yaml),
+        Some(Err(_))
+    ));
+}
