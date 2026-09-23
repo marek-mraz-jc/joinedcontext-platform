@@ -524,3 +524,19 @@ fn an_empty_spec_object_redacts_nothing_and_reports_no_drops() {
     assert_eq!(clean.spec, serde_json::json!({}));
     assert!(export::literal_credentials(&serde_json::json!(null)).is_empty());
 }
+
+/// MF-17: `password: 123456` in YAML is a number, and still a password typed into a manifest.
+#[test]
+fn a_credential_named_field_holding_a_number_or_bool_is_redacted() {
+    let spec = serde_json::json!({ "password": 123456, "token": true });
+    let mut found = export::literal_credentials(&spec);
+    found.sort();
+    assert_eq!(found, vec!["password", "token"]);
+}
+
+/// MF-17: an absent value is not a credential, and a declaration is not one either.
+#[test]
+fn a_credential_named_field_holding_null_is_not_redacted() {
+    let spec = serde_json::json!({ "password": null, "token": { "secretRef": { "name": "t" } } });
+    assert!(export::literal_credentials(&spec).is_empty());
+}

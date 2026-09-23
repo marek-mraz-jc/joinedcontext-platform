@@ -192,3 +192,46 @@ fn the_bearer_token_never_appears_in_a_refused_error_message() {
     );
     assert_eq!(request.matches(TOKEN).count(), 1, "only in the header");
 }
+
+/// CC-18: a 207 whose body is not JSON says nothing about which entities landed, so it
+/// cannot be counted as all of them.
+#[test]
+fn a_207_whose_body_is_not_json_is_not_treated_as_success() {
+    let (base, _) = answering(207, "<html>upstream reset</html>");
+    let result = gateway(&base).upsert("ovzdusie", &entities());
+    assert!(
+        result.is_err(),
+        "a 207 nobody can read was taken as success"
+    );
+}
+
+/// CC-18: a 207 whose `errors` is not a list is not a report the client can read either.
+#[test]
+fn a_207_with_an_errors_key_that_is_not_an_array_is_not_treated_as_success() {
+    let (base, _) = answering(207, r#"{"errors":"the batch was cut short"}"#);
+    let result = gateway(&base).upsert("ovzdusie", &entities());
+    assert!(
+        result.is_err(),
+        "a 207 with an unreadable errors member was taken as success"
+    );
+}
+
+/// CC-18, T-2539: with no `errors`, only a `success` list naming every entity sent is a full
+/// success; one that names fewer, or none at all, is a refusal saying why.
+#[test]
+fn a_207_without_errors_is_success_only_when_every_entity_is_named() {
+    let sent = entities().len();
+    let all: Vec<String> = (0..sent).map(|n| format!("urn:{n}")).collect();
+    let (base, _) = answering(207, &serde_json::json!({ "success": all }).to_string());
+    assert!(gateway(&base).upsert("ovzdusie", &entities()).is_ok());
+
+    for body in [r#"{"success":["urn:0"]}"#, "{}", "[]"] {
+        let (base, _) = answering(207, body);
+        let (status, message) = refused(gateway(&base).upsert("ovzdusie", &entities()));
+        assert_eq!(status, 207, "{body}");
+        assert!(
+            message.contains("does not say which entities landed"),
+            "{body}: {message}"
+        );
+    }
+}
