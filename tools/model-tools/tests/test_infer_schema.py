@@ -88,12 +88,12 @@ def test_units_come_from_the_header_as_cefact_codes():
 
     slots = slots_of(answer)
     # The UN/CEFACT code NGSI-LD puts on the wire and the QUDT anchor a federated reader
-    # dereferences, side by side (DM-06, DM-59). `ug/m3` is `MassDensity` to QUDT, which is why
-    # the table is read out of QUDT's own vocabulary rather than written from memory.
+    # dereferences, side by side (DM-06, DM-59). `ug/m3` is `Density` to QUDT, which is why the
+    # code list is read out of QUDT's own vocabulary rather than written from memory.
     assert slots["pm10"]["unit"] == {
-        "ucum_code": "ug/m3",
+        "ucum_code": "ug.m-3",
         "exact_mappings": ["ucefact:GQ", "qudt-unit:MicroGM-PER-M3"],
-        "has_quantity_kind": "qudt-quantkind:MassDensity",
+        "has_quantity_kind": "qudt-quantkind:Density",
     }
     assert slots["temperature"]["unit"]["exact_mappings"] == ["ucefact:CEL", "qudt-unit:DEG_C"]
     assert slots["speed"]["unit"]["exact_mappings"] == ["ucefact:KMH", "qudt-unit:KiloM-PER-HR"]
@@ -330,20 +330,20 @@ class _Explosive:
         raise AssertionError("the body was read")
 
 
-def test_the_unit_crosswalk_anchors_every_code_it_offers():
-    """DM-59: a UN/CEFACT code alone resolves to nothing, so every unit the inference can emit
-    carries its QUDT unit and its quantity kind. The editor keeps the same table for the picker
-    (`ui/src/pages/models/linkml.ts`, in the other repository); nothing can compare the two from
-    inside one checkout, so each side guards its own shape and a code added here belongs there
-    in the same change."""
-    from infer_schema import UNIT_PREFIXES, UNIT_QUDT, UNIT_UCUM
+def test_every_unit_the_inference_emits_is_a_code_of_the_list_with_its_qudt_anchor():
+    """DM-06, DM-59: a header spelling resolves to a Rec 20 code of the one code list, and a
+    UN/CEFACT code alone resolves to nothing, so each carries its QUDT unit and quantity kind.
+    `hPa` was once written down as `HPA`, which Rec 20 calls a hectolitre of pure alcohol."""
+    from import_sdm import UNIT_SYNONYMS
+    from infer_schema import CODE_LIST, UNIT_PREFIXES, UNITS, unit_block
 
-    assert set(UNIT_QUDT) == set(UNIT_UCUM), set(UNIT_QUDT) ^ set(UNIT_UCUM)
-    for code, (unit, kind) in UNIT_QUDT.items():
-        assert unit and kind, code
-        # Local names, never IRIs: the prefix is declared once in the model, and a full IRI
-        # here would write it twice and let the two drift.
-        assert ":" not in unit and "://" not in unit, code
-        assert ":" not in kind and "://" not in kind, code
+    assert UNITS["hpa"] == "A97" and CODE_LIST["A97"]["name"] == "hectopascal"
+    for code in set(UNITS.values()) | set(UNIT_SYNONYMS):
+        block = unit_block(code)
+        assert block["exact_mappings"][0] == f"ucefact:{code}", code
+        assert block["exact_mappings"][1].startswith("qudt-unit:"), code
+        assert block["has_quantity_kind"].startswith("qudt-quantkind:"), code
+        # Local names after the prefix, never IRIs: the prefix is declared once in the model.
+        assert "://" not in block["exact_mappings"][1] + block["has_quantity_kind"], code
     # Every prefix the emitted CURIEs use, so `check_unit_prefixes` has something to find.
     assert {"ucefact", "qudt-unit", "qudt-quantkind"} <= set(UNIT_PREFIXES)

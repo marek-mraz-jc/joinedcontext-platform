@@ -25,7 +25,7 @@ import yaml
 
 from common import UPSTREAM_ANNOTATION
 # The one crosswalk Model Tools keeps; the editor's `UNIT_CODES` is the other copy (DM-59).
-from infer_schema import UNIT_PREFIXES, UNIT_QUDT, UNIT_UCUM
+from infer_schema import UNIT_PREFIXES, unit_block
 
 SDM_ORG = "smart-data-models"
 SDM_NAMESPACE = "https://smartdatamodels.org/"
@@ -285,7 +285,7 @@ FORMAT_RANGES = {"date-time": "datetime", "date": "date", "time": "time", "uri":
 #: Smart Data Models has no unit field: the unit is a clause of the description, written by hand
 #: and spelled differently every time — `Units:'Celsius degrees'`, `Units:'Km/h'`,
 #: `Units:'w/m2'`, `Units:'centimeters'`. So this is a synonym table over the codes the platform
-#: already offers (`infer_schema.UNIT_UCUM`), and a spelling that is not in it leaves the slot
+#: code list carries (`infer_schema.CODE_LIST`), and a spelling that is not in it leaves the slot
 #: without a unit rather than with a guessed one: a wrong unit is a wrong number, and every
 #: consumer of the model would carry it.
 UNIT_SYNONYMS = {
@@ -307,7 +307,7 @@ UNIT_SYNONYMS = {
     "WTT": ("watts", "watt", "w"),
     "A24": ("candelas per square meter", "cd/m2"),
     "2N": ("decibels", "decibel", "db"),
-    "HPA": ("hectopascals", "hectopascal", "hpa"),
+    "A97": ("hectopascals", "hectopascal", "hpa"),
     "C62": ("dimensionless",),
 }
 #: The clause the catalogue writes the unit in, and nothing looser: `Units:'…'` with either
@@ -331,12 +331,7 @@ def _unit_of(description: str | None) -> dict[str, Any] | None:
     spelled = " ".join(found.group(1).lower().split()).strip(" .'\"")
     for code, spellings in UNIT_SYNONYMS.items():
         if spelled in spellings:
-            qudt_unit, quantity_kind = UNIT_QUDT[code]
-            return {
-                "ucum_code": UNIT_UCUM[code],
-                "exact_mappings": [f"ucefact:{code}", f"qudt-unit:{qudt_unit}"],
-                "has_quantity_kind": f"qudt-quantkind:{quantity_kind}",
-            }
+            return unit_block(code)
     return None
 
 

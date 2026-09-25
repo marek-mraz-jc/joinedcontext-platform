@@ -28,7 +28,7 @@ from typing import Any
 
 import yaml
 
-from common import UPSTREAM_ANNOTATION
+from common import SHIPPED_MODELS, UPSTREAM_ANNOTATION
 
 #: The cap of DM-55; the service refuses a larger body before it is read.
 MAX_SAMPLE_BYTES = 10 * 1024 * 1024
@@ -42,7 +42,7 @@ CORE_SLOTS = ("id", "type", "location", "observedAt")
 SDM_NAMESPACE = "https://smartdatamodels.org/"
 
 #: UN/CEFACT common codes by the token a header carries (DM-06): `pm10_ugm3`, `temperature (°C)`,
-#: `speed [km/h]`. The codes are the ones the editor offers, so an inferred unit is one it accepts.
+#: `speed [km/h]`. Every code is one of the code list's (`CODE_LIST`), which a test holds it to.
 UNITS = {
     "ug/m3": "GQ", "ugm3": "GQ",
     "mg/l": "M1", "mgl": "M1",
@@ -62,43 +62,34 @@ UNITS = {
     "w": "WTT",
     "cd/m2": "A24",
     "db": "2N",
-    "hpa": "HPA",
+    "hpa": "A97",
 }
-UNIT_UCUM = {
-    "GQ": "ug/m3", "M1": "mg/L", "CEL": "Cel", "P1": "%", "MTR": "m", "KMT": "km", "MTS": "m/s",
-    "KMH": "km/h", "SEC": "s", "HUR": "h", "KGM": "kg", "TNE": "t", "LTR": "L", "MTQ": "m3",
-    "KWH": "kW.h", "WTT": "W", "A24": "cd/m2", "2N": "dB", "HPA": "hPa", "C62": "1",
+#: The one UN/CEFACT code list (DM-06, DM-59): UNECE Recommendation 20 joined with QUDT, generated
+#: by `tools/units/generate.py` from pinned sources and shipped beside the models. Every unit an
+#: inferred or imported model declares is read from it, never from a table written here.
+CODE_LIST = {
+    unit["code"]: unit
+    for unit in json.loads((SHIPPED_MODELS / "unece-rec20.json").read_text(encoding="utf-8"))["units"]
 }
 
-#: The QUDT anchor of each unit (DM-59): the unit IRI a federated reader dereferences, and the
-#: quantity kind that says what dimension is being measured, so two organisations' measurements
-#: can be aligned instead of two opaque codes compared. Read out of QUDT's own vocabulary by
-#: `qudt:ucumCode`, never written from memory — `ug/m3` is `MassDensity` to QUDT and not the
-#: `MassConcentration` a person would guess. The editor's `UNIT_CODES` carries the same table for
-#: the picker (`ui/src/pages/models/linkml.ts`, in the other repository); nothing can compare the
-#: two from inside one checkout, so a code added here belongs there in the same change.
-UNIT_QUDT = {
-    "GQ": ("MicroGM-PER-M3", "MassDensity"),
-    "M1": ("MilliGM-PER-L", "MassConcentration"),
-    "CEL": ("DEG_C", "Temperature"),
-    "P1": ("PERCENT", "DimensionlessRatio"),
-    "MTR": ("M", "Length"),
-    "KMT": ("KiloM", "Length"),
-    "MTS": ("M-PER-SEC", "Speed"),
-    "KMH": ("KiloM-PER-HR", "LinearVelocity"),
-    "SEC": ("SEC", "Time"),
-    "HUR": ("HR", "Time"),
-    "KGM": ("KiloGM", "Mass"),
-    "TNE": ("TONNE", "Mass"),
-    "LTR": ("L", "Volume"),
-    "MTQ": ("M3", "Volume"),
-    "KWH": ("KiloW-HR", "Energy"),
-    "WTT": ("W", "Power"),
-    "A24": ("CD-PER-M2", "Luminance"),
-    "2N": ("DeciB", "SoundPressureLevel"),
-    "HPA": ("HectoPA", "ForcePerArea"),
-    "C62": ("NUM", "Dimensionless"),
-}
+
+def unit_block(code: str) -> dict[str, Any]:
+    """The LinkML `unit` of a Rec 20 code: its UCUM code, the CEFACT code and the QUDT anchor.
+
+    The CEFACT code is what NGSI-LD puts on the wire as `unitCode`; the QUDT unit IRI and quantity
+    kind are what a federated reader dereferences to align two organisations' measurements, and
+    both come from QUDT's own vocabulary through the list — `ug/m3` is `Density` to QUDT and not
+    the `MassConcentration` a person would guess. A field the list does not carry is left out.
+    """
+    unit = CODE_LIST[code]
+    block: dict[str, Any] = {}
+    if unit["ucum"]:
+        block["ucum_code"] = unit["ucum"]
+    block["exact_mappings"] = [f"ucefact:{code}"] + ([f"qudt-unit:{unit['qudt']}"] if unit["qudt"] else [])
+    if unit["quantityKinds"]:
+        block["has_quantity_kind"] = f"qudt-quantkind:{unit['quantityKinds'][0]}"
+    return block
+
 
 #: The namespaces the unit mappings cite. Declared on every inferred model that carries a unit,
 #: because a CURIE under an undeclared prefix dangles in every artifact (DM-59).
@@ -477,12 +468,7 @@ def infer(
             if column.get("kind"):
                 definition["annotations"] = {"ngsi_ld_kind": column["kind"]}
             if unit:
-                qudt_unit, quantity_kind = UNIT_QUDT[unit]
-                definition["unit"] = {
-                    "ucum_code": UNIT_UCUM[unit],
-                    "exact_mappings": [f"ucefact:{unit}", f"qudt-unit:{qudt_unit}"],
-                    "has_quantity_kind": f"qudt-quantkind:{quantity_kind}",
-                }
+                definition["unit"] = unit_block(unit)
             models = index.get(slot) or []
             if models:
                 subject = models[0].split("/")[0]
