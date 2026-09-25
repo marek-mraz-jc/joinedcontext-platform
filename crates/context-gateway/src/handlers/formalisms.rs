@@ -1,11 +1,11 @@
-//! The five formalisms the gateway renders rather than serves (T-0284, EP-46, EP-47, EP-49).
+//! The formalisms the gateway renders rather than serves (T-0284, EP-46, EP-47, EP-49).
 //!
-//! SHACL, OWL, RDF, the LinkML source and the Markdown are built from the projected model,
-//! which is the class and slot set [`super::schema::json_schema`] already narrowed to the
-//! caller's grant. That is the whole security argument of this module: a slot the projection
-//! removed is absent from every formalism because every formalism is rendered from the
-//! projection, so no document here can disagree with the JSON Schema, with the `@context` or
-//! with what the data paths actually serve (EP-47).
+//! SHACL, OWL, RDF, the RDF Data Cube, the LinkML source and the Markdown are built from the
+//! projected model, which is the class and slot set [`super::schema::json_schema`] already
+//! narrowed to the caller's grant. That is the whole security argument of this module: a slot
+//! the projection removed is absent from every formalism because every formalism is rendered
+//! from the projection, so no document here can disagree with the JSON Schema, with the
+//! `@context` or with what the data paths actually serve (EP-47).
 //!
 //! The gateway emits Turtle and never parses it. Redacting a triple out of a committed
 //! document would need an RDF stack in a security path, and a parsed and re-serialised
@@ -14,6 +14,7 @@
 //! decision.
 
 use crate::resolver::Model;
+use jc_core::qb::{self as cube, Component};
 use serde_json::{Map, Value};
 use std::fmt::Write as _;
 
@@ -219,10 +220,31 @@ pub fn shacl(classes: &[Class]) -> String {
     out
 }
 
+/// The namespace of the W3C RDF Data Cube vocabulary (DM-60).
+const QB: &str = "http://purl.org/linked-data/cube#";
+
+/// The cube type of a projected slot of a Data Structure Definition, if it is a component.
+fn component_type(class: &Class, definition: &Value) -> Option<&'static str> {
+    if !cube::is_dsd(class.definition) {
+        return None;
+    }
+    Component::of(definition).map(|role| match role {
+        Component::Dimension => "qb:DimensionProperty",
+        Component::Measure => "qb:MeasureProperty",
+    })
+}
+
 /// The OWL ontology of the projected model (EP-46).
+///
+/// A Data Structure Definition's class is a subclass of `qb:Observation` and each of its
+/// components carries its cube type beside its OWL one (DM-60); every other class renders as
+/// it always has.
 pub fn owl(classes: &[Class]) -> String {
     let mut out = turtle_header("OWL ontology");
     out.push_str("@prefix owl: <http://www.w3.org/2002/07/owl#> .\n");
+    if classes.iter().any(|class| cube::is_dsd(class.definition)) {
+        let _ = writeln!(out, "@prefix qb: <{QB}> .");
+    }
 
     for class in classes {
         let _ = write!(
@@ -231,6 +253,9 @@ pub fn owl(classes: &[Class]) -> String {
             class.iri(),
             escape(class.name)
         );
+        if cube::is_dsd(class.definition) {
+            out.push_str(" ;\n  rdfs:subClassOf qb:Observation");
+        }
         if let Some(text) = description(class.definition) {
             let _ = write!(out, " ;\n  rdfs:comment \"{}\"", escape(text));
         }
@@ -243,6 +268,10 @@ pub fn owl(classes: &[Class]) -> String {
             let kind = match xsd(definition) {
                 Some(_) => "owl:DatatypeProperty",
                 None => "rdf:Property",
+            };
+            let kind = match component_type(class, definition) {
+                Some(role) => format!("{kind}, {role}"),
+                None => kind.to_owned(),
             };
             let _ = write!(
                 out,
@@ -261,6 +290,80 @@ pub fn owl(classes: &[Class]) -> String {
         }
     }
     out
+}
+
+/// The RDF Data Cube structure of the projected model, `model.qb.ttl` (DM-60, T-1187).
+///
+/// One `qb:DataStructureDefinition` per granted class that is one, with its components. No
+/// `qb:order`: the projected schema keeps its slots in name order, not the model's, and the
+/// vocabulary makes the order optional, so none is stated rather than a wrong one; the
+/// `model.qb.ttl` Model Tools renders from the source states it (DM-60). `None` when no granted class is a DSD: the document does not
+/// exist then, it is not an empty cube. Rendered from the projection like every other
+/// formalism, so a dimension the grant hides is no component here either (EP-47).
+pub fn qb(classes: &[Class]) -> Option<String> {
+    let cubes: Vec<&Class> = classes
+        .iter()
+        .filter(|class| cube::is_dsd(class.definition))
+        .collect();
+    if cubes.is_empty() {
+        return None;
+    }
+    let mut out = turtle_header("RDF Data Cube structure");
+    let _ = writeln!(out, "@prefix qb: <{QB}> .");
+    for class in cubes {
+        let components: Vec<(&str, &Value, Component)> = class
+            .slots()
+            .into_iter()
+            .filter_map(|(slot, definition)| {
+                Component::of(definition).map(|role| (slot, definition, role))
+            })
+            .collect();
+        let _ = write!(
+            out,
+            "\n<{}Structure> a qb:DataStructureDefinition ;\n  rdfs:label \"{}\"",
+            class.iri(),
+            escape(class.name)
+        );
+        if let Some(text) = description(class.definition) {
+            let _ = write!(out, " ;\n  rdfs:comment \"{}\"", escape(text));
+        }
+        let entries: Vec<String> = components
+            .iter()
+            .map(|(slot, _, role)| {
+                let key = match role {
+                    Component::Dimension => "qb:dimension",
+                    Component::Measure => "qb:measure",
+                };
+                format!("    [ {key} <{}> ]", class.slot_iri(slot))
+            })
+            .collect();
+        if entries.is_empty() {
+            out.push_str(" .\n");
+        } else {
+            let _ = write!(out, " ;\n  qb:component\n{} .\n", entries.join(" ,\n"));
+        }
+        let _ = writeln!(out, "\n<{}> rdfs:subClassOf qb:Observation .", class.iri());
+        for (slot, definition, role) in components {
+            let kind = match role {
+                Component::Dimension => "qb:DimensionProperty",
+                Component::Measure => "qb:MeasureProperty",
+            };
+            let _ = write!(
+                out,
+                "\n<{}> a rdf:Property, {kind} ;\n  rdfs:label \"{}\"",
+                class.slot_iri(slot),
+                escape(slot)
+            );
+            if let Some(datatype) = xsd(definition) {
+                let _ = write!(out, " ;\n  rdfs:range {datatype}");
+            }
+            if let Some(text) = description(definition) {
+                let _ = write!(out, " ;\n  rdfs:comment \"{}\"", escape(text));
+            }
+            out.push_str(" .\n");
+        }
+    }
+    Some(out)
 }
 
 /// The RDFS rendering of the projected model (EP-46).

@@ -118,6 +118,11 @@ fn schema_artifact_of(
         return ProblemDetails::not_found().into_response();
     }
     let visible = schema::visible(subject, endpoint, crate::pdp::now());
+    if wanted == schema::Artifact::Qb && !schema::declares_dsd(&models, &visible) {
+        // A model without a Data Structure Definition has no cube, and a grant that hides the
+        // DSD class hides its cube with it (DM-60, EP-47).
+        return ProblemDetails::not_found().into_response();
+    }
     if !wanted.is_json() {
         // SHACL, OWL, RDF, LinkML and Markdown are rendered from the projected model rather
         // than served from a committed file, so no formalism can carry a slot the grant

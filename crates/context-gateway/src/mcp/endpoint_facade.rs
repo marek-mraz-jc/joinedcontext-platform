@@ -293,9 +293,9 @@ const TOOLS: &[Tool] = &[
                         "type": "string",
                         "enum": [
                             "summary", "json-schema", "context",
-                            "linkml", "shacl", "owl", "rdf", "markdown",
+                            "linkml", "shacl", "owl", "rdf", "markdown", "qb",
                         ],
-                        "description": "summary (the default) lists the models and every artifact with its format, size and digest, linkml first; the others render one, the text formalisms as {format, mediaType, document}",
+                        "description": "summary (the default) lists the models and every artifact with its format, size and digest, linkml first; the others render one, the text formalisms as {format, mediaType, document}; qb only where the model is a data cube",
                     },
                     "entityType": {
                         "oneOf": [
@@ -1590,7 +1590,9 @@ fn resources(endpoint: &Endpoint, subject: &Subject) -> Value {
     // Every formalism the schema surface renders, in reading order, so a client that attaches
     // resources rather than calling tools reaches the same documents (EP-46, T-1858).
     for model in &endpoint.models {
-        for artifact in schema::Artifact::ALL {
+        // The cube is listed only where this caller's projection of the model holds a Data
+        // Structure Definition, as the REST index lists it (DM-60).
+        for artifact in schema::published(&[model], &visible) {
             listed.push(json!({
                 "uri": schema_uri(&endpoint.slug, model.major, artifact),
                 "name": format!("{} v{} {}", model.name, model.major, artifact.format_name()),
@@ -2039,9 +2041,17 @@ fn describe_schema(
     let Some(artifact) = schema::Artifact::from_format(format) else {
         return Err(format!(
             "`{format}` is not a formalism this endpoint renders: it serves summary, \
-             json-schema, context, linkml, shacl, owl, rdf and markdown"
+             json-schema, context, linkml, shacl, owl, rdf, markdown, and qb where the model \
+             declares a Data Structure Definition"
         ));
     };
+    if artifact == schema::Artifact::Qb && !schema::declares_dsd(&models, &visible) {
+        return Err(
+            "this endpoint's model declares no Data Structure Definition you may read, so it \
+             has no RDF Data Cube; ask for shacl, owl or rdf instead"
+                .to_owned(),
+        );
+    }
 
     let mut redacted = Vec::new();
     let rendered = match artifact {
