@@ -25,30 +25,12 @@
       "type": "object"
     },
     "AppClass": {
-      "description": "How an app is built and served (AP-01).",
-      "oneOf": [
-        {
-          "description": "A built front end served from the Portal static host, acting with the user's token (AP-07, AP-14).",
-          "enum": [
-            "static"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "A backend running in the instance namespace with its own service account (AP-08, AP-15).",
-          "enum": [
-            "service"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Backend and front end in one image.",
-          "enum": [
-            "fullstack"
-          ],
-          "type": "string"
-        }
-      ]
+      "description": "The App's shape (AP-124): `ui`, React on the SDK served statically, or `ui-rust`, the same UI with an axum server in a pod. `ui-node` is declared and not built yet.",
+      "enum": [
+        "ui",
+        "ui-rust"
+      ],
+      "type": "string"
     },
     "AppEgress": {
       "additionalProperties": false,

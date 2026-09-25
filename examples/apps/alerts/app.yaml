@@ -7,7 +7,7 @@ metadata:
   namespace: helsinki
   title: { en: "Alerts", sk: "Upozornenia" }
 spec:
-  kind: static
+  kind: ui
   source: { git: { url: "https://git.example.org/helsinki/helsinki_alerts.git", ref: "3f2c9a1b7d4e5f60718293a4b5c6d7e8f9012345" } }
   build: { node: "22" }
   visibility: roles

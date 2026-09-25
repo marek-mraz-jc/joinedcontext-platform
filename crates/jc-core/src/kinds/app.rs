@@ -32,16 +32,91 @@ static ROLE_RE: LazyLock<Regex> =
 /// The most roles one App declares (AP-90).
 pub const MAX_APP_ROLES: usize = 16;
 
-/// How an app is built and served (AP-01).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// How an app is built and served: its shape (AP-01, AP-124, ADR-N-036). Every shape has a UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppClass {
-    /// A built front end served from the Portal static host, acting with the user's token (AP-07, AP-14).
-    Static,
-    /// A backend running in the instance namespace with its own service account (AP-08, AP-15).
-    Service,
-    /// Backend and front end in one image.
-    Fullstack,
+    /// React on the App SDK, served by the Portal's static host with the user's token, with
+    /// optional serverless functions (AP-07, AP-14, SDK-21). Read from `static` for one release.
+    Ui,
+    /// The same UI and an axum server in a pod of its own (AP-105…AP-108). Read from `fullstack`
+    /// for one release.
+    UiRust,
+}
+
+/// The longest refused value an error quotes back.
+const QUOTED_MAX: usize = 64;
+
+impl AppClass {
+    /// The shape `value` names, reading the names of the previous release (AP-124). `ui-node` is
+    /// declared and not built yet, and `service` is withdrawn: each is refused with what to write
+    /// instead, never with serde's list of variants.
+    pub fn parse(value: &str) -> std::result::Result<Self, String> {
+        match value {
+            "ui" | "static" => Ok(Self::Ui),
+            "ui-rust" | "fullstack" => Ok(Self::UiRust),
+            "ui-node" => Err(
+                "`ui-node` is a declared App shape that is not built yet (AP-124): \
+                              write `ui`, or `ui-rust` for a server of the App's own; a Node app \
+                              is built once a person asks for one"
+                    .to_owned(),
+            ),
+            "service" => Err(
+                "`service` is withdrawn, every App has a UI (AP-124): write `ui`, \
+                              or `ui-rust` for a server of the App's own"
+                    .to_owned(),
+            ),
+            other => Err(format!(
+                "`{}` is not an App shape: write `ui`, or `ui-rust` for a server of the App's own \
+                 (AP-124)",
+                other.chars().take(QUOTED_MAX).collect::<String>()
+            )),
+        }
+    }
+
+    /// The name of the previous release `value` is, with the name that replaces it (AP-124).
+    pub fn renamed(value: &str) -> Option<(&'static str, &'static str)> {
+        match value {
+            "static" => Some(("static", "ui")),
+            "fullstack" => Some(("fullstack", "ui-rust")),
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AppClass {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        AppClass::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for AppClass {
+    fn schema_name() -> String {
+        "AppClass".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        // The shapes a manifest is written with; the old names are only read (AP-124).
+        let schema = schemars::schema::SchemaObject {
+            instance_type: Some(schemars::schema::InstanceType::String.into()),
+            enum_values: Some(vec!["ui".into(), "ui-rust".into()]),
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "The App's shape (AP-124): `ui`, React on the SDK served statically, or \
+                     `ui-rust`, the same UI with an axum server in a pod. `ui-node` is declared \
+                     and not built yet."
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        schemars::schema::Schema::Object(schema)
+    }
 }
 
 /// Who may reach a published app (AP-18). A login by default: `project` (AP-120).
@@ -176,21 +251,21 @@ pub struct AppBuild(pub BTreeMap<String, String>);
 
 impl AppBuild {
     fn validate(&self, class: AppClass) -> Result<()> {
-        if self.0.is_empty() && class != AppClass::Static {
+        if self.0.is_empty() && class != AppClass::Ui {
             return Err(Error::Name {
                 field: "build",
                 value: String::new(),
-                reason: "a service or fullstack app pins at least one toolchain version; \
-                         only a static app may have no build step (AP-11, AP-83)",
+                reason: "a ui-rust app pins at least one toolchain version; only a ui app may \
+                         have no build step (AP-11, AP-83)",
             });
         }
         // A static bundle is HTML, CSS and JavaScript: nothing in it is compiled from Rust.
-        if class == AppClass::Static && self.0.contains_key("rust") {
+        if class == AppClass::Ui && self.0.contains_key("rust") {
             return Err(Error::Name {
                 field: "build",
                 value: "rust".to_owned(),
-                reason: "a static app is built by node or by no build step (`build: {}`), \
-                         never by rust; a Rust backend is a fullstack app (AP-83)",
+                reason: "a ui app is built by node or by no build step (`build: {}`), never by \
+                         rust; a Rust server is a ui-rust app (AP-83)",
             });
         }
         for (toolchain, version) in &self.0 {
@@ -665,7 +740,7 @@ impl Kind for AppSpec {
         // static App naming a folder of the configuration repository is an App it cannot build,
         // and it answers 404 to its whole audience. Only a bundle the Portal image ships is
         // served without the lane (AP-87); the Portal checks that it holds that bundle.
-        if self.class == AppClass::Static
+        if self.class == AppClass::Ui
             && self.lifecycle == AppLifecycle::Published
             && self.source.git.is_none()
             && meta
@@ -677,7 +752,7 @@ impl Kind for AppSpec {
             return Err(Error::Name {
                 field: "spec.source",
                 value: "path".to_owned(),
-                reason: "a published static App names spec.source.git: the build lane builds a \
+                reason: "a published ui App names spec.source.git: the build lane builds a \
                          repository at a commit, not a folder of the configuration repository; \
                          retire the App, or publish it again from its own repository (AP-87)",
             });
@@ -791,12 +866,12 @@ impl AppSpec {
                     reason: "visibility: roles admits a person holding a role, and the app declares none (AP-94)",
                 });
             }
-            if self.class != AppClass::Static {
+            if self.class != AppClass::Ui {
                 return Err(Error::Name {
                     field: "visibility",
                     value: "roles".to_owned(),
-                    reason: "visibility: roles is enforced by the static host, and a service or \
-                             fullstack app's requests never pass it (AP-94)",
+                    reason: "visibility: roles is enforced by the static host, and a ui-rust \
+                             app's requests never pass it (AP-94)",
                 });
             }
         }
@@ -825,9 +900,8 @@ impl AppSpec {
 impl fmt::Display for AppClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Static => "static",
-            Self::Service => "service",
-            Self::Fullstack => "fullstack",
+            Self::Ui => "ui",
+            Self::UiRust => "ui-rust",
         })
     }
 }

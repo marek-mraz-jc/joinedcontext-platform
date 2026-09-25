@@ -257,10 +257,13 @@ fn routed_apps(repo: &Repository) -> Vec<RoutedApp> {
             continue;
         }
         let spec = &resource.manifest.spec;
-        let own_pod = matches!(
-            spec.get("kind").and_then(Value::as_str),
-            Some("service" | "fullstack")
-        );
+        // Read as jc-core reads it, so `ui-rust` and the old `fullstack` both route to the pod
+        // (AP-124); a value jc-core refuses routes nowhere near a pod.
+        let own_pod = spec
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(|kind| jc_core::kinds::AppClass::parse(kind).ok())
+            == Some(jc_core::kinds::AppClass::UiRust);
         let public = spec.get("visibility").and_then(Value::as_str) == Some("public");
         let endpoint = format!("app-{}", id.name);
         let mut slugs: Vec<String> = repo
