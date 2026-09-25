@@ -1657,7 +1657,9 @@ fn subject_of(
                     endpoint.audience,
                     account.roles_in(&account.project, &endpoint.space),
                 ),
-                groups,
+                // A workload's grants are its manifest's (PF-35, T-2545): a group the token
+                // claims is Keycloak membership nobody reviewed, so it reaches no group Policy.
+                groups: BTreeSet::new(),
                 did: None,
                 agreement: None,
             });
