@@ -223,7 +223,15 @@ async fn a_measured_attribute_is_an_addressable_datastream() {
         .iter()
         .find(|stream| stream["@iot.id"] == json!(format!("{URN}/pm10")))
         .expect("the pm10 datastream");
-    assert_eq!(pm10["unitOfMeasurement"]["symbol"], json!("GQ"));
+    // DM-06: the code list names the unit, the code's IRI defines it (T-2812).
+    assert_eq!(
+        pm10["unitOfMeasurement"],
+        json!({
+            "name": "microgram per cubic metre",
+            "symbol": "µg/m³",
+            "definition": "https://vocabulary.uncefact.org/UnitMeasureCode#GQ"
+        })
+    );
 
     let one = BrokerStub::start(vec![json!([station()])]).await;
     let (status, alone) = get(

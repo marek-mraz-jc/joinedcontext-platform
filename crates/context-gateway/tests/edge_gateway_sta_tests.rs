@@ -275,12 +275,38 @@ fn a_unit_the_attribute_does_not_carry_is_said_to_be_unknown_and_not_invented() 
 fn a_unit_the_attribute_carries_names_its_definition_in_the_unece_vocabulary() {
     let streams = datastreams(ENDPOINT, &station());
     assert_eq!(streams.len(), 1);
-    assert_eq!(streams[0]["unitOfMeasurement"]["name"], json!("GQ"));
-    assert_eq!(streams[0]["unitOfMeasurement"]["symbol"], json!("GQ"));
+    // The code list names it (DM-06, T-2812); the code stays in the definition.
+    assert_eq!(
+        streams[0]["unitOfMeasurement"]["name"],
+        json!("microgram per cubic metre")
+    );
+    assert_eq!(streams[0]["unitOfMeasurement"]["symbol"], json!("µg/m³"));
     assert_eq!(
         streams[0]["unitOfMeasurement"]["definition"],
         json!("https://vocabulary.uncefact.org/UnitMeasureCode#GQ")
     );
+}
+
+#[test]
+fn a_code_the_list_does_not_know_is_kept_as_written_and_a_unit_without_symbol_shows_its_code() {
+    let entity = json!({
+        "id": URN,
+        "type": "AirQualityObserved",
+        "made": { "type": "Property", "value": 3, "unitCode": "XQZ" },
+        "bikes": { "type": "Property", "value": 3, "unitCode": "H87" }
+    });
+    let streams = datastreams(ENDPOINT, &entity);
+    let unit = |name: &str| {
+        streams
+            .iter()
+            .find(|stream| stream["name"] == json!(name))
+            .map(|stream| stream["unitOfMeasurement"].clone())
+            .expect("the datastream")
+    };
+    assert_eq!(unit("made")["name"], json!("XQZ"));
+    assert_eq!(unit("made")["symbol"], json!("XQZ"));
+    assert_eq!(unit("bikes")["name"], json!("piece"));
+    assert_eq!(unit("bikes")["symbol"], json!("H87"));
 }
 
 #[test]
