@@ -4170,11 +4170,3 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
-
-[[patch.unused]]
-name = "jc-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "jcctl"
-version = "0.1.0"
