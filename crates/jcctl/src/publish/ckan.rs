@@ -147,7 +147,7 @@ pub fn package(
         "title": text_in(record.get("dct:title"), language).unwrap_or_else(|| name.to_owned()),
         "url": format!("{url}/"),
         "private": spec.audience != Audience::Public,
-        "resources": resources(&spec.enabled_representations, &url, record),
+        "resources": resources(&spec.served_representations(), &url, record),
         "extras": extras(record, &url, language),
     });
     if let Some(notes) = text_in(record.get("dct:description"), language) {

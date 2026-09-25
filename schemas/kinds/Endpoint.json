@@ -542,6 +542,13 @@
           ],
           "description": "Optional ceiling on one `file.*` download (EP-44)."
         },
+        "mcp": {
+          "description": "`false` turns the Endpoint's MCP instance off. Every Endpoint serves `mcp` without listing it, public or internal, gated by its own Policy (EP-24, T-2901); see [`EndpointSpec::served_representations`].",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "policyRef": {
           "anyOf": [
             {

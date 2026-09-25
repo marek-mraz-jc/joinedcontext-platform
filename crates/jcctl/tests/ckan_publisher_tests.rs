@@ -223,6 +223,37 @@ fn the_first_run_creates_the_dataset_and_the_second_changes_nothing() {
     );
 }
 
+/// EP-24, EP-64: MCP is published for every Endpoint without being listed, because the
+/// gateway serves it; `mcp: false` takes the resource off the catalogue with the instance.
+#[test]
+fn the_mcp_resource_follows_the_opt_out() {
+    let mut api = ckan();
+    let mcp = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/mcp";
+    publish(
+        &mut api,
+        &endpoint("[ngsi-ld]", PUBLISH),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the first run publishes");
+    let dataset = api.package("kvalita-ovzdusia").expect("the dataset");
+    assert!(resource_urls(dataset).contains(&mcp));
+
+    let off = format!("  mcp: false\n{PUBLISH}");
+    let outcome = publish(
+        &mut api,
+        &endpoint("[ngsi-ld]", &off),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the second run publishes");
+    assert_eq!(outcome, Outcome::Updated);
+    let dataset = api.package("kvalita-ovzdusia").expect("the dataset");
+    assert!(!resource_urls(dataset).contains(&mcp));
+}
+
 /// EP-64: a representation that was switched off loses its resource.
 #[test]
 fn a_disabled_representation_loses_its_resource() {
@@ -252,6 +283,7 @@ fn a_disabled_representation_loses_its_resource() {
         resource_urls(dataset),
         vec![
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/ngsi-ld/v1/",
+            "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/mcp",
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/index.json",
         ]
     );
@@ -538,6 +570,7 @@ fn every_schema_artifact_the_record_lists_becomes_its_own_resource() {
         resource_urls(&dataset),
         vec![
             format!("{base}/ngsi-ld/v1/"),
+            format!("{base}/mcp"),
             format!("{base}/schema/index.json"),
             format!("{base}/schema/v2/model.shacl.ttl"),
             format!("{base}/schema/v2/context.jsonld"),

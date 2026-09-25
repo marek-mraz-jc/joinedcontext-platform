@@ -257,6 +257,11 @@ pub struct EndpointSpec {
     pub policy_ref: Option<Urn>,
     /// Set of enabled representation formats (EP-05).
     pub enabled_representations: Vec<Representation>,
+    /// `false` turns the Endpoint's MCP instance off. Every Endpoint serves `mcp` without
+    /// listing it, public or internal, gated by its own Policy (EP-24, T-2901); see
+    /// [`EndpointSpec::served_representations`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<bool>,
     /// Optional rate limiting configuration (EP-20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
@@ -343,6 +348,17 @@ impl Kind for EndpointSpec {
 }
 
 impl EndpointSpec {
+    /// The representations this Endpoint serves: the ones it lists, and `mcp`, which every
+    /// Endpoint serves unless `mcp: false` (EP-24, T-2901). The gateway, the catalogue records
+    /// and the publishers all read this, never the list alone.
+    pub fn served_representations(&self) -> Vec<Representation> {
+        let mut served = self.enabled_representations.clone();
+        if self.mcp != Some(false) && !served.contains(&Representation::Mcp) {
+            served.push(Representation::Mcp);
+        }
+        served
+    }
+
     /// Validates endpoint audience, representations, limits, and policy reference.
     pub fn validate(&self) -> Result<()> {
         let space_name = self.context_space_ref.name();
@@ -419,6 +435,13 @@ impl EndpointSpec {
                 field: "enabledRepresentations",
                 value: String::new(),
                 reason: "enabledRepresentations must not be empty",
+            });
+        }
+        if self.mcp == Some(false) && self.enabled_representations.contains(&Representation::Mcp) {
+            return Err(Error::Name {
+                field: "mcp",
+                value: "false".to_string(),
+                reason: "mcp: false turns off the MCP instance that enabledRepresentations lists; drop one of the two (EP-24)",
             });
         }
         let mut seen = std::collections::BTreeSet::new();
