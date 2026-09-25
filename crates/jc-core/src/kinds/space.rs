@@ -213,7 +213,11 @@ pub struct ContextSpaceSpec {
     /// Default locale for entities and metadata within this space (PF-25).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_locale: Option<String>,
-    /// Reference to the primary LinkML Data Model for this space (Architecture/03).
+    /// The one LinkML Data Model of this space, whose classes are its types (DM-61, ADR-N-033).
+    ///
+    /// Absent on a space created before DM-61, which `jcctl validate` warns about. It names a
+    /// model of the space's own project: another project's model is reused through the LinkML
+    /// `imports` of this one, read-only and at a pinned version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_model_ref: Option<Ref>,
     /// Enforced time-to-live in days for ephemeral sandboxes (1..=14, PF-19).
@@ -290,6 +294,20 @@ impl ContextSpaceSpec {
     pub fn validate_with_meta(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_space_name(&meta.name)?;
         self.validate()?;
+        if let (Some(owner), Some(project)) = (
+            self.data_model_ref.as_ref().and_then(Ref::namespace),
+            meta.namespace.as_deref(),
+        ) {
+            if owner != project {
+                return Err(Error::Name {
+                    field: "spec.dataModelRef.namespace",
+                    value: owner.to_string(),
+                    reason: "a space's data model belongs to its own project; reuse another \
+                             project's model through an `imports` entry of this one, at a \
+                             pinned version (DM-61)",
+                });
+            }
+        }
         match (&self.urn_segment, &meta.namespace) {
             (Some(pin), _) => names::validate_space_name(pin),
             (None, Some(project)) => {

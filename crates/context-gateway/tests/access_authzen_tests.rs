@@ -21,6 +21,7 @@ fn policy(yaml: &str) -> PolicySpec {
 /// The public grant of DEMO step 4, plus a prohibition and a grant for somebody else.
 fn endpoint() -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

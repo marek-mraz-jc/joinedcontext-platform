@@ -105,6 +105,10 @@ pub struct Endpoint {
     /// The data models of the space, with whatever artifacts the repository carries
     /// beside them (EP-46, DM-02).
     pub models: Vec<Model>,
+    /// The classes of the space's one model, when the space names it in `spec.dataModelRef`
+    /// (DM-61): a write of any other type is refused. `None` for a space that names no model
+    /// yet, which `jcctl validate` warns about while the repository is migrated.
+    pub declared_types: Option<DeclaredTypes>,
     /// The Mapping this endpoint serves its space through, when it serves a view of another
     /// model rather than the space's own (EP-54, DM-51).
     ///
@@ -115,6 +119,30 @@ pub struct Endpoint {
     /// The manifest's `spec.catalog`, which the DCAT-AP record and the ODRL offer render
     /// (EP-78, EP-79).
     pub catalog: Option<std::sync::Arc<jc_core::kinds::Catalog>>,
+}
+
+/// The types a space's one model declares (DM-61, ADR-N-033).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredTypes {
+    /// The model's manifest name, which a refusal names.
+    pub model: String,
+    /// Its classes, the only entity types the space takes.
+    pub classes: BTreeSet<String>,
+}
+
+impl DeclaredTypes {
+    /// Whether `entity_type` is one of the model's classes.
+    ///
+    /// A type written as an IRI or a CURIE is compared by its local name, the part after the
+    /// last `/`, `#` or `:`: an expanded type is the same class the compacted one names, and
+    /// refusing it would refuse a correct write for its spelling.
+    pub fn declares(&self, entity_type: &str) -> bool {
+        let local = entity_type
+            .rsplit(['/', '#', ':'])
+            .next()
+            .unwrap_or(entity_type);
+        self.classes.contains(entity_type) || self.classes.contains(local)
+    }
 }
 
 /// One version of one data model, as the schema surface publishes it (EP-46, DM-22).

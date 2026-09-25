@@ -78,6 +78,7 @@ fn space(
 ) -> Space {
     Space {
         endpoint: Arc::new(Endpoint {
+            declared_types: None,
             roles: Default::default(),
             slug: name.to_owned(),
             title: Default::default(),

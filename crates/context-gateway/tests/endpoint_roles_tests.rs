@@ -64,6 +64,7 @@ fn app_roles() -> EndpointRoles {
 
 fn endpoint(slug: &str, audience: Audience, roles: EndpointRoles) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles,
         slug: slug.to_owned(),
         title: Default::default(),

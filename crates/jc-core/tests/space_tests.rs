@@ -217,3 +217,39 @@ fn space_rejects_unknown_fields() {
         GOLDEN_SPACE.replace("isSandbox: false", "isSandbox: false\n  unknownField: bad");
     assert!(ContextSpace::from_yaml(&bad_space).is_err());
 }
+
+#[test]
+fn a_space_names_a_model_of_its_own_project_dm_61() {
+    let own = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  dataModelRef: { kind: DataModel, name: bb-air-quality }",
+    );
+    let space = ContextSpace::from_yaml(&own).expect("a space naming its own model");
+    space
+        .spec
+        .validate_with_meta(&space.metadata)
+        .expect("a model of the space's own project");
+
+    let foreign = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  dataModelRef: { kind: DataModel, name: fleet, namespace: helsinki }",
+    );
+    let space = ContextSpace::from_yaml(&foreign).expect("the manifest parses");
+    let refused = space
+        .spec
+        .validate_with_meta(&space.metadata)
+        .expect_err("another project's model is imported, never named");
+    assert!(
+        refused.to_string().contains("spec.dataModelRef.namespace")
+            && refused.to_string().contains("imports"),
+        "{refused}"
+    );
+
+    let wrong_kind = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  dataModelRef: { kind: Endpoint, name: bb-air-quality }",
+    );
+    assert!(ContextSpace::from_yaml(&wrong_kind)
+        .map(|space| space.spec.validate_with_meta(&space.metadata))
+        .is_ok_and(|verdict| verdict.is_err()));
+}

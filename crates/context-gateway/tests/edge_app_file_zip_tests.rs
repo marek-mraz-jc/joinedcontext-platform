@@ -50,6 +50,7 @@ fn model() -> Model {
 
 fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

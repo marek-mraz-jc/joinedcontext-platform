@@ -44,6 +44,7 @@ fn policy(assignee: &str, id: &str, marker: &str) -> PolicySpec {
 
 fn endpoint(audience: Audience) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

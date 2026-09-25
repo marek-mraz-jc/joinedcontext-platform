@@ -55,6 +55,7 @@ applicableLegislation: ['http://data.europa.eu/eli/reg_impl/2023/138/oj']\n";
 
 fn endpoint(audience: Audience, catalog: Option<Catalog>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: [("en".to_owned(), "City events".to_owned())].into(),

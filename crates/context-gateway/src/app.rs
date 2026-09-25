@@ -1169,6 +1169,9 @@ fn refuse_entity(
     endpoint: &Endpoint,
     org_domain: &str,
 ) -> Result<(), Box<ProblemDetails>> {
+    if let Some(problem) = undeclared_type(entity, endpoint) {
+        return Err(Box::new(problem));
+    }
     if let (Some(path_id), Some(object)) = (addressed, entity.as_object()) {
         let named = object.get("id").or_else(|| object.get("@id"));
         if named.is_some_and(|id| id.as_str() != Some(path_id)) {
@@ -1279,6 +1282,27 @@ async fn merged_batch(
     };
     errors.extend(refusal_entries(refused));
     batch_result(success, errors)
+}
+
+/// 400 naming the type, when an entity's type is not a class of the space's one model (DM-61).
+///
+/// The model is published on the schema surface, so naming the missing type tells the caller
+/// nothing a grant hides; it is the one thing they need to fix the write. A space that names no
+/// model yet is not narrowed here.
+fn undeclared_type(entity: &Value, endpoint: &Endpoint) -> Option<ProblemDetails> {
+    let declared = endpoint.declared_types.as_ref()?;
+    let object = entity.as_object()?;
+    let types: Vec<&str> = match object.get("type").or_else(|| object.get("@type"))? {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => return Some(ProblemDetails::bad_request().with_detail("entity type is not a string")),
+    };
+    let missing = types.into_iter().find(|kind| !declared.declares(kind))?;
+    tracing::info!(slug = %endpoint.slug, entity_type = missing, model = %declared.model, "write refused: type not in the model");
+    Some(ProblemDetails::bad_request().with_detail(format!(
+        "entity type `{missing}` is not a class of the space's data model `{}` (DM-61)",
+        declared.model
+    )))
 }
 
 /// Narrows a subscription payload to the grants and routes its delivery through the

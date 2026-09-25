@@ -41,6 +41,7 @@ operations: [queryEntity, retrieveEntity]
 fn space_named(space: &str, role: &str) -> Space {
     Space {
         endpoint: Arc::new(Endpoint {
+            declared_types: None,
             roles: Default::default(),
             slug: space.to_owned(),
             title: BTreeMap::new(),

@@ -21,6 +21,7 @@ const BASE: &str = "https://bb.example.sk";
 
 fn endpoint(audience: Audience, title: &[(&str, &str)]) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: title

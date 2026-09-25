@@ -79,6 +79,7 @@ fn air_quality(with_artifacts: bool) -> Model {
 /// The public grant of DEMO step 4: three attributes of one type, and nothing else.
 fn endpoint(models: Vec<Model>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

@@ -105,6 +105,7 @@ fn narrow() -> PolicySpec {
 
 fn endpoint_with(policies: Vec<PolicySpec>, rate_limit: Option<RateLimits>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

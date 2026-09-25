@@ -7,6 +7,7 @@ const SLUG: &str = "zt4qm7ge2xdv6ksb3ncf5arw2y";
 
 fn endpoint(slug: &str, space: &str) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
         title: std::collections::BTreeMap::new(),
