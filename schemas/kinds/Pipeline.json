@@ -156,6 +156,28 @@
       ],
       "type": "object"
     },
+    "Expiry": {
+      "additionalProperties": false,
+      "description": "Stale-entity expiry: entities of `types` not modified for `after` are deleted (PL-64).",
+      "properties": {
+        "after": {
+          "description": "Whole hours or days, `1h` to `365d`.",
+          "type": "string"
+        },
+        "types": {
+          "description": "The entity types the sweep deletes, one to twenty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "after",
+        "types"
+      ],
+      "type": "object"
+    },
     "MultiLanguageMap": {
       "additionalProperties": {
         "type": "string"
@@ -481,6 +503,17 @@
         "enabled": {
           "description": "Whether the pipeline runs (PL-40). `false` pauses it: the reconciler leaves a resident stream out of the runner and suspends a scheduled CronJob, the manifest stays, and a Resume is the flag flipped back. Absent means `true`, and `true` is not written back.",
           "type": "boolean"
+        },
+        "expiry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Expiry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Deletes the entities its source stopped sending; absent, nothing is deleted (PL-64)."
         },
         "output": {
           "anyOf": [

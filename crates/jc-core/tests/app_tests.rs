@@ -318,6 +318,7 @@ fn limits_and_csp_ap12_ap17() {
     wildcard.spec.csp = Some(ContentSecurityPolicy {
         connect_src: vec!["*".to_string()],
         frame_ancestors: vec!["none".to_string()],
+        frame_src: vec![],
     });
     assert!(matches!(
         wildcard.validate().expect_err("a wildcard connect-src"),
@@ -331,6 +332,7 @@ fn limits_and_csp_ap12_ap17() {
     plaintext.spec.csp = Some(ContentSecurityPolicy {
         connect_src: vec!["http://tracker.example.com".to_string()],
         frame_ancestors: vec![],
+        frame_src: vec![],
     });
     assert!(plaintext.validate().is_err());
 
@@ -341,11 +343,53 @@ fn limits_and_csp_ap12_ap17() {
             "https://id.banskabystrica.sk".to_string(),
         ],
         frame_ancestors: vec!["none".to_string()],
+        frame_src: vec![],
     });
     assert!(
         issuer.validate().is_ok(),
         "the OIDC issuer is allowed (AP-11)"
     );
+}
+
+#[test]
+fn frame_src_names_https_origins_the_app_embeds_ap12() {
+    let embeds = GOLDEN.replace(
+        "  csp: { connectSrc: [self], frameAncestors: [none] }",
+        "  csp: { connectSrc: [self], frameAncestors: [none], frameSrc: [\"https://www.openstreetmap.org\"] }",
+    );
+    let app = App::from_yaml(&embeds).expect("parses");
+    app.validate().expect("an https origin validates");
+    let csp = app.spec.csp.as_ref().expect("csp");
+    assert_eq!(csp.frame_src, ["https://www.openstreetmap.org"]);
+    assert_eq!(
+        app,
+        App::from_yaml(&app.to_yaml().expect("serialize")).expect("re-import")
+    );
+
+    for (source, why) in [
+        ("*", "a wildcard frames anything"),
+        ("https://*.example.com", "a wildcard subdomain"),
+        ("http://maps.example.com", "plaintext"),
+        ("none", "self is always framed"),
+        ("data:", "not an origin"),
+    ] {
+        let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
+        app.spec.csp = Some(ContentSecurityPolicy {
+            connect_src: vec!["self".to_string()],
+            frame_ancestors: vec![],
+            frame_src: vec![source.to_string()],
+        });
+        assert!(
+            matches!(
+                app.validate().expect_err(why),
+                Error::Name {
+                    field: "csp.frameSrc",
+                    ..
+                }
+            ),
+            "{source}: {why}"
+        );
+    }
 }
 
 #[test]

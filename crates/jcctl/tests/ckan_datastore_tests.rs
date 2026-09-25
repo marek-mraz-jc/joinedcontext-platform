@@ -5,10 +5,10 @@
 //! Endpoint's own tabular answer, and a notification contributes ids and nothing else.
 
 use jc_core::kinds::ckan::CkanPublication;
-use jcctl::publish::ckan::InMemoryCkan;
+use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan};
 use jcctl::publish::ckan_datastore::{
-    drop_table, ensure, fields, mirrored, records, sync, table, touched, MirrorError, Outcome,
-    ID_COLUMN, PRIMARY_KEY,
+    drop_table, ensure, ensure_view, fields, mirrored, records, sync, table, touched, MirrorError,
+    Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY,
 };
 use serde_json::{json, Value};
 
@@ -603,4 +603,78 @@ fn no_payload_this_module_builds_carries_the_api_token() {
             "{action} carried the API token"
         );
     }
+}
+
+// --- the grid on the dataset page (T-2893, EP-62) ------------------------------------------
+
+/// A mirrored table as `ensure` leaves it: created, and no view yet.
+fn created_table() -> (InMemoryCkan, String) {
+    let mut ckan = InMemoryCkan::new();
+    let (columns, rows) = page();
+    let fields = fields(&columns, &rows, &[schema()]);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &fields).expect("created");
+    (ckan, resource)
+}
+
+#[test]
+fn a_table_without_views_gets_one_grid_and_a_second_pass_none() {
+    let (mut ckan, resource) = created_table();
+
+    assert!(ensure_view(&mut ckan, &resource).expect("the first pass"));
+    assert!(!ensure_view(&mut ckan, &resource).expect("the second pass"));
+
+    assert_eq!(
+        ckan.actions(),
+        vec!["datastore_create", "resource_view_create"]
+    );
+    let views = ckan.views(&resource);
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0]["view_type"], json!(GRID_VIEW));
+    assert_eq!(views[0]["resource_id"], json!(resource));
+    assert_eq!(views[0]["title"], json!("Table"));
+}
+
+#[test]
+fn a_resource_that_already_has_a_grid_gets_none() {
+    let (mut ckan, resource) = created_table();
+    // Made by hand in CKAN, or by an earlier run: either way it is the grid.
+    ckan.action(
+        "resource_view_create",
+        &json!({ "resource_id": resource, "view_type": GRID_VIEW, "title": "Rows" }),
+    )
+    .expect("a grid made before");
+
+    assert!(!ensure_view(&mut ckan, &resource).expect("the pass"));
+    assert_eq!(ckan.views(&resource).len(), 1);
+    assert_eq!(ckan.views(&resource)[0]["title"], json!("Rows"));
+}
+
+#[test]
+fn another_kind_of_view_does_not_stand_in_for_the_grid() {
+    let (mut ckan, resource) = created_table();
+    ckan.action(
+        "resource_view_create",
+        &json!({ "resource_id": resource, "view_type": "text_view", "title": "Text" }),
+    )
+    .expect("a text view");
+
+    assert!(ensure_view(&mut ckan, &resource).expect("the pass"));
+    let kinds: Vec<&str> = ckan
+        .views(&resource)
+        .iter()
+        .map(|view| view["view_type"].as_str().expect("a type"))
+        .collect();
+    assert_eq!(kinds, vec!["text_view", GRID_VIEW]);
+}
+
+#[test]
+fn a_catalogue_that_refuses_the_view_is_an_error_naming_the_action() {
+    let mut ckan = InMemoryCkan::new();
+
+    let err = ensure_view(&mut ckan, "no-such-resource").expect_err("refused");
+
+    assert!(matches!(
+        &err,
+        MirrorError::Api(CkanError::Rejected { action, .. }) if action == "resource_view_create"
+    ));
 }

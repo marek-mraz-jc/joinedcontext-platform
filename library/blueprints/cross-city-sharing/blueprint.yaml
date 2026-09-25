@@ -1,0 +1,69 @@
+# The platform's blueprint library (CC-28): one side of a cross-city share, the CSR pair of CC-14.
+# The registration brings the partner city's data into a hub space of this city, read as a
+# ServiceAccount the partner granted; the Endpoint is this city's half, the one the partner's own
+# registration points at, open to the partner's project alone. Joining is this change and
+# leaving is its revert: registration manifests only, no code, no broker-specific step.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: cross-city-sharing
+  namespace: org
+  title: { en: "Share with a partner city", fi: "Jaa kumppanikaupungin kanssa", sk: "Zdieľať s partnerským mestom" }
+spec:
+  version: 1.0.0
+  category: federation
+  riskClass: red
+  allowedRoles: [portal-approver]
+  parameterSchema:
+    type: object
+    required: [name, hubSpace, sharedSpace, partnerProject, partnerEndpoint, entityTypes, serviceAccount, endpointSlug]
+    additionalProperties: false
+    properties:
+      name: { type: string, title: "Share name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the registration and the Endpoint." }
+      hubSpace: { type: string, title: "Hub space that reads the partner", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      sharedSpace: { type: string, title: "Space this city shares", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      partnerProject: { type: string, title: "The partner city's project", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
+      partnerEndpoint: { type: string, title: "The partner's NGSI-LD address", format: uri, pattern: "^https://[^@/?#]+(/[^?#@]*)?$" }
+      entityTypes:
+        type: array
+        title: "Entity types read from the partner"
+        minItems: 1
+        maxItems: 20
+        uniqueItems: true
+        items: { type: string, pattern: "^[A-Z][A-Za-z0-9]+$" }
+      serviceAccount: { type: string, title: "Account the partner granted this city", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: serviceaccounts } }
+      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+  templates:
+    - name: registration
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: ContextSourceRegistration
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ name }}: {{ partnerProject }}" }
+        spec:
+          contextSpaceRef: { kind: ContextSpace, name: "{{ hubSpace }}" }
+          endpoint: "{{ partnerEndpoint }}"
+          information:
+            - entities:
+        {%- for type in entityTypes %}
+                - type: "{{ type }}"
+        {%- endfor %}
+          federation:
+            identity: serviceAccount
+            serviceAccountRef: { kind: ServiceAccount, name: "{{ serviceAccount }}" }
+          mode: inclusive
+          operations: [federationOps]
+    - name: endpoint
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Endpoint
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ name }} for {{ partnerProject }}" }
+        spec:
+          contextSpaceRef: { kind: ContextSpace, name: "{{ sharedSpace }}" }
+          slug: "{{ endpointSlug }}"
+          audience: project-list
+          allowedProjects: ["{{ partnerProject }}"]
+          enabledRepresentations: [ngsi-ld]

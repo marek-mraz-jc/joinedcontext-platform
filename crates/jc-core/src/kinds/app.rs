@@ -590,6 +590,9 @@ pub struct ContentSecurityPolicy {
     /// `frame-ancestors`; defaults to `none` (AP-12).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame_ancestors: Vec<String>,
+    /// `frame-src` beyond `self`; only https origins, never `*` (AP-12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frame_src: Vec<String>,
 }
 
 impl ContentSecurityPolicy {
@@ -597,6 +600,7 @@ impl ContentSecurityPolicy {
         for (field, sources) in [
             ("csp.connectSrc", &self.connect_src),
             ("csp.frameAncestors", &self.frame_ancestors),
+            ("csp.frameSrc", &self.frame_src),
         ] {
             for source in sources {
                 let ok = source == "self"
@@ -610,6 +614,14 @@ impl ContentSecurityPolicy {
                     });
                 }
             }
+        }
+        // `self` is always framed; `none` next to it would say the opposite (AP-12).
+        if let Some(none) = self.frame_src.iter().find(|source| *source == "none") {
+            return Err(Error::Name {
+                field: "csp.frameSrc",
+                value: none.clone(),
+                reason: "`frame-src` always allows `self`; list the https origins the app embeds, or leave it empty (AP-12)",
+            });
         }
         Ok(())
     }
