@@ -96,6 +96,67 @@ struct StreamUsage {
     total: Option<u64>,
     input: u64,
     output: u64,
+    cached: u64,
+}
+
+/// The counts of one `usage` object, OpenAI-compatible or Anthropic: the total when it is given,
+/// the input, the output, and the input read from the provider's prompt cache
+/// (`prompt_tokens_details.cached_tokens`, or Anthropic's `cache_read_input_tokens`).
+fn counts(usage: &Value) -> (Option<u64>, u64, u64, u64) {
+    let count = |keys: &[&str]| keys.iter().find_map(|key| usage.get(*key)?.as_u64());
+    let cached = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| count(&["cache_read_input_tokens"]))
+        .unwrap_or(0);
+    (
+        count(&["total_tokens"]),
+        count(&["prompt_tokens", "input_tokens"]).unwrap_or(0),
+        count(&["completion_tokens", "output_tokens"]).unwrap_or(0),
+        cached,
+    )
+}
+
+/// One call as the Portal's `usage` frame carries it (API/04 §4, AG-72, T-2771).
+#[derive(Debug, Default, PartialEq)]
+struct CallUsage {
+    tokens: u64,
+    input: u64,
+    output: u64,
+    cached: u64,
+    latency_ms: u64,
+    /// The `model` the call named, cut to [`MODEL_NAME_MAX`] characters.
+    model: Option<String>,
+}
+
+/// The most of a call's `model` a usage frame repeats; the body is the run's to write.
+const MODEL_NAME_MAX: usize = 128;
+
+impl CallUsage {
+    fn payload(&self) -> Value {
+        let mut payload = json!({
+            "tokensThisStep": self.tokens,
+            "inputTokens": self.input,
+            "outputTokens": self.output,
+            "cachedTokens": self.cached,
+            "latencyMs": self.latency_ms,
+        });
+        if let Some(model) = &self.model {
+            payload["model"] = json!(model);
+        }
+        payload
+    }
+}
+
+/// The `model` a call's body names, for its usage frame.
+fn model_of(body: &Bytes) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let model = value.get("model")?.as_str()?;
+    Some(model.chars().take(MODEL_NAME_MAX).collect())
+}
+
+fn millis(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 impl StreamUsage {
@@ -128,16 +189,13 @@ impl StreamUsage {
         else {
             return;
         };
-        let count = |keys: &[&str]| keys.iter().find_map(|key| usage.get(*key)?.as_u64());
-        if let Some(total) = count(&["total_tokens"]) {
-            self.total = Some(total);
+        let (total, input, output, cached) = counts(usage);
+        if total.is_some() {
+            self.total = total;
         }
-        self.input = self
-            .input
-            .max(count(&["prompt_tokens", "input_tokens"]).unwrap_or(0));
-        self.output = self
-            .output
-            .max(count(&["completion_tokens", "output_tokens"]).unwrap_or(0));
+        self.input = self.input.max(input);
+        self.output = self.output.max(output);
+        self.cached = self.cached.max(cached);
     }
 
     fn tokens(&self) -> Option<u64> {
@@ -146,19 +204,21 @@ impl StreamUsage {
     }
 }
 
-/// The tokens of one call, counted against the run and reported to the Portal (AG-41).
+/// The tokens of one call, counted against the run and reported to the Portal with its halves,
+/// its cached input, its latency and its model (AG-41, AG-72).
 fn record_usage(
     state: &ProxyState,
     run_id: &str,
-    tokens: u64,
+    usage: CallUsage,
 ) -> impl std::future::Future<Output = ()> {
     let state = state.clone();
     let run_id = run_id.to_owned();
     async move {
-        if tokens == 0 {
+        if usage.tokens == 0 {
             return;
         }
-        state.limits.record_tokens(&run_id, tokens).await;
+        state.limits.record_tokens(&run_id, usage.tokens).await;
+        let payload = usage.payload();
         let portal_base = state.config.portal_base.clone();
         let http = state.http.clone();
         let credentials = state.credentials.clone();
@@ -178,7 +238,7 @@ fn record_usage(
                 .json(&serde_json::json!({
                     "runId": run_id,
                     "kind": "usage",
-                    "payload": { "tokensThisStep": tokens }
+                    "payload": payload
                 }))
                 .send()
                 .await;
@@ -241,6 +301,7 @@ pub async fn handler(
         body_bytes
     };
     let uncounted = uncounted_stream(&body_bytes);
+    let model = model_of(&body_bytes);
 
     let target_url = format!(
         "{}/{}",
@@ -264,6 +325,7 @@ pub async fn handler(
 
     client_req = client_req.body(body_bytes);
 
+    let sent = Instant::now();
     let upstream_resp = match client_req.send().await {
         Ok(r) => r,
         Err(e) => return super::upstream_unavailable(super::MODEL, &e),
@@ -283,28 +345,28 @@ pub async fn handler(
             rest,
             uncounted,
             start,
+            sent,
+            model,
         };
         return stream_through(state, call, status, upstream_resp);
     }
     let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
 
-    // Extract token usage
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp_bytes) {
-        let tokens = if let Some(usage) = v.get("usage") {
-            let total = usage.get("total_tokens").and_then(|n| n.as_u64());
-            let input = usage
-                .get("input_tokens")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0);
-            let output = usage
-                .get("output_tokens")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0);
-            total.unwrap_or(input + output)
-        } else {
-            0
+    let latency_ms = millis(sent);
+    if let Some(usage) = serde_json::from_slice::<Value>(&resp_bytes)
+        .ok()
+        .and_then(|answer| answer.get("usage").cloned())
+    {
+        let (total, input, output, cached) = counts(&usage);
+        let usage = CallUsage {
+            tokens: total.unwrap_or(input + output),
+            input,
+            output,
+            cached,
+            latency_ms,
+            model,
         };
-        record_usage(&state, &run.id, tokens).await;
+        record_usage(&state, &run.id, usage).await;
     }
 
     log_request(&AuditEntry {
@@ -332,6 +394,9 @@ struct Streamed {
     rest: String,
     uncounted: u64,
     start: Instant,
+    /// When the call left for the provider: a usage frame's latency is counted from here.
+    sent: Instant,
+    model: Option<String>,
 }
 
 /// A stream passed through chunk by chunk (ADR-N-032). Its usage is read as it passes and
@@ -350,6 +415,8 @@ fn stream_through(
         rest,
         uncounted,
         start,
+        sent,
+        model,
     } = call;
     use futures::StreamExt;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
@@ -379,7 +446,15 @@ fn stream_through(
             Some(tokens) if whole => tokens,
             seen => seen.unwrap_or(0).max(uncounted),
         };
-        record_usage(&state, &run.id, tokens).await;
+        let call = CallUsage {
+            tokens,
+            input: usage.input,
+            output: usage.output,
+            cached: usage.cached,
+            latency_ms: millis(sent),
+            model,
+        };
+        record_usage(&state, &run.id, call).await;
         log_request(&AuditEntry {
             run_id: &run.id,
             user: &run.created_by,
@@ -459,6 +534,44 @@ mod tests {
         let mut none = StreamUsage::default();
         none.feed(b"data: {\"choices\":[]}\n\n: keep-alive\n");
         assert_eq!(none.tokens(), None);
+    }
+
+    /// T-2771: the counts are read in both shapes, the cached input included, and the frame the
+    /// Portal gets carries them with the latency and the model named in the call.
+    #[test]
+    fn a_call_usage_carries_its_halves_its_cache_its_latency_and_its_model() {
+        let openai = json!({ "prompt_tokens": 3980, "completion_tokens": 140, "total_tokens": 4120, "prompt_tokens_details": { "cached_tokens": 3200 } });
+        assert_eq!(counts(&openai), (Some(4120), 3980, 140, 3200));
+        let anthropic =
+            json!({ "input_tokens": 90, "output_tokens": 30, "cache_read_input_tokens": 800 });
+        assert_eq!(counts(&anthropic), (None, 90, 30, 800));
+        assert_eq!(counts(&json!({})), (None, 0, 0, 0));
+
+        let mut streamed = StreamUsage::default();
+        streamed.feed(b"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":8}}}\n");
+        assert_eq!(
+            (streamed.input, streamed.output, streamed.cached),
+            (10, 2, 8)
+        );
+
+        let long = "m".repeat(400);
+        let body = Bytes::from(json!({ "model": long, "messages": [] }).to_string());
+        assert_eq!(model_of(&body).map(|m| m.len()), Some(MODEL_NAME_MAX));
+        assert_eq!(model_of(&Bytes::from_static(b"not json")), None);
+
+        let call = CallUsage {
+            tokens: 4120,
+            input: 3980,
+            output: 140,
+            cached: 3200,
+            latency_ms: 1830,
+            model: Some("google/gemini-3.8-flash".into()),
+        };
+        assert_eq!(
+            call.payload(),
+            json!({ "tokensThisStep": 4120, "inputTokens": 3980, "outputTokens": 140, "cachedTokens": 3200, "latencyMs": 1830, "model": "google/gemini-3.8-flash" })
+        );
+        assert!(CallUsage::default().payload().get("model").is_none());
     }
 
     #[test]

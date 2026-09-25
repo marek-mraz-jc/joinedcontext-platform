@@ -172,6 +172,17 @@ pub fn endpoints_of(repo: &Repository) -> Vec<Endpoint> {
     endpoints_with_models(repo, None)
 }
 
+/// The client `app-{name}` when Endpoint `endpoint` of `project` is the one the Portal generates
+/// for the App `{name}` declared in that project (ADR-N-030, AP-97).
+fn app_of(repo: &Repository, project: &str, endpoint: &str) -> Option<String> {
+    let app = endpoint.strip_prefix("app-")?;
+    repo.iter()
+        .any(|(id, _)| {
+            id.kind == "App" && id.name == app && id.namespace.as_deref() == Some(project)
+        })
+        .then(|| endpoint.to_owned())
+}
+
 /// The endpoint table, with the model artifacts read from `root` when one is given.
 ///
 /// `DataModel.spec.artifacts` names files committed beside the LinkML source, so the
@@ -236,7 +247,10 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             }
         });
         endpoints.push(Endpoint {
-            roles: EndpointRoles::of(&project, &id.name, &spec),
+            roles: match app_of(repo, &project, &id.name) {
+                Some(client) => EndpointRoles::of_app(&project, &id.name, &spec, client),
+                None => EndpointRoles::of(&project, &id.name, &spec),
+            },
             slug: spec.slug.to_string(),
             title: language_map(&resource.manifest.metadata.rest, "title"),
             description: language_map(&resource.manifest.metadata.rest, "description"),

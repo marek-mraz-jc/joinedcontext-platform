@@ -514,3 +514,60 @@ async fn a_stream_without_usage_counts_as_what_it_was_allowed() {
     let third = app.oneshot(ask(60)).await.expect("an answer");
     assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// T-2771, AG-72: every model call reaches the Portal as a `usage` frame with its halves, the
+/// input the provider read from its cache, how long the provider took, and the model named in the
+/// call, so a slow answer is traced to its call.
+#[tokio::test]
+async fn a_model_call_is_reported_with_its_latency_tokens_and_model() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({
+                    "choices": [{ "message": { "content": "hi" } }],
+                    "usage": { "prompt_tokens": 3980, "completion_tokens": 140, "total_tokens": 4120,
+                               "prompt_tokens_details": { "cached_tokens": 3200 } }
+                }))
+                .set_delay(std::time::Duration::from_millis(120)),
+        )
+        .mount(&provider)
+        .await;
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/agent-runs/events"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({ "seq": 1 })))
+        .mount(&portal)
+        .await;
+
+    let response = proxy_asking(&provider.uri(), &portal)
+        .oneshot(
+            authed("POST", "/v1/llm/v1/chat/completions")
+                .body(body(r#"{"model":"google/gemini-3.8-flash","messages":[]}"#))
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The report is sent beside the answer, never before it: wait for it.
+    let mut reported = None;
+    for _ in 0..100 {
+        let seen = portal.received_requests().await.unwrap_or_default();
+        if let Some(request) = seen.first() {
+            reported = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let reported = reported.expect("the usage reached the Portal");
+    assert_eq!(reported["kind"], "usage");
+    let usage = &reported["payload"];
+    assert_eq!(usage["tokensThisStep"], 4120);
+    assert_eq!(usage["inputTokens"], 3980);
+    assert_eq!(usage["outputTokens"], 140);
+    assert_eq!(usage["cachedTokens"], 3200);
+    assert_eq!(usage["model"], "google/gemini-3.8-flash");
+    let latency = usage["latencyMs"].as_u64().expect("a latency");
+    assert!((120..10_000).contains(&latency), "{latency}");
+}

@@ -1578,33 +1578,36 @@ pub(crate) fn authenticate(
     endpoint: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<Subject, Box<ProblemDetails>> {
-    let mut subject = identify(gateway, endpoint, headers)?;
-    with_endpoint_roles(&mut subject, endpoint);
+    let (mut subject, client_roles) = identify(gateway, endpoint, headers)?;
+    with_endpoint_roles(&mut subject, endpoint, &client_roles);
     Ok(subject)
 }
 
 /// The roles an Endpoint gives exist on requests through it alone (AP-97). One that a token or
 /// an account asserts is dropped whatever its source, so no realm role, no ServiceAccount
 /// template and no other endpoint can carry an application's grant; then this endpoint's own
-/// are added for the caller it admitted.
-fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint) {
+/// are added for the caller it admitted: on an App's Endpoint, from `client_roles`, the roles
+/// the token of that App's own client carries (ADR-N-030).
+fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint, client_roles: &[String]) {
     subject
         .roles
         .retain(|role| !role.starts_with(jc_core::kinds::ENDPOINT_ROLE_PREFIX));
     let held: Vec<String> = endpoint
         .roles
-        .held_by(subject.user.as_deref(), &subject.groups)
+        .held_by(subject.user.as_deref(), &subject.groups, client_roles)
         .map(str::to_owned)
         .collect();
     subject.roles.extend(held);
 }
 
-/// Who is calling, before the endpoint's own roles (PF-45, PF-46).
+/// Who is calling, before the endpoint's own roles (PF-45, PF-46), and the roles their token
+/// carries for the endpoint's App client, when it is an App's Endpoint and that client obtained
+/// the token (ADR-N-030, AP-97).
 fn identify(
     gateway: &Gateway,
     endpoint: &Endpoint,
     headers: &HeaderMap,
-) -> Result<Subject, Box<ProblemDetails>> {
+) -> Result<(Subject, Vec<String>), Box<ProblemDetails>> {
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -1613,7 +1616,9 @@ fn identify(
         Ok(raw) => raw,
         // No token at all: the anonymous caller, which only a public endpoint admits
         // (EP-16, GW22).
-        Err(token::Rejected::NoToken) if endpoint.admits(None) => return Ok(Subject::anonymous()),
+        Err(token::Rejected::NoToken) if endpoint.admits(None) => {
+            return Ok((Subject::anonymous(), Vec::new()))
+        }
         Err(rejected) => return Err(Box::new(rejected.into())),
     };
 
@@ -1627,7 +1632,13 @@ fn identify(
         .verify(raw, &gateway.audiences_for(endpoint))
         .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
 
-    subject_of(&claims, endpoint, gateway)
+    let client_roles = endpoint
+        .roles
+        .app_client
+        .as_deref()
+        .map(|client| claims.client_roles(client))
+        .unwrap_or_default();
+    Ok((subject_of(&claims, endpoint, gateway)?, client_roles))
 }
 
 /// The audience of a person signed in at the edge (ADR-N-019): the gateway's own name, accepted

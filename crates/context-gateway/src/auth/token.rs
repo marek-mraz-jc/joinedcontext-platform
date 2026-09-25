@@ -35,6 +35,9 @@ pub struct Claims {
     /// The groups Keycloak asserts.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// The client roles Keycloak asserts, by client id (ADR-N-030, AP-97).
+    #[serde(default)]
+    pub resource_access: HashMap<String, RealmAccess>,
     /// When the token expires. Always present: the verifier refuses a token without it.
     pub exp: i64,
     /// When the token was issued, which is what makes its lifetime measurable (DS-11).
@@ -57,6 +60,18 @@ pub struct RealmAccess {
 }
 
 impl Claims {
+    /// The roles of `client` this token carries, when `client` obtained it (`azp`); nothing for a
+    /// token another client obtained, whatever its `resource_access` says (ADR-N-030, AP-97).
+    pub fn client_roles(&self, client: &str) -> Vec<String> {
+        if self.azp.as_deref() != Some(client) {
+            return Vec::new();
+        }
+        self.resource_access
+            .get(client)
+            .map(|access| access.roles.clone())
+            .unwrap_or_default()
+    }
+
     /// The realm roles the token asserts.
     pub fn roles(&self) -> &[String] {
         self.realm_access
