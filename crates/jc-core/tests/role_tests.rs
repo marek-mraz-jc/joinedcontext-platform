@@ -79,11 +79,72 @@ fn a_constraint_has_exactly_one_operator_on_a_spec_field() {
     assert!(err.to_string().contains("exactly one"), "{err}");
     let err = role("notIn: [public] }", "}").expect_err("no operator");
     assert!(err.to_string().contains("exactly one"), "{err}");
-    let err = role("field: spec.audience", "field: metadata.name").expect_err("not a spec field");
+    let err =
+        role("field: spec.audience", "field: metadata.namespace").expect_err("not a spec field");
     assert!(err.to_string().contains("spec field"), "{err}");
     let err = role("notIn: [public] }", "matches: [public] }").expect_err("unknown operator");
     assert!(matches!(err, Error::Parse(_)), "{err}");
     role("notIn: [public] }", "in: [internal, private] }").expect("`in` is an operator");
+}
+
+/// The janitor's rule: a name confines it (T-2627, PF-49).
+fn janitor(pattern: &str) -> Result<Role, Error> {
+    role(
+        "{ field: spec.audience, notIn: [public] }",
+        &format!("{{ field: metadata.name, pattern: '{pattern}' }}"),
+    )
+}
+
+#[test]
+fn a_pattern_on_the_name_matches_the_whole_value() {
+    let role = janitor("t1[0-9]{3}[a-z]?-.+|.+-[0-9]{4}").expect("a name pattern validates");
+    let constraint = &role.spec.rules[1].constraints[0];
+    assert_eq!(constraint.field, "metadata.name");
+    for name in ["t1588-space", "t1589r-bikes", "citybikes-0915"] {
+        assert!(constraint.holds(Some(name)), "{name} is a journey's");
+    }
+    // Anchored on both ends: a pattern never matches a part of a name.
+    for name in ["helsinki-t1588-space", "citybikes-09150", "air-quality", ""] {
+        assert!(!constraint.holds(Some(name)), "{name} is nobody's residue");
+    }
+    assert!(!constraint.holds(None), "an absent name matches no pattern");
+    let yaml = serde_norway::to_string(&role).expect("serializes");
+    assert_eq!(Role::from_yaml(&yaml).expect("parses back"), role);
+}
+
+#[test]
+fn a_pattern_compiles_is_short_and_is_the_only_operator() {
+    let err = janitor("t1[0-9").expect_err("unclosed class");
+    assert!(err.to_string().contains("regular expression"), "{err}");
+    let err = janitor(&"a".repeat(257)).expect_err("too long");
+    assert!(err.to_string().contains("256"), "{err}");
+    janitor(&"a".repeat(256)).expect("256 characters are allowed");
+    let err = role(
+        "{ field: spec.audience, notIn: [public] }",
+        "{ field: metadata.name, pattern: 't1.+', equals: t1 }",
+    )
+    .expect_err("two operators");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+    let err = role(
+        "{ field: spec.audience, notIn: [public] }",
+        "{ field: metadata.name, pattern: '' }",
+    )
+    .expect_err("an empty pattern");
+    assert!(err.to_string().contains("exactly one"), "{err}");
+}
+
+#[test]
+fn every_operator_holds_the_way_the_portal_and_conftest_read_it() {
+    let parse = |yaml: &str| -> jc_core::kinds::Constraint {
+        serde_norway::from_str(yaml).expect("a constraint parses")
+    };
+    let equals = parse("{ field: spec.audience, equals: public }");
+    assert!(equals.holds(Some("public")) && !equals.holds(Some("x")) && !equals.holds(None));
+    let one_of = parse("{ field: spec.audience, in: [public] }");
+    assert!(one_of.holds(Some("public")) && !one_of.holds(Some("x")) && !one_of.holds(None));
+    // `notIn` admits an absent value: a manifest without the field is not one of the refused.
+    let not_in = parse("{ field: spec.audience, notIn: [public] }");
+    assert!(!not_in.holds(Some("public")) && not_in.holds(Some("x")) && not_in.holds(None));
 }
 
 #[test]

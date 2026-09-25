@@ -158,3 +158,26 @@ test_the_build_lane_rule_grants_no_app_change if {
 		with data.roles as build_lane_roles
 		with data.bindings as build_lane_bindings
 }
+
+# The janitor deletes what a journey named as its own and nothing else (T-2627, PF-49).
+janitor_roles := {"janitor": {"rules": [{"kinds": ["Pipeline"], "verbs": ["approve", "delete"], "constraints": [{"field": "metadata.name", "pattern": "t1[0-9]{3}[a-z]?-.+|.+-[0-9]{4}"}]}]}}
+
+janitor_bindings := [{"name": "janitors", "subjects": [{"user": "janitor"}], "role": "janitor", "scope": {"organization": "banskabystrica"}}]
+
+named_deletion(name) := {"path": sprintf("projects/ovzdusie/pipelines/%s/pipeline.yaml", [name]), "action": "delete", "kind": "Pipeline", "name": name, "project": "ovzdusie", "manifest": {"kind": "Pipeline", "metadata": {"name": name}, "spec": {"class": "resident"}}}
+
+test_the_janitor_deletes_a_journeys_residue if {
+	every name in ["t1588-bikes", "t1589r-bikes", "citybikes-0915"] {
+		count(deny) == 0 with input as {"author": "janitor", "groups": [], "changes": [named_deletion(name)]}
+			with data.roles as janitor_roles
+			with data.bindings as janitor_bindings
+	}
+}
+
+test_the_janitor_deletes_nothing_else if {
+	every name in ["aq", "helsinki-t1588-bikes", "citybikes-09150"] {
+		count(deny) == 1 with input as {"author": "janitor", "groups": [], "changes": [named_deletion(name)]}
+			with data.roles as janitor_roles
+			with data.bindings as janitor_bindings
+	}
+}

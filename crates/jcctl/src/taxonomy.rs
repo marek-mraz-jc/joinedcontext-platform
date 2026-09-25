@@ -76,6 +76,7 @@ fn audience_is_public() -> Constraint {
         one_of: vec![PUBLIC.into()],
         not_in: Vec::new(),
         equals: None,
+        pattern: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn audience_is_not_public() -> Constraint {
         one_of: Vec::new(),
         not_in: vec![PUBLIC.into()],
         equals: None,
+        pattern: None,
     }
 }
 

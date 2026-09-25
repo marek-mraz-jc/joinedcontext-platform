@@ -98,4 +98,12 @@ constraint_holds(constraint, manifest) if {
 	not value_at(manifest, constraint.field) in constraint.notIn
 }
 
+# The whole value matches, as jc-core's `Constraint::holds` reads it (T-2627).
+constraint_holds(constraint, manifest) if {
+	constraint.pattern
+	value := value_at(manifest, constraint.field)
+	is_string(value)
+	regex.match(sprintf("^(?:%s)$", [constraint.pattern]), value)
+}
+
 value_at(doc, path) := object.get(doc, split(path, "."), null)

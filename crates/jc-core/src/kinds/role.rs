@@ -27,7 +27,8 @@ pub enum Verb {
     Delete,
 }
 
-/// A constraint on one spec field; exactly one of `in`, `notIn`, `equals` is given.
+/// A constraint on one spec field or on `metadata.name`; exactly one of `in`, `notIn`,
+/// `equals`, `pattern` is given.
 ///
 /// The one exception is [`BUILD_FIELD`] with no operator, on a rule of `App` with `propose`
 /// alone: it names the rule as the writer of that field, and a rule carrying it authorizes
@@ -35,7 +36,7 @@ pub enum Verb {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Constraint {
-    /// Dotted path from the manifest root, e.g. `spec.audience`.
+    /// Dotted path from the manifest root, e.g. `spec.audience` or `metadata.name`.
     pub field: String,
     /// The value must be one of these.
     #[serde(default, rename = "in", skip_serializing_if = "Vec::is_empty")]
@@ -46,6 +47,18 @@ pub struct Constraint {
     /// The value must equal this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equals: Option<String>,
+    /// The whole value must match this regular expression, at most [`PATTERN_MAX`] characters
+    /// (T-2627): `t1[0-9]{3}-.+` confines a rule to the names a journey gives what it makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+}
+
+/// The longest `pattern` a constraint may carry.
+pub const PATTERN_MAX: usize = 256;
+
+/// `pattern` anchored on both ends, so it matches the whole value and never a part of it.
+fn whole_value(pattern: &str) -> std::result::Result<regex::Regex, regex::Error> {
+    regex::Regex::new(&format!("^(?:{pattern})$"))
 }
 
 /// The one `status` field a role may write: the build lane's `status.build` of an App (AP-73).
@@ -186,6 +199,24 @@ impl RoleSpec {
 }
 
 impl Constraint {
+    /// Whether `value`, the field's text or `None` when the manifest has none, satisfies the
+    /// constraint. `notIn` admits an absent value; every other operator needs one. The Portal
+    /// and the forge's `roles.rego` read the operators the same way (PF-50, PF-51).
+    pub fn holds(&self, value: Option<&str>) -> bool {
+        if let Some(expected) = &self.equals {
+            return value == Some(expected.as_str());
+        }
+        if let Some(pattern) = &self.pattern {
+            // A pattern that does not compile was refused at validation; one that slipped past
+            // it admits nothing.
+            return value.is_some_and(|v| whole_value(pattern).is_ok_and(|re| re.is_match(v)));
+        }
+        if !self.one_of.is_empty() {
+            return value.is_some_and(|v| self.one_of.iter().any(|x| x == v));
+        }
+        !value.is_some_and(|v| self.not_in.iter().any(|x| x == v))
+    }
+
     /// `{ field: status.build }` alone, on a rule of `App` with `propose` alone (AP-73).
     fn validate_status(&self, rule: &Rule) -> Result<()> {
         if self.field != BUILD_FIELD {
@@ -195,11 +226,15 @@ impl Constraint {
                 reason: "the one status field a role writes is `status.build` (AP-73)",
             });
         }
-        if !self.one_of.is_empty() || !self.not_in.is_empty() || self.equals.is_some() {
+        if !self.one_of.is_empty()
+            || !self.not_in.is_empty()
+            || self.equals.is_some()
+            || self.pattern.is_some()
+        {
             return Err(Error::Name {
                 field: "spec.rules[].constraints[]",
                 value: self.field.clone(),
-                reason: "`status.build` names its writer and carries no `in`, `notIn` or `equals` (AP-73)",
+                reason: "`status.build` names its writer and carries no `in`, `notIn`, `equals` or `pattern` (AP-73)",
             });
         }
         if rule.kinds != ["App"] || rule.verbs != [Verb::Propose] || rule.constraints.len() != 1 {
@@ -213,22 +248,40 @@ impl Constraint {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.field.trim().is_empty() || !self.field.starts_with("spec.") {
+        let spec_field = self.field.starts_with("spec.") && self.field.len() > "spec.".len();
+        if !spec_field && self.field != "metadata.name" {
             return Err(Error::Name {
                 field: "spec.rules[].constraints[].field",
                 value: self.field.clone(),
-                reason: "a constraint names a spec field, e.g. `spec.audience`",
+                reason: "a constraint names a spec field, e.g. `spec.audience`, or `metadata.name`",
             });
         }
         let operators = usize::from(!self.one_of.is_empty())
             + usize::from(!self.not_in.is_empty())
-            + usize::from(self.equals.is_some());
-        if operators != 1 {
+            + usize::from(self.equals.is_some())
+            + usize::from(self.pattern.as_ref().is_some_and(|p| !p.is_empty()));
+        if operators != 1 || self.pattern.as_ref().is_some_and(String::is_empty) {
             return Err(Error::Name {
                 field: "spec.rules[].constraints[]",
                 value: self.field.clone(),
-                reason: "a constraint has exactly one of `in`, `notIn`, `equals`",
+                reason: "a constraint has exactly one of `in`, `notIn`, `equals`, `pattern`",
             });
+        }
+        if let Some(pattern) = &self.pattern {
+            if pattern.chars().count() > PATTERN_MAX {
+                return Err(Error::Name {
+                    field: "spec.rules[].constraints[].pattern",
+                    value: self.field.clone(),
+                    reason: "a pattern is at most 256 characters",
+                });
+            }
+            if whole_value(pattern).is_err() {
+                return Err(Error::Name {
+                    field: "spec.rules[].constraints[].pattern",
+                    value: pattern.clone(),
+                    reason: "a pattern is a regular expression the Portal and Conftest both read (RE2 syntax)",
+                });
+            }
         }
         Ok(())
     }

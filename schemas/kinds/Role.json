@@ -75,7 +75,7 @@
     },
     "Constraint": {
       "additionalProperties": false,
-      "description": "A constraint on one spec field; exactly one of `in`, `notIn`, `equals` is given.\n\nThe one exception is [`BUILD_FIELD`] with no operator, on a rule of `App` with `propose` alone: it names the rule as the writer of that field, and a rule carrying it authorizes nothing else (AP-73).",
+      "description": "A constraint on one spec field or on `metadata.name`; exactly one of `in`, `notIn`, `equals`, `pattern` is given.\n\nThe one exception is [`BUILD_FIELD`] with no operator, on a rule of `App` with `propose` alone: it names the rule as the writer of that field, and a rule carrying it authorizes nothing else (AP-73).",
       "properties": {
         "equals": {
           "description": "The value must equal this.",
@@ -85,7 +85,7 @@
           ]
         },
         "field": {
-          "description": "Dotted path from the manifest root, e.g. `spec.audience`.",
+          "description": "Dotted path from the manifest root, e.g. `spec.audience` or `metadata.name`.",
           "type": "string"
         },
         "in": {
@@ -101,6 +101,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "pattern": {
+          "description": "The whole value must match this regular expression, at most [`PATTERN_MAX`] characters (T-2627): `t1[0-9]{3}-.+` confines a rule to the names a journey gives what it makes.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
