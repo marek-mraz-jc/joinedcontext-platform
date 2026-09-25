@@ -76,7 +76,7 @@ fn write(dir: &Path, name: &str, body: &str) {
 }
 
 fn gateway_on(dir: &Path) -> Arc<Gateway> {
-    let (endpoints, spaces, _accounts, _federations, _agreements) =
+    let (endpoints, spaces, _accounts, _federations, _agreements, _limits) =
         store::load(dir).expect("the repository loads");
     Arc::new(
         Gateway::new(
@@ -371,4 +371,39 @@ fn a_change_under_the_previews_directory_is_a_change() {
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&previews);
+}
+
+const ORGANIZATION: &str = "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  \
+                            name: banskabystrica\n  namespace: org\nspec:\n  domain: banskabystrica.sk\n  \
+                            locales: [\"sk\"]\n  defaultLocale: sk\n";
+
+/// ADR-N-035: the Organization's gateway body limit is swapped with the tables, and taking it
+/// out again is the catalog's 8 MiB, not the last value set.
+#[test]
+fn a_changed_body_limit_holds_from_the_next_tick() {
+    let dir = repo("body-limit");
+    write(&dir, "organization.yaml", ORGANIZATION);
+    let gateway = gateway_on(&dir);
+    let mut reaper = Reaper::new(Arc::clone(&gateway), &dir);
+    assert_eq!(gateway.max_request_body(), 8 * 1024 * 1024, "the default");
+
+    let limited =
+        format!("{ORGANIZATION}  limits:\n    gateway:\n      maxRequestBodyMegabytes: 2\n");
+    write(&dir, "organization.yaml", &limited);
+    assert!(reaper.tick());
+    assert_eq!(gateway.max_request_body(), 2 * 1024 * 1024);
+    assert_eq!(
+        store::load(&dir).expect("loads").5.max_request_body,
+        2 * 1024 * 1024
+    );
+
+    write(&dir, "organization.yaml", ORGANIZATION);
+    assert!(reaper.tick());
+    assert_eq!(
+        gateway.max_request_body(),
+        8 * 1024 * 1024,
+        "back to the default"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

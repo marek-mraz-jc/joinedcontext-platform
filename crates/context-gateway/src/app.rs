@@ -44,9 +44,11 @@ use jc_core::kinds::{Audience, Operation, RateLimits, Representation};
 use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// The largest request or response body the gateway will hold in memory.
+/// The largest broker answer the gateway will hold in memory. A request body is held to the
+/// Organization's own limit instead ([`Gateway::max_request_body`], ADR-N-035).
 ///
 /// A write has to be inspected whole before any of it is applied and a read has to be
 /// projected before any of it is sent, so neither can stream today.
@@ -121,6 +123,9 @@ pub struct Gateway {
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
     /// spread over many Endpoints is still one subject's burst (ADR-N-025 section 3, EP-87).
     pub hub_rate_limit: RateLimits,
+    /// The largest request body read, from the Organization's `spec.limits.gateway`
+    /// (ADR-N-035); swapped with the tables when the repository changes.
+    max_request_body: AtomicUsize,
 }
 
 /// The hub's per-subject quota unless the deployment names another: ten Endpoint calls a
@@ -178,6 +183,7 @@ impl Gateway {
                 crate::domain_gate::Mode::Report,
             )),
             hub_rate_limit: HUB_RATE_LIMIT,
+            max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
         }
     }
 
@@ -306,6 +312,17 @@ impl Gateway {
     /// longer names stop resolving from the next request on.
     pub fn replace_accounts(&self, accounts: ServiceAccounts) {
         self.accounts.store(Arc::new(accounts));
+    }
+
+    /// Replaces the limits the Organization sets (ADR-N-035): from the next request on.
+    pub fn replace_limits(&self, limits: crate::store::Limits) {
+        self.max_request_body
+            .store(limits.max_request_body, Ordering::Relaxed);
+    }
+
+    /// The largest request body this gateway reads now, in bytes.
+    pub fn max_request_body(&self) -> usize {
+        self.max_request_body.load(Ordering::Relaxed)
     }
 
     /// Replaces the endpoint table (EP-19).
@@ -834,9 +851,15 @@ pub(crate) async fn serve_ngsi_ld(
     }
 
     let (mut parts, body) = request.into_parts();
-    let Ok(sent) = axum::body::to_bytes(body, MAX_BODY).await else {
+    let limit = gateway.max_request_body();
+    let Ok(sent) = axum::body::to_bytes(body, limit).await else {
         return ProblemDetails::bad_request()
-            .with_detail("request body is unreadable or larger than the gateway accepts")
+            .with_detail(format!(
+                "the request body is unreadable or larger than the {} MiB this organization \
+                 accepts (spec.limits.gateway.maxRequestBodyMegabytes); send less at once, or \
+                 ask an organization admin to raise it in Organization settings",
+                limit / (1024 * 1024)
+            ))
             .into_response();
     };
 
