@@ -812,3 +812,84 @@ fn a_missing_visibility_is_project_and_never_public() {
     let written = app.to_yaml().expect("serializes");
     assert!(written.contains("visibility: project"), "{written}");
 }
+
+/// The golden App with `spec.egress` set to the YAML list `entries`.
+fn with_egress(entries: &str) -> Result<App, String> {
+    let app =
+        App::from_yaml(&format!("{GOLDEN}  egress: {entries}\n")).map_err(|err| err.to_string())?;
+    app.validate().map_err(|err| err.to_string())?;
+    Ok(app)
+}
+
+fn refusal(entries: &str) -> String {
+    with_egress(entries).expect_err(entries)
+}
+
+#[test]
+fn egress_takes_networks_with_their_ports_ap134() {
+    let app = with_egress("[{ cidr: 203.0.113.0/24, ports: [443] }, { cidr: \"2001:db8::/32\", ports: [443, 8443] }, { cidr: 198.51.100.7/32, ports: [5432] }, { cidr: \"2001:db8::1/128\", ports: [22] }]")
+        .expect("networks with ports are a valid egress");
+    assert_eq!(app.spec.egress.len(), 4);
+    assert_eq!(app.spec.egress[1].ports, [443, 8443]);
+    let serialized = app.to_yaml().expect("serialize");
+    assert_eq!(app, App::from_yaml(&serialized).expect("re-import"));
+    assert!(
+        !App::from_yaml(GOLDEN)
+            .expect("golden")
+            .to_yaml()
+            .expect("serialize")
+            .contains("egress"),
+        "an App that declares none writes none"
+    );
+}
+
+#[test]
+fn egress_refuses_everything_names_and_sloppy_networks_ap134() {
+    for (entries, says) in [
+        ("[{ cidr: 0.0.0.0/0, ports: [443] }]", "every address"),
+        ("[{ cidr: \"::/0\", ports: [443] }]", "every address"),
+        (
+            "[{ cidr: api.example.com/32, ports: [443] }]",
+            "never a host name",
+        ),
+        (
+            "[{ cidr: api.example.com, ports: [443] }]",
+            "an address and a prefix length",
+        ),
+        (
+            "[{ cidr: 203.0.113.0, ports: [443] }]",
+            "an address and a prefix length",
+        ),
+        ("[{ cidr: 203.0.113.0/33, ports: [443] }]", "from 1 to 32"),
+        (
+            "[{ cidr: \"2001:db8::/129\", ports: [443] }]",
+            "from 1 to 128",
+        ),
+        ("[{ cidr: 203.0.113.9/24, ports: [443] }]", "host bits"),
+        ("[{ cidr: \"2001:db8::1/64\", ports: [443] }]", "host bits"),
+        ("[{ cidr: 203.0.113.0/24, ports: [] }]", "needs its ports"),
+        ("[{ cidr: 203.0.113.0/24, ports: [0] }]", "needs its ports"),
+    ] {
+        let message = refusal(entries);
+        assert!(message.contains(says), "{entries}: {message}");
+        assert!(message.contains("AP-134"), "{entries}: {message}");
+    }
+    // The refusal names the entry, so a person finds it in a list of several.
+    let message =
+        refusal("[{ cidr: 203.0.113.0/24, ports: [443] }, { cidr: 0.0.0.0/0, ports: [443] }]");
+    assert!(message.contains("`0.0.0.0/0`"), "{message}");
+}
+
+#[test]
+fn egress_refuses_an_unknown_key_and_a_port_out_of_range_ap134() {
+    for entries in [
+        "[{ cidr: 203.0.113.0/24, ports: [443], host: api.example.com }]",
+        "[{ cidr: 203.0.113.0/24, ports: [65536] }]",
+        "[{ cidr: 203.0.113.0/24 }]",
+    ] {
+        assert!(
+            App::from_yaml(&format!("{GOLDEN}  egress: {entries}\n")).is_err(),
+            "{entries} parses"
+        );
+    }
+}
