@@ -33,7 +33,7 @@ pub use agent_profile::{
     AgentTool, AgentWorkspace, ModelProvider, DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use app::{
-    AppAccess, AppBuild, AppClass, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
+    AppAccess, AppBuild, AppClass, AppEgress, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
     AppVisibility, ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource,
     TemporalConstraint,
 };

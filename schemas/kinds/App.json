@@ -50,6 +50,30 @@
         }
       ]
     },
+    "AppEgress": {
+      "additionalProperties": false,
+      "description": "One destination a server pod reaches besides its endpoint (AP-134). A NetworkPolicy matches addresses, never names, so a host name has no place here (ADR-N-037).",
+      "properties": {
+        "cidr": {
+          "description": "An IPv4 or IPv6 network, `203.0.113.0/24`, with no host bits set; never `/0`.",
+          "type": "string"
+        },
+        "ports": {
+          "description": "The TCP ports the pod may reach there, at least one.",
+          "items": {
+            "format": "uint16",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cidr",
+        "ports"
+      ],
+      "type": "object"
+    },
     "AppLifecycle": {
       "description": "Lifecycle state of an app (AP-18, AP-19, AP-20).",
       "oneOf": [
@@ -194,6 +218,13 @@
           "description": "What the app needs to read or write; the reconciler renders its Endpoint and Policies from this (AP-04, AP-05).",
           "items": {
             "$ref": "#/definitions/DataNeed"
+          },
+          "type": "array"
+        },
+        "egress": {
+          "description": "Where a server pod may connect besides its endpoint, by address only; declaring one takes the red lane (AP-134).",
+          "items": {
+            "$ref": "#/definitions/AppEgress"
           },
           "type": "array"
         },

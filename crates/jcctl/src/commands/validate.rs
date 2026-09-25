@@ -644,8 +644,9 @@ fn app_writes_open_to_everyone(repo: &Repository) -> Vec<(Location, String)> {
     warnings
 }
 
-/// Every `App` whose name another project's `App` also declares (AP-14a): `/apps/{name}/` and
-/// the pod `app-{name}` are one address for the organization, so the edge cannot serve both.
+/// Every `App` whose name another project's `App` also declares (AP-14a): the host
+/// `{name}.apps.{domain}` and the pod `app-{name}` are one address for the organization, so the
+/// edge cannot serve both.
 fn app_names_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
     claimed_twice(
         repo,
@@ -653,8 +654,8 @@ fn app_names_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
         |_, name| name.to_owned(),
         |name, _, projects| {
             format!(
-                "App {name} is declared by projects {projects}; /apps/{name}/ is one address for \
-                 the whole organization, rename all but one (AP-14a)"
+                "App {name} is declared by projects {projects}; the host {name}.apps.{{domain}} is \
+                 one address for the whole organization, rename all but one (AP-14a)"
             )
         },
     )

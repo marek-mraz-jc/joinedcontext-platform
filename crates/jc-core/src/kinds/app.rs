@@ -563,6 +563,69 @@ pub struct AppSpec {
     /// Who holds each role (AP-91).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub access: Vec<AppAccess>,
+    /// Where a server pod may connect besides its endpoint, by address only; declaring one takes
+    /// the red lane (AP-134).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress: Vec<AppEgress>,
+}
+
+/// One destination a server pod reaches besides its endpoint (AP-134). A NetworkPolicy matches
+/// addresses, never names, so a host name has no place here (ADR-N-037).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppEgress {
+    /// An IPv4 or IPv6 network, `203.0.113.0/24`, with no host bits set; never `/0`.
+    pub cidr: String,
+    /// The TCP ports the pod may reach there, at least one.
+    pub ports: Vec<u16>,
+}
+
+impl AppEgress {
+    fn validate(&self) -> Result<()> {
+        let invalid = |reason: String| Error::Invalid {
+            field: "egress[].cidr".to_owned(),
+            reason: format!("`{}`: {reason} (AP-134)", self.cidr),
+        };
+        let (address, prefix) = self.cidr.split_once('/').ok_or_else(|| {
+            invalid("a CIDR is an address and a prefix length, `203.0.113.0/24`".into())
+        })?;
+        let address: std::net::IpAddr = address.parse().map_err(|_| {
+            invalid(
+                "is not an IP network; a NetworkPolicy matches addresses, never a host name".into(),
+            )
+        })?;
+        let width: u8 = if address.is_ipv4() { 32 } else { 128 };
+        let prefix: u8 = prefix
+            .parse()
+            .ok()
+            .filter(|prefix| *prefix <= width)
+            .ok_or_else(|| invalid(format!("the prefix length is a number from 1 to {width}")))?;
+        if prefix == 0 {
+            return Err(invalid(
+                "is every address; name the networks the App needs".into(),
+            ));
+        }
+        let bits = match address {
+            std::net::IpAddr::V4(v4) => u128::from(u32::from(v4)) << 96,
+            std::net::IpAddr::V6(v6) => u128::from(v6),
+        };
+        // A /128 leaves no host bits, and `checked_shl` says so rather than overflowing.
+        if bits.checked_shl(u32::from(prefix)).unwrap_or(0) != 0 {
+            return Err(invalid(format!(
+                "sets host bits past /{prefix}; write the network address"
+            )));
+        }
+        if self.ports.is_empty() || self.ports.contains(&0) {
+            return Err(Error::Invalid {
+                field: "egress[].ports".to_owned(),
+                reason: format!(
+                    "`{}` needs its ports, each from 1 to 65535; none would open every port (AP-134)",
+                    self.cidr
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Kind for AppSpec {
@@ -646,6 +709,9 @@ impl AppSpec {
         }
 
         self.validate_roles()?;
+        for destination in &self.egress {
+            destination.validate()?;
+        }
 
         if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {
             return Err(Error::Name {

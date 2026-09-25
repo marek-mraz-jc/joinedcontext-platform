@@ -175,7 +175,6 @@ fn the_portal_routes_carry_the_portal_host_and_the_surfaces_the_apex() {
         "well-known",
         "context-space",
         "context-endpoint",
-        "apps-surface",
         "apex-redirect",
     ] {
         assert_eq!(
@@ -237,7 +236,6 @@ fn route_priorities_put_the_specific_surfaces_above_the_catch_all() {
     assert_eq!(priority("portal-ui"), 1);
     assert!(priority("context-space") > priority("portal-api"));
     assert!(priority("context-endpoint") > priority("context-space"));
-    assert!(priority("apps-surface") > priority("context-endpoint"));
 
     let endpoint = find(&document, "routes", "context-endpoint");
     assert_eq!(endpoint["uri"], "/api/endpoint/*");
@@ -246,22 +244,17 @@ fn route_priorities_put_the_specific_surfaces_above_the_catch_all() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Every app, whatever its kind, gets its own route behind the edge login, above the
-/// shared `/apps/*` surface (AP-26).
+/// Every app, whatever its kind, gets its own route behind the edge login, the whole of its
+/// own host (AP-26, AP-133).
 #[test]
 fn every_app_kind_gets_a_route_with_the_edge_login() {
     let dir = repo_with_three_apps("apisix-apps");
     let document = document(&dir);
 
-    let surface = find(&document, "routes", "apps-surface")["priority"]
-        .as_u64()
-        .expect("priority");
-
     for name in ["air-quality-today", "air-quality-map", "hsl-transport"] {
         let route = find(&document, "routes", &format!("app-{name}"));
-        assert_eq!(route["uri"], format!("/apps/{name}/*"));
-        assert_eq!(route["host"], "city.example.com");
-        assert!(route["priority"].as_u64().expect("priority") > surface);
+        assert_eq!(route["uri"], "/*");
+        assert_eq!(route["host"], format!("{name}.apps.city.example.com"));
         assert!(
             route.get("plugin_config_id").is_none(),
             "an app route carries its plugins inline"
@@ -321,7 +314,10 @@ fn the_cookie_name_path_and_the_logout_path_follow_the_app_name() {
         let oidc = &find(&document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"];
         let session = &oidc["session"];
         assert_eq!(session["cookie_name"], format!("jc_edge_app_{name}"));
-        assert_eq!(session["cookie_path"], format!("/apps/{name}/"));
+        assert_eq!(
+            session["cookie_path"], "/",
+            "host-only on its own host (AP-29)"
+        );
         assert_eq!(session["cookie_secure"], true);
         assert_eq!(session["cookie_http_only"], true);
         assert_eq!(session["cookie_same_site"], "Lax");
@@ -329,14 +325,14 @@ fn the_cookie_name_path_and_the_logout_path_follow_the_app_name() {
         assert_eq!(session["rolling_timeout"], 3600);
         assert_eq!(session["absolute_timeout"], 36000);
         assert!(session.get("cookie").is_none(), "no nested cookie block");
-        assert_eq!(oidc["logout_path"], format!("/apps/{name}/logout"));
+        assert_eq!(oidc["logout_path"], "/logout");
         assert_eq!(
             oidc["redirect_uri"],
-            format!("https://city.example.com/apps/{name}/callback")
+            format!("https://{name}.apps.city.example.com/callback")
         );
         assert_eq!(
             oidc["post_logout_redirect_uri"],
-            format!("https://city.example.com/apps/{name}/")
+            format!("https://{name}.apps.city.example.com/")
         );
     }
 
@@ -379,8 +375,8 @@ fn no_route_or_upstream_mentions_the_old_sidecar_port() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The Portal routes and the shared surface run the same login front as the apps, with
-/// the cookie scoped to their own host or path (ADR-N-019).
+/// The Portal routes run the same login front as the apps, with the cookie scoped to their
+/// own host (ADR-N-019).
 #[test]
 fn the_portal_and_the_shared_surface_log_in_at_the_edge() {
     let dir = demo_repo("apisix-portal-login");
@@ -416,19 +412,9 @@ fn the_portal_and_the_shared_surface_log_in_at_the_edge() {
     assert_eq!(api["session"]["cookie_name"], "jc_edge");
     assert_eq!(api["set_access_token_header"], true);
 
-    let apps = &plugins_of(&document, "apps-surface")["openid-connect"];
-    assert_eq!(apps["unauth_action"], "auth");
-    assert_eq!(apps["session"]["cookie_name"], "jc_edge_apps");
-    assert_eq!(apps["session"]["cookie_path"], "/apps/");
-    assert_eq!(
-        apps["redirect_uri"],
-        "https://city.example.com/apps/callback"
-    );
-    assert_eq!(apps["logout_path"], "/apps/logout");
-    assert_eq!(
-        find(&document, "routes", "apps-surface")["upstream_id"],
-        "upstream-portal"
-    );
+    // No App is served on a shared surface any more (ADR-N-037).
+    assert!(!has(&document, "routes", "apps-surface"));
+    assert!(!has(&document, "plugin_configs", "pc-apps-surface"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -444,7 +430,6 @@ fn every_login_and_context_route_strips_every_forgeable_header() {
     for id in [
         "portal-ui",
         "portal-api",
-        "apps-surface",
         "context-space",
         "context-endpoint",
         "app-air-quality-today",
@@ -495,12 +480,7 @@ fn the_secret_placeholders_appear_verbatim_and_no_secret_value_does() {
     assert!(config.contains("${EDGE_CLIENT_SECRET}"), "{config}");
     assert!(config.contains("${OIDC_SESSION_SECRET}"), "{config}");
 
-    for id in [
-        "portal-ui",
-        "portal-api",
-        "apps-surface",
-        "app-air-quality-today",
-    ] {
+    for id in ["portal-ui", "portal-api", "app-air-quality-today"] {
         let oidc = &plugins_of(&document, id)["openid-connect"];
         assert_eq!(oidc["client_secret"], "${EDGE_CLIENT_SECRET}", "{id}");
         assert_eq!(oidc["session"]["secret"], "${OIDC_SESSION_SECRET}", "{id}");
@@ -656,7 +636,7 @@ fn two_apps_never_share_a_cookie_callback_or_logout() {
         let text = oidc.to_string();
         for other in names.iter().filter(|other| **other != name) {
             assert!(
-                !text.contains(&format!("/apps/{other}/")),
+                !text.contains(&format!("{other}.apps.")),
                 "{name} names {other}: {text}"
             );
         }
@@ -718,15 +698,208 @@ fn an_app_of_unknown_kind_still_strips_every_forgeable_header() {
     }
 }
 
-/// AP-26: an App name the loader accepts never escapes the `/apps/` prefix of its route.
+/// The routes of the three Apps, by name: the App, its endpoint if any, its redirect.
+const APP_NAMES: [&str; 3] = ["air-quality-today", "air-quality-map", "hsl-transport"];
+
+/// AP-133: an App's routes sit on its own host, and the apex matches `/apps/` only to send the
+/// browser there.
 #[test]
-fn every_app_route_stays_under_its_own_apps_prefix() {
-    let dir = repo_with_three_apps("apisix-prefix");
+fn every_app_route_is_bound_to_its_own_host() {
+    let dir = repo_with_endpoints("apisix-hosts-per-app");
     let document = document(&dir);
     for route in document["routes"].as_array().expect("routes") {
         let id = route["id"].as_str().unwrap_or_default();
-        if let Some(name) = id.strip_prefix("app-") {
-            assert_eq!(route["uri"], format!("/apps/{name}/*"), "{id}");
+        let text = route.to_string();
+        if !id.starts_with("app-") {
+            assert!(
+                !text.contains("/apps/"),
+                "{id} matches an App's old path: {text}"
+            );
+            assert!(
+                !text.contains(".apps."),
+                "{id} reaches an App's host: {text}"
+            );
+            continue;
+        }
+        let name = APP_NAMES
+            .iter()
+            .find(|name| {
+                [
+                    format!("app-{name}"),
+                    format!("app-{name}-endpoint"),
+                    format!("app-{name}-moved"),
+                ]
+                .contains(&id.to_owned())
+            })
+            .unwrap_or_else(|| panic!("{id} is no route of a known App"));
+        if id.ends_with("-moved") {
+            assert_eq!(route["host"], "city.example.com", "{id}");
+        } else {
+            assert_eq!(
+                route["host"],
+                format!("{name}.apps.city.example.com"),
+                "{id}"
+            );
+        }
+        for other in APP_NAMES.iter().filter(|other| *other != name) {
+            assert!(
+                !text.contains(&format!("{other}.apps.")),
+                "{id} names {other}"
+            );
+            assert!(
+                !text.contains(&format!("/apps/{other}")),
+                "{id} names {other}"
+            );
+        }
+    }
+}
+
+const MAP_SLUG: &str = "m4pq7ge2xdv6ksb3ncf5arw2yz";
+const HSL_SLUG: &str = "h5lq7ge2xdv6ksb3ncf5arw2yt";
+
+/// The three Apps, each project's App endpoint where the Portal would render it: the map's
+/// and the transport's hold a slug in Git, `air-quality-today`'s none.
+fn repo_with_endpoints(test_name: &str) -> std::path::PathBuf {
+    let dir = repo_with_three_apps(test_name);
+    write(
+        &dir,
+        "projects/doprava/project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    for (project, name, slug) in [
+        ("ovzdusie", "air-quality-map", MAP_SLUG),
+        ("doprava", "hsl-transport", HSL_SLUG),
+    ] {
+        write(
+            &dir,
+            &format!("projects/{project}/spaces/ovzdusie/endpoints/app-{name}.yaml"),
+            &ENDPOINT
+                .replace("name: public-air", &format!("name: app-{name}"))
+                .replace("namespace: ovzdusie", &format!("namespace: {project}"))
+                .replace("zt4qm7ge2xdv6ksb3ncf5arw2y", slug),
+        );
+    }
+    // An Endpoint of the right name in the wrong project is not the map's.
+    write(
+        &dir,
+        "projects/doprava/spaces/ovzdusie/endpoints/app-air-quality-map.yaml",
+        &ENDPOINT
+            .replace("name: public-air", "name: app-air-quality-map")
+            .replace("namespace: ovzdusie", "namespace: doprava")
+            .replace("zt4qm7ge2xdv6ksb3ncf5arw2y", "w7ongq7ge2xdv6ksb3ncf5arw2"),
+    );
+    dir
+}
+
+/// A `ui` App is the Portal's static host rewritten to its folder; a `ui-rust` App is its own
+/// pod, unrewritten. Both answer the whole of their host (AP-133).
+#[test]
+fn a_static_app_is_rewritten_to_its_folder_and_a_pod_app_is_not() {
+    let dir = repo_with_three_apps("apisix-static-rewrite");
+    let document = document(&dir);
+    let map = find(&document, "routes", "app-air-quality-map");
+    assert_eq!(map["upstream_id"], "upstream-portal");
+    assert_eq!(
+        map["plugins"]["proxy-rewrite"]["regex_uri"],
+        serde_json::json!(["^/(.*)$", "/apps/air-quality-map/$1"])
+    );
+    let hsl = find(&document, "routes", "app-hsl-transport");
+    assert_eq!(hsl["upstream_id"], "upstream-app-hsl-transport");
+    assert!(hsl["plugins"].get("proxy-rewrite").is_none(), "{hsl}");
+}
+
+/// AP-133: an App's host routes its own endpoint's slugs to the gateway and no other; an App
+/// whose endpoint slug is not in Git gets no endpoint route at all.
+#[test]
+fn an_app_host_routes_its_own_endpoint_slugs_only() {
+    let dir = repo_with_endpoints("apisix-app-endpoint");
+    let document = document(&dir);
+
+    let map = find(&document, "routes", "app-air-quality-map-endpoint");
+    assert_eq!(map["host"], "air-quality-map.apps.city.example.com");
+    assert_eq!(
+        map["uris"],
+        serde_json::json!([format!("/api/endpoint/{MAP_SLUG}/*")])
+    );
+    assert_eq!(map["upstream_id"], "upstream-context-gateway");
+    assert!(
+        map["priority"].as_u64()
+            > find(&document, "routes", "app-air-quality-map")["priority"].as_u64()
+    );
+    let hsl = find(&document, "routes", "app-hsl-transport-endpoint");
+    assert_eq!(
+        hsl["uris"],
+        serde_json::json!([format!("/api/endpoint/{HSL_SLUG}/*")])
+    );
+    assert!(!has(&document, "routes", "app-air-quality-today-endpoint"));
+
+    // No slug of another App, of the demo's public endpoint or of the same-named Endpoint of
+    // another project is reachable on an App's host.
+    let on_app_hosts: String = document["routes"]
+        .as_array()
+        .expect("routes")
+        .iter()
+        .filter(|route| {
+            route["host"]
+                .as_str()
+                .is_some_and(|host| host.contains(".apps."))
+        })
+        .map(|route| format!("{route}\n"))
+        .collect();
+    for foreign in ["zt4qm7ge2xdv6ksb3ncf5arw2y", "w7ongq7ge2xdv6ksb3ncf5arw2"] {
+        assert!(!on_app_hosts.contains(foreign), "{foreign} on an App host");
+    }
+    assert_eq!(on_app_hosts.matches(MAP_SLUG).count(), 1);
+    assert_eq!(on_app_hosts.matches(HSL_SLUG).count(), 1);
+
+    // A fetch without a session is a 401 for a non-public App, and passes for a public one;
+    // the session's token reaches the gateway as its bearer.
+    let map_login = &map["plugins"]["openid-connect"];
+    assert_eq!(map_login["unauth_action"], "deny");
+    assert_eq!(map_login["access_token_in_authorization_header"], true);
+    assert_eq!(
+        map_login["session"]["cookie_name"],
+        "jc_edge_app_air-quality-map"
+    );
+    assert_eq!(hsl["plugins"]["openid-connect"]["unauth_action"], "pass");
+    for header in FORGEABLE_HEADERS {
+        assert!(map["plugins"]["serverless-pre-function"]
+            .to_string()
+            .contains(header));
+    }
+}
+
+/// ADR-N-037 §3: the old address answers a 308 to the App's host, reaches no upstream and
+/// runs no login, so the apex never sets an App's cookie.
+#[test]
+fn the_old_app_path_redirects_to_the_host_without_a_session() {
+    let dir = repo_with_three_apps("apisix-app-moved");
+    let document = document(&dir);
+    for name in APP_NAMES {
+        let moved = find(&document, "routes", &format!("app-{name}-moved"));
+        assert_eq!(moved["host"], "city.example.com");
+        assert_eq!(
+            moved["uris"],
+            serde_json::json!([format!("/apps/{name}"), format!("/apps/{name}/*")])
+        );
+        assert!(moved.get("upstream_id").is_none(), "{moved}");
+        assert!(moved.get("plugin_config_id").is_none(), "{moved}");
+        let plugins = moved["plugins"].as_object().expect("plugins");
+        assert_eq!(plugins.keys().collect::<Vec<_>>(), ["redirect"], "{moved}");
+        let redirect = &plugins["redirect"];
+        assert_eq!(redirect["ret_code"], 308);
+        assert_eq!(redirect["append_query_string"], true);
+        let pattern = redirect["regex_uri"][0].as_str().expect("a pattern");
+        let target = redirect["regex_uri"][1].as_str().expect("a target");
+        assert_eq!(target, format!("https://{name}.apps.city.example.com/$1"));
+        let pattern = regex::Regex::new(pattern).expect("the pattern compiles");
+        for (path, rest) in [
+            (format!("/apps/{name}"), ""),
+            (format!("/apps/{name}/"), ""),
+            (format!("/apps/{name}/data/today.json"), "data/today.json"),
+        ] {
+            let captured = pattern.captures(&path).unwrap_or_else(|| panic!("{path}"));
+            assert_eq!(&captured[1], rest, "{path}");
         }
     }
 }
@@ -741,7 +914,7 @@ fn clashes(dir: &std::path::Path, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// AP-14a: `/apps/{name}/` is one address for the whole organization, so a second project's
+/// AP-14a: the host `{name}.apps.{domain}` is one address for the whole organization, so a second project's
 /// App of the same name is refused by `validate`, not silently merged into the first one's
 /// route with the visibility of whichever sorts first.
 #[test]

@@ -760,6 +760,49 @@ fn an_app_role_naming_an_undeclared_group_is_refused_and_a_declared_one_is_not()
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// AP-134: `jcctl validate` refuses an egress destination that is every address or a name,
+/// naming the entry, and passes a network with its ports.
+#[test]
+fn an_app_egress_of_every_address_or_a_host_name_is_refused() {
+    let dir = valid_repo("app-egress");
+    let with = |egress: &str| {
+        write(
+            &dir,
+            ROLES_APP_PATH,
+            &roles_app(
+                "{ group: air-quality-team }",
+                &format!("      roles: [editor]\n  egress: {egress}\n"),
+            ),
+        );
+        validate::run(&dir)
+            .findings
+            .into_iter()
+            .map(|f| f.message)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        with("[{ cidr: 203.0.113.0/24, ports: [443] }]"),
+        Vec::<String>::new()
+    );
+    for (egress, entry) in [
+        ("[{ cidr: 0.0.0.0/0, ports: [443] }]", "`0.0.0.0/0`"),
+        ("[{ cidr: \"::/0\", ports: [443] }]", "`::/0`"),
+        (
+            "[{ cidr: api.example.com/32, ports: [443] }]",
+            "`api.example.com/32`",
+        ),
+    ] {
+        let found = with(egress);
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains(entry) && m.contains("AP-134")),
+            "{egress}: {found:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// AP-91, PF-41: a role member outside the organization's domain is refused; a subdomain of it
 /// is the organization's.
 #[test]
