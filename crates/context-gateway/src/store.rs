@@ -248,6 +248,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
                 }
             }
         });
+        let representations = spec.served_representations();
         endpoints.push(Endpoint {
             roles: match app_of(repo, &project, &id.name) {
                 Some(client) => EndpointRoles::of_app(&project, &id.name, &spec, client),
@@ -263,7 +264,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             project,
             audience: spec.audience,
             allowed_projects: spec.allowed_projects,
-            representations: spec.enabled_representations,
+            representations,
             rate_limit: spec.rate_limits,
             file_limits: spec.file_limits,
             hidden_attributes: spec

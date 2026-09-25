@@ -420,3 +420,68 @@ fn a_catalog_with_a_bad_member_fails_the_endpoint_with_the_field_named() {
 fn a_catalog_licence_outside_the_table_does_not_parse() {
     assert!(Endpoint::from_yaml(&with_catalog("    license: proprietary\n")).is_err());
 }
+
+fn listing(representations: &str, extra: &str) -> Endpoint {
+    Endpoint::from_yaml(&format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: air\n  \
+         namespace: bb-ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  \
+         slug: zt4qm7ge2xdv6ksb3ncf5arw2y\n  audience: project-list\n  \
+         allowedProjects: [bb-doprava]\n  enabledRepresentations: {representations}\n{extra}"
+    ))
+    .expect("the manifest parses")
+}
+
+/// EP-24: MCP is served without being listed, internal or public, and only `mcp: false`
+/// leaves it out; the listed order stays as written.
+#[test]
+fn every_endpoint_serves_mcp_unless_it_opts_out() {
+    let listed = listing("[ngsi-ld, geojson]", "");
+    listed.validate().expect("valid");
+    assert_eq!(
+        listed.spec.served_representations(),
+        [
+            Representation::NgsiLd,
+            Representation::GeoJson,
+            Representation::Mcp
+        ]
+    );
+
+    let already = listing("[mcp, ngsi-ld]", "");
+    assert_eq!(
+        already.spec.served_representations(),
+        [Representation::Mcp, Representation::NgsiLd],
+        "a listed mcp is not served twice"
+    );
+
+    let off = listing("[ngsi-ld]", "  mcp: false\n");
+    off.validate().expect("an opt-out is valid");
+    assert_eq!(off.spec.served_representations(), [Representation::NgsiLd]);
+
+    let on = listing("[ngsi-ld]", "  mcp: true\n");
+    assert!(on
+        .spec
+        .served_representations()
+        .contains(&Representation::Mcp));
+}
+
+/// EP-24: `mcp: false` beside a listed `mcp` says two things at once and is refused, with the
+/// way out in the message.
+#[test]
+fn an_opt_out_beside_a_listed_mcp_is_refused() {
+    let both = listing("[ngsi-ld, mcp]", "  mcp: false\n");
+    let refused = both.validate().expect_err("a contradiction is refused");
+    assert!(
+        refused.to_string().contains("drop one of the two"),
+        "{refused}"
+    );
+}
+
+/// The opt-out is a boolean; anything else is refused at parse time, not read as "on".
+#[test]
+fn a_non_boolean_mcp_switch_is_refused() {
+    let raw = "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: air\n  \
+               namespace: bb-ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  \
+               slug: zt4qm7ge2xdv6ksb3ncf5arw2y\n  audience: public\n  \
+               enabledRepresentations: [ngsi-ld]\n  mcp: \"off\"\n";
+    assert!(Endpoint::from_yaml(raw).is_err());
+}

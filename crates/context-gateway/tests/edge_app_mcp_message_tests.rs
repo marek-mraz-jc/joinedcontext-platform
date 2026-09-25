@@ -178,8 +178,9 @@ async fn a_public_instance_answers_without_a_token() {
     assert!(answer["result"]["tools"].is_array(), "{body}");
 }
 
-/// EP-05: an endpoint that serves NGSI-LD only has no MCP instance, and asking for one is
-/// 404 — the same 404 as an endpoint that does not exist, so the representation table is not
+/// EP-05, EP-24: an endpoint whose resolved table leaves MCP out (a manifest with
+/// `mcp: false`; the store adds MCP to every other one) has no MCP instance, and asking for one
+/// is 404 — the same 404 as an endpoint that does not exist, so the representation table is not
 /// readable from outside either.
 #[tokio::test]
 async fn an_endpoint_without_the_mcp_representation_has_no_instance() {
