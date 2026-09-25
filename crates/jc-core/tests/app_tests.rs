@@ -786,3 +786,20 @@ fn an_unknown_field_in_a_role_or_an_access_entry_is_refused_at_parse_time() {
         assert!(App::from_yaml(&text).is_err(), "{to}");
     }
 }
+
+/// AP-120, T-2690: an App that does not say who may open it asks for a login: it is `project`,
+/// never `public`, and it serializes back with the value it was read as.
+#[test]
+fn a_missing_visibility_is_project_and_never_public() {
+    let yaml = GOLDEN.replace("  visibility: public\n", "");
+    assert!(
+        !yaml.contains("visibility"),
+        "the fixture still names a visibility"
+    );
+    let app = App::from_yaml(&yaml).expect("an App without visibility parses");
+    app.validate().expect("and validates");
+    assert_eq!(app.spec.visibility, AppVisibility::Project);
+    assert_eq!(AppVisibility::default(), AppVisibility::Project);
+    let written = app.to_yaml().expect("serializes");
+    assert!(written.contains("visibility: project"), "{written}");
+}
