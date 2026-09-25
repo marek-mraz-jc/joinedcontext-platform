@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import importlib.metadata as metadata
 import os
+import re
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any, Iterator
 
 import jsonasobj2
+import yaml
 from linkml_runtime import SchemaView
 from linkml_runtime.linkml_model.meta import ClassDefinition, SlotDefinition
 
@@ -71,6 +74,49 @@ SHIPPED_MODELS = Path(
 ).resolve()
 # The loader appends `.yaml` to whatever an import maps to, so the entry stops at the stem.
 IMPORT_MAP = {"ngsi-ld-core": str(SHIPPED_MODELS / "ngsi-ld-core.linkml")}
+
+#: A platform model an import names at a pinned major (DM-75): an organization model, or a model
+#: of the importing model's own project. No colon, so LinkML never expands it as a CURIE; no
+#: slash, so LinkML never resolves the imported model's own imports relative to its name.
+MODEL_IMPORT = re.compile(r"^(org|project)\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.v(0|[1-9][0-9]*)$")
+
+#: The platform models the current request imports, name to spooled stem. Model Tools reads no
+#: platform state, so the caller resolves them and hands over their sources; a context
+#: variable keeps two requests compiling at once from seeing each other's (DM-18).
+_REQUEST_IMPORTS: ContextVar[dict[str, str]] = ContextVar("request_imports", default={})
+
+
+@contextmanager
+def imported(sources: dict[str, str]) -> Iterator[None]:
+    """Make `sources` (import name to LinkML text) resolvable for the calls inside the block.
+
+    Each source is spooled under a name of our own, never the import name, so nothing the
+    caller sends picks a path; the folder is removed when the block ends.
+    """
+    with TemporaryDirectory() as folder:
+        mapping: dict[str, str] = {}
+        for index, (name, text) in enumerate(sorted(sources.items())):
+            stem = Path(folder) / f"import-{index}"
+            stem.with_suffix(".yaml").write_text(text, encoding="utf-8")
+            mapping[name] = str(stem)
+        token = _REQUEST_IMPORTS.set(mapping)
+        try:
+            yield
+        finally:
+            _REQUEST_IMPORTS.reset(token)
+
+
+def model_imports(text: str) -> list[str]:
+    """The platform-model imports one LinkML document names, and every other `org.` or
+    `project.` entry, malformed ones included: those are refused rather than read as a file."""
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
+    imports = document.get("imports") if isinstance(document, dict) else None
+    if not isinstance(imports, list):
+        return []
+    return [entry for entry in imports if isinstance(entry, str) and entry.split(".", 1)[0] in ("org", "project") and "." in entry]
 
 
 class ModelError(Exception):
@@ -256,7 +302,7 @@ def _view(path: str) -> SchemaView:
     generator. Merging once here is also what makes the artifacts self-contained: a consumer
     of the JSON Schema or the SHACL shapes has no way to resolve our imports.
     """
-    view = SchemaView(path, importmap=IMPORT_MAP)
+    view = SchemaView(path, importmap={**_REQUEST_IMPORTS.get(), **IMPORT_MAP})
     view.merge_imports()
     return view
 

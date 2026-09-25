@@ -473,3 +473,40 @@ fn merge_refuses_a_clash_and_touches_nothing() {
     assert!(merge(&dir, "helsinki", "nowhere", None).is_err());
     assert!(merge(&dir, "helsinki", "city", Some("Not A Label")).is_err());
 }
+
+#[test]
+fn a_model_no_space_owns_is_no_second_model_of_a_space_dm74() {
+    let dir = repo("levels", &[("air", "AirQualityObserved", AIR)], Some("air"));
+    let spaceless = |namespace: &str| {
+        model_manifest("shared", "KeyPerformanceIndicator")
+            .replace("namespace: helsinki", &format!("namespace: {namespace}"))
+            .replace("  contextSpaceRef: city\n", "")
+    };
+    // An organization model and a project model beside the space's one model.
+    write(&dir, "datamodels/shared/shared.yaml", &spaceless("org"));
+    write(&dir, "datamodels/shared/shared.linkml.yaml", KPI);
+    write(
+        &dir,
+        "projects/helsinki/datamodels/shared/shared.yaml",
+        &spaceless("helsinki"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/datamodels/shared/shared.linkml.yaml",
+        KPI,
+    );
+    let report = validate::run(&dir);
+    assert!(report.is_valid(), "{:#?}", report.findings);
+
+    // An organization model that claims a space is refused, naming the field.
+    write(
+        &dir,
+        "datamodels/shared/shared.yaml",
+        &spaceless("org").replace("spec:\n", "spec:\n  contextSpaceRef: city\n"),
+    );
+    let refused = messages(&validate::run(&dir).findings);
+    assert!(
+        refused.iter().any(|m| m.contains("contextSpaceRef")),
+        "{refused:#?}"
+    );
+}

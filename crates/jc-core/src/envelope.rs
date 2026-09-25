@@ -46,6 +46,10 @@ pub trait Kind:
     /// (PF-68). `None` for every kind that lives in one place, which is all but `Role`.
     const PROJECT_PATH_TEMPLATE: Option<&'static str> = None;
 
+    /// Where a kind whose project path names a `{space}` lives in a project when no space owns
+    /// the manifest (DM-74). `None` for every kind but `DataModel`.
+    const SPACELESS_PATH_TEMPLATE: Option<&'static str> = None;
+
     /// Kind-specific validation of the spec against its own metadata.
     ///
     /// The default checks nothing; every kind that has invariants of its own implements it,
@@ -76,8 +80,11 @@ pub trait Kind:
     /// same path.
     fn repo_path(&self, meta: &ObjectMeta) -> String {
         let namespace = meta.namespace.as_deref().unwrap_or_default();
-        let template = match Self::PROJECT_PATH_TEMPLATE {
-            Some(in_project) if !namespace.is_empty() && namespace != ORG_NAMESPACE => in_project,
+        let in_project = !namespace.is_empty() && namespace != ORG_NAMESPACE;
+        let spaceless = self.context_space().is_none_or(str::is_empty);
+        let template = match (Self::PROJECT_PATH_TEMPLATE, Self::SPACELESS_PATH_TEMPLATE) {
+            (_, Some(no_space)) if in_project && spaceless => no_space,
+            (Some(project), _) if in_project => project,
             _ => Self::PATH_TEMPLATE,
         };
         template

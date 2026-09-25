@@ -2,7 +2,9 @@
 
 use chrono::{DateTime, Utc};
 use jc_core::error::Error;
-use jc_core::kinds::data_model::{DataModelLifecycle, DataModelSource, RemoteSource, SemVer};
+use jc_core::kinds::data_model::{
+    DataModelLifecycle, DataModelOrigin, DataModelSource, RemoteSource, SemVer,
+};
 use jc_core::kinds::DataModel;
 
 /// Verbatim from docs/Architecture/11-data-models.md section 4.1.
@@ -331,4 +333,180 @@ fn unknown_fields_and_bad_class_names_are_rejected() {
             ..
         }
     ));
+}
+
+/// An organization model: namespace `org`, no space (DM-74, ADR-N-039).
+const ORGANIZATION_MODEL: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataModel
+metadata:
+  name: air-quality
+  namespace: org
+spec:
+  linkml: ./air-quality.linkml.yaml
+  version: 1.2.0
+  lifecycle: published
+  classes: [AirQualityObserved]
+  origin:
+    project: bb-ovzdusie
+    space: ovzdusie
+    name: bb-air-quality
+    version: 1.2.0
+    commit: 9f1c2b7
+  artifacts:
+    jsonSchema: ./json-schema/air-quality.v1.json
+    context: ./context/air-quality.v1.jsonld
+    docs: ./docs/air-quality.md
+    example: ./examples/air-quality.example.jsonld
+"#;
+
+#[test]
+fn a_model_lives_in_the_organization_or_in_a_project_dm74() {
+    let organization = DataModel::from_yaml(ORGANIZATION_MODEL).expect("valid YAML");
+    organization
+        .validate()
+        .expect("an organization model validates");
+    assert_eq!(
+        organization.resource_path().expect("path"),
+        "datamodels/air-quality/air-quality.yaml"
+    );
+    assert_eq!(
+        organization.spec.origin.as_ref().map(|o| o.version.major()),
+        Some(1)
+    );
+
+    // A project model no space owns sits in the project's own datamodels folder.
+    let mut project = organization.clone();
+    project.metadata.namespace = Some("bb-ovzdusie".into());
+    project.spec.origin = None;
+    project
+        .validate()
+        .expect("a project model without a space validates");
+    assert_eq!(
+        project.resource_path().expect("path"),
+        "projects/bb-ovzdusie/datamodels/air-quality/air-quality.yaml"
+    );
+
+    // A space's model keeps its path (DM-61).
+    let space = DataModel::from_yaml(GOLDEN).expect("valid golden YAML");
+    assert_eq!(
+        space.resource_path().expect("path"),
+        "projects/bb-ovzdusie/spaces/ovzdusie/datamodels/bb-air-quality.yaml"
+    );
+
+    let info = jc_core::registry::by_kind("DataModel").expect("catalogued");
+    assert_eq!(info.repo_path("org", "", "m"), "datamodels/m/m.yaml");
+    assert_eq!(
+        info.repo_path("p", "", "m"),
+        "projects/p/datamodels/m/m.yaml"
+    );
+    assert_eq!(
+        info.repo_path("p", "s", "m"),
+        "projects/p/spaces/s/datamodels/m.yaml"
+    );
+}
+
+#[test]
+fn an_organization_model_belongs_to_no_space_and_needs_its_namespace_dm74() {
+    let mut in_a_space = DataModel::from_yaml(ORGANIZATION_MODEL).expect("valid YAML");
+    in_a_space.spec.context_space_ref = Some("ovzdusie".into());
+    let err = in_a_space
+        .validate()
+        .expect_err("an organization model in a space");
+    assert!(
+        matches!(
+            err,
+            Error::Name {
+                field: "contextSpaceRef",
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    let mut no_namespace = DataModel::from_yaml(ORGANIZATION_MODEL).expect("valid YAML");
+    no_namespace.metadata.namespace = None;
+    let err = no_namespace
+        .validate()
+        .expect_err("the organization is namespace `org`");
+    assert!(
+        matches!(
+            err,
+            Error::Name {
+                field: "metadata.namespace",
+                ..
+            }
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn origin_names_a_project_model_at_a_commit_dm76() {
+    let base = DataModel::from_yaml(ORGANIZATION_MODEL).expect("valid YAML");
+    type Break = fn(&mut DataModelOrigin);
+    let cases: [(&str, Break); 4] = [
+        ("origin.project", |o| o.project = "org".into()),
+        ("origin.space", |o| o.space = Some("Bad Space".into())),
+        ("origin.name", |o| o.name = "Not_A_Label".into()),
+        ("origin.commit", |o| o.commit = "HEAD".into()),
+    ];
+    for (field, break_it) in cases {
+        let mut model = base.clone();
+        break_it(model.spec.origin.as_mut().expect("origin"));
+        let err = model.validate().expect_err(field);
+        assert!(
+            matches!(err, Error::Name { field: f, .. } if f == field),
+            "{field}: {err}"
+        );
+    }
+    let mut unknown = serde_json::to_value(&base).expect("json");
+    unknown["spec"]["origin"]["url"] = "https://example.org".into();
+    assert!(serde_json::from_value::<DataModel>(unknown).is_err());
+}
+
+#[test]
+fn a_model_import_names_an_organization_or_own_project_model_at_a_major_dm75() {
+    use jc_core::kinds::data_model::ModelImport;
+    let parsed = |entry: &str| ModelImport::parse(entry).map(|r| r.map(|i| i.to_string()).ok());
+    assert_eq!(
+        parsed("org.air-quality.v1"),
+        Some(Some("org.air-quality.v1".into()))
+    );
+    assert_eq!(
+        parsed("project.bikes.v0"),
+        Some(Some("project.bikes.v0".into()))
+    );
+    // Not a platform model: LinkML's own, the shipped core, a URL.
+    for other in [
+        "linkml:types",
+        "ngsi-ld-core",
+        "https://w3id.org/x",
+        "./local",
+    ] {
+        assert_eq!(parsed(other), None, "{other}");
+    }
+    // Starts like one and is malformed: refused, never read as a local file.
+    for bad in [
+        "org.air-quality",
+        "org.air-quality.1",
+        "org.air-quality.v01",
+        "org.air-quality.v",
+        "org.Air_Quality.v1",
+        "project./x.v1",
+        "org.a.v1.extra",
+    ] {
+        assert_eq!(parsed(bad), Some(None), "{bad}");
+    }
+    let source = serde_json::json!({
+        "imports": ["linkml:types", "ngsi-ld-core", "org.air-quality.v2", "project.bikes.v1"]
+    });
+    let all = ModelImport::all_in(&source).expect("well formed");
+    assert_eq!(
+        all.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["org.air-quality.v2", "project.bikes.v1"]
+    );
+    assert!(ModelImport::all_in(&serde_json::json!({ "imports": ["org.x"] })).is_err());
+    assert!(ModelImport::all_in(&serde_json::json!({}))
+        .expect("none")
+        .is_empty());
 }

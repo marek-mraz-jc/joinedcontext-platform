@@ -375,7 +375,8 @@ pub fn merge(
         .filter_map(|(id, resource)| {
             let spec: DataModelSpec =
                 serde_json::from_value(resource.manifest.spec.clone()).ok()?;
-            (spec.context_space_ref == space && spec.lifecycle != DataModelLifecycle::Mirrored)
+            (spec.context_space_ref.as_deref() == Some(space)
+                && spec.lifecycle != DataModelLifecycle::Mirrored)
                 .then(|| {
                     let metadata = serde_json::to_value(&resource.manifest.metadata)
                         .unwrap_or(serde_json::Value::Null);

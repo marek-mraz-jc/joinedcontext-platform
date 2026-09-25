@@ -37,7 +37,7 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import yaml
 
-from common import RelationshipError, as_path, generator_version
+from common import MODEL_IMPORT, RelationshipError, as_path, generator_version, imported, model_imports
 from gen_context import compile_context
 from gen_docs import compile_docs
 from gen_example import compile_example
@@ -62,6 +62,8 @@ from import_sdm import (
 #: Model Tools is shared and stateless, so it refuses an oversized source itself rather than
 #: trusting that the only caller already did.
 MAX_BODY_BYTES = 512 * 1024
+#: Platform models one `/generate` may import, transitively; the body cap bounds their size.
+MAX_IMPORTS = 32
 #: `/infer-schema` carries a sample of up to 10 MiB (DM-55), base64 in JSON: a third more.
 MAX_INFER_BODY_BYTES = MAX_SAMPLE_BYTES * 4 // 3 + 4096
 
@@ -146,11 +148,44 @@ def artifacts(
 
 
 def generate(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """`POST /generate`: compile the source the editor is holding."""
+    """`POST /generate`: compile the source the editor is holding.
+
+    `imports` maps each platform model the source imports, directly or through another import,
+    to that model's LinkML at the pinned major (DM-75). The caller resolves them: Model Tools
+    reads no platform state. An import left unresolved is the person's message, not a file the
+    loader goes looking for.
+    """
     source = body.get("source")
     if not isinstance(source, str) or not source.strip():
         return 400, {"errors": ["'source' must be the LinkML document as a string"]}
-    return 200, artifacts(source)
+    imports = body.get("imports", {})
+    if (
+        not isinstance(imports, dict)
+        or len(imports) > MAX_IMPORTS
+        or not all(
+            isinstance(name, str) and MODEL_IMPORT.match(name) and isinstance(text, str) and text.strip()
+            for name, text in imports.items()
+        )
+    ):
+        return 400, {
+            "errors": [
+                f"'imports' maps at most {MAX_IMPORTS} names `org.{{name}}.v{{major}}` or "
+                "`project.{name}.v{major}` to that model's LinkML source (DM-75)"
+            ]
+        }
+    named = {entry for text in (source, *imports.values()) for entry in model_imports(text)}
+    unresolved = sorted(entry for entry in named if entry not in imports)
+    if unresolved:
+        return 200, {
+            "generatorVersion": generator_version(),
+            "errors": [
+                f"import '{entry}' is not resolved: name a published organization model as "
+                "org.{name}.v{major} or a model of this project as project.{name}.v{major} (DM-75)"
+                for entry in unresolved
+            ],
+        }
+    with imported(imports):
+        return 200, artifacts(source)
 
 
 def import_sdm(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:

@@ -1024,24 +1024,25 @@ fn one_model_per_space(repo_dir: &Path, repo: &Repository) -> (Located, Located)
             continue;
         }
         let location = (resource.path.clone(), resource.document, resource.line);
-        let held = models
-            .entry((id.namespace.clone(), spec.context_space_ref.clone()))
-            .or_default();
-        if let Some(first) = held.first() {
-            refused.push((
-                location.clone(),
-                format!(
-                    "DataModel `{}` is a second model of space `{}` beside `{first}`; a space has \
-                     one model (DM-61). Merge them into one: jcctl model merge --repo-dir <repo> \
-                     --project {} --space {} (DM-62)",
-                    id.name,
-                    spec.context_space_ref,
-                    id.namespace.as_deref().unwrap_or_default(),
-                    spec.context_space_ref,
-                ),
-            ));
+        // An organization model and a project model no space owns count for no space (DM-74).
+        if let Some(space) = &spec.context_space_ref {
+            let held = models
+                .entry((id.namespace.clone(), space.clone()))
+                .or_default();
+            if let Some(first) = held.first() {
+                refused.push((
+                    location.clone(),
+                    format!(
+                        "DataModel `{}` is a second model of space `{space}` beside `{first}`; a \
+                         space has one model (DM-61). Merge them into one: jcctl model merge \
+                         --repo-dir <repo> --project {} --space {space} (DM-62)",
+                        id.name,
+                        id.namespace.as_deref().unwrap_or_default(),
+                    ),
+                ));
+            }
+            held.push(id.name.clone());
         }
-        held.push(id.name.clone());
         if spec.validate().is_ok() {
             for import in imports_out_of_the_folder(repo_dir, &resource.path, &spec.linkml) {
                 refused.push((

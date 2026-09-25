@@ -193,7 +193,7 @@ fn a_peer_model_becomes_a_read_only_foreign_data_model() {
         serde_json::from_value(model.manifest.spec.clone()).expect("the mirror is a DataModel");
     assert!(spec.validate().is_ok(), "{:?}", spec.validate());
     assert_eq!(spec.lifecycle, jc_core::kinds::DataModelLifecycle::Mirrored);
-    assert_eq!(spec.context_space_ref, "partner-air");
+    assert_eq!(spec.context_space_ref.as_deref(), Some("partner-air"));
     assert_eq!(spec.classes, vec!["AirQualityObserved".to_owned()]);
     // DM-49: a mirror is nobody's own model, and the lifecycle says so on its own.
     assert!(!spec.can_be_referenced());

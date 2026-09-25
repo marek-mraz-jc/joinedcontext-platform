@@ -485,3 +485,207 @@ fn an_unreachable_model_tools_is_an_error_and_not_an_empty_report() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot reach Model Tools"));
 }
+
+/// An organization model the space's model imports (DM-74, DM-75).
+const ORGANIZATION_MODEL: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataModel
+metadata:
+  name: stations
+  namespace: org
+spec:
+  linkml: stations.linkml.yaml
+  version: 1.3.0
+  lifecycle: published
+  classes: ["Station"]
+  artifacts:
+    jsonSchema: json-schema/stations.v1.json
+    context: context/stations.v1.jsonld
+    docs: docs/stations.md
+    example: examples/stations.example.jsonld
+"#;
+const ORGANIZATION_SOURCE: &str = "id: https://example.org/stations\nname: stations\n";
+const IMPORTING_SOURCE: &str =
+    "id: https://banskabystrica.sk/parking\nname: parking\nimports: [linkml:types, org.stations.v1]\n";
+
+/// A Model Tools like [`spawn`] that also keeps every `/generate` body it was sent.
+fn spawn_recording() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = std::sync::Arc::clone(&bodies);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("a bound address").port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let request = read_request(&mut stream);
+            let body = if request.starts_with("POST /generate") {
+                if let Some((_, sent)) = request.split_once("\r\n\r\n") {
+                    if let Ok(sent) = serde_json::from_str(sent) {
+                        kept.lock().expect("not poisoned").push(sent);
+                    }
+                }
+                full_answer()
+            } else {
+                json!({"status": "ok", "generatorVersion": PIN}).to_string()
+            };
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), bodies)
+}
+
+fn with_organization_model(dir: &Path) {
+    common::write(dir, "datamodels/stations/stations.yaml", ORGANIZATION_MODEL);
+    common::write(
+        dir,
+        "datamodels/stations/stations.linkml.yaml",
+        ORGANIZATION_SOURCE,
+    );
+}
+
+fn sent_imports(bodies: &std::sync::Mutex<Vec<Value>>) -> Vec<Value> {
+    bodies
+        .lock()
+        .expect("not poisoned")
+        .iter()
+        .filter_map(|body| body.get("imports").cloned())
+        .collect()
+}
+
+#[test]
+fn generate_hands_model_tools_the_organization_model_a_space_imports_dm75() {
+    let dir = repo("model-generate-imports", PIN);
+    common::write(
+        &dir,
+        &format!("{MODEL_DIR}/parking-spot.linkml.yaml"),
+        IMPORTING_SOURCE,
+    );
+    with_organization_model(&dir);
+    let (url, bodies) = spawn_recording();
+
+    let output = run(&[
+        "model",
+        "generate",
+        "--repo-dir",
+        dir.to_str().unwrap(),
+        "--url",
+        &url,
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        sent_imports(&bodies),
+        [json!({ "org.stations.v1": ORGANIZATION_SOURCE })],
+        "only the importing model sends imports, and exactly the one it names"
+    );
+}
+
+#[test]
+fn a_project_repository_reads_organization_models_from_the_org_dir_dm75() {
+    let dir = repo("model-generate-org-dir", PIN);
+    common::write(
+        &dir,
+        &format!("{MODEL_DIR}/parking-spot.linkml.yaml"),
+        IMPORTING_SOURCE,
+    );
+    let organization = common::demo_repo("model-generate-org-dir-organization");
+    with_organization_model(&organization);
+    let (url, bodies) = spawn_recording();
+
+    // Without the organization checkout the import has nothing to resolve to.
+    let output = run(&[
+        "model",
+        "validate",
+        "--repo-dir",
+        dir.to_str().unwrap(),
+        "--url",
+        &url,
+    ]);
+    assert!(!output.status.success());
+    let errors = report(&output)["models"][0]["errors"].to_string();
+    assert!(
+        errors.contains("org.stations.v1") && errors.contains("--org-dir"),
+        "{errors}"
+    );
+
+    let output = run(&[
+        "model",
+        "validate",
+        "--repo-dir",
+        dir.to_str().unwrap(),
+        "--org-dir",
+        organization.to_str().unwrap(),
+        "--url",
+        &url,
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        sent_imports(&bodies),
+        [json!({ "org.stations.v1": ORGANIZATION_SOURCE })]
+    );
+}
+
+#[test]
+fn an_import_pinned_to_another_major_or_to_a_draft_fails_the_model_dm22() {
+    let dir = repo("model-generate-import-major", PIN);
+    common::write(
+        &dir,
+        &format!("{MODEL_DIR}/parking-spot.linkml.yaml"),
+        &IMPORTING_SOURCE.replace("org.stations.v1", "org.stations.v2"),
+    );
+    with_organization_model(&dir);
+    let (url, bodies) = spawn_recording();
+
+    let output = run(&[
+        "model",
+        "validate",
+        "--repo-dir",
+        dir.to_str().unwrap(),
+        "--url",
+        &url,
+    ]);
+    assert!(!output.status.success());
+    let errors = report(&output)["models"].to_string();
+    assert!(
+        errors.contains("is at version 1.3.0, and the import pins major 2"),
+        "{errors}"
+    );
+    assert!(
+        sent_imports(&bodies).is_empty(),
+        "nothing unresolved reaches Model Tools"
+    );
+
+    common::write(
+        &dir,
+        &format!("{MODEL_DIR}/parking-spot.linkml.yaml"),
+        IMPORTING_SOURCE,
+    );
+    common::write(
+        &dir,
+        "datamodels/stations/stations.yaml",
+        &ORGANIZATION_MODEL.replace("lifecycle: published", "lifecycle: draft"),
+    );
+    let output = run(&[
+        "model",
+        "validate",
+        "--repo-dir",
+        dir.to_str().unwrap(),
+        "--url",
+        &url,
+    ]);
+    assert!(!output.status.success());
+    assert!(report(&output)["models"].to_string().contains("is a draft"));
+}
