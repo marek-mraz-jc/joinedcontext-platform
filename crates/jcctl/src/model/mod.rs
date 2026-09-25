@@ -11,9 +11,13 @@ pub mod http;
 pub mod merge;
 
 use crate::loader::{LoadedResource, Repository};
-use jc_core::kinds::data_model::{DataModelSpec, GeneratedArtifacts};
+use jc_core::envelope::ORG_NAMESPACE;
+use jc_core::kinds::data_model::{
+    DataModelLifecycle, DataModelSpec, GeneratedArtifacts, ModelImport,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -245,8 +249,21 @@ impl ModelTools {
 
     /// `POST /generate`: what one LinkML document compiles to.
     pub fn generate(&self, source: &str) -> Result<Answer, Error> {
-        let body = serde_json::json!({ "source": source }).to_string();
-        Answer::parse(&self.call("/generate", Some(&body))?)
+        self.generate_with(source, &BTreeMap::new())
+    }
+
+    /// `POST /generate` of a document that imports platform models, with their sources by the
+    /// name the import gives them (DM-76).
+    pub fn generate_with(
+        &self,
+        source: &str,
+        imports: &BTreeMap<String, String>,
+    ) -> Result<Answer, Error> {
+        let mut body = serde_json::json!({ "source": source });
+        if !imports.is_empty() {
+            body["imports"] = serde_json::json!(imports);
+        }
+        Answer::parse(&self.call("/generate", Some(&body.to_string()))?)
     }
 
     /// `POST /import-sdm`: one catalogue model, as the LinkML it becomes (DM-07…DM-11).
@@ -345,8 +362,25 @@ pub fn pinned_generator(repo_dir: &Path) -> Result<String, Error> {
 /// `Generate` and `Diff` check the pin first: both read committed artifacts and one of them
 /// rewrites them, and doing either with the wrong generator is the failure DM-19 names.
 /// `Validate` reads no artifact and writes none, so it runs against whatever is reachable.
-pub fn run(repo_dir: &Path, tools: &ModelTools, mode: Mode) -> Result<Report, Error> {
+///
+/// `org_dir` is the organization checkout a project repository's models import organization
+/// models from (DM-76); without it they are looked for in `repo_dir`, which is the organization
+/// checkout itself when that is what is being generated.
+pub fn run(
+    repo_dir: &Path,
+    org_dir: Option<&Path>,
+    tools: &ModelTools,
+    mode: Mode,
+) -> Result<Report, Error> {
     let repo = Repository::load(repo_dir).map_err(|err| Error::Repository(err.to_string()))?;
+    let organization = org_dir
+        .map(Repository::load)
+        .transpose()
+        .map_err(|err| Error::Repository(err.to_string()))?;
+    let models = Models {
+        repo: &repo,
+        organization: organization.as_ref().unwrap_or(&repo),
+    };
     let running = tools.generator_version()?;
 
     if mode != Mode::Validate {
@@ -360,25 +394,133 @@ pub fn run(repo_dir: &Path, tools: &ModelTools, mode: Mode) -> Result<Report, Er
         }
     }
 
-    let mut models = Vec::new();
+    let mut reports = Vec::new();
     for (id, resource) in repo.iter() {
         if resource.manifest.kind != "DataModel" {
             continue;
         }
-        models.push(one(repo.root(), &id.to_string(), resource, tools, mode)?);
+        let namespace = id.namespace.as_deref().unwrap_or_default();
+        reports.push(one(
+            repo.root(),
+            &id.to_string(),
+            namespace,
+            resource,
+            &models,
+            tools,
+            mode,
+        )?);
     }
 
     Ok(Report {
         generator_version: running,
-        models,
+        models: reports,
     })
+}
+
+/// Where the platform models an import names are found: the organization's in the organization
+/// checkout, a project's own in the repository being generated.
+struct Models<'a> {
+    repo: &'a Repository,
+    organization: &'a Repository,
+}
+
+impl Models<'_> {
+    /// The LinkML source of every platform model `source` imports, transitively, by the name
+    /// the import gives it (DM-76). A model imported from an organization model is an
+    /// organization model too: the organization's catalogue never depends on one project.
+    ///
+    /// ponytail: a pin resolves to the version the checkout holds, and a pin to an older major
+    /// is refused naming both; read the model's source from history when a consumer must
+    /// regenerate against a superseded major.
+    fn imports_of(
+        &self,
+        namespace: &str,
+        source: &str,
+    ) -> std::result::Result<BTreeMap<String, String>, String> {
+        let mut resolved = BTreeMap::new();
+        let mut todo = vec![(namespace.to_owned(), source.to_owned())];
+        while let Some((importer, text)) = todo.pop() {
+            // A source that does not parse is Model Tools' message to give.
+            let Ok(document) = serde_norway::from_str::<Value>(&text) else {
+                continue;
+            };
+            for import in ModelImport::all_in(&document).map_err(|err| err.to_string())? {
+                let key = import.to_string();
+                if resolved.contains_key(&key) {
+                    continue;
+                }
+                let (repo, home) = match (import.organization, importer.as_str()) {
+                    (true, _) => (self.organization, ORG_NAMESPACE),
+                    (false, ORG_NAMESPACE) => {
+                        return Err(format!(
+                            "import '{key}': an organization model imports organization models \
+                             only (DM-76)"
+                        ))
+                    }
+                    (false, project) => (self.repo, project),
+                };
+                let text = model_source(repo, home, &import)
+                    .map_err(|why| format!("import '{key}': {why}"))?;
+                todo.push((home.to_owned(), text.clone()));
+                resolved.insert(key, text);
+            }
+        }
+        Ok(resolved)
+    }
+}
+
+/// The LinkML source of the model `import` names in `namespace`, at the major it pins.
+fn model_source(
+    repo: &Repository,
+    namespace: &str,
+    import: &ModelImport,
+) -> std::result::Result<String, String> {
+    let level = if namespace == ORG_NAMESPACE {
+        "organization model"
+    } else {
+        "model of this project"
+    };
+    let Some((_, resource)) = repo.iter().find(|(id, _)| {
+        id.kind == "DataModel"
+            && id.name == import.name
+            && id.namespace.as_deref() == Some(namespace)
+    }) else {
+        return Err(format!(
+            "there is no {level} `{}` in {}; pass --org-dir <organization checkout> for an \
+             organization model",
+            import.name,
+            repo.root().display()
+        ));
+    };
+    let spec: DataModelSpec = serde_json::from_value(resource.manifest.spec.clone())
+        .map_err(|err| format!("{}: {err}", resource.path.display()))?;
+    if spec.version.major() != import.major {
+        return Err(format!(
+            "the {level} `{}` is at version {}, and the import pins major {} (DM-22)",
+            import.name, spec.version, import.major
+        ));
+    }
+    if spec.lifecycle == DataModelLifecycle::Draft {
+        return Err(format!(
+            "the {level} `{}` is a draft; only a published version is imported (DM-26)",
+            import.name
+        ));
+    }
+    let linkml = resource
+        .path
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join(&spec.linkml);
+    read(repo.root(), &linkml).map_err(|err| err.to_string())
 }
 
 /// Renders one DataModel and writes or compares what `spec.artifacts` declares.
 fn one(
     root: &Path,
     id: &str,
+    namespace: &str,
     resource: &LoadedResource,
+    models: &Models<'_>,
     tools: &ModelTools,
     mode: Mode,
 ) -> Result<ModelReport, Error> {
@@ -410,7 +552,14 @@ fn one(
     report.linkml = display(&linkml);
     let source = read(root, &linkml)?;
 
-    let answer = tools.generate(&source)?;
+    let imports = match models.imports_of(namespace, &source) {
+        Ok(imports) => imports,
+        Err(why) => {
+            report.errors.push(format!("{}: {why}", display(&linkml)));
+            return Ok(report);
+        }
+    };
+    let answer = tools.generate_with(&source, &imports)?;
     report.errors = answer.errors;
     if mode == Mode::Validate || !report.errors.is_empty() {
         // A model that does not compile has no artifacts to write, and the half-set a failing

@@ -491,3 +491,85 @@ def test_every_module_of_src_is_installed_into_the_image():
     listed = set(re.findall(r'"([A-Za-z0-9_]+)"', block.group(1)))
     shipped = {path.stem for path in (PACKAGE / "src").glob("*.py")}
     assert shipped - listed == set(), "add these to py-modules in pyproject.toml"
+
+
+#: An organization model a space's model imports (DM-76): one class, its own slot.
+STATIONS = """
+id: https://example.org/ns/stations
+name: stations
+prefixes:
+  linkml: https://w3id.org/linkml/
+  ex: https://example.org/ns/
+default_prefix: ex
+default_range: string
+imports: [linkml:types, ngsi-ld-core]
+classes:
+  Station:
+    class_uri: ex:Station
+    is_a: Entity
+    slots: [capacity]
+slots:
+  capacity:
+    slot_uri: ex:capacity
+    range: integer
+"""
+
+BIKES = """
+id: https://example.org/ns/bikes
+name: bikes
+prefixes:
+  linkml: https://w3id.org/linkml/
+  ex: https://example.org/ns/
+default_prefix: ex
+default_range: string
+imports: [linkml:types, ngsi-ld-core, org.stations.v1]
+classes:
+  BikeStation:
+    class_uri: ex:BikeStation
+    is_a: Station
+"""
+
+
+def test_a_space_model_importing_an_organization_model_compiles_with_its_classes():
+    """DM-76: the caller hands over the imported source, and the artifacts carry its classes."""
+    status, body = call("POST", "/generate", {"source": BIKES, "imports": {"org.stations.v1": STATIONS}})
+
+    assert status == 200
+    assert not body.get("errors"), body.get("errors")
+    schema = json.dumps(body["jsonSchema"])
+    assert "BikeStation" in schema and "Station" in schema and "capacity" in schema
+
+
+def test_an_unresolved_or_malformed_model_import_is_the_persons_message_not_a_file_read():
+    """DM-76: an import nobody resolved is named; it is never looked for on the disk."""
+    status, body = call("POST", "/generate", {"source": BIKES})
+    assert status == 200
+    assert body["errors"] == [
+        "import 'org.stations.v1' is not resolved: name a published organization model as "
+        "org.{name}.v{major} or a model of this project as project.{name}.v{major} (DM-76)"
+    ]
+
+    # An import inside an imported model must be resolved too.
+    nested = STATIONS.replace("[linkml:types, ngsi-ld-core]", "[linkml:types, ngsi-ld-core, org.places.v2]")
+    status, body = call("POST", "/generate", {"source": BIKES, "imports": {"org.stations.v1": nested}})
+    assert status == 200
+    assert [e.split("'")[1] for e in body["errors"]] == ["org.places.v2"]
+
+    malformed = BIKES.replace("org.stations.v1", "org.../../etc/passwd")
+    status, body = call("POST", "/generate", {"source": malformed})
+    assert status == 200
+    assert "org.../../etc/passwd" in body["errors"][0]
+
+
+def test_imports_must_be_platform_model_names_to_sources():
+    for imports in [
+        [],
+        {"org/stations/v1": STATIONS},
+        {"org.stations.v1": ""},
+        {"org.stations.v1": 7},
+        {"ngsi-ld-core": STATIONS},
+        {f"org.m{i}.v1": STATIONS for i in range(33)},
+    ]:
+        status, body = call("POST", "/generate", {"source": BIKES, "imports": imports})
+        assert status == 400, imports
+        assert "DM-76" in body["errors"][0]

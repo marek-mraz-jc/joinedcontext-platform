@@ -23,6 +23,9 @@ pub struct KindInfo {
     /// Where a kind of scope [`Scope::OrganizationOrProject`] lives inside a project (PF-68);
     /// `None` for every kind that lives in one place.
     pub project_path_template: Option<&'static str>,
+    /// Where it lives inside a project when no space owns it (DM-75); `None` for every kind but
+    /// `DataModel`.
+    pub spaceless_path_template: Option<&'static str>,
 }
 
 macro_rules! catalogue {
@@ -34,6 +37,7 @@ macro_rules! catalogue {
             scope: <$spec as Kind>::SCOPE,
             path_template: <$spec as Kind>::PATH_TEMPLATE,
             project_path_template: <$spec as Kind>::PROJECT_PATH_TEMPLATE,
+            spaceless_path_template: <$spec as Kind>::SPACELESS_PATH_TEMPLATE,
         }),+];
 
         /// Parses and validates a manifest of `kind` from YAML without knowing its Rust type.
@@ -115,14 +119,12 @@ impl KindInfo {
     ///
     /// `project` is the manifest's namespace, so a kind that lives in either place lands where
     /// its namespace says (PF-68). `space` is ignored by kinds whose template has no `{space}`
-    /// placeholder.
+    /// placeholder, and an empty one picks the spaceless path of a kind that has one (DM-75).
     pub fn repo_path(&self, project: &str, space: &str, name: &str) -> String {
-        let template = match self.project_path_template {
-            Some(in_project)
-                if !project.is_empty() && project != crate::envelope::ORG_NAMESPACE =>
-            {
-                in_project
-            }
+        let in_project = !project.is_empty() && project != crate::envelope::ORG_NAMESPACE;
+        let template = match (self.project_path_template, self.spaceless_path_template) {
+            (_, Some(no_space)) if in_project && space.is_empty() => no_space,
+            (Some(project_template), _) if in_project => project_template,
             _ => self.path_template,
         };
         template

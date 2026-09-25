@@ -517,8 +517,12 @@ fn models_by_space(
             if spec.lifecycle == DataModelLifecycle::Mirrored {
                 continue;
             }
+            // A model no space owns is served by no space; a space that imports it carries its
+            // classes in its own compiled artifacts (DM-75, DM-76).
+            let Some(space) = spec.context_space_ref.clone() else {
+                continue;
+            };
             let project = id.namespace.clone().unwrap_or_default();
-            let space = spec.context_space_ref.clone();
             models.entry((project, space)).or_default().push(model_of(
                 &id.name,
                 &spec,

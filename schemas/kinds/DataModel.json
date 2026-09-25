@@ -113,6 +113,46 @@
         }
       ]
     },
+    "DataModelOrigin": {
+      "additionalProperties": false,
+      "description": "Where an organization model was promoted from (DM-77), recorded and never linked: the organization owns the copy, and a project bundle keeps it on a model it lands (MF-50).",
+      "properties": {
+        "commit": {
+          "description": "Commit of the project repository the source was copied at, 7 to 40 lowercase hexadecimal characters.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the model in that project.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Project the model was promoted from.",
+          "type": "string"
+        },
+        "space": {
+          "description": "Context Space whose model it was; absent for a project model no space owns.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SemVer"
+            }
+          ],
+          "description": "Version that was promoted."
+        }
+      },
+      "required": [
+        "commit",
+        "name",
+        "project",
+        "version"
+      ],
+      "type": "object"
+    },
     "DataModelSource": {
       "additionalProperties": false,
       "description": "Provenance of a data model, absent for a hand-authored one (DM-08, DM-48).\n\nEither the upstream `repository`/`path`/`commit` triple of an imported model or the `remote` block of a mirrored foreign model — never both.",
@@ -180,8 +220,11 @@
           "type": "array"
         },
         "contextSpaceRef": {
-          "description": "DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path (MF-06).",
-          "type": "string"
+          "description": "DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path (MF-06). Absent on a model no space owns: an organization model, or a project model at `projects/{p}/datamodels/{name}/` (DM-75).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "lifecycle": {
           "allOf": [
@@ -199,6 +242,17 @@
           "default": false,
           "description": "Whether entities of this model may carry undeclared attributes (DM-28).",
           "type": "boolean"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DataModelOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where an organization model was promoted from (DM-77); kept on a model a bundle lands (MF-50)."
         },
         "source": {
           "anyOf": [
@@ -221,7 +275,6 @@
         }
       },
       "required": [
-        "contextSpaceRef",
         "lifecycle",
         "linkml",
         "version"

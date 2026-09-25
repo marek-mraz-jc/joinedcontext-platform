@@ -1,6 +1,6 @@
 //! Manifest kind for LinkML Data Models and generated schema artifacts (T-0117, DM-01..DM-53).
 
-use crate::envelope::{Kind, ObjectMeta, Scope, TypedRef};
+use crate::envelope::{Kind, ObjectMeta, Scope, TypedRef, ORG_NAMESPACE};
 use crate::error::{Error, Result};
 use crate::names;
 use chrono::{DateTime, Utc};
@@ -298,6 +298,121 @@ impl DataModelSource {
     }
 }
 
+/// Where an organization model was promoted from (DM-77), recorded and never linked: the
+/// organization owns the copy, and a project bundle keeps it on a model it lands (MF-50).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DataModelOrigin {
+    /// Project the model was promoted from.
+    pub project: String,
+    /// Context Space whose model it was; absent for a project model no space owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
+    /// Name of the model in that project.
+    pub name: String,
+    /// Version that was promoted.
+    pub version: SemVer,
+    /// Commit of the project repository the source was copied at, 7 to 40 lowercase hexadecimal characters.
+    pub commit: String,
+}
+
+impl DataModelOrigin {
+    fn validate(&self) -> Result<()> {
+        names::validate_namespace(&self.project).map_err(|e| names::rename(e, "origin.project"))?;
+        if self.project == ORG_NAMESPACE {
+            return Err(Error::Name {
+                field: "origin.project",
+                value: self.project.clone(),
+                reason: "a model is promoted from a project, never from the organization (DM-77)",
+            });
+        }
+        if let Some(space) = &self.space {
+            names::validate_space_name(space).map_err(|e| names::rename(e, "origin.space"))?;
+        }
+        names::validate_dns1123_label(&self.name).map_err(|e| names::rename(e, "origin.name"))?;
+        if !COMMIT_RE.is_match(&self.commit) {
+            return Err(Error::Name {
+                field: "origin.commit",
+                value: self.commit.clone(),
+                reason: "commit must be 7 to 40 lowercase hexadecimal characters",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A LinkML `imports` entry naming a model of this platform at a pinned major (DM-76):
+/// `org.{name}.v{major}` for an organization model, `project.{name}.v{major}` for a model of the
+/// importing model's own project. No colon, so LinkML looks the name up in the import map the
+/// Portal and `jcctl` hand Model Tools and never expands it as a CURIE; no slash, so LinkML never
+/// resolves the imported model's own imports relative to it; another project's model has no
+/// name here at all.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModelImport {
+    /// Whether the imported model is an organization model rather than one of the project's own.
+    pub organization: bool,
+    /// Name of the imported model.
+    pub name: String,
+    /// Pinned major version (DM-22).
+    pub major: u32,
+}
+
+impl ModelImport {
+    /// Parses one `imports` entry: `None` when it names no platform model (`linkml:types`,
+    /// `ngsi-ld-core`, a URL), an error when it starts like one and is malformed.
+    pub fn parse(entry: &str) -> Option<Result<Self>> {
+        let (level, rest) = entry.split_once('.')?;
+        let organization = match level {
+            "org" => true,
+            "project" => false,
+            _ => return None,
+        };
+        let malformed = || Error::Name {
+            field: "imports",
+            value: entry.to_string(),
+            reason: "a model import is `org.{name}.v{major}` or `project.{name}.v{major}` (DM-76)",
+        };
+        let Some((name, version)) = rest.split_once('.') else {
+            return Some(Err(malformed()));
+        };
+        let major = version
+            .strip_prefix('v')
+            .filter(|digits| !digits.is_empty() && (*digits == "0" || !digits.starts_with('0')))
+            .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u32>().ok());
+        let Some(major) = major else {
+            return Some(Err(malformed()));
+        };
+        if names::validate_dns1123_label(name).is_err() {
+            return Some(Err(malformed()));
+        }
+        Some(Ok(Self {
+            organization,
+            name: name.to_string(),
+            major,
+        }))
+    }
+
+    /// Every platform-model import of a parsed LinkML document, in document order.
+    pub fn all_in(source: &serde_json::Value) -> Result<Vec<Self>> {
+        source
+            .get("imports")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(Self::parse)
+            .collect()
+    }
+}
+
+impl fmt::Display for ModelImport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let level = if self.organization { "org" } else { "project" };
+        write!(f, "{level}.{}.v{}", self.name, self.major)
+    }
+}
+
 /// Artifacts generated beside the LinkML source and committed in the same change (DM-02).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -332,8 +447,11 @@ impl GeneratedArtifacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DataModelSpec {
-    /// DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path (MF-06).
-    pub context_space_ref: String,
+    /// DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path
+    /// (MF-06). Absent on a model no space owns: an organization model, or a project model at
+    /// `projects/{p}/datamodels/{name}/` (DM-75).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_space_ref: Option<String>,
     /// Path of the authoring LinkML source, relative to this manifest and ending `.linkml.yaml` (DM-01).
     pub linkml: String,
     /// Semantic version; the major is the served `schema/v{major}` (DM-22).
@@ -346,6 +464,9 @@ pub struct DataModelSpec {
     /// Provenance; absent for a hand-authored model (DM-08, DM-48).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<DataModelSource>,
+    /// Where an organization model was promoted from (DM-77); kept on a model a bundle lands (MF-50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<DataModelOrigin>,
     /// Artifacts generated beside the source in the same commit (DM-02).
     #[serde(default)]
     pub artifacts: GeneratedArtifacts,
@@ -360,24 +481,43 @@ pub struct DataModelSpec {
 impl Kind for DataModelSpec {
     const KIND: &'static str = "DataModel";
     const PLURAL: &'static str = "datamodels";
-    const SCOPE: Scope = Scope::Project;
-    const PATH_TEMPLATE: &'static str = "projects/{project}/spaces/{space}/datamodels/{name}.yaml";
+    /// An organization model or a project model (DM-75, ADR-N-039).
+    const SCOPE: Scope = Scope::OrganizationOrProject;
+    const PATH_TEMPLATE: &'static str = "datamodels/{name}/{name}.yaml";
+    const PROJECT_PATH_TEMPLATE: Option<&'static str> =
+        Some("projects/{project}/spaces/{space}/datamodels/{name}.yaml");
+    const SPACELESS_PATH_TEMPLATE: Option<&'static str> =
+        Some("projects/{project}/datamodels/{name}/{name}.yaml");
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
+        if meta.namespace.as_deref() == Some(ORG_NAMESPACE) {
+            if let Some(space) = &self.context_space_ref {
+                return Err(Error::Name {
+                    field: "contextSpaceRef",
+                    value: space.clone(),
+                    reason: "an organization model belongs to no space; a space model lives in its project (DM-75)",
+                });
+            }
+        }
         self.validate()
     }
 
     fn context_space(&self) -> Option<&str> {
-        Some(&self.context_space_ref)
+        self.context_space_ref.as_deref()
     }
 }
 
 impl DataModelSpec {
     /// Validates the space reference, paths, lifecycle invariants and provenance.
     pub fn validate(&self) -> Result<()> {
-        names::validate_dns1123_label(&self.context_space_ref)
-            .map_err(|e| names::rename(e, "contextSpaceRef"))?;
+        if let Some(space) = &self.context_space_ref {
+            names::validate_dns1123_label(space)
+                .map_err(|e| names::rename(e, "contextSpaceRef"))?;
+        }
+        if let Some(origin) = &self.origin {
+            origin.validate()?;
+        }
 
         names::validate_relative_path("linkml", &self.linkml)?;
         if !self.linkml.ends_with(".linkml.yaml") {
@@ -428,6 +568,11 @@ impl DataModelSpec {
         }
 
         Ok(())
+    }
+
+    /// Whether this is an organization model rather than a project one (DM-75).
+    pub fn is_organization_model(meta: &ObjectMeta) -> bool {
+        meta.namespace.as_deref() == Some(ORG_NAMESPACE)
     }
 
     /// Returns `true` if this data model version can be referenced by Endpoints and Pipelines (DM-26).
