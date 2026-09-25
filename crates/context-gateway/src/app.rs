@@ -1004,7 +1004,17 @@ pub(crate) async fn serve_ngsi_ld(
     // unnarrowed (AG-85).
     let selects_in_body = operation == Operation::QueryBatch
         || (operation == Operation::QueryTemporal && path == "/temporal/entityOperations/query");
-    if selects_in_body && !sent.is_empty() {
+    if selects_in_body && sent.is_empty() {
+        // The URL of a batch query carries no selector any more (T-2995), so an empty body would
+        // be a query the grants never narrowed.
+        return ProblemDetails::bad_request()
+            .with_detail(
+                "a batch query carries its query in the body (CIM 009 clause 5.6.9): send \
+                 {\"type\": \"Query\", \"entities\": [{\"type\": …}]}",
+            )
+            .into_response();
+    }
+    if selects_in_body {
         match narrowed_batch_query(&sent, *constraints) {
             Ok((narrowed, decided)) => {
                 constraints = decided;
@@ -1101,6 +1111,10 @@ pub(crate) async fn serve_ngsi_ld(
         // the vocabulary of a type filter would either ignore them or answer something else.
         // The narrowing of these answers happens on their own members instead (T-2134).
         query::passthrough(&params)
+    } else if selects_in_body {
+        // The body carries the selector, narrowed above; the URL only the caller's window
+        // (CIM 009 clauses 5.6.9 and 5.6.12, T-2995).
+        query::batch_window(&params)
     } else if let (Operation::RetrieveTemporal, Some(id)) =
         (operation, operations::addressed_entity(&path))
     {
@@ -2440,6 +2454,21 @@ fn narrowed_batch_query(
     // type guard judges what comes back for it (T-2130).
     if let Some(entities) = payload.get_mut("entities").and_then(Value::as_array_mut) {
         let named = entities.len();
+        // An id names its type (`urn:ngsi-ld:{Type}:…`): the entry says so to the broker, so the
+        // attributes asked beside it are that type's and an id of a type no grant names is not
+        // asked for at all (T-2995, T-1862). The URL used to carry the granted types instead.
+        for entry in entities.iter_mut() {
+            if entry.get("type").is_none() {
+                let typed = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(crate::relationships::type_of_id)
+                    .map(str::to_owned);
+                if let (Some(kind), Some(fields)) = (typed, entry.as_object_mut()) {
+                    fields.insert("type".to_owned(), Value::String(kind));
+                }
+            }
+        }
         if !decided.types.is_empty() {
             entities.retain(
                 |selector| match selector.get("type").and_then(Value::as_str) {
@@ -2457,6 +2486,59 @@ fn narrowed_batch_query(
         }
     }
 
+    // A body that names no entity asks for every type; the grants' types are what it may ask
+    // for, and the URL no longer says so (T-2995).
+    let names_entities = payload
+        .get("entities")
+        .and_then(Value::as_array)
+        .is_some_and(|entities| !entities.is_empty());
+    if !names_entities && !decided.types.is_empty() {
+        payload["entities"] = Value::Array(
+            decided
+                .types
+                .iter()
+                .map(|granted| serde_json::json!({ "type": granted }))
+                .collect(),
+        );
+    }
+
+    // The attributes: the granted ones, or those of the body's own the grants cover.
+    let asked: Option<Vec<String>> = payload.get("attrs").and_then(Value::as_array).map(|attrs| {
+        attrs
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    });
+    let granted = attrs_of_the_selected_types(&payload, &decided);
+    if let Some(attrs) = query::body_attrs(asked.as_deref(), &granted) {
+        if attrs.is_empty() {
+            decided.empty = true;
+            return Ok((body.to_vec(), decided));
+        }
+        payload["attrs"] = Value::Array(attrs.into_iter().map(Value::String).collect());
+    }
+
+    // The grant's area and window narrow only at the broker, so they ride in the body. One
+    // `geoQ` holds one area: a body with its own beside the grant's is refused, never replaced.
+    for (member, granted) in [("geoQ", &decided.geo_q), ("temporalQ", &decided.temporal_q)] {
+        let Some(granted) = granted else { continue };
+        if payload.get(member).is_some() {
+            return Err(Box::new(ProblemDetails::bad_request().with_detail(
+                format!(
+                    "{member}: this endpoint grants you a {} of its own, and a batch query holds \
+                 one; send the query without `{member}`, or ask with GET, where both apply",
+                    if member == "geoQ" {
+                        "area"
+                    } else {
+                        "time window"
+                    }
+                ),
+            )));
+        }
+        payload[member] = query::compound_object(granted);
+    }
+
     // The grants' own filter joins the caller's, so a body can only ever narrow further.
     if let Some(q) = &decided.q {
         let caller = payload.get("q").and_then(Value::as_str).map(str::to_owned);
@@ -2471,6 +2553,35 @@ fn narrowed_batch_query(
         Box::new(ProblemDetails::internal())
     })?;
     Ok((narrowed, decided))
+}
+
+/// The granted attributes of the types a batch query's entries select (T-2995, R9, T-1862): an
+/// entry names its type, or an id that names one. No attribute is asked for beside a type that
+/// does not serve it, as [`query::upstream_by_id`] keeps it for one entity; an entry whose type
+/// cannot be told, or a type the grants list no slots for, keeps the union.
+fn attrs_of_the_selected_types(payload: &Value, decided: &Constraints) -> BTreeSet<String> {
+    let Some(entries) = payload.get("entities").and_then(Value::as_array) else {
+        return decided.attrs.clone();
+    };
+    let mut scoped = BTreeSet::new();
+    for entry in entries {
+        let named = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|asked| projection::term(asked).to_owned())
+            .or_else(|| {
+                entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(crate::relationships::type_of_id)
+                    .map(str::to_owned)
+            });
+        let Some(slots) = named.and_then(|kind| decided.attrs_by_type.get(&kind)) else {
+            return decided.attrs.clone();
+        };
+        scoped.extend(decided.attrs.intersection(slots).cloned());
+    }
+    scoped
 }
 
 /// Cuts the broker's answer down to what the grants cover (R9, R22, R24).

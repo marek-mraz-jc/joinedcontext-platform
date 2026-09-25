@@ -467,6 +467,67 @@ fn joined(params: &[(String, String)], names: &[&str]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(";"))
 }
 
+/// The URL of a batch query: the caller's window and nothing else (T-2995).
+///
+/// `POST /entityOperations/query` and `POST /temporal/entityOperations/query` carry their
+/// selector in the body (CIM 009 clauses 5.6.9 and 5.6.12), and the body is narrowed to the
+/// grants before it is sent. Their URL takes only these parameters, and a broker that holds
+/// to it (Antares) refuses any other with `400`, so a grant's `type` appended here failed the
+/// read rather than narrowing it.
+pub fn batch_window(params: &[(String, String)]) -> String {
+    const WINDOW: [&str; 6] = ["limit", "offset", "count", "options", "format", "local"];
+    let kept: Vec<(String, String)> = params
+        .iter()
+        .filter(|(name, _)| WINDOW.contains(&name.as_str()))
+        .cloned()
+        .collect();
+    render(&kept)
+}
+
+/// A grant's compound filter (`georel=within;geometry=Polygon;coordinates=[…]`) as the object a
+/// query body carries it in (`geoQ`, `temporalQ`; CIM 009 clauses 5.2.13 and 5.2.21). The
+/// coordinates are the JSON they are written as; a value that is not JSON stays a string.
+pub fn compound_object(compound: &str) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in split_compound(compound) {
+        let value = match name.as_str() {
+            "coordinates" => {
+                serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value))
+            }
+            _ => serde_json::Value::String(value),
+        };
+        object.insert(name, value);
+    }
+    serde_json::Value::Object(object)
+}
+
+/// The attributes a batch query's body may ask for (T-2995): with no `attrs` of its own, the
+/// granted ones as [`broker_attrs`] gives them to the URL; with its own, those of them the grants
+/// cover. `None` when the grants name no attributes, so the body's own stand; an empty set when
+/// the body asked only for attributes it may not read.
+pub fn body_attrs(
+    asked: Option<&[String]>,
+    granted: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    if granted.is_empty() {
+        return None;
+    }
+    let asked_set: BTreeSet<String> = asked.unwrap_or_default().iter().cloned().collect();
+    let as_param = [(
+        "attrs".to_owned(),
+        asked_set.iter().cloned().collect::<Vec<_>>().join(","),
+    )];
+    let allowed = broker_attrs(&as_param, granted);
+    Some(match asked {
+        None => allowed,
+        Some(asked) => asked
+            .iter()
+            .filter(|name| allowed.contains(crate::pdp::projection::term(name)))
+            .cloned()
+            .collect(),
+    })
+}
+
 /// The parameters a compound geo or temporal filter is made of, and the only names a `;`
 /// may introduce inside one (CIM 009 clauses 4.10 and 4.11).
 const COMPOUND_MEMBERS: &[&str] = &[
