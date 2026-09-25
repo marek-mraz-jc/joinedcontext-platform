@@ -16,7 +16,7 @@ use crate::translators::view_mapping::ViewMapping;
 use crate::units::UnitRules;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
-    ModelProjectionSpec, PolicySpec, Representation,
+    ModelProjectionSpec, PolicySpec, PrincipalKind, Representation,
 };
 use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
@@ -212,10 +212,16 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
         let space = repo.space_segment(&project, &space_name);
         let key = (project.clone(), space_name.clone());
         let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
-        let bound = match &spec.policy_ref {
+        let app_client = app_of(repo, &project, &id.name);
+        let mut bound = match &spec.policy_ref {
             Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
             None => named.iter().map(|(_, spec)| spec.clone()).collect(),
         };
+        if app_client.is_some() {
+            bound.retain(|policy| {
+                policy.effect.is_prohibition() || is_own_grant(policy, &project, &id.name)
+            });
+        }
         let projection = spec.projection_ref.as_ref().and_then(|reference| {
             let named = (
                 reference
@@ -250,7 +256,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
         });
         let representations = spec.served_representations();
         endpoints.push(Endpoint {
-            roles: match app_of(repo, &project, &id.name) {
+            roles: match app_client {
                 Some(client) => EndpointRoles::of_app(&project, &id.name, &spec, client),
                 None => EndpointRoles::of(&project, &id.name, &spec),
             },
@@ -470,6 +476,27 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
     policies
 }
 
+/// Whether `policy` is assigned to one of the roles the Endpoint `endpoint` hands out:
+/// `endpoint:{project}/{endpoint}` or `endpoint:{project}/{endpoint}/{role}` (AP-96).
+///
+/// An App's generated Endpoint evaluates these permissions and the space's prohibitions alone
+/// (AP-139): a grant written for a person, a group, the role `public` or another endpoint stays
+/// on the surfaces written for it, so the App's endpoint serves what the App declares.
+fn is_own_grant(policy: &PolicySpec, project: &str, endpoint: &str) -> bool {
+    let own = jc_core::kinds::endpoint_role(project, endpoint, None);
+    policy.assignee.kind == PrincipalKind::Role
+        && policy
+            .assignee
+            .id
+            .strip_prefix(own.as_str())
+            .is_some_and(|rest| {
+                rest.is_empty()
+                    || rest
+                        .strip_prefix('/')
+                        .is_some_and(|role| !role.is_empty() && !role.contains('/'))
+            })
+}
+
 /// The one Policy an endpoint with `spec.policyRef` evaluates (EP-14, GW8).
 ///
 /// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
@@ -673,10 +700,35 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_map, normalize};
+    use super::{is_own_grant, language_map, normalize};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+
+    /// AP-139: an App's endpoint owns its caller role and each of its named roles, and nothing
+    /// that only starts like them or is not a role at all.
+    #[test]
+    fn an_endpoints_own_grant_is_one_of_its_roles_by_kind_and_exact_name() {
+        let assigned = |kind: &str, id: &str| -> jc_core::kinds::PolicySpec {
+            serde_norway::from_str(&format!(
+                "contextSpaceRef: helsinki\nassigner: did:web:hel.fi\n\
+                 assignee: {{ kind: {kind}, id: \"{id}\" }}\noperations: [queryEntity]\n"
+            ))
+            .expect("a policy spec")
+        };
+        let own =
+            |kind: &str, id: &str| is_own_grant(&assigned(kind, id), "helsinki", "app-events");
+        assert!(own("role", "endpoint:helsinki/app-events"));
+        assert!(own("role", "endpoint:helsinki/app-events/editor"));
+        assert!(!own("role", "endpoint:helsinki/app-events-2"));
+        assert!(!own("role", "endpoint:helsinki/app-events-2/editor"));
+        assert!(!own("role", "endpoint:helsinki/app-events/"));
+        assert!(!own("role", "endpoint:helsinki/app-events/editor/x"));
+        assert!(!own("role", "endpoint:espoo/app-events"));
+        assert!(!own("role", "public"));
+        assert!(!own("user", "endpoint:helsinki/app-events"));
+        assert!(!own("group", "endpoint:helsinki/app-events"));
+    }
 
     /// A plain title reads as text of no locale, the legacy map as its locales, and a
     /// shape no manifest may carry as nothing (UI-50).
