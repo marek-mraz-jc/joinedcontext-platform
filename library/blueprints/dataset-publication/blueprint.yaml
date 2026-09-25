@@ -1,0 +1,76 @@
+# The platform's blueprint library (CC-28): a dataset published as open data. One public
+# Endpoint carries both halves: its DCAT-AP catalogue record (EP-78) registers the dataset, and
+# its CKAN publication (EP-62) is the open-data view a portal harvests.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: dataset-publication
+  namespace: org
+  title: { en: "Publish a dataset as open data", fi: "Julkaise aineisto avoimena datana", sk: "Zverejniť dataset ako otvorené dáta" }
+spec:
+  version: 1.0.0
+  category: publication
+  # Public by construction: an organization admin reviews what leaves the organization.
+  riskClass: red
+  allowedRoles: [portal-approver]
+  parameterSchema:
+    type: object
+    required: [name, space, publisher, contactName, contactEmail, license, ckanInstance, ckanOrganization, endpointSlug]
+    additionalProperties: false
+    properties:
+      name: { type: string, title: "Dataset name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the Endpoint and the CKAN dataset." }
+      space: { type: string, title: "Context space published", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      publisher: { type: string, title: "Publisher", pattern: '^[^"\\\x00-\x1f]{2,200}$' }
+      contactName: { type: string, title: "Contact (a role, not a person)", pattern: '^[^"\\\x00-\x1f]{2,200}$' }
+      contactEmail: { type: string, title: "Contact e-mail", format: email, pattern: '^[^@\s"\\]+@[^@\s"\\]+\.[^@\s"\\]+$' }
+      license:
+        type: string
+        title: "Licence"
+        default: CC_BY_4_0
+        oneOf:
+          - { const: CC0, title: "CC0 1.0" }
+          - { const: CC_BY_4_0, title: "CC BY 4.0" }
+          - { const: CC_BYSA_4_0, title: "CC BY-SA 4.0" }
+          - { const: ODC_BY, title: "ODC Attribution" }
+          - { const: ODC_ODBL, title: "ODC Open Database Licence" }
+          - { const: ODC_PDDL, title: "ODC Public Domain Dedication" }
+      theme:
+        type: string
+        title: "EU data theme"
+        default: GOVE
+        enum: [AGRI, ECON, EDUC, ENER, ENVI, GOVE, HEAL, INTR, JUST, REGI, SOCI, TECH, TRAN]
+      frequency:
+        type: string
+        title: "Updated"
+        default: DAILY
+        enum: [CONT, HOURLY, DAILY, WEEKLY, MONTHLY, QUARTERLY, ANNUAL, IRREG]
+      ckanInstance: { type: string, title: "Open-data portal", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: ckaninstances } }
+      ckanOrganization: { type: string, title: "Organization in the open-data portal", pattern: "^[a-z0-9][a-z0-9_-]{1,99}$" }
+      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+  # A parameter with a default is filled by the form; a caller of the API may leave it out, so
+  # every template names the same default again.
+  templates:
+    - name: endpoint
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Endpoint
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ name }}" }
+        spec:
+          contextSpaceRef: { kind: ContextSpace, name: "{{ space }}" }
+          slug: "{{ endpointSlug }}"
+          audience: public
+          enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features]
+          catalog:
+            publisher: { name: { en: "{{ publisher }}" } }
+            contactPoint: { name: "{{ contactName }}", email: "{{ contactEmail }}" }
+            license: {{ license | default('CC_BY_4_0') }}
+            themes: [{{ theme | default('GOVE') }}]
+            frequency: {{ frequency | default('DAILY') }}
+          publish:
+            ckan:
+              instanceRef: { kind: CkanInstance, name: "{{ ckanInstance }}" }
+              organization: "{{ ckanOrganization }}"
+              name: "{{ name }}"
+              datastore: { representation: csv, refresh: onChange }
