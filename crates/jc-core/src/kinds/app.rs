@@ -808,6 +808,9 @@ pub struct EndpointFact {
     pub space: String,
     /// Its `joinedcontext.com/generated-by` annotation, when it carries one.
     pub generated_by: Option<String>,
+    /// Its `audience` is `public`: the only kind of Endpoint an App reads a further space through
+    /// (AP-04).
+    pub public: bool,
 }
 
 /// A `SharedSpaceReference` as [`served_endpoints`] reads it.
@@ -825,7 +828,8 @@ pub struct ReferenceFact {
 
 /// The Endpoints an App reads, the primary first (AP-04, AP-113): for each `dataNeeds` item the
 /// App's own generated `Endpoint app-{name}` when it serves that item's space, otherwise every
-/// Endpoint of the project over that space by name; then the target of every
+/// Endpoint of the project over that space by name, only the public ones when the space is not
+/// the first need's (the further space, AP-04); then the target of every
 /// `SharedSpaceReference` of the project by name; each slug once, the first
 /// [`MAX_APP_ENDPOINTS`] kept.
 ///
@@ -849,6 +853,10 @@ pub fn served_endpoints<'a>(
         found.sort_by(|a, b| a.name.cmp(&b.name));
         found
     };
+    let first = spec
+        .data_needs
+        .first()
+        .map(|need| need.context_space_ref.name());
     let mut found: Vec<&'a EndpointFact> = Vec::new();
     for need in &spec.data_needs {
         let space = need.context_space_ref.name();
@@ -856,10 +864,15 @@ pub fn served_endpoints<'a>(
             found.push(own);
             continue;
         }
+        let further = first != Some(space);
         found.extend(by_name(
             endpoints
                 .iter()
-                .filter(|endpoint| endpoint.project == project && endpoint.space == space)
+                .filter(|endpoint| {
+                    endpoint.project == project
+                        && endpoint.space == space
+                        && (endpoint.public || !further)
+                })
                 .collect(),
         ));
     }

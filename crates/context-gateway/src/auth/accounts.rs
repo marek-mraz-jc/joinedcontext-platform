@@ -212,6 +212,7 @@ fn apps_of(repo: &Repository) -> HashMap<String, BTreeSet<String>> {
                         .and_then(|annotations| annotations.get(jc_core::annotations::GENERATED_BY))
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned),
+                    public: spec.audience == jc_core::kinds::endpoint::Audience::Public,
                 });
             }
             "SharedSpaceReference" => {
