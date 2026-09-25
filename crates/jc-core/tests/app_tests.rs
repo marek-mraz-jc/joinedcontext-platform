@@ -392,6 +392,68 @@ fn frame_src_names_https_origins_the_app_embeds_ap12() {
     }
 }
 
+/// T-2936: a CSP source is one https source expression, never a value that opens a directive of
+/// its own, in any of the three lists (AP-12).
+#[test]
+fn a_csp_source_never_carries_a_directive_of_its_own_ap12() {
+    let hostile = [
+        "https://a.example; script-src 'unsafe-inline' 'unsafe-eval'",
+        "https://a.example 'unsafe-inline'",
+        "https://a.example,https://b.example",
+        "https://a.example'",
+        "https://user:pw@a.example",
+        "https://a.example/?q=1",
+        "https://a.example/#top",
+        "https://",
+        "https://-a.example",
+    ];
+    for field in ["csp.connectSrc", "csp.frameAncestors", "csp.frameSrc"] {
+        for source in hostile {
+            let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
+            let one = vec![source.to_string()];
+            app.spec.csp = Some(ContentSecurityPolicy {
+                connect_src: if field == "csp.connectSrc" {
+                    one.clone()
+                } else {
+                    vec![]
+                },
+                frame_ancestors: if field == "csp.frameAncestors" {
+                    one.clone()
+                } else {
+                    vec![]
+                },
+                frame_src: if field == "csp.frameSrc" { one } else { vec![] },
+            });
+            match app.validate().expect_err(source) {
+                Error::Name {
+                    field: refused,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(refused, field, "{source}");
+                    assert!(value.chars().count() <= 64, "{value}");
+                }
+                other => panic!("{source}: {other:?}"),
+            }
+        }
+    }
+    for source in [
+        "https://www.openstreetmap.org",
+        "https://maps.example.fi:8443",
+        "https://video.example.fi/embed/",
+        "https://tiles.example.com/v1/%7Bz%7D",
+    ] {
+        let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
+        app.spec.csp = Some(ContentSecurityPolicy {
+            connect_src: vec![source.to_string()],
+            frame_ancestors: vec![source.to_string()],
+            frame_src: vec![source.to_string()],
+        });
+        app.validate()
+            .unwrap_or_else(|err| panic!("{source} is one https source: {err}"));
+    }
+}
+
 #[test]
 fn lifecycle_transitions_ap18() {
     use AppLifecycle::{Draft, Preview, Published, Retired};

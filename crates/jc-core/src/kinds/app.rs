@@ -29,6 +29,14 @@ static ATTR_RE: LazyLock<Regex> =
 static ROLE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9-]{0,31}$").expect("valid regex"));
 
+/// One https source expression and nothing else: a host, an optional port and an optional path of
+/// plain characters. A `;`, a space or a quote would let the value open a CSP directive of its own
+/// (`https://a.example; script-src 'unsafe-eval'`), and `*` would widen it (AP-12).
+static CSP_SOURCE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%/-]*)?$")
+        .expect("valid regex")
+});
+
 /// The most roles one App declares (AP-90).
 pub const MAX_APP_ROLES: usize = 16;
 
@@ -603,14 +611,12 @@ impl ContentSecurityPolicy {
             ("csp.frameSrc", &self.frame_src),
         ] {
             for source in sources {
-                let ok = source == "self"
-                    || source == "none"
-                    || source.starts_with("https://") && !source.contains('*');
+                let ok = source == "self" || source == "none" || CSP_SOURCE.is_match(source);
                 if !ok {
                     return Err(Error::Name {
                         field,
-                        value: source.clone(),
-                        reason: "a CSP source must be `self`, `none` or an https origin without a wildcard (AP-12)",
+                        value: source.chars().take(QUOTED_MAX).collect(),
+                        reason: "a CSP source must be `self`, `none` or one https origin, optionally with a path: no wildcard, space, `;`, `,`, quote, user, query or fragment (AP-12)",
                     });
                 }
             }
