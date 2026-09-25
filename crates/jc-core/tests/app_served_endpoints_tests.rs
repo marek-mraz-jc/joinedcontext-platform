@@ -28,7 +28,13 @@ fn endpoint(project: &str, name: &str, slug: &str, space: &str) -> EndpointFact 
         slug: slug.to_owned(),
         space: space.to_owned(),
         generated_by: None,
+        public: false,
     }
+}
+
+fn public(mut endpoint: EndpointFact) -> EndpointFact {
+    endpoint.public = true;
+    endpoint
 }
 
 fn generated(mut endpoint: EndpointFact) -> EndpointFact {
@@ -50,13 +56,20 @@ fn slugs(found: &[&EndpointFact]) -> Vec<String> {
 }
 
 #[test]
-fn the_apps_own_endpoint_serves_its_space_and_the_other_spaces_every_endpoint_by_name() {
+fn the_apps_own_endpoint_serves_its_space_and_the_further_spaces_public_endpoints_by_name() {
     let app = app(&["alerts", "weather"]);
     let endpoints = vec![
         generated(endpoint("helsinki", "app-alerts", "s-own", "alerts")),
         endpoint("helsinki", "alerts-public", "s-alerts-public", "alerts"),
-        endpoint("helsinki", "weather-z", "s-weather-z", "weather"),
-        endpoint("helsinki", "weather-a", "s-weather-a", "weather"),
+        // The further space is read through its public endpoints alone (AP-04, T-2933).
+        public(endpoint("helsinki", "weather-z", "s-weather-z", "weather")),
+        public(endpoint("helsinki", "weather-a", "s-weather-a", "weather")),
+        endpoint(
+            "helsinki",
+            "weather-internal",
+            "s-weather-internal",
+            "weather",
+        ),
         // Another project's space of the same name is not the App's.
         endpoint("espoo", "weather-b", "s-espoo", "weather"),
     ];
@@ -125,4 +138,18 @@ fn an_app_whose_spaces_have_no_endpoint_reads_nothing() {
     let endpoints = vec![endpoint("helsinki", "weather", "s-weather", "weather")];
     assert!(served_endpoints("helsinki", "alerts", &app.spec, &endpoints, &[]).is_empty());
     assert!(served_endpoints("helsinki", "alerts", &app.spec, &[], &[]).is_empty());
+}
+
+/// AP-04 (T-2933): the first need's space is the App's own; until its generated endpoint is
+/// committed every endpoint of that space serves it. A further space offers only what already
+/// answers anyone, so naming it in `dataNeeds` reaches no endpoint that is not public.
+#[test]
+fn a_further_space_without_a_public_endpoint_is_read_through_nothing() {
+    let app = app(&["alerts", "weather"]);
+    let endpoints = vec![
+        endpoint("helsinki", "alerts-internal", "s-alerts", "alerts"),
+        endpoint("helsinki", "weather-internal", "s-weather", "weather"),
+    ];
+    let found = served_endpoints("helsinki", "alerts", &app.spec, &endpoints, &[]);
+    assert_eq!(slugs(&found), ["s-alerts"]);
 }

@@ -285,3 +285,64 @@ fn an_apps_client_is_admitted_on_the_endpoints_its_app_reads_and_no_other() {
     assert!(!accounts.admits_on("app-ghost", OWN), "no App named ghost");
     assert!(accounts.admits_on("edge", AIR), "a client that is no App's");
 }
+
+/// AP-04 (T-2933): an App may read one further space of its project, through that space's public
+/// Endpoints alone; its client is admitted on the public one and not on another Endpoint of the
+/// same space.
+#[test]
+fn an_apps_client_reaches_a_further_space_through_its_public_endpoint_alone() {
+    let (org, checkouts) = organization("app-further-space");
+    let dir = checkouts.projects.join("ovzdusie");
+    const PUBLIC: &str = "pvbhcpvbhcpvbhcpvbhcpvbhcp";
+    const INTERNAL: &str = "ntrnantrnantrnantrnantrnan";
+    write(
+        &dir,
+        "apps/radar/app.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: radar\n  \
+         namespace: ovzdusie\nspec:\n  kind: static\n  source:\n    path: ./src\n  build:\n    \
+         node: \"22\"\n  visibility: organization\n  lifecycle: published\n  dataNeeds:\n  \
+         - contextSpaceRef: { kind: ContextSpace, name: ovzdusie }\n    types: [AirQualityObserved]\n    \
+         operations: [queryEntity]\n  \
+         - contextSpaceRef: { kind: ContextSpace, name: registre }\n    types: [AdministrativeArea]\n    \
+         operations: [queryEntity]\n",
+    );
+    write(
+        &dir,
+        "spaces/registre/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: registre\n  \
+         namespace: ovzdusie\nspec:\n  isSandbox: false\n",
+    );
+    for (name, slug, audience) in [
+        ("registre-public", PUBLIC, "public"),
+        ("registre-internal", INTERNAL, "organization"),
+    ] {
+        write(
+            &dir,
+            &format!("spaces/registre/endpoints/{name}.yaml"),
+            &format!(
+                "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: {name}\n  \
+                 namespace: ovzdusie\nspec:\n  contextSpaceRef: registre\n  slug: {slug}\n  \
+                 audience: {audience}\n  enabledRepresentations: [\"ngsi-ld\"]\n"
+            ),
+        );
+    }
+    let (endpoints, _, accounts, ..) = store::load_from(&org, Some(&checkouts)).expect("assembles");
+    assert!(
+        slugs(&endpoints).contains(&PUBLIC) && slugs(&endpoints).contains(&INTERNAL),
+        "{:?}",
+        slugs(&endpoints)
+    );
+
+    assert!(
+        accounts.admits_on("app-radar", PUBLIC),
+        "the further space's public Endpoint"
+    );
+    assert!(
+        !accounts.admits_on("app-radar", INTERNAL),
+        "a further space is never read through an Endpoint that is not public"
+    );
+    assert!(
+        accounts.admits_on("app-radar", AIR),
+        "its own space's endpoint, none generated yet"
+    );
+}
