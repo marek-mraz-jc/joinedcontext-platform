@@ -782,3 +782,116 @@ fn a_licensed_slovak_dataset_is_unchanged_on_the_second_run() {
     .expect("the second run");
     assert_eq!(second, Outcome::Unchanged);
 }
+
+/// A record with the catalogue block, in the shape the gateway answers it (EP-78).
+fn catalogued_record() -> Value {
+    json!({
+        "@id": "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y",
+        "@type": "dcat:Dataset",
+        "dct:identifier": "zt4qm7ge2xdv6ksb3ncf5arw2y",
+        "dct:title": [{ "@value": "Kvalita ovzdušia", "@language": "sk" }],
+        "dct:description": [{ "@value": "Hodinové merania.", "@language": "sk" }],
+        "dct:publisher": {
+            "@id": "https://www.banskabystrica.sk/",
+            "@type": "foaf:Agent",
+            "foaf:name": [
+                { "@value": "City of Banská Bystrica", "@language": "en" },
+                { "@value": "Mesto Banská Bystrica", "@language": "sk" }
+            ]
+        },
+        "dcat:contactPoint": {
+            "@type": "vcard:Kind",
+            "vcard:fn": "Otvorené dáta",
+            "vcard:hasEmail": "mailto:opendata@example.org"
+        },
+        "dct:license": "http://publications.europa.eu/resource/authority/licence/CC_BY_4_0",
+        "dcat:theme": ["http://publications.europa.eu/resource/authority/data-theme/ENVI"],
+        "dcat:keyword": [{ "@value": "ovzdušie", "@language": "sk" }, { "@value": "air", "@language": "en" }],
+        "dct:spatial": ["http://data.europa.eu/nuts/code/SK032"],
+        "dct:temporal": { "@type": "dct:PeriodOfTime", "dcat:startDate": "2020-01-01" },
+        "dct:accrualPeriodicity": "http://publications.europa.eu/resource/authority/frequency/HOURLY",
+        "dcat:distribution": [{
+            "@id": "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/v1/model.schema.json",
+            "@type": "dcat:Distribution",
+            "dct:title": "AirQuality model.schema.json",
+            "dcat:accessURL": "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/v1/model.schema.json",
+            "dcat:mediaType": "https://www.iana.org/assignments/media-types/application/schema+json",
+            "dcat:byteSize": "812",
+            "spdx:checksum": { "@type": "spdx:Checksum", "spdx:checksumValue": "4a1f" }
+        }]
+    })
+}
+
+/// EP-63, EP-78: CKAN harvests the catalogue block, field for field, in the space's language.
+#[test]
+fn the_catalogue_block_becomes_the_ckan_dataset_fields() {
+    let dataset = package(
+        &endpoint("[ngsi-ld, csv]", PUBLISH),
+        &instance(),
+        &catalogued_record(),
+        &Settings::new("data.example.org").in_language("sk"),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+
+    assert_eq!(dataset["license_id"], json!("cc-by"));
+    assert_eq!(
+        extra(&dataset, "license_url"),
+        Some("http://publications.europa.eu/resource/authority/licence/CC_BY_4_0")
+    );
+    assert_eq!(
+        extra(&dataset, "publisher_name"),
+        Some("Mesto Banská Bystrica")
+    );
+    assert_eq!(
+        extra(&dataset, "publisher_uri"),
+        Some("https://www.banskabystrica.sk/")
+    );
+    assert_eq!(extra(&dataset, "contact_name"), Some("Otvorené dáta"));
+    assert_eq!(
+        extra(&dataset, "contact_email"),
+        Some("opendata@example.org")
+    );
+    assert_eq!(extra(&dataset, "temporal_start"), Some("2020-01-01"));
+    assert_eq!(
+        extra(&dataset, "spatial_uri"),
+        Some("http://data.europa.eu/nuts/code/SK032")
+    );
+    assert_eq!(
+        extra(&dataset, "spatial"),
+        None,
+        "GeoJSON only under `spatial`"
+    );
+    assert_eq!(
+        extra(&dataset, "frequency"),
+        Some("http://publications.europa.eu/resource/authority/frequency/HOURLY")
+    );
+    assert!(extra(&dataset, "theme").is_some_and(|t| t.contains("data-theme/ENVI")));
+    // Typed nodes are written field by field, never as a JSON dump.
+    assert_eq!(extra(&dataset, "publisher"), None);
+    assert_eq!(extra(&dataset, "contact_point"), None);
+    assert_eq!(extra(&dataset, "temporal"), None);
+    let tags: Vec<&str> = dataset["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .filter_map(|tag| tag["name"].as_str())
+        .collect();
+    assert!(
+        tags.contains(&"ovzdušie") && tags.contains(&"air"),
+        "{tags:?}"
+    );
+
+    let schema = dataset["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .find(|r| {
+            r["url"]
+                .as_str()
+                .is_some_and(|u| u.ends_with("model.schema.json"))
+        })
+        .expect("the schema artifact resource");
+    assert_eq!(schema["mimetype"], json!("application/schema+json"));
+    assert_eq!(schema["size"], json!(812));
+}

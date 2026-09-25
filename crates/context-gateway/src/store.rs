@@ -254,6 +254,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
                 .unwrap_or_default(),
             projection,
             base_path: format!("/api/endpoint/{}", spec.slug),
+            catalog: spec.catalog.map(Arc::new),
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
                     view.namespace
@@ -384,6 +385,7 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 // A space's canonical surface serves the space's own model; a view is a
                 // decision of a published endpoint (SP-01, EP-54).
                 view_mapping: None,
+                catalog: None,
                 base_path: format!("/cs/{segment}"),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),

@@ -12,7 +12,7 @@
 
 use crate::loader::RawManifest;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
-use jc_core::kinds::{Audience, EndpointSpec, Representation};
+use jc_core::kinds::{Audience, EndpointSpec, Licence, Representation};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -148,14 +148,18 @@ pub fn package(
         "url": format!("{url}/"),
         "private": spec.audience != Audience::Public,
         "resources": resources(&spec.enabled_representations, &url, record),
-        "extras": extras(record, &url),
+        "extras": extras(record, &url, language),
     });
     if let Some(notes) = text_in(record.get("dct:description"), language) {
         payload["notes"] = json!(notes);
     }
     if let Some(license) = text(record.get("dct:license")) {
-        // A licence IRI is not a CKAN licence id; the register holds ids like `cc-by`.
+        // A licence IRI is not a CKAN licence id; the register holds ids like `cc-by`. One of
+        // the EU licence table the Endpoint may name has a known id (EP-78).
         if license.contains("://") {
+            if let Some(known) = Licence::ALL.iter().find(|l| l.iri() == license) {
+                payload["license_id"] = json!(known.ckan_id());
+            }
             push_extra(&mut payload, "license_url", &license);
         } else {
             payload["license_id"] = json!(license);
@@ -322,10 +326,15 @@ fn schema_resources(record: &Value) -> Vec<Value> {
                 "hash_algorithm": "sha256",
             });
             if let Some(media_type) = distribution.get("dcat:mediaType") {
-                resource["mimetype"] = media_type.clone();
+                resource["mimetype"] = mimetype(media_type);
             }
-            if let Some(bytes) = distribution.get("dcat:byteSize") {
-                resource["size"] = bytes.clone();
+            // A typed literal in the record, a number in CKAN.
+            let bytes = distribution.get("dcat:byteSize");
+            if let Some(size) = bytes
+                .and_then(Value::as_u64)
+                .or_else(|| bytes.and_then(Value::as_str)?.parse().ok())
+            {
+                resource["size"] = json!(size);
             }
             Some(resource)
         })
@@ -404,19 +413,79 @@ const EXTRAS: &[(&str, &str)] = &[
     ("adms:status", "status"),
 ];
 
-fn extras(record: &Value, url: &str) -> Value {
+fn extras(record: &Value, url: &str, language: Option<&str>) -> Value {
     let mut extras: Vec<Value> = EXTRAS
         .iter()
         .filter_map(|(term, key)| {
-            let value = flatten(record.get(*term)?)?;
-            Some(json!({ "key": key, "value": value }))
+            let value = record.get(*term)?;
+            // A typed node (a `foaf:Agent`, a `vcard:Kind`, a period) is written field by
+            // field below, under the keys ckanext-dcat reads, not as a JSON dump.
+            if value.get("@type").is_some() {
+                return None;
+            }
+            // `spatial` is GeoJSON to the spatial extension; a location IRI goes to its own key.
+            let key = match (value, *key) {
+                (Value::String(_) | Value::Array(_), "spatial") => "spatial_uri",
+                (_, key) => key,
+            };
+            Some(json!({ "key": key, "value": flatten(value)? }))
         })
         .collect();
+    extras.extend(catalog_extras(record, language));
     // Who wrote this dataset and where it came from, so a manual edit in CKAN is visible
     // as drift rather than being silently overwritten without a trace (MF-08).
     extras.push(json!({ "key": "endpoint", "value": format!("{url}/") }));
     extras.push(json!({ "key": "generated_by", "value": GENERATOR }));
     Value::Array(extras)
+}
+
+/// The structured terms of the catalogue block, under the keys ckanext-dcat reads (EP-78).
+fn catalog_extras(record: &Value, language: Option<&str>) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut put = |key: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            out.push(json!({ "key": key, "value": value }));
+        }
+    };
+    let publisher = record.get("dct:publisher");
+    put(
+        "publisher_name",
+        text_in(publisher.and_then(|p| p.get("foaf:name")), language),
+    );
+    put("publisher_uri", text(publisher.and_then(|p| p.get("@id"))));
+    let contact = record.get("dcat:contactPoint");
+    put(
+        "contact_name",
+        text(contact.and_then(|c| c.get("vcard:fn"))),
+    );
+    put(
+        "contact_email",
+        text(contact.and_then(|c| c.get("vcard:hasEmail")))
+            .map(|email| email.trim_start_matches("mailto:").to_owned()),
+    );
+    let temporal = record.get("dct:temporal");
+    put(
+        "temporal_start",
+        text(temporal.and_then(|t| t.get("dcat:startDate"))),
+    );
+    put(
+        "temporal_end",
+        text(temporal.and_then(|t| t.get("dcat:endDate"))),
+    );
+    if let Some(Value::Array(themes)) = record.get("dcat:theme") {
+        put("theme", serde_json::to_string(themes).ok());
+    }
+    out
+}
+
+/// A `dcat:mediaType` as CKAN's `mimetype`: the record names the IANA IRI (EP-78).
+fn mimetype(media_type: &Value) -> Value {
+    match media_type.as_str() {
+        Some(iri) => json!(iri
+            .strip_prefix("https://www.iana.org/assignments/media-types/")
+            .unwrap_or(iri)),
+        None => media_type.clone(),
+    }
 }
 
 fn push_extra(payload: &mut Value, key: &str, value: &str) {

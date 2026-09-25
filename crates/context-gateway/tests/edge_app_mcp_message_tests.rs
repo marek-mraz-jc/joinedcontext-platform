@@ -72,6 +72,7 @@ fn endpoint(slug: &str, audience: Audience, representations: Vec<Representation>
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: public_grant(),
     }
 }

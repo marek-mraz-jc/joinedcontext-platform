@@ -45,6 +45,7 @@ fn endpoint(slug: &str, representations: Vec<Representation>) -> Endpoint {
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![
             policy(
                 r#"contextSpaceRef: ovzdusie

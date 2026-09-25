@@ -65,6 +65,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         hidden_attributes: Default::default(),
         projection: None,
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![Model {
             name: "air-quality".to_owned(),

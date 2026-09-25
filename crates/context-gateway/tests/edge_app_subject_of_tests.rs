@@ -60,6 +60,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![
             policy("role", "data-steward", "StewardView"),
             policy("role", "sensor-writer", "SensorWrite"),

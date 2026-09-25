@@ -93,6 +93,7 @@ fn endpoint(
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![policy(&format!(
             r#"contextSpaceRef: {space}
 assigner: did:web:banskabystrica.sk

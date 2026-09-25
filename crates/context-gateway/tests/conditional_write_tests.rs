@@ -161,6 +161,7 @@ fn endpoint(condition: Option<&str>) -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![policy(condition)],
     }
 }

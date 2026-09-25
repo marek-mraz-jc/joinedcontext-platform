@@ -39,6 +39,15 @@ jobs:
       # docs is generated from those sentences, so a variable added without one is caught
       # here rather than a lane later.
       - run: cargo test -p jc-core --test configuration_documentation_tests --locked
+      # Every variant of an Endpoint's DCAT-AP record against the SEMIC DCAT-AP 3.0 shapes pinned
+      # in the repository, and its JSON-LD and Turtle as one graph (T-2789, EP-78). The test
+      # writes the records, pyshacl reads them: one test binary and a pip install, under a minute.
+      - run: cargo test -p context-gateway --test dcat_ap_catalog_tests --locked
+        env: { DCAT_RECORDS_DIR: "${{ runner.temp }}/dcat-records" }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.11" }
+      - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
+      - run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
   model-tools:
     # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
     # than after it, so the fast lane stays as long as its slowest job and no longer.

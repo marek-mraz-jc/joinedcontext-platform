@@ -147,6 +147,7 @@ fn endpoint(view: Option<ViewMapping>) -> Endpoint {
         hidden_attributes: Default::default(),
         projection: None,
         view_mapping: view.map(Arc::new),
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![policy()],

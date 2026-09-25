@@ -56,6 +56,7 @@ fn endpoint(policy: &str) -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![serde_norway::from_str(policy).expect("the policy spec parses")],
     }
 }

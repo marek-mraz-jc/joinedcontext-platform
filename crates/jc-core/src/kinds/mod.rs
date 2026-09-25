@@ -5,6 +5,7 @@ pub mod app;
 pub mod bento_inputs;
 pub mod bento_processors;
 pub mod blueprint;
+pub mod catalog;
 pub mod ckan;
 pub mod csr;
 pub mod dashboard;
@@ -37,6 +38,9 @@ pub use app::{
     TemporalConstraint,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
+pub use catalog::{
+    Catalog, ContactPoint, DataTheme, Duty, Frequency, Licence, Publisher, Source, Temporal,
+};
 pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
 pub use csr::{ContextSourceRegistrationSpec, Federation, FederationIdentity, RegistrationMode};
 pub use dashboard::{

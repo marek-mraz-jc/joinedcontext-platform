@@ -278,6 +278,10 @@ pub struct EndpointSpec {
     /// far (EP-62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish: Option<crate::kinds::ckan::Publication>,
+    /// What a DCAT-AP catalogue needs beyond the distributions: publisher, contact, licence,
+    /// themes, coverage, frequency and provenance (EP-78, EP-79).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<crate::kinds::catalog::Catalog>,
     /// A `Mapping` whose target model this Endpoint serves instead of the space's own
     /// (EP-54, DM-51).
     ///
@@ -442,6 +446,10 @@ impl EndpointSpec {
 
         if let Some(ref publish) = self.publish {
             publish.validate(&self.enabled_representations)?;
+        }
+
+        if let Some(ref catalog) = self.catalog {
+            catalog.validate()?;
         }
 
         if let Some(ref policy) = self.policy_ref {
