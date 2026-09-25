@@ -70,7 +70,7 @@ fn a_project_round_trips_with_its_history_and_equal_heads() {
     let app = app_repository("bundle-round-app");
     let out = temp_dir("bundle-round-out");
     let apps = BTreeMap::from([("app-air".to_owned(), app.clone())]);
-    let written = export(&project, "ovzdusie", &apps, &out, "tester").expect("exports");
+    let written = export(&project, "ovzdusie", &apps, None, &out, "tester").expect("exports");
 
     let roles: Vec<(String, BundleRole)> = written
         .spec
@@ -121,7 +121,7 @@ fn a_project_round_trips_with_its_history_and_equal_heads() {
 fn a_tampered_bundle_or_a_moved_head_is_refused() {
     let project = project_repository("bundle-tamper-project");
     let out = temp_dir("bundle-tamper-out");
-    export(&project, "ovzdusie", &BTreeMap::new(), &out, "tester").expect("exports");
+    export(&project, "ovzdusie", &BTreeMap::new(), None, &out, "tester").expect("exports");
 
     let text = std::fs::read_to_string(out.join(INDEX)).expect("index");
     let head = index(&out).spec.repositories[0].head.clone();
@@ -144,7 +144,7 @@ fn a_tampered_bundle_or_a_moved_head_is_refused() {
 fn a_newer_layout_and_a_path_out_of_the_bundle_are_refused() {
     let project = project_repository("bundle-newer-project");
     let out = temp_dir("bundle-newer-out");
-    export(&project, "ovzdusie", &BTreeMap::new(), &out, "tester").expect("exports");
+    export(&project, "ovzdusie", &BTreeMap::new(), None, &out, "tester").expect("exports");
 
     write(&project, ".jc/layout", "3\n");
     commit(&project, "a layout from the future");
@@ -152,6 +152,7 @@ fn a_newer_layout_and_a_path_out_of_the_bundle_are_refused() {
         &project,
         "ovzdusie",
         &BTreeMap::new(),
+        None,
         &temp_dir("n2"),
         "tester",
     )
@@ -256,4 +257,132 @@ fn an_older_organization_is_migrated_on_import() {
         "2\n"
     );
     assert!(migrated.join("projects/ovzdusie.yaml").is_file());
+}
+
+/// An organization model, as the organization checkout keeps it (DM-75).
+const ORGANIZATION_MODEL: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataModel
+metadata:
+  name: stations
+  namespace: org
+spec:
+  linkml: stations.linkml.yaml
+  version: 1.3.0
+  lifecycle: published
+  classes: ["Station"]
+"#;
+const ORGANIZATION_SOURCE: &str = "id: https://example.org/stations\nname: stations\n";
+
+/// The space's own model, importing the organization's (DM-76).
+const SPACE_MODEL: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataModel
+metadata:
+  name: parking
+  namespace: ovzdusie
+spec:
+  contextSpaceRef: ovzdusie
+  linkml: parking.linkml.yaml
+  version: 1.0.0
+  lifecycle: published
+  classes: ["ParkingSpot"]
+"#;
+const SPACE_SOURCE: &str =
+    "id: https://banskabystrica.sk/parking\nname: parking\nimports: [linkml:types, org.stations.v1]\n";
+
+/// MF-49: a project importing an organization model carries a copy of it, listed in the index
+/// with its version, the SHA-256 of its source and its origin; it holds the schema files alone,
+/// and without the organization checkout the export is refused naming the import.
+#[test]
+fn an_imported_organization_model_travels_with_the_project() {
+    let project = project_repository("bundle-model-project");
+    write(
+        &project,
+        "spaces/ovzdusie/datamodels/parking.yaml",
+        SPACE_MODEL,
+    );
+    write(
+        &project,
+        "spaces/ovzdusie/datamodels/parking.linkml.yaml",
+        SPACE_SOURCE,
+    );
+    commit(&project, "a model importing the organization's stations");
+    let organization = common::demo_repo("bundle-model-organization");
+    write(
+        &organization,
+        "datamodels/stations/stations.yaml",
+        ORGANIZATION_MODEL,
+    );
+    write(
+        &organization,
+        "datamodels/stations/stations.linkml.yaml",
+        ORGANIZATION_SOURCE,
+    );
+
+    let refused = export(
+        &project,
+        "ovzdusie",
+        &BTreeMap::new(),
+        None,
+        &temp_dir("bundle-model-refused"),
+        "tester",
+    )
+    .expect_err("an import with nothing to carry it from");
+    assert!(
+        refused.to_string().contains("org.stations.v1")
+            && refused.to_string().contains("--org-dir"),
+        "{refused}"
+    );
+
+    let out = temp_dir("bundle-model-out");
+    let written = export(
+        &project,
+        "ovzdusie",
+        &BTreeMap::new(),
+        Some(&organization),
+        &out,
+        "tester",
+    )
+    .expect("exports");
+    let [model] = written.spec.models.as_slice() else {
+        panic!("one carried model: {:?}", written.spec.models);
+    };
+    assert_eq!(model.name, "stations");
+    assert_eq!(model.version.to_string(), "1.3.0");
+    assert_eq!(model.origin.organization, "banskabystrica");
+    assert_eq!(model.origin.name, "stations");
+    assert_eq!(model.file, "models/stations.v1.linkml.yaml");
+    assert_eq!(
+        std::fs::read_to_string(out.join(&model.file)).expect("the source"),
+        ORGANIZATION_SOURCE
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join(&model.manifest)).expect("the manifest"),
+        ORGANIZATION_MODEL
+    );
+    use sha2::Digest as _;
+    assert_eq!(
+        model.sha256,
+        format!("{:x}", sha2::Sha256::digest(ORGANIZATION_SOURCE))
+    );
+    assert_eq!(index(&out), written);
+
+    // Schema files only: nothing else of the organization checkout travels.
+    let mut carried: Vec<String> = std::fs::read_dir(out.join("models"))
+        .expect("models/")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    carried.sort();
+    assert_eq!(carried, ["stations.v1.linkml.yaml", "stations.v1.yaml"]);
+    assert!(!out.join("org.yaml").exists());
+
+    // And it comes along on import, verified like every file of the index.
+    let landed = temp_dir("bundle-model-in");
+    import(&out, &landed).expect("imports");
+    assert!(landed.join("models/stations.v1.linkml.yaml").is_file());
 }

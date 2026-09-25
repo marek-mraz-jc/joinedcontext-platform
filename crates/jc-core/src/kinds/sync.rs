@@ -438,6 +438,39 @@ pub struct BundleSpec {
     /// one per application of it. An import verifies each by its head commit (MF-46).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repositories: Vec<BundleRepository>,
+    /// The organization models a git-native export carries because the project imports them
+    /// (MF-49): schema files only, each listed in `files` too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<BundleModel>,
+}
+
+/// One organization model a project export carries (MF-49, ADR-N-039 §3.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BundleModel {
+    /// The model's name in the organization it came from.
+    pub name: String,
+    /// The version the organization held when the project was exported.
+    pub version: crate::kinds::SemVer,
+    /// Its `DataModel` manifest, relative to the index, under `models/`.
+    pub manifest: String,
+    /// Its LinkML source, relative to the index, under `models/`.
+    pub file: String,
+    /// Lowercase hexadecimal SHA-256 of the LinkML source: what an import compares a
+    /// destination model's source with (MF-50).
+    pub sha256: String,
+    /// Where it came from.
+    pub origin: BundleModelOrigin,
+}
+
+/// The organization a carried model belongs to, and its name there (MF-49).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BundleModelOrigin {
+    /// The exporting organization's `metadata.name`.
+    pub organization: String,
+    /// The model's name in that organization.
+    pub name: String,
 }
 
 /// One repository of a git-native export (MF-45).
@@ -575,6 +608,51 @@ impl BundleSpec {
         // An import reads and writes where these point, so none leaves the bundle (MF-42).
         for file in &self.files {
             names::validate_relative_path("files.path", &file.path)?;
+        }
+
+        let mut models_seen: Vec<&str> = Vec::with_capacity(self.models.len());
+        for model in &self.models {
+            names::validate_dns1123_label(&model.name)
+                .map_err(|e| names::rename(e, "models.name"))?;
+            names::validate_dns1123_label(&model.origin.name)
+                .map_err(|e| names::rename(e, "models.origin.name"))?;
+            names::validate_dns1123_label(&model.origin.organization)
+                .map_err(|e| names::rename(e, "models.origin.organization"))?;
+            if models_seen.contains(&model.name.as_str()) {
+                return Err(Error::Name {
+                    field: "models.name",
+                    value: model.name.clone(),
+                    reason:
+                        "a model is carried once, at the one version its organization holds (MF-49)",
+                });
+            }
+            models_seen.push(&model.name);
+            if model.sha256.len() != 64
+                || !model
+                    .sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(Error::Name {
+                    field: "models.sha256",
+                    value: model.sha256.clone(),
+                    reason: "a SHA-256 is 64 lowercase hexadecimal characters",
+                });
+            }
+            for (field, path) in [
+                ("models.manifest", &model.manifest),
+                ("models.file", &model.file),
+            ] {
+                names::validate_relative_path(field, path)?;
+                // A carried model is a schema file under models/, verified like every other file.
+                if !path.starts_with("models/") || !self.files.iter().any(|f| &f.path == path) {
+                    return Err(Error::Name {
+                        field,
+                        value: path.clone(),
+                        reason: "a carried model's files are under models/ and listed in files (MF-42, MF-49)",
+                    });
+                }
+            }
         }
         Ok(())
     }

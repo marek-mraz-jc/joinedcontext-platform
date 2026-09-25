@@ -469,12 +469,13 @@ impl Models<'_> {
     }
 }
 
-/// The LinkML source of the model `import` names in `namespace`, at the major it pins.
-fn model_source(
-    repo: &Repository,
+/// The model `import` names in `namespace`, at the major it pins and published: its manifest,
+/// its spec and the path of its LinkML source.
+fn pinned_model<'r>(
+    repo: &'r Repository,
     namespace: &str,
     import: &ModelImport,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<(&'r LoadedResource, DataModelSpec, PathBuf), String> {
     let level = if namespace == ORG_NAMESPACE {
         "organization model"
     } else {
@@ -511,7 +512,91 @@ fn model_source(
         .parent()
         .unwrap_or(Path::new(""))
         .join(&spec.linkml);
+    Ok((resource, spec, linkml))
+}
+
+/// The LinkML source of the model `import` names in `namespace`, at the major it pins.
+fn model_source(
+    repo: &Repository,
+    namespace: &str,
+    import: &ModelImport,
+) -> std::result::Result<String, String> {
+    let (_, _, linkml) = pinned_model(repo, namespace, import)?;
     read(repo.root(), &linkml).map_err(|err| err.to_string())
+}
+
+/// An organization model a project imports, where the organization checkout keeps it (MF-49).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarriedModel {
+    /// Its name in the organization.
+    pub name: String,
+    /// The version the checkout holds.
+    pub version: jc_core::kinds::SemVer,
+    /// Its manifest, relative to the organization checkout.
+    pub manifest: PathBuf,
+    /// Its LinkML source, relative to the organization checkout.
+    pub source: PathBuf,
+}
+
+/// Every organization model a DataModel of the project checkout `repo_dir` imports, and what
+/// those import in turn, as the organization checkout `org_dir` holds them (MF-49). A project
+/// that imports one is refused without `org_dir`.
+pub fn organization_imports(
+    repo_dir: &Path,
+    org_dir: Option<&Path>,
+) -> std::result::Result<Vec<CarriedModel>, String> {
+    let repo = Repository::load(repo_dir).map_err(|err| err.to_string())?;
+    let mut todo = Vec::new();
+    for (_, resource) in repo.iter() {
+        if resource.manifest.kind != "DataModel" {
+            continue;
+        }
+        let Ok(spec) = serde_json::from_value::<DataModelSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        let linkml = resource
+            .path
+            .parent()
+            .unwrap_or(Path::new(""))
+            .join(&spec.linkml);
+        todo.push(read(repo.root(), &linkml).map_err(|err| err.to_string())?);
+    }
+    let mut organization = None;
+    let mut carried: BTreeMap<String, CarriedModel> = BTreeMap::new();
+    while let Some(text) = todo.pop() {
+        let Ok(document) = serde_norway::from_str::<Value>(&text) else {
+            continue;
+        };
+        for import in ModelImport::all_in(&document).map_err(|err| err.to_string())? {
+            if !import.organization || carried.contains_key(&import.name) {
+                continue;
+            }
+            if organization.is_none() {
+                let dir = org_dir.ok_or_else(|| {
+                    format!(
+                        "the project imports the organization model `{import}`; pass --org-dir \
+                         <organization checkout> so the export carries it (MF-49)"
+                    )
+                })?;
+                organization = Some(Repository::load(dir).map_err(|err| err.to_string())?);
+            }
+            let org = organization.as_ref().ok_or("no organization checkout")?;
+            let (resource, spec, linkml) = pinned_model(org, ORG_NAMESPACE, &import)
+                .map_err(|why| format!("import '{import}': {why}"))?;
+            todo.push(read(org.root(), &linkml).map_err(|err| err.to_string())?);
+            carried.insert(
+                import.name.clone(),
+                CarriedModel {
+                    name: import.name.clone(),
+                    version: spec.version,
+                    manifest: resource.path.clone(),
+                    source: linkml,
+                },
+            );
+        }
+    }
+    Ok(carried.into_values().collect())
 }
 
 /// Renders one DataModel and writes or compares what `spec.artifacts` declares.

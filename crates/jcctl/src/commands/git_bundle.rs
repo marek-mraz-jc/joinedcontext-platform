@@ -13,7 +13,8 @@
 use crate::assemble::layout_at;
 use crate::commands::migrate;
 use jc_core::kinds::{
-    Bundle, BundleFile, BundleRepository, BundleRole as Role, BundleSpec, Project,
+    Bundle, BundleFile, BundleModel, BundleModelOrigin, BundleRepository, BundleRole as Role,
+    BundleSpec, Project,
 };
 use jc_core::project::{self, RepositoryRole, PROJECT_FILE};
 use sha2::{Digest, Sha256};
@@ -100,11 +101,14 @@ fn sha256_of(path: &Path) -> Result<String, BundleError> {
 }
 
 /// Exports the project repository checked out at `repo_dir`, and the application repositories
-/// of `apps` (name → checkout), into `out_dir` (MF-45). Returns the index it wrote.
+/// of `apps` (name → checkout), into `out_dir` (MF-45), with a copy of every organization model
+/// the project imports, read from the organization checkout `org_dir` (MF-49). Returns the index
+/// it wrote.
 pub fn export(
     repo_dir: &Path,
     slug: &str,
     apps: &BTreeMap<String, PathBuf>,
+    org_dir: Option<&Path>,
     out_dir: &Path,
     exported_by: &str,
 ) -> Result<Bundle, BundleError> {
@@ -118,6 +122,9 @@ pub fn export(
             "project.yaml is a registry entry; export takes a project repository",
         ));
     }
+    // Before anything is written: a project that imports an organization model is exported
+    // with it or not at all (MF-49).
+    let carried = crate::model::organization_imports(repo_dir, org_dir).map_err(refused)?;
     empty(out_dir)?;
 
     let mut repositories = Vec::new();
@@ -151,6 +158,35 @@ pub fn export(
             role,
             file: bundle_file,
             head: git(&dir, &["rev-parse", "HEAD"])?,
+        });
+    }
+
+    // Schema files only: the manifest and the LinkML source, as the organization holds them.
+    let mut models = Vec::new();
+    let org_root = org_dir.unwrap_or(repo_dir);
+    for model in carried {
+        let major = model.version.major();
+        let manifest = format!("models/{}.v{major}.yaml", model.name);
+        let file = format!("models/{}.v{major}.linkml.yaml", model.name);
+        for (to, from) in [(&manifest, &model.manifest), (&file, &model.source)] {
+            let target = out_dir.join(to);
+            std::fs::create_dir_all(target.parent().unwrap_or(out_dir)).map_err(io(out_dir))?;
+            std::fs::copy(org_root.join(from), &target).map_err(io(&target))?;
+            files.push(BundleFile {
+                path: to.clone(),
+                sha256: sha256_of(&target)?,
+            });
+        }
+        models.push(BundleModel {
+            sha256: sha256_of(&out_dir.join(&file))?,
+            origin: BundleModelOrigin {
+                organization: own.spec.organization_ref.name().to_owned(),
+                name: model.name.clone(),
+            },
+            name: model.name,
+            version: model.version,
+            manifest,
+            file,
         });
     }
 
@@ -195,6 +231,7 @@ pub fn export(
             readme: None,
             schemas: None,
             repositories,
+            models,
         },
         status: None,
     };
@@ -289,7 +326,7 @@ pub fn import(dir: &Path, out_dir: &Path) -> Result<Imported, BundleError> {
         }
     }
     for file in &index.spec.files {
-        if file.path.starts_with("projects/") {
+        if file.path.starts_with("projects/") || file.path.starts_with("models/") {
             let target = out_dir.join(&file.path);
             std::fs::create_dir_all(target.parent().unwrap_or(out_dir)).map_err(io(out_dir))?;
             std::fs::copy(dir.join(&file.path), &target).map_err(io(&target))?;

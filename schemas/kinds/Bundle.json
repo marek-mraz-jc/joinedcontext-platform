@@ -82,6 +82,72 @@
       ],
       "type": "object"
     },
+    "BundleModel": {
+      "additionalProperties": false,
+      "description": "One organization model a project export carries (MF-49, ADR-N-039 §3.4).",
+      "properties": {
+        "file": {
+          "description": "Its LinkML source, relative to the index, under `models/`.",
+          "type": "string"
+        },
+        "manifest": {
+          "description": "Its `DataModel` manifest, relative to the index, under `models/`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The model's name in the organization it came from.",
+          "type": "string"
+        },
+        "origin": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BundleModelOrigin"
+            }
+          ],
+          "description": "Where it came from."
+        },
+        "sha256": {
+          "description": "Lowercase hexadecimal SHA-256 of the LinkML source: what an import compares a destination model's source with (MF-50).",
+          "type": "string"
+        },
+        "version": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SemVer"
+            }
+          ],
+          "description": "The version the organization held when the project was exported."
+        }
+      },
+      "required": [
+        "file",
+        "manifest",
+        "name",
+        "origin",
+        "sha256",
+        "version"
+      ],
+      "type": "object"
+    },
+    "BundleModelOrigin": {
+      "additionalProperties": false,
+      "description": "The organization a carried model belongs to, and its name there (MF-49).",
+      "properties": {
+        "name": {
+          "description": "The model's name in that organization.",
+          "type": "string"
+        },
+        "organization": {
+          "description": "The exporting organization's `metadata.name`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "organization"
+      ],
+      "type": "object"
+    },
     "BundleRepository": {
       "additionalProperties": false,
       "description": "One repository of a git-native export (MF-45).",
@@ -182,6 +248,13 @@
           "description": "The exported resources.",
           "items": {
             "$ref": "#/definitions/BundleItem"
+          },
+          "type": "array"
+        },
+        "models": {
+          "description": "The organization models a git-native export carries because the project imports them (MF-49): schema files only, each listed in `files` too.",
+          "items": {
+            "$ref": "#/definitions/BundleModel"
           },
           "type": "array"
         },
@@ -399,6 +472,11 @@
           "type": "string"
         }
       ]
+    },
+    "SemVer": {
+      "description": "Semantic version string conforming to major.minor.patch (DM-22)",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "type": "string"
     },
     "Status": {
       "additionalProperties": false,
