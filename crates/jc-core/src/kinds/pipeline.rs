@@ -90,6 +90,76 @@ pub struct PipelineSpec {
     /// Resource quotas allocated to this pipeline runner (PL-11).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<PipelineQuotas>,
+    /// Deletes the entities its source stopped sending; absent, nothing is deleted (PL-64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<Expiry>,
+}
+
+/// The longest expiry window, in hours: a year (PL-64).
+pub const EXPIRY_MAX_HOURS: u64 = 365 * 24;
+
+/// The most entity types one expiry names (PL-64).
+pub const EXPIRY_MAX_TYPES: usize = 20;
+
+/// Stale-entity expiry: entities of `types` not modified for `after` are deleted (PL-64).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Expiry {
+    /// Whole hours or days, `1h` to `365d`.
+    pub after: String,
+    /// The entity types the sweep deletes, one to twenty.
+    pub types: Vec<String>,
+}
+
+impl Expiry {
+    /// The window in hours, `None` when `after` is not whole hours or days.
+    pub fn hours(&self) -> Option<u64> {
+        let (count, unit) = self.after.split_at(self.after.len().checked_sub(1)?);
+        if count.is_empty() || count.starts_with('0') || !count.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        let count: u64 = count.parse().ok()?;
+        match unit {
+            "h" => Some(count),
+            "d" => count.checked_mul(24),
+            _ => None,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self
+            .hours()
+            .is_some_and(|h| (1..=EXPIRY_MAX_HOURS).contains(&h))
+        {
+            return Err(Error::Invalid {
+                field: "spec.expiry.after".to_owned(),
+                reason: format!(
+                    "`{}` is not a window: write whole hours or days from `1h` to `365d`, \
+                     such as `12h` or `14d` (PL-64)",
+                    self.after
+                ),
+            });
+        }
+        if self.types.is_empty() || self.types.len() > EXPIRY_MAX_TYPES {
+            return Err(Error::Invalid {
+                field: "spec.expiry.types".to_owned(),
+                reason: format!(
+                    "name the entity types the pipeline writes, one to {EXPIRY_MAX_TYPES} (PL-64)"
+                ),
+            });
+        }
+        for (index, entity_type) in self.types.iter().enumerate() {
+            names::validate_entity_type(entity_type)?;
+            if self.types[..index].contains(entity_type) {
+                return Err(Error::Invalid {
+                    field: "spec.expiry.types".to_owned(),
+                    reason: format!("`{entity_type}` is named twice (PL-64)"),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_true() -> bool {
@@ -585,6 +655,20 @@ impl PipelineSpec {
 
         for sref in &self.secret_refs {
             names::validate_dns1123_label(&sref.name)?;
+        }
+
+        if let Some(expiry) = &self.expiry {
+            expiry.validate()?;
+            // The sweep deletes in the one space the pipeline writes; with two it could not say
+            // which of them absence means removal in.
+            if self.outputs().len() != 1 {
+                return Err(Error::Invalid {
+                    field: "spec.expiry".to_owned(),
+                    reason: "expiry sweeps the one space a pipeline writes, and this pipeline \
+                             has more than one output (PL-64)"
+                        .to_owned(),
+                });
+            }
         }
 
         Ok(())
