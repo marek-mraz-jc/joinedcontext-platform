@@ -259,6 +259,8 @@ fn portal(options: &ClientOptions) -> Result<jcctl::portal::Portal, String> {
 
 /// `jcctl login --idm <issuer> [--token-file <path>]` (T-2846, PF-45): the device flow, the
 /// address and code on stderr, the token into a file of mode 600 and never on screen.
+/// `JC_IDM` is the identity provider's issuer when `--idm` is not given, e.g.
+/// `https://idm.<domain>/realms/<realm>`.
 fn login(options: &ClientOptions) -> ExitCode {
     let Some(idm) = options
         .idm
