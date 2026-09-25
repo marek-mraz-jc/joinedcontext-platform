@@ -4,7 +4,9 @@
 //! **The contract.** A `Policy` names a space, not an endpoint, so the App reconciler assigns an
 //! application's grants to roles only its own Endpoint hands out: `endpoint:{project}/{name}`
 //! to every caller it admits when it sets `callerRole`, and `endpoint:{project}/{name}/{role}`
-//! to a caller matching a subject of that role. Two endpoints over one space carry the same
+//! to a caller whose token of the App's own client `app-{name}` carries that role in
+//! `resource_access.app-{name}.roles` (ADR-N-030). An Endpoint no App generated gives a named
+//! role to the subjects its manifest names. Two endpoints over one space carry the same
 //! Policies here, as they do on a cluster; what each caller's access document lists says which
 //! roles reached them.
 
@@ -26,6 +28,8 @@ use tower::ServiceExt;
 const APP_SLUG: &str = "k4y7pq2mztsvhx3nbwrs5cjdef";
 /// Another endpoint over the same space, with no roles of its own.
 const PLAIN_SLUG: &str = "q7w6e5r4t3y2uaiopazsxdcfgh";
+/// A hand-written endpoint over the same space whose role names its holders.
+const HAND_SLUG: &str = "h2j3k4l5m6n7p8q9r2s3t4u5v6";
 const PROJECT: &str = "helsinki";
 
 fn policy(role: &str, marker: &str) -> PolicySpec {
@@ -46,11 +50,30 @@ fn policies() -> Vec<PolicySpec> {
             "EditorWrite",
         ),
         policy("data-steward", "StewardView"),
+        policy(
+            &endpoint_role(PROJECT, "hand-alerts", Some("editor")),
+            "HandWrite",
+        ),
     ]
 }
 
-/// The App's Endpoint as the reconciler renders it: a caller role and one named role.
+/// The App's Endpoint as the reconciler renders it: a caller role and one named role, reached
+/// by the App's own client.
 fn app_roles() -> EndpointRoles {
+    EndpointRoles::of_app(
+        PROJECT,
+        "app-alerts",
+        &roles_spec(),
+        "app-alerts".to_owned(),
+    )
+}
+
+/// The hand-written endpoint: the same roles, held by the subjects the manifest names.
+fn hand_roles() -> EndpointRoles {
+    EndpointRoles::of(PROJECT, "hand-alerts", &roles_spec())
+}
+
+fn roles_spec() -> EndpointSpec {
     let spec: EndpointSpec = serde_norway::from_str(&format!(
         "contextSpaceRef: helsinki\nslug: {APP_SLUG}\naudience: organization\n\
          enabledRepresentations: [ngsi-ld]\ncallerRole: true\nroles:\n\
@@ -59,7 +82,7 @@ fn app_roles() -> EndpointRoles {
     ))
     .expect("the endpoint spec parses");
     spec.validate().expect("the endpoint spec is valid");
-    EndpointRoles::of(PROJECT, "app-alerts", &spec)
+    spec
 }
 
 fn endpoint(slug: &str, audience: Audience, roles: EndpointRoles) -> Endpoint {
@@ -102,6 +125,7 @@ fn fixture(audience: Audience) -> Fixture {
         .serve([
             endpoint(APP_SLUG, audience, app_roles()),
             endpoint(PLAIN_SLUG, audience, EndpointRoles::default()),
+            endpoint(HAND_SLUG, audience, hand_roles()),
         ])
         .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None),
     ));
@@ -169,10 +193,53 @@ async fn the_caller_role_is_held_on_the_apps_endpoint_and_not_on_another_of_the_
     assert!(elsewhere.is_empty(), "{elsewhere:?}");
 }
 
-/// AP-97: a role's user matches the token's `preferred_username` whatever its case, its group
-/// matches the `groups` claim with or without the leading slash, and nobody else holds it.
+/// A person's token of client `azp` carrying `roles` for `client`.
+fn with_client_roles(azp: &str, client: &str, roles: &[&str]) -> Value {
+    json!({
+        "preferred_username": "jana.kovacova@hel.fi",
+        "azp": azp,
+        "resource_access": { client: { "roles": roles } },
+    })
+}
+
+/// AP-97, ADR-N-030: on the App's Endpoint a named role comes from the roles a token of the App's
+/// own client carries for it and from nothing else: not a subject the manifest names, not a
+/// realm role or group of the same name, not another client's roles, not a token another client
+/// obtained. The same token holds nothing of the app's on another endpoint of the space.
 #[tokio::test]
-async fn a_named_role_goes_to_its_user_and_its_group_and_to_nobody_else() {
+async fn a_named_role_comes_from_the_apps_own_client_alone() {
+    let fixture = fixture(Audience::Organization);
+    let editor = with_client_roles("app-alerts", "app-alerts", &["editor"]);
+    let (_, on_app) = granted(&fixture, APP_SLUG, Some(editor.clone())).await;
+    assert_eq!(on_app, ["AppRead", "EditorWrite"]);
+    let (_, elsewhere) = granted(&fixture, PLAIN_SLUG, Some(editor)).await;
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+
+    for viewer in [
+        // The manifest's subject, with no role of the App's client.
+        with_client_roles("app-alerts", "app-alerts", &[]),
+        // The role on another App's client.
+        with_client_roles("app-other", "app-other", &["editor"]),
+        // The App's client roles in a token another client obtained.
+        with_client_roles("edge", "app-alerts", &["editor"]),
+        // A realm role and a group named like the role.
+        json!({
+            "preferred_username": "someone@hel.fi",
+            "azp": "app-alerts",
+            "realm_access": { "roles": ["editor"] },
+            "groups": ["alert-editors", "editor"],
+        }),
+    ] {
+        let (_, on_app) = granted(&fixture, APP_SLUG, Some(viewer.clone())).await;
+        assert_eq!(on_app, ["AppRead"], "{viewer}");
+    }
+}
+
+/// An endpoint no App generated keeps its manifest's subjects: a role's user matches the token's
+/// `preferred_username` whatever its case, its group matches the `groups` claim with or without
+/// the leading slash, and nobody else holds it.
+#[tokio::test]
+async fn a_hand_written_endpoints_role_goes_to_its_user_and_its_group_and_to_nobody_else() {
     let fixture = fixture(Audience::Organization);
     for editor in [
         json!({ "preferred_username": "jana.kovacova@hel.fi" }),
@@ -180,16 +247,16 @@ async fn a_named_role_goes_to_its_user_and_its_group_and_to_nobody_else() {
         json!({ "preferred_username": "someone@hel.fi", "groups": ["alert-editors"] }),
         json!({ "preferred_username": "someone@hel.fi", "groups": ["/alert-editors"] }),
     ] {
-        let (_, on_app) = granted(&fixture, APP_SLUG, Some(editor.clone())).await;
-        assert_eq!(on_app, ["AppRead", "EditorWrite"], "{editor}");
+        let (_, on_hand) = granted(&fixture, HAND_SLUG, Some(editor.clone())).await;
+        assert_eq!(on_hand, ["HandWrite"], "{editor}");
     }
     for viewer in [
         json!({ "preferred_username": "someone@hel.fi" }),
         json!({ "preferred_username": "jana.kovacova@hel.fi.evil.org" }),
         json!({ "preferred_username": "someone@hel.fi", "groups": ["alert-editors-2", "editor"] }),
     ] {
-        let (_, on_app) = granted(&fixture, APP_SLUG, Some(viewer.clone())).await;
-        assert_eq!(on_app, ["AppRead"], "{viewer}");
+        let (_, on_hand) = granted(&fixture, HAND_SLUG, Some(viewer.clone())).await;
+        assert!(on_hand.is_empty(), "{viewer}: {on_hand:?}");
     }
 }
 

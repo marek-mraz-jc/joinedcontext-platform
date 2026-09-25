@@ -20,8 +20,13 @@ use std::sync::Arc;
 pub struct EndpointRoles {
     /// Held by every caller the endpoint admits, when the manifest sets `callerRole`.
     pub caller: Option<String>,
-    /// Each role's full name, [`jc_core::kinds::endpoint_role`], and who holds it.
-    pub named: Vec<(String, Vec<jc_core::kinds::Subject>)>,
+    /// Each role: its name in the manifest, its full name, [`jc_core::kinds::endpoint_role`],
+    /// and who holds it.
+    pub named: Vec<(String, String, Vec<jc_core::kinds::Subject>)>,
+    /// `app-{name}` when this is the Endpoint the Portal generated for App `{name}`: its named
+    /// roles are then held by the roles a token of that client carries for it, and by no
+    /// subject (ADR-N-030 §3.4).
+    pub app_client: Option<String>,
 }
 
 impl EndpointRoles {
@@ -36,30 +41,53 @@ impl EndpointRoles {
                 .iter()
                 .map(|role| {
                     (
+                        role.name.clone(),
                         jc_core::kinds::endpoint_role(project, endpoint, Some(&role.name)),
                         role.subjects.clone(),
                     )
                 })
                 .collect(),
+            app_client: None,
+        }
+    }
+
+    /// [`Self::of`] for the Endpoint an App's client reaches (ADR-N-030, AP-97).
+    pub fn of_app(
+        project: &str,
+        endpoint: &str,
+        spec: &jc_core::kinds::EndpointSpec,
+        client: String,
+    ) -> Self {
+        Self {
+            app_client: Some(client),
+            ..Self::of(project, endpoint, spec)
         }
     }
 
     /// The roles this endpoint gives a caller who signed in as `user` (the token's
-    /// `preferred_username`, the e-mail in this realm) with `groups`.
+    /// `preferred_username`, the e-mail in this realm) with `groups`, and whose token carries
+    /// `client_roles` for this endpoint's App client ([`crate::auth::token::Claims::client_roles`]).
     pub fn held_by<'a>(
         &'a self,
         user: Option<&'a str>,
         groups: &'a BTreeSet<String>,
+        client_roles: &'a [String],
     ) -> impl Iterator<Item = &'a str> + 'a {
-        let named = self.named.iter().filter_map(move |(role, subjects)| {
-            subjects
-                .iter()
-                .any(|subject| match (&subject.user, &subject.group) {
-                    (Some(wanted), None) => user.is_some_and(|u| u.eq_ignore_ascii_case(wanted)),
-                    (None, Some(wanted)) => groups.contains(wanted),
-                    _ => false,
-                })
-                .then_some(role.as_str())
+        let named = self.named.iter().filter_map(move |(name, role, subjects)| {
+            let held = if self.app_client.is_some() {
+                client_roles.contains(name)
+            } else {
+                subjects
+                    .iter()
+                    .any(|subject| match (&subject.user, &subject.group) {
+                        (Some(wanted), None) => {
+                            user.is_some_and(|u| u.eq_ignore_ascii_case(wanted))
+                        }
+                        (None, Some(wanted)) => groups.contains(wanted),
+                        _ => false,
+                    })
+            };
+            held.then_some(role.as_str())
         });
         self.caller.as_deref().into_iter().chain(named)
     }

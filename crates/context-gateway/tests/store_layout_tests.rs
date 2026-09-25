@@ -186,3 +186,49 @@ fn an_endpoint_slug_claimed_by_two_projects_is_refused() {
         "the last table keeps serving"
     );
 }
+
+/// ADR-N-030, AP-97: the Endpoint `app-{name}` of a project that declares the App `{name}` is
+/// that App's, reached by its client `app-{name}`; one named like an App nobody declares there,
+/// and every other endpoint, gives its roles to the subjects its manifest names.
+#[test]
+fn an_apps_own_endpoint_is_known_by_the_app_declared_beside_it() {
+    let (org, checkouts) = organization("app-client");
+    let dir = checkouts.projects.join("ovzdusie");
+    write(
+        &dir,
+        "apps/radar/app.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: radar\n  \
+         namespace: ovzdusie\nspec:\n  kind: static\n  source:\n    path: ./src\n  build:\n    \
+         node: \"22\"\n  visibility: organization\n  lifecycle: published\n  dataNeeds: []\n",
+    );
+    for (name, slug) in [
+        ("app-radar", "r4d4rr4d4rr4d4rr4d4rr4d4rr"),
+        ("app-ghost", "ghqstghqstghqstghqstghqstg"),
+    ] {
+        write(
+            &dir,
+            &format!("spaces/ovzdusie/endpoints/{name}.yaml"),
+            &format!(
+                "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: {name}\n  \
+                 namespace: ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  slug: {slug}\n  \
+                 audience: organization\n  enabledRepresentations: [\"ngsi-ld\"]\n  callerRole: true\n"
+            ),
+        );
+    }
+    let (endpoints, ..) = store::load_from(&org, Some(&checkouts)).expect("assembles");
+    let client = |slug: &str| {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.slug == slug)
+            .unwrap_or_else(|| panic!("{slug} is served"))
+            .roles
+            .app_client
+            .clone()
+    };
+    assert_eq!(
+        client("r4d4rr4d4rr4d4rr4d4rr4d4rr").as_deref(),
+        Some("app-radar")
+    );
+    assert_eq!(client("ghqstghqstghqstghqstghqstg"), None);
+    assert_eq!(client(AIR), None);
+}
