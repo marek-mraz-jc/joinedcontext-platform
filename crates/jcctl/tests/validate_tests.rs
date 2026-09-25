@@ -823,3 +823,70 @@ fn a_write_open_to_everyone_is_a_warning_and_a_role_gated_one_is_not() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn project(dir: &Path, name: &str) {
+    write(
+        dir,
+        &format!("projects/{name}/project.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: {name}\n  \
+             namespace: org\nspec:\n  organizationRef: banskabystrica\n"
+        ),
+    );
+}
+
+fn space(dir: &Path, project: &str, name: &str, pin: Option<&str>) {
+    let pin = pin.map_or(String::new(), |pin| format!("  urnSegment: {pin}\n"));
+    write(
+        dir,
+        &format!("projects/{project}/spaces/{name}/space.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: \
+             {name}\n  namespace: {project}\nspec:\n  isSandbox: false\n{pin}"
+        ),
+    );
+}
+
+fn segment_clashes(dir: &Path) -> Vec<String> {
+    validate::run(dir)
+        .findings
+        .into_iter()
+        .map(|f| f.message)
+        .filter(|m| m.contains("PF-44"))
+        .collect()
+}
+
+/// PF-44, AP-115: two projects' spaces rendering one id segment are refused at each manifest,
+/// naming both projects: `a-b`/`c` and `a`/`b-c` both render `a-b-c`, and so do two equal pins.
+#[test]
+fn two_projects_spaces_rendering_one_id_segment_are_refused_naming_both() {
+    let dir = valid_repo("space-segment-clash");
+    for name in ["mesto", "mesto-doprava"] {
+        project(&dir, name);
+    }
+    space(&dir, "mesto-doprava", "linky", None);
+    space(&dir, "mesto", "doprava-linky", None);
+    let found = segment_clashes(&dir);
+    assert_eq!(found.len(), 2, "each manifest is located: {found:?}");
+    for message in &found {
+        assert!(
+            message.contains("'mesto-doprava-linky'")
+                && message.contains("mesto and mesto-doprava"),
+            "names both: {message}"
+        );
+    }
+
+    // A pin moves one of them off the segment; pinning the other's segment clashes again.
+    space(&dir, "mesto", "doprava-linky", Some("mesto-linky"));
+    assert!(
+        segment_clashes(&dir).is_empty(),
+        "{:?}",
+        segment_clashes(&dir)
+    );
+    space(&dir, "ovzdusie", "ovzdusie", Some("mesto-linky"));
+    let found = segment_clashes(&dir);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].contains("mesto and ovzdusie"), "{found:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -434,7 +434,10 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
         });
     }
 
-    for (location, message) in app_names_claimed_twice(&repo) {
+    for (location, message) in app_names_claimed_twice(&repo)
+        .into_iter()
+        .chain(space_segments_claimed_twice(&repo))
+    {
         report.findings.push(Finding {
             path: location.0,
             document: location.1,
@@ -644,28 +647,65 @@ fn app_writes_open_to_everyone(repo: &Repository) -> Vec<(Location, String)> {
 /// Every `App` whose name another project's `App` also declares (AP-14a): `/apps/{name}/` and
 /// the pod `app-{name}` are one address for the organization, so the edge cannot serve both.
 fn app_names_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
-    let mut projects: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for (id, _) in repo.iter().filter(|(id, _)| id.kind == "App") {
-        projects
-            .entry(id.name.as_str())
-            .or_default()
-            .insert(id.namespace.as_deref().unwrap_or_default());
+    claimed_twice(
+        repo,
+        "App",
+        |_, name| name.to_owned(),
+        |name, _, projects| {
+            format!(
+                "App {name} is declared by projects {projects}; /apps/{name}/ is one address for \
+                 the whole organization, rename all but one (AP-14a)"
+            )
+        },
+    )
+}
+
+/// Every `ContextSpace` whose `{space}` id segment another project's space also renders (PF-44,
+/// PF-84, AP-115): `{project}-{name}` of `a-b`/`c` and `a`/`b-c` are one segment, and so are two
+/// equal `urnSegment` pins, and an id could then land in either space.
+fn space_segments_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
+    claimed_twice(
+        repo,
+        "ContextSpace",
+        |project, name| repo.space_segment(project, name),
+        |name, segment, projects| {
+            format!(
+                "Context Space {name} renders the id segment '{segment}', which projects \
+                 {projects} all render; a segment is unique in the organization, rename the \
+                 space or pin spec.urnSegment (PF-44, PF-84)"
+            )
+        },
+    )
+}
+
+/// Every `kind` manifest whose `key` another project's manifest of that kind also has, located
+/// and named with every project holding it: `message(name, key, "a and b")`.
+fn claimed_twice(
+    repo: &Repository,
+    kind: &str,
+    key: impl Fn(&str, &str) -> String,
+    message: impl Fn(&str, &str, &str) -> String,
+) -> Vec<(Location, String)> {
+    let of_kind = || {
+        repo.iter()
+            .filter(move |(id, _)| id.kind == kind)
+            .map(|(id, resource)| {
+                let project = id.namespace.as_deref().unwrap_or_default();
+                (id, resource, project, key(project, &id.name))
+            })
+    };
+    let mut projects: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for (_, _, project, key) in of_kind() {
+        projects.entry(key).or_default().insert(project);
     }
-    repo.iter()
-        .filter(|(id, _)| id.kind == "App")
-        .filter_map(|(id, resource)| {
-            let claimants = projects.get(id.name.as_str())?;
+    of_kind()
+        .filter_map(|(id, resource, _, key)| {
+            let claimants = projects.get(&key)?;
             (claimants.len() > 1).then(|| {
                 let names: Vec<&str> = claimants.iter().copied().collect();
                 (
                     (resource.path.clone(), resource.document, resource.line),
-                    format!(
-                        "App {} is declared by projects {}; /apps/{}/ is one address for the \
-                         whole organization, rename all but one (AP-14a)",
-                        id.name,
-                        names.join(" and "),
-                        id.name
-                    ),
+                    message(&id.name, &key, &names.join(" and ")),
                 )
             })
         })
