@@ -281,11 +281,12 @@ async fn probes_and_unlimited_endpoints_are_never_throttled() {
     }
 }
 
-/// T-0813: the canonical surface of a space is the one a member uses directly, and it was
-/// counted by nothing in the gateway — the limiter matched `/api/endpoint/` alone, so one
-/// client could spend the edge's shared anonymous bucket for everybody.
+/// T-2775, SP-22, EP-20: a space declares no limit and the gateway applies no default of its
+/// own, so the canonical surface is never counted here. It used to be counted in a bucket of 600
+/// a minute, burst 50, that nobody chose (`SPACE_DEFAULT`); the edge's anti-flood bucket is the
+/// only count left in front of it.
 #[tokio::test]
-async fn the_canonical_space_surface_is_counted_per_caller() {
+async fn the_canonical_space_surface_is_not_limited() {
     use context_gateway::resolver::Space;
     use jc_core::kinds::PolicySpec;
 
@@ -309,7 +310,7 @@ information:
             project: SPACE.to_owned(),
             base_path: format!("/cs/{SPACE}"),
             representations: vec![Representation::NgsiLd, Representation::Mcp],
-            // The record carries none: the limiter's own default is what counts it.
+            // A space's record never carries one (store.rs builds it with none).
             rate_limit: None,
             policies: vec![policy],
             ..endpoint(None)
@@ -340,31 +341,14 @@ information:
         .expect("the gateway answers")
     };
 
-    let first = read(app.clone(), "203.0.113.7").await;
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(
-        first
-            .headers()
-            .get("ratelimit-limit")
-            .and_then(|value| value.to_str().ok()),
-        Some("600"),
-        "the surface advertises the bucket it is counted in (MIM0-R7)"
-    );
-
-    // The burst is 50 and the read above spent one of them: 49 more empty it.
-    for _ in 0..49 {
-        assert_eq!(
-            read(app.clone(), "203.0.113.7").await.status(),
-            StatusCode::OK
+    // Past the burst the old default allowed, from one address.
+    for _ in 0..60 {
+        let answer = read(app.clone(), "203.0.113.7").await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert!(
+            !answer.headers().contains_key("ratelimit-limit"),
+            "a surface nobody limited advertises no quota"
         );
+        assert!(answer.headers().get("retry-after").is_none());
     }
-    let refused = read(app.clone(), "203.0.113.7").await;
-    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert!(refused.headers().get("retry-after").is_some());
-
-    // And the caller next to it still has its own: the bucket is per caller, not per space.
-    assert_eq!(
-        read(app.clone(), "198.51.100.4").await.status(),
-        StatusCode::OK
-    );
 }
