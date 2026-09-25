@@ -69,7 +69,7 @@ fn second_endpoint() -> String {
 }
 
 fn gateway_on(dir: &Path) -> Arc<Gateway> {
-    let (endpoints, spaces, _accounts, _federations, _agreements) =
+    let (endpoints, spaces, _accounts, _federations, _agreements, _) =
         store::load(dir).expect("the repository loads");
     Arc::new(
         Gateway::new(

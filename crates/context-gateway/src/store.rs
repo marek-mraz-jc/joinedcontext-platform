@@ -31,7 +31,62 @@ pub type Tables = (
     ServiceAccounts,
     Federations,
     Agreements,
+    Limits,
 );
+
+const GATEWAY_BODY: &str = "spec.limits.gateway.maxRequestBodyMegabytes";
+
+/// What the organization's manifest bounds on every request the gateway reads (ADR-N-035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The largest request body the gateway reads, in bytes
+    /// (`spec.limits.gateway.maxRequestBodyMegabytes`).
+    pub max_request_body: usize,
+}
+
+impl Default for Limits {
+    /// The catalog's defaults: what an organization that sets nothing gets.
+    fn default() -> Self {
+        Self::of(None)
+    }
+}
+
+impl Limits {
+    /// The value in force for `set` megabytes: the catalog's default when absent, held inside
+    /// the catalog's range. The Portal refuses a manifest past the operator's bound before it is
+    /// merged, so the range here is the last line, not the first.
+    fn of(set: Option<u32>) -> Self {
+        let entry = jc_core::kinds::org_settings::entry_at(GATEWAY_BODY);
+        let megabytes = set
+            .or_else(|| entry.and_then(|entry| entry.default))
+            .unwrap_or(8);
+        let (min, max) = entry.map_or((1, None), |entry| (entry.min, entry.max));
+        let megabytes = megabytes.min(max.unwrap_or(u32::MAX)).max(min);
+        Self {
+            max_request_body: megabytes as usize * 1024 * 1024,
+        }
+    }
+}
+
+/// The limits the repository's `Organization` sets. Only its `spec.limits` is read, so a field
+/// this gateway does not know yet elsewhere in the manifest never turns them back into the
+/// defaults; limits that do not parse are the defaults, and the log says so.
+pub fn limits_of(repo: &Repository) -> Limits {
+    let Some(limits) = repo
+        .iter()
+        .find(|(id, _)| id.kind == "Organization")
+        .and_then(|(_, loaded)| loaded.manifest.spec.get("limits"))
+    else {
+        return Limits::default();
+    };
+    match serde_json::from_value::<jc_core::kinds::OrganizationLimits>(limits.clone()) {
+        Ok(limits) => Limits::of(limits.gateway.max_request_body_megabytes),
+        Err(error) => {
+            tracing::warn!(%error, "the Organization's spec.limits do not parse; the defaults apply");
+            Limits::default()
+        }
+    }
+}
 
 /// Where a layout 2 organization's projects are read and assembled (CC-86, ADR-N-029).
 ///
@@ -117,6 +172,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         accounts_of(repo),
         federations_of(repo),
         agreements_of(repo),
+        limits_of(repo),
     )
 }
 
@@ -129,7 +185,8 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements) = load_from(dir, checkouts)?;
+    let (mut endpoints, mut spaces, accounts, federations, agreements, limits) =
+        load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -163,7 +220,7 @@ pub fn load_with_previews(
                 .filter(|space| !segments.contains(&space.endpoint.space)),
         );
     }
-    Ok((endpoints, spaces, accounts, federations, agreements))
+    Ok((endpoints, spaces, accounts, federations, agreements, limits))
 }
 
 /// The endpoint table a loaded repository describes.

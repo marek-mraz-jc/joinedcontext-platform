@@ -93,7 +93,7 @@ impl Reaper {
             self.checkouts.as_ref(),
             self.previews.as_deref(),
         ) {
-            Ok((endpoints, spaces, accounts, federations, agreements)) => {
+            Ok((endpoints, spaces, accounts, federations, agreements, limits)) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
                 // grant the PDP would have honoured; the space table carries the same
@@ -112,6 +112,8 @@ impl Reaper {
                 // reconcile that withdraws the `Policy` entities compiled from it, so an
                 // outstanding transfer token names an agreement nobody serves any more.
                 self.gateway.replace_agreements(agreements);
+                // ADR-N-035: a changed body limit holds from the next request on.
+                self.gateway.replace_limits(limits);
                 self.seen = current;
                 tracing::info!(
                     endpoints = counts.0,

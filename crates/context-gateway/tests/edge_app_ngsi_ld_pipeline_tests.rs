@@ -338,6 +338,49 @@ async fn a_body_larger_than_max_body_is_400_not_a_panic() {
     assert!(broker.asked().is_empty());
 }
 
+/// ADR-N-035: the organization's `spec.limits.gateway.maxRequestBodyMegabytes` is the ceiling,
+/// and the refusal names it and who can change it; a body inside it is not refused for its size.
+#[tokio::test]
+async fn a_body_past_the_organizations_limit_is_400_naming_the_setting() {
+    let broker = Stub::start(StatusCode::CREATED, &[], "").await;
+    let gateway = Gateway::new(
+        Broker::new(&broker.url),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve([endpoint()]);
+    gateway.replace_limits(context_gateway::store::Limits {
+        max_request_body: 1024 * 1024,
+    });
+    let app = router(Arc::new(gateway));
+
+    let (status, _, body) = send(
+        app.clone(),
+        Method::POST,
+        &ngsi("/entities"),
+        Some("application/json"),
+        vec![b' '; 1024 * 1024 + 1],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("1 MiB"), "{body}");
+    assert!(body.contains("maxRequestBodyMegabytes"), "{body}");
+    assert!(body.contains("Organization settings"), "{body}");
+    assert!(broker.asked().is_empty());
+
+    let mut inside = br#"{"id":"urn:ngsi-ld:T:banskabystrica.sk:ovzdusie:1","type":"T"}"#.to_vec();
+    inside.resize(1024 * 1024, b' ');
+    let (_, _, body) = send(
+        app,
+        Method::POST,
+        &ngsi("/entities"),
+        Some("application/json"),
+        inside,
+    )
+    .await;
+    assert!(!body.contains("maxRequestBodyMegabytes"), "{body}");
+}
+
 /// CIM 009 6.3.2: a write whose media type the surface does not take is refused before its body
 /// is parsed, so a body that would not parse either still gets the media-type answer.
 #[tokio::test]
