@@ -45,6 +45,147 @@ fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
         .unwrap_or_else(|_| body.clone())
 }
 
+/// Whether the call asks for a stream (`"stream": true`, ADR-N-032).
+fn wants_stream(body: &Bytes) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// A streamed chat completion that asks for the usage chunk, so the proxy can count the call:
+/// OpenAI-compatible providers send it only when `stream_options.include_usage` is set. A body
+/// that already says, or Anthropic's messages (whose stream always carries usage), is left alone.
+fn with_stream_usage(body: &Bytes, rest: &str) -> Bytes {
+    if rest.ends_with("messages") {
+        return body.clone();
+    }
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(body) else {
+        return body.clone();
+    };
+    let options = map.entry("stream_options").or_insert_with(|| json!({}));
+    let Value::Object(options) = options else {
+        return body.clone();
+    };
+    options.entry("include_usage").or_insert(json!(true));
+    serde_json::to_vec(&map)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
+}
+
+/// What a stream that reports no usage is counted as: the output it was allowed and a quarter of
+/// its body's bytes for the input. Never nothing: the budget is a cost control (AG-41).
+fn uncounted_stream(body: &Bytes) -> u64 {
+    let allowed = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("max_tokens").and_then(Value::as_u64))
+        .unwrap_or(STREAM_OUTPUT_UNSAID);
+    allowed + body.len() as u64 / 4
+}
+
+/// The output a stream is counted for when its request names no `max_tokens`.
+const STREAM_OUTPUT_UNSAID: u64 = 8192;
+
+/// The longest line of a stream the usage reader keeps; a longer one is dropped unread.
+const STREAM_LINE_MAX: usize = 1 << 20;
+
+/// The usage a provider reports inside its stream, read line by line as the chunks pass.
+#[derive(Default)]
+struct StreamUsage {
+    line: Vec<u8>,
+    total: Option<u64>,
+    input: u64,
+    output: u64,
+}
+
+impl StreamUsage {
+    fn feed(&mut self, chunk: &[u8]) {
+        for &byte in chunk {
+            if byte == b'\n' {
+                let line = std::mem::take(&mut self.line);
+                self.read_line(&line);
+            } else if self.line.len() < STREAM_LINE_MAX {
+                self.line.push(byte);
+            }
+        }
+    }
+
+    fn read_line(&mut self, line: &[u8]) {
+        let Some(data) = std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| line.trim().strip_prefix("data:"))
+        else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
+            return;
+        };
+        // OpenAI-compatible: `usage` on the last chunk. Anthropic: `message.usage` on
+        // `message_start` (the input), `usage` on `message_delta` (the output so far).
+        let Some(usage) = value
+            .get("usage")
+            .or_else(|| value.pointer("/message/usage"))
+        else {
+            return;
+        };
+        let count = |keys: &[&str]| keys.iter().find_map(|key| usage.get(*key)?.as_u64());
+        if let Some(total) = count(&["total_tokens"]) {
+            self.total = Some(total);
+        }
+        self.input = self
+            .input
+            .max(count(&["prompt_tokens", "input_tokens"]).unwrap_or(0));
+        self.output = self
+            .output
+            .max(count(&["completion_tokens", "output_tokens"]).unwrap_or(0));
+    }
+
+    fn tokens(&self) -> Option<u64> {
+        self.total
+            .or_else(|| (self.input + self.output > 0).then_some(self.input + self.output))
+    }
+}
+
+/// The tokens of one call, counted against the run and reported to the Portal (AG-41).
+fn record_usage(
+    state: &ProxyState,
+    run_id: &str,
+    tokens: u64,
+) -> impl std::future::Future<Output = ()> {
+    let state = state.clone();
+    let run_id = run_id.to_owned();
+    async move {
+        if tokens == 0 {
+            return;
+        }
+        state.limits.record_tokens(&run_id, tokens).await;
+        let portal_base = state.config.portal_base.clone();
+        let http = state.http.clone();
+        let credentials = state.credentials.clone();
+        tokio::spawn(async move {
+            // The report travels on the same identity as every other callback, minted in the
+            // spawned task so the answer to the run is never held up for the realm. A realm
+            // that cannot be reached costs this report and nothing else.
+            let Ok(bearer) = credentials.get_portal_token().await else {
+                tracing::warn!(run = %run_id, "no token to report usage with");
+                return;
+            };
+            let mut url = portal_base;
+            url.set_path("internal/agent-runs/events");
+            let _ = http
+                .post(url)
+                .bearer_auth(bearer)
+                .json(&serde_json::json!({
+                    "runId": run_id,
+                    "kind": "usage",
+                    "payload": { "tokensThisStep": tokens }
+                }))
+                .send()
+                .await;
+        });
+    }
+}
+
 pub async fn handler(
     State(state): State<ProxyState>,
     method: Method,
@@ -93,6 +234,13 @@ pub async fn handler(
         Some(effort) => with_reasoning(&body_bytes, &rest, effort),
         None => body_bytes,
     };
+    let streamed = wants_stream(&body_bytes);
+    let body_bytes = if streamed {
+        with_stream_usage(&body_bytes, &rest)
+    } else {
+        body_bytes
+    };
+    let uncounted = uncounted_stream(&body_bytes);
 
     let target_url = format!(
         "{}/{}",
@@ -128,6 +276,16 @@ pub async fn handler(
     {
         return refusal;
     }
+    if streamed && status.is_success() {
+        let call = Streamed {
+            run,
+            method,
+            rest,
+            uncounted,
+            start,
+        };
+        return stream_through(state, call, status, upstream_resp);
+    }
     let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
 
     // Extract token usage
@@ -146,36 +304,7 @@ pub async fn handler(
         } else {
             0
         };
-
-        if tokens > 0 {
-            state.limits.record_tokens(&run.id, tokens).await;
-            // Report usage asynchronously to Portal
-            let portal_base = state.config.portal_base.clone();
-            let run_id = run.id.clone();
-            let http = state.http.clone();
-            let credentials = state.credentials.clone();
-            tokio::spawn(async move {
-                // The report travels on the same identity as every other callback, minted in the
-                // spawned task so the answer to the run is never held up for the realm. A realm
-                // that cannot be reached costs this report and nothing else.
-                let Ok(bearer) = credentials.get_portal_token().await else {
-                    tracing::warn!(run = %run_id, "no token to report usage with");
-                    return;
-                };
-                let mut url = portal_base;
-                url.set_path("internal/agent-runs/events");
-                let _ = http
-                    .post(url)
-                    .bearer_auth(bearer)
-                    .json(&serde_json::json!({
-                        "runId": run_id,
-                        "kind": "usage",
-                        "payload": { "tokensThisStep": tokens }
-                    }))
-                    .send()
-                    .await;
-            });
-        }
+        record_usage(&state, &run.id, tokens).await;
     }
 
     log_request(&AuditEntry {
@@ -193,6 +322,84 @@ pub async fn handler(
         .status(status)
         .header("Content-Type", "application/json")
         .body(Body::from(resp_bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// One streamed call: whose it is, what it asked and what it counts as without a usage.
+struct Streamed {
+    run: std::sync::Arc<crate::runs::RunContext>,
+    method: Method,
+    rest: String,
+    uncounted: u64,
+    start: Instant,
+}
+
+/// A stream passed through chunk by chunk (ADR-N-032). Its usage is read as it passes and
+/// counted before the stream closes, so a caller that read to the end finds the call charged; a
+/// stream without usage, or one the caller leaves, is counted as `uncounted` and the provider's
+/// request is dropped with it.
+fn stream_through(
+    state: ProxyState,
+    call: Streamed,
+    status: StatusCode,
+    upstream: reqwest::Response,
+) -> Response {
+    let Streamed {
+        run,
+        method,
+        rest,
+        uncounted,
+        start,
+    } = call;
+    use futures::StreamExt;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+    tokio::spawn(async move {
+        let mut chunks = upstream.bytes_stream();
+        let mut usage = StreamUsage::default();
+        let mut bytes = 0usize;
+        let mut whole = true;
+        while let Some(chunk) = chunks.next().await {
+            match chunk {
+                Ok(chunk) => {
+                    bytes += chunk.len();
+                    usage.feed(&chunk);
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        whole = false;
+                        break;
+                    }
+                }
+                Err(err) => {
+                    whole = false;
+                    let _ = tx.send(Err(std::io::Error::other(err))).await;
+                    break;
+                }
+            }
+        }
+        let tokens = match usage.tokens() {
+            Some(tokens) if whole => tokens,
+            seen => seen.unwrap_or(0).max(uncounted),
+        };
+        record_usage(&state, &run.id, tokens).await;
+        log_request(&AuditEntry {
+            run_id: &run.id,
+            user: &run.created_by,
+            upstream: "model-provider",
+            method: method.as_str(),
+            path: &rest,
+            status: status.as_u16(),
+            bytes,
+            duration_ms: start.elapsed().as_millis(),
+        });
+        drop(tx);
+    });
+    let body = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (chunk, rx))
+    });
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .body(Body::from_stream(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -235,5 +442,45 @@ mod tests {
             .is_none());
         let not_json = Bytes::from_static(b"not json");
         assert_eq!(with_reasoning(&not_json, "messages", "high"), not_json);
+    }
+
+    #[test]
+    fn a_stream_is_counted_from_its_own_usage_frames_split_anywhere() {
+        let anthropic = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":90,\"output_tokens\":1}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":30}}\n\n";
+        let mut usage = StreamUsage::default();
+        for piece in anthropic.as_bytes().chunks(7) {
+            usage.feed(piece);
+        }
+        assert_eq!(usage.tokens(), Some(120));
+
+        let mut openai = StreamUsage::default();
+        openai.feed(b"data: {\"usage\":{\"total_tokens\":42}}\n\ndata: [DONE]\n\n");
+        assert_eq!(openai.tokens(), Some(42));
+        let mut none = StreamUsage::default();
+        none.feed(b"data: {\"choices\":[]}\n\n: keep-alive\n");
+        assert_eq!(none.tokens(), None);
+    }
+
+    #[test]
+    fn a_streamed_chat_asks_for_its_usage_and_messages_are_left_alone() {
+        let asked = |body: &str, rest: &str| -> Value {
+            serde_json::from_slice(&with_stream_usage(&Bytes::from(body.to_owned()), rest)).unwrap()
+        };
+        let chat = asked(r#"{"stream":true}"#, "v1/chat/completions");
+        assert_eq!(chat["stream_options"], json!({ "include_usage": true }));
+        let own = asked(
+            r#"{"stream":true,"stream_options":{"include_usage":false}}"#,
+            "chat/completions",
+        );
+        assert_eq!(own["stream_options"], json!({ "include_usage": false }));
+        assert!(asked(r#"{"stream":true}"#, "v1/messages")
+            .get("stream_options")
+            .is_none());
+        assert!(wants_stream(&Bytes::from_static(br#"{"stream":true}"#)));
+        assert!(!wants_stream(&Bytes::from_static(b"not json")));
+        assert_eq!(
+            uncounted_stream(&Bytes::from_static(br#"{"max_tokens":60}"#)),
+            60 + 4
+        );
     }
 }

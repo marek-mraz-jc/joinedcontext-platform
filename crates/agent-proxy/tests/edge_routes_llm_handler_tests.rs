@@ -442,3 +442,75 @@ async fn a_body_that_is_not_json_is_forwarded_unchanged() {
         "the bytes travelled as they arrived"
     );
 }
+
+/// T-2821, ADR-N-032: a streamed call passes through as the provider's events, and the usage
+/// its last chunk reports is counted before the stream ends, so the next call past the budget
+/// is refused as for a whole answer.
+#[tokio::test]
+async fn a_stream_passes_through_and_its_usage_is_counted() {
+    let provider = MockServer::start().await;
+    let stream = "data: {\"choices\":[{\"delta\":{\"content\":\"Two stations\"}}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{\"content\":\" are empty.\"}}]}\n\n\
+                  data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120}}\n\n\
+                  data: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::body_partial_json(serde_json::json!({
+            "stream": true,
+            "stream_options": { "include_usage": true }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(stream, "text/event-stream"))
+        .mount(&provider)
+        .await;
+    let app = proxy(&provider.uri(), 0, 100);
+    let ask = || {
+        authed("POST", "/v1/llm/v1/chat/completions")
+            .body(body(r#"{"model":"m","stream":true,"max_tokens":50}"#))
+            .expect("a request")
+    };
+    let first = app.clone().oneshot(ask()).await.expect("an answer");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        first.headers()["content-type"],
+        "text/event-stream",
+        "the provider's events, not a JSON body"
+    );
+    let text = body_of(first).await;
+    assert!(
+        text.contains("Two stations") && text.contains("[DONE]"),
+        "{text}"
+    );
+    let second = app.oneshot(ask()).await.expect("an answer");
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// AG-41: a stream that reports no usage is never free: it counts as the output it was allowed
+/// plus a quarter of its body, so a run cannot stream past its budget.
+#[tokio::test]
+async fn a_stream_without_usage_counts_as_what_it_was_allowed() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .mount(&provider)
+        .await;
+    let app = proxy(&provider.uri(), 0, 100);
+    let ask = |max: u64| {
+        authed("POST", "/v1/llm/v1/chat/completions")
+            .body(body(&format!(
+                r#"{{"model":"m","stream":true,"max_tokens":{max}}}"#
+            )))
+            .expect("a request")
+    };
+    // 60 allowed plus the body's quarter stays under 100; the next such call goes over.
+    let first = app.clone().oneshot(ask(60)).await.expect("an answer");
+    assert_eq!(first.status(), StatusCode::OK);
+    body_of(first).await;
+    let second = app.clone().oneshot(ask(60)).await.expect("an answer");
+    assert_eq!(second.status(), StatusCode::OK);
+    body_of(second).await;
+    let third = app.oneshot(ask(60)).await.expect("an answer");
+    assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
+}
