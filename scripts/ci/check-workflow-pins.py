@@ -12,7 +12,8 @@ image under the project's name and mint the identity that signs it. A workflow-l
 both to every job in the file, including one added later for something unrelated.
 
 Line-based on purpose: the runner has no YAML library installed by default, and both rules are
-decidable from the text. Run it from anywhere: `python3 scripts/ci/check-workflow-pins.py`.
+decidable from the text. A third rule, OPS-41: an image a workflow signs by digest also has a
+CycloneDX SBOM attested to that digest. Run it from anywhere: `python3 scripts/ci/check-workflow-pins.py`.
 """
 
 import re
@@ -23,10 +24,36 @@ WORKFLOWS = Path(__file__).resolve().parents[2] / ".github/workflows"
 USES = re.compile(r"^\s*(?:- )?uses:\s*(\S+)")
 COMMIT = re.compile(r"@[0-9a-f]{40}$")
 PUBLISHES = ("packages: write", "id-token: write")
+EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
+
+
+def pushed_image(line: str):
+    """The `image@digest` a cosign line names, with its `${{ }}` written without spaces."""
+    tight = EXPRESSION.sub(lambda m: "${{" + m.group(1).replace(" ", "") + "}}", line)
+    refs = [token.strip("\"'") for token in tight.split() if "@${{" in token and "outputs.digest" in token]
+    return refs[-1] if refs else None
+
+
+def unattested(lines):
+    """OPS-41: every image a workflow pushes and signs by digest carries a CycloneDX SBOM attested
+    to that same digest, so a signed image never ships without its bill of materials."""
+    signed, attested = {}, set()
+    for number, line in enumerate(lines, 1):
+        code = line.split("#", 1)[0]
+        if "cosign sign " in code and (image := pushed_image(code)):
+            signed.setdefault(image, number)
+        if "cosign attest " in code and "--type cyclonedx" in code and (image := pushed_image(code)):
+            attested.add(image)
+    return [(number, image) for image, number in signed.items() if image not in attested]
 
 
 def problems(path: Path):
     lines = path.read_text().splitlines()
+    for number, image in unattested(lines):
+        yield (
+            f"{path.name}:{number}: {image} is signed and no CycloneDX SBOM is attested to it "
+            "(`cosign attest --type cyclonedx`, OPS-41)"
+        )
     if not any(line.startswith("permissions:") for line in lines):
         yield f"{path.name}: no top-level `permissions:`; every job would get the repository default"
     for number, line in enumerate(lines, 1):
