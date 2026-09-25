@@ -1,0 +1,34 @@
+# RDF Data Cube structure of the model population (DM-60).
+@prefix qb: <http://purl.org/linked-data/cube#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<https://banskabystrica.sk/ns/PopulationObservationStructure> a qb:DataStructureDefinition ;
+  rdfs:label "PopulationObservation" ;
+  rdfs:comment "The number of inhabitants of one district in one age band at the end of one year." ;
+  qb:component
+    [ qb:dimension <https://banskabystrica.sk/ns/refDistrict> ; qb:order 1 ] ,
+    [ qb:dimension <https://banskabystrica.sk/ns/ageBand> ; qb:order 2 ] ,
+    [ qb:dimension <https://banskabystrica.sk/ns/year> ; qb:order 3 ] ,
+    [ qb:measure <https://banskabystrica.sk/ns/population> ; qb:order 4 ] .
+
+<https://banskabystrica.sk/ns/PopulationObservation> rdfs:subClassOf qb:Observation .
+
+<https://banskabystrica.sk/ns/refDistrict> a rdf:Property, qb:DimensionProperty ;
+  rdfs:label "refDistrict" ;
+  rdfs:comment "The district counted, an entity of the city's territorial register." .
+
+<https://banskabystrica.sk/ns/ageBand> a rdf:Property, qb:DimensionProperty ;
+  rdfs:label "ageBand" ;
+  rdfs:comment "The age band counted, five years wide." .
+
+<https://banskabystrica.sk/ns/year> a rdf:Property, qb:DimensionProperty ;
+  rdfs:label "year" ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "The year at whose end the population was counted." .
+
+<https://banskabystrica.sk/ns/population> a rdf:Property, qb:MeasureProperty ;
+  rdfs:label "population" ;
+  rdfs:range xsd:integer ;
+  rdfs:comment "Inhabitants with permanent residence." .

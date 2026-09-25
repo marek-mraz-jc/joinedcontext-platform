@@ -394,7 +394,7 @@ fn schema_directory(endpoint: &Endpoint, visible: &schema::Visible) -> Vec<(Stri
             .iter()
             .filter(|model| model.major == major)
             .collect();
-        for artifact in schema::Artifact::ALL {
+        for artifact in schema::published(&models, visible) {
             let mut redacted = Vec::new();
             let body = match artifact {
                 schema::Artifact::JsonSchema => {

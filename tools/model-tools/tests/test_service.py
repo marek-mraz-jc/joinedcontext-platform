@@ -34,6 +34,7 @@ ARTIFACT_FIELDS = {
     "shacl",
     "owl",
     "typescript",
+    "qb",
     "generatorVersion",
     "errors",
 }
@@ -480,3 +481,13 @@ def test_the_image_installs_this_package_and_serves_the_service():
     assert "pyproject.toml" in dockerfile, "the image must install the pinned dependencies"
     assert "service" in dockerfile, "the image must start the HTTP face"
     assert "USER" in dockerfile, "the container does not run as root"
+
+
+def test_every_module_of_src_is_installed_into_the_image():
+    """`py-modules` is a list, so a new generator left out of it imports here and not in the
+    image, where `service` fails to start (T-1188 added `gen_qb`)."""
+    block = re.search(r"py-modules = \[(.*?)\]", (PACKAGE / "pyproject.toml").read_text(), re.S)
+    assert block, "pyproject.toml no longer lists py-modules"
+    listed = set(re.findall(r'"([A-Za-z0-9_]+)"', block.group(1)))
+    shipped = {path.stem for path in (PACKAGE / "src").glob("*.py")}
+    assert shipped - listed == set(), "add these to py-modules in pyproject.toml"

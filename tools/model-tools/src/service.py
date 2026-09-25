@@ -42,6 +42,7 @@ from gen_context import compile_context
 from gen_docs import compile_docs
 from gen_example import compile_example
 from gen_json_schema import compile_schema
+from gen_qb import compile_qb
 from gen_rdf_artifacts import compile_owl, compile_shacl
 from gen_typescript import compile_typescript
 from infer_schema import MAX_SAMPLE_BYTES, SampleError, infer
@@ -81,6 +82,8 @@ CATALOGUE_TTL_SECONDS = 24 * 60 * 60
 #: The first four are the set DM-02 commits beside the source, in that order; SHACL and OWL
 #: are DM-44's artifact-store set and are rendered in the same run so they cannot disagree.
 #: `typescript` is the `jc-types.ts` a generated application compiles against (SDK-10).
+#: `qb` is the RDF Data Cube structure, and only a model declaring a Data Structure Definition
+#: has one: its renderer answers None for any other, and the field is then absent (DM-60).
 RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("jsonSchema", compile_schema),
     ("context", compile_context),
@@ -89,6 +92,7 @@ RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("shacl", compile_shacl),
     ("owl", compile_owl),
     ("typescript", compile_typescript),
+    ("qb", compile_qb),
 )
 
 
@@ -121,13 +125,16 @@ def artifacts(
                 # beats a value derived from a range, so the generated one does not replace it.
                 continue
             try:
-                rendered[field] = render(path)
+                artifact = render(path)
             except RelationshipError as err:
                 # Every generator loads the model and refuses it the same way: said once, one
                 # entry per broken rule (DM-68).
                 broken = err.problems
             except Exception as err:  # noqa: BLE001 - a generator crash is a message, not a 500
                 failures.setdefault(str(err).replace(path, "<source>"), []).append(field)
+            else:
+                if artifact is not None:
+                    rendered[field] = artifact
 
     if broken:
         return {"generatorVersion": rendered["generatorVersion"], "errors": broken}

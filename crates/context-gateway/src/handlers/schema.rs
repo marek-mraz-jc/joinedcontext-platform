@@ -70,6 +70,9 @@ pub enum Artifact {
     LinkMl,
     /// The human documentation of the projection (T-0284).
     Markdown,
+    /// The RDF Data Cube structure of the projection, published only where a granted class is
+    /// a Data Structure Definition (DM-60, T-1187).
+    Qb,
 }
 
 impl Artifact {
@@ -78,7 +81,7 @@ impl Artifact {
         match self {
             Artifact::JsonSchema => JSON_SCHEMA,
             Artifact::Context => JSON_LD,
-            Artifact::Shacl | Artifact::Rdf => TURTLE,
+            Artifact::Shacl | Artifact::Rdf | Artifact::Qb => TURTLE,
             Artifact::Owl => TURTLE_OWL,
             Artifact::LinkMl => YAML,
             Artifact::Markdown => MARKDOWN,
@@ -100,6 +103,7 @@ impl Artifact {
             Artifact::Rdf => "model.rdf.ttl",
             Artifact::LinkMl => "model.linkml.yaml",
             Artifact::Markdown => "model.md",
+            Artifact::Qb => "model.qb.ttl",
         }
     }
 
@@ -115,6 +119,7 @@ impl Artifact {
             Artifact::Rdf => "rdf",
             Artifact::LinkMl => "linkml",
             Artifact::Markdown => "markdown",
+            Artifact::Qb => "qb",
         }
     }
 
@@ -123,10 +128,12 @@ impl Artifact {
     pub fn from_format(name: &str) -> Option<Artifact> {
         Artifact::ALL
             .into_iter()
+            .chain([Artifact::Qb])
             .find(|artifact| artifact.format_name() == name)
     }
 
-    /// The seven documents an endpoint publishes about one major (EP-46).
+    /// The seven documents an endpoint publishes about every major (EP-46); [`published`]
+    /// adds [`Artifact::Qb`] where the projection holds a Data Structure Definition.
     pub const ALL: [Artifact; 7] = [
         Artifact::LinkMl,
         Artifact::JsonSchema,
@@ -152,6 +159,7 @@ pub fn artifact_of(segment: &str, accept: &str) -> Option<Artifact> {
         "model.rdf.ttl" | "rdf" => Some(Artifact::Rdf),
         "model.linkml.yaml" | "linkml" => Some(Artifact::LinkMl),
         "model.md" | "docs" => Some(Artifact::Markdown),
+        "model.qb.ttl" | "qb" => Some(Artifact::Qb),
         "model" => Some(negotiated(accept)),
         _ => None,
     }
@@ -201,9 +209,34 @@ pub fn render(models: &[&Model], wanted: Artifact, visible: &Visible) -> String 
         Artifact::Rdf => formalisms::rdf(&classes),
         Artifact::LinkMl => formalisms::linkml(models, &classes),
         Artifact::Markdown => formalisms::markdown(models, &classes),
+        Artifact::Qb => formalisms::qb(&classes).unwrap_or_default(),
         // The two JSON documents have their own builders; this is not the way to them.
         Artifact::JsonSchema | Artifact::Context => String::new(),
     }
+}
+
+/// Whether a class this caller may read is a Data Structure Definition, which is what makes
+/// `model.qb.ttl` a document of this major rather than a `404` (DM-60).
+pub fn declares_dsd(models: &[&Model], visible: &Visible) -> bool {
+    let schema = json_schema(models, visible, &mut Vec::new());
+    let empty = Map::new();
+    let defs = schema
+        .get("$defs")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    formalisms::classes(models, defs)
+        .iter()
+        .any(|class| jc_core::qb::is_dsd(class.definition))
+}
+
+/// The documents one major publishes to this caller, in reading order: [`Artifact::ALL`],
+/// and the cube where a granted class is a Data Structure Definition (DM-60).
+pub fn published(models: &[&Model], visible: &Visible) -> Vec<Artifact> {
+    let mut artifacts = Artifact::ALL.to_vec();
+    if declares_dsd(models, visible) {
+        artifacts.push(Artifact::Qb);
+    }
+    artifacts
 }
 
 /// What one caller may read here: the union of the permissions in force, less whatever a
@@ -408,7 +441,7 @@ pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> S
     json!({ "endpoint": endpoint.slug, "models": models })
 }
 
-/// The seven documents one model publishes, each described by the projection a caller would
+/// The documents one model publishes, each described by the projection a caller would
 /// actually fetch rather than by the file on disk (EP-46, EP-48).
 fn artifacts(models: &[&Model], visible: &Visible, digest: &impl Fn(&[u8]) -> String) -> Value {
     let mut described = Map::new();
@@ -433,7 +466,7 @@ pub fn measured(
     visible: &Visible,
     digest: &impl Fn(&[u8]) -> String,
 ) -> Vec<(Artifact, usize, String)> {
-    Artifact::ALL
+    published(models, visible)
         .into_iter()
         .map(|wanted| {
             let body = match wanted {
