@@ -127,7 +127,14 @@ fn fixture(audience: Audience) -> Fixture {
             endpoint(PLAIN_SLUG, audience, EndpointRoles::default()),
             endpoint(HAND_SLUG, audience, hand_roles()),
         ])
-        .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None),
+        .authenticate(
+            Arc::new(realm.verifier()),
+            // Each App's client reaches the Endpoints its App reads (AP-113).
+            ServiceAccounts::new()
+                .with_app("app-alerts", [APP_SLUG])
+                .with_app("app-other", [APP_SLUG]),
+            None,
+        ),
     ));
     Fixture { realm, app }
 }
@@ -205,14 +212,16 @@ fn with_client_roles(azp: &str, client: &str, roles: &[&str]) -> Value {
 /// AP-97, ADR-N-030: on the App's Endpoint a named role comes from the roles a token of the App's
 /// own client carries for it and from nothing else: not a subject the manifest names, not a
 /// realm role or group of the same name, not another client's roles, not a token another client
-/// obtained. The same token holds nothing of the app's on another endpoint of the space.
+/// obtained. The same token is refused on another endpoint of the space, which its App does not
+/// read (AP-113).
 #[tokio::test]
 async fn a_named_role_comes_from_the_apps_own_client_alone() {
     let fixture = fixture(Audience::Organization);
     let editor = with_client_roles("app-alerts", "app-alerts", &["editor"]);
     let (_, on_app) = granted(&fixture, APP_SLUG, Some(editor.clone())).await;
     assert_eq!(on_app, ["AppRead", "EditorWrite"]);
-    let (_, elsewhere) = granted(&fixture, PLAIN_SLUG, Some(editor)).await;
+    let (status, elsewhere) = granted(&fixture, PLAIN_SLUG, Some(editor)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(elsewhere.is_empty(), "{elsewhere:?}");
 
     for viewer in [
@@ -294,4 +303,38 @@ async fn the_caller_role_follows_admission_for_anonymous_and_refused_callers() {
     let (status, on_app) = granted(&organization, APP_SLUG, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(on_app.is_empty(), "{on_app:?}");
+}
+
+/// AP-113 (T-2860): a token of an App's client is admitted on the Endpoints its App reads and is
+/// `401` on every other, whatever its `aud` names, so an audience that reached the client outside
+/// the reconciler opens nothing. An `app-*` client no App names reaches nothing, and a person's
+/// edge token is not narrowed.
+#[tokio::test]
+async fn an_apps_client_reaches_the_endpoints_its_app_reads_and_no_other() {
+    let fixture = fixture(Audience::Organization);
+    let token = |azp: &str| {
+        json!({
+            "preferred_username": "jana.kovacova@hel.fi",
+            "azp": azp,
+            "aud": [azp, APP_SLUG, PLAIN_SLUG, HAND_SLUG],
+        })
+    };
+
+    let (status, on_app) = granted(&fixture, APP_SLUG, Some(token("app-alerts"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(on_app, ["AppRead"]);
+    for slug in [PLAIN_SLUG, HAND_SLUG] {
+        let (status, granted) = granted(&fixture, slug, Some(token("app-alerts"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{slug}");
+        assert!(granted.is_empty(), "{slug}: {granted:?}");
+    }
+
+    let (status, _) = granted(&fixture, APP_SLUG, Some(token("app-ghost"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no App is named ghost");
+
+    let person = json!({ "preferred_username": "peter.novak@hel.fi", "azp": "edge" });
+    for slug in [APP_SLUG, PLAIN_SLUG, HAND_SLUG] {
+        let (status, _) = granted(&fixture, slug, Some(person.clone())).await;
+        assert_eq!(status, StatusCode::OK, "the edge token on {slug}");
+    }
 }

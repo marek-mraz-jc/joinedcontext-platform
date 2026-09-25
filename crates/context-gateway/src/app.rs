@@ -2058,6 +2058,14 @@ pub(crate) fn subject_from(
     endpoint: &Endpoint,
     claims: &Claims,
 ) -> Result<Subject, Box<ProblemDetails>> {
+    // An App's client reaches the Endpoints its App reads and no other, whatever audience its
+    // token names (AP-113): the same answer as a token bound to another resource.
+    if let Some(azp) = claims.azp.as_deref() {
+        if !gateway.accounts.load().admits_on(azp, &endpoint.slug) {
+            tracing::info!(azp, slug = %endpoint.slug, "an App client's token on an Endpoint its App does not read");
+            return Err(Box::new(ProblemDetails::unauthorized()));
+        }
+    }
     let client_roles = endpoint
         .roles
         .app_client

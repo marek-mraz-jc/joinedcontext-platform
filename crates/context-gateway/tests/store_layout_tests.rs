@@ -232,3 +232,56 @@ fn an_apps_own_endpoint_is_known_by_the_app_declared_beside_it() {
     assert_eq!(client("ghqstghqstghqstghqstghqstg"), None);
     assert_eq!(client(AIR), None);
 }
+
+/// AP-113 (T-2860): an App's client is admitted on the Endpoints its App reads, by the rule the
+/// Portal gives the client's audiences with: its own generated Endpoint for its space (not the
+/// other Endpoint of that space), the target of the project's SharedSpaceReference, and nothing
+/// else. An `app-*` client no App names reaches nothing; any other client is not narrowed.
+#[test]
+fn an_apps_client_is_admitted_on_the_endpoints_its_app_reads_and_no_other() {
+    let (org, checkouts) = organization("app-audiences");
+    let dir = checkouts.projects.join("ovzdusie");
+    const OWN: &str = "r4d4rr4d4rr4d4rr4d4rr4d4rr";
+    write(
+        &dir,
+        "apps/radar/app.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: radar\n  \
+         namespace: ovzdusie\nspec:\n  kind: static\n  source:\n    path: ./src\n  build:\n    \
+         node: \"22\"\n  visibility: organization\n  lifecycle: published\n  dataNeeds:\n  \
+         - contextSpaceRef: { kind: ContextSpace, name: ovzdusie }\n    types: [AirQualityObserved]\n    \
+         operations: [queryEntity]\n",
+    );
+    write(
+        &dir,
+        "spaces/ovzdusie/endpoints/app-radar.yaml",
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: app-radar\n  \
+             namespace: ovzdusie\n  annotations:\n    joinedcontext.com/generated-by: {}\nspec:\n  \
+             contextSpaceRef: ovzdusie\n  slug: {OWN}\n  audience: organization\n  \
+             enabledRepresentations: [\"ngsi-ld\"]\n  callerRole: true\n",
+            jc_core::kinds::app::APP_ENDPOINT_GENERATOR
+        ),
+    );
+    write(
+        &dir,
+        "shared/traffic.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: SharedSpaceReference\nmetadata:\n  \
+         name: traffic\n  namespace: ovzdusie\nspec:\n  endpointRef: { project: doprava, name: public }\n  \
+         alias: traffic\n",
+    );
+    let (endpoints, _, accounts, ..) = store::load_from(&org, Some(&checkouts)).expect("assembles");
+    assert!(
+        slugs(&endpoints).contains(&TRAFFIC) && slugs(&endpoints).contains(&OWN),
+        "{:?}",
+        slugs(&endpoints)
+    );
+
+    assert!(accounts.admits_on("app-radar", OWN), "its own Endpoint");
+    assert!(accounts.admits_on("app-radar", TRAFFIC), "the shared one");
+    assert!(
+        !accounts.admits_on("app-radar", AIR),
+        "another Endpoint of its space is not one the App reads"
+    );
+    assert!(!accounts.admits_on("app-ghost", OWN), "no App named ghost");
+    assert!(accounts.admits_on("edge", AIR), "a client that is no App's");
+}
