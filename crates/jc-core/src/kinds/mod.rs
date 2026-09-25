@@ -78,7 +78,9 @@ pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,
     PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
-pub use role::{BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, Verb};
+pub use role::{
+    BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, Verb, PERSON,
+};
 pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
     ServiceAccountLimits, ServiceAccountSpec, Workload,

@@ -364,9 +364,30 @@
           "type": "string"
         },
         {
-          "description": "Delete a manifest.",
+          "description": "Delete a manifest; on [`PERSON`], delete the person.",
           "enum": [
             "delete"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Create a person ([`PERSON`] only, ADR-N-031).",
+          "enum": [
+            "create"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Edit a person's name, e-mail and language, and send them a password reset ([`PERSON`] only, ADR-N-031).",
+          "enum": [
+            "update"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Disable and enable a person, end their sessions, remove their second factor ([`PERSON`] only, ADR-N-031).",
+          "enum": [
+            "disable"
           ],
           "type": "string"
         }

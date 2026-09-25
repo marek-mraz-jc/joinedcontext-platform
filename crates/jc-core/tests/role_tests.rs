@@ -383,3 +383,74 @@ fn the_build_lanes_role_writes_status_build_and_nothing_beside_it() {
         "a spec constraint is no status writer"
     );
 }
+
+/// ADR-N-031, PF-91: a person is not a manifest. A rule on `Person` names that kind alone and
+/// takes `read`, `create`, `update`, `disable` and `delete`; the three person verbs mean nothing on
+/// any other kind, and `propose`/`approve` mean nothing on a person.
+#[test]
+fn person_verbs_belong_to_person_alone() {
+    let people =
+        "  rules:\n    - kinds: [Person]\n      verbs: [read, create, update, disable, delete]\n";
+    let golden_rules = ROLE
+        .split_once("  rules:\n")
+        .map(|(_, rules)| format!("  rules:\n{rules}"))
+        .expect("the golden role has rules");
+    let admin = role(&golden_rules, people).expect("people-admin validates");
+    assert_eq!(
+        admin.spec.rules[0].verbs,
+        vec![
+            Verb::Read,
+            Verb::Create,
+            Verb::Update,
+            Verb::Disable,
+            Verb::Delete
+        ]
+    );
+    assert!(admin.spec.rules[0].grants("Person", Verb::Disable));
+    assert!(!admin.spec.rules[0].grants("Pipeline", Verb::Disable));
+
+    for (rules, says) in [
+        ("    - kinds: [Pipeline]\n      verbs: [create]\n", "Person alone"),
+        ("    - kinds: [Endpoint]\n      verbs: [disable]\n", "Person alone"),
+        ("    - kinds: [Person]\n      verbs: [propose]\n", "no Change"),
+        ("    - kinds: [Person]\n      verbs: [approve]\n", "no Change"),
+        ("    - kinds: [Person, Pipeline]\n      verbs: [read]\n", "Person alone"),
+        (
+            "    - kinds: [Person]\n      verbs: [read]\n      constraints:\n        - { field: spec.email, equals: a }\n",
+            "no manifest fields",
+        ),
+    ] {
+        let err = role(&golden_rules, &format!("  rules:\n{rules}"))
+            .expect_err("a person verb out of place");
+        assert!(err.to_string().contains(says), "{rules}: {err}");
+    }
+}
+
+/// A project role reaches project kinds only (PF-68), and a person is the organization's.
+#[test]
+fn a_project_role_names_no_person() {
+    let spec: jc_core::kinds::RoleSpec = serde_json::from_value(serde_json::json!({
+        "rules": [{ "kinds": ["Person"], "verbs": ["read"] }]
+    }))
+    .expect("a role spec");
+    spec.validate().expect("valid in the organization");
+    assert!(spec.validate_in_project().is_err());
+}
+
+#[test]
+fn every_verb_is_written_as_a_manifest_writes_it() {
+    for verb in [
+        Verb::Read,
+        Verb::Propose,
+        Verb::Approve,
+        Verb::Delete,
+        Verb::Create,
+        Verb::Update,
+        Verb::Disable,
+    ] {
+        assert_eq!(
+            serde_json::to_value(verb).expect("serialises"),
+            serde_json::Value::from(verb.as_str())
+        );
+    }
+}

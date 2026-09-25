@@ -1,6 +1,6 @@
 //! The role taxonomy every organization starts from (PF-56, PF-71, T-0873).
 //!
-//! Eight roles, written as `Role` manifests into `users/roles/`: what a person may read, what
+//! Nine roles, written as `Role` manifests into `users/roles/`: what a person may read, what
 //! each kind of editor may propose, who approves, and who may let data out to the public. They
 //! are a seed a person extends by proposing further roles, never a list the platform enforces:
 //! `jcctl roles seed` writes a file only where there is none, so an edited role stays edited.
@@ -90,6 +90,20 @@ fn audience_is_not_public() -> Constraint {
     }
 }
 
+/// Every verb on the people of the realm (PF-91, ADR-N-031).
+fn people() -> Rule {
+    rule(
+        vec![jc_core::kinds::PERSON.into()],
+        vec![
+            Verb::Read,
+            Verb::Create,
+            Verb::Update,
+            Verb::Disable,
+            Verb::Delete,
+        ],
+    )
+}
+
 /// Every kind that lives inside a project, in catalogue order.
 pub fn project_kinds() -> Vec<String> {
     registry::KINDS
@@ -111,7 +125,7 @@ fn without(kinds: Vec<String>, dropped: &str) -> Vec<String> {
     kinds.into_iter().filter(|kind| kind != dropped).collect()
 }
 
-/// The eight roles of the taxonomy (PF-56, PF-71).
+/// The nine roles of the taxonomy (PF-56, PF-71, PF-91).
 pub fn taxonomy() -> Vec<Seeded> {
     let project = project_kinds;
     vec![
@@ -175,13 +189,22 @@ pub fn taxonomy() -> Vec<Seeded> {
             ],
         },
         Seeded {
+            name: "people-admin",
+            purpose: "Creates, edits, disables and deletes the people of the organization's \
+                      realm; what they may do stays with the bindings (PF-91).",
+            rules: vec![people()],
+        },
+        Seeded {
             name: "org-admin",
             purpose: "The one role that approves the red lane: every verb on every kind, roles \
-                      and bindings included (CC-70).",
-            rules: vec![rule(
-                all_kinds(),
-                vec![Verb::Propose, Verb::Approve, Verb::Delete],
-            )],
+                      and bindings included (CC-70), and the people of the realm (PF-91).",
+            rules: vec![
+                rule(
+                    all_kinds(),
+                    vec![Verb::Propose, Verb::Approve, Verb::Delete],
+                ),
+                people(),
+            ],
         },
     ]
 }
