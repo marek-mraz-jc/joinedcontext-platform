@@ -20,6 +20,9 @@ pub const RUN_ID: &str = "e3b0c442-98fc-1c14-9afb-4c7b2756a120";
 pub const TICKET: &str = "secret-ticket-123";
 /// The run's primary endpoint slug.
 pub const SLUG: &str = "scsd2eehkx42n53z2zyd6vshfh7s7irf";
+/// The proxy's client in a stubbed realm, and its secret.
+pub const PROXY_CLIENT: &str = "helsinki-agent-proxy";
+pub const PROXY_SECRET: &str = "proxy-client-secret";
 
 fn ticket_hash(ticket: &str) -> String {
     let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
@@ -63,6 +66,9 @@ pub struct Bases {
     pub model: String,
     pub forge: String,
     pub portal: String,
+    /// The realm, when a suite stubs one: the proxy then holds a real client secret and asks the
+    /// realm for every token, and no stub token is minted (ADR-N-038).
+    pub realm: Option<String>,
 }
 
 impl Default for Bases {
@@ -72,6 +78,7 @@ impl Default for Bases {
             model: "http://model-provider.invalid".to_owned(),
             forge: "http://gitea-http.invalid:3000".to_owned(),
             portal: "http://portal.invalid:8080".to_owned(),
+            realm: None,
         }
     }
 }
@@ -85,6 +92,9 @@ pub fn state(run: RunContext, bases: Bases) -> Arc<ProxyState> {
         "JC_PORTAL_BASE" => Some(bases.portal.clone()),
         "JC_MODEL_KEY" => Some("mock-model-key".to_owned()),
         "JC_FORGE_TOKEN" => Some("mock-forge-token".to_owned()),
+        "JC_OIDC_ISSUER" => bases.realm.clone(),
+        "JC_OIDC_CLIENT_ID" => bases.realm.as_ref().map(|_| PROXY_CLIENT.to_owned()),
+        "JC_OIDC_CLIENT_SECRET" => bases.realm.as_ref().map(|_| PROXY_SECRET.to_owned()),
         _ => None,
     })
     .expect("the test configuration is complete");

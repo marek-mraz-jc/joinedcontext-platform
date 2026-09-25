@@ -4,6 +4,7 @@ pub mod diagnostics;
 pub mod events;
 pub mod fetch;
 pub mod forge;
+pub mod identity;
 pub mod inbox;
 pub mod llm;
 pub mod mcp;

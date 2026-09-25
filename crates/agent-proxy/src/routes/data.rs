@@ -2,6 +2,7 @@
 
 use crate::audit::{log_request, AuditEntry};
 use crate::auth::authenticate;
+use crate::delegation::GrantError;
 use crate::ProxyState;
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -108,13 +109,23 @@ async fn forward(
         format!("endpoints/{slug}/{rest}")
     };
 
-    let token = match state.credentials.get_endpoint_token(&slug).await {
+    // The run reads as the person who started it, with their exchanged token, and with nothing
+    // else: no grant is a 401 and never the proxy's own token (ADR-N-038 §3.3, AG-94).
+    let token = match state.credentials.get_run_token(&run.id).await {
         Ok(t) => t,
+        Err(error @ (GrantError::Missing | GrantError::Refused(_))) => {
+            tracing::info!(run = %run.id, %error, "a data call of a run without its person's grant");
+            return jc_core::ProblemDetails::unauthorized()
+                .with_detail(match error {
+                    GrantError::Missing => "this run holds no identity of the person who started it: it was not started from a signed-in session, or its grant has ended (ADR-N-038)",
+                    _ => "the session of the person who started this run has ended, and so has the run's access to data (ADR-N-038)",
+                })
+                .into_response();
+        }
         Err(error) => {
-            // The credential manager's message names the realm, the client and the token URL.
-            // A run learns that the proxy has no token for the endpoint and nothing else, the
-            // same answer `portal_bearer` gives for the Portal (AG-52, T-2271).
-            tracing::warn!(%error, slug = %slug, "no token for the endpoint");
+            // The message names the realm. A run learns that the proxy has no token and nothing
+            // else, the same answer `portal_bearer` gives for the Portal (AG-52, T-2271).
+            tracing::warn!(%error, slug = %slug, "no token for the run");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 jc_core::ProblemDetails::new(503, "upstream-unavailable", "Upstream Unavailable")
