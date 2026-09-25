@@ -49,6 +49,28 @@ pub struct Claims {
     /// The DID of the participant a transfer token was issued to (DS-04, DS-11).
     #[serde(default)]
     pub participant: Option<String>,
+    /// The audiences the token names (RFC 7519 `aud`, one string or a list). The verifier has
+    /// already required one of the accepted ones; this says which, which is what tells a hub
+    /// token from an Endpoint's own (ADR-N-025 section 4).
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub aud: Vec<String>,
+    /// The scopes the token was granted, space-separated (RFC 6749 section 3.3).
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// `aud` as RFC 7519 section 4.1.3 allows it: a single string or an array of them.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Audience {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Audience::deserialize(deserializer)? {
+        Audience::One(audience) => vec![audience],
+        Audience::Many(audiences) => audiences,
+    })
 }
 
 /// Keycloak's realm role container.
@@ -70,6 +92,22 @@ impl Claims {
             .get(client)
             .map(|access| access.roles.clone())
             .unwrap_or_default()
+    }
+
+    /// Whether the token names any of `audiences`.
+    pub fn names_audience(&self, audiences: &[String]) -> bool {
+        self.aud.iter().any(|audience| audiences.contains(audience))
+    }
+
+    /// The Endpoint slugs the token's `endpoint:{slug}` scopes name: what the person picked at
+    /// connect time for a hub connector (ADR-N-025 section 4, EP-88).
+    pub fn endpoint_scopes(&self) -> impl Iterator<Item = &str> {
+        self.scope
+            .as_deref()
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .filter_map(|scope| scope.strip_prefix("endpoint:"))
+            .filter(|slug| !slug.is_empty())
     }
 
     /// The realm roles the token asserts.

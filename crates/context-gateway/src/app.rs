@@ -40,7 +40,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
 use axum::Router;
-use jc_core::kinds::{Audience, Operation, Representation};
+use jc_core::kinds::{Audience, Operation, RateLimits, Representation};
 use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -118,6 +118,42 @@ pub struct Gateway {
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
+    /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
+    /// spread over many Endpoints is still one subject's burst (ADR-N-025 section 3, EP-87).
+    pub hub_rate_limit: RateLimits,
+}
+
+/// The hub's per-subject quota unless the deployment names another: ten Endpoint calls a
+/// second, sustained, is more than one person's agent makes and less than a scraper wants.
+// ponytail: a constant, set per gateway with `limit_hub_to`; an env var when an operator
+// measures a reason to tune it.
+pub const HUB_RATE_LIMIT: RateLimits = RateLimits {
+    requests_per_minute: 600,
+    burst: Some(60),
+};
+
+/// What a tool call re-enters the NGSI-LD path with: the caller's own `Authorization` header,
+/// and the door the call came in by (EP-26, ADR-N-025 section 4).
+#[derive(Debug, Clone)]
+pub struct Credential {
+    /// The header as the caller sent it; `None` for an anonymous caller.
+    pub authorization: Option<HeaderValue>,
+    /// Where the call entered.
+    pub door: Door,
+}
+
+/// The door a request came in by (ADR-N-025 section 4).
+///
+/// A token whose audience is the hub is accepted only on a call that entered at `/api/mcp`,
+/// and only for the Endpoints its `endpoint:{slug}` scopes name: the same token sent to an
+/// Endpoint's own URL is refused, so a hub connector is never a key to the REST surfaces.
+/// The door is a function argument and never a header, so no client can claim it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Door {
+    /// `/api/endpoint/{slug}/…` or `/cs/{space}/…`, as every surface before the hub.
+    Endpoint,
+    /// `/api/mcp`, naming the Endpoint in the `endpoint` argument (EP-87).
+    Hub,
 }
 
 impl Gateway {
@@ -141,7 +177,14 @@ impl Gateway {
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
+            hub_rate_limit: HUB_RATE_LIMIT,
         }
+    }
+
+    /// Spends at most `limits` a minute per subject on the MCP hub (ADR-N-025 section 3).
+    pub fn limit_hub_to(mut self, limits: RateLimits) -> Self {
+        self.hub_rate_limit = limits;
+        self
     }
 
     /// Accepts tokens from one realm, and maps their `azp` to these accounts (PF-46).
@@ -191,12 +234,40 @@ impl Gateway {
     }
 
     /// Every value that names this endpoint as an RFC 8707 resource.
-    fn audiences_for(&self, endpoint: &Endpoint) -> Vec<String> {
+    pub(crate) fn audiences_for(&self, endpoint: &Endpoint) -> Vec<String> {
         audiences_of(
             &endpoint.slug,
             &endpoint.base_path,
             self.public_url.as_deref(),
         )
+    }
+
+    /// Every value that names the hub as an RFC 8707 resource: its Keycloak client and, when
+    /// the deployment names its public URL, `{url}/api/mcp` (ADR-N-025 section 4).
+    pub(crate) fn hub_audiences(&self) -> Vec<String> {
+        let mut audiences = vec![HUB_AUDIENCE.to_owned()];
+        if let Some(base) = self.public_url.as_deref() {
+            audiences.push(format!("{base}{HUB_PATH}"));
+        }
+        audiences
+    }
+
+    /// What a token may be bound to on a call to `endpoint` through `door`.
+    fn audiences_by(&self, endpoint: &Endpoint, door: Door) -> Vec<String> {
+        let mut audiences = self.audiences_for(endpoint);
+        if door == Door::Hub {
+            audiences.extend(self.hub_audiences());
+        }
+        audiences
+    }
+
+    /// Whether a verified token reaches `endpoint` through the hub (EP-88, PF-45, PF-46): its
+    /// audience names the Endpoint itself (its slug, its URL or the edge), or it names the hub
+    /// and an `endpoint:{slug}` scope picks this Endpoint. The Endpoint's Policy still decides.
+    pub(crate) fn reaches(&self, claims: &Claims, endpoint: &Endpoint) -> bool {
+        claims.names_audience(&self.audiences_for(endpoint))
+            || (claims.names_audience(&self.hub_audiences())
+                && claims.endpoint_scopes().any(|slug| slug == endpoint.slug))
     }
 
     /// Replaces the federation table, the same way the accounts are replaced (EP-70).
@@ -280,6 +351,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
+        // One connector over every Endpoint the token reaches (EP-87, ADR-N-025).
+        .route(HUB_PATH, post(mcp::hub::message))
+        .route(
+            "/api/mcp/.well-known/oauth-protected-resource",
+            get(mcp::hub::protected_resource),
+        )
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route(
             "/api/endpoint/{slug}/preview",
@@ -424,8 +501,12 @@ pub async fn ngsi_ld_request(
     path: &str,
     query: &str,
     body: Option<Vec<u8>>,
-    authorization: Option<HeaderValue>,
+    credential: Credential,
 ) -> Response<Body> {
+    let Credential {
+        authorization,
+        door,
+    } = credential;
     let prefix = format!("{}/ngsi-ld/v1", endpoint.base_path);
     let uri = match query.is_empty() {
         true => format!("{prefix}{path}"),
@@ -455,11 +536,12 @@ pub async fn ngsi_ld_request(
             request.headers(),
         )
         .map(|(space, subject)| (Arc::clone(&space.endpoint), subject)),
-        None => admit(
+        None => admit_by(
             &gateway,
             &endpoint.slug,
             Some(Representation::Mcp),
             request.headers(),
+            door,
         ),
     };
     as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
@@ -1926,7 +2008,63 @@ pub(crate) fn authenticate(
     endpoint: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<Subject, Box<ProblemDetails>> {
-    let (mut subject, client_roles) = identify(gateway, endpoint, headers)?;
+    authenticate_by(gateway, endpoint, headers, Door::Endpoint)
+}
+
+/// [`authenticate`], for a request that came in by `door` (ADR-N-025 section 4).
+pub(crate) fn authenticate_by(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    headers: &HeaderMap,
+    door: Door,
+) -> Result<Subject, Box<ProblemDetails>> {
+    let presented = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+
+    let raw = match token::bearer(presented) {
+        Ok(raw) => raw,
+        // No token at all: the anonymous caller, which only a public endpoint admits
+        // (EP-16, GW22).
+        Err(token::Rejected::NoToken) if endpoint.admits(None) => {
+            let mut subject = Subject::anonymous();
+            with_endpoint_roles(&mut subject, endpoint, &[]);
+            return Ok(subject);
+        }
+        Err(rejected) => return Err(Box::new(rejected.into())),
+    };
+
+    // A token was presented and the gateway has no realm to check it against. Believing
+    // it would be believing the client.
+    let Some(verifier) = &gateway.verifier else {
+        tracing::warn!("a token was presented but no realm is configured");
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    };
+    let claims = verifier
+        .verify(raw, &gateway.audiences_by(endpoint, door))
+        .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
+    // A hub token whose scopes do not pick this Endpoint does not reach it, and learns no more
+    // than it would about a slug that does not exist (EP-88, SP-20).
+    if door == Door::Hub && !gateway.reaches(&claims, endpoint) {
+        return Err(Box::new(ProblemDetails::not_found()));
+    }
+    subject_from(gateway, endpoint, &claims)
+}
+
+/// The subject a verified token is on `endpoint`: who it names, admitted by the Endpoint's
+/// audience, with the Endpoint's own roles (PF-46, EP-14, AP-97).
+pub(crate) fn subject_from(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    claims: &Claims,
+) -> Result<Subject, Box<ProblemDetails>> {
+    let client_roles = endpoint
+        .roles
+        .app_client
+        .as_deref()
+        .map(|client| claims.client_roles(client))
+        .unwrap_or_default();
+    let mut subject = subject_of(claims, endpoint, gateway)?;
     with_endpoint_roles(&mut subject, endpoint, &client_roles);
     Ok(subject)
 }
@@ -1948,51 +2086,17 @@ fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint, client_roles:
     subject.roles.extend(held);
 }
 
-/// Who is calling, before the endpoint's own roles (PF-45, PF-46), and the roles their token
-/// carries for the endpoint's App client, when it is an App's Endpoint and that client obtained
-/// the token (ADR-N-030, AP-97).
-fn identify(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    headers: &HeaderMap,
-) -> Result<(Subject, Vec<String>), Box<ProblemDetails>> {
-    let presented = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-
-    let raw = match token::bearer(presented) {
-        Ok(raw) => raw,
-        // No token at all: the anonymous caller, which only a public endpoint admits
-        // (EP-16, GW22).
-        Err(token::Rejected::NoToken) if endpoint.admits(None) => {
-            return Ok((Subject::anonymous(), Vec::new()))
-        }
-        Err(rejected) => return Err(Box::new(rejected.into())),
-    };
-
-    // A token was presented and the gateway has no realm to check it against. Believing
-    // it would be believing the client.
-    let Some(verifier) = &gateway.verifier else {
-        tracing::warn!("a token was presented but no realm is configured");
-        return Err(Box::new(ProblemDetails::unauthorized()));
-    };
-    let claims = verifier
-        .verify(raw, &gateway.audiences_for(endpoint))
-        .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
-
-    let client_roles = endpoint
-        .roles
-        .app_client
-        .as_deref()
-        .map(|client| claims.client_roles(client))
-        .unwrap_or_default();
-    Ok((subject_of(&claims, endpoint, gateway)?, client_roles))
-}
-
 /// The audience of a person signed in at the edge (ADR-N-019): the gateway's own name, accepted
 /// on every endpoint, because a session cannot name an endpoint approved after the login. The
 /// Policy decision stays per endpoint (PF-46).
 pub const EDGE_AUDIENCE: &str = "context-gateway";
+
+/// The hub's Keycloak client, which is also the audience of the tokens it obtains (ADR-N-025
+/// section 4, EP-88).
+pub const HUB_AUDIENCE: &str = "mcp-hub";
+
+/// Where the hub answers (EP-87).
+pub const HUB_PATH: &str = "/api/mcp";
 
 /// The slug, the public resource URI when the deployment names one, and the edge audience.
 fn audiences_of(slug: &str, base_path: &str, public_url: Option<&str>) -> Vec<String> {
@@ -2119,7 +2223,7 @@ fn roles_on(audience: Audience, asserted: impl IntoIterator<Item = String>) -> B
 }
 
 /// The principal, as one string for the audit log.
-fn principal_of(subject: &Subject) -> String {
+pub(crate) fn principal_of(subject: &Subject) -> String {
     match (&subject.user, &subject.service_account, &subject.did) {
         (Some(user), _, _) => match &subject.via {
             Some(account) => format!("user:{user} via serviceAccount:{account}"),
@@ -2144,6 +2248,17 @@ pub(crate) fn admit(
     representation: Option<Representation>,
     headers: &HeaderMap,
 ) -> Result<(Arc<Endpoint>, Subject), Box<Response<Body>>> {
+    admit_by(gateway, slug, representation, headers, Door::Endpoint)
+}
+
+/// [`admit`], for a request that came in by `door` (ADR-N-025 section 4).
+pub(crate) fn admit_by(
+    gateway: &Gateway,
+    slug: &str,
+    representation: Option<Representation>,
+    headers: &HeaderMap,
+    door: Door,
+) -> Result<(Arc<Endpoint>, Subject), Box<Response<Body>>> {
     let endpoint = gateway
         .resolver
         .resolve(slug)
@@ -2154,7 +2269,7 @@ pub(crate) fn admit(
     if representation.is_some_and(|wanted| !endpoint.serves(wanted)) {
         return Err(Box::new(ProblemDetails::not_found().into_response()));
     }
-    let subject = authenticate(gateway, &endpoint, headers)
+    let subject = authenticate_by(gateway, &endpoint, headers, door)
         .map_err(|problem| Box::new(problem.into_response()))?;
     Ok((endpoint, subject))
 }
@@ -2209,7 +2324,11 @@ async fn mcp_answer(
         return mcp::endpoint_facade::parse_error();
     };
 
-    match mcp::endpoint_facade::handle(gateway, endpoint, subject, authorization, message).await {
+    let credential = Credential {
+        authorization,
+        door: Door::Endpoint,
+    };
+    match mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, message).await {
         Some(answer) => mcp::endpoint_facade::json_response(StatusCode::OK, &answer),
         // A notification is acknowledged and nothing more: there is no state to change.
         None => StatusCode::ACCEPTED.into_response(),

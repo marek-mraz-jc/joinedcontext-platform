@@ -217,25 +217,33 @@ pub async fn enforce(
         return next.run(request).await;
     };
 
-    let caller = caller_key(&request);
+    let caller = caller_key(request.headers());
     let decision = gateway
         .rate_limiter
         .check(&endpoint.slug, &caller, &limits, Instant::now());
     if !decision.allowed {
         tracing::info!(slug = %endpoint.slug, "rate limit reached");
-        let mut refusal = ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
-            .with_detail("the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names")
-            .into_response();
-        set_headers(refusal.headers_mut(), &decision);
-        if let Ok(value) = HeaderValue::from_str(&decision.reset.to_string()) {
-            refusal.headers_mut().insert("retry-after", value);
-        }
-        return refusal;
+        return too_many(
+            &decision,
+            "the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names",
+        );
     }
 
     let mut response = next.run(request).await;
     set_headers(response.headers_mut(), &decision);
     response
+}
+
+/// The 429 of a spent bucket, with the `RateLimit` fields and `Retry-After` (EP-20).
+pub(crate) fn too_many(decision: &Decision, detail: &str) -> Response<Body> {
+    let mut refusal = ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
+        .with_detail(detail)
+        .into_response();
+    set_headers(refusal.headers_mut(), decision);
+    if let Ok(value) = HeaderValue::from_str(&decision.reset.to_string()) {
+        refusal.headers_mut().insert("retry-after", value);
+    }
+    refusal
 }
 
 /// The slug in `/api/endpoint/{slug}/…`, or nothing off the endpoint surface.
@@ -257,9 +265,8 @@ fn slug_of(path: &str) -> Option<&str> {
 /// The address comes from the LAST `X-Forwarded-For` entry, which is the peer the gateway's
 /// own proxy saw. A client that sends the header itself only prepends to its own value,
 /// so a spoofed entry is never the one read.
-fn caller_key(request: &Request) -> String {
-    if let Some(credential) = request
-        .headers()
+pub(crate) fn caller_key(headers: &axum::http::HeaderMap) -> String {
+    if let Some(credential) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
     {
@@ -270,8 +277,7 @@ fn caller_key(request: &Request) -> String {
             .collect();
         return format!("credential:{hex}");
     }
-    let address = request
-        .headers()
+    let address = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit(',').next())
@@ -282,7 +288,7 @@ fn caller_key(request: &Request) -> String {
 }
 
 /// The three standard fields of the answer (EP-20, MIM0-R7).
-fn set_headers(headers: &mut axum::http::HeaderMap, decision: &Decision) {
+pub(crate) fn set_headers(headers: &mut axum::http::HeaderMap, decision: &Decision) {
     for (name, value) in [
         ("ratelimit-limit", decision.limit.to_string()),
         ("ratelimit-remaining", decision.remaining.to_string()),
@@ -361,12 +367,16 @@ mod tests {
         assert!(limiter.check("slug", "caller", &slowest, later).allowed);
     }
 
-    fn asking(headers: &[(&str, &str)]) -> Request {
+    fn asking(headers: &[(&str, &str)]) -> axum::http::HeaderMap {
         let mut builder = Request::builder().uri("/ngsi-ld/v1/entities?type=Device");
         for (name, value) in headers {
             builder = builder.header(*name, *value);
         }
-        builder.body(Body::empty()).expect("a request")
+        builder
+            .body(Body::empty())
+            .expect("a request")
+            .headers()
+            .clone()
     }
 
     /// T-0965: a caller who presents a credential is keyed by it, so no `X-Forwarded-For` a
