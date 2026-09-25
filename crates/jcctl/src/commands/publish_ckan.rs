@@ -511,9 +511,12 @@ fn mirror(api: &mut impl CkanApi, target: &Target, text: &str) -> Result<Mirror,
         resource.as_deref().unwrap_or(DATASTORE_RESOURCE),
         &fields,
     )?;
+    // The grid is asked for as soon as the table exists, and its refusal is reported after the
+    // rows: a sync that fails part-way or a pass cut off on a large table still leaves the view
+    // (T-2931), and a catalogue that refuses the view still holds today's data.
+    let view = datastore::ensure_view(api, &resource_id);
     let synced = datastore::sync(api, &resource_id, &[], &records)?;
-    // After the rows, so a catalogue that refuses the view still holds today's data.
-    datastore::ensure_view(api, &resource_id)?;
+    view?;
     Ok(Mirror {
         table,
         rows: synced.upserted.len(),

@@ -11,7 +11,7 @@ use jcctl::commands::publish_ckan::{
     TokenSource, DATASTORE_RESOURCE,
 };
 use jcctl::loader::Repository;
-use jcctl::publish::ckan::{InMemoryCkan, Outcome, Settings};
+use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan, Outcome, Settings};
 use jcctl::publish::ckan_datastore;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -230,8 +230,8 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         vec![
             "package_create",
             "datastore_create",
-            "datastore_upsert",
-            "resource_view_create"
+            "resource_view_create",
+            "datastore_upsert"
         ]
     );
     // EP-62: the sheet opens as a grid on the dataset page.
@@ -281,13 +281,93 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         vec![
             "package_create",
             "datastore_create",
-            "datastore_upsert",
             "resource_view_create",
+            "datastore_upsert",
             "datastore_upsert"
         ],
         "a reload writes rows and nothing else"
     );
     assert_eq!(api.views(DATASTORE_RESOURCE).len(), 1, "a second grid");
+}
+
+/// A catalogue that refuses one action and answers the rest as `InMemoryCkan` does.
+struct Refusing {
+    ckan: InMemoryCkan,
+    action: &'static str,
+}
+
+impl CkanApi for Refusing {
+    fn show(&self, action: &str, name: &str) -> Result<Option<Value>, CkanError> {
+        self.ckan.show(action, name)
+    }
+
+    fn action(&mut self, action: &str, payload: &Value) -> Result<Value, CkanError> {
+        if action == self.action {
+            return Err(CkanError::Rejected {
+                action: action.to_owned(),
+                message: "refused by the test".to_owned(),
+            });
+        }
+        self.ckan.action(action, payload)
+    }
+}
+
+/// EP-62 (T-2962): the grid does not wait on the rows. A sync that fails part-way on a large
+/// table left a filled DataStore with no view (T-2931); the view is asked for once the table
+/// exists, and the sync's error is still the pass's answer.
+#[test]
+fn a_row_sync_that_fails_still_leaves_the_grid_view() {
+    let dir = repo("sync-refused");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let mut api = Refusing {
+        ckan: InMemoryCkan::new().with_organization("mesto-banska-bystrica"),
+        action: "datastore_upsert",
+    };
+
+    let error = publish_one(
+        &mut api,
+        &found[1],
+        &record("air-rows"),
+        Some(CSV),
+        &settings(),
+    )
+    .expect_err("the rows were refused");
+    assert!(error.to_string().contains("datastore_upsert"), "{error}");
+    let views = api.ckan.views(DATASTORE_RESOURCE);
+    assert_eq!(views.len(), 1, "the grid is there although no row is");
+    assert_eq!(views[0]["view_type"], json!(ckan_datastore::GRID_VIEW));
+}
+
+/// EP-62 (T-2962): the other way round, which is why the view once came second: a catalogue
+/// that refuses the view still holds today's rows, and the pass says what it refused.
+#[test]
+fn a_refused_view_still_lands_the_rows() {
+    let dir = repo("view-refused");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let mut api = Refusing {
+        ckan: InMemoryCkan::new().with_organization("mesto-banska-bystrica"),
+        action: "resource_view_create",
+    };
+
+    let error = publish_one(
+        &mut api,
+        &found[1],
+        &record("air-rows"),
+        Some(CSV),
+        &settings(),
+    )
+    .expect_err("the view was refused");
+    assert!(
+        error.to_string().contains("resource_view_create"),
+        "{error}"
+    );
+    assert_eq!(
+        api.ckan.rows(DATASTORE_RESOURCE).map(|rows| rows.len()),
+        Some(2)
+    );
+    assert!(api.ckan.views(DATASTORE_RESOURCE).is_empty());
 }
 
 /// A mirror without rows is an error, not a dataset without its table.
@@ -328,8 +408,8 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
         vec![
             "package_create",
             "datastore_create",
-            "datastore_upsert",
             "resource_view_create",
+            "datastore_upsert",
             "package_delete"
         ]
     );
