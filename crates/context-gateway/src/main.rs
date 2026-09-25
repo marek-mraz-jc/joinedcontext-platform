@@ -130,6 +130,20 @@ async fn main() -> ExitCode {
     ) {
         tokio::spawn(Arc::clone(&domain_gate).follow(url, token.clone()));
     }
+    // Each subscription's subscriber is sealed with this key and every delivery decided again
+    // for them (GW27, T-2383); without it a subscription that routes a delivery is refused.
+    let gateway =
+        match config.delivery_key.as_ref().and_then(|key| {
+            context_gateway::egress::subject::DeliveryKey::new(key.expose().as_bytes())
+        }) {
+            Some(key) => gateway.seal_subscribers_with(key),
+            None => {
+                tracing::warn!(
+                    "JC_GATEWAY_DELIVERY_KEY is not set: subscriptions that deliver are refused"
+                );
+                gateway
+            }
+        };
     let gateway = Arc::new(
         gateway
             .deliver_through(config.egress_url.clone())

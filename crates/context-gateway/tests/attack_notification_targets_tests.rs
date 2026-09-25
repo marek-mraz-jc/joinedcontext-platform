@@ -21,6 +21,8 @@
 //! there, resolver and redirect policy included. It is tested in that repository, which is why
 //! nothing here fetches a context.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
@@ -249,7 +251,7 @@ fn percent(raw: &str) -> String {
 async fn a_redirect_from_the_subscriber_is_never_followed() {
     let (secret, reached) = inside().await;
     let (webhook, asked) = redirecting(format!("{secret}/latest/meta-data/")).await;
-    let stored = json!({
+    let mut stored = json!({
         "id": SUBSCRIPTION,
         "type": "Subscription",
         "entities": [{ "type": "AirQualityObserved" }],
@@ -264,6 +266,11 @@ async fn a_redirect_from_the_subscriber_is_never_followed() {
             }
         }
     });
+    common::seal_stored(
+        &mut stored,
+        &format!("/api/endpoint/{SLUG}"),
+        &context_gateway::pdp::evaluator::Subject::anonymous(),
+    );
     let upstream = broker(stored).await;
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
@@ -271,7 +278,16 @@ async fn a_redirect_from_the_subscriber_is_never_followed() {
             // The sinks listen on loopback; an installation names its own in-cluster
             // subscribers the same way (T-1302).
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
-            .serve([endpoint()]),
+            .seal_subscribers_with(common::delivery_key())
+            .serve([Endpoint {
+                policies: vec![common::public_subscribe_policy(
+                    SPACE,
+                    DOMAIN,
+                    "AirQualityObserved",
+                    &["temperature"],
+                )],
+                ..endpoint()
+            }]),
     );
 
     let response = router(gateway)

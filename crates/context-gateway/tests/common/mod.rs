@@ -290,3 +290,67 @@ fn entity_type_list(pages: &[Value]) -> axum::Json<Value> {
         "typeList": types.into_iter().collect::<Vec<_>>(),
     }))
 }
+
+/// The delivery key of this run, generated like the realm's so none is ever committed (GW27).
+fn delivery_secret() -> &'static [u8; 32] {
+    static SECRET: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        let mut bytes = [0u8; 32];
+        ring::rand::SecureRandom::fill(&SystemRandom::new(), &mut bytes)
+            .expect("the system has randomness");
+        bytes
+    })
+}
+
+/// The key a test gateway seals each subscription's subscriber with (GW27, T-2383).
+pub fn delivery_key() -> context_gateway::egress::subject::DeliveryKey {
+    context_gateway::egress::subject::DeliveryKey::new(delivery_secret())
+        .expect("32 bytes is a long enough key")
+}
+
+/// A stored subscription's routed endpoint, sealed for `subject` the way the gateway seals it
+/// when the subscription is written: over the endpoint, the target and the areas the URI names.
+pub fn seal_stored(
+    subscription: &mut Value,
+    base_path: &str,
+    subject: &context_gateway::pdp::evaluator::Subject,
+) {
+    use context_gateway::query::{encode, first, parse};
+    let uri = subscription["notification"]["endpoint"]["uri"]
+        .as_str()
+        .expect("a stored endpoint")
+        .to_owned();
+    let (_, query) = uri.split_once('?').expect("a routed endpoint");
+    let params = parse(query);
+    let target = first(&params, "to").expect("a target");
+    let areas: Vec<String> = params
+        .iter()
+        .filter(|(name, _)| name == "area")
+        .map(|(_, area)| area.clone())
+        .collect();
+    let sealed = delivery_key().seal(base_path, target, &areas, subject);
+    subscription["notification"]["endpoint"]["uri"] =
+        Value::String(format!("{uri}&sub={}", encode(&sealed)));
+}
+
+/// A public grant to subscribe to one type's attributes in one space: what a stored subscription
+/// of an attack case was written under, and what its delivery is decided against again (GW27).
+pub fn public_subscribe_policy(
+    space: &str,
+    domain: &str,
+    kind: &str,
+    attributes: &[&str],
+) -> jc_core::kinds::PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: {space}\n\
+         assigner: did:web:{domain}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [createSubscription, queryEntity]\n\
+         information:\n\
+         \x20 - entities:\n\
+         \x20     - type: {kind}\n\
+         \x20   propertyNames: [{}]\n",
+        attributes.join(", ")
+    ))
+    .expect("the policy spec parses")
+}

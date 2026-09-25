@@ -11,6 +11,8 @@
 //! refusal, its reason, and an empty hop log; the two control cases assert that the same routes
 //! carry an id of this space through, so the file fails if the surface simply stopped writing.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -134,6 +136,7 @@ async fn send_with(
             // delivery back through (R46); without one the surface answers 501 and the tenancy
             // of a subscription would never be reached.
             .deliver_through(Some("https://platform.example.sk".to_owned()))
+            .seal_subscribers_with(common::delivery_key())
             .serve([endpoint()]),
     );
     let mut request = Request::builder()

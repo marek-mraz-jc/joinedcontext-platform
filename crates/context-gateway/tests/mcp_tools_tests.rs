@@ -804,6 +804,8 @@ fn app_with_steward(broker: &str, realm: &common::Realm) -> Router {
         )
         .serve([endpoint(PUBLIC, Audience::Public), private])
         .serve_spaces([space()])
+        // A subscription carries its subscriber sealed, so each delivery is decided again (GW27).
+        .seal_subscribers_with(common::delivery_key())
         .authenticate(
             Arc::new(realm.verifier()),
             ServiceAccounts::new(),
