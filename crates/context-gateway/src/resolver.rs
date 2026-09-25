@@ -160,6 +160,9 @@ pub struct DeclaredTypes {
     /// (DM-06): read from the model's generated JSON Schema and the space's
     /// `spec.missingUnitCode`.
     pub units: crate::units::UnitRules,
+    /// The stored end of each relationship of its classes, held at every write (DM-70): read
+    /// from the same generated JSON Schema.
+    pub relationships: crate::relationships::RelationshipRules,
 }
 
 impl DeclaredTypes {

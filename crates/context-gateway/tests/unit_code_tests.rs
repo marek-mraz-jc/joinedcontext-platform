@@ -82,6 +82,7 @@ fn endpoint(missing: MissingUnitCode) -> Endpoint {
             model: "bb-air-quality".into(),
             classes: ["AirQualityObserved".to_owned()].into(),
             units: UnitRules::from_schema(&schema(), missing),
+            relationships: Default::default(),
         }),
         catalog: None,
         roles: Default::default(),
