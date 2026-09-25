@@ -90,6 +90,27 @@ fn audience_is_not_public() -> Constraint {
     }
 }
 
+fn visibility_is_public() -> Constraint {
+    Constraint {
+        field: "spec.visibility".into(),
+        one_of: vec![PUBLIC.into()],
+        not_in: Vec::new(),
+        equals: None,
+        pattern: None,
+    }
+}
+
+/// An App without `spec.visibility` is `project` (AP-120), which `not_in` admits.
+fn visibility_is_not_public() -> Constraint {
+    Constraint {
+        field: "spec.visibility".into(),
+        one_of: Vec::new(),
+        not_in: vec![PUBLIC.into()],
+        equals: None,
+        pattern: None,
+    }
+}
+
 /// Every verb on the people of the realm (PF-91, ADR-N-031).
 fn people() -> Rule {
     rule(
@@ -163,11 +184,18 @@ pub fn taxonomy() -> Vec<Seeded> {
         Seeded {
             name: "steward",
             purpose: "The domain lead: proposes and approves everything in the project, except \
-                      letting an endpoint out to the public (PF-71).",
+                      letting an endpoint or an app out to the public (PF-71).",
             rules: vec![
                 rule(
-                    without(project(), "Endpoint"),
+                    without(without(project(), "Endpoint"), "App"),
                     vec![Verb::Propose, Verb::Approve],
+                ),
+                // Proposing a public App is the author's; approving it is the publisher's (AP-120).
+                rule(vec!["App".into()], vec![Verb::Propose]),
+                constrained(
+                    vec!["App".into()],
+                    vec![Verb::Approve],
+                    visibility_is_not_public(),
                 ),
                 constrained(
                     vec!["Endpoint".into()],
@@ -185,6 +213,11 @@ pub fn taxonomy() -> Vec<Seeded> {
                     vec!["Endpoint".into()],
                     vec![Verb::Approve],
                     audience_is_public(),
+                ),
+                constrained(
+                    vec!["App".into()],
+                    vec![Verb::Approve],
+                    visibility_is_public(),
                 ),
             ],
         },
