@@ -308,6 +308,9 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
+        // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
+        .route("/catalog.jsonld", get(catalog_feed_jsonld))
+        .route("/catalog.ttl", get(catalog_feed_turtle))
         .route("/cs", get(space_catalog))
         .route("/cs/{space}", get(space_record))
         .route("/cs/{space}/ngsi-ld/v1/{*rest}", any(space_ngsi_ld))
@@ -2051,6 +2054,49 @@ async fn endpoint_record(
         Ok(media) => ([(axum::http::header::CONTENT_TYPE, media)], body).into_response(),
         Err(_) => ProblemDetails::internal().into_response(),
     }
+}
+
+/// The records of every public Endpoint as the anonymous caller reads each one, which is all
+/// the feed may carry (EP-84, EP-69): no token is read, so no grant widens what it lists.
+fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
+    let anonymous = Subject::anonymous();
+    let now = crate::pdp::now();
+    gateway
+        .resolver
+        .endpoints()
+        .into_iter()
+        .filter(|endpoint| endpoint.audience == Audience::Public)
+        .map(|endpoint| {
+            let visible = schema::visible(&anonymous, &endpoint, now);
+            let index = schema::index(&endpoint, &visible, sha256_hex);
+            let space = gateway.resolver.resolve_space(&endpoint.space);
+            endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url())
+        })
+        .collect()
+}
+
+fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
+    endpoint_surface::feed(
+        public_records(gateway),
+        gateway.base_url(),
+        &gateway.org_domain,
+    )
+}
+
+/// `GET /catalog.jsonld`: the organization's DCAT-AP catalogue as JSON-LD (EP-84).
+async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
+    let body = serde_json::to_string(&catalog_feed(&gateway)).unwrap_or_default();
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/ld+json")],
+        body,
+    )
+        .into_response()
+}
+
+/// `GET /catalog.ttl`: the same catalogue as Turtle (EP-84).
+async fn catalog_feed_turtle(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
+    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway));
+    ([(axum::http::header::CONTENT_TYPE, "text/turtle")], body).into_response()
 }
 
 /// The lowercase hex sha256 of a body, which is what every `ETag` here is.
