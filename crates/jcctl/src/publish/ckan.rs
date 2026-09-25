@@ -667,6 +667,8 @@ pub struct InMemoryCkan {
     packages: BTreeMap<String, Value>,
     /// DataStore tables by resource id: the declared fields, and the rows by primary key.
     tables: BTreeMap<String, (Vec<Value>, BTreeMap<String, Value>)>,
+    /// Resource views by resource id, in creation order.
+    views: BTreeMap<String, Vec<Value>>,
     calls: Vec<(String, Value)>,
     token: String,
 }
@@ -719,6 +721,11 @@ impl InMemoryCkan {
         self.tables.get(resource_id).map(|(_, rows)| rows)
     }
 
+    /// The views of one resource, in creation order; empty for a resource without any.
+    pub fn views(&self, resource_id: &str) -> &[Value] {
+        self.views.get(resource_id).map_or(&[], Vec::as_slice)
+    }
+
     /// The DataStore fields declared for one resource, in declaration order.
     pub fn table_fields(&self, resource_id: &str) -> Option<&[Value]> {
         self.tables
@@ -746,6 +753,11 @@ impl CkanApi for InMemoryCkan {
                 .tables
                 .get(name)
                 .map(|(fields, _)| json!({ "resource_id": name, "id": name, "fields": fields }))),
+            // CKAN answers 404 for a resource it does not hold, and a list for one it does.
+            "resource_view_list" => Ok(self
+                .tables
+                .contains_key(name)
+                .then(|| json!(self.views(name)))),
             other => Err(Self::rejected(other, "unknown show action")),
         }
     }
@@ -754,6 +766,17 @@ impl CkanApi for InMemoryCkan {
         self.calls.push((action.to_owned(), payload.clone()));
         if action.starts_with("datastore_") {
             return self.datastore(action, payload);
+        }
+        if action == "resource_view_create" {
+            let id = Self::resource_of(action, payload)?;
+            if !self.tables.contains_key(&id) {
+                return Err(Self::rejected(action, "unknown resource"));
+            }
+            let views = self.views.entry(id).or_default();
+            let mut view = payload.clone();
+            view["id"] = json!(format!("view-{}", views.len() + 1));
+            views.push(view.clone());
+            return Ok(view);
         }
         let name = payload
             .get("name")
@@ -869,6 +892,7 @@ impl InMemoryCkan {
                 match payload.get("filters") {
                     None => {
                         self.tables.remove(&id);
+                        self.views.remove(&id);
                     }
                     Some(filters) => {
                         let (_, rows) = self
