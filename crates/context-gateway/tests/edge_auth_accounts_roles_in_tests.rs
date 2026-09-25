@@ -28,6 +28,7 @@ fn account(roles: Vec<ScopedRole>) -> Account {
         name: "collector".to_owned(),
         project: "helsinki".to_owned(),
         roles,
+        delegates: false,
     }
 }
 

@@ -59,6 +59,10 @@ pub struct Config {
     /// deployment turns it on where every client is meshed; an unmeshed call is then refused
     /// rather than served on the strength of a NetworkPolicy alone.
     pub require_mesh_identity: bool,
+    /// The Portal's Keycloak client (`JC_PORTAL_CLIENT_ID`, default `portal-api`): the one
+    /// caller whose service-account token may hand this proxy a person's token for a run
+    /// (`POST /internal/runs/{run}/identity`, ADR-N-038, AG-52, AG-94).
+    pub portal_client_id: String,
 }
 
 impl std::fmt::Debug for Config {
@@ -78,6 +82,7 @@ impl std::fmt::Debug for Config {
             .field("model_provider", &self.model_provider)
             .field("oidc_token_url", &self.oidc_token_url)
             .field("require_mesh_identity", &self.require_mesh_identity)
+            .field("portal_client_id", &self.portal_client_id)
             .finish()
     }
 }
@@ -186,6 +191,9 @@ impl Config {
         // audience-bound to the Portal's internal listener, and it expires by itself.
         let oidc_token_url = lookup("JC_OIDC_TOKEN_URL").filter(|v| !v.trim().is_empty());
         let require_mesh_identity = lookup("JC_REQUIRE_MESH_IDENTITY").is_some_and(|v| v == "true");
+        let portal_client_id = lookup("JC_PORTAL_CLIENT_ID")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "portal-api".to_string());
 
         Ok(Self {
             bind,
@@ -202,6 +210,7 @@ impl Config {
             model_key,
             model_provider,
             require_mesh_identity,
+            portal_client_id,
         })
     }
 }
@@ -218,6 +227,21 @@ impl Config {
             url.path().trim_end_matches('/')
         ));
         url.to_string()
+    }
+
+    /// The realm's introspection endpoint (RFC 7662), beside its token endpoint.
+    pub fn introspection_url(&self) -> String {
+        format!("{}/introspect", self.token_url())
+    }
+
+    /// The realm's revocation endpoint (RFC 7009): Keycloak serves it as a sibling of the token
+    /// endpoint, `…/protocol/openid-connect/revoke`.
+    pub fn revocation_url(&self) -> String {
+        let token = self.token_url();
+        match token.strip_suffix("/token") {
+            Some(base) => format!("{base}/revoke"),
+            None => format!("{token}/revoke"),
+        }
     }
 }
 

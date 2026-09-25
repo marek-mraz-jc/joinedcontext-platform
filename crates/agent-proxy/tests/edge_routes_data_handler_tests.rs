@@ -405,8 +405,8 @@ async fn nothing_the_workspace_sets_reaches_the_gateway_as_an_identity() {
         headers
             .get("authorization")
             .and_then(|value| value.to_str().ok()),
-        Some(format!("Bearer mock-token-for-{SLUG}").as_str()),
-        "the gateway is told the endpoint's token and nothing else"
+        Some(format!("Bearer mock-token-for-run-{RUN_ID}").as_str()),
+        "the gateway is told the run's token and nothing else"
     );
     for forbidden in [
         "cookie",
