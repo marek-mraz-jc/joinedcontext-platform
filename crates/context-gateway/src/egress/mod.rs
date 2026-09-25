@@ -5,3 +5,4 @@
 //! has to run on the way out rather than on the way in.
 
 pub mod notifications;
+pub mod subject;

@@ -15,6 +15,7 @@ use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::pdp::evaluator::Subject;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
@@ -293,6 +294,7 @@ fn gateway_with(
                 Some(PUBLIC_URL.to_owned()),
             )
             .deliver_through(egress.map(str::to_owned))
+            .seal_subscribers_with(common::delivery_key())
             // The sinks listen on this address; the installation would name its own (T-1302).
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
@@ -303,8 +305,14 @@ fn gateway_with(
     )
 }
 
-/// The subscription the gateway would have stored: narrowed, and routed back through itself.
+/// The subscription the gateway would have stored: narrowed, routed back through itself, and
+/// sealed for the anonymous caller the public policy grants (GW27).
 fn stored(to: &str, attributes: Value, q: &str) -> Value {
+    stored_in(to, attributes, q, &[])
+}
+
+/// The same, before the subscriber is sealed into it.
+fn unsealed(to: &str, attributes: Value, q: &str) -> Value {
     json!({
         "id": SUBSCRIPTION,
         "type": "Subscription",
@@ -321,6 +329,32 @@ fn stored(to: &str, attributes: Value, q: &str) -> Value {
             }
         }
     })
+}
+
+/// A routed URI the gateway wrote, without the subscriber sealed at its end, after checking the
+/// seal opens as the anonymous caller the public policy grants (GW27, T-2383).
+fn unsealed_uri(uri: &str) -> String {
+    let (rest, _) = uri
+        .rsplit_once("&sub=")
+        .unwrap_or_else(|| panic!("the subscriber is sealed into the endpoint: {uri}"));
+    let params = context_gateway::query::parse(uri.split_once('?').expect("a query").1);
+    let first = |name: &str| context_gateway::query::first(&params, name).unwrap_or_default();
+    let areas: Vec<String> = params
+        .iter()
+        .filter(|(name, _)| name == "area")
+        .map(|(_, area)| area.clone())
+        .collect();
+    assert_eq!(
+        common::delivery_key().open(
+            &format!("/api/endpoint/{SLUG}"),
+            first("to"),
+            &areas,
+            first("sub")
+        ),
+        Some(Subject::anonymous()),
+        "the seal opens as the caller who wrote the subscription: {uri}"
+    );
+    rest.to_owned()
 }
 
 fn notification(entities: Vec<Value>) -> Value {
@@ -438,9 +472,11 @@ async fn a_created_subscription_is_narrowed_and_its_delivery_routed_back_through
     assert_eq!(status, StatusCode::CREATED);
     let stored = forwarded.first().expect("the broker was told something");
 
-    let uri = stored["notification"]["endpoint"]["uri"]
-        .as_str()
-        .expect("a rewritten uri");
+    let uri = &unsealed_uri(
+        stored["notification"]["endpoint"]["uri"]
+            .as_str()
+            .expect("a rewritten uri"),
+    );
     assert!(
         uri.starts_with(&format!(
             "{PUBLIC_URL}/api/endpoint/{SLUG}/egress/notifications?to="
@@ -515,9 +551,11 @@ async fn an_endpoint_behind_tls_is_accepted_at_creation_and_routed_like_any_othe
     .await;
 
     assert_eq!(status, StatusCode::CREATED);
-    let uri = forwarded[0]["notification"]["endpoint"]["uri"]
-        .as_str()
-        .expect("the stored subscription carries a rewritten endpoint");
+    let uri = unsealed_uri(
+        forwarded[0]["notification"]["endpoint"]["uri"]
+            .as_str()
+            .expect("the stored subscription carries a rewritten endpoint"),
+    );
     assert_eq!(
         uri,
         format!(
@@ -747,7 +785,7 @@ fn placed(id: &str, longitude: f64, latitude: f64) -> Value {
 
 /// The stored subscription of a caller whose grants drew `areas`.
 fn stored_in(to: &str, attributes: Value, q: &str, areas: &[&str]) -> Value {
-    let mut subscription = stored(to, attributes, q);
+    let mut subscription = unsealed(to, attributes, q);
     let uri = subscription["notification"]["endpoint"]["uri"]
         .as_str()
         .expect("the stored endpoint")
@@ -756,6 +794,11 @@ fn stored_in(to: &str, attributes: Value, q: &str, areas: &[&str]) -> Value {
         areas
             .iter()
             .fold(uri, |uri, area| format!("{uri}&area={}", percent(area))),
+    );
+    common::seal_stored(
+        &mut subscription,
+        &format!("/api/endpoint/{SLUG}"),
+        &Subject::anonymous(),
     );
     subscription
 }
@@ -917,9 +960,11 @@ async fn a_deployment_that_names_an_egress_url_has_the_broker_deliver_there() {
     .await;
 
     assert_eq!(status, StatusCode::CREATED);
-    let uri = forwarded[0]["notification"]["endpoint"]["uri"]
-        .as_str()
-        .expect("a rewritten uri");
+    let uri = &unsealed_uri(
+        forwarded[0]["notification"]["endpoint"]["uri"]
+            .as_str()
+            .expect("a rewritten uri"),
+    );
     assert!(
         uri.starts_with(&format!(
             "{EGRESS}/api/endpoint/{SLUG}/egress/notifications?to="
@@ -1074,6 +1119,23 @@ spec:
       slots: [battery, location]
 "#;
 
+/// The grant the two-class subscriptions below were written under: both classes, the union of
+/// their slots. Each delivery is decided again against it (GW27), so it has to hold them.
+fn two_class_policy() -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: {SPACE}\n\
+         assigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [queryEntity, createSubscription, updateSubscription]\n\
+         information:\n\
+         \x20 - entities:\n\
+         \x20     - type: AirQualityObserved\n\
+         \x20     - type: Device\n\
+         \x20   propertyNames: [temperature, battery, location]\n"
+    ))
+    .expect("the policy spec parses")
+}
+
 /// One delivery through an endpoint that carries the two-class projection, with what the sink saw.
 async fn deliver_projected(
     stored_subscription: Value,
@@ -1087,6 +1149,11 @@ async fn deliver_projected(
             "{PUBLIC_URL}/api/endpoint/{SLUG}/egress/notifications?to={}",
             percent(&webhook)
         ));
+        common::seal_stored(
+            &mut subscription,
+            &format!("/api/endpoint/{SLUG}"),
+            &Subject::anonymous(),
+        );
         subscription
     };
     let matching: Vec<String> = entities
@@ -1114,9 +1181,11 @@ async fn deliver_projected(
                 Some(PUBLIC_URL.to_owned()),
             )
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
+            .seal_subscribers_with(common::delivery_key())
             .serve([Endpoint {
                 roles: Default::default(),
                 projection: Some(Arc::new(projection.spec)),
+                policies: vec![two_class_policy()],
                 ..endpoint(hidden)
             }]),
     );
@@ -1424,5 +1493,188 @@ async fn an_entity_of_a_type_this_endpoint_does_not_serve_is_never_delivered() {
     assert!(
         !text.contains("Person") && !text.contains("nationalId") && !text.contains("010101/0000"),
         "an entity of a type this endpoint does not serve reached the subscriber: {text}",
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// T-2383, GW27, R48: a delivery is decided again for the subscriber it was written for, against
+// the policies the gateway holds now. A grant revoked after the subscription was stored stops
+// its deliveries; a grant narrowed since narrows them; a subscriber the gateway cannot verify
+// gets nothing delivered.
+// ---------------------------------------------------------------------------------------------
+
+/// One delivery through a gateway serving `policies`, of the subscription `stored_for` builds
+/// around the subscriber's webhook, with what the subscriber received.
+async fn deliver_under(
+    policies: Vec<PolicySpec>,
+    stored_for: impl FnOnce(&str) -> Value,
+) -> (StatusCode, Vec<Value>) {
+    let (webhook, seen, _) = sink().await;
+    let (upstream, _) = broker(BrokerState {
+        stored: Some(stored_for(&webhook)),
+        matching: vec![SENSOR.to_owned()],
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(PUBLIC_URL.to_owned()),
+            )
+            .deliver_privately_to(vec!["127.0.0.1".to_owned()])
+            .seal_subscribers_with(common::delivery_key())
+            .serve([Endpoint {
+                roles: Default::default(),
+                policies,
+                ..endpoint(&[])
+            }]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/egress/notifications"))
+                .header("content-type", "application/json")
+                .body(Body::from(notification(vec![sensor(SENSOR)]).to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let delivered = seen.lock().expect("the delivery log").clone();
+    (response.status(), delivered)
+}
+
+/// What an anonymous subscriber stored under [`policy`], sealed for them.
+fn public_subscription(webhook: &str) -> Value {
+    stored(
+        webhook,
+        json!(["location", "temperature"]),
+        "((temperature<100))",
+    )
+}
+
+/// A public grant over `kind` with `attributes`, and nothing else.
+fn public_grant(kind: &str, attributes: &[&str]) -> PolicySpec {
+    common::public_subscribe_policy(SPACE, DOMAIN, kind, attributes)
+}
+
+#[tokio::test]
+async fn a_revoked_grant_stops_the_subscription_it_allowed() {
+    // Delivered while the grant stands.
+    let (status, delivered) = deliver_under(vec![policy()], public_subscription).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        delivered.len(),
+        1,
+        "the grant stands, so the subscriber is told"
+    );
+
+    // The policy set replaced by one that no longer grants the type: nothing leaves.
+    let (status, delivered) = deliver_under(
+        vec![public_grant("Device", &["battery"])],
+        public_subscription,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        delivered.is_empty(),
+        "a type the grants no longer cover reached the subscriber: {delivered:?}"
+    );
+
+    // And no policy at all: the subscriber holds nothing, so nothing is sent.
+    let (status, delivered) = deliver_under(Vec::new(), public_subscription).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(delivered.is_empty(), "{delivered:?}");
+}
+
+#[tokio::test]
+async fn a_narrowed_grant_projects_the_delivery_by_what_it_still_allows() {
+    let (status, delivered) = deliver_under(
+        vec![public_grant("AirQualityObserved", &["location"])],
+        public_subscription,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let entity = &delivered
+        .first()
+        .unwrap_or_else(|| panic!("the type is still granted: {delivered:?}"))["data"][0];
+    assert_eq!(entity["id"], SENSOR, "{entity}");
+    assert!(
+        entity.get("temperature").is_none(),
+        "an attribute the grant no longer names was delivered: {entity}"
+    );
+    assert!(entity.get(UNGRANTED).is_none(), "{entity}");
+}
+
+#[tokio::test]
+async fn a_subscriber_the_gateway_cannot_verify_gets_nothing_delivered() {
+    // Written before subscribers were sealed: no `sub`.
+    let (status, delivered) = deliver_under(vec![policy()], |webhook| {
+        unsealed(webhook, json!(["temperature"]), "((temperature<100))")
+    })
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(delivered.is_empty(), "{delivered:?}");
+
+    // A subject swapped in the broker for one holding more: the seal no longer opens.
+    let (status, delivered) = deliver_under(vec![policy()], |webhook| {
+        let mut subscription = public_subscription(webhook);
+        let uri = subscription["notification"]["endpoint"]["uri"]
+            .as_str()
+            .expect("a routed endpoint")
+            .to_owned();
+        let (kept, sealed) = uri.rsplit_once("&sub=").expect("a sealed subscriber");
+        let (_, tag) = sealed.split_once('.').expect("payload and tag");
+        let widened = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            br#"{"r":["public","admin"]}"#,
+        );
+        subscription["notification"]["endpoint"]["uri"] =
+            Value::String(format!("{kept}&sub={widened}.{tag}"));
+        subscription
+    })
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(delivered.is_empty(), "{delivered:?}");
+}
+
+#[tokio::test]
+async fn a_gateway_without_a_delivery_key_stores_no_subscription_that_delivers() {
+    let (upstream, forwarded) = broker(BrokerState {
+        stored: None,
+        matching: Vec::new(),
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .deliver_through(Some(EGRESS.to_owned()))
+            .serve([endpoint(&[])]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "type": "Subscription",
+                        "entities": [{ "type": "AirQualityObserved" }],
+                        "notification": { "endpoint": { "uri": "http://mesto.example/hooks/x" } }
+                    })
+                    .to_string(),
+                ))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert!(
+        forwarded.lock().expect("the forwarding log").is_empty(),
+        "a subscription nobody could decide again reached the broker"
     );
 }

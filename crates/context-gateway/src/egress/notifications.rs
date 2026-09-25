@@ -17,7 +17,8 @@
 //! (T-0428, GW11).
 
 use crate::app::Gateway;
-use crate::pdp::evaluator::{conjoin, narrow, Constraints};
+use crate::egress::subject::DeliveryKey;
+use crate::pdp::evaluator::{conjoin, narrow, Constraints, Subject, Verdict};
 use crate::pdp::{geo, projection};
 use crate::proxy::Broker;
 use crate::query;
@@ -27,6 +28,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HOST};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
+use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
@@ -42,6 +44,9 @@ const TARGET: &str = "to";
 
 /// The parameter carrying one granted area, repeated once per grant (GW11).
 const AREA: &str = "area";
+
+/// The parameter carrying the subscriber, sealed by the gateway (GW27, T-2383).
+const SUBJECT: &str = "sub";
 
 /// The tenant header the gateway pins on the internal hop (GW20).
 const TENANT: &str = "NGSILD-Tenant";
@@ -144,6 +149,43 @@ pub fn narrow_subscription(
     Ok(())
 }
 
+/// Seals the subscriber into a routed notification endpoint, so each delivery can be decided
+/// again for them (GW27, T-2383). Called after [`narrow_subscription`]; a fragment that routes
+/// nothing, a `PATCH` that leaves the notification alone, is left as it is.
+///
+/// A gateway without a delivery key refuses the write rather than storing a subscription it
+/// could never decide again: that one would outlive every revocation (`501`).
+pub fn seal_route(
+    subscription: &mut Value,
+    base_path: &str,
+    key: Option<&DeliveryKey>,
+    subject: &Subject,
+) -> Result<(), Box<ProblemDetails>> {
+    let Some(uri) = subscription
+        .pointer_mut("/notification/endpoint/uri")
+        .filter(|uri| uri.is_string())
+    else {
+        return Ok(());
+    };
+    let Some((target, areas, _)) = uri.as_str().and_then(routed_parts) else {
+        return Ok(());
+    };
+    let Some(key) = key else {
+        return Err(Box::new(unsupported(
+            "this gateway holds no key to sign a subscription's subscriber with, so it could not \
+             decide a delivery again once a grant is revoked; set JC_GATEWAY_DELIVERY_KEY",
+        )));
+    };
+    let sealed = key.seal(base_path, &target, &areas, subject);
+    let routed = format!(
+        "{}&{SUBJECT}={}",
+        uri.as_str().unwrap_or_default(),
+        query::encode(&sealed)
+    );
+    *uri = Value::String(routed);
+    Ok(())
+}
+
 /// The delivery path: the broker's notification, projected and forwarded (R46).
 pub async fn deliver(
     State(gateway): State<Arc<Gateway>>,
@@ -182,7 +224,7 @@ pub async fn deliver(
         Ok(None) => return ProblemDetails::not_found().into_response(),
         Err(problem) => return problem.into_response(),
     };
-    let Some((target, areas)) = delivery_of(&stored) else {
+    let Some((target, _, sealed)) = delivery_of(&stored) else {
         tracing::warn!(
             subscription = %subscription_id,
             "a delivery names a subscription whose notification endpoint does not route \
@@ -190,6 +232,44 @@ pub async fn deliver(
         );
         return ProblemDetails::not_found().into_response();
     };
+    let Some(subject) = subscriber(
+        gateway.delivery_key.as_deref(),
+        &endpoint.base_path,
+        &stored,
+        sealed.as_deref(),
+    ) else {
+        // Written before subscribers were sealed, sealed under another key, or altered in the
+        // broker: nobody can say whose grants it delivers under, so it delivers under none.
+        tracing::warn!(
+            subscription = %subscription_id,
+            "a delivery names a subscription whose subscriber does not verify; not delivered, \
+             it is written again to deliver (GW27)"
+        );
+        return ProblemDetails::not_found().into_response();
+    };
+    // Decided again, now, for the subscriber it was written for: a grant revoked since stops the
+    // delivery, a grant narrowed since narrows it (GW27, R48, T-2383).
+    // The same question its creation asked: a subscription write carries no query string, so
+    // the request is empty and the stored selection is narrowed below, as it was then.
+    let verdict = gateway.pdp.decide(
+        &subject,
+        Operation::CreateSubscription,
+        &crate::pdp::evaluator::Request::default(),
+        &endpoint,
+    );
+    tracing::info!(
+        slug = %endpoint.slug,
+        subscription = %subscription_id,
+        allowed = !verdict.is_deny(),
+        "delivery decision"
+    );
+    let Verdict::Rewrite(granted) = verdict else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if granted.empty {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let areas = granted_areas(&granted);
 
     // `data` is a list of entities, as CIM 009 says a notification carries. Anything else is not a
     // notification this gateway delivers: the per-type filter below reads an array, so a bare
@@ -205,7 +285,10 @@ pub async fn deliver(
             .into_response();
     }
 
-    let judged = delivery_constraints(&stored, &endpoint);
+    let Some(judged) = regranted(delivery_constraints(&stored, &endpoint), &granted) else {
+        // Nothing the subscription selects is granted any more: nothing leaves (GW27).
+        return StatusCode::NO_CONTENT.into_response();
+    };
     if let Some(data) = notification.get_mut("data") {
         // An entity of a type this endpoint does not serve is not delivered, and what is
         // delivered keeps the slots of its own type (EP-26, MP-02, T-1862).
@@ -213,7 +296,13 @@ pub async fn deliver(
             entities.retain(|entity| projection::permitted(entity, &judged));
         }
         projection::project_by_type(data, &judged);
-        if let Some(filter) = stored.get("q").and_then(Value::as_str) {
+        // The subscription's own condition, which carries the grants it was written under, and
+        // the grants' filters as they stand now (R12, R13).
+        let filter = conjoin(
+            stored.get("q").and_then(Value::as_str),
+            &granted.q.iter().cloned().collect::<Vec<_>>(),
+        );
+        if let Some(filter) = filter.as_deref() {
             if let Err(problem) =
                 keep_matching(&gateway.broker, &endpoint.space, filter, data).await
             {
@@ -406,12 +495,17 @@ fn granted_areas(constraints: &Constraints) -> Vec<String> {
 ///
 /// `None` for a subscription this gateway did not route, which is the answer for one
 /// created directly on the broker: the gateway delivers nothing it did not narrow.
-fn delivery_of(stored: &Value) -> Option<(String, Vec<String>)> {
+fn delivery_of(stored: &Value) -> Option<(String, Vec<String>, Option<String>)> {
     let uri = stored
         .get("notification")?
         .get("endpoint")?
         .get("uri")?
         .as_str()?;
+    routed_parts(uri)
+}
+
+/// The target, the areas and the sealed subscriber of a routed notification endpoint.
+fn routed_parts(uri: &str) -> Option<(String, Vec<String>, Option<String>)> {
     let (path, query) = uri.split_once('?')?;
     if !path.ends_with(EGRESS_PATH) {
         return None;
@@ -426,7 +520,63 @@ fn delivery_of(stored: &Value) -> Option<(String, Vec<String>)> {
         .filter(|(name, _)| name == AREA)
         .map(|(_, area)| area.clone())
         .collect();
-    Some((target, areas))
+    let sealed = query::first(&params, SUBJECT).map(str::to_owned);
+    Some((target, areas, sealed))
+}
+
+/// The subscriber a stored subscription was sealed for, when it verifies under this gateway's
+/// key for this endpoint, its target and its areas (GW27).
+fn subscriber(
+    key: Option<&DeliveryKey>,
+    base_path: &str,
+    stored: &Value,
+    sealed: Option<&str>,
+) -> Option<Subject> {
+    let (target, areas, _) = delivery_of(stored)?;
+    key?.open(base_path, &target, &areas, sealed?)
+}
+
+/// Two whitelists together, `None` when both name something and share nothing. [`narrow`] reads
+/// an empty set as "no narrowing", so an empty intersection would come back as everything: the
+/// one answer a revocation must never produce.
+fn both(held: &BTreeSet<String>, now: &BTreeSet<String>) -> Option<BTreeSet<String>> {
+    let narrowed = narrow(held, now);
+    match narrowed.is_empty() && !(held.is_empty() && now.is_empty()) {
+        true => None,
+        false => Some(narrowed),
+    }
+}
+
+/// The constraints a delivery is judged by, narrowed by the grants as they stand now: the types,
+/// ids and attributes a revocation took away since the subscription was written are no longer
+/// delivered (GW27, T-2383). Never wider than either half, and `None` when they share nothing:
+/// then nothing is delivered at all.
+fn regranted(mut judged: Constraints, now: &Constraints) -> Option<Constraints> {
+    judged.types = both(&judged.types, &now.types)?;
+    judged.id_patterns = now.id_patterns.clone();
+    let allowed = match now.served.is_empty() {
+        false => &now.served,
+        true => &now.attrs,
+    };
+    // A set only ever shrinks here: an empty one keeps whatever it meant before.
+    let shrink = |held: &mut BTreeSet<String>, by: &BTreeSet<String>| {
+        if !held.is_empty() && !by.is_empty() {
+            held.retain(|name| by.contains(name));
+        }
+    };
+    if !allowed.is_empty() {
+        judged.attrs = both(&judged.attrs, allowed)?;
+        for slots in judged.attrs_by_type.values_mut() {
+            shrink(slots, allowed);
+        }
+    }
+    for (class, slots) in &now.attrs_by_type {
+        if let Some(held) = judged.attrs_by_type.get_mut(class) {
+            shrink(held, slots);
+        }
+    }
+    judged.hidden.extend(now.hidden.iter().cloned());
+    Some(judged)
 }
 
 /// The attributes a stored subscription was narrowed to; empty is a subscription over

@@ -15,6 +15,8 @@
 //!
 //! What is left, and what this file plays, is the clock.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -89,7 +91,7 @@ async fn silent() -> (String, Arc<Mutex<usize>>) {
 
 /// A broker holding one subscription, which is all the delivery path reads of it.
 async fn broker(target: &str) -> String {
-    let stored = json!({
+    let mut stored = json!({
         "id": SUBSCRIPTION,
         "type": "Subscription",
         "entities": [{ "type": "AirQualityObserved" }],
@@ -104,6 +106,11 @@ async fn broker(target: &str) -> String {
             }
         }
     });
+    common::seal_stored(
+        &mut stored,
+        &format!("/api/endpoint/{SLUG}"),
+        &context_gateway::pdp::evaluator::Subject::anonymous(),
+    );
     let app = Router::new().fallback(any(move |request: Request| {
         let stored = stored.clone();
         async move {
@@ -145,7 +152,16 @@ async fn a_subscriber_that_never_answers_does_not_hold_the_delivery_open() {
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
             .deliver_through(Some(BASE.to_owned()))
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
-            .serve([endpoint()]),
+            .seal_subscribers_with(common::delivery_key())
+            .serve([Endpoint {
+                policies: vec![common::public_subscribe_policy(
+                    SPACE,
+                    DOMAIN,
+                    "AirQualityObserved",
+                    &["temperature"],
+                )],
+                ..endpoint()
+            }]),
     );
 
     let response = router(gateway)

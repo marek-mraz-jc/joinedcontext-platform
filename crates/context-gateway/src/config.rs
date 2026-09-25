@@ -69,6 +69,10 @@ pub struct Config {
     /// Hosts inside the platform's own networks a notification may still be delivered to
     /// (`JC_GATEWAY_EGRESS_PRIVATE_HOSTS`, comma-separated); empty refuses them all (T-1302).
     pub egress_private_hosts: Vec<String>,
+    /// The key a subscription's subscriber is sealed with (`JC_GATEWAY_DELIVERY_KEY`, a secret
+    /// of at least 32 bytes), so each delivery is decided again against the policies in force
+    /// (GW27, T-2383); unset refuses every subscription that routes a delivery with `501`.
+    pub delivery_key: Option<jc_core::Secret>,
     /// `report` or `enforce` (`JC_GATEWAY_DOMAIN_VERIFICATION`, default `report`): whether a
     /// write waits for the Organization's verified domain (PF-41, Architecture/03 §3).
     pub domain_verification: crate::domain_gate::Mode,
@@ -127,6 +131,24 @@ impl Config {
             return Err(ConfigError::Invalid {
                 name: "JC_OIDC_ISSUER",
                 reason: "an issuer without a JWKS URL verifies nothing, and a JWKS URL without an issuer accepts any realm; set both or neither".to_owned(),
+            });
+        }
+
+        let delivery_key = std::env::var("JC_GATEWAY_DELIVERY_KEY")
+            .ok()
+            .filter(|key| !key.trim().is_empty())
+            .map(jc_core::Secret::new);
+        if delivery_key
+            .as_ref()
+            .is_some_and(|key| key.expose().len() < crate::egress::subject::MIN_KEY_BYTES)
+        {
+            // The length only, never the value (CC-06).
+            return Err(ConfigError::Invalid {
+                name: "JC_GATEWAY_DELIVERY_KEY",
+                reason: format!(
+                    "shorter than {} bytes, too weak to sign a subscription's subscriber with",
+                    crate::egress::subject::MIN_KEY_BYTES
+                ),
             });
         }
 
@@ -207,6 +229,7 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            delivery_key,
         })
     }
 }
@@ -279,6 +302,7 @@ mod tests {
             egress_url: None,
             egress_ca_bundle: None,
             egress_private_hosts: Vec::new(),
+            delivery_key: None,
             domain_verification: crate::domain_gate::Mode::Report,
             domain_verifications_url: None,
         }

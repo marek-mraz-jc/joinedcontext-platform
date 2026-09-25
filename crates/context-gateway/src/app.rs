@@ -109,6 +109,9 @@ pub struct Gateway {
     pub egress_url: Option<String>,
     /// Hosts inside the platform's networks a notification may be delivered to (T-1302).
     pub private_hosts: Vec<String>,
+    /// The key a subscription's subscriber is sealed with, so each delivery is decided again
+    /// for them (GW27, T-2383). Absent refuses every subscription that routes a delivery.
+    pub delivery_key: Option<Arc<crate::egress::subject::DeliveryKey>>,
     /// One token bucket per endpoint and caller (EP-20).
     pub rate_limiter: RateLimiter,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
@@ -132,6 +135,7 @@ impl Gateway {
             public_url: None,
             egress_url: None,
             private_hosts: Vec::new(),
+            delivery_key: None,
             rate_limiter: RateLimiter::new(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
@@ -162,6 +166,13 @@ impl Gateway {
     /// public edge, where it would arrive indistinguishable from any request off the internet.
     pub fn deliver_through(mut self, egress_url: Option<String>) -> Self {
         self.egress_url = egress_url;
+        self
+    }
+
+    /// Seals each subscription's subscriber with `key` and decides every delivery again for
+    /// them (GW27, T-2383).
+    pub fn seal_subscribers_with(mut self, key: crate::egress::subject::DeliveryKey) -> Self {
+        self.delivery_key = Some(Arc::new(key));
         self
     }
 
@@ -730,6 +741,7 @@ pub(crate) async fn serve_ngsi_ld(
             gateway.egress_base(),
             &gateway.private_hosts,
             operation,
+            (gateway.delivery_key.as_deref(), &subject),
         ) {
             Ok(narrowed) => sent = narrowed,
             Err(problem) => return problem.into_response(),
@@ -1392,6 +1404,7 @@ fn narrowed_subscription(
     base_url: &str,
     private_hosts: &[String],
     operation: Operation,
+    (key, subject): (Option<&egress::subject::DeliveryKey>, &Subject),
 ) -> Result<Vec<u8>, Box<ProblemDetails>> {
     let mut payload: Value = serde_json::from_slice(body).map_err(|_| {
         Box::new(ProblemDetails::bad_request().with_detail("request body is not JSON"))
@@ -1404,6 +1417,7 @@ fn narrowed_subscription(
         private_hosts,
         operation == Operation::CreateSubscription,
     )?;
+    egress::notifications::seal_route(&mut payload, &endpoint.base_path, key, subject)?;
     serde_json::to_vec(&payload).map_err(|error| {
         tracing::error!(%error, "the narrowed subscription does not serialize");
         Box::new(ProblemDetails::internal())
