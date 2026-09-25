@@ -78,6 +78,10 @@ pub fn dataset(space: &Space, base: &str) -> Value {
         "dct:title": localized(&space.title, space.name()),
         "dcat:service": services(space, &iri),
     });
+    let distributions = distributions(space, &iri);
+    if !distributions.is_empty() {
+        record["dcat:distribution"] = Value::Array(distributions);
+    }
     if !space.description.is_empty() {
         record["dct:description"] = localized(&space.description, "");
     }
@@ -101,21 +105,24 @@ struct Child {
     title: &'static str,
     /// The specification it implements, for `dct:conformsTo`.
     conforms_to: Option<&'static str>,
+    /// The media type of a child that is a file to download, which makes it a
+    /// `dcat:Distribution` rather than a `dcat:DataService` (SP-10).
+    download: Option<&'static str>,
 }
 
 /// The children of a space: every one the router serves, and nothing else (SP-04, T-2373).
 ///
 /// A record is a promise a harvester follows. `schema/` was advertised as a directory nobody
 /// routes, and `dump/` and `access` were linked from the HTML page alone; all three answered
-/// 404. `dump/` is SP-04's and is not built (**T-2391**), `access` is not a child of a space
-/// at all, and the schema surface is entered by its index — so those are what the record
-/// says now. The one list below is what all three serializations render, so they cannot
-/// drift apart again.
+/// 404. `access` is not a child of a space at all, the schema surface is entered by its index,
+/// and `dump/` is named when the space serves it (T-2391). The one list below is what all
+/// three serializations render, so they cannot drift apart again.
 fn children(space: &Space) -> Vec<Child> {
     let mut children = vec![Child {
         path: "ngsi-ld/v1/",
         title: "NGSI-LD API",
         conforms_to: Some("https://www.etsi.org/deliver/etsi_gs/CIM/001_099/009/"),
+        download: None,
     }];
     if space
         .endpoint
@@ -126,21 +133,36 @@ fn children(space: &Space) -> Vec<Child> {
             path: "mcp",
             title: "Model Context Protocol",
             conforms_to: Some("https://modelcontextprotocol.io/specification"),
+            download: None,
         });
     }
     children.push(Child {
         path: "schema/index.json",
         title: "Schema artifacts",
         conforms_to: None,
+        download: None,
     });
+    if space
+        .endpoint
+        .representations
+        .contains(&jc_core::kinds::Representation::Zip)
+    {
+        children.push(Child {
+            path: "dump/",
+            title: "Dump",
+            conforms_to: None,
+            download: Some(crate::translators::zip_export::MEDIA_TYPE),
+        });
+    }
     children
 }
 
-/// The data services and distributions of a space, which are exactly its children (SP-04).
+/// The data services of a space: its children that are not a file to download (SP-04).
 fn services(space: &Space, iri: &str) -> Value {
     Value::Array(
         children(space)
             .into_iter()
+            .filter(|child| child.download.is_none())
             .map(|child| {
                 let url = format!("{iri}/{}", child.path);
                 let mut service = json!({
@@ -157,6 +179,24 @@ fn services(space: &Space, iri: &str) -> Value {
             })
             .collect::<Vec<_>>(),
     )
+}
+
+/// The distributions of a space: its children that are a file to download (SP-10).
+fn distributions(space: &Space, iri: &str) -> Vec<Value> {
+    children(space)
+        .into_iter()
+        .filter_map(|child| {
+            let media = child.download?;
+            let url = format!("{iri}/{}", child.path);
+            Some(json!({
+                "@id": url,
+                "@type": "dcat:Distribution",
+                "dct:title": child.title,
+                "dcat:downloadURL": url,
+                "dcat:mediaType": media,
+            }))
+        })
+        .collect()
 }
 
 /// The catalog of the spaces a caller may discover (SP-11).
@@ -201,12 +241,31 @@ pub fn dataset_turtle(space: &Space, base: &str) -> String {
     }
     // The same children the JSON-LD record names: a triple store that harvests the Turtle
     // and a client that reads the JSON-LD have to learn the same surface (SP-10).
-    let children = children(space);
-    let links: Vec<String> = children
-        .iter()
-        .map(|child| format!("<{iri}/{}>", child.path))
-        .collect();
-    out.push_str(&format!(";\n    dcat:service {} .\n", links.join(", ")));
+    let (downloads, children): (Vec<Child>, Vec<Child>) = children(space)
+        .into_iter()
+        .partition(|child| child.download.is_some());
+    let links = |children: &[Child]| {
+        children
+            .iter()
+            .map(|child| format!("<{iri}/{}>", child.path))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !downloads.is_empty() {
+        out.push_str(&format!(";\n    dcat:distribution {} ", links(&downloads)));
+    }
+    out.push_str(&format!(";\n    dcat:service {} .\n", links(&children)));
+    for child in &downloads {
+        out.push_str(&format!(
+            "\n<{iri}/{path}> a dcat:Distribution ;\n\
+             \x20   dct:title {title} ;\n\
+             \x20   dcat:downloadURL <{iri}/{path}> ;\n\
+             \x20   dcat:mediaType {media} .\n",
+            path = child.path,
+            title = literal(child.title),
+            media = literal(child.download.unwrap_or_default())
+        ));
+    }
     for child in &children {
         out.push_str(&format!(
             "\n<{iri}/{path}> a dcat:DataService ;\n\

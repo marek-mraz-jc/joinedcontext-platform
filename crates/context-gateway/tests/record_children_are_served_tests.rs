@@ -285,6 +285,8 @@ async fn the_three_serializations_of_a_space_record_name_the_same_children() {
     assert_eq!(
         first,
         &vec![
+            // The dump is back now that the router serves it (T-2391).
+            format!("/cs/{SPACE}/dump/"),
             format!("/cs/{SPACE}/mcp"),
             format!("/cs/{SPACE}/ngsi-ld/v1/"),
             format!("/cs/{SPACE}/schema/index.json"),

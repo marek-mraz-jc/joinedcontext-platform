@@ -2,14 +2,16 @@
 
 use crate::app::accept_language;
 use crate::app::admit;
+use crate::app::admit_space;
 use crate::app::broker_speaks_json;
 use crate::app::json_response;
 use crate::app::sha256_hex;
 use crate::app::Gateway;
 use crate::handlers::reads::paged_entities;
 use crate::handlers::reads::too_large;
-use crate::handlers::{endpoint_surface, schema};
+use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::response::RESULTS_RESTRICTED;
+use crate::pdp::evaluator::Subject;
 use crate::resolver::{Endpoint, Model};
 use crate::translators::{geojson, tabular, zip_export};
 use crate::{middleware::tenancy, query};
@@ -273,26 +275,66 @@ pub(crate) async fn file_zip(
     };
 
     let params = query::parse(request.uri().query().unwrap_or_default());
-    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
-    let (entities, restricted) = match paged_entities(
+    let space = gateway.resolver.resolve_space(&endpoint.space);
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let index = schema::index(&endpoint, &visible, sha256_hex);
+    let dcat = endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url());
+    zip_download(&gateway, &endpoint, &subject, &params, &dcat, &mut request).await
+}
+
+/// `/cs/{space}/dump/`: the `file.zip` bundle over everything in the space the caller's grants
+/// read, generated per request (SP-13, T-2391). No query narrows it: a dump is the space, and the
+/// caller who wants less asks the NGSI-LD surface. The projection is the space's own, the one
+/// `ngsi-ld/v1/` applies, and a caller whose grants reach nothing gets the `404` of a space that
+/// does not exist (SP-06).
+pub(crate) async fn space_dump(
+    State(gateway): State<Arc<Gateway>>,
+    Path(name): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    broker_speaks_json(&mut request);
+    let (space, subject) = match admit_space(
         &gateway,
-        &endpoint,
-        &subject,
-        &params,
-        &mut request,
-        &limits,
-    )
-    .await
-    {
-        Ok(answer) => answer,
+        &name,
+        Some(Representation::Zip),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
+    let dcat = space_surface::dataset(&space, gateway.base_url());
+    zip_download(
+        &gateway,
+        &space.endpoint,
+        &subject,
+        &[],
+        &dcat,
+        &mut request,
+    )
+    .await
+}
 
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    let schemas = schema_directory(&endpoint, &visible);
-    let index = schema::index(&endpoint, &visible, sha256_hex);
-    let space = gateway.resolver.resolve_space(&endpoint.space);
-    let dcat = endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url());
+/// One bundle as a download (EP-41, EP-44): the projected entities paged out of the broker, the
+/// schema directory of the caller's own view and the catalogue record it was cut from, under the
+/// endpoint's ceilings, which refuse the whole archive with `413` rather than truncate it.
+async fn zip_download(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    params: &[(String, String)],
+    dcat: &serde_json::Value,
+    request: &mut Request,
+) -> Response<Body> {
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    let (entities, restricted) =
+        match paged_entities(gateway, endpoint, subject, params, request, &limits).await {
+            Ok(answer) => answer,
+            Err(problem) => return *problem,
+        };
+
+    let visible = schema::visible(subject, endpoint, crate::pdp::now());
+    let schemas = schema_directory(endpoint, &visible);
 
     let exported_at = crate::pdp::now().to_rfc3339();
     let query = params
@@ -307,7 +349,7 @@ pub(crate) async fn file_zip(
         exported_at: &exported_at,
     };
 
-    let archive = match zip_export::bundle(&entities, &schemas, &dcat, &manifest, &limits) {
+    let archive = match zip_export::bundle(&entities, &schemas, dcat, &manifest, &limits) {
         Ok(archive) => archive,
         Err(zip_export::BundleError::TooLarge(_)) => return too_large(),
         Err(error) => {
@@ -322,8 +364,8 @@ pub(crate) async fn file_zip(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static(zip_export::MEDIA_TYPE),
     );
-    // The slug is base32 and the date is digits, so the filename needs no quoting beyond the
-    // quotes themselves (EP-43).
+    // A slug is base32, a space name a DNS label, and the date is digits, so the filename needs
+    // no quoting beyond the quotes themselves (EP-43).
     if let Ok(disposition) = HeaderValue::from_str(&format!(
         "attachment; filename=\"{}\"",
         zip_export::file_name(&endpoint.slug, &exported_at)
