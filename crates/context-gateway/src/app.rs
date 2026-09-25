@@ -815,6 +815,41 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
+    // A write keeps the relationships of the space's model (DM-70, T-2740): the target's type,
+    // one target on a single end, a required end, and a target the writer can read in the space.
+    // A batch is answered per entity (207); anything else is refused whole. A view endpoint
+    // writes in its target model, which the space's rules do not describe.
+    if operation.is_write() && !subscribing && endpoint.view_mapping.is_none() {
+        if let Some(rules) = endpoint
+            .declared_types
+            .as_ref()
+            .map(|declared| &declared.relationships)
+            .filter(|rules| !rules.is_empty())
+        {
+            let before = sent.len();
+            let held = HeldWrite {
+                gateway,
+                subject: &subject,
+                endpoint: &endpoint,
+                headers: &parts.headers,
+                path: &path,
+                params: &params,
+                operation,
+                rules,
+            };
+            if let Err(answer) = held.check(&mut sent, &mut divided).await {
+                tracing::info!(slug = %endpoint.slug, "write refused: it breaks a relationship of the space's model");
+                return *answer;
+            }
+            if sent.len() != before {
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+            }
+        }
+    }
+
     // CIM 009 clause 5.6.9 puts a query's selector in the body, and a filter is a read wherever
     // it is written. The body is narrowed here rather than in the decision point because the
     // decision is taken before a body is read (T-2259, T-1862).
@@ -942,6 +977,227 @@ pub(crate) async fn serve_ngsi_ld(
         None => answer,
     };
     with_filled_units(answer, &units_filled)
+}
+
+/// Ids the existence read of a write asks for at once; a batch naming more is read in chunks.
+const TARGETS_PER_READ: usize = 100;
+
+/// One write held against the relationships of the space's model (DM-70, T-2740).
+struct HeldWrite<'a> {
+    gateway: &'a Gateway,
+    subject: &'a Subject,
+    endpoint: &'a Endpoint,
+    headers: &'a HeaderMap,
+    path: &'a str,
+    params: &'a [(String, String)],
+    operation: Operation,
+    rules: &'a crate::relationships::RelationshipRules,
+}
+
+impl HeldWrite<'_> {
+    /// Refuses a write that breaks a relationship, or divides a batch: the entities that break
+    /// one leave `sent` and join the refusals the answer merges (GW18's 207).
+    async fn check(
+        &self,
+        sent: &mut Vec<u8>,
+        divided: &mut Option<(Vec<String>, Refused)>,
+    ) -> Result<(), Box<Response<Body>>> {
+        use crate::relationships::{self, Extent, Shape};
+        let refuse = |problem: ProblemDetails| Box::new(problem.into_response());
+
+        let addressed = operations::addressed_entity(self.path).map(query::decode);
+        let targeted = operations::targeted_attribute(self.path);
+        // Removing a required end outright empties it as surely as a null does.
+        if self.operation == Operation::DeleteAttrs {
+            if let (Some(id), Some(attribute)) = (addressed.as_deref(), targeted) {
+                relationships::deleted_attribute(id, attribute, self.rules)
+                    .map_err(|violation| refuse(violation.into()))?;
+            }
+            return Ok(());
+        }
+        let extent = match self.operation {
+            Operation::CreateEntity | Operation::ReplaceEntity | Operation::CreateBatch => {
+                Extent::Whole
+            }
+            // `options=update` makes an upsert a merge into what is there (CIM 009 5.6.8).
+            Operation::UpsertBatch
+                if !query::first(self.params, "options").is_some_and(|options| {
+                    options.split(',').any(|option| option.trim() == "update")
+                }) =>
+            {
+                Extent::Whole
+            }
+            Operation::UpsertBatch
+            | Operation::UpdateBatch
+            | Operation::MergeBatch
+            | Operation::MergeEntity
+            | Operation::AppendAttrs
+            | Operation::UpdateAttrs
+            | Operation::ReplaceAttrs
+            | Operation::UpdateEntity => Extent::Partial,
+            // A temporal write records history, and a delete carries no targets.
+            _ => return Ok(()),
+        };
+        if sent.is_empty() {
+            return Ok(());
+        }
+        let Ok(payload) = serde_json::from_slice::<Value>(sent) else {
+            // `judge_write` already refused a body that is not JSON.
+            return Ok(());
+        };
+        let batch = matches!(
+            self.operation,
+            Operation::CreateBatch
+                | Operation::UpsertBatch
+                | Operation::UpdateBatch
+                | Operation::MergeBatch
+        );
+        let shape = Shape {
+            addressed: addressed.as_deref(),
+            targeted,
+            extent,
+        };
+        let (Value::Array(entries), true) = (&payload, batch) else {
+            let targets = relationships::targets_of(&payload, shape, self.rules)
+                .map_err(|violation| refuse(violation.into()))?;
+            let found = self
+                .readable(&targets)
+                .await
+                .map_err(|problem| refuse(*problem))?;
+            if let Some(violation) = relationships::first_missing(&targets, &found) {
+                return Err(refuse(violation.into()));
+            }
+            return Ok(());
+        };
+
+        // Each entity on its own, then one existence read for the targets of all of them.
+        let mut refused: Refused = Vec::new();
+        let mut kept: Vec<(usize, relationships::Targets)> = Vec::new();
+        for (at, entry) in entries.iter().enumerate() {
+            match relationships::targets_of(entry, shape, self.rules) {
+                Ok(targets) => kept.push((at, targets)),
+                Err(violation) => {
+                    refused.push((batch_entry_id(entry).unwrap_or_default(), violation.into()))
+                }
+            }
+        }
+        let mut all = relationships::Targets::new();
+        for (_, targets) in &kept {
+            all.extend(
+                targets
+                    .iter()
+                    .map(|(urn, named)| (urn.clone(), named.clone())),
+            );
+        }
+        let found = self
+            .readable(&all)
+            .await
+            .map_err(|problem| refuse(*problem))?;
+        let mut permitted = Vec::new();
+        for (at, targets) in kept {
+            let entry = &entries[at];
+            match relationships::first_missing(&targets, &found) {
+                Some(violation) => {
+                    refused.push((batch_entry_id(entry).unwrap_or_default(), violation.into()))
+                }
+                None => permitted.push(entry.clone()),
+            }
+        }
+        if refused.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = permitted.iter().filter_map(batch_entry_id).collect();
+        let refused = match divided.take() {
+            Some((_, mut earlier)) => {
+                earlier.extend(refused);
+                earlier
+            }
+            None => refused,
+        };
+        if permitted.is_empty() {
+            return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
+        }
+        *sent = serde_json::to_vec(&permitted).map_err(|error| {
+            tracing::error!(%error, "the entities a relationship check kept do not serialize");
+            refuse(ProblemDetails::internal())
+        })?;
+        *divided = Some((ids, refused));
+        Ok(())
+    }
+
+    /// The targets the writer can read in the space: one read through this endpoint under the
+    /// caller's own read grants, so a target they may not read is as absent as one that is not
+    /// there, and a refusal tells them nothing a read would not (DM-71).
+    async fn readable(
+        &self,
+        targets: &crate::relationships::Targets,
+    ) -> Result<BTreeSet<String>, Box<ProblemDetails>> {
+        let mut found = BTreeSet::new();
+        if targets.is_empty() {
+            return Ok(found);
+        }
+        let requested = evaluator::Request {
+            types: targets.values().map(|named| named.target.clone()).collect(),
+            ..Default::default()
+        };
+        let Verdict::Rewrite(read) = self.gateway.pdp.decide(
+            self.subject,
+            Operation::QueryEntity,
+            &requested,
+            self.endpoint,
+        ) else {
+            return Ok(found);
+        };
+        if read.empty {
+            return Ok(found);
+        }
+        // The grant's filters narrow the read; the attributes and the time window would only
+        // hide the entity, which is all this read looks for.
+        let mut probe = (*read).clone();
+        probe.attrs.clear();
+        probe.temporal_q = None;
+        probe.temporal_windows.clear();
+        let narrowed = query::upstream(&[], &probe, &[]);
+        let urns: Vec<&String> = targets.keys().collect();
+        for chunk in urns.chunks(TARGETS_PER_READ) {
+            let ids = chunk
+                .iter()
+                .map(|urn| query::encode(urn))
+                .collect::<Vec<_>>()
+                .join(",");
+            let answer = conditional::retrieve(
+                &self.gateway.broker,
+                &format!(
+                    "/ngsi-ld/v1/entities?id={ids}&limit={}&{narrowed}",
+                    chunk.len()
+                ),
+                self.headers,
+            )
+            .await?;
+            if !(200..300).contains(&answer.status) {
+                tracing::error!(
+                    status = answer.status,
+                    "the broker refused the read of a write's relationship targets"
+                );
+                return Err(Box::new(ProblemDetails::new(
+                    502,
+                    "upstream-unavailable",
+                    "Broker Unavailable",
+                )));
+            }
+            found.extend(
+                answer
+                    .body
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entity| entity.get("id").and_then(Value::as_str))
+                    .filter(|id| write_guard::check_granted_id(id, &probe).is_ok())
+                    .map(str::to_owned),
+            );
+        }
+        Ok(found)
+    }
 }
 
 /// Checks and fills the units of a write body in place (DM-06), answering the quantities it

@@ -71,6 +71,7 @@ fn endpoint(declared: Option<&[&str]>) -> Endpoint {
             model: "bb-air-quality".into(),
             classes: classes.iter().map(|class| (*class).to_owned()).collect(),
             units: Default::default(),
+            relationships: Default::default(),
         }),
         catalog: None,
         roles: Default::default(),
@@ -190,6 +191,7 @@ fn an_expanded_or_compacted_type_names_the_same_class() {
         model: "m".into(),
         classes: ["AirQualityObserved".to_owned()].into(),
         units: Default::default(),
+        relationships: Default::default(),
     };
     for written in [
         "AirQualityObserved",
@@ -286,6 +288,7 @@ fn the_table_narrows_a_space_to_the_model_it_names_and_only_then() {
         model: "bb-air-quality".into(),
         classes: ["AirQualityObserved".to_owned(), "Device".to_owned()].into(),
         units: Default::default(),
+        relationships: Default::default(),
     };
     assert_eq!(endpoint.as_ref(), Some(&expected));
     assert_eq!(

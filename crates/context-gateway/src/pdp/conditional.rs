@@ -242,17 +242,17 @@ async fn condition_holds(
 }
 
 /// One answer to a read the gateway made on its own account.
-struct Read {
-    status: u16,
-    etag: Option<String>,
-    body: Value,
+pub(crate) struct Read {
+    pub(crate) status: u16,
+    pub(crate) etag: Option<String>,
+    pub(crate) body: Value,
 }
 
 /// Reads from the broker with the pinned tenant and nothing else the caller sent.
 ///
 /// A fresh header map rather than the request's: the write's `Content-Length`, its media
 /// type and its own `If-Match` all describe a body this read does not send.
-async fn retrieve(
+pub(crate) async fn retrieve(
     broker: &Broker,
     target: &str,
     headers: &HeaderMap,
