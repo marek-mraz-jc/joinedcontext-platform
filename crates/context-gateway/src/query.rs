@@ -712,10 +712,6 @@ mod tests {
         );
     }
 
-    /// T-2963, R9: `id` and `type` are an entity's identity, not attributes, and the broker
-    /// refuses them in `attrs`. A grant that names them (an App's `dataNeeds.attrs` often does)
-    /// or the identity-only set of `narrow_to_identity` reaches the broker without them; the
-    /// caller's own `attrs=id` still does, and its answer stays the broker's.
     /// T-2987: one entity's history is asked without `type` (CIM 009 6.19.3.1), with the slots of
     /// the type its id names instead of the union, and an id that names no type keeps the union.
     #[test]
@@ -757,6 +753,10 @@ mod tests {
         assert_eq!(first(&query, "type"), Some("User,Vehicle"));
     }
 
+    /// T-2963, R9: `id` and `type` are an entity's identity, not attributes, and the broker
+    /// refuses them in `attrs`. A grant that names them (an App's `dataNeeds.attrs` often does)
+    /// or the identity-only set of `narrow_to_identity` reaches the broker without them; the
+    /// caller's own `attrs=id` still does, and its answer stays the broker's.
     #[test]
     fn a_grants_identity_members_never_reach_the_broker_as_attributes() {
         let grant = |attrs: &[&str]| Constraints {
