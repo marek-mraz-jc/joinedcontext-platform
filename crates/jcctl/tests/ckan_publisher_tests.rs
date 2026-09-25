@@ -140,6 +140,49 @@ fn the_dataset_metadata_is_the_endpoints_own_dcat_record() {
     assert_eq!(tags, vec!["air-quality", "ovzdusie"]);
 }
 
+/// T-2982, EP-63: a keyword CKAN cannot hold as a tag is written the way it can, never sent as it
+/// is: CKAN refuses the whole `package_update` over one tag, and praha-mesto's "P+R" kept its
+/// dataset, its DataStore and its grid view from being published on every pass.
+#[test]
+fn a_keyword_becomes_a_tag_ckan_accepts() {
+    let long = "a".repeat(120);
+    let mut record = record();
+    record["dcat:keyword"] = json!([
+        { "@language": "cs", "@value": "P+R" },
+        { "@language": "cs", "@value": "sdílená kola" },
+        { "@language": "cs", "@value": "  vzduch / voda  " },
+        { "@language": "en", "@value": "park_and-ride.v2" },
+        { "@language": "en", "@value": "+" },
+        { "@language": "en", "@value": "P R" },
+        { "@language": "en", "@value": long },
+    ]);
+    let dataset = package(
+        &endpoint("[ngsi-ld, csv]", PUBLISH),
+        &instance(),
+        &record,
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    let tags: Vec<&str> = dataset["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .map(|tag| tag["name"].as_str().expect("a tag name"))
+        .collect();
+    assert_eq!(
+        tags,
+        vec![
+            "P R",
+            "a".repeat(100).as_str(),
+            "park_and-ride.v2",
+            "sdílená kola",
+            "vzduch voda",
+        ],
+        "one tag per distinct cleaned keyword; a keyword with nothing left is none"
+    );
+}
+
 /// EP-64: one resource per enabled representation, each at its own URL under the endpoint.
 #[test]
 fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {

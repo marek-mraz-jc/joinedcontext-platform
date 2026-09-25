@@ -503,11 +503,37 @@ fn tags(record: &Value) -> Vec<Value> {
     };
     // A language map repeats one concept per locale; CKAN tags are a set.
     keywords
-        .into_iter()
+        .iter()
+        .filter_map(|keyword| tag_name(keyword))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|keyword| json!({ "name": keyword }))
         .collect()
+}
+
+/// The shortest and the longest tag CKAN holds (`ckan.model.tag`).
+const TAG_LENGTH: std::ops::RangeInclusive<usize> = 2..=100;
+
+/// `keyword` as a CKAN tag, `None` when nothing of it is left (T-2982).
+///
+/// CKAN refuses the whole `package_update` over one tag outside letters, digits, space, `-`,
+/// `_` and `.`, so every other character becomes a space (`P+R` is `P R`), spaces collapse and
+/// the tag is cut to CKAN's length. The DCAT-AP record keeps the keyword as it was written.
+fn tag_name(keyword: &str) -> Option<String> {
+    let allowed = |c: char| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.');
+    let spaced: String = keyword
+        .chars()
+        .map(|c| if allowed(c) { c } else { ' ' })
+        .collect();
+    let tag: String = spaced
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(*TAG_LENGTH.end())
+        .collect();
+    let tag = tag.trim_end().to_owned();
+    TAG_LENGTH.contains(&tag.chars().count()).then_some(tag)
 }
 
 /// The organization the dataset lands in: the publication's, else the instance default.
