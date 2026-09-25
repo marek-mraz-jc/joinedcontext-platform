@@ -99,9 +99,7 @@ pub fn collect(
 ) -> Result<Report, PlatformError> {
     let mut report = Report::default();
 
-    // Two kinds may share a plural — `Policy` and `ScopeDefinition` are both `policies` —
-    // so the answer to a query is not one kind's resources and the path template comes
-    // from each manifest's own kind, not from the query.
+    // The path template comes from each manifest's own kind, not from the query.
     // A kind that lives in either place is asked for in both, so a project's own roles are
     // exported beside the organization's (PF-68).
     let queries: BTreeSet<(&str, &str)> = registry::KINDS

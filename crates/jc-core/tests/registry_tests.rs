@@ -15,9 +15,9 @@ fn kind_and_plural_lookups_agree_and_are_unique() {
         c.len()
     };
     assert_eq!(unique_kinds, kinds.len(), "duplicate kind name in KINDS");
-    // Policy and ScopeDefinition deliberately share the `policies` plural (Architecture/06).
+    // Every kind has a plural of its own, so a route never has to guess the kind (R19, T-2954).
     plurals.dedup();
-    assert!(plurals.len() >= KINDS.len() - 1);
+    assert_eq!(plurals.len(), KINDS.len(), "two kinds share a plural");
 
     for info in KINDS {
         assert_eq!(by_kind(info.kind), Some(info));
@@ -25,6 +25,19 @@ fn kind_and_plural_lookups_agree_and_are_unique() {
     }
     assert!(by_kind("NoSuchKind").is_none());
     assert!(by_plural("nosuchplural").is_none());
+}
+
+/// R19, MF-11: ScopeDefinition answers under `scopedefinitions` and `policies` is Policy alone,
+/// while the ScopeDefinition file stays where it always was.
+#[test]
+fn scope_definition_has_its_own_plural_and_keeps_its_path() {
+    let scope = by_plural("scopedefinitions").expect("scopedefinitions catalogued");
+    assert_eq!(scope.kind, "ScopeDefinition");
+    assert_eq!(
+        scope.repo_path("bb-ovzdusie", "", "geo-sk-bb"),
+        "projects/bb-ovzdusie/policies/geo-sk-bb.yaml"
+    );
+    assert_eq!(by_plural("policies").map(|k| k.kind), Some("Policy"));
 }
 
 #[test]
