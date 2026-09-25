@@ -361,6 +361,75 @@ spec:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// T-1471, PF-63, PF-64: a group the identity provider owns is bound with `source: provider`
+/// and needs no manifest; marked and declared at once, it would have two owners.
+#[test]
+fn a_provider_group_needs_no_manifest_and_may_not_have_one() {
+    let dir = valid_repo("provider-group");
+    write(
+        &dir,
+        "users/roles/reader.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Role
+metadata:
+  name: reader
+  namespace: org
+spec:
+  rules:
+    - kinds: [Project]
+      verbs: [read]
+"#,
+    );
+    write(
+        &dir,
+        "users/assignments/viewers.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: RoleBinding
+metadata:
+  name: viewers
+  namespace: org
+spec:
+  subjects:
+    - { group: platform-readers, source: provider }
+    - { group: nobody }
+  role: reader
+  scope: { organization: org }
+"#,
+    );
+    let report = validate::run(&dir);
+    let found = messages(&report.findings);
+    assert_eq!(
+        found.len(),
+        1,
+        "only the unmarked group is undeclared: {found:?}"
+    );
+    assert!(found[0].contains("group `nobody`"), "{found:?}");
+
+    write(
+        &dir,
+        "users/groups/platform-readers.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Group
+metadata:
+  name: platform-readers
+  namespace: org
+spec:
+  members:
+    - { user: jana.kovacova@banskabystrica.sk }
+"#,
+    );
+    let report = validate::run(&dir);
+    let found = messages(&report.findings);
+    assert!(
+        found.iter().any(
+            |m| m.contains("marks group `platform-readers` `source: provider`")
+                && m.contains("`users/groups/platform-readers.yaml` declares it too")
+        ),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- T-2527: the edge cases of `run` and its reference checks (PL-39, PF-49, PF-68, PF-69) ---
 
 /// A pipeline of `project` whose source is `reference` (YAML), at `projects/{project}/…`.

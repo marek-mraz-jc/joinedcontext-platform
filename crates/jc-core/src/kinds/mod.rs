@@ -83,7 +83,8 @@ pub use policy::{
     PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
 pub use role::{
-    BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, Verb, PERSON,
+    BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, SubjectSource, Verb,
+    PERSON,
 };
 pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,

@@ -373,9 +373,23 @@ pub struct Subject {
     /// The user's identifier in the identity provider (username or e-mail).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// A group of the identity provider.
+    /// A group: a `Group` manifest of the organization unless `source` says otherwise (PF-64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Who owns `group`'s members: absent for a `Group` manifest, `provider` for a group the
+    /// identity provider owns, which the reconciler never manages. Only a `RoleBinding` subject
+    /// carries it, and only with `group` (PF-63, PF-64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SubjectSource>,
+}
+
+/// Who owns the members of a subject's group (PF-64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum SubjectSource {
+    /// A group of the identity provider, such as the realm's default group; no `Group`
+    /// manifest declares it and the reconciler never creates, edits or prunes it (PF-63).
+    Provider,
 }
 
 /// When a binding applies; absent bounds are open.
@@ -437,6 +451,14 @@ impl RoleBindingSpec {
                         reason: "a subject is exactly one of `user`, `group`, and not empty",
                     })
                 }
+            }
+            if let (Some(user), Some(_)) = (&subject.user, subject.source) {
+                return Err(Error::Name {
+                    field: "spec.subjects[].source",
+                    value: user.clone(),
+                    reason: "`source: provider` marks a group of the identity provider; a user \
+                             has no source (PF-64)",
+                });
             }
         }
         names::validate_dns1123_label(&self.role)?;

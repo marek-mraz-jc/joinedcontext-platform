@@ -321,6 +321,18 @@ pub(crate) fn validate_subjects(
     }
     let mut seen = BTreeSet::new();
     for subject in subjects {
+        if subject.source.is_some() {
+            return Err(Error::Name {
+                field,
+                value: subject
+                    .group
+                    .clone()
+                    .or_else(|| subject.user.clone())
+                    .unwrap_or_default(),
+                reason: "a role here names Group manifests only; `source: provider` belongs to a \
+                         RoleBinding subject (AP-91, PF-64)",
+            });
+        }
         let named = match (subject.user.as_deref(), subject.group.as_deref()) {
             (Some(user), None) => {
                 let ok = crate::kinds::group::is_address(user)

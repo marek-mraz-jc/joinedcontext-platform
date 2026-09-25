@@ -704,11 +704,11 @@ fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
     use jc_core::kinds::Subject;
     let user = |u: &str| Subject {
         user: Some(u.to_owned()),
-        group: None,
+        ..Subject::default()
     };
     let group = |g: &str| Subject {
-        user: None,
         group: Some(g.to_owned()),
+        ..Subject::default()
     };
     for (subjects, value) in [
         (vec![user("Jana.Kovacova@hel.fi")], "Jana.Kovacova@hel.fi"),
@@ -721,6 +721,7 @@ fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
             vec![Subject {
                 user: Some("jana@hel.fi".into()),
                 group: Some("x".into()),
+                ..Subject::default()
             }],
             "",
         ),
@@ -729,6 +730,14 @@ fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
         (
             vec![user("jana@hel.fi"), user("jana@hel.fi")],
             "jana@hel.fi",
+        ),
+        // PF-64: the identity provider's groups are a RoleBinding's to name, not an App's.
+        (
+            vec![Subject {
+                source: Some(jc_core::kinds::SubjectSource::Provider),
+                ..group("platform-readers")
+            }],
+            "platform-readers",
         ),
     ] {
         let mut app = roles_app();
