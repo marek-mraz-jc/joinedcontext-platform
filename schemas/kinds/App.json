@@ -1159,11 +1159,22 @@
       "description": "One human or group a binding names; exactly one of `user`, `group` (PF-49).",
       "properties": {
         "group": {
-          "description": "A group of the identity provider.",
+          "description": "A group: a `Group` manifest of the organization unless `source` says otherwise (PF-64).",
           "type": [
             "string",
             "null"
           ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SubjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who owns `group`'s members: absent for a `Group` manifest, `provider` for a group the identity provider owns, which the reconciler never manages. Only a `RoleBinding` subject carries it, and only with `group` (PF-63, PF-64)."
         },
         "user": {
           "description": "The user's identifier in the identity provider (username or e-mail).",
@@ -1174,6 +1185,18 @@
         }
       },
       "type": "object"
+    },
+    "SubjectSource": {
+      "description": "Who owns the members of a subject's group (PF-64).",
+      "oneOf": [
+        {
+          "description": "A group of the identity provider, such as the realm's default group; no `Group` manifest declares it and the reconciler never creates, edits or prunes it (PF-63).",
+          "enum": [
+            "provider"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "TemporalConstraint": {
       "additionalProperties": false,

@@ -518,7 +518,9 @@ fn roles_that_do_not_resolve(repo: &Repository) -> Vec<(Location, String)> {
 ///
 /// A binding to a group nobody declared matches nobody, silently: the people it was written for
 /// read nothing and no error says why. The group's membership is configuration (PF-62), so the
-/// manifest is here to be found. A `ServiceAccount` names no group — its `spec.roles[]` carries a
+/// manifest is here to be found, unless the binding marks the group `source: provider`: the
+/// identity provider owns that one, and a manifest of the same name is the finding instead. A
+/// `ServiceAccount` names no group — its `spec.roles[]` carries a
 /// role and a scope and nothing else — so there is nothing of its to check here.
 fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
     let declared: BTreeSet<&str> = repo
@@ -541,11 +543,26 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
             "App" => app_subjects(&resource.manifest.spec).collect(),
             _ => continue,
         };
-        let named: Vec<&str> = subjects
-            .iter()
-            .filter_map(|subject| subject.get("group").and_then(|g| g.as_str()))
-            .collect();
-        for group in named {
+        for subject in subjects {
+            let Some(group) = subject.get("group").and_then(|g| g.as_str()) else {
+                continue;
+            };
+            // A group the identity provider owns is marked in the binding and has no manifest;
+            // one that also has a manifest would have two owners (PF-63, PF-64).
+            if subject.get("source").and_then(|s| s.as_str()) == Some("provider") {
+                if declared.contains(group) {
+                    findings.push((
+                        (resource.path.clone(), resource.document, resource.line),
+                        format!(
+                            "{id} marks group `{group}` `source: provider`, and \
+                             `users/groups/{group}.yaml` declares it too: drop the mark to bind \
+                             the Group manifest, or the manifest if the identity provider owns \
+                             its members (PF-63, PF-64)"
+                        ),
+                    ));
+                }
+                continue;
+            }
             if declared.contains(group) {
                 continue;
             }
