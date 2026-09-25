@@ -23,7 +23,9 @@ from typing import Any
 from linkml.generators.jsonschemagen import JsonSchemaGenerator
 from linkml_runtime import SchemaView
 
-from common import ModelError, generator_version, load, ngsi_ld_kind, slots_of, unit_of
+import yaml
+
+from common import ModelError, as_path, generator_version, load, ngsi_ld_kind, slots_of, unit_of
 
 DRAFT_07 = "http://json-schema.org/schema#"
 DRAFT_07_ID = "http://json-schema.org/draft-07/schema#"
@@ -160,16 +162,54 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
     return schema
 
 
+def _text(value: Any) -> str | dict[str, str] | None:
+    """A title or description as a person reads it: a string, or a map of language to string."""
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        texts = {str(tag): text for tag, text in value.items() if isinstance(text, str) and text.strip()}
+        return texts or None
+    return None
+
+
+def _enum_titles(schema: dict[str, Any], raw: Any) -> dict[str, Any]:
+    """Carry each permissible value's title and description into its enum (UI-86).
+
+    `gen-json-schema` writes an enum as its bare values, so the grid and the forms could show a
+    person only `traffic`. The titles travel as `x-enum-titles` and `x-enum-descriptions`,
+    keyed by value, which a draft-07 validator ignores. They are read from the YAML itself: a
+    title per language is a map there, which LinkML's own model flattens into its repr.
+    """
+    definitions = schema.get("definitions", {})
+    enums = raw.get("enums") if isinstance(raw, dict) else None
+    for name, enum in (enums or {}).items():
+        target = definitions.get(name)
+        values = enum.get("permissible_values") if isinstance(enum, dict) else None
+        if not isinstance(target, dict) or not isinstance(values, dict):
+            continue
+        for key, member in (("x-enum-titles", "title"), ("x-enum-descriptions", "description")):
+            found = {
+                str(value): text
+                for value, details in values.items()
+                if isinstance(details, dict) and (text := _text(details.get(member))) is not None
+            }
+            if found:
+                target[key] = found
+    return schema
+
+
 def compile_schema(source: str | Path) -> dict[str, Any]:
     """Render one LinkML document as a draft-07 JSON Schema."""
     view = load(source)
+    with as_path(source) as path:
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     # `not_closed=False` is DM-28's default: a payload with an undeclared attribute is refused
     # unless the class opts into an open world.
     rendered = JsonSchemaGenerator(view.schema, not_closed=False).serialize()
     schema = _to_draft_07(json.loads(rendered))
     schema["$schema"] = DRAFT_07_ID
     schema["x-generator-version"] = generator_version()
-    return _annotate(schema, view)
+    return _enum_titles(_annotate(schema, view), raw)
 
 
 def main(argv: list[str] | None = None) -> int:
