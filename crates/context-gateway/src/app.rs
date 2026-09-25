@@ -1392,8 +1392,11 @@ impl HeldWrite<'_> {
                 .join(",");
             let answer = conditional::retrieve(
                 &self.gateway.broker,
+                // Only which ids exist is asked (`pick=id`, CIM 009 4.21): a target with a
+                // polygon or a long history is megabytes, and a chunk of them outgrew the
+                // probe's cap and answered every write 500 (praha CityDistrict, T-2971).
                 &format!(
-                    "/ngsi-ld/v1/entities?id={ids}&limit={}&{narrowed}",
+                    "/ngsi-ld/v1/entities?id={ids}&pick=id&limit={}&{narrowed}",
                     chunk.len()
                 ),
                 self.headers,

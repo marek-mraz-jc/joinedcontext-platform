@@ -71,13 +71,23 @@ async fn broker() -> (String, Calls) {
                         .collect()
                 };
                 let (ids, types) = (wanted("id"), wanted("type"));
+                // A read that neither picks nor projects gets the whole entity, and a real
+                // target (a district's polygon) is larger than the gateway's probe (T-2971).
+                let whole = wanted("pick").is_empty() && wanted("attrs").is_empty();
                 let found: Vec<Value> = held
                     .iter()
                     .filter(|entity| ids.iter().any(|id| entity["id"] == id.as_str()))
                     .filter(|entity| {
                         types.is_empty() || types.iter().any(|kind| entity["type"] == kind.as_str())
                     })
-                    .cloned()
+                    .map(|entity| {
+                        let mut entity = entity.clone();
+                        if whole {
+                            entity["boundary"] =
+                                json!({ "type": "Property", "value": "x".repeat(1_200_000) });
+                        }
+                        entity
+                    })
                     .collect();
                 axum::Json(Value::Array(found)).into_response()
             },
