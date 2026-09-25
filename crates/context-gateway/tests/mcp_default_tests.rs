@@ -171,6 +171,29 @@ async fn an_endpoint_serves_mcp_without_listing_it() {
     assert!(listed.serves(jc_core::kinds::Representation::Mcp));
 }
 
+/// EP-10 (T-2939): GeoJSON is served without being listed too, so the endpoint that lists
+/// NGSI-LD alone resolves `file.geojson` and advertises it wherever its representations go.
+#[tokio::test]
+async fn an_endpoint_serves_geojson_without_listing_it() {
+    let realm = common::Realm::new();
+    let dir = repo("geojson");
+    let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+    let listed = endpoints
+        .iter()
+        .find(|e| e.slug == LISTED_NGSI)
+        .expect("loaded");
+    assert!(listed.serves(jc_core::kinds::Representation::GeoJson));
+
+    // Resolved and admitted, the download goes on to the broker (none listens here), rather
+    // than the 404 of a surface the endpoint does not serve.
+    let request = Request::builder()
+        .uri(format!("/api/endpoint/{LISTED_NGSI}/file.geojson"))
+        .body(Body::empty())
+        .expect("a request");
+    let (status, body) = send(app(&dir, &realm), request).await;
+    assert_ne!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
 /// EP-24, EP-23: `mcp: false` turns the instance off, and the path then answers the bytes an
 /// unknown slug gets, so the opt-out is not readable from outside.
 #[tokio::test]

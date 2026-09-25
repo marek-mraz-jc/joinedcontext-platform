@@ -283,6 +283,8 @@ fn a_disabled_representation_loses_its_resource() {
         resource_urls(dataset),
         vec![
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/ngsi-ld/v1/",
+            // GeoJSON and MCP stay without being listed (EP-10, EP-24); the CSV is gone.
+            "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/file.geojson",
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/mcp",
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/index.json",
         ]
@@ -570,6 +572,7 @@ fn every_schema_artifact_the_record_lists_becomes_its_own_resource() {
         resource_urls(&dataset),
         vec![
             format!("{base}/ngsi-ld/v1/"),
+            format!("{base}/file.geojson"),
             format!("{base}/mcp"),
             format!("{base}/schema/index.json"),
             format!("{base}/schema/v2/model.shacl.ttl"),

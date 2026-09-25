@@ -81,13 +81,10 @@ pub fn bundle(
     let table = tabular::table(entities, limits)?;
     let csv = tabular::csv(&table, limits)?;
 
-    // A dataset with no geometry is not an error here, unlike a request that asked for GeoJSON
-    // and nothing else: the bundle carries every shape, and an empty collection is the honest
-    // shape of a non-spatial answer.
     // A bundle is a file, not an answer to one request: it carries the language maps as the
-    // entities hold them rather than one caller's language frozen into a download.
-    let features = geojson::feature_collection(entities, None)
-        .unwrap_or_else(|_| json!({ "type": "FeatureCollection", "features": [] }));
+    // entities hold them rather than one caller's language frozen into a download. A dataset
+    // with no geometry is Features with a `null` one, as `file.geojson` answers it (EP-09).
+    let features = geojson::feature_collection(entities, None);
 
     let types = types_in(entities);
     let root = file_name(bundle.slug, bundle.exported_at)

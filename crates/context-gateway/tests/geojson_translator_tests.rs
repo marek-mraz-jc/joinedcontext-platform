@@ -1,4 +1,4 @@
-use context_gateway::translators::geojson::{feature, feature_collection, Untranslatable};
+use context_gateway::translators::geojson::{feature, feature_collection};
 use serde_json::{json, Value};
 
 fn station(location: Value) -> Value {
@@ -68,16 +68,26 @@ fn attributes_are_flattened_and_the_geometry_is_not_a_property() {
     );
 }
 
-/// EP-10: a caller that asks a non-spatial type for GeoJSON gets a 400, not an empty
-/// collection that looks like an empty answer.
+/// EP-09, EP-10 (T-2939): a non-spatial answer is a collection of Features with a `null`
+/// geometry (RFC 7946 §3.2), every entity kept with its properties, never a refusal.
 #[test]
-fn entities_without_a_geometry_are_a_bad_request() {
+fn entities_without_a_geometry_are_features_with_a_null_geometry() {
     let flat = json!([{
         "id": "urn:ngsi-ld:Invoice:banskabystrica.sk:uctovnictvo:2026-01",
         "type": "Invoice",
         "amount": { "type": "Property", "value": 120.0 }
     }]);
-    assert_eq!(feature_collection(&flat, None), Err(Untranslatable));
+    let collection = feature_collection(&flat, None);
+    assert_eq!(collection["type"], json!("FeatureCollection"));
+    assert_eq!(
+        collection["features"],
+        json!([{
+            "type": "Feature",
+            "id": "urn:ngsi-ld:Invoice:banskabystrica.sk:uctovnictvo:2026-01",
+            "geometry": null,
+            "properties": { "type": "Invoice", "amount": 120.0 }
+        }])
+    );
 
     // A `location` that is not a geometry is not a geometry.
     for impostor in [
@@ -88,8 +98,8 @@ fn entities_without_a_geometry_are_a_bad_request() {
         let mut entity = station(json!(null));
         entity["location"] = impostor.clone();
         assert_eq!(
-            feature_collection(&json!([entity]), None),
-            Err(Untranslatable),
+            feature_collection(&json!([entity]), None)["features"][0]["geometry"],
+            json!(null),
             "{impostor} was read as a geometry"
         );
     }
@@ -98,27 +108,30 @@ fn entities_without_a_geometry_are_a_bad_request() {
 /// Nothing to show is not a type error: an empty answer is an empty collection.
 #[test]
 fn an_empty_answer_is_an_empty_collection() {
-    let empty = feature_collection(&json!([]), None).expect("an empty collection");
+    let empty = feature_collection(&json!([]), None);
     assert_eq!(empty["type"], json!("FeatureCollection"));
     assert_eq!(empty["features"], json!([]));
 }
 
-/// A mixed answer keeps what it can: the spatial entities become features, the rest are
-/// simply not on a map.
+/// A mixed answer keeps every entity, in order: the spatial one with its geometry, the other
+/// with a `null` one a map client skips (EP-09).
 #[test]
-fn a_mixed_answer_keeps_the_entities_that_have_a_geometry() {
+fn a_mixed_answer_keeps_every_entity() {
     let mixed = json!([
         station(json!({ "type": "Point", "coordinates": [19.146, 48.736] })),
         json!({ "id": "urn:ngsi-ld:Invoice:a:b:c", "type": "Invoice" }),
     ]);
-    let collection = feature_collection(&mixed, None).expect("a collection");
+    let collection = feature_collection(&mixed, None);
     let features = collection["features"].as_array().expect("features");
 
-    assert_eq!(features.len(), 1);
+    assert_eq!(features.len(), 2);
     assert_eq!(
         features[0]["properties"]["type"],
         json!("AirQualityObserved")
     );
+    assert_eq!(features[0]["geometry"]["type"], json!("Point"));
+    assert_eq!(features[1]["id"], json!("urn:ngsi-ld:Invoice:a:b:c"));
+    assert_eq!(features[1]["geometry"], json!(null));
 }
 
 /// A single entity translates too: `retrieveEntity` answers one object, not a list.
@@ -127,8 +140,7 @@ fn one_entity_translates_to_a_collection_of_one() {
     let collection = feature_collection(
         &station(json!({ "type": "Point", "coordinates": [19.1, 48.7] })),
         None,
-    )
-    .expect("a collection");
+    );
     assert_eq!(collection["features"].as_array().map(Vec::len), Some(1));
 }
 
