@@ -1,0 +1,81 @@
+# The platform's blueprint library (CC-28): a new source of data, onboarded in one change. The
+# DataSource says where the data comes from, the Pipeline writes it into a Context Space, and the
+# Endpoint registers what it writes as a read surface of the organization. The pipeline's first
+# run seeds the space: seed entities are broker JSON beside the space, not manifests, so a
+# blueprint does not render them (CC-72).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: data-source-onboarding
+  namespace: org
+  title: { en: "Onboard a data source", fi: "Ota tietolähde käyttöön", sk: "Pripojiť zdroj dát" }
+spec:
+  version: 1.0.0
+  category: ingestion
+  riskClass: yellow
+  allowedRoles: [portal-approver]
+  parameterSchema:
+    type: object
+    required: [name, space, url, entityType, endpointSlug]
+    additionalProperties: false
+    properties:
+      name: { type: string, title: "Source name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the DataSource, the Pipeline and the Endpoint." }
+      space: { type: string, title: "Context space", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      url: { type: string, title: "URL of the JSON resource", format: uri, pattern: "^https://[^\\s\"\\\\]+$" }
+      entityType: { type: string, title: "Entity type written", pattern: "^[A-Z][A-Za-z0-9]+$" }
+      period:
+        type: string
+        title: "Fetch every"
+        default: 1h
+        oneOf:
+          - { const: 15m, title: "15 minutes" }
+          - { const: 1h, title: "Hour" }
+          - { const: 1d, title: "Day" }
+      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+  # A parameter with a default is filled by the form; a caller of the API may leave it out, so
+  # every template names the same default again.
+  templates:
+    - name: datasource
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: DataSource
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ name }} ({{ entityType }})" }
+        spec:
+          type: http
+          http:
+            url: "{{ url }}"
+            verb: GET
+            headers: { Accept: application/json }
+            timeout: 30s
+    - name: pipeline
+      template: |
+        {%- set every = period | default('1h') -%}
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Pipeline
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ entityType }} from {{ name }}" }
+        spec:
+          class: auto
+          period: "{{ every }}"
+          schedule: "{{ {'15m': '*/15 * * * *', '1h': '0 * * * *', '1d': '0 3 * * *'}[every] }}"
+          source:
+            dataSourceRef: { kind: DataSource, name: "{{ name }}" }
+          targetEndpoint: "urn:ngsi-ld:Endpoint:{orgDomain}:{{ space }}:{{ name }}"
+          quotas:
+            maxMemoryMb: 128
+            cpuMillicores: 100
+    - name: endpoint
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Endpoint
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ entityType }} from {{ name }}" }
+        spec:
+          contextSpaceRef: { kind: ContextSpace, name: "{{ space }}" }
+          slug: "{{ endpointSlug }}"
+          audience: organization
+          enabledRepresentations: [ngsi-ld, geojson, csv]

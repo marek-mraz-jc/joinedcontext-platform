@@ -1,0 +1,72 @@
+# The platform's blueprint library (CC-28): a subscription that calls a notification channel when
+# an observed value crosses a limit. An instance follows this folder through a SyncSource, and a
+# new version arrives as a merge request in its repository (CC-26).
+apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: threshold-alert
+  namespace: org
+  title: { en: "Threshold alert", fi: "Raja-arvohälytys", sk: "Upozornenie na prekročenie hodnoty" }
+spec:
+  version: 1.0.0
+  category: alerting
+  riskClass: green
+  allowedRoles: [domain-editor, portal-approver]
+  parameterSchema:
+    type: object
+    required: [name, space, entityType, observedProperty, thresholdValue, webhookUrl]
+    additionalProperties: false
+    properties:
+      name: { type: string, title: "Alert name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the subscription." }
+      space: { type: string, title: "Context space", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      entityType: { type: string, title: "Entity type watched", pattern: "^[A-Z][A-Za-z0-9]+$", default: AirQualityObserved }
+      observedProperty: { type: string, title: "Property watched", pattern: "^[a-zA-Z][A-Za-z0-9_]*$", default: airQualityIndex }
+      comparison:
+        type: string
+        title: "Alert when the value is"
+        default: ">"
+        oneOf:
+          - { const: ">", title: "above the limit" }
+          - { const: ">=", title: "at or above the limit" }
+          - { const: "<", title: "below the limit" }
+          - { const: "<=", title: "at or below the limit" }
+      thresholdValue: { type: number, title: "Limit" }
+      webhookUrl: { type: string, title: "Notification channel (webhook URL)", format: uri, pattern: "^https://[^\\s\"\\\\]+$" }
+      webhookSecret:
+        type: object
+        title: "Token the channel expects"
+        x-jc-widget: secretRef
+        required: [name]
+        additionalProperties: false
+        properties:
+          name: { type: string, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
+          key: { type: string, pattern: "^[-._a-zA-Z0-9]{1,253}$" }
+          envVar: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
+      throttling: { type: integer, title: "Seconds between two alerts", minimum: 0, maximum: 86400, default: 300 }
+  # A parameter with a default is filled by the form; a caller of the API may leave it out, so
+  # every template names the same default again.
+  templates:
+    - name: subscription
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: "{{ name }}"
+          title: { en: "{{ entityType }} {{ observedProperty }} {{ comparison | default('>') }} {{ thresholdValue }}" }
+        spec:
+          contextSpaceRef: { kind: ContextSpace, name: "{{ space }}" }
+          entities:
+            - type: "{{ entityType }}"
+          watchedAttributes: ["{{ observedProperty }}"]
+          q: "{{ observedProperty }}{{ comparison | default('>') }}{{ thresholdValue }}"
+          notification:
+            endpoint:
+              uri: "{{ webhookUrl }}"
+              accept: application/json
+        {%- if webhookSecret is defined %}
+              secretRef: { name: "{{ webhookSecret.name }}", key: "{{ webhookSecret.key | default('token') }}" }
+        {%- endif %}
+            attributes: ["{{ observedProperty }}"]
+            format: normalized
+          throttling: {{ throttling | default(300) }}
+          description: "Calls the channel when {{ observedProperty }} of a {{ entityType }} is {{ comparison | default('>') }} {{ thresholdValue }} (blueprint threshold-alert)."
