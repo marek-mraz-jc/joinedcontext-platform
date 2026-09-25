@@ -782,6 +782,102 @@ pub const SHIPPED_WITH_PORTAL: &str = "portal";
 /// a compiled module. Neither is ever written by hand, and neither travels in a bundle.
 pub const BUILT_ANNOTATIONS: [&str; 2] = ["joinedcontext.com/image", "joinedcontext.com/module"];
 
+/// The value of `joinedcontext.com/generated-by` on the `Endpoint app-{name}` the Portal's app
+/// reconciler generates for an App (AP-04).
+pub const APP_ENDPOINT_GENERATOR: &str = "portal/app-reconciler";
+
+/// The most Endpoints one App reads; more is a manifest to split (AP-04).
+pub const MAX_APP_ENDPOINTS: usize = 5;
+
+/// An Endpoint as [`served_endpoints`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointFact {
+    /// The project the Endpoint belongs to.
+    pub project: String,
+    /// Its name in that project.
+    pub name: String,
+    /// Its slug; an Endpoint without one serves nobody and is never offered.
+    pub slug: String,
+    /// The name of the context space it serves, as its `contextSpaceRef` names it.
+    pub space: String,
+    /// Its `joinedcontext.com/generated-by` annotation, when it carries one.
+    pub generated_by: Option<String>,
+}
+
+/// A `SharedSpaceReference` as [`served_endpoints`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceFact {
+    /// The project that holds the reference.
+    pub project: String,
+    /// The reference's name, which orders the references.
+    pub name: String,
+    /// The project of the Endpoint it references.
+    pub source_project: String,
+    /// The name of the Endpoint it references.
+    pub endpoint: String,
+}
+
+/// The Endpoints an App reads, the primary first (AP-04, AP-113): for each `dataNeeds` item the
+/// App's own generated `Endpoint app-{name}` when it serves that item's space, otherwise every
+/// Endpoint of the project over that space by name; then the target of every
+/// `SharedSpaceReference` of the project by name; each slug once, the first
+/// [`MAX_APP_ENDPOINTS`] kept.
+///
+/// One rule for every side (Architecture/16 section 12): the audiences of the App's client, the
+/// endpoints its page is configured with, and the Endpoints the Context Gateway admits a token of
+/// `app-{name}` on. A copy of it on either side would drift, and a drift locks a working App out.
+pub fn served_endpoints<'a>(
+    project: &str,
+    app: &str,
+    spec: &AppSpec,
+    endpoints: &'a [EndpointFact],
+    references: &[ReferenceFact],
+) -> Vec<&'a EndpointFact> {
+    let own_name = format!("app-{app}");
+    let own = endpoints.iter().find(|endpoint| {
+        endpoint.project == project
+            && endpoint.name == own_name
+            && endpoint.generated_by.as_deref() == Some(APP_ENDPOINT_GENERATOR)
+    });
+    let by_name = |mut found: Vec<&'a EndpointFact>| {
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        found
+    };
+    let mut found: Vec<&'a EndpointFact> = Vec::new();
+    for need in &spec.data_needs {
+        let space = need.context_space_ref.name();
+        if let Some(own) = own.filter(|own| own.space == space) {
+            found.push(own);
+            continue;
+        }
+        found.extend(by_name(
+            endpoints
+                .iter()
+                .filter(|endpoint| endpoint.project == project && endpoint.space == space)
+                .collect(),
+        ));
+    }
+    let mut held: Vec<&ReferenceFact> = references
+        .iter()
+        .filter(|reference| reference.project == project)
+        .collect();
+    held.sort_by(|a, b| a.name.cmp(&b.name));
+    for reference in held {
+        found.extend(endpoints.iter().find(|endpoint| {
+            endpoint.project == reference.source_project && endpoint.name == reference.endpoint
+        }));
+    }
+
+    let mut unique: Vec<&'a EndpointFact> = Vec::new();
+    for endpoint in found {
+        if !endpoint.slug.is_empty() && !unique.iter().any(|seen| seen.slug == endpoint.slug) {
+            unique.push(endpoint);
+        }
+    }
+    unique.truncate(MAX_APP_ENDPOINTS);
+    unique
+}
+
 impl AppSpec {
     /// Validates source, build, data needs, limits and CSP.
     pub fn validate(&self) -> Result<()> {

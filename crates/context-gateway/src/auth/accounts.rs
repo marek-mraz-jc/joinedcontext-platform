@@ -65,7 +65,12 @@ impl Account {
 #[derive(Debug, Clone, Default)]
 pub struct ServiceAccounts {
     by_client_id: HashMap<String, Account>,
+    /// The slugs each App's client `app-{name}` is admitted on (AP-113).
+    apps: HashMap<String, BTreeSet<String>>,
 }
+
+/// Every App's Keycloak client is `app-{name}` (ADR-N-030, AP-14a).
+pub const APP_CLIENT_PREFIX: &str = "app-";
 
 impl ServiceAccounts {
     /// An empty table: every `azp` resolves to nothing.
@@ -86,6 +91,28 @@ impl ServiceAccounts {
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.by_client_id.is_empty()
+    }
+
+    /// The table with the App client `client` admitted on the Endpoints `slugs` (AP-113).
+    pub fn with_app(
+        mut self,
+        client: impl Into<String>,
+        slugs: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.apps
+            .insert(client.into(), slugs.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Whether a token whose `azp` is `azp` may be admitted on the Endpoint `slug` (AP-113): an
+    /// App's client only on the Endpoints that App reads, and an `app-*` client that neither an
+    /// App nor a ServiceAccount of the repository names on none. Every other client is no App's
+    /// and is not narrowed here.
+    pub fn admits_on(&self, azp: &str, slug: &str) -> bool {
+        match self.apps.get(azp) {
+            Some(slugs) => slugs.contains(slug),
+            None => !azp.starts_with(APP_CLIENT_PREFIX) || self.by_client_id.contains_key(azp),
+        }
     }
 }
 
@@ -143,5 +170,99 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
             },
         );
     }
-    ServiceAccounts { by_client_id }
+    ServiceAccounts {
+        by_client_id,
+        apps: apps_of(repo),
+    }
+}
+
+/// The slugs each App's client is admitted on, by the one rule the Portal gives its client's
+/// audiences with (jc-core `served_endpoints`, AP-113). Slugs are the Endpoints' own, not a
+/// preview's, so a token of an App reaches the Endpoints of `main` alone.
+fn apps_of(repo: &Repository) -> HashMap<String, BTreeSet<String>> {
+    enum Target {
+        Named(String, String),
+        Slug(String),
+    }
+
+    use jc_core::kinds::app::{served_endpoints, EndpointFact, ReferenceFact};
+    use jc_core::kinds::{AppSpec, EndpointSpec, SharedSpaceReferenceSpec};
+
+    let mut endpoints = Vec::new();
+    let mut references = Vec::new();
+    let mut apps = Vec::new();
+    for (id, resource) in repo.iter() {
+        let project = id.namespace.clone().unwrap_or_default();
+        let spec = resource.manifest.spec.clone();
+        match id.kind.as_str() {
+            "Endpoint" => {
+                let Ok(spec) = serde_json::from_value::<EndpointSpec>(spec) else {
+                    continue;
+                };
+                endpoints.push(EndpointFact {
+                    project,
+                    name: id.name.clone(),
+                    slug: spec.slug.as_str().to_owned(),
+                    space: spec.context_space_ref.name().to_owned(),
+                    generated_by: resource
+                        .manifest
+                        .metadata
+                        .rest
+                        .get("annotations")
+                        .and_then(|annotations| annotations.get(jc_core::annotations::GENERATED_BY))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                });
+            }
+            "SharedSpaceReference" => {
+                let Ok(spec) = serde_json::from_value::<SharedSpaceReferenceSpec>(spec) else {
+                    continue;
+                };
+                // The loader renders an `endpointRef` it resolved as that Endpoint's slug (EP-77),
+                // so the reference names its target either way.
+                let target = match (spec.endpoint_ref, spec.endpoint_slug) {
+                    (Some(target), _) => Target::Named(target.project, target.name),
+                    (None, Some(slug)) => Target::Slug(slug.as_str().to_owned()),
+                    (None, None) => continue,
+                };
+                references.push((project, id.name.clone(), target));
+            }
+            "App" => match serde_json::from_value::<AppSpec>(spec) {
+                Ok(spec) => apps.push((project, id.name.clone(), spec)),
+                // An App that does not parse has no client the reconciler keeps, so its client
+                // resolves to nothing and is admitted nowhere.
+                Err(error) => {
+                    tracing::warn!(app = %id.name, %error, "App left out of the audience table")
+                }
+            },
+            _ => {}
+        }
+    }
+    let references: Vec<ReferenceFact> = references
+        .into_iter()
+        .filter_map(|(project, name, target)| {
+            let (source_project, endpoint) = match target {
+                Target::Named(project, name) => (project, name),
+                Target::Slug(slug) => endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.slug == slug)
+                    .map(|endpoint| (endpoint.project.clone(), endpoint.name.clone()))?,
+            };
+            Some(ReferenceFact {
+                project,
+                name,
+                source_project,
+                endpoint,
+            })
+        })
+        .collect();
+    apps.into_iter()
+        .map(|(project, name, spec)| {
+            let slugs = served_endpoints(&project, &name, &spec, &endpoints, &references)
+                .into_iter()
+                .map(|endpoint| endpoint.slug.clone())
+                .collect();
+            (format!("{APP_CLIENT_PREFIX}{name}"), slugs)
+        })
+        .collect()
 }
