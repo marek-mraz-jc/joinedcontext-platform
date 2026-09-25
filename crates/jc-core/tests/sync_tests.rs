@@ -548,3 +548,62 @@ fn a_webhook_driven_source_roundtrips_through_yaml() {
         "a polled source grew a webhook member"
     );
 }
+
+/// MF-49: a carried organization model is a schema file under `models/`, listed in `files`,
+/// with a real SHA-256 and names that are labels; it is carried once.
+#[test]
+fn a_carried_model_stays_under_models_and_is_verified_like_every_file() {
+    use jc_core::kinds::{BundleFile, BundleModel, BundleModelOrigin, SemVer};
+    let sha = "a".repeat(64);
+    let mut base = Bundle::from_yaml(GOLDEN_BUNDLE).expect("valid golden YAML");
+    for path in ["models/stations.v1.yaml", "models/stations.v1.linkml.yaml"] {
+        base.spec.files.push(BundleFile {
+            path: path.to_owned(),
+            sha256: sha.clone(),
+        });
+    }
+    base.spec.models.push(BundleModel {
+        name: "stations".to_owned(),
+        version: SemVer::new("1.3.0").expect("semver"),
+        manifest: "models/stations.v1.yaml".to_owned(),
+        file: "models/stations.v1.linkml.yaml".to_owned(),
+        sha256: sha,
+        origin: BundleModelOrigin {
+            organization: "banskabystrica".to_owned(),
+            name: "stations".to_owned(),
+        },
+    });
+    base.validate().expect("a carried model");
+    let yaml = serde_norway::to_string(&base).expect("yaml");
+    assert_eq!(Bundle::from_yaml(&yaml).expect("round trip"), base);
+
+    let refused = |change: fn(&mut BundleModel)| {
+        let mut bundle = base.clone();
+        change(&mut bundle.spec.models[0]);
+        bundle.validate().is_err()
+    };
+    assert!(
+        refused(|m| m.file = "stations.linkml.yaml".to_owned()),
+        "outside models/"
+    );
+    assert!(
+        refused(|m| m.file = "models/other.linkml.yaml".to_owned()),
+        "not in files"
+    );
+    assert!(
+        refused(|m| m.manifest = "models/../../etc/passwd".to_owned()),
+        "escaping"
+    );
+    assert!(refused(|m| m.sha256 = "A".repeat(64)), "uppercase sha");
+    assert!(refused(|m| m.sha256 = "ab".to_owned()), "short sha");
+    assert!(refused(|m| m.name = "Stations".to_owned()), "not a label");
+    assert!(
+        refused(|m| m.origin.organization = String::new()),
+        "no organization"
+    );
+
+    let mut twice = base.clone();
+    let first = twice.spec.models[0].clone();
+    twice.spec.models.push(first);
+    assert!(twice.validate().is_err(), "carried once");
+}
