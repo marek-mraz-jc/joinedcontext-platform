@@ -270,6 +270,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
+        .route(
+            "/api/endpoint/{slug}/preview",
+            post(crate::handlers::preview::preview),
+        )
         // Where a rewritten notification endpoint points, and the only surface the
         // broker calls rather than answers (R46).
         .route(
@@ -470,7 +474,7 @@ fn ngsi_ld_error_type(status: u16) -> Option<&'static str> {
 /// that way; this makes the gateway's own refusals indistinguishable from it, so a client
 /// that keys on `type` learns the same thing whichever of the two refused. The Portal API
 /// keeps `application/problem+json`: a different surface, a different contract.
-async fn as_ngsi_ld_error(response: Response<Body>) -> Response<Body> {
+pub(crate) async fn as_ngsi_ld_error(response: Response<Body>) -> Response<Body> {
     let is_problem = response
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
@@ -509,7 +513,7 @@ async fn as_ngsi_ld_error(response: Response<Body>) -> Response<Body> {
     }
 }
 
-async fn serve_ngsi_ld(
+pub(crate) async fn serve_ngsi_ld(
     gateway: &Gateway,
     admitted: Result<(Arc<Endpoint>, Subject), Box<Response<Body>>>,
     prefix: &str,

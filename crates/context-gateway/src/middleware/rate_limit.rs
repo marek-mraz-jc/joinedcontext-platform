@@ -204,24 +204,16 @@ pub async fn enforce(
     request: Request,
     next: Next,
 ) -> Response<Body> {
-    let path = request.uri().path().to_owned();
-    // The canonical surface of a space is served from the same record a published endpoint
-    // is, and is counted the same way — in the gateway's own bucket, because a space
-    // declares no limit of its own (T-0813, SP-01, EP-20).
-    let (endpoint, default) = match slug_of(&path) {
-        Some(slug) => (gateway.resolver.resolve(slug), None),
-        None => (
-            space_of(&path)
-                .and_then(|name| gateway.resolver.resolve_space(name))
-                .map(|space| Arc::clone(&space.endpoint)),
-            Some(SPACE_DEFAULT),
-        ),
-    };
-    let Some(endpoint) = endpoint else {
+    // Only a published endpoint that declares a limit is counted. The canonical surface of a
+    // space and an endpoint without `rateLimits` are not: a limit is an explicit choice, never
+    // a default of the gateway's own (T-2775, EP-20, SP-22).
+    let Some(endpoint) =
+        slug_of(request.uri().path()).and_then(|slug| gateway.resolver.resolve(slug))
+    else {
         // An unknown slug costs nobody quota: the handler answers 404 (EP-03).
         return next.run(request).await;
     };
-    let Some(limits) = endpoint.rate_limit.clone().or(default) else {
+    let Some(limits) = endpoint.rate_limit.clone() else {
         return next.run(request).await;
     };
 
@@ -253,28 +245,6 @@ fn slug_of(path: &str) -> Option<&str> {
         .next()
         .filter(|slug| !slug.is_empty())
 }
-
-/// The space in `/cs/{space}/…`, or nothing off the canonical surface (SP-01).
-fn space_of(path: &str) -> Option<&str> {
-    path.strip_prefix("/cs/")?
-        .split('/')
-        .next()
-        .filter(|space| !space.is_empty())
-}
-
-/// The bucket every space's canonical surface is counted in when nothing narrower says
-/// otherwise (T-0813, EP-20).
-///
-/// A space carries no rate limit of its own — the manifest has no field for one, because the
-/// surface is the space rather than a published product — so this is the gateway's own
-/// number, the one the seeded endpoints declare. It is applied here rather than written into
-/// the record, so that a space is counted however its record was built. Without it the
-/// surface a member uses directly is counted only by the edge, where every anonymous caller
-/// shares one bucket and one client can spend the surface for everybody.
-pub const SPACE_DEFAULT: RateLimits = RateLimits {
-    requests_per_minute: 600,
-    burst: Some(50),
-};
 
 /// Who is spending the quota: the presented credential when there is one, the client
 /// address otherwise (EP-20).

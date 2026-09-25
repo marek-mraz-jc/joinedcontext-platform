@@ -120,9 +120,8 @@ async fn an_endpoint_that_declares_no_limit_is_not_limited_here() {
 
 #[tokio::test]
 async fn an_unknown_space_costs_nobody_a_token_either() {
-    // The space surface's own default (`SPACE_DEFAULT`) is covered by
-    // `rate_limit_tests.rs::the_canonical_space_surface_is_counted_per_caller`; this is the
-    // other branch, where nothing resolves and nothing is spent.
+    // A known space is not counted either (`rate_limit_tests.rs::
+    // the_canonical_space_surface_is_not_limited`); an unknown one must not start a bucket.
     let app = app(None);
     let response = call(&app, "/cs/does-not-exist/ngsi-ld/v1/entities", FROM).await;
     assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
