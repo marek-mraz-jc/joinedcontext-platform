@@ -19,6 +19,7 @@ pub mod names;
 pub mod project;
 pub mod registry;
 pub mod secret;
+pub mod units;
 pub mod urn;
 
 pub use envelope::{

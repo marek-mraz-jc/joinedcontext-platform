@@ -365,7 +365,7 @@ def test_a_unit_is_read_from_the_clause_and_never_from_loose_prose():
 
     assert _unit_of("Length of the segment in meters") is None
     assert _unit_of("Property. Distance. Units:'meters'")["ucum_code"] == "m"
-    assert _unit_of('Property. Speed. Units:"Km/h"')["ucum_code"] == "km/h"
+    assert _unit_of('Property. Speed. Units:"Km/h"')["ucum_code"] == "km.h-1"
     # A trailing full stop and stray case are the catalogue's own habits, not a new unit.
     assert _unit_of("Property. Units:'CELSIUS DEGREES'.")["ucum_code"] == "Cel"
     assert _unit_of("Property. Units:'parsecs'") is None
