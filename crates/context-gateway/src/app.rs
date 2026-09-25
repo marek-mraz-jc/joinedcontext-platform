@@ -16,7 +16,7 @@ use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::access_routes::{access, access_check};
-use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip};
+use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
 use crate::handlers::ogc::ogc_features;
 use crate::handlers::schema_routes::{
     schema_artifact, schema_index, space_schema_artifact, space_schema_index,
@@ -319,6 +319,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         // same two routes as the endpoint surface, because it is the same surface named
         // by its space (SP-03).
         .route("/cs/{space}/schema/index.json", get(space_schema_index))
+        .route("/cs/{space}/dump/", get(space_dump))
         .route(
             "/cs/{space}/schema/{version}/{artifact}",
             get(space_schema_artifact),
