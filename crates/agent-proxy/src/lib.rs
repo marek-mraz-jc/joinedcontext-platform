@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod delegation;
 pub mod inject;
 pub mod limits;
 pub mod public_dns;
@@ -116,6 +117,10 @@ pub fn router(state: Arc<ProxyState>) -> Router {
         .route("/v1/mcp", post(routes::mcp::handler))
         .route("/v1/runs/events", post(routes::events::handler))
         .route("/v1/runs/inbox", get(routes::inbox::handler))
+        .route(
+            "/internal/runs/{run}/identity",
+            post(routes::identity::handler),
+        )
         .fallback(|| async {
             jc_core::ProblemDetails::forbidden().with_detail("endpoint not recognized by proxy")
         })

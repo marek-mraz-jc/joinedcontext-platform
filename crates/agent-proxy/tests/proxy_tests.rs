@@ -402,7 +402,8 @@ fn ticketed(method: &str, uri: &str, body: Body) -> Request<Body> {
 }
 
 /// A read and an MCP call under the run's second endpoint reach that endpoint on the gateway,
-/// each with a token minted for that endpoint's audience and not the primary's.
+/// each with the run's own token: its person's, one for every endpoint of the run, whose Policy
+/// decides the call (ADR-N-038 §3.2–3).
 #[tokio::test]
 async fn a_second_endpoint_of_the_run_is_reached_with_its_own_token() {
     use wiremock::matchers::{body_partial_json, header, method, path, query_param};
@@ -414,7 +415,7 @@ async fn a_second_endpoint_of_the_run_is_reached_with_its_own_token() {
         .and(query_param("type", "KeyPerformanceIndicator"))
         .and(header(
             "authorization",
-            format!("Bearer mock-token-for-{KPIS}").as_str(),
+            "Bearer mock-token-for-run-e3b0c442-98fc-1c14-9afb-4c7b2756a120",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
         .expect(1)
@@ -424,7 +425,7 @@ async fn a_second_endpoint_of_the_run_is_reached_with_its_own_token() {
         .and(path(format!("/api/endpoint/{KPIS}/mcp")))
         .and(header(
             "authorization",
-            format!("Bearer mock-token-for-{KPIS}").as_str(),
+            "Bearer mock-token-for-run-e3b0c442-98fc-1c14-9afb-4c7b2756a120",
         ))
         .and(body_partial_json(
             serde_json::json!({ "method": "tools/call" }),
@@ -1059,11 +1060,11 @@ async fn a_header_the_workspace_wrote_never_reaches_the_gateway() {
     let seen = gateway.received_requests().await.unwrap_or_default();
     assert_eq!(seen.len(), 1);
     let sent = &seen[0].headers;
-    // The proxy's own bearer is there, and it is the only authorization.
+    // The run's own bearer is there, and it is the only authorization.
     assert_eq!(
         sent.get("authorization")
             .and_then(|value| value.to_str().ok()),
-        Some("Bearer mock-token-for-scsd2eehkx42n53z2zyd6vshfh7s7irf")
+        Some("Bearer mock-token-for-run-e3b0c442-98fc-1c14-9afb-4c7b2756a120")
     );
     for dropped in [
         "cookie",

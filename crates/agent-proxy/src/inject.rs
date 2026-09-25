@@ -15,17 +15,21 @@ pub struct CredentialManager {
     config: Arc<Config>,
     http: reqwest::Client,
     endpoint_tokens: Arc<Mutex<HashMap<String, (Instant, String)>>>,
+    /// The runs' delegated grants: a run's data calls carry its person's token and no token of
+    /// this proxy's own (ADR-N-038, AG-94).
+    grants: crate::delegation::Grants,
 }
 
 impl CredentialManager {
     pub fn new(config: Arc<Config>) -> Self {
         Self {
-            config,
+            config: config.clone(),
             // The grant carries the OIDC client secret in its form body. A redirect would put
             // that body on the wire to whatever the realm named, so this client follows none
             // (T-1695).
             http: crate::no_redirect_client(Some(Duration::from_secs(5))),
             endpoint_tokens: Arc::new(Mutex::new(HashMap::new())),
+            grants: crate::delegation::Grants::new(config.clone()),
         }
     }
 
@@ -84,6 +88,25 @@ impl CredentialManager {
         );
 
         Ok(data.access_token)
+    }
+
+    /// The token a run's data call carries: its person's, exchanged when the run started
+    /// (ADR-N-038 §3.3). There is no fallback to this proxy's own token.
+    pub async fn get_run_token(
+        &self,
+        run_id: &str,
+    ) -> Result<String, crate::delegation::GrantError> {
+        // The suites' stub, on the terms of `get_endpoint_token` (T-1480).
+        #[cfg(feature = "test-stub")]
+        if self.config.oidc_client_secret.is_empty() {
+            return Ok(format!("mock-token-for-run-{run_id}"));
+        }
+        self.grants.token(run_id).await
+    }
+
+    /// The runs' delegated grants.
+    pub fn grants(&self) -> &crate::delegation::Grants {
+        &self.grants
     }
 
     pub fn get_forge_token(&self) -> &str {

@@ -42,4 +42,6 @@ agent-proxy = { path = ".", features = ["test-stub"] }
 # `password_hash::rand_core::OsRng` only exists with getrandom on; the tests hash a ticket.
 rand_core = { version = "0.6", features = ["getrandom"] }
 tower = { version = "0.5", features = ["util"] }
+# Captures the proxy's log lines, to prove no token is written to one; already in the tree via jc-core.
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 wiremock = "0.6"
