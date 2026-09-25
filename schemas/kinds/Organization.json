@@ -2,6 +2,63 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AgentLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.agents`: model spend in whole units of the currency the agent proxy's provider bills in, the day and the month in UTC.",
+      "properties": {
+        "spendPerDay": {
+          "description": "Spend a day; absent is no limit.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "spendPerMonth": {
+          "description": "Spend a month; absent is no limit.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AgentsPolicy": {
+      "additionalProperties": false,
+      "description": "`spec.policies.agents`.",
+      "properties": {
+        "models": {
+          "description": "The models the agent proxy lets a run call. Absent is every model the installation's agent profiles name; a model outside those is never reachable whatever this lists.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "AppsPolicy": {
+      "additionalProperties": false,
+      "description": "`spec.policies.apps` (PF-103).",
+      "properties": {
+        "public": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PublicApps"
+            }
+          ],
+          "description": "Whether an App may be `public`; `refused` makes every door refuse a Change that sets an App public, and leaves the Apps already public as they are (PF-100, PF-103)."
+        }
+      },
+      "type": "object"
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -148,6 +205,114 @@
         }
       ]
     },
+    "DataLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.data`.",
+      "properties": {
+        "uploadMegabytes": {
+          "description": "The largest upload or import, in MiB; at most the edge's body.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EdgeLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.edge`.",
+      "properties": {
+        "maxRequestBodyMegabytes": {
+          "description": "The largest request body the edge accepts, in MiB.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requestsPerMinute": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EdgeRates"
+            }
+          ],
+          "description": "Requests a minute per route class."
+        }
+      },
+      "type": "object"
+    },
+    "EdgeRates": {
+      "additionalProperties": false,
+      "description": "`spec.limits.edge.requestsPerMinute`.",
+      "properties": {
+        "api": {
+          "description": "The Portal API, per token.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "dataRead": {
+          "description": "Context-space reads (`GET`, `HEAD`), per token.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "dataWrite": {
+          "description": "Context-space writes (every other method), per token.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "publicEndpoint": {
+          "description": "A public endpoint, per address.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "web": {
+          "description": "The Portal's pages, per address.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GatewayLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.gateway`.",
+      "properties": {
+        "maxRequestBodyMegabytes": {
+          "description": "The largest request body the gateway accepts, in MiB; at most the edge's.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "MultiLanguageMap": {
       "additionalProperties": {
         "type": "string"
@@ -216,6 +381,100 @@
       ],
       "type": "object"
     },
+    "OrganizationLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits`: the organization's numbers (ADR-N-035 §3). Every field is optional; an absent one is its [`CATALOG`] default.",
+      "properties": {
+        "agents": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentLimits"
+            }
+          ],
+          "description": "Model spend of the assistant and agent runs."
+        },
+        "data": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/DataLimits"
+            }
+          ],
+          "description": "Uploads and imports."
+        },
+        "edge": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EdgeLimits"
+            }
+          ],
+          "description": "What the edge admits."
+        },
+        "gateway": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GatewayLimits"
+            }
+          ],
+          "description": "What the context gateway admits."
+        },
+        "people": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PeopleLimits"
+            }
+          ],
+          "description": "Invitations."
+        },
+        "pipelines": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PipelineLimits"
+            }
+          ],
+          "description": "Pipeline outcomes and tests."
+        },
+        "signIn": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SignInLimits"
+            }
+          ],
+          "description": "How long a sign-in lasts."
+        }
+      },
+      "type": "object"
+    },
+    "OrganizationPolicies": {
+      "additionalProperties": false,
+      "description": "`spec.policies`: the organization's choices (ADR-N-035 §3).",
+      "properties": {
+        "agents": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentsPolicy"
+            }
+          ],
+          "description": "What the assistant and agent runs may use."
+        },
+        "apps": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppsPolicy"
+            }
+          ],
+          "description": "What the organization's Apps may be."
+        },
+        "signIn": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SignInPolicy"
+            }
+          ],
+          "description": "How people sign in."
+        }
+      },
+      "type": "object"
+    },
     "OrganizationSpec": {
       "additionalProperties": false,
       "description": "Desired specification of an [`Organization`][crate::kinds::Organization] resource (PF-01, PF-02, PF-25, PF-41).",
@@ -242,12 +501,28 @@
             "null"
           ]
         },
+        "limits": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/OrganizationLimits"
+            }
+          ],
+          "description": "The organization's numbers: edge rates, body sizes, sessions, invitations, model spend, pipeline outcomes and uploads (ADR-N-035, PF-96)."
+        },
         "locales": {
           "description": "Ordered list of supported locales, most preferred first (PF-25).",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "policies": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/OrganizationPolicies"
+            }
+          ],
+          "description": "The organization's choices: public apps, the password policy, the models agents may use (ADR-N-035, PF-96)."
         },
         "projects": {
           "allOf": [
@@ -267,6 +542,47 @@
         "domain",
         "locales"
       ],
+      "type": "object"
+    },
+    "PasswordPolicy": {
+      "additionalProperties": false,
+      "description": "`spec.policies.signIn.password`: written to the realm's password policy.",
+      "properties": {
+        "history": {
+          "description": "How many earlier passwords a new one may not repeat; 0 to 24.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "minLength": {
+          "description": "The shortest password the realm accepts; at least 12.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PeopleLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.people`.",
+      "properties": {
+        "invitationHours": {
+          "description": "Hours an invitation link stays usable.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "Phase": {
@@ -315,6 +631,31 @@
           "type": "string"
         }
       ]
+    },
+    "PipelineLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.pipelines`.",
+      "properties": {
+        "rejectedKept": {
+          "description": "Rejected records a pipeline keeps, newest first.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sampleMegabytes": {
+          "description": "The largest sample a pipeline test takes, in MiB; at most the edge's body.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ProjectCreation": {
       "description": "Who may open a project (PF-65). `group:<name>` names a `Group` of the organization.",
@@ -412,6 +753,25 @@
       },
       "type": "object"
     },
+    "PublicApps": {
+      "description": "Whether the organization's Apps may be public (PF-103).",
+      "oneOf": [
+        {
+          "description": "An App may be public.",
+          "enum": [
+            "allowed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No Change may set an App public.",
+          "enum": [
+            "refused"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Quotas": {
       "additionalProperties": false,
       "description": "Structural resource quotas per project (PF-17).\n\nAn absent field indicates unlimited quota for that resource.",
@@ -487,6 +847,46 @@
             "integer",
             "null"
           ]
+        }
+      },
+      "type": "object"
+    },
+    "SignInLimits": {
+      "additionalProperties": false,
+      "description": "`spec.limits.signIn`: written to the edge session and the realm alike (AP-29).",
+      "properties": {
+        "sessionIdleMinutes": {
+          "description": "Minutes without a request before a session ends.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sessionMaxHours": {
+          "description": "Hours after sign-in when a session ends whatever happens.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SignInPolicy": {
+      "additionalProperties": false,
+      "description": "`spec.policies.signIn`.",
+      "properties": {
+        "password": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PasswordPolicy"
+            }
+          ],
+          "description": "The realm's password policy."
         }
       },
       "type": "object"
