@@ -103,6 +103,17 @@ pub fn mirrored(publication: &CkanPublication) -> Option<Representation> {
 /// numbers. A column no model declares — an open-world attribute (DM-28), a nested leaf —
 /// is typed from the values in front of us and falls back to text.
 pub fn fields(columns: &[String], rows: &[Vec<Value>], schemas: &[Value]) -> Vec<Value> {
+    fields_by(columns, schemas, |index| observed(rows, index))
+}
+
+/// [`fields`], with the type of a column no model settles read by `kind_of` from the column's
+/// index: a caller holding the table in another shape than typed rows reads it from there,
+/// without a typed copy of the whole table (T-2968).
+pub fn fields_by(
+    columns: &[String],
+    schemas: &[Value],
+    kind_of: impl Fn(usize) -> String,
+) -> Vec<Value> {
     let declared = declarations(schemas);
     columns
         .iter()
@@ -113,7 +124,7 @@ pub fn fields(columns: &[String], rows: &[Vec<Value>], schemas: &[Value]) -> Vec
             let declared = declared.get(attribute);
             let kind = declared
                 .and_then(|declaration| declaration.datastore_type(column))
-                .unwrap_or_else(|| observed(rows, index));
+                .unwrap_or_else(|| kind_of(index));
             let mut field = json!({ "id": id, "type": kind });
             if let Some(notes) = declared.and_then(|declaration| declaration.description.clone()) {
                 field["info"] = json!({ "notes": notes });
@@ -143,38 +154,50 @@ pub fn table(package_id: &str, name: &str, fields: &[Value]) -> Value {
 /// cell is written as null rather than dropped: an attribute that stopped being answered
 /// must clear the column, not keep yesterday's value.
 pub fn records(columns: &[String], rows: &[Vec<Value>]) -> Result<Vec<Value>, MirrorError> {
-    let id = columns
-        .iter()
-        .position(|column| column == ID_COLUMN)
-        .ok_or(MirrorError::NoIdColumn)?;
+    id_column(columns)?;
     rows.iter()
         .enumerate()
-        .map(|(index, row)| {
-            if row.len() != columns.len() {
-                return Err(MirrorError::RaggedRow {
-                    row: index,
-                    cells: row.len(),
-                    columns: columns.len(),
-                });
-            }
-            let mut record = Map::new();
-            for (column, cell) in columns.iter().zip(row) {
-                record.insert(field_name(column), cell.clone());
-            }
-            // A row whose id is not a string has no key CKAN can address it by.
-            if !record
-                .get(PRIMARY_KEY)
-                .is_some_and(|value| value.as_str().is_some_and(|id| !id.is_empty()))
-            {
-                return Err(MirrorError::RaggedRow {
-                    row: index,
-                    cells: id,
-                    columns: columns.len(),
-                });
-            }
-            Ok(Value::Object(record))
-        })
+        .map(|(index, row)| record(columns, index, row.clone()))
         .collect()
+}
+
+/// Row `index` of the tabular answer as one DataStore record, as [`records`] writes it; the
+/// cells are moved into the record, so a caller building one batch at a time holds no second
+/// copy of the row (T-2968).
+pub fn record(columns: &[String], index: usize, row: Vec<Value>) -> Result<Value, MirrorError> {
+    let id = id_column(columns)?;
+    if row.len() != columns.len() {
+        return Err(MirrorError::RaggedRow {
+            row: index,
+            cells: row.len(),
+            columns: columns.len(),
+        });
+    }
+    let mut record = Map::new();
+    for (column, cell) in columns.iter().zip(row) {
+        record.insert(field_name(column), cell);
+    }
+    // A row whose id is not a string has no key CKAN can address it by.
+    if !record
+        .get(PRIMARY_KEY)
+        .is_some_and(|value| value.as_str().is_some_and(|id| !id.is_empty()))
+    {
+        return Err(MirrorError::RaggedRow {
+            row: index,
+            cells: id,
+            columns: columns.len(),
+        });
+    }
+    Ok(Value::Object(record))
+}
+
+/// Where the `id` column is: a table without one has no row CKAN can address, however few
+/// rows it has.
+pub fn id_column(columns: &[String]) -> Result<usize, MirrorError> {
+    columns
+        .iter()
+        .position(|column| column == ID_COLUMN)
+        .ok_or(MirrorError::NoIdColumn)
 }
 
 /// The entity ids one NGSI-LD notification asks to be refreshed (EP-65, EP-44).
@@ -256,15 +279,7 @@ pub fn sync(
         .map(str::to_owned)
         .collect();
     for batch in records.chunks(UPSERT_BATCH) {
-        api.action(
-            "datastore_upsert",
-            &json!({
-                "resource_id": resource_id,
-                "method": "upsert",
-                "records": batch,
-                "force": true,
-            }),
-        )?;
+        upsert(api, resource_id, batch.to_vec())?;
     }
     let answered: BTreeSet<&str> = upserted.iter().map(String::as_str).collect();
     let deleted: Vec<String> = requested
@@ -285,6 +300,21 @@ pub fn sync(
         )?;
     }
     Ok(Synced { upserted, deleted })
+}
+
+/// One `datastore_upsert` of `batch`, at most [`UPSERT_BATCH`] records (EP-65).
+///
+/// The batch is moved into the payload rather than copied into it: a payload built with
+/// `json!` from a borrowed batch holds the batch twice for as long as the request is sent.
+pub fn upsert(
+    api: &mut impl CkanApi,
+    resource_id: &str,
+    batch: Vec<Value>,
+) -> Result<(), MirrorError> {
+    let mut payload = json!({ "resource_id": resource_id, "method": "upsert", "force": true });
+    payload["records"] = Value::Array(batch);
+    api.action("datastore_upsert", &payload)?;
+    Ok(())
 }
 
 /// Gives the table's resource the grid its dataset page opens in (EP-62, EP-65).
@@ -466,28 +496,52 @@ fn declaration(property: &Value) -> Declaration {
 /// because one entity carried a string where the others carried numbers is worse than a
 /// column of text.
 fn observed(rows: &[Vec<Value>], index: usize) -> String {
-    let mut kind: Option<&str> = None;
+    let mut kind: Option<&'static str> = None;
     for row in rows {
-        let cell = match row.get(index) {
+        match row.get(index) {
             Some(Value::Null) | None => continue,
-            Some(cell) => cell,
-        };
-        let observed = match cell {
-            Value::Bool(_) => "bool",
-            Value::Number(number) if number.is_i64() || number.is_u64() => "int",
-            Value::Number(_) => "float",
-            Value::Object(_) | Value::Array(_) => "json",
-            Value::String(_) | Value::Null => "text",
-        };
-        kind = match kind {
-            None => Some(observed),
-            Some(known) if known == observed => Some(known),
-            // An int column that meets a float is a float column; anything else is text.
-            Some(known) if matches!((known, observed), ("int", "float") | ("float", "int")) => {
-                Some("float")
-            }
-            Some(_) => return "text".to_owned(),
-        };
+            Some(cell) => match fold(kind, cell) {
+                Some(next) => kind = Some(next),
+                None => return "text".to_owned(),
+            },
+        }
     }
     kind.unwrap_or("text").to_owned()
+}
+
+/// The CKAN type of one column from its cells, as [`fields`] reads it off typed rows; for a
+/// caller that produces each cell as it goes and keeps none of them (T-2968).
+pub fn observed_kind(cells: impl IntoIterator<Item = Value>) -> String {
+    let mut kind: Option<&'static str> = None;
+    for cell in cells {
+        if cell.is_null() {
+            continue;
+        }
+        match fold(kind, &cell) {
+            Some(next) => kind = Some(next),
+            None => return "text".to_owned(),
+        }
+    }
+    kind.unwrap_or("text").to_owned()
+}
+
+/// The column's kind once `cell` is seen, from what it was before; `None` is a mixed column,
+/// which is text.
+fn fold(kind: Option<&'static str>, cell: &Value) -> Option<&'static str> {
+    let observed = match cell {
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::Object(_) | Value::Array(_) => "json",
+        Value::String(_) | Value::Null => "text",
+    };
+    match kind {
+        None => Some(observed),
+        Some(known) if known == observed => Some(known),
+        // An int column that meets a float is a float column; anything else is text.
+        Some(known) if matches!((known, observed), ("int", "float") | ("float", "int")) => {
+            Some("float")
+        }
+        Some(_) => None,
+    }
 }

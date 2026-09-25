@@ -470,38 +470,41 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
 }
 
 /// Creates or extends the table and reloads it from `text` (EP-65).
+///
+/// The table is held once, as the text cells of the CSV, and every other shape of a row is
+/// built one batch at a time and dropped with it: a typed copy, a copy keeping the text columns
+/// and the records of every row at once came to 27 times the CSV, and the Portal runs this for
+/// every mirrored table on every pass (T-2968). Every row is checked before the catalogue is
+/// written, so a table with one bad row still changes nothing.
 fn mirror(api: &mut impl CkanApi, target: &Target, text: &str) -> Result<Mirror, Error> {
     let (columns, raw) = csv_table(text)?;
-    let typed: Vec<Vec<Value>> = raw
-        .iter()
-        .map(|row| row.iter().map(|cell| typed_cell(cell)).collect())
-        .collect();
-    let fields = datastore::fields(&columns, &typed, &[]);
+    let cell_of =
+        |row: &[String], index: usize| row.get(index).map_or(Value::Null, |c| typed_cell(c));
+    let fields = datastore::fields_by(&columns, &[], |index| {
+        datastore::observed_kind(raw.iter().map(|row| cell_of(row, index)))
+    });
     // A column CKAN will hold as text keeps the cell as it was written: `42` in a text
     // column is the text "42", not a number the database would refuse.
     let text_columns: Vec<bool> = fields
         .iter()
         .map(|field| field.get("type") == Some(&Value::String("text".to_owned())))
         .collect();
-    let rows: Vec<Vec<Value>> = raw
-        .iter()
-        .zip(&typed)
-        .map(|(raw_row, typed_row)| {
-            raw_row
-                .iter()
-                .zip(typed_row)
-                .enumerate()
-                .map(|(index, (raw_cell, typed_cell))| {
-                    if text_columns.get(index).copied().unwrap_or(true) && !raw_cell.is_empty() {
-                        Value::String(raw_cell.clone())
-                    } else {
-                        typed_cell.clone()
-                    }
-                })
-                .collect()
-        })
-        .collect();
-    let records = datastore::records(&columns, &rows)?;
+    let values = |row: &[String]| -> Vec<Value> {
+        row.iter()
+            .enumerate()
+            .map(|(index, cell)| {
+                if text_columns.get(index).copied().unwrap_or(true) && !cell.is_empty() {
+                    Value::String(cell.clone())
+                } else {
+                    typed_cell(cell)
+                }
+            })
+            .collect()
+    };
+    datastore::id_column(&columns)?;
+    for (index, row) in raw.iter().enumerate() {
+        datastore::record(&columns, index, values(row))?;
+    }
 
     let name = target.dataset_name();
     let (package_id, resource) = live_table(api, name)?;
@@ -515,12 +518,19 @@ fn mirror(api: &mut impl CkanApi, target: &Target, text: &str) -> Result<Mirror,
     // rows: a sync that fails part-way or a pass cut off on a large table still leaves the view
     // (T-2931), and a catalogue that refuses the view still holds today's data.
     let view = datastore::ensure_view(api, &resource_id);
-    let synced = datastore::sync(api, &resource_id, &[], &records)?;
+    let mut rows = 0;
+    for (batch_index, chunk) in raw.chunks(datastore::UPSERT_BATCH).enumerate() {
+        let first = batch_index * datastore::UPSERT_BATCH;
+        let batch = chunk
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| datastore::record(&columns, first + offset, values(row)))
+            .collect::<Result<Vec<_>, _>>()?;
+        rows += batch.len();
+        datastore::upsert(api, &resource_id, batch)?;
+    }
     view?;
-    Ok(Mirror {
-        table,
-        rows: synced.upserted.len(),
-    })
+    Ok(Mirror { table, rows })
 }
 
 /// The live dataset's id and the id of its DataStore resource, when the dataset has one.
