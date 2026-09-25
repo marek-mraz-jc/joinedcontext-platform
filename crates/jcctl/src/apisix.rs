@@ -3,19 +3,21 @@
 //!
 //! APISIX runs in file mode with no etcd and no Admin API, so the whole routing table is
 //! one rendered file. The Portal is served on `portal.{host}`; the apex `{host}` keeps the
-//! shared surfaces (`/apps/*`, `/git/*`, `/cs/*`, `/api/endpoint/*`, `/.well-known/*`) and
-//! redirects `/` to the Portal (ADR-N-019).
+//! shared surfaces (`/git/*`, `/cs/*`, `/api/endpoint/*`, `/.well-known/*`) and redirects `/`
+//! to the Portal (ADR-N-019). Every `App` is served on a host of its own,
+//! `{name}.apps.{host}`, so the browser's same-origin policy keeps one App's storage, cookies
+//! and frames from every other App, the forge and the endpoints (ADR-N-037, AP-133). The old
+//! `/apps/{name}/` path on the apex only redirects there, with no session.
 //!
 //! Login happens at the edge: the `openid-connect` plugin in session mode sits on the
-//! Portal routes, on the shared `/apps/*` surface and on the route every `App` gets,
-//! `static` apps included, so no app pod carries a login sidecar and no app contains login
-//! code (AP-26). The one confidential client `edge` of the realm serves all of them
+//! Portal routes and on the routes every `App` gets, `static` apps included, so no app pod
+//! carries a login sidecar and no app contains login code (AP-26). The one confidential client `edge` of the realm serves all of them
 //! (AP-27). The plugin sets `X-Userinfo` and `X-Access-Token` for the upstream after the
 //! route stripped them from the client request, so only the edge can set them; a
 //! `visibility: public` app lets an anonymous request pass (AP-28). The session cookie of
-//! an app route is scoped to `/apps/{name}/` and `/apps/{name}/logout` ends the edge and
-//! the Keycloak session (AP-29). Endpoints add no routes: `/api/endpoint/*` is one route
-//! and the gateway resolves the slug behind it.
+//! an app is host-only on `/` of its host and `/logout` ends the edge and the Keycloak
+//! session (AP-29). On the apex `/api/endpoint/*` is one route and the gateway resolves the
+//! slug behind it; an App's host routes the slugs of its own Endpoint and no other.
 //!
 //! Two secrets appear in the output as the literal strings [`EDGE_CLIENT_SECRET`] and
 //! [`OIDC_SESSION_SECRET`]. The deployment's ConfigMap template turns them into APISIX
@@ -93,8 +95,13 @@ impl Settings {
         format!("https://portal.{}{path}", self.host)
     }
 
-    fn apex_url(&self, path: &str) -> String {
-        format!("https://{}{path}", self.host)
+    /// The host an App is served on (AP-133).
+    fn app_host(&self, name: &str) -> String {
+        format!("{name}.apps.{}", self.host)
+    }
+
+    fn app_url(&self, name: &str, path: &str) -> String {
+        format!("https://{}{path}", self.app_host(name))
     }
 
     fn node(&self, service: &str, port: u16) -> String {
@@ -165,14 +172,6 @@ pub fn render(repo: &Repository, settings: &Settings) -> String {
             "upstream-context-gateway",
             "pc-endpoint-surface",
         ),
-        shared_route(
-            "apps-surface",
-            "/apps/*",
-            apex,
-            25,
-            "upstream-portal",
-            "pc-apps-surface",
-        ),
     ];
     let mut upstreams = vec![
         upstream(
@@ -214,6 +213,10 @@ pub fn render(repo: &Repository, settings: &Settings) -> String {
             "upstream-portal".to_owned()
         };
         routes.push(app_route(settings, &app, &upstream_id));
+        if let Some(route) = app_endpoint_route(settings, &app) {
+            routes.push(route);
+        }
+        routes.push(app_moved_route(settings, &app.name));
     }
 
     routes.sort_by_key(|r| r["id"].as_str().unwrap_or_default().to_owned());
@@ -238,54 +241,139 @@ struct RoutedApp {
     own_pod: bool,
     /// `visibility: public`: an anonymous request passes through to the app.
     public: bool,
+    /// The slugs of the App's own Endpoint, `app-{name}` in its project: the only slugs its
+    /// host routes to the gateway (AP-133). The Portal mints the slug and keeps it out of Git,
+    /// so a repository usually holds none and the host then routes no endpoint at all.
+    slugs: Vec<String>,
 }
 
 /// Every `App` gets a route, whatever its kind (AP-26); two manifests of one name render
-/// one route, the names sorted so the output is stable.
+/// one route, the names sorted so the output is stable. Of two claimants the first project
+/// in sort order wins, and `jcctl validate` refuses the pair (AP-14a).
 fn routed_apps(repo: &Repository) -> Vec<RoutedApp> {
     let mut apps: BTreeMap<String, RoutedApp> = BTreeMap::new();
     for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "App") {
+        if apps.contains_key(&id.name) {
+            continue;
+        }
         let spec = &resource.manifest.spec;
         let own_pod = matches!(
             spec.get("kind").and_then(Value::as_str),
             Some("service" | "fullstack")
         );
         let public = spec.get("visibility").and_then(Value::as_str) == Some("public");
-        apps.entry(id.name.clone()).or_insert(RoutedApp {
-            name: id.name.clone(),
-            own_pod,
-            public,
-        });
+        let endpoint = format!("app-{}", id.name);
+        let mut slugs: Vec<String> = repo
+            .iter()
+            .filter(|(other, _)| {
+                other.kind == "Endpoint"
+                    && other.name == endpoint
+                    && other.namespace == id.namespace
+            })
+            .filter_map(|(_, resource)| resource.manifest.spec.get("slug")?.as_str())
+            .map(str::to_owned)
+            .collect();
+        slugs.sort();
+        slugs.dedup();
+        apps.insert(
+            id.name.clone(),
+            RoutedApp {
+                name: id.name.clone(),
+                own_pod,
+                public,
+                slugs,
+            },
+        );
     }
     apps.into_values().collect()
 }
 
-/// The route of one app: its own login front, cookie scoped to the app, at a higher
-/// priority than the shared `/apps/*` surface (AP-26…AP-29).
+/// The App's login front on its own host: the cookie host-only on `/`, the callback and the
+/// logout on the host (AP-29, AP-133).
+fn app_login(settings: &Settings, app: &RoutedApp, unauth_action: &'static str) -> Session {
+    let name = app.name.as_str();
+    Session {
+        unauth_action,
+        cookie_name: format!("jc_edge_app_{name}"),
+        cookie_path: "/".to_owned(),
+        redirect_uri: settings.app_url(name, "/callback"),
+        logout_path: "/logout".to_owned(),
+        post_logout_redirect_uri: settings.app_url(name, "/"),
+    }
+}
+
+/// The route of one app: everything on its host, behind its own login front (AP-26…AP-29,
+/// AP-133). A `static` app's files live under `/apps/{name}/` of the Portal's static host,
+/// so its path is rewritten there; the browser only ever sees the App's host.
 fn app_route(settings: &Settings, app: &RoutedApp, upstream_id: &str) -> Value {
     let name = app.name.as_str();
-    let base = format!("/apps/{name}/");
-    let login = Session {
-        unauth_action: if app.public { "pass" } else { "auth" },
-        cookie_name: format!("jc_edge_app_{name}"),
-        cookie_path: base.clone(),
-        redirect_uri: settings.apex_url(&format!("{base}callback")),
-        logout_path: format!("{base}logout"),
-        post_logout_redirect_uri: settings.apex_url(&base),
-    };
+    let login = app_login(settings, app, if app.public { "pass" } else { "auth" });
+    let mut plugins = json!({
+        "request-id": { "include_in_response": true },
+        "serverless-pre-function": strip_forgeable_headers(),
+        "openid-connect": openid_connect_session(settings, &login),
+        "response-rewrite": security_headers(WEB_HEADERS),
+    });
+    if !app.own_pod {
+        plugins["proxy-rewrite"] = json!({ "regex_uri": ["^/(.*)$", format!("/apps/{name}/$1")] });
+    }
     inline_route(
         &format!("app-{name}"),
-        &format!("{base}*"),
-        &settings.host,
+        "/*",
+        &settings.app_host(name),
         30,
         upstream_id,
-        json!({
+        plugins,
+    )
+}
+
+/// The App's own endpoint on its host, for its own slugs only (AP-133). A request without a
+/// session is a `401` for a non-public App, not a redirect a `fetch` cannot follow, and the
+/// session's token reaches the gateway as the bearer it verifies.
+fn app_endpoint_route(settings: &Settings, app: &RoutedApp) -> Option<Value> {
+    if app.slugs.is_empty() {
+        return None;
+    }
+    let name = app.name.as_str();
+    let login = app_login(settings, app, if app.public { "pass" } else { "deny" });
+    let mut oidc = openid_connect_session(settings, &login);
+    oidc["access_token_in_authorization_header"] = json!(true);
+    let uris: Vec<String> = app
+        .slugs
+        .iter()
+        .map(|slug| format!("/api/endpoint/{slug}/*"))
+        .collect();
+    Some(json!({
+        "id": format!("app-{name}-endpoint"),
+        "uris": uris,
+        "host": settings.app_host(name),
+        "priority": 35,
+        "upstream_id": "upstream-context-gateway",
+        "plugins": {
             "request-id": { "include_in_response": true },
             "serverless-pre-function": strip_forgeable_headers(),
-            "openid-connect": openid_connect_session(settings, &login),
-            "response-rewrite": security_headers(WEB_HEADERS),
-        }),
-    )
+            "openid-connect": oidc,
+            "response-rewrite": security_headers(&[("X-Frame-Options", "DENY")]),
+        },
+    }))
+}
+
+/// The old address on the apex: a `308` to the App's host carrying no session, so a
+/// bookmark still arrives and the apex never sets an App's cookie (ADR-N-037 §3).
+fn app_moved_route(settings: &Settings, name: &str) -> Value {
+    json!({
+        "id": format!("app-{name}-moved"),
+        "uris": [format!("/apps/{name}"), format!("/apps/{name}/*")],
+        "host": settings.host,
+        "priority": 30,
+        "plugins": {
+            "redirect": {
+                "regex_uri": [format!("^/apps/{name}/?(.*)$"), settings.app_url(name, "/$1")],
+                "ret_code": 308,
+                "append_query_string": true,
+            },
+        },
+    })
 }
 
 fn base_route(id: &str, uri: &str, host: &str, priority: u32) -> Value {
@@ -407,8 +495,8 @@ struct Session {
     /// `auth`: an anonymous browser is sent to Keycloak; `pass`: it reaches the upstream
     /// without identity headers and the upstream decides (AP-28).
     unauth_action: &'static str,
-    /// One cookie name per login front, so overlapping paths (`/apps/` under
-    /// `/apps/{name}/`) never present the wrong session cookie.
+    /// One cookie name per login front, so a browser never presents one front's session to
+    /// another.
     cookie_name: String,
     cookie_path: String,
     redirect_uri: String,
@@ -483,14 +571,6 @@ fn plugin_configs(settings: &Settings) -> Value {
         logout_path: "/logout".to_owned(),
         post_logout_redirect_uri: settings.portal_url("/"),
     };
-    let apps_login = Session {
-        unauth_action: "auth",
-        cookie_name: "jc_edge_apps".to_owned(),
-        cookie_path: "/apps/".to_owned(),
-        redirect_uri: settings.apex_url("/apps/callback"),
-        logout_path: "/apps/logout".to_owned(),
-        post_logout_redirect_uri: settings.apex_url("/apps/"),
-    };
 
     json!([
         {
@@ -518,15 +598,6 @@ fn plugin_configs(settings: &Settings) -> Value {
                 "serverless-pre-function": strip_forgeable_headers(),
                 "openid-connect": openid_connect_session(settings, &portal_login("pass")),
                 "response-rewrite": security_headers(API_HEADERS),
-            },
-        },
-        {
-            "id": "pc-apps-surface",
-            "plugins": {
-                "request-id": { "include_in_response": true },
-                "serverless-pre-function": strip_forgeable_headers(),
-                "openid-connect": openid_connect_session(settings, &apps_login),
-                "response-rewrite": security_headers(WEB_HEADERS),
             },
         },
         {

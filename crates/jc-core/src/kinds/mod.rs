@@ -33,7 +33,7 @@ pub use agent_profile::{
     AgentTool, AgentWorkspace, ModelProvider, DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use app::{
-    AppAccess, AppBuild, AppClass, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
+    AppAccess, AppBuild, AppClass, AppEgress, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
     AppVisibility, ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource,
     TemporalConstraint,
 };
@@ -83,7 +83,8 @@ pub use policy::{
     PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
 pub use role::{
-    BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, Verb, PERSON,
+    BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, SubjectSource, Verb,
+    PERSON,
 };
 pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,

@@ -386,7 +386,13 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 project,
                 audience: Audience::Public,
                 allowed_projects: Vec::new(),
-                representations: vec![Representation::NgsiLd, Representation::Mcp],
+                // The dump is a space's own child (SP-04, SP-13): the file bundle over what the
+                // caller's grants read, generated per request (T-2391).
+                representations: vec![
+                    Representation::NgsiLd,
+                    Representation::Mcp,
+                    Representation::Zip,
+                ],
                 // No limit of its own: the manifest has no field for one, and the limiter
                 // counts the canonical surface in its own default bucket (T-0813).
                 rate_limit: None,

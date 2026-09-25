@@ -3,7 +3,7 @@
 use chrono::{TimeZone, Utc};
 use jc_core::envelope::ResourceEnvelope;
 use jc_core::error::Error;
-use jc_core::kinds::{Role, RoleBindingSpec, Verb};
+use jc_core::kinds::{Role, RoleBindingSpec, SubjectSource, Verb};
 
 const ROLE: &str = include_str!("golden/023-Role-12-identity-and-access.yaml");
 const BINDING: &str = include_str!("golden/024-RoleBinding-12-identity-and-access.yaml");
@@ -453,4 +453,39 @@ fn every_verb_is_written_as_a_manifest_writes_it() {
             serde_json::Value::from(verb.as_str())
         );
     }
+}
+
+/// T-1471, PF-64: a group the identity provider owns is bound with `source: provider`; the mark
+/// is a group's alone and names one owner, `provider`.
+#[test]
+fn a_provider_group_is_marked_on_the_group_and_nowhere_else() {
+    let marked = binding(
+        "{ group: air-quality-team }",
+        "{ group: platform-readers, source: provider }",
+    )
+    .expect("a marked group is a subject");
+    assert_eq!(
+        marked.spec.subjects[0].source,
+        Some(SubjectSource::Provider)
+    );
+    assert_eq!(
+        binding("", "").expect("unmarked").spec.subjects[0].source,
+        None
+    );
+
+    let err = binding(
+        "{ user: jana.kovacova@banskabystrica.sk }",
+        "{ user: jana.kovacova@banskabystrica.sk, source: provider }",
+    )
+    .expect_err("a user has no source");
+    assert!(err.to_string().contains("a user has no source"), "{err}");
+    let err = binding(
+        "{ group: air-quality-team }",
+        "{ group: air-quality-team, source: keycloak }",
+    )
+    .expect_err("provider is the one source");
+    assert!(matches!(err, Error::Parse(_)), "{err}");
+    let err = binding("{ group: air-quality-team }", "{ source: provider }")
+        .expect_err("a mark names no one");
+    assert!(err.to_string().contains("exactly one"), "{err}");
 }
