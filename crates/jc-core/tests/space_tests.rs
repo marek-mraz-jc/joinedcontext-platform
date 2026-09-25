@@ -1,4 +1,4 @@
-use jc_core::kinds::{ContextSpace, ContextSpaceSpec, Project, Quotas};
+use jc_core::kinds::{ContextSpace, ContextSpaceSpec, MissingUnitCode, Project, Quotas};
 use jc_core::Urn;
 
 const GOLDEN_PROJECT: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -175,6 +175,7 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         data_model_ref: None,
         ttl_days: Some(7),
         urn_segment: None,
+        missing_unit_code: MissingUnitCode::Fill,
     };
     assert!(spec.validate().is_ok());
 
@@ -252,4 +253,31 @@ fn a_space_names_a_model_of_its_own_project_dm_61() {
     assert!(ContextSpace::from_yaml(&wrong_kind)
         .map(|space| space.spec.validate_with_meta(&space.metadata))
         .is_ok_and(|verdict| verdict.is_err()));
+}
+
+/// DM-06: a space fills a missing `unitCode` unless it says `refuse`; the default stays unwritten,
+/// and a value outside the two is refused when the manifest is read.
+#[test]
+fn a_space_fills_a_missing_unit_code_unless_it_refuses_dm_06() {
+    let default: ContextSpaceSpec =
+        serde_json::from_value(serde_json::json!({})).expect("empty spec");
+    assert_eq!(default.missing_unit_code, MissingUnitCode::Fill);
+    assert!(serde_json::to_value(&default)
+        .expect("serialize")
+        .get("missingUnitCode")
+        .is_none());
+
+    let strict: ContextSpaceSpec =
+        serde_json::from_value(serde_json::json!({ "missingUnitCode": "refuse" }))
+            .expect("strict spec");
+    assert_eq!(strict.missing_unit_code, MissingUnitCode::Refuse);
+    assert_eq!(
+        serde_json::to_value(&strict).expect("serialize")["missingUnitCode"],
+        "refuse"
+    );
+
+    assert!(serde_json::from_value::<ContextSpaceSpec>(
+        serde_json::json!({ "missingUnitCode": "guess" })
+    )
+    .is_err());
 }

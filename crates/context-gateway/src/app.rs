@@ -772,6 +772,33 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
+    // A quantity is written in its model's unit or not at all (DM-06, T-2810): a wrong
+    // `unitCode` is refused, a missing one filled with the model's code unless the space
+    // refuses that. A view endpoint writes in its target model, which the space's rules do not
+    // describe, so it is left to the mapping.
+    let mut units_filled = Vec::new();
+    if operation.is_write() && !subscribing && !sent.is_empty() && endpoint.view_mapping.is_none() {
+        if let Some(rules) = endpoint
+            .declared_types
+            .as_ref()
+            .map(|declared| &declared.units)
+        {
+            match filled_units(&mut sent, &path, rules) {
+                Ok(filled) => units_filled = filled,
+                Err(problem) => {
+                    tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
+                    return problem.into_response();
+                }
+            }
+            if !units_filled.is_empty() {
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+            }
+        }
+    }
+
     // CIM 009 clause 5.6.9 puts a query's selector in the body, and a filter is a read wherever
     // it is written. The body is narrowed here rather than in the decision point because the
     // decision is taken before a body is read (T-2259, T-1862).
@@ -893,14 +920,61 @@ pub(crate) async fn serve_ngsi_ld(
         None => projected,
         Some(mapping) => translated(projected, mapping).await,
     };
-    if let Some((forwarded, refused)) = divided {
-        return merged_batch(answer, forwarded, refused).await;
+    let answer = match divided {
+        Some((forwarded, refused)) => merged_batch(answer, forwarded, refused).await,
+        None if geojson => as_geojson(answer, operation, lang.as_deref()).await,
+        None => answer,
+    };
+    with_filled_units(answer, &units_filled)
+}
+
+/// Checks and fills the units of a write body in place (DM-06), answering the quantities it
+/// filled. The body is rewritten only when something was filled.
+fn filled_units(
+    sent: &mut Vec<u8>,
+    path: &str,
+    rules: &crate::units::UnitRules,
+) -> Result<Vec<String>, Box<ProblemDetails>> {
+    if rules.is_empty() {
+        return Ok(Vec::new());
     }
-    if geojson {
-        as_geojson(answer, operation, lang.as_deref()).await
-    } else {
-        answer
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        // `judge_write` already refused a body that is not JSON; nothing is left to check.
+        return Ok(Vec::new());
+    };
+    let addressed = operations::addressed_entity(path).map(query::decode);
+    let shape = crate::units::Shape {
+        addressed: addressed.as_deref(),
+        targeted: operations::targeted_attribute(path),
+    };
+    let filled = crate::units::enforce(&mut payload, shape, rules)
+        .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
+    if !filled.is_empty() {
+        *sent = serde_json::to_vec(&payload).map_err(|error| {
+            tracing::error!(%error, "a write with its units filled does not serialize");
+            Box::new(ProblemDetails::internal())
+        })?;
     }
+    Ok(filled)
+}
+
+/// The answer to a write whose units the gateway filled, saying which (DM-06). A refused
+/// write changed nothing, so it says nothing either.
+fn with_filled_units(mut answer: Response<Body>, filled: &[String]) -> Response<Body> {
+    if filled.is_empty() || !answer.status().is_success() {
+        return answer;
+    }
+    match HeaderValue::from_str(&filled.join(", ")) {
+        Ok(value) => {
+            answer
+                .headers_mut()
+                .insert(crate::units::FILLED_HEADER, value);
+        }
+        Err(_) => {
+            tracing::warn!("the filled units do not fit a header; the answer does not name them")
+        }
+    }
+    answer
 }
 
 /// A projected NGSI-LD answer as GeoJSON (CIM 009 6.3.15, T-2583): one entity is a `Feature`, a

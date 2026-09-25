@@ -89,7 +89,7 @@ pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
-pub use space::{urn_segment, ContextSpaceSpec, ProjectSpec, Quotas};
+pub use space::{urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectSpec, Quotas};
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
 };

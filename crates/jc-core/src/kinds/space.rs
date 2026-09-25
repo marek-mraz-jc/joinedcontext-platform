@@ -227,6 +227,29 @@ pub struct ContextSpaceSpec {
     /// `{project}-{name}`; pins the segment of a space that predates PF-84 (PF-84).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub urn_segment: Option<String>,
+    /// What a write through an Endpoint does with a quantity Property of the model that carries
+    /// no `unitCode`: `fill` writes the model's code and says so, `refuse` answers `400` (DM-06).
+    /// A `unitCode` other than the model's is refused either way.
+    #[serde(default, skip_serializing_if = "MissingUnitCode::is_fill")]
+    pub missing_unit_code: MissingUnitCode,
+}
+
+/// What a space does with a quantity written without its `unitCode` (DM-06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MissingUnitCode {
+    /// The gateway writes the model's code and names it in the answer.
+    #[default]
+    Fill,
+    /// The gateway refuses the write, naming the attribute and the code it needs.
+    Refuse,
+}
+
+impl MissingUnitCode {
+    /// Whether this is the default, which a manifest leaves unwritten.
+    pub fn is_fill(&self) -> bool {
+        *self == Self::Fill
+    }
 }
 
 /// The `{space}` segment of every entity id of a space: its pin, else `{project}-{name}` (PF-84).
