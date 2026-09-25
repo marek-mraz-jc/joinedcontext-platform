@@ -1101,6 +1101,12 @@ pub(crate) async fn serve_ngsi_ld(
         // the vocabulary of a type filter would either ignore them or answer something else.
         // The narrowing of these answers happens on their own members instead (T-2134).
         query::passthrough(&params)
+    } else if let (Operation::RetrieveTemporal, Some(id)) =
+        (operation, operations::addressed_entity(&path))
+    {
+        // One entity's history takes no `type` (CIM 009 6.19.3.1); its type is judged on the
+        // answer below (T-2987).
+        query::upstream_by_id(&params, &constraints, &query::decode(id))
     } else {
         query::upstream(&params, &constraints, &[])
     };

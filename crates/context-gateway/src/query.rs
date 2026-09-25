@@ -343,12 +343,45 @@ pub fn upstream(
     constraints: &Constraints,
     fallback_types: &[String],
 ) -> String {
+    narrowed(
+        params,
+        constraints,
+        &constraints.attrs,
+        fallback_types,
+        true,
+    )
+}
+
+/// [`upstream`] for the temporal evolution of one entity, addressed by its id (T-2987).
+///
+/// CIM 009 6.19.3.1 takes no `type` there, and a broker that holds to it refuses the request
+/// with `400` (Antares does), so every history read under a type grant failed. The grants'
+/// types still narrow: what the broker answers is judged by [`crate::pdp::projection::permitted`]
+/// before it is served, and an entity of a type no grant names is the gateway's own `404`
+/// (T-2130). Without a type beside it, `attrs` is the slots of the type the id names rather than
+/// the union over every granted type, so no attribute is asked for beside a type that does not
+/// serve it (R9, T-1862). An id that names no type keeps the union.
+pub fn upstream_by_id(params: &[(String, String)], constraints: &Constraints, id: &str) -> String {
+    let own = crate::relationships::type_of_id(id)
+        .and_then(|kind| constraints.attrs_by_type.get(kind))
+        .map(|slots| constraints.attrs.intersection(slots).cloned().collect());
+    let attrs = own.as_ref().unwrap_or(&constraints.attrs);
+    narrowed(params, constraints, attrs, &[], false)
+}
+
+fn narrowed(
+    params: &[(String, String)],
+    constraints: &Constraints,
+    attrs: &BTreeSet<String>,
+    fallback_types: &[String],
+    with_type: bool,
+) -> String {
     let mut out = kept(params);
 
-    if !constraints.types.is_empty() {
+    if with_type && !constraints.types.is_empty() {
         out.push(("type".to_owned(), join_list(&constraints.types)));
     }
-    let attrs = broker_attrs(params, &constraints.attrs);
+    let attrs = broker_attrs(params, attrs);
     if !attrs.is_empty() {
         out.push(("attrs".to_owned(), join_list(&attrs)));
     }
@@ -683,6 +716,47 @@ mod tests {
     /// refuses them in `attrs`. A grant that names them (an App's `dataNeeds.attrs` often does)
     /// or the identity-only set of `narrow_to_identity` reaches the broker without them; the
     /// caller's own `attrs=id` still does, and its answer stays the broker's.
+    /// T-2987: one entity's history is asked without `type` (CIM 009 6.19.3.1), with the slots of
+    /// the type its id names instead of the union, and an id that names no type keeps the union.
+    #[test]
+    fn a_read_by_id_sends_no_type_and_the_slots_of_its_own_type() {
+        let constraints = Constraints {
+            types: BTreeSet::from(["User".to_owned(), "Vehicle".to_owned()]),
+            attrs: ["age", "location", "name", "weight"]
+                .map(str::to_owned)
+                .into(),
+            attrs_by_type: [
+                (
+                    "User".to_owned(),
+                    ["age", "location", "name"].map(str::to_owned).into(),
+                ),
+                (
+                    "Vehicle".to_owned(),
+                    ["location", "name", "weight"].map(str::to_owned).into(),
+                ),
+            ]
+            .into(),
+            ..Constraints::default()
+        };
+        let params = [("lastN".to_owned(), "10".to_owned())];
+
+        let vehicle = parse(&upstream_by_id(
+            &params,
+            &constraints,
+            "urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01",
+        ));
+        assert_eq!(first(&vehicle, "type"), None);
+        assert_eq!(first(&vehicle, "attrs"), Some("location,name,weight"));
+        assert_eq!(first(&vehicle, "lastN"), Some("10"));
+
+        let unnamed = parse(&upstream_by_id(&params, &constraints, "bus-01"));
+        assert_eq!(first(&unnamed, "type"), None);
+        assert_eq!(first(&unnamed, "attrs"), Some("age,location,name,weight"));
+
+        let query = parse(&upstream(&params, &constraints, &[]));
+        assert_eq!(first(&query, "type"), Some("User,Vehicle"));
+    }
+
     #[test]
     fn a_grants_identity_members_never_reach_the_broker_as_attributes() {
         let grant = |attrs: &[&str]| Constraints {

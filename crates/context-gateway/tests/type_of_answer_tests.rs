@@ -175,6 +175,84 @@ async fn a_temporal_retrieve_of_an_ungranted_type_by_id_is_not_found() {
     assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
 }
 
+/// T-2987, CIM 009 6.19.3.1: one entity's history takes no `type`, and a broker holding to it
+/// refused every history read under a type grant with 400. The grant's type is judged on the
+/// answer instead, so it reaches the broker without one.
+#[tokio::test]
+async fn a_temporal_retrieve_by_id_asks_the_broker_without_the_granted_type() {
+    let (status, body, log) = ask(
+        entity(VEHICLE, "Vehicle"),
+        &["Vehicle"],
+        &format!("/ngsi-ld/v1/temporal/entities/{VEHICLE}?attrs=name"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body was {body}");
+    assert!(
+        body.contains("Vehicle north"),
+        "the Vehicle is granted: {body}"
+    );
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        !log[0].contains("type="),
+        "the broker was sent a type: {log:?}"
+    );
+    assert!(log[0].contains("attrs=name"), "{log:?}");
+}
+
+/// T-2987: without `type` upstream, a broker answering an entity of another type for a URN that
+/// names a granted one is still refused, with the gateway's own miss.
+#[tokio::test]
+async fn a_temporal_retrieve_by_id_still_refuses_what_the_broker_answers_of_another_type() {
+    let (status, body, log) = ask(
+        entity(VEHICLE, "Depot"),
+        &["Vehicle"],
+        &format!("/ngsi-ld/v1/temporal/entities/{VEHICLE}"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
+    assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
+    assert_eq!(log.len(), 1, "the broker was asked: {log:?}");
+}
+
+/// T-2987: the query form keeps the grant's type, which is how it selects (CIM 009 6.18.3.2).
+#[tokio::test]
+async fn a_temporal_query_still_sends_the_granted_type() {
+    let (_, _, log) = ask(
+        json!([entity(VEHICLE, "Vehicle")]),
+        &["Vehicle"],
+        "/ngsi-ld/v1/temporal/entities?attrs=name",
+    )
+    .await;
+
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(log[0].contains("type=Vehicle"), "{log:?}");
+}
+
+/// T-2987: a SensorThings Datastream reads the same history through the same function, so its
+/// Observations reach the broker without `type` as well.
+#[tokio::test]
+async fn sensorthings_observations_ask_the_broker_without_the_granted_type() {
+    let (status, body, log) = ask(
+        entity(VEHICLE, "Vehicle"),
+        &["Vehicle"],
+        &format!("/sta/v1.1/Datastreams('{VEHICLE}/name')/Observations"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "body was {body}");
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0].starts_with("/ngsi-ld/v1/temporal/entities/"),
+        "{log:?}"
+    );
+    assert!(
+        !log[0].contains("type="),
+        "the broker was sent a type: {log:?}"
+    );
+}
+
 /// MP-02: a list leaves the ungranted entity out instead of paging it.
 #[tokio::test]
 async fn a_query_that_the_broker_answers_too_widely_drops_the_ungranted_type() {

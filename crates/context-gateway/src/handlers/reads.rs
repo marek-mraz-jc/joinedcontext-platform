@@ -180,10 +180,12 @@ pub(crate) async fn query_temporal(
     tenancy::pin_tenant(request, &endpoint.space)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
+    // By id, so without the grants' `type` (CIM 009 6.19.3.1): `projection::permitted` below
+    // judges the type of what comes back (T-2987).
     let target = format!(
         "/ngsi-ld/v1/temporal/entities/{}?{}",
         query::encode(urn),
-        query::upstream(params, &constraints, &[])
+        query::upstream_by_id(params, &constraints, urn)
     );
     let answer = gateway
         .broker
