@@ -24,6 +24,7 @@ pub mod pdp;
 pub mod previews;
 pub mod proxy;
 pub mod query;
+pub mod relationships;
 pub mod resolver;
 pub mod store;
 pub mod telemetry;

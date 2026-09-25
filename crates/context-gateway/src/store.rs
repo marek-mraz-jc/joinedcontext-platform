@@ -10,6 +10,7 @@
 use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::auth::dataspace_token::{agreements_of, Agreements};
 use crate::federation::{federations_of, Federations};
+use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::translators::view_mapping::ViewMapping;
 use crate::units::UnitRules;
@@ -564,6 +565,11 @@ fn declared_types(
                             .json_schema
                             .as_ref()
                             .map(|schema| UnitRules::from_schema(schema, space.missing_unit_code))
+                            .unwrap_or_default(),
+                        relationships: model
+                            .json_schema
+                            .as_ref()
+                            .map(RelationshipRules::from_schema)
                             .unwrap_or_default(),
                     },
                 );
