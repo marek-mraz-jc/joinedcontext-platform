@@ -142,6 +142,7 @@ fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         projection: projected.then(projection),
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

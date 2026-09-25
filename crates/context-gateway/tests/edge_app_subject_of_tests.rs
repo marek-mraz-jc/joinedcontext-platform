@@ -61,6 +61,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![
             policy("role", "data-steward", "StewardView"),
             policy("role", "sensor-writer", "SensorWrite"),
@@ -215,8 +216,8 @@ async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_sa
         json!({
             "azp": workload(),
             "preferred_username": "jana.novakova",
-            // A group that names a project only: whether a group grant reaches a workload is
-            // open (T-2549), so no group here carries one.
+            // A group that names a project only; a group Policy never reaches a workload
+            // (T-2545, `a_service_accounts_token_groups_reach_no_group_policy`).
             "groups": ["/ovzdusie"],
             "realm_access": { "roles": ["data-steward"] },
         }),
@@ -227,6 +228,25 @@ async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_sa
         document["subject"],
         json!({ "type": "serviceAccount", "id": "senzory" })
     );
+    assert_eq!(
+        granted(&document),
+        ["AccountOwn", "SensorWrite"],
+        "{document}"
+    );
+}
+
+/// PF-35, T-2545: a workload's grants are its manifest's. A `groups` claim on its token — a
+/// Keycloak admin putting the service-account user into a group — reaches no Policy granted to
+/// that group, because that membership is not a reviewed change.
+#[tokio::test]
+async fn a_service_accounts_token_groups_reach_no_group_policy() {
+    let fixture = fixture("account-in-a-group", Audience::Organization, PROJECT);
+    let (status, document) = access(
+        &fixture,
+        json!({ "azp": workload(), "groups": ["/stewards"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{document}");
     assert_eq!(
         granted(&document),
         ["AccountOwn", "SensorWrite"],

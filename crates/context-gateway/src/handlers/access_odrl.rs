@@ -54,7 +54,14 @@ pub fn policy(
         .into_iter()
         .partition(|policy| policy.effect.is_prohibition());
 
-    let permission = rules(&permissions);
+    let mut permission = rules(&permissions);
+    // The licence's duties bind every use the grants permit (EP-79); a prohibition has none.
+    let duties = licence_duties(endpoint);
+    if !duties.is_empty() {
+        for rule in &mut permission {
+            rule["duty"] = Value::Array(duties.clone());
+        }
+    }
     let prohibition = rules(&prohibitions);
 
     let mut document = Map::new();
@@ -219,6 +226,19 @@ fn rules(policies: &[&PolicySpec]) -> Vec<Value> {
         }
     }
     rules
+}
+
+/// The duties of the endpoint's licence in this document's dialect: `attribute`, and the
+/// share-alike requirement by its full IRI, which the ODRL context does not name (EP-79).
+fn licence_duties(endpoint: &Endpoint) -> Vec<Value> {
+    let Some(licence) = endpoint.catalog.as_deref().and_then(|c| c.license) else {
+        return Vec::new();
+    };
+    crate::handlers::endpoint_surface::duties(licence.duty())
+        .iter()
+        .filter_map(|duty| duty.get("odrl:action").and_then(Value::as_str))
+        .map(|action| json!({ "action": action.strip_prefix("odrl:").unwrap_or(action) }))
+        .collect()
 }
 
 /// The residual a rule carries: the two query strings verbatim, geography and time decomposed.
@@ -482,6 +502,21 @@ fn rule_node(rule: &Value) -> String {
     }
     if let Some(assigner) = rule.get("assigner").and_then(Value::as_str) {
         parts.push(format!("odrl:assigner {}", party_term(assigner)));
+    }
+    for duty in rule
+        .get("duty")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(action) = duty.get("action").and_then(Value::as_str) {
+            let action = if action.contains("://") {
+                format!("<{action}>")
+            } else {
+                format!("odrl:{action}")
+            };
+            parts.push(format!("odrl:duty [ odrl:action {action} ]"));
+        }
     }
     for item in rule
         .get("constraint")

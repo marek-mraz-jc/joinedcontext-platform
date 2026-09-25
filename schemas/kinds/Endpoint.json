@@ -74,6 +74,124 @@
       ],
       "type": "object"
     },
+    "Catalog": {
+      "additionalProperties": false,
+      "description": "The catalogue description of one Endpoint (EP-78).",
+      "properties": {
+        "applicableLegislation": {
+          "description": "ELI IRIs of the laws that apply: `dcatap:applicableLegislation`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "attribution": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The words the attribution duty asks for, per language: `dct:rights`.",
+          "type": "object"
+        },
+        "contactPoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContactPoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where questions about it go: `dcat:contactPoint`, a role address (EP-80)."
+        },
+        "frequency": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Frequency"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How often the data changes, from the EU frequency table: `dct:accrualPeriodicity`."
+        },
+        "keywords": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Keywords per language: `dcat:keyword`.",
+          "type": "object"
+        },
+        "license": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Licence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The licence, from the EU licence table: `dct:license`."
+        },
+        "pipelineRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Pipeline of this project that fills the space: `prov:wasGeneratedBy`."
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Publisher"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who publishes the dataset: `dct:publisher`."
+        },
+        "source": {
+          "description": "The original open datasets the data comes from: `dct:source`.",
+          "items": {
+            "$ref": "#/definitions/Source"
+          },
+          "type": "array"
+        },
+        "spatial": {
+          "description": "NUTS codes or location IRIs: `dct:spatial`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "temporal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Temporal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The period the data covers: `dct:temporal`."
+        },
+        "themes": {
+          "description": "EU data themes: `dcat:theme`.",
+          "items": {
+            "$ref": "#/definitions/DataTheme"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "CkanPublication": {
       "additionalProperties": false,
       "description": "Publication of one Endpoint as one CKAN dataset (EP-62…EP-65).",
@@ -165,6 +283,25 @@
       ],
       "type": "object"
     },
+    "ContactPoint": {
+      "additionalProperties": false,
+      "description": "The contact point of a dataset, a `vcard:Kind`.",
+      "properties": {
+        "email": {
+          "description": "A role address, never a person's own (EP-80): `vcard:hasEmail`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The desk's name: `vcard:fn`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "name"
+      ],
+      "type": "object"
+    },
     "DataStore": {
       "additionalProperties": false,
       "description": "The optional row mirror in the CKAN DataStore (EP-65).",
@@ -206,6 +343,102 @@
           "description": "Reloaded whenever the Endpoint is reconciled, for a space without a subscription.",
           "enum": [
             "onReconcile"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "DataTheme": {
+      "description": "A theme of the EU data-theme table.",
+      "oneOf": [
+        {
+          "description": "Agriculture, fisheries, forestry and food.",
+          "enum": [
+            "AGRI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Economy and finance.",
+          "enum": [
+            "ECON"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Education, culture and sport.",
+          "enum": [
+            "EDUC"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Energy.",
+          "enum": [
+            "ENER"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Environment.",
+          "enum": [
+            "ENVI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Government and public sector.",
+          "enum": [
+            "GOVE"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Health.",
+          "enum": [
+            "HEAL"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "International issues.",
+          "enum": [
+            "INTR"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Justice, legal system and public safety.",
+          "enum": [
+            "JUST"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Regions and cities.",
+          "enum": [
+            "REGI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Population and society.",
+          "enum": [
+            "SOCI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Science and technology.",
+          "enum": [
+            "TECH"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Transport.",
+          "enum": [
+            "TRAN"
           ],
           "type": "string"
         }
@@ -271,6 +504,17 @@
         "callerRole": {
           "description": "Every caller this Endpoint admits holds the role [`endpoint_role`] names for it, on requests through this Endpoint alone (AP-96, AP-97). The App reconciler sets it, so an App's grants never reach another surface of the space.",
           "type": "boolean"
+        },
+        "catalog": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Catalog"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What a DCAT-AP catalogue needs beyond the distributions: publisher, contact, licence, themes, coverage, frequency and provenance (EP-78, EP-79)."
         },
         "contextSpaceRef": {
           "allOf": [
@@ -412,6 +656,128 @@
         }
       },
       "type": "object"
+    },
+    "Frequency": {
+      "description": "An update frequency of the EU frequency table.",
+      "oneOf": [
+        {
+          "description": "Continuous.",
+          "enum": [
+            "CONT"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Hourly.",
+          "enum": [
+            "HOURLY"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Daily.",
+          "enum": [
+            "DAILY"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Weekly.",
+          "enum": [
+            "WEEKLY"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Monthly.",
+          "enum": [
+            "MONTHLY"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Quarterly.",
+          "enum": [
+            "QUARTERLY"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Annual.",
+          "enum": [
+            "ANNUAL"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Irregular.",
+          "enum": [
+            "IRREG"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Never updated.",
+          "enum": [
+            "NEVER"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Unknown.",
+          "enum": [
+            "UNKNOWN"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Licence": {
+      "description": "A licence of the EU licence table whose duties are known (EP-79).",
+      "oneOf": [
+        {
+          "description": "Creative Commons Zero 1.0.",
+          "enum": [
+            "CC0"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Creative Commons Attribution 4.0.",
+          "enum": [
+            "CC_BY_4_0"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Creative Commons Attribution-ShareAlike 4.0.",
+          "enum": [
+            "CC_BYSA_4_0"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Open Data Commons Attribution.",
+          "enum": [
+            "ODC_BY"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Open Data Commons Open Database Licence.",
+          "enum": [
+            "ODC_ODBL"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Open Data Commons Public Domain Dedication and Licence.",
+          "enum": [
+            "ODC_PDDL"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "MultiLanguageMap": {
       "additionalProperties": {
@@ -560,6 +926,30 @@
       },
       "type": "object"
     },
+    "Publisher": {
+      "additionalProperties": false,
+      "description": "The publisher of a dataset, a `foaf:Agent`.",
+      "properties": {
+        "name": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The publisher's name per language: `foaf:name`.",
+          "type": "object"
+        },
+        "uri": {
+          "description": "The publisher's own IRI, its web site or registry entry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "RateLimits": {
       "additionalProperties": false,
       "description": "Token-bucket rate limiting configuration per endpoint (EP-20).",
@@ -670,6 +1060,36 @@
         }
       ]
     },
+    "Source": {
+      "additionalProperties": false,
+      "description": "One original dataset the data comes from, itself a `dcat:Dataset`.",
+      "properties": {
+        "description": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Its description per language; DCAT-AP requires one of every dataset it names.",
+          "type": "object"
+        },
+        "title": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Its title per language; DCAT-AP requires one of every dataset it names.",
+          "type": "object"
+        },
+        "url": {
+          "description": "Its IRI, the page or API of the original.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "title",
+        "url"
+      ],
+      "type": "object"
+    },
     "Status": {
       "additionalProperties": false,
       "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
@@ -726,6 +1146,29 @@
         },
         "user": {
           "description": "The user's identifier in the identity provider (username or e-mail).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Temporal": {
+      "additionalProperties": false,
+      "description": "The period a dataset covers; either end may be open.",
+      "properties": {
+        "end": {
+          "description": "The last day covered: `dcat:endDate`.",
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "The first day covered: `dcat:startDate`.",
+          "format": "date",
           "type": [
             "string",
             "null"

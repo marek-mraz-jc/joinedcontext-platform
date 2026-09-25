@@ -23,8 +23,41 @@ pub enum Verb {
     Propose,
     /// Approve a Change of the kind.
     Approve,
-    /// Delete a manifest.
+    /// Delete a manifest; on [`PERSON`], delete the person.
     Delete,
+    /// Create a person ([`PERSON`] only, ADR-N-031).
+    Create,
+    /// Edit a person's name, e-mail and language, and send them a password reset ([`PERSON`]
+    /// only, ADR-N-031).
+    Update,
+    /// Disable and enable a person, end their sessions, remove their second factor ([`PERSON`]
+    /// only, ADR-N-031).
+    Disable,
+}
+
+/// The kind a rule names for the people of the realm (PF-91, ADR-N-031). A person lives in
+/// Keycloak and never in a manifest, so no Change reaches them: they take `read`, `create`,
+/// `update`, `disable` and `delete`, and those three new verbs mean nothing on any other kind.
+pub const PERSON: &str = "Person";
+
+impl Verb {
+    /// The verbs that act on a person directly rather than by a Change (ADR-N-031).
+    pub fn is_person_only(self) -> bool {
+        matches!(self, Verb::Create | Verb::Update | Verb::Disable)
+    }
+
+    /// The verb as a manifest writes it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verb::Read => "read",
+            Verb::Propose => "propose",
+            Verb::Approve => "approve",
+            Verb::Delete => "delete",
+            Verb::Create => "create",
+            Verb::Update => "update",
+            Verb::Disable => "disable",
+        }
+    }
 }
 
 /// A constraint on one spec field or on `metadata.name`; exactly one of `in`, `notIn`,
@@ -94,6 +127,50 @@ pub struct Rule {
     /// Constraints every covered manifest must satisfy for the rule to apply.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<Constraint>,
+}
+
+impl Rule {
+    /// A rule on [`PERSON`] names that kind alone and the verbs a person takes; the person verbs
+    /// appear nowhere else (ADR-N-031). A person is not a manifest, so `propose` and `approve`
+    /// reach nothing there, and `create` on a `Pipeline` would read like a right it is not.
+    fn validate_person(&self) -> Result<()> {
+        let names_person = self.kinds.iter().any(|kind| kind == PERSON);
+        if names_person && self.kinds.len() > 1 {
+            return Err(Error::Name {
+                field: "spec.rules[].kinds",
+                value: self.kinds.join(", "),
+                reason: "a rule on Person names Person alone: a person is not a manifest, so \
+                         the verbs of the other kinds mean something else there (ADR-N-031)",
+            });
+        }
+        if let Some(verb) = self.verbs.iter().find(|verb| {
+            if names_person {
+                matches!(verb, Verb::Propose | Verb::Approve)
+            } else {
+                verb.is_person_only()
+            }
+        }) {
+            return Err(Error::Name {
+                field: "spec.rules[].verbs",
+                value: verb.as_str().to_owned(),
+                reason: if names_person {
+                    "Person takes read, create, update, disable and delete: a person is not a \
+                     manifest, so there is no Change to propose or approve (ADR-N-031)"
+                } else {
+                    "create, update and disable are verbs of Person alone; a manifest is \
+                     created and edited with propose (ADR-N-031)"
+                },
+            });
+        }
+        if !self.constraints.is_empty() && names_person {
+            return Err(Error::Name {
+                field: "spec.rules[].constraints",
+                value: PERSON.to_owned(),
+                reason: "a person has no manifest fields to constrain (ADR-N-031)",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// `spec` of a Role (PF-49).
@@ -183,9 +260,11 @@ impl RoleSpec {
                 return Err(Error::Name {
                     field: "spec.rules[].verbs",
                     value: String::new(),
-                    reason: "a rule names at least one verb of read, propose, approve, delete",
+                    reason: "a rule names at least one verb of read, propose, approve, delete \
+                             (and on Person also create, update, disable)",
                 });
             }
+            rule.validate_person()?;
             for constraint in &rule.constraints {
                 if constraint.field.starts_with("status.") {
                     constraint.validate_status(rule)?;

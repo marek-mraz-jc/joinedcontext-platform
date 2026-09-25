@@ -81,6 +81,7 @@ fn endpoint(slug: &str, audience: Audience, roles: EndpointRoles) -> Endpoint {
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: policies(),
     }
 }

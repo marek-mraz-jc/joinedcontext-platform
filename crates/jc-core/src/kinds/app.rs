@@ -44,13 +44,14 @@ pub enum AppClass {
     Fullstack,
 }
 
-/// Who may reach a published app (AP-18).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Who may reach a published app (AP-18). A login by default: `project` (AP-120).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppVisibility {
     /// Only the author.
     Private,
     /// Members of the owning project.
+    #[default]
     Project,
     /// Anyone in the organization.
     Organization,
@@ -538,7 +539,9 @@ pub struct AppSpec {
     pub source: AppSource,
     /// Toolchain versions the build lane builds with; `{}` on a static app is no build step (AP-11, AP-83).
     pub build: AppBuild,
-    /// Who may reach the published app (AP-18).
+    /// Who may reach the published app (AP-18); `project` when the manifest does not say, so an
+    /// app nobody opened up asks for a login (AP-120).
+    #[serde(default)]
     pub visibility: AppVisibility,
     /// Lifecycle state; a manifest without one is a draft (AP-18).
     #[serde(default)]

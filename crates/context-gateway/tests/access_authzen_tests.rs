@@ -38,6 +38,7 @@ fn endpoint() -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![
             policy(
                 r#"contextSpaceRef: ovzdusie

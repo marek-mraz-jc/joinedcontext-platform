@@ -71,6 +71,7 @@ fn endpoint(declared: Option<&[&str]>) -> Endpoint {
             model: "bb-air-quality".into(),
             classes: classes.iter().map(|class| (*class).to_owned()).collect(),
         }),
+        catalog: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

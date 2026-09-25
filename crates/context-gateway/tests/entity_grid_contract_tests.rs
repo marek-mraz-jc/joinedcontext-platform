@@ -151,6 +151,7 @@ fn endpoint(policy: PolicySpec) -> Endpoint {
         hidden_attributes: ["operatorPhone".to_owned()].into_iter().collect(),
         projection: None,
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![policy],

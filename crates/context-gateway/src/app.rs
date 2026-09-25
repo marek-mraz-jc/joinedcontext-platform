@@ -715,6 +715,9 @@ async fn serve_ngsi_ld(
         Operation::CreateSubscription | Operation::UpdateSubscription
     );
     let mut sent = sent.to_vec();
+    // The ids a divided batch forwards and the entities it refused, merged into one answer once
+    // the broker has spoken (GW18).
+    let mut divided: Option<(Vec<String>, Refused)> = None;
     if subscribing && !sent.is_empty() {
         match narrowed_subscription(
             &sent,
@@ -732,10 +735,36 @@ async fn serve_ngsi_ld(
             .headers
             .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
     } else if operation.is_write() && !sent.is_empty() {
-        if let Some(problem) =
-            refuse_write(&sent, &path, &constraints, &endpoint, &gateway.org_domain)
-        {
-            return problem.into_response();
+        match judge_write(
+            &sent,
+            &path,
+            operation,
+            &constraints,
+            &endpoint,
+            &gateway.org_domain,
+        ) {
+            Err(problem) => return problem.into_response(),
+            Ok(Judged::Whole) => {}
+            // A batch the grants divide: the permitted entities go on, the refused ones are
+            // answered beside what the broker makes of the rest (GW18).
+            Ok(Judged::Divided { permitted, refused }) => {
+                if permitted.is_empty() {
+                    return batch_result(Vec::new(), refusal_entries(refused));
+                }
+                let ids = permitted.iter().filter_map(batch_entry_id).collect();
+                sent = match serde_json::to_vec(&permitted) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::error!(%error, "the permitted part of a batch does not serialize");
+                        return ProblemDetails::internal().into_response();
+                    }
+                };
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+                divided = Some((ids, refused));
+            }
         }
     }
 
@@ -860,6 +889,9 @@ async fn serve_ngsi_ld(
         None => projected,
         Some(mapping) => translated(projected, mapping).await,
     };
+    if let Some((forwarded, refused)) = divided {
+        return merged_batch(answer, forwarded, refused).await;
+    }
     if geojson {
         as_geojson(answer, operation, lang.as_deref()).await
     } else {
@@ -1006,82 +1038,250 @@ fn refused(operation: Operation, path: &str) -> Response<Body> {
     }
 }
 
-/// Checks a write payload whole and answers with the problem that refuses it, or nothing
-/// (GW17, GW18).
+/// The entities of a batch the gateway refused, each with the id it named and the problem.
+type Refused = Vec<(String, ProblemDetails)>;
+
+/// What the write guard makes of a write payload (GW17, GW18).
+enum Judged {
+    /// Every entity it names is permitted: the body goes on as it was sent.
+    Whole,
+    /// A batch the grants divide: `permitted` goes on, `refused` is answered per entity id.
+    Divided {
+        permitted: Vec<Value>,
+        refused: Refused,
+    },
+}
+
+/// The batch operations whose entities are judged one by one (GW18). A batch query is a read
+/// and is narrowed instead.
+fn divides(operation: Operation) -> bool {
+    matches!(
+        operation,
+        Operation::CreateBatch
+            | Operation::UpsertBatch
+            | Operation::UpdateBatch
+            | Operation::MergeBatch
+            | Operation::DeleteBatch
+    )
+}
+
+/// The entity id a batch entry names: the URN itself in a batch delete, the `id` of an entity
+/// otherwise.
+fn batch_entry_id(entry: &Value) -> Option<String> {
+    entry
+        .as_str()
+        .or_else(|| {
+            entry
+                .get("id")
+                .or_else(|| entry.get("@id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+}
+
+/// Checks a write payload and answers with the problem that refuses it whole, or with what
+/// goes on (GW17, GW18).
 ///
 /// The body of a `PATCH .../attrs/{name}` is the bare attribute value, so it is wrapped
 /// back under its name before the grant is consulted; anything else is an entity, or a
-/// batch of them.
-fn refuse_write(
+/// batch of them. An entity is judged whole (GW17); a batch is divided per entity, so the
+/// entities the grants permit are still applied (GW18), unless one of them is malformed.
+fn judge_write(
     body: &[u8],
     path: &str,
+    operation: Operation,
     constraints: &Constraints,
     endpoint: &Endpoint,
     org_domain: &str,
-) -> Option<ProblemDetails> {
+) -> Result<Judged, Box<ProblemDetails>> {
     let Ok(payload) = serde_json::from_slice::<Value>(body) else {
-        return Some(ProblemDetails::bad_request().with_detail("request body is not JSON"));
+        return Err(Box::new(
+            ProblemDetails::bad_request().with_detail("request body is not JSON"),
+        ));
     };
     let payload = match operations::targeted_attribute(path) {
         Some(name) => serde_json::json!({ name: payload }),
         None => payload,
     };
-
-    let entities: Vec<&Value> = match &payload {
-        Value::Array(entities) => entities.iter().collect(),
-        other => vec![other],
-    };
     // An addressed write changes the entity in its path and nothing else (GW17, PF-44).
     let addressed = operations::addressed_entity(path).map(query::decode);
-    for entity in entities {
-        if let Some(problem) = undeclared_type(entity, endpoint) {
-            return Some(problem);
-        }
-        if let (Some(path_id), Some(object)) = (&addressed, entity.as_object()) {
-            let named = object.get("id").or_else(|| object.get("@id"));
-            if named.is_some_and(|id| id.as_str() != Some(path_id.as_str())) {
-                return Some(
-                    ProblemDetails::bad_request()
-                        .with_detail("the body names another entity than the path"),
-                );
-            }
-            if let Some(kind) = object.get("type").or_else(|| object.get("@type")) {
-                if let Err(refusal) = write_guard::check_identifier(
-                    path_id,
-                    Some(kind.as_str().unwrap_or_default()),
-                    &endpoint.space,
+
+    let entries = match payload {
+        Value::Array(entries) if divides(operation) => entries,
+        Value::Array(entities) => {
+            for entity in &entities {
+                refuse_entity(
+                    entity,
+                    addressed.as_deref(),
+                    constraints,
+                    endpoint,
                     org_domain,
-                ) {
-                    return Some(ProblemDetails::from(refusal));
-                }
+                )?;
             }
+            return Ok(Judged::Whole);
         }
-        // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
-        if let Some(hidden) = entity.as_object().and_then(|object| {
-            object
-                .keys()
-                .find(|key| endpoint.hidden_attributes.contains(*key))
-        }) {
-            let refusal = write_guard::Refusal::AttributeOutsideGrant(hidden.clone());
-            tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
-            return Some(ProblemDetails::from(refusal));
+        other => {
+            refuse_entity(
+                &other,
+                addressed.as_deref(),
+                constraints,
+                endpoint,
+                org_domain,
+            )?;
+            return Ok(Judged::Whole);
         }
-        // A batch delete is an array of URN strings: each is an identifier and nothing else
-        // (T-0806).
-        let outcome = if let Some(raw) = entity.as_str() {
-            write_guard::check_identifier(raw, None, &endpoint.space, org_domain)
-                .and_then(|()| write_guard::check_granted_id(raw, constraints))
-        } else if entity.get("id").is_some() || entity.get("@id").is_some() {
-            write_guard::check(entity, constraints, &endpoint.space, org_domain)
-        } else {
-            write_guard::check_fragment(entity, constraints)
-        };
-        if let Err(refusal) = outcome {
-            tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
-            return Some(ProblemDetails::from(refusal));
+    };
+    // Every refusal of a batch is answered under the id it names, so an entry that names none
+    // leaves nothing to answer it under: the request is malformed as a whole.
+    if entries.iter().any(|entry| batch_entry_id(entry).is_none()) {
+        return Err(Box::new(ProblemDetails::bad_request().with_detail(
+            "every entry of a batch operation names its entity by a string id",
+        )));
+    }
+    let mut permitted = Vec::with_capacity(entries.len());
+    let mut refused = Vec::new();
+    for entry in entries {
+        match refuse_entity(&entry, None, constraints, endpoint, org_domain) {
+            Ok(()) => permitted.push(entry),
+            // A malformed or foreign id is no grant decision but a malformed write, and a batch
+            // half applied around it is the one outcome nobody asked for (PF-42, T-1697).
+            Err(problem) if problem.status == StatusCode::BAD_REQUEST.as_u16() => {
+                return Err(problem);
+            }
+            Err(problem) => {
+                refused.push((batch_entry_id(&entry).unwrap_or_default(), *problem));
+            }
         }
     }
-    None
+    Ok(if refused.is_empty() {
+        Judged::Whole
+    } else {
+        Judged::Divided { permitted, refused }
+    })
+}
+
+/// Checks one entity of a write, or the fragment of an addressed one, against the grants and
+/// the endpoint, and answers with the problem that refuses it (GW17).
+fn refuse_entity(
+    entity: &Value,
+    addressed: Option<&str>,
+    constraints: &Constraints,
+    endpoint: &Endpoint,
+    org_domain: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    if let Some(problem) = undeclared_type(entity, endpoint) {
+        return Err(Box::new(problem));
+    }
+    if let (Some(path_id), Some(object)) = (addressed, entity.as_object()) {
+        let named = object.get("id").or_else(|| object.get("@id"));
+        if named.is_some_and(|id| id.as_str() != Some(path_id)) {
+            return Err(Box::new(
+                ProblemDetails::bad_request()
+                    .with_detail("the body names another entity than the path"),
+            ));
+        }
+        if let Some(kind) = object.get("type").or_else(|| object.get("@type")) {
+            write_guard::check_identifier(
+                path_id,
+                Some(kind.as_str().unwrap_or_default()),
+                &endpoint.space,
+                org_domain,
+            )
+            .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
+        }
+    }
+    // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
+    if let Some(hidden) = entity.as_object().and_then(|object| {
+        object
+            .keys()
+            .find(|key| endpoint.hidden_attributes.contains(*key))
+    }) {
+        let refusal = write_guard::Refusal::AttributeOutsideGrant(hidden.clone());
+        tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
+        return Err(Box::new(ProblemDetails::from(refusal)));
+    }
+    // A batch delete is an array of URN strings: each is an identifier and nothing else
+    // (T-0806).
+    let outcome = if let Some(raw) = entity.as_str() {
+        write_guard::check_identifier(raw, None, &endpoint.space, org_domain)
+            .and_then(|()| write_guard::check_granted_id(raw, constraints))
+    } else if entity.get("id").is_some() || entity.get("@id").is_some() {
+        write_guard::check(entity, constraints, &endpoint.space, org_domain)
+    } else {
+        write_guard::check_fragment(entity, constraints)
+    };
+    outcome.map_err(|refusal| {
+        tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
+        Box::new(ProblemDetails::from(refusal))
+    })
+}
+
+/// The `errors` members of a `BatchOperationResult` for the entities the gateway refused.
+fn refusal_entries(refused: Refused) -> Vec<Value> {
+    refused
+        .into_iter()
+        .map(|(id, problem)| serde_json::json!({ "entityId": id, "error": problem }))
+        .collect()
+}
+
+/// A `207 Multi-Status` carrying a `BatchOperationResult` (CIM 009 clause 5.2.16, GW18).
+fn batch_result(success: Vec<Value>, errors: Vec<Value>) -> Response<Body> {
+    let body = serde_json::json!({ "success": success, "errors": errors });
+    let mut answer = (StatusCode::MULTI_STATUS, body.to_string()).into_response();
+    answer.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    answer
+}
+
+/// The broker's answer to the permitted part of a divided batch, with the gateway's refusals
+/// beside it, as one `BatchOperationResult` (GW18).
+///
+/// A `207` from the broker is extended; a success without an id list means every forwarded id
+/// was applied; a refusal of the whole forwarded part is answered for each of its entities, in
+/// the words the gateway already chose for it (a broker failure is never passed on verbatim).
+async fn merged_batch(
+    answer: Response<Body>,
+    forwarded: Vec<String>,
+    refused: Refused,
+) -> Response<Body> {
+    let (parts, body) = answer.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
+        tracing::error!("the broker's answer to a batch is larger than the gateway can merge");
+        return ProblemDetails::internal().into_response();
+    };
+    let payload = serde_json::from_slice::<Value>(&bytes).ok();
+    let (success, mut errors) = match (parts.status, payload) {
+        (StatusCode::MULTI_STATUS, Some(Value::Object(mut result))) => {
+            let mut members = |name: &str| match result.remove(name) {
+                Some(Value::Array(values)) => values,
+                _ => Vec::new(),
+            };
+            (members("success"), members("errors"))
+        }
+        (status, Some(Value::Array(ids))) if status.is_success() => (ids, Vec::new()),
+        (status, _) if status.is_success() => (
+            forwarded.into_iter().map(Value::String).collect(),
+            Vec::new(),
+        ),
+        (status, payload) => {
+            let problem = payload.filter(Value::is_object).unwrap_or_else(|| {
+                serde_json::json!(ProblemDetails::new(
+                    status.as_u16(),
+                    "broker-failure",
+                    "The context broker could not answer",
+                ))
+            });
+            let errors = forwarded
+                .into_iter()
+                .map(|id| serde_json::json!({ "entityId": id, "error": problem }))
+                .collect();
+            (Vec::new(), errors)
+        }
+    };
+    errors.extend(refusal_entries(refused));
+    batch_result(success, errors)
 }
 
 /// 400 naming the type, when an entity's type is not a class of the space's one model (DM-61).
@@ -1481,7 +1681,9 @@ fn subject_of(
                     endpoint.audience,
                     account.roles_in(&account.project, &endpoint.space),
                 ),
-                groups,
+                // A workload's grants are its manifest's (PF-35, T-2545): a group the token
+                // claims is Keycloak membership nobody reviewed, so it reaches no group Policy.
+                groups: BTreeSet::new(),
                 did: None,
                 agreement: None,
             });

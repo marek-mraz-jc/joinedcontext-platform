@@ -950,10 +950,7 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
 /// files, which is neither read-only nor pinned. Warned, while a repository is being migrated: a
 /// space that names no model. A mirrored model is a peer's read-only copy (DM-48), not one of
 /// the space's own, so it is not counted.
-fn one_model_per_space(
-    repo_dir: &Path,
-    repo: &Repository,
-) -> (Located, Located) {
+fn one_model_per_space(repo_dir: &Path, repo: &Repository) -> (Located, Located) {
     let (mut refused, mut warned) = (Vec::new(), Vec::new());
     let mut models: BTreeMap<(Option<String>, String), Vec<String>> = BTreeMap::new();
     for (id, resource) in repo.iter() {

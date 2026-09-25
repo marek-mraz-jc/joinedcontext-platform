@@ -251,20 +251,20 @@
               "$ref": "#/definitions/AppVisibility"
             }
           ],
-          "description": "Who may reach the published app (AP-18)."
+          "default": "project",
+          "description": "Who may reach the published app (AP-18); `project` when the manifest does not say, so an app nobody opened up asks for a login (AP-120)."
         }
       },
       "required": [
         "build",
         "dataNeeds",
         "kind",
-        "source",
-        "visibility"
+        "source"
       ],
       "type": "object"
     },
     "AppVisibility": {
-      "description": "Who may reach a published app (AP-18).",
+      "description": "Who may reach a published app (AP-18). A login by default: `project` (AP-120).",
       "oneOf": [
         {
           "description": "Only the author.",

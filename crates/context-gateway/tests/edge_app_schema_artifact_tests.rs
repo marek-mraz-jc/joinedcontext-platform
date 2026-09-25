@@ -134,6 +134,7 @@ fn endpoint_with(
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![air_quality()],
         view_mapping: None,
+        catalog: None,
         policies,
     }
 }

@@ -66,6 +66,7 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         view_mapping: None,
+        catalog: None,
         models: vec![model()],
         policies: vec![serde_norway::from_str(PUBLIC_READ).expect("the policy spec parses")],
     }

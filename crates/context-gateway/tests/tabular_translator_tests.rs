@@ -389,6 +389,7 @@ fn endpoint(representations: Vec<Representation>, file_limits: Option<FileLimits
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

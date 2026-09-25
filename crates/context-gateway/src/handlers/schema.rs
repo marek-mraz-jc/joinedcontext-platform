@@ -690,6 +690,7 @@ mod visible_tests {
             hidden_attributes: Default::default(),
             projection: None,
             view_mapping: None,
+            catalog: None,
             base_path: "/api/endpoint/s".to_owned(),
             models: vec![model(&["AirQualityObserved", "Vehicle"])],
             policies,

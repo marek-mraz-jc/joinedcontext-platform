@@ -68,6 +68,7 @@ fn endpoint_of(space: &str, policies: Vec<PolicySpec>) -> Endpoint {
         base_path: format!("/cs/{space}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies,
     }
 }

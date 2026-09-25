@@ -73,6 +73,7 @@ fn hub_endpoint() -> Endpoint {
         base_path: format!("/api/endpoint/{HUB_SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: vec![policy()],
     }
 }

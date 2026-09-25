@@ -43,6 +43,7 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         view_mapping: None,
+        catalog: None,
         models: vec![Model {
             name: "air-quality".to_owned(),
             version: "1.2.0".to_owned(),
