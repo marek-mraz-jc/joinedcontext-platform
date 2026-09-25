@@ -422,6 +422,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "frameSrc": {
+          "description": "`frame-src` beyond `self`; only https origins, never `*` (AP-12).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
