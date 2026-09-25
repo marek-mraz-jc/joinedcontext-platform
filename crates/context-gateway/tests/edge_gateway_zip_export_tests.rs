@@ -268,9 +268,9 @@ fn a_schema_is_counted_towards_the_ceiling_like_the_data_is() {
 }
 
 #[test]
-fn an_answer_with_no_geometry_carries_an_empty_collection_and_not_a_failure() {
-    // A non-spatial dataset is ordinary. The bundle carries every shape, and the honest GeoJSON
-    // of a table with no coordinates is a collection of nothing.
+fn an_answer_with_no_geometry_carries_null_geometry_features_and_not_a_failure() {
+    // A non-spatial dataset is ordinary. The bundle carries every shape, and its GeoJSON is the
+    // one `file.geojson` answers: every entity a Feature with a `null` geometry (EP-09, T-2939).
     let flat = json!([{
         "id": "urn:ngsi-ld:Obyvatelstvo:banskabystrica.sk:demografia:2026",
         "type": "Obyvatelstvo",
@@ -279,7 +279,9 @@ fn an_answer_with_no_geometry_carries_an_empty_collection_and_not_a_failure() {
     let archive = bundle(&flat, &[], &dcat(), &descriptor(), &Limits::DEFAULT).expect("a bundle");
     let features: Value = serde_json::from_str(&text(&archive, "entities.geojson")).expect("json");
     assert_eq!(features["type"], json!("FeatureCollection"));
-    assert_eq!(features["features"], json!([]));
+    assert_eq!(features["features"].as_array().map(Vec::len), Some(1));
+    assert_eq!(features["features"][0]["geometry"], json!(null));
+    assert_eq!(features["features"][0]["properties"]["pocet"], json!(76000));
     assert!(text(&archive, "entities.csv").contains("pocet"));
 }
 
