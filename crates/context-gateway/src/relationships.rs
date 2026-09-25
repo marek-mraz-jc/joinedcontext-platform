@@ -192,7 +192,7 @@ fn local(name: &str) -> &str {
 }
 
 /// The type an id names: `urn:ngsi-ld:{Type}:…` (PF-10).
-fn type_of_id(id: &str) -> Option<&str> {
+pub(crate) fn type_of_id(id: &str) -> Option<&str> {
     let mut parts = id.splitn(4, ':');
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
         (Some(urn), Some(ngsi), Some(kind), Some(_))
