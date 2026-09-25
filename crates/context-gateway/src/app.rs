@@ -348,6 +348,9 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         // every client that stores a base URL drops it.
         .route("/api/endpoint/{slug}", get(endpoint_record))
         .route("/api/endpoint/{slug}/", get(endpoint_record))
+        // The NGSI-LD access URL the DCAT record advertises, both spellings (EP-90).
+        .route("/api/endpoint/{slug}/ngsi-ld/v1", get(ngsi_ld_entry))
+        .route("/api/endpoint/{slug}/ngsi-ld/v1/", get(ngsi_ld_entry))
         .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
@@ -460,6 +463,42 @@ async fn ngsi_ld(
     );
     let prefix = format!("/api/endpoint/{slug}/ngsi-ld/v1");
     as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
+}
+
+/// The entry document at the NGSI-LD access URL (EP-90): where the entities are, the types this
+/// caller may read with a query for each, and the access and schema documents. The gateway's
+/// own answer, not a CIM 009 resource; the types are the schema surface's projection, so it
+/// names none the grants withhold.
+async fn ngsi_ld_entry(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = match admit(
+        &gateway,
+        &slug,
+        Some(Representation::NgsiLd),
+        request.headers(),
+    ) {
+        Ok(admitted) => admitted,
+        Err(problem) => return as_ngsi_ld_error(*problem).await,
+    };
+    let root = format!("{}{}", gateway.base_url(), endpoint.base_path);
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    let types: Vec<Value> = schema::visible_types(&endpoint, &visible)
+        .into_iter()
+        .map(|name| {
+            let url = format!("{root}/ngsi-ld/v1/entities?type={}", query::encode(&name));
+            serde_json::json!({ "type": name, "query": url })
+        })
+        .collect();
+    json_response(&serde_json::json!({
+        "entities": format!("{root}/ngsi-ld/v1/entities"),
+        "types": types,
+        "access": format!("{root}/access"),
+        "schema": format!("{root}/schema/index.json"),
+    }))
 }
 
 /// The same tree under a context space name (SP-03).
@@ -664,8 +703,8 @@ pub(crate) async fn serve_ngsi_ld(
             return ProblemDetails::bad_request()
                 .with_detail(
                     "a query names at least one of type, attrs, q or georel; an id list or \
-                     idPattern alone is not a selector (CIM 009 5.7.2.4). Ask \
-                     /ngsi-ld/v1/types for the types this endpoint serves, or retrieve one \
+                     idPattern alone is not a selector (CIM 009 5.7.2.4). The entry at \
+                     /ngsi-ld/v1/ lists the types you may query here, or retrieve one \
                      entity at /ngsi-ld/v1/entities/{id}",
                 )
                 .into_response();
