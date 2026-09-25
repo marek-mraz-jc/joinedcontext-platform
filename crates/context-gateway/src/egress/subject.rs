@@ -100,6 +100,8 @@ struct Wire {
     d: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     a: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    v: Option<String>,
 }
 
 impl From<&Subject> for Wire {
@@ -111,6 +113,7 @@ impl From<&Subject> for Wire {
             r: subject.roles.clone(),
             d: subject.did.clone(),
             a: subject.agreement.clone(),
+            v: subject.via.clone(),
         }
     }
 }
@@ -124,6 +127,7 @@ impl From<Wire> for Subject {
             roles: wire.r,
             did: wire.d,
             agreement: wire.a,
+            via: wire.v,
         }
     }
 }

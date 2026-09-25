@@ -60,6 +60,7 @@ fn jana() -> Subject {
         service_account: Some("pipeline-runner".to_owned()),
         did: Some("did:web:banskabystrica.sk:agents:kpi".to_owned()),
         agreement: None,
+        via: None,
     }
 }
 
@@ -88,6 +89,8 @@ fn a_principal_kind_matches_only_its_own_field() {
         service_account: None,
         did: None,
         agreement: None,
+        // The account a delegated call came through is never a principal of it (AG-95).
+        via: Some("shared-name".to_owned()),
     };
 
     assert_eq!(

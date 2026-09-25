@@ -66,6 +66,7 @@ fn endpoint(audience: Audience) -> Endpoint {
             policy("role", "data-steward", "StewardView"),
             policy("role", "sensor-writer", "SensorWrite"),
             policy("serviceAccount", "senzory", "AccountOwn"),
+            policy("serviceAccount", "asistent", "DelegateOwn"),
             policy("group", "stewards", "GroupView"),
             policy("role", "public", "PublicView"),
         ],
@@ -93,6 +94,13 @@ impl Repo {
             format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: senzory\n  namespace: {project}\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"edge cases\"\n  roles:\n    - role: sensor-writer\n      scope: {{ project: {project} }}\n  credentials:\n    - kind: oauth-client\n      name: default\n"),
         )
         .expect("the account");
+        // A client that reads for people: tokens it exchanges from a person's own are that
+        // person's (ADR-N-038, AG-95). Its own role would show as `SensorWrite`.
+        std::fs::write(
+            accounts.join("asistent.yaml"),
+            format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: asistent\n  namespace: {project}\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"agent runs\"\n  roles:\n    - role: sensor-writer\n      scope: {{ project: {project} }}\n  credentials:\n    - kind: oauth-client\n      name: default\n  delegation: token-exchange\n"),
+        )
+        .expect("the delegating account");
         Self(dir)
     }
 }
@@ -206,8 +214,9 @@ async fn a_service_account_whose_project_the_endpoint_does_not_admit_is_forbidde
     assert_eq!(status, StatusCode::FORBIDDEN, "{document}");
 }
 
-/// PF-35: a workload is its manifest: the person and the realm roles a token also carries add
-/// nothing to what the account's own bindings grant.
+/// PF-35, AG-95: a workload is its manifest. Its own token (subject: its service-account user)
+/// gets the account's bindings, and the realm roles and groups the token also carries add
+/// nothing to them.
 #[tokio::test]
 async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_same_token() {
     let fixture = fixture("account-with-human-claims", Audience::Organization, PROJECT);
@@ -215,7 +224,7 @@ async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_sa
         &fixture,
         json!({
             "azp": workload(),
-            "preferred_username": "jana.novakova",
+            "preferred_username": format!("service-account-{}", workload()),
             // A group that names a project only; a group Policy never reaches a workload
             // (T-2545, `a_service_accounts_token_groups_reach_no_group_policy`).
             "groups": ["/ovzdusie"],
@@ -260,10 +269,20 @@ async fn a_token_with_azp_and_preferred_username_prefers_the_service_account_pat
     let fixture = fixture("both-names", Audience::Organization, PROJECT);
     let (_, document) = access(
         &fixture,
-        json!({ "azp": workload(), "preferred_username": "jana.novakova" }),
+        json!({ "azp": workload(), "preferred_username": format!("service-account-{}", workload()) }),
     )
     .await;
     assert_eq!(document["subject"]["type"], "serviceAccount", "{document}");
+
+    // AG-95: a person's name on a token of a client whose account delegates nothing is neither
+    // the person nor the workload: it is refused.
+    let (status, document) = access(
+        &fixture,
+        json!({ "azp": workload(), "preferred_username": "jana.novakova", "groups": ["ovzdusie"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{document}");
+    assert!(granted(&document).is_empty(), "{document}");
 
     // An `azp` no manifest names, with a person: the person, as a browser login is.
     let (status, document) = access(
@@ -394,4 +413,68 @@ async fn a_service_account_resolved_for_the_wrong_realm_is_never_looked_up_by_na
         .await
         .expect("the gateway answers");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// AG-95, AG-01 (ADR-N-038): a person's token exchanged by a client whose account declares
+/// `delegation: token-exchange` is that person: their groups and roles reach the PDP, and the
+/// account's own bindings and grants do not.
+#[tokio::test]
+async fn a_delegated_token_is_decided_as_the_person_and_never_with_the_accounts_grants() {
+    let fixture = fixture("delegated", Audience::Organization, PROJECT);
+    let delegate = client_id(PROJECT, "asistent");
+    let (status, document) = access(
+        &fixture,
+        json!({
+            "azp": delegate,
+            "preferred_username": "jana.novakova",
+            "groups": ["/ovzdusie", "/stewards"],
+            "realm_access": { "roles": ["data-steward"] },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert_eq!(
+        document["subject"],
+        json!({ "type": "user", "id": "jana.novakova" })
+    );
+    assert_eq!(
+        granted(&document),
+        ["GroupView", "StewardView"],
+        "{document}"
+    );
+
+    // The same client's own token is the account, with its own grants only.
+    let (status, document) = access(
+        &fixture,
+        json!({ "azp": delegate, "preferred_username": format!("service-account-{delegate}") }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert_eq!(
+        document["subject"],
+        json!({ "type": "serviceAccount", "id": "asistent" })
+    );
+    assert_eq!(
+        granted(&document),
+        ["DelegateOwn", "SensorWrite"],
+        "{document}"
+    );
+}
+
+/// AG-95, EP-14: a delegated person is admitted as the person is: a person whose groups name no
+/// project the endpoint serves is refused on a project-list endpoint, whatever the account's
+/// project is.
+#[tokio::test]
+async fn a_delegated_person_outside_the_endpoints_projects_is_refused() {
+    let fixture = fixture("delegated-stranger", Audience::ProjectList, PROJECT);
+    let (status, document) = access(
+        &fixture,
+        json!({
+            "azp": client_id(PROJECT, "asistent"),
+            "preferred_username": "eva.stranger",
+            "groups": ["/zdravie"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{document}");
 }

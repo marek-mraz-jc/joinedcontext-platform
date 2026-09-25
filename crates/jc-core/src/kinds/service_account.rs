@@ -27,6 +27,20 @@ pub struct ServiceAccountSpec {
     /// Optional Kubernetes workload binding (PF-47).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<Workload>,
+    /// Whether tokens this account's client obtains by exchanging a person's own act for that
+    /// person (ADR-N-038, AG-95). Absent, a token of this client whose subject is a person is
+    /// refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Delegation>,
+}
+
+/// How an account's client may act for a person (ADR-N-038, AG-95).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Delegation {
+    /// RFC 8693 token exchange: the client turns the person's token into one of its own whose
+    /// subject is still the person, and the gateway decides it as that person.
+    TokenExchange,
 }
 
 /// Accountable human owner reference (PF-34).
