@@ -381,3 +381,42 @@ fn an_endpoint_role_with_a_bad_name_a_twin_or_a_bad_member_is_refused() {
         assert!(endpoint.validate().is_err(), "{roles}");
     }
 }
+
+/// The golden Endpoint with a `spec.catalog` block appended (EP-78).
+fn with_catalog(catalog: &str) -> String {
+    format!("{GOLDEN}  catalog:\n{catalog}")
+}
+
+#[test]
+fn a_catalog_block_parses_validates_and_roundtrips() {
+    let yaml = with_catalog(
+        "    publisher: { name: { sk: Mesto Banská Bystrica, en: City of Banská Bystrica } }\n\
+         \x20   contactPoint: { name: Otvorené dáta, email: opendata@example.org }\n\
+         \x20   license: CC_BY_4_0\n\
+         \x20   themes: [ENVI]\n\
+         \x20   spatial: [SK032]\n\
+         \x20   frequency: HOURLY\n",
+    );
+    let ep = Endpoint::from_yaml(&yaml).expect("valid catalog");
+    ep.validate().expect("catalog validates");
+    let catalog = ep.spec.catalog.as_ref().expect("catalog kept");
+    assert_eq!(catalog.license.map(|l| l.code()), Some("CC_BY_4_0"));
+    let reimported = Endpoint::from_yaml(&ep.to_yaml().expect("yaml")).expect("re-import");
+    assert_eq!(ep, reimported);
+}
+
+#[test]
+fn a_catalog_with_a_bad_member_fails_the_endpoint_with_the_field_named() {
+    let yaml = with_catalog("    contactPoint: { name: Desk, email: not-an-address }\n");
+    let ep = Endpoint::from_yaml(&yaml).expect("parses");
+    let message = ep.validate().expect_err("refused").to_string();
+    assert!(
+        message.contains("spec.catalog.contactPoint.email"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_catalog_licence_outside_the_table_does_not_parse() {
+    assert!(Endpoint::from_yaml(&with_catalog("    license: proprietary\n")).is_err());
+}

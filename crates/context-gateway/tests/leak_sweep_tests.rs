@@ -186,6 +186,7 @@ fn endpoint() -> Endpoint {
         hidden_attributes: ["secretPin".to_owned()].into_iter().collect(),
         projection: Some(Arc::new(projection.spec)),
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

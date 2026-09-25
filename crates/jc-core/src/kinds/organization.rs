@@ -156,6 +156,9 @@ pub enum ContactRole {
     DataProtection,
     /// Information security officer contact.
     Security,
+    /// The open-data desk: the role address a dataset's catalogue record names as its contact
+    /// point, which the Portal prefills into an Endpoint's `spec.catalog` (EP-78, EP-80).
+    OpenData,
 }
 
 impl Kind for OrganizationSpec {

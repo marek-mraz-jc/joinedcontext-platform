@@ -23,6 +23,7 @@ fn endpoint(slug: &str, space: &str) -> Endpoint {
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: Vec::new(),
     }
 }

@@ -123,6 +123,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         hidden_attributes: Default::default(),
         projection: None,
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: vec![policy()],

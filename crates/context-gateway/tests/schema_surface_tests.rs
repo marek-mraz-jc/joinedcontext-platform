@@ -93,6 +93,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         hidden_attributes: Default::default(),
         projection: None,
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models,
         policies: vec![policy(

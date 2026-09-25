@@ -119,6 +119,7 @@ fn endpoint_with(policies: Vec<PolicySpec>, rate_limit: Option<RateLimits>) -> E
         hidden_attributes: [HIDDEN.to_owned()].into_iter().collect(),
         projection: None,
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

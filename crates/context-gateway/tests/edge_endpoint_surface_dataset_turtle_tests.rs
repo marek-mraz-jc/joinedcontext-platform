@@ -40,6 +40,7 @@ fn endpoint(audience: Audience, title: &[(&str, &str)]) -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: Vec::new(),
     }
 }
@@ -162,9 +163,10 @@ fn a_title_with_a_quote_backslash_or_newline_is_escaped_and_does_not_break_the_d
             literals.iter().any(|l| l == title),
             "{title:?}: {literals:?}"
         );
+        // The title twice and no third time: the dataset's and its data service's (EP-78).
         assert_eq!(
-            document.matches("\n    dct:title ").count(),
-            1,
+            literals.iter().filter(|l| *l == title).count(),
+            2,
             "{title:?}:\n{document}"
         );
     }

@@ -94,6 +94,7 @@ fn space(
             base_path: format!("/cs/{name}"),
             models: Vec::new(),
             view_mapping: None,
+            catalog: None,
             policies,
         }),
         title: Default::default(),

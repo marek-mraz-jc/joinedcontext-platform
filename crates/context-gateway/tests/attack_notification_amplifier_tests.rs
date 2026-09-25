@@ -53,6 +53,7 @@ fn endpoint() -> Endpoint {
         hidden_attributes: BTreeSet::new(),
         projection: None,
         view_mapping: None,
+        catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policies: Vec::new(),

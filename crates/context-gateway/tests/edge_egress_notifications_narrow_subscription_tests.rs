@@ -49,6 +49,7 @@ fn endpoint(hidden: &[&str]) -> Endpoint {
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         view_mapping: None,
+        catalog: None,
         policies: Vec::new(),
     }
 }

@@ -96,6 +96,7 @@ fn endpoint(slug: &str, space: &str, representations: Vec<Representation>) -> En
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![air_quality()],
         view_mapping: None,
+        catalog: None,
         policies: public_grant(space),
     }
 }

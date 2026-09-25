@@ -334,3 +334,10 @@ spec:
         .expect_err("zero is not a quota");
     assert!(err.to_string().contains("requestsPerMinute"), "{err}");
 }
+
+#[test]
+fn the_open_data_desk_is_a_contact_role() {
+    let role: jc_core::kinds::organization::ContactRole =
+        serde_norway::from_str("open-data").expect("parses");
+    assert_eq!(role, jc_core::kinds::organization::ContactRole::OpenData);
+}

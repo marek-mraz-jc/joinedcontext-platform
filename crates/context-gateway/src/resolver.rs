@@ -112,6 +112,9 @@ pub struct Endpoint {
     /// read: an endpoint that is meant to be a view and has no IR would otherwise serve the
     /// source model under the target model's name, which is worse than not serving at all.
     pub view_mapping: Option<std::sync::Arc<crate::translators::view_mapping::ViewMapping>>,
+    /// The manifest's `spec.catalog`, which the DCAT-AP record and the ODRL offer render
+    /// (EP-78, EP-79).
+    pub catalog: Option<std::sync::Arc<jc_core::kinds::Catalog>>,
 }
 
 /// One version of one data model, as the schema surface publishes it (EP-46, DM-22).
