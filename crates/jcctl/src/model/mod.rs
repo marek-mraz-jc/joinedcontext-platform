@@ -253,7 +253,7 @@ impl ModelTools {
     }
 
     /// `POST /generate` of a document that imports platform models, with their sources by the
-    /// name the import gives them (DM-75).
+    /// name the import gives them (DM-76).
     pub fn generate_with(
         &self,
         source: &str,
@@ -364,7 +364,7 @@ pub fn pinned_generator(repo_dir: &Path) -> Result<String, Error> {
 /// `Validate` reads no artifact and writes none, so it runs against whatever is reachable.
 ///
 /// `org_dir` is the organization checkout a project repository's models import organization
-/// models from (DM-75); without it they are looked for in `repo_dir`, which is the organization
+/// models from (DM-76); without it they are looked for in `repo_dir`, which is the organization
 /// checkout itself when that is what is being generated.
 pub fn run(
     repo_dir: &Path,
@@ -426,7 +426,7 @@ struct Models<'a> {
 
 impl Models<'_> {
     /// The LinkML source of every platform model `source` imports, transitively, by the name
-    /// the import gives it (DM-75). A model imported from an organization model is an
+    /// the import gives it (DM-76). A model imported from an organization model is an
     /// organization model too: the organization's catalogue never depends on one project.
     ///
     /// ponytail: a pin resolves to the version the checkout holds, and a pin to an older major
@@ -454,7 +454,7 @@ impl Models<'_> {
                     (false, ORG_NAMESPACE) => {
                         return Err(format!(
                             "import '{key}': an organization model imports organization models \
-                             only (DM-75)"
+                             only (DM-76)"
                         ))
                     }
                     (false, project) => (self.repo, project),

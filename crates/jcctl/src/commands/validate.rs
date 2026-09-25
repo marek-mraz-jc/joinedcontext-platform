@@ -1024,7 +1024,7 @@ fn one_model_per_space(repo_dir: &Path, repo: &Repository) -> (Located, Located)
             continue;
         }
         let location = (resource.path.clone(), resource.document, resource.line);
-        // An organization model and a project model no space owns count for no space (DM-74).
+        // An organization model and a project model no space owns count for no space (DM-75).
         if let Some(space) = &spec.context_space_ref {
             let held = models
                 .entry((id.namespace.clone(), space.clone()))

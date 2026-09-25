@@ -518,7 +518,7 @@ fn models_by_space(
                 continue;
             }
             // A model no space owns is served by no space; a space that imports it carries its
-            // classes in its own compiled artifacts (DM-74, DM-75).
+            // classes in its own compiled artifacts (DM-75, DM-76).
             let Some(space) = spec.context_space_ref.clone() else {
                 continue;
             };

@@ -115,7 +115,7 @@
     },
     "DataModelOrigin": {
       "additionalProperties": false,
-      "description": "Where an organization model was promoted from (DM-76), recorded and never linked: the organization owns the copy, and a project bundle keeps it on a model it lands (MF-50).",
+      "description": "Where an organization model was promoted from (DM-77), recorded and never linked: the organization owns the copy, and a project bundle keeps it on a model it lands (MF-50).",
       "properties": {
         "commit": {
           "description": "Commit of the project repository the source was copied at, 7 to 40 lowercase hexadecimal characters.",
@@ -220,7 +220,7 @@
           "type": "array"
         },
         "contextSpaceRef": {
-          "description": "DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path (MF-06). Absent on a model no space owns: an organization model, or a project model at `projects/{p}/datamodels/{name}/` (DM-74).",
+          "description": "DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path (MF-06). Absent on a model no space owns: an organization model, or a project model at `projects/{p}/datamodels/{name}/` (DM-75).",
           "type": [
             "string",
             "null"
@@ -252,7 +252,7 @@
               "type": "null"
             }
           ],
-          "description": "Where an organization model was promoted from (DM-76); kept on a model a bundle lands (MF-50)."
+          "description": "Where an organization model was promoted from (DM-77); kept on a model a bundle lands (MF-50)."
         },
         "source": {
           "anyOf": [

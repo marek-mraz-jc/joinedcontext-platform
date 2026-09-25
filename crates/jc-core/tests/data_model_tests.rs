@@ -335,7 +335,7 @@ fn unknown_fields_and_bad_class_names_are_rejected() {
     ));
 }
 
-/// An organization model: namespace `org`, no space (DM-74, ADR-N-039).
+/// An organization model: namespace `org`, no space (DM-75, ADR-N-039).
 const ORGANIZATION_MODEL: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: DataModel
 metadata:

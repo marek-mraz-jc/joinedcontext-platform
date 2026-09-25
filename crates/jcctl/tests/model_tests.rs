@@ -486,7 +486,7 @@ fn an_unreachable_model_tools_is_an_error_and_not_an_empty_report() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot reach Model Tools"));
 }
 
-/// An organization model the space's model imports (DM-74, DM-75).
+/// An organization model the space's model imports (DM-75, DM-76).
 const ORGANIZATION_MODEL: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: DataModel
 metadata:

@@ -75,7 +75,7 @@ SHIPPED_MODELS = Path(
 # The loader appends `.yaml` to whatever an import maps to, so the entry stops at the stem.
 IMPORT_MAP = {"ngsi-ld-core": str(SHIPPED_MODELS / "ngsi-ld-core.linkml")}
 
-#: A platform model an import names at a pinned major (DM-75): an organization model, or a model
+#: A platform model an import names at a pinned major (DM-76): an organization model, or a model
 #: of the importing model's own project. No colon, so LinkML never expands it as a CURIE; no
 #: slash, so LinkML never resolves the imported model's own imports relative to its name.
 MODEL_IMPORT = re.compile(r"^(org|project)\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.v(0|[1-9][0-9]*)$")

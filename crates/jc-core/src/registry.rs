@@ -23,7 +23,7 @@ pub struct KindInfo {
     /// Where a kind of scope [`Scope::OrganizationOrProject`] lives inside a project (PF-68);
     /// `None` for every kind that lives in one place.
     pub project_path_template: Option<&'static str>,
-    /// Where it lives inside a project when no space owns it (DM-74); `None` for every kind but
+    /// Where it lives inside a project when no space owns it (DM-75); `None` for every kind but
     /// `DataModel`.
     pub spaceless_path_template: Option<&'static str>,
 }
@@ -119,7 +119,7 @@ impl KindInfo {
     ///
     /// `project` is the manifest's namespace, so a kind that lives in either place lands where
     /// its namespace says (PF-68). `space` is ignored by kinds whose template has no `{space}`
-    /// placeholder, and an empty one picks the spaceless path of a kind that has one (DM-74).
+    /// placeholder, and an empty one picks the spaceless path of a kind that has one (DM-75).
     pub fn repo_path(&self, project: &str, space: &str, name: &str) -> String {
         let in_project = !project.is_empty() && project != crate::envelope::ORG_NAMESPACE;
         let template = match (self.project_path_template, self.spaceless_path_template) {

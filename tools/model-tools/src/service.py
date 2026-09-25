@@ -151,7 +151,7 @@ def generate(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """`POST /generate`: compile the source the editor is holding.
 
     `imports` maps each platform model the source imports, directly or through another import,
-    to that model's LinkML at the pinned major (DM-75). The caller resolves them: Model Tools
+    to that model's LinkML at the pinned major (DM-76). The caller resolves them: Model Tools
     reads no platform state. An import left unresolved is the person's message, not a file the
     loader goes looking for.
     """
@@ -170,7 +170,7 @@ def generate(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         return 400, {
             "errors": [
                 f"'imports' maps at most {MAX_IMPORTS} names `org.{{name}}.v{{major}}` or "
-                "`project.{name}.v{major}` to that model's LinkML source (DM-75)"
+                "`project.{name}.v{major}` to that model's LinkML source (DM-76)"
             ]
         }
     named = {entry for text in (source, *imports.values()) for entry in model_imports(text)}
@@ -180,7 +180,7 @@ def generate(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
             "generatorVersion": generator_version(),
             "errors": [
                 f"import '{entry}' is not resolved: name a published organization model as "
-                "org.{name}.v{major} or a model of this project as project.{name}.v{major} (DM-75)"
+                "org.{name}.v{major} or a model of this project as project.{name}.v{major} (DM-76)"
                 for entry in unresolved
             ],
         }

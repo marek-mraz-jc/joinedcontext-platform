@@ -47,7 +47,7 @@ pub trait Kind:
     const PROJECT_PATH_TEMPLATE: Option<&'static str> = None;
 
     /// Where a kind whose project path names a `{space}` lives in a project when no space owns
-    /// the manifest (DM-74). `None` for every kind but `DataModel`.
+    /// the manifest (DM-75). `None` for every kind but `DataModel`.
     const SPACELESS_PATH_TEMPLATE: Option<&'static str> = None;
 
     /// Kind-specific validation of the spec against its own metadata.

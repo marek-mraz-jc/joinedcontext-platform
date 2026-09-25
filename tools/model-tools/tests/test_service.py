@@ -493,7 +493,7 @@ def test_every_module_of_src_is_installed_into_the_image():
     assert shipped - listed == set(), "add these to py-modules in pyproject.toml"
 
 
-#: An organization model a space's model imports (DM-75): one class, its own slot.
+#: An organization model a space's model imports (DM-76): one class, its own slot.
 STATIONS = """
 id: https://example.org/ns/stations
 name: stations
@@ -531,7 +531,7 @@ classes:
 
 
 def test_a_space_model_importing_an_organization_model_compiles_with_its_classes():
-    """DM-75: the caller hands over the imported source, and the artifacts carry its classes."""
+    """DM-76: the caller hands over the imported source, and the artifacts carry its classes."""
     status, body = call("POST", "/generate", {"source": BIKES, "imports": {"org.stations.v1": STATIONS}})
 
     assert status == 200
@@ -541,12 +541,12 @@ def test_a_space_model_importing_an_organization_model_compiles_with_its_classes
 
 
 def test_an_unresolved_or_malformed_model_import_is_the_persons_message_not_a_file_read():
-    """DM-75: an import nobody resolved is named; it is never looked for on the disk."""
+    """DM-76: an import nobody resolved is named; it is never looked for on the disk."""
     status, body = call("POST", "/generate", {"source": BIKES})
     assert status == 200
     assert body["errors"] == [
         "import 'org.stations.v1' is not resolved: name a published organization model as "
-        "org.{name}.v{major} or a model of this project as project.{name}.v{major} (DM-75)"
+        "org.{name}.v{major} or a model of this project as project.{name}.v{major} (DM-76)"
     ]
 
     # An import inside an imported model must be resolved too.
@@ -572,4 +572,4 @@ def test_imports_must_be_platform_model_names_to_sources():
     ]:
         status, body = call("POST", "/generate", {"source": BIKES, "imports": imports})
         assert status == 400, imports
-        assert "DM-75" in body["errors"][0]
+        assert "DM-76" in body["errors"][0]

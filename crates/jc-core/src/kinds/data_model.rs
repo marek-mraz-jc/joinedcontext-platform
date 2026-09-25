@@ -298,7 +298,7 @@ impl DataModelSource {
     }
 }
 
-/// Where an organization model was promoted from (DM-76), recorded and never linked: the
+/// Where an organization model was promoted from (DM-77), recorded and never linked: the
 /// organization owns the copy, and a project bundle keeps it on a model it lands (MF-50).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -323,7 +323,7 @@ impl DataModelOrigin {
             return Err(Error::Name {
                 field: "origin.project",
                 value: self.project.clone(),
-                reason: "a model is promoted from a project, never from the organization (DM-76)",
+                reason: "a model is promoted from a project, never from the organization (DM-77)",
             });
         }
         if let Some(space) = &self.space {
@@ -341,7 +341,7 @@ impl DataModelOrigin {
     }
 }
 
-/// A LinkML `imports` entry naming a model of this platform at a pinned major (DM-75):
+/// A LinkML `imports` entry naming a model of this platform at a pinned major (DM-76):
 /// `org.{name}.v{major}` for an organization model, `project.{name}.v{major}` for a model of the
 /// importing model's own project. No colon, so LinkML looks the name up in the import map the
 /// Portal and `jcctl` hand Model Tools and never expands it as a CURIE; no slash, so LinkML never
@@ -370,7 +370,7 @@ impl ModelImport {
         let malformed = || Error::Name {
             field: "imports",
             value: entry.to_string(),
-            reason: "a model import is `org.{name}.v{major}` or `project.{name}.v{major}` (DM-75)",
+            reason: "a model import is `org.{name}.v{major}` or `project.{name}.v{major}` (DM-76)",
         };
         let Some((name, version)) = rest.split_once('.') else {
             return Some(Err(malformed()));
@@ -449,7 +449,7 @@ impl GeneratedArtifacts {
 pub struct DataModelSpec {
     /// DNS-1123 label of the owning ContextSpace; with `metadata.namespace` it derives the path
     /// (MF-06). Absent on a model no space owns: an organization model, or a project model at
-    /// `projects/{p}/datamodels/{name}/` (DM-74).
+    /// `projects/{p}/datamodels/{name}/` (DM-75).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_space_ref: Option<String>,
     /// Path of the authoring LinkML source, relative to this manifest and ending `.linkml.yaml` (DM-01).
@@ -464,7 +464,7 @@ pub struct DataModelSpec {
     /// Provenance; absent for a hand-authored model (DM-08, DM-48).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<DataModelSource>,
-    /// Where an organization model was promoted from (DM-76); kept on a model a bundle lands (MF-50).
+    /// Where an organization model was promoted from (DM-77); kept on a model a bundle lands (MF-50).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<DataModelOrigin>,
     /// Artifacts generated beside the source in the same commit (DM-02).
@@ -481,7 +481,7 @@ pub struct DataModelSpec {
 impl Kind for DataModelSpec {
     const KIND: &'static str = "DataModel";
     const PLURAL: &'static str = "datamodels";
-    /// An organization model or a project model (DM-74, ADR-N-039).
+    /// An organization model or a project model (DM-75, ADR-N-039).
     const SCOPE: Scope = Scope::OrganizationOrProject;
     const PATH_TEMPLATE: &'static str = "datamodels/{name}/{name}.yaml";
     const PROJECT_PATH_TEMPLATE: Option<&'static str> =
@@ -496,7 +496,7 @@ impl Kind for DataModelSpec {
                 return Err(Error::Name {
                     field: "contextSpaceRef",
                     value: space.clone(),
-                    reason: "an organization model belongs to no space; a space model lives in its project (DM-74)",
+                    reason: "an organization model belongs to no space; a space model lives in its project (DM-75)",
                 });
             }
         }
@@ -570,7 +570,7 @@ impl DataModelSpec {
         Ok(())
     }
 
-    /// Whether this is an organization model rather than a project one (DM-74).
+    /// Whether this is an organization model rather than a project one (DM-75).
     pub fn is_organization_model(meta: &ObjectMeta) -> bool {
         meta.namespace.as_deref() == Some(ORG_NAMESPACE)
     }
