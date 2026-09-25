@@ -39,6 +39,7 @@ fn every_seeded_role_is_a_valid_role_manifest() {
             "app-editor",
             "steward",
             "publisher",
+            "people-admin",
             "org-admin"
         ]
     );
@@ -124,6 +125,39 @@ fn only_org_admin_approves_a_public_endpoint_unconstrained() {
     }
 }
 
+/// PF-91: `people-admin` holds every verb on Person and nothing else; `org-admin` holds it too.
+#[test]
+fn people_admin_manages_people_and_org_admin_holds_it() {
+    let people = vec![
+        Verb::Read,
+        Verb::Create,
+        Verb::Update,
+        Verb::Disable,
+        Verb::Delete,
+    ];
+    let admin = role("people-admin");
+    assert_eq!(admin.rules.len(), 1);
+    assert_eq!(admin.rules[0].kinds, vec!["Person".to_owned()]);
+    assert_eq!(admin.rules[0].verbs, people);
+
+    let org = role("org-admin");
+    assert!(
+        org.rules
+            .iter()
+            .any(|rule| rule.kinds == vec!["Person".to_owned()] && rule.verbs == people),
+        "org-admin holds people-admin's rule"
+    );
+    for name in ["viewer", "steward", "publisher", "app-editor"] {
+        assert!(
+            role(name)
+                .rules
+                .iter()
+                .all(|rule| !rule.kinds.contains(&"Person".to_owned())),
+            "{name} reaches no person"
+        );
+    }
+}
+
 #[test]
 fn an_editor_never_approves_and_never_deletes() {
     for name in [
@@ -150,7 +184,7 @@ fn seeding_twice_writes_nothing_the_second_time_and_leaves_an_edited_role_alone(
     std::fs::create_dir_all(&dir).expect("a temporary repository");
 
     let written = taxonomy::seed(&dir).expect("seeds");
-    assert_eq!(written.len(), 8);
+    assert_eq!(written.len(), 9);
     let steward = dir.join("users/roles/steward.yaml");
     std::fs::write(&steward, "# edited by a person\n").expect("edit the steward");
 
