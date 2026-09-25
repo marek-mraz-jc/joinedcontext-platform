@@ -118,6 +118,7 @@ def load(source: str | Path) -> SchemaView:
         view = _view(path)
     check_unit_prefixes(view)
     check_relationships(view)
+    check_data_structures(view)
     return view
 
 
@@ -163,6 +164,88 @@ def check_unit_prefixes(view: SchemaView) -> None:
             "resolves to nothing wherever the artifacts carry it; add it to `prefixes`: "
             + "; ".join(sorted(dangling))
         )
+
+
+#: The class annotation that makes a class a Data Structure Definition (DM-60).
+QB_DSD_ANNOTATION = "qb_dsd"
+#: The slot annotation that names a slot's role in the cube (DM-60).
+QB_COMPONENT_ANNOTATION = "qb_component"
+QB_COMPONENTS = ("dimension", "measure")
+#: The ranges the one time dimension may have: a period is a date, an instant or a year.
+QB_TIME_RANGES = ("date", "datetime", "integer")
+
+
+def is_dsd(cls: ClassDefinition) -> bool:
+    """Whether the class is annotated as a Data Structure Definition (DM-60)."""
+    return (annotation_value(cls, QB_DSD_ANNOTATION) or "").lower() == "true"
+
+
+def component_of(slot: SlotDefinition) -> str | None:
+    """The cube role a slot declares, `dimension` or `measure`, or None."""
+    return annotation_value(slot, QB_COMPONENT_ANNOTATION)
+
+
+def dsd_components(view: SchemaView, cls: ClassDefinition) -> list[tuple[SlotDefinition, str]]:
+    """The components of a DSD class in slot order, each with its role."""
+    return [(slot, role) for slot in slots_of(view, cls) if (role := component_of(slot)) is not None]
+
+
+def check_data_structures(view: SchemaView) -> None:
+    """Refuse a Data Structure Definition that breaks a rule of DM-60, every rule at once.
+
+    A cube whose observation may leave out a dimension is not a table, and a measure without a
+    unit is a number nobody can compare; both are refused here rather than discovered by the
+    first statistician who reads `model.qb.ttl`.
+    """
+    problems: list[str] = []
+    dsd_slots: set[str] = set()
+    for cls in view.all_classes().values():
+        flag = annotation_value(cls, QB_DSD_ANNOTATION)
+        if flag is not None and flag.lower() not in ("true", "false"):
+            problems.append(f"class '{cls.name}' has {QB_DSD_ANNOTATION} '{flag}'; it is true or false")
+            continue
+        if not is_dsd(cls):
+            continue
+        dimensions = measures = time = 0
+        for slot, role in dsd_components(view, cls):
+            dsd_slots.add(slot.name)
+            where = f"slot '{slot.name}' of the DSD '{cls.name}'"
+            if role not in QB_COMPONENTS:
+                problems.append(f"{where} has {QB_COMPONENT_ANNOTATION} '{role}'; it is dimension or measure")
+                continue
+            if not slot.required:
+                problems.append(f"{where} is a {role} and must be required: an observation without it is no cell of the table")
+            if slot.multivalued:
+                problems.append(f"{where} is a {role} and holds one value per observation, so it cannot be multivalued")
+            kind = ngsi_ld_kind(slot)
+            if role == "dimension":
+                dimensions += 1
+                if kind == "Property" and (slot.range or "string") in QB_TIME_RANGES:
+                    time += 1
+                elif kind not in ("VocabProperty", "Relationship"):
+                    problems.append(
+                        f"{where} is a dimension of kind {kind} with range {slot.range or 'string'}; a dimension is a "
+                        "VocabProperty, a Relationship, or the one time dimension (a Property of range "
+                        + ", ".join(QB_TIME_RANGES) + ")"
+                    )
+            else:
+                measures += 1
+                if kind != "Property":
+                    problems.append(f"{where} is a measure of kind {kind}; a measure is a Property")
+                elif unit_of(slot) is None:
+                    problems.append(f"{where} is a measure without a unit; give it one (DM-59)")
+        if time > 1:
+            problems.append(f"the DSD '{cls.name}' has {time} time dimensions; it has one at most, the rest are VocabProperty terms")
+        if dimensions == 0 or measures == 0:
+            problems.append(f"the DSD '{cls.name}' needs at least one dimension and one measure (qb_component on its slots)")
+    for slot in view.all_slots().values():
+        if component_of(slot) is not None and slot.name not in dsd_slots:
+            problems.append(
+                f"slot '{slot.name}' declares {QB_COMPONENT_ANNOTATION} but no class using it is annotated "
+                f"{QB_DSD_ANNOTATION}: true"
+            )
+    if problems:
+        raise ModelError("the Data Structure Definition is not a cube: " + "; ".join(problems))
 
 
 def _view(path: str) -> SchemaView:

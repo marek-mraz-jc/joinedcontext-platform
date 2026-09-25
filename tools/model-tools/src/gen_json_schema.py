@@ -25,7 +25,17 @@ from linkml_runtime import SchemaView
 
 import yaml
 
-from common import ModelError, as_path, generator_version, load, ngsi_ld_kind, slots_of, unit_of
+from common import (
+    ModelError,
+    as_path,
+    component_of,
+    generator_version,
+    is_dsd,
+    load,
+    ngsi_ld_kind,
+    slots_of,
+    unit_of,
+)
 from relationships import analyse
 
 DRAFT_07 = "http://json-schema.org/schema#"
@@ -139,6 +149,11 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
         target = definitions.get(cls.name)
         if not isinstance(target, dict):
             continue
+        # A Data Structure Definition and its components' roles travel the same way, so the
+        # gateway renders `model.qb.ttl` from the projection it already narrows (DM-60).
+        dsd = is_dsd(cls)
+        if dsd:
+            target["x-qb-dsd"] = True
         properties = target.get("properties", {})
         for slot in slots_of(view, cls):
             prop = properties.get(slot.alias or slot.name)
@@ -160,6 +175,9 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
             unit = unit_of(slot)
             if unit:
                 prop["x-unit"] = unit
+            role = component_of(slot) if dsd else None
+            if role:
+                prop["x-qb-component"] = role
     return schema
 
 
@@ -224,6 +242,7 @@ def _relationships(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
         urn = {"type": "string", "pattern": f"^urn:ngsi-ld:{other.cls}:"}
         description = prop.get("description")
         kind = prop.get("x-ngsi-ld-kind")
+        role = prop.get("x-qb-component")
         prop.clear()
         if stored.multivalued:
             prop.update({"type": "array", "items": urn})
@@ -235,6 +254,8 @@ def _relationships(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
             prop["description"] = description
         if kind:
             prop["x-ngsi-ld-kind"] = kind
+        if role:
+            prop["x-qb-component"] = role
         prop["x-ngsi-ld-relationship"] = {
             "target": other.cls,
             "inverse": other.slot,

@@ -43,6 +43,7 @@ py-modules = [
   "gen_context",
   "gen_docs",
   "gen_example",
+  "gen_qb",
   "gen_rdf_artifacts",
   "gen_typescript",
   "import_sdm",

@@ -1,0 +1,82 @@
+# The first data cube (DM-60, T-1186): population of Banská Bystrica by district, age band and
+# year, as the Statistical Office of the Slovak Republic publishes it. One entity of
+# PopulationObservation is one cell of that table.
+id: https://banskabystrica.sk/ns/population
+name: population
+title: Population by district, age band and year
+prefixes:
+  linkml: https://w3id.org/linkml/
+  bb: https://banskabystrica.sk/ns/
+  unece: https://vocabulary.uncefact.org/UnitMeasureCode#
+  qudt-unit: http://qudt.org/vocab/unit/
+  qudt-quantkind: http://qudt.org/vocab/quantitykind/
+default_prefix: bb
+default_range: string
+imports:
+  - linkml:types
+  - ngsi-ld-core
+
+classes:
+  PopulationObservation:
+    class_uri: bb:PopulationObservation
+    description: The number of inhabitants of one district in one age band at the end of one year.
+    is_a: Entity
+    slots: [refDistrict, ageBand, year, population, source]
+    annotations:
+      qb_dsd: "true"
+
+slots:
+  refDistrict:
+    slot_uri: bb:refDistrict
+    description: The district counted, an entity of the city's territorial register.
+    range: uriorcurie
+    required: true
+    annotations:
+      ngsi_ld_kind: Relationship
+      qb_component: dimension
+  ageBand:
+    slot_uri: bb:ageBand
+    description: The age band counted, five years wide.
+    range: AgeBand
+    required: true
+    annotations:
+      ngsi_ld_kind: VocabProperty
+      qb_component: dimension
+  year:
+    slot_uri: bb:year
+    description: The year at whose end the population was counted.
+    range: integer
+    required: true
+    annotations:
+      ngsi_ld_kind: Property
+      qb_component: dimension
+  population:
+    slot_uri: bb:population
+    description: Inhabitants with permanent residence.
+    range: integer
+    required: true
+    unit:
+      ucum_code: "1"
+      symbol: persons
+      exact_mappings:
+        - unece:IE
+        - qudt-unit:NUM
+      has_quantity_kind: qudt-quantkind:Population
+    annotations:
+      ngsi_ld_kind: Property
+      qb_component: measure
+  source:
+    slot_uri: bb:source
+    description: The statistics table the value was read from; not a component of the cube.
+    annotations:
+      ngsi_ld_kind: Property
+
+enums:
+  AgeBand:
+    permissible_values:
+      "0-4": {}
+      "5-9": {}
+      "10-14": {}
+      "15-19": {}
+      "20-64": {}
+      "65+": {}
