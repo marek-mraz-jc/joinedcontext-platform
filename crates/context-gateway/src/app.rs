@@ -2450,8 +2450,9 @@ fn narrowed_batch_query(
     }
 
     // Each entry selects by type, by id, or by both. An entry naming a type outside the grants
-    // is not this caller's to ask for; an entry naming only an id stays, and the answer's own
-    // type guard judges what comes back for it (T-2130).
+    // is not this caller's to ask for; one without a type gets the type its id names, or one copy
+    // per granted type (T-2995), and the answer's own type guard still judges what comes back
+    // (T-2130).
     if let Some(entities) = payload.get_mut("entities").and_then(Value::as_array_mut) {
         let named = entities.len();
         // An id names its type (`urn:ngsi-ld:{Type}:…`): the entry says so to the broker, so the
@@ -2468,6 +2469,28 @@ fn narrowed_batch_query(
                     fields.insert("type".to_owned(), Value::String(kind));
                 }
             }
+        }
+        // An entry that still names no type (an `idPattern`, an id that is no URN) would select
+        // and count every type: under a type grant it is asked once per granted type instead.
+        if !decided.types.is_empty() {
+            let expanded: Vec<Value> = entities
+                .drain(..)
+                .flat_map(|entry| match entry.get("type") {
+                    Some(_) => vec![entry],
+                    None => decided
+                        .types
+                        .iter()
+                        .map(|granted| {
+                            let mut typed = entry.clone();
+                            if let Some(fields) = typed.as_object_mut() {
+                                fields.insert("type".to_owned(), Value::String(granted.clone()));
+                            }
+                            typed
+                        })
+                        .collect(),
+                })
+                .collect();
+            *entities = expanded;
         }
         if !decided.types.is_empty() {
             entities.retain(

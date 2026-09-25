@@ -232,6 +232,26 @@ async fn an_entry_by_id_is_asked_as_the_type_its_id_names() {
     );
 }
 
+/// An entry that names neither a type nor an id that carries one (`idPattern`) is asked once per
+/// granted type, so nothing of an ungranted type is selected or counted.
+#[tokio::test]
+async fn an_untyped_entry_is_asked_once_per_granted_type() {
+    let (status, answer, sent) = query(
+        false,
+        "entityOperations/query",
+        "?count=true",
+        json!({ "type": "Query", "entities": [{ "idPattern": ".*" }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (url, body) = only_hop(&sent);
+    assert_eq!(url, "count=true");
+    assert_eq!(
+        body["entities"],
+        json!([{ "idPattern": ".*", "type": "AirQualityObserved" }])
+    );
+}
+
 /// The grant's area and window narrow at the broker only, so they move into the body with the
 /// rest: `geoQ` and `temporalQ` are the grant's, never dropped.
 #[tokio::test]
