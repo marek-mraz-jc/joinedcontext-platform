@@ -227,8 +227,17 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
     );
     assert_eq!(
         api.actions(),
-        vec!["package_create", "datastore_create", "datastore_upsert"]
+        vec![
+            "package_create",
+            "datastore_create",
+            "datastore_upsert",
+            "resource_view_create"
+        ]
     );
+    // EP-62: the sheet opens as a grid on the dataset page.
+    let views = api.views(DATASTORE_RESOURCE);
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0]["view_type"], json!(ckan_datastore::GRID_VIEW));
     let fields = api.table_fields(DATASTORE_RESOURCE).expect("the table");
     let types: Vec<(&str, &str)> = fields
         .iter()
@@ -273,10 +282,12 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
             "package_create",
             "datastore_create",
             "datastore_upsert",
+            "resource_view_create",
             "datastore_upsert"
         ],
         "a reload writes rows and nothing else"
     );
+    assert_eq!(api.views(DATASTORE_RESOURCE).len(), 1, "a second grid");
 }
 
 /// A mirror without rows is an error, not a dataset without its table.
@@ -318,13 +329,14 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
             "package_create",
             "datastore_create",
             "datastore_upsert",
+            "resource_view_create",
             "package_delete"
         ]
     );
 
     let again = withdraw_one(&mut api, target).expect("nothing to withdraw");
     assert_eq!(again.outcome, Outcome::Unchanged);
-    assert_eq!(api.actions().len(), 4);
+    assert_eq!(api.actions().len(), 5);
 }
 
 // --- the CSV the gateway writes ------------------------------------------------------------

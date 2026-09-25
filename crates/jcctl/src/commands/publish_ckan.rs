@@ -512,6 +512,8 @@ fn mirror(api: &mut impl CkanApi, target: &Target, text: &str) -> Result<Mirror,
         &fields,
     )?;
     let synced = datastore::sync(api, &resource_id, &[], &records)?;
+    // After the rows, so a catalogue that refuses the view still holds today's data.
+    datastore::ensure_view(api, &resource_id)?;
     Ok(Mirror {
         table,
         rows: synced.upserted.len(),

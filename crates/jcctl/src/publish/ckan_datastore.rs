@@ -30,6 +30,9 @@ pub const PRIMARY_KEY: &str = "entity_id";
 /// The tabular column the primary key is read from (EP-08).
 pub const ID_COLUMN: &str = "id";
 
+/// The resource view that shows a DataStore table as a sortable, searchable grid.
+pub const GRID_VIEW: &str = "datatables_view";
+
 /// What one run did to the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -276,6 +279,32 @@ pub fn sync(
         )?;
     }
     Ok(Synced { upserted, deleted })
+}
+
+/// Gives the table's resource the grid its dataset page opens in (EP-62, EP-65).
+///
+/// CKAN makes no view for a resource the DataStore API created, so without this the page
+/// shows a download link and nothing to read. Idempotent: a resource that already has a
+/// [`GRID_VIEW`], whoever made it, gets no second one, and a run over a mirror published
+/// before this existed adds the one it lacks. Returns whether a view was created.
+pub fn ensure_view(api: &mut impl CkanApi, resource_id: &str) -> Result<bool, MirrorError> {
+    let views = api.show("resource_view_list", resource_id)?;
+    let has_grid = views
+        .as_ref()
+        .and_then(Value::as_array)
+        .is_some_and(|views| {
+            views
+                .iter()
+                .any(|view| view.get("view_type").and_then(Value::as_str) == Some(GRID_VIEW))
+        });
+    if has_grid {
+        return Ok(false);
+    }
+    api.action(
+        "resource_view_create",
+        &json!({ "resource_id": resource_id, "view_type": GRID_VIEW, "title": "Table" }),
+    )?;
+    Ok(true)
 }
 
 /// Removes the whole table an Endpoint no longer mirrors (EP-62, CC-19).
