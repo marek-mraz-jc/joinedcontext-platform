@@ -36,6 +36,10 @@ pub struct Subject {
     /// under it carries (DS-13). Never a grant of its own: what the agreement allows is in
     /// the `Policy` entities compiled from it.
     pub agreement: Option<String>,
+    /// The service account a person's call came through, when a delegating client exchanged
+    /// their token (ADR-N-038, AG-95). The audit line names it; it grants nothing, so it is
+    /// never matched as a principal.
+    pub via: Option<String>,
 }
 
 impl Subject {

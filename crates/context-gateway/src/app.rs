@@ -1776,8 +1776,32 @@ fn subject_of(
     // A workload: `azp` has to name a ServiceAccount this repository declares, or the
     // token is valid and the account is unknown, which is an account with no grants
     // (PF-46).
+    let mut via = None;
     if let Some(azp) = claims.azp.as_deref() {
-        if let Some(account) = gateway.accounts.load().resolve(azp) {
+        let accounts = gateway.accounts.load();
+        let account = accounts.resolve(azp);
+        // A person's token the account's client exchanged (ADR-N-038, AG-95): the subject is
+        // a person, not the client's own service-account user. Decided as that person when the
+        // account declares delegation, and refused when it does not, so no client can carry a
+        // person's rights, or its own rights under a person's name, without saying so.
+        let for_a_person = claims
+            .preferred_username
+            .as_deref()
+            .is_some_and(|user| !user.eq_ignore_ascii_case(&format!("service-account-{azp}")));
+        match account {
+            Some(account) if for_a_person && account.delegates => {
+                via = Some(account.name.clone());
+            }
+            Some(_) if for_a_person => {
+                tracing::warn!(
+                    azp,
+                    "a person's token from a client whose account delegates nothing"
+                );
+                return Err(Box::new(ProblemDetails::forbidden()));
+            }
+            _ => {}
+        }
+        if let Some(account) = account.filter(|_| via.is_none()) {
             if !endpoint.admits(Some(&account.project)) {
                 return Err(Box::new(ProblemDetails::forbidden()));
             }
@@ -1793,9 +1817,10 @@ fn subject_of(
                 groups: BTreeSet::new(),
                 did: None,
                 agreement: None,
+                via: None,
             });
         }
-        if claims.preferred_username.is_none() {
+        if via.is_none() && claims.preferred_username.is_none() {
             tracing::warn!(azp, "token from a client no ServiceAccount manifest names");
             return Err(Box::new(ProblemDetails::forbidden()));
         }
@@ -1822,6 +1847,7 @@ fn subject_of(
         groups,
         did: None,
         agreement: None,
+        via,
     })
 }
 
@@ -1839,7 +1865,10 @@ fn roles_on(audience: Audience, asserted: impl IntoIterator<Item = String>) -> B
 /// The principal, as one string for the audit log.
 fn principal_of(subject: &Subject) -> String {
     match (&subject.user, &subject.service_account, &subject.did) {
-        (Some(user), _, _) => format!("user:{user}"),
+        (Some(user), _, _) => match &subject.via {
+            Some(account) => format!("user:{user} via serviceAccount:{account}"),
+            None => format!("user:{user}"),
+        },
         (_, Some(account), _) => format!("serviceAccount:{account}"),
         // A data space consumer is its DID and nothing else, so the audit line says so
         // rather than calling a whole agreement anonymous (DS-13).
@@ -2236,6 +2265,30 @@ pub(crate) fn json_response(payload: &Value) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AG-95: the audit line of a delegated call names the person and the account it came
+    /// through; an ordinary person or workload is named alone.
+    #[test]
+    fn the_audit_principal_names_the_account_a_persons_call_came_through() {
+        let person = Subject {
+            user: Some("jana".to_owned()),
+            ..Subject::default()
+        };
+        let delegated = Subject {
+            via: Some("agent-proxy".to_owned()),
+            ..person.clone()
+        };
+        let workload = Subject {
+            service_account: Some("agent-proxy".to_owned()),
+            ..Subject::default()
+        };
+        assert_eq!(principal_of(&person), "user:jana");
+        assert_eq!(
+            principal_of(&delegated),
+            "user:jana via serviceAccount:agent-proxy"
+        );
+        assert_eq!(principal_of(&workload), "serviceAccount:agent-proxy");
+    }
 
     #[test]
     fn a_signed_in_caller_on_a_public_endpoint_holds_the_public_role_too() {

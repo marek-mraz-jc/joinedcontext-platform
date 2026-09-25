@@ -160,6 +160,7 @@ pub fn subject(
         groups: std::collections::BTreeSet::new(),
         did: Some(participant.to_owned()),
         agreement: Some(id.to_owned()),
+        via: None,
     })
 }
 

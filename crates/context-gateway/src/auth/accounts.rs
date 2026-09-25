@@ -25,6 +25,9 @@ pub struct Account {
     /// The account's role bindings, kept with their scope so only the ones that reach the
     /// endpoint being called are handed to the PDP.
     pub roles: Vec<ScopedRole>,
+    /// Whether a person's token its client exchanged is decided as that person (ADR-N-038,
+    /// AG-95).
+    pub delegates: bool,
 }
 
 /// One role and where it applies.
@@ -135,6 +138,8 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
                         organization: binding.scope.organization.is_some(),
                     })
                     .collect(),
+                delegates: spec.delegation
+                    == Some(jc_core::kinds::service_account::Delegation::TokenExchange),
             },
         );
     }
