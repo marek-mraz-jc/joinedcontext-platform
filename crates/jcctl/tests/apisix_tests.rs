@@ -61,7 +61,7 @@ metadata:
   name: air-quality-today
   namespace: ovzdusie
 spec:
-  kind: service
+  kind: ui-rust
   source:
     path: apps/air-quality-today
   build: {}
@@ -339,8 +339,8 @@ fn the_cookie_name_path_and_the_logout_path_follow_the_app_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A `service` or `fullstack` app upstreams to its own pod on 8080; a `static` app is
-/// served by the Portal and gets no upstream of its own (AP-26).
+/// A `ui-rust` app, or one written with the old `fullstack`, upstreams to its own pod on 8080;
+/// a `ui` (`static`) app is served by the Portal and gets no upstream of its own (AP-26, AP-124).
 #[test]
 fn app_upstreams_point_at_the_pod_or_the_portal_by_kind() {
     let dir = repo_with_three_apps("apisix-upstreams");
@@ -525,13 +525,13 @@ fn two_apps_of_one_name_render_one_route_and_one_upstream() {
         &dir,
         "ovzdusie",
         "board",
-        "  kind: service\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
+        "  kind: ui-rust\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
     );
     app(
         &dir,
         "doprava",
         "board",
-        "  kind: service\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
+        "  kind: ui-rust\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
     );
     let document = document(&dir);
     let count = |section: &str, id: &str| {

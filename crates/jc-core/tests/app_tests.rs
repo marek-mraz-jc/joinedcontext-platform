@@ -46,7 +46,7 @@ fn golden_app_parses_validates_and_roundtrips() {
         app.resource_path().expect("resource path"),
         "projects/bb-ovzdusie/apps/air-quality-today/app.yaml"
     );
-    assert_eq!(app.spec.class, AppClass::Fullstack);
+    assert_eq!(app.spec.class, AppClass::UiRust);
     assert_eq!(app.spec.visibility, AppVisibility::Public);
     assert_eq!(
         app.spec.lifecycle,
@@ -459,7 +459,7 @@ fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ship
     use jc_core::kinds::app::{GitSource, SHIPPED_WITH_ANNOTATION};
 
     let mut app = App::from_yaml(GOLDEN).expect("valid golden YAML");
-    app.spec.class = AppClass::Static;
+    app.spec.class = AppClass::Ui;
     // A static bundle is never built by rust (AP-83).
     app.spec.build.0.remove("rust");
     app.spec.visibility = AppVisibility::Project;
@@ -506,7 +506,7 @@ fn a_published_static_app_without_a_repository_is_refused_unless_the_portal_ship
         assert!(other.validate().is_ok(), "{lifecycle} is not served");
     }
     let mut fullstack = app.clone();
-    fullstack.spec.class = AppClass::Fullstack;
+    fullstack.spec.class = AppClass::UiRust;
     assert!(
         fullstack.validate().is_ok(),
         "the lane of AP-87 is the static one"
@@ -561,10 +561,10 @@ fn a_static_app_with_an_empty_build_is_a_plain_html_app_ap83() {
     );
 }
 
-/// AP-83, AP-11: only a static App may skip the build, and a static App is never built by rust.
+/// AP-83, AP-11: only a ui App may skip the build, and a ui App is never built by rust.
 #[test]
 fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
-    for class in ["service", "fullstack"] {
+    for class in ["ui-rust", "fullstack"] {
         let yaml = PLAIN_HTML.replace("  kind: static", &format!("  kind: {class}"));
         let app = App::from_yaml(&yaml).expect("parses");
         match app.validate().expect_err("a backend needs a toolchain") {
@@ -585,7 +585,7 @@ fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
             reason,
         } => {
             assert_eq!((field, value.as_str()), ("build", "rust"));
-            assert!(reason.contains("fullstack"), "{reason}");
+            assert!(reason.contains("ui-rust"), "{reason}");
         }
         other => panic!("unexpected error {other:?}"),
     }
@@ -760,21 +760,20 @@ fn visibility_roles_without_roles_or_on_a_pod_served_app_is_refused() {
     none.spec.data_needs[1].roles.clear();
     assert_eq!(refused(&none), ("visibility", "roles".to_owned()));
 
-    for class in [AppClass::Service, AppClass::Fullstack] {
-        let mut app = roles_app();
-        app.spec.class = class;
-        app.spec.build = jc_core::kinds::AppBuild(
-            [
-                ("rust".to_owned(), "1.90".to_owned()),
-                ("node".to_owned(), "22".to_owned()),
-            ]
-            .into(),
-        );
-        assert_eq!(refused(&app), ("visibility", "roles".to_owned()), "{class}");
-        // The roles themselves are fine on such an app: its data grants still follow them.
-        app.spec.visibility = AppVisibility::Organization;
-        app.validate().expect("roles without visibility: roles");
-    }
+    // The one pod-served shape (AP-124).
+    let mut app = roles_app();
+    app.spec.class = AppClass::UiRust;
+    app.spec.build = jc_core::kinds::AppBuild(
+        [
+            ("rust".to_owned(), "1.90".to_owned()),
+            ("node".to_owned(), "22".to_owned()),
+        ]
+        .into(),
+    );
+    assert_eq!(refused(&app), ("visibility", "roles".to_owned()));
+    // The roles themselves are fine on such an app: its data grants still follow them.
+    app.spec.visibility = AppVisibility::Organization;
+    app.validate().expect("roles without visibility: roles");
 }
 
 /// AP-90, AP-16: a role carries nothing but its name, title and description.
@@ -892,4 +891,57 @@ fn egress_refuses_an_unknown_key_and_a_port_out_of_range_ap134() {
             "{entries} parses"
         );
     }
+}
+
+/// AP-124, T-2723: the shapes are `ui` and `ui-rust`, and the names of the previous release are
+/// read as them. `ui-node` is declared and not built yet, and `service` is withdrawn: each is
+/// refused with what to write instead, not with serde's list of variants.
+#[test]
+fn the_shapes_are_ui_and_ui_rust_and_ui_node_is_refused_until_it_is_built_ap124() {
+    for (written, read) in [
+        ("ui", AppClass::Ui),
+        ("static", AppClass::Ui),
+        ("ui-rust", AppClass::UiRust),
+        ("fullstack", AppClass::UiRust),
+    ] {
+        let mut yaml = PLAIN_HTML.replace("  kind: static", &format!("  kind: {written}"));
+        if read == AppClass::UiRust {
+            yaml = yaml.replace("  build: {}", "  build:\n    rust: \"1.90\"");
+        }
+        let app = App::from_yaml(&yaml).unwrap_or_else(|err| panic!("{written}: {err}"));
+        assert_eq!(app.spec.class, read, "{written}");
+    }
+    assert_eq!(AppClass::renamed("static"), Some(("static", "ui")));
+    assert_eq!(
+        AppClass::renamed("fullstack"),
+        Some(("fullstack", "ui-rust"))
+    );
+    assert_eq!(AppClass::renamed("ui"), None);
+
+    for (written, says) in [
+        ("ui-node", "not built yet"),
+        ("service", "withdrawn"),
+        ("desktop", "is not an App shape"),
+    ] {
+        let yaml = PLAIN_HTML.replace("  kind: static", &format!("  kind: {written}"));
+        let err = App::from_yaml(&yaml).expect_err(written).to_string();
+        assert!(err.contains(says), "{written}: {err}");
+        assert!(
+            err.contains("`ui`") && err.contains("`ui-rust`"),
+            "{written}: {err}"
+        );
+        assert!(!err.contains("expected one of"), "{written}: {err}");
+    }
+    // A long value is quoted short.
+    let long = "x".repeat(500);
+    let err = AppClass::parse(&long).expect_err("refused");
+    assert!(err.len() < 200, "{err}");
+
+    // Written back in the new names.
+    let app = App::from_yaml(PLAIN_HTML).expect("parses");
+    assert_eq!(serde_json::to_value(app.spec.class).expect("json"), "ui");
+    assert_eq!(
+        serde_json::to_value(AppClass::UiRust).expect("json"),
+        "ui-rust"
+    );
 }
