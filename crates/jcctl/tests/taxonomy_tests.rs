@@ -197,3 +197,43 @@ fn seeding_twice_writes_nothing_the_second_time_and_leaves_an_edited_role_alone(
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// AP-120, PF-71 (T-2690): a public App is the publisher's to approve, as a public Endpoint is. The
+/// steward approves every other App, one without `spec.visibility` included (it is `project`), and
+/// still proposes a public one: writing it is the author's, letting it out is the publisher's.
+#[test]
+fn a_public_app_is_the_publishers_to_approve_and_every_other_app_the_stewards() {
+    let approves = |name: &str, visibility: Option<&str>| {
+        role(name).rules.iter().any(|rule| {
+            rule.kinds.contains(&"App".to_owned())
+                && rule.verbs.contains(&Verb::Approve)
+                && rule.constraints.iter().all(|c| c.holds(visibility))
+        })
+    };
+    assert!(approves("publisher", Some("public")));
+    assert!(!approves("publisher", Some("project")));
+    assert!(!approves("publisher", None));
+    assert!(!approves("steward", Some("public")));
+    assert!(approves("steward", Some("project")));
+    assert!(approves("steward", Some("roles")));
+    assert!(
+        approves("steward", None),
+        "an App without visibility is project (AP-120)"
+    );
+
+    let steward_proposes_apps = role("steward").rules.iter().any(|rule| {
+        rule.kinds == vec!["App".to_owned()]
+            && rule.verbs == vec![Verb::Propose]
+            && rule.constraints.is_empty()
+    });
+    assert!(
+        steward_proposes_apps,
+        "a steward proposes any App, public ones too"
+    );
+    // The steward's unconstrained rule leaves App out, or it would approve a public one.
+    assert!(role("steward")
+        .rules
+        .iter()
+        .filter(|rule| rule.constraints.is_empty() && rule.verbs.contains(&Verb::Approve))
+        .all(|rule| !rule.kinds.contains(&"App".to_owned())));
+}
