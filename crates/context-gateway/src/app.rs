@@ -991,6 +991,48 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
+    // A delete runs the rule of every relationship that points at what it deletes (DM-71,
+    // T-2858), after every other check passed, so a delete refused above has changed nothing.
+    if matches!(operation, Operation::DeleteEntity | Operation::DeleteBatch)
+        && endpoint.view_mapping.is_none()
+    {
+        if let Some(rules) = endpoint
+            .declared_types
+            .as_ref()
+            .map(|declared| &declared.relationships)
+            .filter(|rules| !rules.is_empty())
+        {
+            let held = HeldDelete {
+                gateway,
+                subject: &subject,
+                endpoint: &endpoint,
+                headers: &parts.headers,
+                rules,
+            };
+            let held = if operation == Operation::DeleteEntity {
+                match operations::addressed_entity(&path).map(query::decode) {
+                    Some(id) => held.entity(&id).await.map(|()| false),
+                    None => Ok(false),
+                }
+            } else {
+                held.batch(&mut sent, &mut divided).await
+            };
+            match held {
+                Ok(true) => {
+                    parts.headers.remove(CONTENT_LENGTH);
+                    parts
+                        .headers
+                        .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+                }
+                Ok(false) => {}
+                Err(answer) => {
+                    tracing::info!(slug = %endpoint.slug, "delete refused: a relationship keeps it");
+                    return *answer;
+                }
+            }
+        }
+    }
+
     let sent_query = if operation.is_write() || vocabulary::describes(operation) {
         // A discovery request takes `details` and nothing else (CIM 009 clause 5.7.10): the
         // grants' `type`, `attrs` and `q` say which entities may be read, and a broker asked for
@@ -1149,6 +1191,14 @@ impl HeldWrite<'_> {
             if let Some(violation) = relationships::first_missing(&targets, &found) {
                 return Err(refuse(violation.into()));
             }
+            let claims = relationships::claims_of(&payload, shape, self.rules);
+            if let Some(violation) = self
+                .untaken(&claims, &[])
+                .await
+                .map_err(|problem| refuse(*problem))?
+            {
+                return Err(refuse(violation.into()));
+            }
             return Ok(());
         };
 
@@ -1176,13 +1226,27 @@ impl HeldWrite<'_> {
             .await
             .map_err(|problem| refuse(*problem))?;
         let mut permitted = Vec::new();
+        // One-to-one targets in the batch's order: the first entity that names one takes it.
+        let mut taken: Vec<relationships::Claim> = Vec::new();
         for (at, targets) in kept {
             let entry = &entries[at];
-            match relationships::first_missing(&targets, &found) {
+            if let Some(violation) = relationships::first_missing(&targets, &found) {
+                refused.push((batch_entry_id(entry).unwrap_or_default(), violation.into()));
+                continue;
+            }
+            let claims = relationships::claims_of(entry, shape, self.rules);
+            match self
+                .untaken(&claims, &taken)
+                .await
+                .map_err(|problem| refuse(*problem))?
+            {
                 Some(violation) => {
                     refused.push((batch_entry_id(entry).unwrap_or_default(), violation.into()))
                 }
-                None => permitted.push(entry.clone()),
+                None => {
+                    taken.extend(claims);
+                    permitted.push(entry.clone());
+                }
             }
         }
         if refused.is_empty() {
@@ -1205,6 +1269,46 @@ impl HeldWrite<'_> {
         })?;
         *divided = Some((ids, refused));
         Ok(())
+    }
+
+    /// The first one-to-one target of `claims` that another source stores, or that `earlier`
+    /// claims of this write already took (DM-70 `target-taken`). A read of the space right
+    /// before the write, not a constraint in the store: two writes inside the window between
+    /// this read and the broker's write can both take one target (Architecture/11 §1.2, T-2858).
+    async fn untaken(
+        &self,
+        claims: &[crate::relationships::Claim],
+        earlier: &[crate::relationships::Claim],
+    ) -> Result<Option<crate::relationships::Violation>, Box<ProblemDetails>> {
+        let all: Vec<_> = earlier.iter().chain(claims).cloned().collect();
+        if let Some(twice) = crate::relationships::claimed_twice(&all) {
+            return Ok(Some(twice.taken()));
+        }
+        let mut asked = BTreeSet::new();
+        for claim in claims {
+            if !asked.insert((&claim.class, &claim.slot, &claim.object)) {
+                continue;
+            }
+            // Two answers are enough: the holder itself, and anyone else.
+            let storing = storing(
+                &self.gateway.broker,
+                self.headers,
+                &claim.class,
+                &claim.slot,
+                &claim.object,
+                2,
+                0,
+            )
+            .await?;
+            let other = storing
+                .iter()
+                .filter_map(|entity| entity.get("id").and_then(Value::as_str))
+                .any(|id| Some(id) != claim.holder.as_deref());
+            if other {
+                return Ok(Some(claim.taken()));
+            }
+        }
+        Ok(None)
     }
 
     /// The targets the writer can read in the space: one read through this endpoint under the
@@ -1280,6 +1384,468 @@ impl HeldWrite<'_> {
         }
         Ok(found)
     }
+}
+
+/// The entities of `class` whose stored end `slot` names `object`: the computed end's query
+/// (DM-67). Read with the pinned tenant and none of the caller's grants, because a relationship
+/// rule holds for the whole space; what the caller may see of the answer is decided by whoever
+/// uses it.
+async fn storing(
+    broker: &Broker,
+    headers: &HeaderMap,
+    class: &str,
+    slot: &str,
+    object: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<Value>, Box<ProblemDetails>> {
+    let q = query::encode(&format!("{slot}==\"{object}\""));
+    let target = format!(
+        "/ngsi-ld/v1/entities?type={}&q={q}&attrs={}&limit={limit}&offset={offset}",
+        query::encode(class),
+        query::encode(slot),
+    );
+    let answer = conditional::retrieve(broker, &target, headers).await?;
+    if !(200..300).contains(&answer.status) {
+        tracing::error!(
+            status = answer.status,
+            "the broker refused the read of the entities that point at a target"
+        );
+        return Err(Box::new(ProblemDetails::new(
+            502,
+            "upstream-unavailable",
+            "Broker Unavailable",
+        )));
+    }
+    Ok(match answer.body {
+        Value::Array(entities) => entities,
+        _ => Vec::new(),
+    })
+}
+
+/// Entities a delete's rules may reach, counting the ones they change and the ones they delete
+/// with it; a delete that reaches more is refused before anything changes (DM-71).
+const REACHED_PER_DELETE: usize = 500;
+
+/// Entities that point at a target, read per page.
+const POINTING_PER_READ: usize = 100;
+
+/// One change a delete's rules make to an entity that points at what it deletes (DM-66).
+#[derive(Debug)]
+enum Unlinking {
+    /// The entity goes with its target (`cascade` on a single end).
+    Delete(String),
+    /// The whole attribute goes (`set-null` on a single end).
+    DeleteAttribute { id: String, slot: String },
+    /// One link instance of a many end goes.
+    DeleteInstance {
+        id: String,
+        slot: String,
+        dataset: Option<String>,
+    },
+    /// A link instance whose `object` list named the target keeps its other targets.
+    Rewrite {
+        id: String,
+        slot: String,
+        dataset: Option<String>,
+        objects: Vec<String>,
+    },
+}
+
+/// One delete held against the relationships of the space's model (DM-71, T-2858).
+///
+/// The broker keeps no relationship rules (the owner's decision of 2026-09-25), so the rules run
+/// here as the gateway's own writes: every entity that points at what is deleted is read, the
+/// delete is refused while one of them keeps it (`restrict`, or a rule that would empty a
+/// required end, or an entity the caller may not change), and otherwise the entities are changed
+/// or deleted first and the entity itself last. Nothing is changed until every rule has passed;
+/// a reference written after the read is the race window Architecture/11 §1.2 names.
+struct HeldDelete<'a> {
+    gateway: &'a Gateway,
+    subject: &'a Subject,
+    endpoint: &'a Endpoint,
+    headers: &'a HeaderMap,
+    rules: &'a crate::relationships::RelationshipRules,
+}
+
+impl HeldDelete<'_> {
+    /// Runs the rules of a delete of one entity; the entity itself is the forwarded delete's.
+    async fn entity(&self, id: &str) -> Result<(), Box<Response<Body>>> {
+        let answer = |problem: Box<ProblemDetails>| Box::new(problem.into_response());
+        let steps = self.plan(id).await.map_err(answer)?;
+        self.apply(id, &steps).await.map_err(answer)
+    }
+
+    /// Runs the rules of a batch delete per id: an id the rules keep is refused in the batch's
+    /// answer (207), the others go on. Answers whether `sent` was rewritten.
+    async fn batch(
+        &self,
+        sent: &mut Vec<u8>,
+        divided: &mut Option<(Vec<String>, Refused)>,
+    ) -> Result<bool, Box<Response<Body>>> {
+        let answer = |problem: Box<ProblemDetails>| Box::new(problem.into_response());
+        let Ok(Value::Array(entries)) = serde_json::from_slice::<Value>(sent) else {
+            return Ok(false);
+        };
+        let mut refused: Refused = Vec::new();
+        let mut permitted = Vec::new();
+        let mut plans = Vec::new();
+        for entry in entries {
+            let Some(id) = entry.as_str() else {
+                permitted.push(entry);
+                continue;
+            };
+            match self.plan(id).await {
+                Ok(steps) => {
+                    plans.push((id.to_owned(), steps));
+                    permitted.push(entry);
+                }
+                Err(problem) if problem.status == 409 => refused.push((id.to_owned(), *problem)),
+                Err(problem) => return Err(answer(problem)),
+            }
+        }
+        for (id, steps) in &plans {
+            self.apply(id, steps).await.map_err(answer)?;
+        }
+        if refused.is_empty() {
+            return Ok(false);
+        }
+        let ids: Vec<String> = permitted.iter().filter_map(batch_entry_id).collect();
+        let refused = match divided.take() {
+            Some((_, mut earlier)) => {
+                earlier.extend(refused);
+                earlier
+            }
+            None => refused,
+        };
+        if permitted.is_empty() {
+            return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
+        }
+        *sent = serde_json::to_vec(&permitted).map_err(|error| {
+            tracing::error!(%error, "the ids a delete's rules kept do not serialize");
+            answer(Box::new(ProblemDetails::internal()))
+        })?;
+        *divided = Some((ids, refused));
+        Ok(true)
+    }
+
+    /// What the rules of a delete of `root` change, in the order they are applied: the
+    /// attributes and links first, then the entities deleted with it, farthest first, so a stop
+    /// part way never leaves a reference to something already gone. Reads only.
+    async fn plan(&self, root: &str) -> Result<Vec<Unlinking>, Box<ProblemDetails>> {
+        use crate::relationships::{unlink, Unlink};
+        let mut edits = Vec::new();
+        let mut deleted = Vec::new();
+        let mut going = BTreeSet::from([root.to_owned()]);
+        let mut queue = std::collections::VecDeque::from([root.to_owned()]);
+        while let Some(id) = queue.pop_front() {
+            for at in self.rules.referencing_id(&id) {
+                let pointing = self.pointing(at.class, at.slot, &id).await?;
+                for entity in &pointing {
+                    let Some(other) = entity.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    // An entity deleted by this same delete keeps nothing and needs no change.
+                    if going.contains(other) {
+                        continue;
+                    }
+                    match unlink(entity, at.slot, at.end, &id) {
+                        Unlink::Refused => {
+                            return Err(self.kept(at.class, at.slot, &id, &pointing, true));
+                        }
+                        Unlink::DeleteEntity => {
+                            self.may(
+                                Operation::DeleteEntity,
+                                at.class,
+                                other,
+                                at.slot,
+                                &id,
+                                &pointing,
+                            )?;
+                            going.insert(other.to_owned());
+                            queue.push_back(other.to_owned());
+                            deleted.push(Unlinking::Delete(other.to_owned()));
+                        }
+                        Unlink::DeleteAttribute => {
+                            self.may(
+                                Operation::DeleteAttrs,
+                                at.class,
+                                other,
+                                at.slot,
+                                &id,
+                                &pointing,
+                            )?;
+                            edits.push(Unlinking::DeleteAttribute {
+                                id: other.to_owned(),
+                                slot: at.slot.to_owned(),
+                            });
+                        }
+                        Unlink::Instances { removed, rewritten } => {
+                            if !removed.is_empty() {
+                                self.may(
+                                    Operation::DeleteAttrs,
+                                    at.class,
+                                    other,
+                                    at.slot,
+                                    &id,
+                                    &pointing,
+                                )?;
+                            }
+                            if !rewritten.is_empty() {
+                                self.may(
+                                    Operation::UpdateAttrs,
+                                    at.class,
+                                    other,
+                                    at.slot,
+                                    &id,
+                                    &pointing,
+                                )?;
+                            }
+                            edits.extend(removed.into_iter().map(|dataset| {
+                                Unlinking::DeleteInstance {
+                                    id: other.to_owned(),
+                                    slot: at.slot.to_owned(),
+                                    dataset,
+                                }
+                            }));
+                            edits.extend(rewritten.into_iter().map(|(dataset, objects)| {
+                                Unlinking::Rewrite {
+                                    id: other.to_owned(),
+                                    slot: at.slot.to_owned(),
+                                    dataset,
+                                    objects,
+                                }
+                            }));
+                        }
+                    }
+                    if going.len() + edits.len() > REACHED_PER_DELETE {
+                        return Err(Box::new(too_far(root)));
+                    }
+                }
+            }
+        }
+        edits.extend(deleted.into_iter().rev());
+        Ok(edits)
+    }
+
+    /// Every entity of `class` whose end `slot` points at `id`, page by page.
+    async fn pointing(
+        &self,
+        class: &str,
+        slot: &str,
+        id: &str,
+    ) -> Result<Vec<Value>, Box<ProblemDetails>> {
+        let mut all = Vec::new();
+        loop {
+            let page = storing(
+                &self.gateway.broker,
+                self.headers,
+                class,
+                slot,
+                id,
+                POINTING_PER_READ,
+                all.len(),
+            )
+            .await?;
+            let last = page.len() < POINTING_PER_READ;
+            all.extend(page);
+            if last {
+                return Ok(all);
+            }
+            if all.len() > REACHED_PER_DELETE {
+                return Err(Box::new(too_far(id)));
+            }
+        }
+    }
+
+    /// Refuses the change unless the caller's own grants allow `operation` on `other`: a rule
+    /// never reaches an entity its caller could not have changed by hand. A grant that decides
+    /// from the stored entity is not evaluated here and is held as a refusal.
+    fn may(
+        &self,
+        operation: Operation,
+        class: &str,
+        other: &str,
+        slot: &str,
+        id: &str,
+        pointing: &[Value],
+    ) -> Result<(), Box<ProblemDetails>> {
+        let requested = evaluator::Request {
+            types: BTreeSet::from([class.to_owned()]),
+            ..Default::default()
+        };
+        let allowed =
+            match self
+                .gateway
+                .pdp
+                .decide(self.subject, operation, &requested, self.endpoint)
+            {
+                Verdict::Rewrite(granted) => {
+                    !granted.empty
+                        && !conditional::state_dependent(&granted)
+                        && write_guard::check_granted_id(other, &granted).is_ok()
+                }
+                _ => false,
+            };
+        if allowed {
+            Ok(())
+        } else {
+            Err(self.kept(class, slot, id, pointing, false))
+        }
+    }
+
+    /// 409 for a delete the rules keep (DM-71): the slot and how many point at the target,
+    /// their ids only as far as the caller may read them, and never an id when the reason is an
+    /// entity the caller may not change.
+    fn kept(
+        &self,
+        class: &str,
+        slot: &str,
+        id: &str,
+        pointing: &[Value],
+        by_rule: bool,
+    ) -> Box<ProblemDetails> {
+        let count = pointing.len();
+        let detail = if by_rule {
+            format!(
+                "{count} `{class}` still point at `{id}` through `{slot}`, and the model's delete \
+                 rule keeps it while they do; unlink or delete them first (DM-71)"
+            )
+        } else {
+            format!(
+                "{count} `{class}` point at `{id}` through `{slot}`, and the delete rule would \
+                 change one you may not change; ask someone who may, or unlink it first (DM-71)"
+            )
+        };
+        let ids: Vec<Value> = if by_rule {
+            self.readable_ids(class, pointing)
+        } else {
+            Vec::new()
+        };
+        Box::new(
+            ProblemDetails::conflict()
+                .with_detail(detail)
+                .with_extension("rule", Value::String("restrict".to_owned()))
+                .with_extension("slot", Value::String(slot.to_owned()))
+                .with_extension("count", Value::from(count))
+                .with_extension("ids", Value::Array(ids)),
+        )
+    }
+
+    /// The ids of `pointing` the caller's read grants on this endpoint select.
+    fn readable_ids(&self, class: &str, pointing: &[Value]) -> Vec<Value> {
+        let requested = evaluator::Request {
+            types: BTreeSet::from([class.to_owned()]),
+            ..Default::default()
+        };
+        let Verdict::Rewrite(read) = self.gateway.pdp.decide(
+            self.subject,
+            Operation::QueryEntity,
+            &requested,
+            self.endpoint,
+        ) else {
+            return Vec::new();
+        };
+        if read.empty || conditional::state_dependent(&read) {
+            return Vec::new();
+        }
+        pointing
+            .iter()
+            .filter_map(|entity| entity.get("id").and_then(Value::as_str))
+            .filter(|id| write_guard::check_granted_id(id, &read).is_ok())
+            .map(|id| Value::String(id.to_owned()))
+            .collect()
+    }
+
+    /// Applies the planned changes in order. A step the broker refuses stops the delete with the
+    /// entity still in place, and the answer says how many changes were already made.
+    async fn apply(&self, root: &str, steps: &[Unlinking]) -> Result<(), Box<ProblemDetails>> {
+        for (done, step) in steps.iter().enumerate() {
+            let entity = |id: &str| format!("/ngsi-ld/v1/entities/{}", query::encode(id));
+            let attribute =
+                |id: &str, slot: &str| format!("{}/attrs/{}", entity(id), query::encode(slot));
+            let (method, target, body) = match step {
+                Unlinking::Delete(id) => (Method::DELETE, entity(id), None),
+                Unlinking::DeleteAttribute { id, slot } => {
+                    (Method::DELETE, attribute(id, slot), None)
+                }
+                Unlinking::DeleteInstance { id, slot, dataset } => {
+                    let target = match dataset {
+                        Some(dataset) => format!(
+                            "{}?datasetId={}",
+                            attribute(id, slot),
+                            query::encode(dataset)
+                        ),
+                        None => attribute(id, slot),
+                    };
+                    (Method::DELETE, target, None)
+                }
+                Unlinking::Rewrite {
+                    id,
+                    slot,
+                    dataset,
+                    objects,
+                } => {
+                    let mut value =
+                        serde_json::json!({ "type": "Relationship", "object": objects });
+                    if let Some(dataset) = dataset {
+                        value["datasetId"] = Value::String(dataset.clone());
+                    }
+                    (Method::PATCH, attribute(id, slot), Some(value.to_string()))
+                }
+            };
+            let mut headers = HeaderMap::new();
+            if let Some(tenant) = self.headers.get(tenancy::TENANT) {
+                headers.insert(tenancy::TENANT, tenant.clone());
+            }
+            if body.is_some() {
+                headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+            }
+            let body = body.map_or_else(Body::empty, Body::from);
+            let status = match self
+                .gateway
+                .broker
+                .send(method, &target, headers, body)
+                .await
+            {
+                Ok(answer) => answer.status(),
+                Err(error) => {
+                    tracing::error!(%error, "the broker did not take a delete rule's change");
+                    StatusCode::BAD_GATEWAY
+                }
+            };
+            // An entity another delete already took is gone either way; a link or an attribute
+            // that is not found was not removed by this delete, so it stops like any refusal.
+            let gone = status == StatusCode::NOT_FOUND && matches!(step, Unlinking::Delete(_));
+            if !status.is_success() && !gone {
+                tracing::error!(%status, %target, "the broker refused a delete rule's change");
+                return Err(Box::new(
+                    ProblemDetails::new(502, "upstream-unavailable", "Broker Unavailable")
+                        .with_detail(format!(
+                            "`{root}` is not deleted: the broker refused change {} of {} its \
+                             delete rules make, after {done} were made (DM-71)",
+                            done + 1,
+                            steps.len()
+                        ))
+                        .with_extension("changed", Value::from(done)),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 409 for a delete whose rules reach more entities than one delete may change.
+fn too_far(id: &str) -> ProblemDetails {
+    ProblemDetails::conflict()
+        .with_detail(format!(
+            "deleting `{id}` would reach more than {REACHED_PER_DELETE} entities through the \
+             model's delete rules; delete them in smaller parts first (DM-71)"
+        ))
+        .with_extension("rule", Value::String("restrict".to_owned()))
 }
 
 /// Checks and fills the units of a write body in place (DM-06), answering the quantities it

@@ -12,8 +12,11 @@
 //! - names a target the space does not hold, or that the writer may not read
 //!   (`target-missing`, checked by [`targets_of`] and one read through the endpoint).
 //!
-//! `target-taken` and the delete rules need the store's own constraint, so they are the
-//! broker's (T-2858); the gateway never reads and then writes to decide them. Reads are not
+//! It also refuses a one-to-one target another source already stores (`target-taken`), and runs
+//! the delete rule of every stored end that points at an entity being deleted (DM-71). The
+//! broker holds no relationship rules (the owner's decision of 2026-09-25, T-2858), so both are
+//! a read of the space followed by the write, with the race window Architecture/11 §1.2 names:
+//! [`claims_of`] and [`unlink`] decide, the enforcement point reads and writes. Reads are not
 //! touched: the computed end is never added to an answer (DM-67, CIM 009).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +39,73 @@ pub struct StoredEnd {
     pub many: bool,
     /// Whether an entity needs at least one target on it.
     pub required: bool,
+    /// Whether a target may be stored by one source only: a one-to-one (`target-taken`).
+    pub unique: bool,
+    /// What a delete of a target does to the entities that store it (DM-66).
+    pub on_delete: OnDelete,
+}
+
+/// The delete rule of a relationship (DM-66): `restrict` when the model states none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnDelete {
+    /// The delete is refused while any entity stores the target.
+    #[default]
+    Restrict,
+    /// A single end's entity is deleted with the target; a many end loses the one link.
+    Cascade,
+    /// The reference is removed: the whole attribute of a single end, the one link of a many end.
+    SetNull,
+}
+
+impl OnDelete {
+    fn read(value: Option<&str>) -> Self {
+        match value {
+            Some("cascade") => Self::Cascade,
+            Some("set-null") => Self::SetNull,
+            // Model Tools refuses any other rule (DM-68), so an unknown one is held strictly.
+            _ => Self::Restrict,
+        }
+    }
+}
+
+/// One stored end that points at a class: where to look for the entities a delete of that class
+/// reaches (DM-71).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Referencing<'a> {
+    /// The class that stores the end.
+    pub class: &'a str,
+    /// The stored end.
+    pub slot: &'a str,
+    /// The end's rules.
+    pub end: &'a StoredEnd,
+}
+
+/// A one-to-one target a write gives an entity; no other source may store it (`target-taken`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    /// The class of the entity written.
+    pub class: String,
+    /// The stored end.
+    pub slot: String,
+    /// The target URN.
+    pub object: String,
+    /// The class the end points at.
+    pub target: String,
+    /// The entity that claims it, when the write names it; its own current link is no conflict.
+    pub holder: Option<String>,
+}
+
+impl Claim {
+    /// The refusal for this claim when another source already stores the target.
+    pub fn taken(&self) -> Violation {
+        Violation {
+            rule: "target-taken",
+            class: self.class.clone(),
+            slot: self.slot.clone(),
+            object: Some(self.object.clone()),
+            target: self.target.clone(),
+        }
+    }
 }
 
 /// A target a write names, and where: what a `target-missing` refusal says.
@@ -63,7 +133,7 @@ pub struct RelationshipRules {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     /// The rule identifier: `target-missing`, `target-wrong-type`, `single-end-many-targets`,
-    /// `required-end-missing`.
+    /// `required-end-missing`, `target-taken`.
     pub rule: &'static str,
     /// The class of the entity written.
     pub class: String,
@@ -94,6 +164,10 @@ impl From<Violation> for ProblemDetails {
             ),
             "required-end-missing" => format!(
                 "`{slot}` of `{class}` is required: every `{class}` points at a {target} (DM-70)"
+            ),
+            "target-taken" => format!(
+                "`{slot}` of `{class}` is one-to-one, and another `{class}` already points at \
+                 `{named}`; unlink it there first (DM-70)"
             ),
             _ => format!(
                 "`{slot}` of `{class}` points at `{named}`, which is no {target} of this space you \
@@ -165,6 +239,11 @@ impl RelationshipRules {
                             target: target.to_owned(),
                             many: property.get("type").and_then(Value::as_str) == Some("array"),
                             required: required.contains(name.as_str()),
+                            unique: relationship.get("unique").and_then(Value::as_bool)
+                                == Some(true),
+                            on_delete: OnDelete::read(
+                                relationship.get("onDelete").and_then(Value::as_str),
+                            ),
                         },
                     ))
                 })
@@ -179,6 +258,30 @@ impl RelationshipRules {
     /// Whether the model relates nothing, so a write needs no look.
     pub fn is_empty(&self) -> bool {
         self.by_class.is_empty()
+    }
+
+    /// Every stored end that points at `entity_type`, the entities a delete of one reaches.
+    pub fn referencing(&self, entity_type: &str) -> Vec<Referencing<'_>> {
+        let wanted = local(entity_type);
+        self.by_class
+            .iter()
+            .flat_map(|(class, ends)| {
+                ends.iter()
+                    .filter(|(_, end)| local(&end.target) == wanted)
+                    .map(move |(slot, end)| Referencing {
+                        class: class.as_str(),
+                        slot: slot.as_str(),
+                        end,
+                    })
+            })
+            .collect()
+    }
+
+    /// Every stored end that points at the type the id `urn:ngsi-ld:{Type}:…` names.
+    pub fn referencing_id(&self, id: &str) -> Vec<Referencing<'_>> {
+        type_of_id(id)
+            .map(|kind| self.referencing(kind))
+            .unwrap_or_default()
     }
 
     fn of_class(&self, entity_type: &str) -> Option<(&str, &BTreeMap<String, StoredEnd>)> {
@@ -389,6 +492,138 @@ pub fn first_missing(targets: &Targets, found: &BTreeSet<String>) -> Option<Viol
             object: Some(urn.clone()),
             target: named.target.clone(),
         })
+}
+
+/// The one-to-one targets a write gives its entities, for the `target-taken` read. Run after
+/// [`targets_of`] accepted the payload; the payload is not changed.
+pub fn claims_of(payload: &Value, shape: Shape<'_>, rules: &RelationshipRules) -> Vec<Claim> {
+    let mut claims = Vec::new();
+    if rules.is_empty() {
+        return claims;
+    }
+    let mut claim = |entity: &Value| {
+        let Some(object) = entity.as_object() else {
+            return;
+        };
+        let holder = object
+            .get("id")
+            .or_else(|| object.get("@id"))
+            .and_then(Value::as_str)
+            .or(shape.addressed)
+            .map(str::to_owned);
+        for entity_type in types_of(object, shape.addressed) {
+            let Some((class, ends)) = rules.of_class(entity_type) else {
+                continue;
+            };
+            for (slot, end) in ends.iter().filter(|(_, end)| end.unique) {
+                let named = object.get(slot).and_then(objects).unwrap_or_default();
+                claims.extend(named.into_iter().map(|urn| Claim {
+                    class: class.to_owned(),
+                    slot: slot.clone(),
+                    object: urn,
+                    target: end.target.clone(),
+                    holder: holder.clone(),
+                }));
+            }
+        }
+    };
+    if let Some(attribute) = shape.targeted {
+        claim(&serde_json::json!({ attribute: payload }));
+        return claims;
+    }
+    match payload {
+        Value::Array(entities) => entities.iter().for_each(&mut claim),
+        entity => claim(entity),
+    }
+    claims
+}
+
+/// The claim of `claims` that another holder in the same write already made: two entities of one
+/// batch cannot both take a one-to-one target.
+pub fn claimed_twice(claims: &[Claim]) -> Option<&Claim> {
+    let mut seen: BTreeMap<(&str, &str, &str), Option<&str>> = BTreeMap::new();
+    claims.iter().find(|claim| {
+        let key = (
+            claim.class.as_str(),
+            claim.slot.as_str(),
+            claim.object.as_str(),
+        );
+        match seen.get(&key) {
+            Some(first) => *first != claim.holder.as_deref() || claim.holder.is_none(),
+            None => {
+                seen.insert(key, claim.holder.as_deref());
+                false
+            }
+        }
+    })
+}
+
+/// What a delete of `deleted` does to one entity that stores it on `slot` (DM-66, DM-71).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unlink {
+    /// The delete is refused: `restrict`, or a rule that would leave a required end empty.
+    Refused,
+    /// The entity goes with its target: `cascade` on a single end.
+    DeleteEntity,
+    /// The whole attribute goes: `set-null` on a single end.
+    DeleteAttribute,
+    /// A many end loses the links to the target and keeps the others: the instances to delete
+    /// (by `datasetId`, `None` for the default instance) and the ones whose `object` list keeps
+    /// other targets, with what they keep.
+    Instances {
+        /// Instances whose only target is the deleted entity.
+        removed: Vec<Option<String>>,
+        /// Instances that name the deleted entity beside others, with the others.
+        rewritten: Vec<(Option<String>, Vec<String>)>,
+    },
+}
+
+/// Decides what a delete of `deleted` does to `entity`, which stores it on the end `slot` (read
+/// with at least that attribute). Pure: the enforcement point reads the entity and applies it.
+pub fn unlink(entity: &Value, slot: &str, end: &StoredEnd, deleted: &str) -> Unlink {
+    if end.on_delete == OnDelete::Restrict {
+        return Unlink::Refused;
+    }
+    if !end.many {
+        return match end.on_delete {
+            OnDelete::Cascade => Unlink::DeleteEntity,
+            OnDelete::SetNull if end.required => Unlink::Refused,
+            _ => Unlink::DeleteAttribute,
+        };
+    }
+    let instances: Vec<&Value> = match entity.get(slot) {
+        Some(Value::Array(instances)) => instances.iter().collect(),
+        Some(instance) => vec![instance],
+        None => Vec::new(),
+    };
+    let mut removed = Vec::new();
+    let mut rewritten = Vec::new();
+    let mut left = 0;
+    for instance in instances {
+        let dataset = instance
+            .get("datasetId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let named = objects(instance).unwrap_or_default();
+        let others: Vec<String> = named
+            .iter()
+            .filter(|urn| *urn != deleted)
+            .cloned()
+            .collect();
+        left += others.len();
+        if others.len() == named.len() {
+            continue;
+        }
+        if others.is_empty() {
+            removed.push(dataset);
+        } else {
+            rewritten.push((dataset, others));
+        }
+    }
+    if end.required && left == 0 && !(removed.is_empty() && rewritten.is_empty()) {
+        return Unlink::Refused;
+    }
+    Unlink::Instances { removed, rewritten }
 }
 
 #[cfg(test)]
@@ -637,5 +872,195 @@ mod tests {
         took.sort();
         let p95 = took[took.len() * 95 / 100];
         assert!(p95 < std::time::Duration::from_millis(5), "p95 {p95:?}");
+    }
+
+    // --- target-taken and the delete rules (T-2858) ------------------------------------------
+
+    const DESK: &str = "urn:ngsi-ld:Desk:hel.fi:schools:d1";
+    const TEACHER: &str = "urn:ngsi-ld:Teacher:hel.fi:schools:t1";
+    const OTHER_TEACHER: &str = "urn:ngsi-ld:Teacher:hel.fi:schools:t2";
+
+    /// A Teacher has one Desk (one-to-one, set-null), belongs to a School (required, cascade),
+    /// and teaches Courses (many-to-many, cascade, required).
+    fn staff() -> RelationshipRules {
+        let end = |target: &str, cardinality: &str, on_delete: &str, unique: bool| {
+            json!({ "target": target, "inverse": "x", "cardinality": cardinality,
+                    "onDelete": on_delete, "unique": unique })
+        };
+        RelationshipRules::from_schema(&json!({ "definitions": {
+            "Teacher": {
+                "required": ["school", "courses"],
+                "properties": {
+                    "desk": { "type": "string", "x-ngsi-ld-relationship":
+                        end("Desk", "one-to-one", "set-null", true) },
+                    "school": { "type": "string", "x-ngsi-ld-relationship":
+                        end("School", "many-to-one", "cascade", false) },
+                    "courses": { "type": "array", "items": { "type": "string" },
+                        "x-ngsi-ld-relationship": end("Course", "many-to-many", "cascade", false) }
+                }
+            },
+            "Room": {
+                "properties": {
+                    "desks": { "type": "array", "items": { "type": "string" },
+                        "x-ngsi-ld-relationship": end("Desk", "many-to-many", "bogus", false) }
+                }
+            }
+        } }))
+    }
+
+    fn end_of<'a>(rules: &'a RelationshipRules, class: &str, slot: &str) -> &'a StoredEnd {
+        &rules.of_class(class).expect("the class relates").1[slot]
+    }
+
+    #[test]
+    fn unique_and_the_delete_rule_are_read_and_an_unknown_rule_restricts() {
+        // The T-2740 rules state no delete rule: restrict, the model's default (DM-66).
+        assert_eq!(
+            end_of(&rules(), "User", "school").on_delete,
+            OnDelete::Restrict
+        );
+        let rules = staff();
+        assert!(end_of(&rules, "Teacher", "desk").unique);
+        assert_eq!(
+            end_of(&rules, "Teacher", "desk").on_delete,
+            OnDelete::SetNull
+        );
+        assert_eq!(
+            end_of(&rules, "Teacher", "school").on_delete,
+            OnDelete::Cascade
+        );
+        assert!(!end_of(&rules, "Teacher", "school").unique);
+        assert_eq!(
+            end_of(&rules, "Room", "desks").on_delete,
+            OnDelete::Restrict
+        );
+    }
+
+    #[test]
+    fn the_ends_that_point_at_a_type_are_every_class_that_stores_one() {
+        let rules = staff();
+        let desk: Vec<(&str, &str)> = rules
+            .referencing("Desk")
+            .iter()
+            .map(|at| (at.class, at.slot))
+            .collect();
+        assert_eq!(desk, vec![("Room", "desks"), ("Teacher", "desk")]);
+        assert!(
+            rules.referencing("https://example.org/Desk").len() == 2,
+            "an expanded type"
+        );
+        assert!(rules.referencing("Teacher").is_empty());
+    }
+
+    #[test]
+    fn a_write_claims_only_its_one_to_one_targets_with_its_own_id() {
+        let rules = staff();
+        let teacher = json!({ "id": TEACHER, "type": "Teacher",
+            "desk": { "type": "Relationship", "object": DESK },
+            "school": { "type": "Relationship", "object": SCHOOL } });
+        let claims = claims_of(&teacher, whole(), &rules);
+        assert_eq!(claims.len(), 1, "{claims:?}");
+        assert_eq!(claims[0].slot, "desk");
+        assert_eq!(claims[0].object, DESK);
+        assert_eq!(claims[0].holder.as_deref(), Some(TEACHER));
+        assert_eq!(claims[0].taken().rule, "target-taken");
+
+        // A fragment for one attribute is claimed by the entity of the path.
+        let shape = Shape {
+            addressed: Some(TEACHER),
+            targeted: Some("desk"),
+            extent: Extent::Partial,
+        };
+        let claims = claims_of(
+            &json!({ "type": "Relationship", "object": DESK }),
+            shape,
+            &rules,
+        );
+        assert_eq!(claims[0].holder.as_deref(), Some(TEACHER));
+        // Unlinking with NGSI-LD's null claims nothing.
+        assert!(claims_of(
+            &json!({ "id": TEACHER, "type": "Teacher", "desk": "urn:ngsi-ld:null" }),
+            partial(TEACHER),
+            &rules
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn two_entities_of_one_batch_cannot_both_take_a_target() {
+        let rules = staff();
+        let teacher = |id: &str| {
+            json!({ "id": id, "type": "Teacher",
+            "desk": { "type": "Relationship", "object": DESK } })
+        };
+        let batch = json!([teacher(TEACHER), teacher(OTHER_TEACHER)]);
+        let claims = claims_of(&batch, whole(), &rules);
+        let twice = claimed_twice(&claims).expect("the second takes it again");
+        assert_eq!(twice.holder.as_deref(), Some(OTHER_TEACHER));
+        // One entity naming its own target twice is no conflict.
+        let same = json!([teacher(TEACHER), teacher(TEACHER)]);
+        assert!(claimed_twice(&claims_of(&same, whole(), &rules)).is_none());
+    }
+
+    #[test]
+    fn a_delete_rule_decides_what_happens_to_each_referencing_entity() {
+        let rules = staff();
+        let teacher = json!({ "id": TEACHER, "type": "Teacher",
+            "desk": { "type": "Relationship", "object": DESK } });
+        // set-null on an optional single end removes the attribute.
+        assert_eq!(
+            unlink(&teacher, "desk", end_of(&rules, "Teacher", "desk"), DESK),
+            Unlink::DeleteAttribute
+        );
+        // cascade on a single end takes the entity.
+        assert_eq!(
+            unlink(
+                &teacher,
+                "school",
+                end_of(&rules, "Teacher", "school"),
+                SCHOOL
+            ),
+            Unlink::DeleteEntity
+        );
+        // restrict refuses whatever the entity holds.
+        assert_eq!(
+            unlink(&json!({}), "desks", end_of(&rules, "Room", "desks"), DESK),
+            Unlink::Refused
+        );
+        // set-null on a required single end would empty it: refused as restrict is.
+        let mut required = end_of(&rules, "Teacher", "desk").clone();
+        required.required = true;
+        assert_eq!(unlink(&teacher, "desk", &required, DESK), Unlink::Refused);
+    }
+
+    #[test]
+    fn a_many_end_loses_only_the_link_to_the_deleted_target() {
+        let rules = staff();
+        let courses = end_of(&rules, "Teacher", "courses");
+        let teacher = json!({ "id": TEACHER, "type": "Teacher", "courses": [
+            { "type": "Relationship", "object": COURSE, "datasetId": "urn:ngsi-ld:Dataset:c1" },
+            { "type": "Relationship", "object": [COURSE, "urn:ngsi-ld:Course:hel.fi:schools:c3"] },
+            { "type": "Relationship", "object": "urn:ngsi-ld:Course:hel.fi:schools:c4",
+              "datasetId": "urn:ngsi-ld:Dataset:c4" }
+        ] });
+        assert_eq!(
+            unlink(&teacher, "courses", courses, COURSE),
+            Unlink::Instances {
+                removed: vec![Some("urn:ngsi-ld:Dataset:c1".into())],
+                rewritten: vec![(None, vec!["urn:ngsi-ld:Course:hel.fi:schools:c3".into()])],
+            }
+        );
+        // The last course of a required many end cannot go.
+        let last = json!({ "courses": { "type": "Relationship", "object": COURSE } });
+        assert_eq!(unlink(&last, "courses", courses, COURSE), Unlink::Refused);
+        // An entity that no longer names the target (it moved meanwhile) needs nothing.
+        let moved = json!({ "courses": { "type": "Relationship", "object": "urn:ngsi-ld:Course:hel.fi:schools:c9" } });
+        assert_eq!(
+            unlink(&moved, "courses", courses, COURSE),
+            Unlink::Instances {
+                removed: vec![],
+                rewritten: vec![]
+            }
+        );
     }
 }
