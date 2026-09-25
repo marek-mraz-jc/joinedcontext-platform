@@ -29,6 +29,7 @@ fn policy(yaml: &str) -> PolicySpec {
 /// may list the types.
 fn endpoint(slug: &str, representations: Vec<Representation>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
         title: std::collections::BTreeMap::new(),

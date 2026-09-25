@@ -85,6 +85,7 @@ fn endpoint(granted_types: &[&str]) -> Endpoint {
     ))
     .expect("the policy parses");
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

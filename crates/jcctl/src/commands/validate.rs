@@ -8,7 +8,7 @@
 
 use crate::assemble::{assemble, AssembleError, Assembly, Directories, Resolver};
 use crate::loader::{LoadError, Repository};
-use jc_core::kinds::{DataModelSpec, ModelProjectionSpec};
+use jc_core::kinds::{ContextSpaceSpec, DataModelLifecycle, DataModelSpec, ModelProjectionSpec};
 use jc_core::registry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -362,6 +362,24 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
         });
     }
 
+    let (refused, warned) = one_model_per_space(repo_dir, &repo);
+    for (location, message) in refused {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+    for (location, message) in warned {
+        report.warnings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in federation_topology(&repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -449,6 +467,9 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
 
 /// Where a finding sits: the file, the document inside it and its first line.
 type Location = (PathBuf, usize, usize);
+
+/// Messages, each at the place it is about.
+type Located = Vec<(Location, String)>;
 
 /// What the roles compiler refuses: a role name in two places, a binding that names a role it
 /// cannot reach, or one that names no role at all (PF-68, PF-69, PF-49).
@@ -920,6 +941,148 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
         ));
     }
     stale
+}
+
+/// A Context Space has one data model, and names it (DM-61, DM-62, ADR-N-033).
+///
+/// Refused: a second model of one space, a `dataModelRef` that names no model of that space,
+/// and a LinkML import that reaches out of the model's folder into another space's or project's
+/// files, which is neither read-only nor pinned. Warned, while a repository is being migrated: a
+/// space that names no model. A mirrored model is a peer's read-only copy (DM-48), not one of
+/// the space's own, so it is not counted.
+fn one_model_per_space(
+    repo_dir: &Path,
+    repo: &Repository,
+) -> (Located, Located) {
+    let (mut refused, mut warned) = (Vec::new(), Vec::new());
+    let mut models: BTreeMap<(Option<String>, String), Vec<String>> = BTreeMap::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "DataModel" {
+            continue;
+        }
+        // A model the typed parse refused is already a finding above.
+        let Ok(spec) = serde_json::from_value::<DataModelSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        if spec.lifecycle == DataModelLifecycle::Mirrored {
+            continue;
+        }
+        let location = (resource.path.clone(), resource.document, resource.line);
+        let held = models
+            .entry((id.namespace.clone(), spec.context_space_ref.clone()))
+            .or_default();
+        if let Some(first) = held.first() {
+            refused.push((
+                location.clone(),
+                format!(
+                    "DataModel `{}` is a second model of space `{}` beside `{first}`; a space has \
+                     one model (DM-61). Merge them into one: jcctl model merge --repo-dir <repo> \
+                     --project {} --space {} (DM-62)",
+                    id.name,
+                    spec.context_space_ref,
+                    id.namespace.as_deref().unwrap_or_default(),
+                    spec.context_space_ref,
+                ),
+            ));
+        }
+        held.push(id.name.clone());
+        if spec.validate().is_ok() {
+            for import in imports_out_of_the_folder(repo_dir, &resource.path, &spec.linkml) {
+                refused.push((
+                    location.clone(),
+                    format!(
+                        "DataModel `{}` imports `{import}` from outside its folder; import \
+                         another space's model by its published schema URL at a pinned version, \
+                         read-only (DM-61)",
+                        id.name
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (id, resource) in repo.iter() {
+        if id.kind != "ContextSpace" {
+            continue;
+        }
+        let Ok(spec) = serde_json::from_value::<ContextSpaceSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        let location = (resource.path.clone(), resource.document, resource.line);
+        let held = models
+            .get(&(id.namespace.clone(), id.name.clone()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        match (&spec.data_model_ref, held) {
+            (Some(named), held) if !held.iter().any(|model| model == named.name()) => {
+                refused.push((
+                    location,
+                    format!(
+                        "ContextSpace `{}` names DataModel `{}` in spec.dataModelRef, which is not \
+                         a model of this space{} (DM-61)",
+                        id.name,
+                        named.name(),
+                        match held.first() {
+                            Some(model) => format!("; its model is `{model}`"),
+                            None => String::new(),
+                        }
+                    ),
+                ));
+            }
+            (Some(_), _) => {}
+            (None, [model, ..]) => warned.push((
+                location,
+                format!(
+                    "ContextSpace `{}` names no data model; add spec.dataModelRef: \
+                     {{ kind: DataModel, name: {model} }} (DM-61)",
+                    id.name
+                ),
+            )),
+            (None, []) => warned.push((
+                location,
+                format!(
+                    "ContextSpace `{}` has no data model; create its model and name it in \
+                     spec.dataModelRef, so a write of a type it does not declare is refused \
+                     (DM-61, DM-62)",
+                    id.name
+                ),
+            )),
+        }
+    }
+    (refused, warned)
+}
+
+/// The `imports` of a model's LinkML source that climb out of the model's folder.
+///
+/// A relative import names a file of the repository; one that leaves the folder reads another
+/// space's source as it is today rather than a published version of it. A source that cannot
+/// be read or parsed imports nothing here: `jcctl model validate` is what compiles it.
+fn imports_out_of_the_folder(repo_dir: &Path, manifest: &Path, linkml: &str) -> Vec<String> {
+    let path = repo_dir
+        .join(manifest)
+        .parent()
+        .map(|dir| dir.join(linkml))
+        .unwrap_or_else(|| repo_dir.join(linkml));
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(source) = serde_norway::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    source
+        .get("imports")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|import| {
+            !import.contains("://")
+                && (import.starts_with('/') || import.split('/').any(|segment| segment == ".."))
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Turns the error that stopped the walk into a finding, keeping whatever location it

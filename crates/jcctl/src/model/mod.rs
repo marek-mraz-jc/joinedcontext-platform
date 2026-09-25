@@ -8,6 +8,7 @@
 //! against anything else (DM-19).
 
 pub mod http;
+pub mod merge;
 
 use crate::loader::{LoadedResource, Repository};
 use jc_core::kinds::data_model::{DataModelSpec, GeneratedArtifacts};

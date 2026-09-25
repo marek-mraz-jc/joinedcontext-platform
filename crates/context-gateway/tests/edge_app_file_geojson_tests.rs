@@ -32,6 +32,7 @@ operations: [queryEntity, retrieveEntity]
 /// The dev seed's public endpoint: anonymous callers read, nothing narrows what they read.
 fn endpoint() -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

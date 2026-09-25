@@ -249,6 +249,7 @@ fn policy() -> PolicySpec {
 
 fn endpoint(hidden: &[&str]) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

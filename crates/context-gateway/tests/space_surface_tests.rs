@@ -64,6 +64,7 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
     title.insert("en".to_owned(), format!("The {name} space"));
     Space {
         endpoint: Arc::new(Endpoint {
+            declared_types: None,
             roles: Default::default(),
             slug: name.to_owned(),
             title: std::collections::BTreeMap::new(),

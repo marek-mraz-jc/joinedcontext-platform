@@ -153,6 +153,7 @@ fn policy(information: &str) -> PolicySpec {
 
 fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

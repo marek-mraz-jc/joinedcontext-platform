@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]...\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]...\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -91,6 +91,12 @@ fn main() -> ExitCode {
         },
         ["model", "import", id, rest @ ..] => match import_options(rest) {
             Some((out, url)) => model_import(id, &out, url),
+            None => usage(),
+        },
+        ["model", "merge", rest @ ..] => match merge_options(rest) {
+            Some((dir, project, space, name)) => {
+                model_merge(&dir, &project, &space, name.as_deref())
+            }
             None => usage(),
         },
         ["model", "infer", rest @ ..] => match infer_options(rest) {
@@ -1110,6 +1116,58 @@ fn model_options(args: &[&str]) -> Option<(PathBuf, Option<String>)> {
         dir.map(|dir| (dir, url))
     } else {
         None
+    }
+}
+
+/// Parses `--repo-dir`, `--project`, `--space` and the optional `--name`, in any order.
+fn merge_options(args: &[&str]) -> Option<(PathBuf, String, String, Option<String>)> {
+    let (mut dir, mut project, mut space, mut name) = (None, None, None, None);
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest {
+        match *flag {
+            "--repo-dir" => dir = Some(PathBuf::from(value)),
+            "--project" => project = Some((*value).to_owned()),
+            "--space" => space = Some((*value).to_owned()),
+            "--name" => name = Some((*value).to_owned()),
+            _ => return None,
+        }
+        rest = tail;
+    }
+    match (rest.is_empty(), dir, project, space) {
+        (true, Some(dir), Some(project), Some(space)) => Some((dir, project, space, name)),
+        _ => None,
+    }
+}
+
+/// `jcctl model merge`: every model of one space becomes one (DM-62). What it wrote and
+/// removed is one JSON line; the space still has to name the model and the artifacts still
+/// have to be rendered, and stderr says both.
+fn model_merge(dir: &Path, project: &str, space: &str, name: Option<&str>) -> ExitCode {
+    match model::merge::merge(dir, project, space, name) {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "model": report.model,
+                    "merged": report.merged,
+                    "written": report.written,
+                    "removed": report.removed,
+                })
+            );
+            if !report.written.is_empty() {
+                eprintln!(
+                    "jcctl: name it in the space: spec.dataModelRef: {{ kind: DataModel, name: {} }}, \
+                     then render its artifacts: jcctl model generate --repo-dir {}",
+                    report.model,
+                    dir.display()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("jcctl: {err}");
+            ExitCode::FAILURE
+        }
     }
 }
 

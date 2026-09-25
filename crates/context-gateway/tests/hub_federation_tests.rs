@@ -56,6 +56,7 @@ information:
 
 fn hub_endpoint() -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: HUB_SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

@@ -80,6 +80,7 @@ fn air_quality() -> Model {
 /// fixture this file needs: a record only advertises what the manifest enabled.
 fn endpoint(slug: &str, space: &str, representations: Vec<Representation>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
         title: Default::default(),

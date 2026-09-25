@@ -51,6 +51,7 @@ operations: [queryEntity]
 
 fn endpoint_of(space: &str, policies: Vec<PolicySpec>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: space.to_owned(),
         title: BTreeMap::new(),

@@ -10,7 +10,7 @@
 use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::auth::dataspace_token::{agreements_of, Agreements};
 use crate::federation::{federations_of, Federations};
-use crate::resolver::{Endpoint, EndpointRoles, Model, Space};
+use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
@@ -180,6 +180,7 @@ pub fn endpoints_of(repo: &Repository) -> Vec<Endpoint> {
 pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endpoint> {
     let policies = policies_by_space(repo);
     let models = models_by_space(repo, root);
+    let declared = declared_types(repo, &models);
     let views = view_mappings(repo, root);
     let projections = projections(repo);
 
@@ -241,6 +242,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             description: language_map(&resource.manifest.metadata.rest, "description"),
             policies: bound,
             models: models.get(&key).cloned().unwrap_or_default(),
+            declared_types: declared.get(&key).cloned(),
             space,
             project,
             audience: spec.audience,
@@ -343,6 +345,7 @@ fn view_mappings(
 pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
     let policies = policies_by_space(repo);
     let models = models_by_space(repo, root);
+    let declared = declared_types(repo, &models);
 
     let mut spaces = Vec::new();
     for (id, resource) in repo.iter() {
@@ -381,6 +384,7 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                     .map(|named| named.iter().map(|(_, spec)| spec.clone()).collect())
                     .unwrap_or_default(),
                 models: models.get(&key).cloned().unwrap_or_default(),
+                declared_types: declared.get(&key).cloned(),
                 // A space's canonical surface serves the space's own model; a view is a
                 // decision of a published endpoint (SP-01, EP-54).
                 view_mapping: None,
@@ -500,6 +504,49 @@ fn models_by_space(
         }
     }
     models
+}
+
+/// The classes of every space's one model, for the spaces that name it (DM-61).
+///
+/// A space that names a model its repository does not hold declares nothing here and says so:
+/// `jcctl validate` refuses that before a commit, and a gateway that refused every write of the
+/// space over it would take a working surface down for a reference.
+fn declared_types(
+    repo: &Repository,
+    models: &BTreeMap<(String, String), Vec<Model>>,
+) -> BTreeMap<(String, String), DeclaredTypes> {
+    let mut declared = BTreeMap::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "ContextSpace" {
+            continue;
+        }
+        let Some(named) =
+            spec_of::<ContextSpaceSpec>(&resource.manifest).and_then(|spec| spec.data_model_ref)
+        else {
+            continue;
+        };
+        let key = (id.namespace.clone().unwrap_or_default(), id.name.clone());
+        let model = models
+            .get(&key)
+            .and_then(|held| held.iter().find(|model| model.name == named.name()));
+        match model {
+            Some(model) => {
+                declared.insert(
+                    key,
+                    DeclaredTypes {
+                        model: model.name.clone(),
+                        classes: model.classes.iter().cloned().collect(),
+                    },
+                );
+            }
+            None => tracing::warn!(
+                space = %id.name,
+                model = %named.name(),
+                "spec.dataModelRef names no model of the space; its writes are not narrowed to one"
+            ),
+        }
+    }
+    declared
 }
 
 /// Deserializes one manifest's `spec`, discarding a manifest the gateway cannot read.

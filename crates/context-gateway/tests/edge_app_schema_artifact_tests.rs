@@ -117,6 +117,7 @@ fn endpoint_with(
     hidden: &[&str],
 ) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
         title: Default::default(),

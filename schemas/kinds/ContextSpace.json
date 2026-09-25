@@ -86,7 +86,7 @@
               "type": "null"
             }
           ],
-          "description": "Reference to the primary LinkML Data Model for this space (Architecture/03)."
+          "description": "The one LinkML Data Model of this space, whose classes are its types (DM-61, ADR-N-033).\n\nAbsent on a space created before DM-61, which `jcctl validate` warns about. It names a model of the space's own project: another project's model is reused through the LinkML `imports` of this one, read-only and at a pinned version."
         },
         "defaultLocale": {
           "description": "Default locale for entities and metadata within this space (PF-25).",

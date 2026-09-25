@@ -136,6 +136,7 @@ information:
 
 fn endpoint(slug: &str, audience: Audience) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
         title: std::collections::BTreeMap::new(),
@@ -516,6 +517,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
     let accounts = service_accounts();
 
     let writer = Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: WRITER_SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

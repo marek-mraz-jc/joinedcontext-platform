@@ -85,6 +85,7 @@ fn policy(extra: &str) -> PolicySpec {
 
 fn endpoint(policy: PolicySpec) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

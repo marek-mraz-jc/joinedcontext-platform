@@ -39,6 +39,7 @@ const SUBSCRIPTION: &str = "urn:ngsi-ld:Subscription:banskabystrica.sk:ovzdusie:
 
 fn endpoint() -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: std::collections::BTreeMap::new(),

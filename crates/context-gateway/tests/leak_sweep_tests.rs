@@ -162,6 +162,7 @@ fn endpoint() -> Endpoint {
         json!({ "type": "object", "properties": p })
     };
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

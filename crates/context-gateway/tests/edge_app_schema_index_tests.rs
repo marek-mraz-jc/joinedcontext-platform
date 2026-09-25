@@ -75,6 +75,7 @@ fn air_quality() -> Model {
 
 fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
         title: Default::default(),

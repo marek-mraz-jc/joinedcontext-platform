@@ -50,6 +50,7 @@ temporalQ: "timerel=after;timeAt=2026-01-01T00:00:00Z"
 
 fn endpoint() -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

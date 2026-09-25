@@ -38,6 +38,7 @@ fn policy(yaml: &str) -> PolicySpec {
 
 fn endpoint() -> Endpoint {
     Endpoint {
+        declared_types: None,
         roles: Default::default(),
         slug: OPEN.to_owned(),
         title: Default::default(),
