@@ -383,6 +383,79 @@ fn a_mirror_declared_without_rows_is_refused() {
     assert!(matches!(error, Error::Rows(_)), "{error}");
 }
 
+/// A CSV of `rows` air-quality rows; row `bad`, when given, has a cell too many.
+fn rows_csv(rows: usize, bad: Option<usize>) -> String {
+    let mut text = String::from("id,type,temperature.value\r\n");
+    for row in 0..rows {
+        let extra = if Some(row) == bad { ",surplus" } else { "" };
+        text.push_str(&format!(
+            "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:{row},AirQualityObserved,{row}.5{extra}\r\n"
+        ));
+    }
+    text
+}
+
+/// T-2968: a table larger than one upsert goes out batch by batch, every row of it, typed from
+/// all its rows and not from the first batch alone.
+#[test]
+fn a_table_larger_than_one_upsert_is_written_in_batches_and_whole() {
+    let dir = repo("mirror-batches");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+
+    let line = publish_one(
+        &mut api,
+        &found[1],
+        &record("air-rows"),
+        Some(&rows_csv(1201, None)),
+        &settings(),
+    )
+    .expect("published");
+
+    assert_eq!(line.mirror.map(|m| m.rows), Some(1201));
+    let upserts: Vec<usize> = api
+        .calls()
+        .filter(|(action, _)| *action == "datastore_upsert")
+        .map(|(_, payload)| payload["records"].as_array().map_or(0, Vec::len))
+        .collect();
+    assert_eq!(upserts, vec![500, 500, 201]);
+    assert_eq!(
+        api.rows(DATASTORE_RESOURCE).map(|rows| rows.len()),
+        Some(1201)
+    );
+    let fields = api.table_fields(DATASTORE_RESOURCE).expect("the table");
+    assert_eq!(fields[2]["type"], json!("float"));
+}
+
+/// T-2968: a bad row in the last batch refuses the table before the first batch is written, so
+/// a publication never leaves half a reload in the catalogue.
+#[test]
+fn a_bad_row_in_a_later_batch_writes_no_row_at_all() {
+    let dir = repo("mirror-bad-row");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+
+    let error = publish_one(
+        &mut api,
+        &found[1],
+        &record("air-rows"),
+        Some(&rows_csv(1201, Some(1100))),
+        &settings(),
+    )
+    .expect_err("a ragged row is refused");
+
+    assert!(error.to_string().contains("1100"), "{error}");
+    assert!(
+        !api.actions()
+            .iter()
+            .any(|action| action.starts_with("datastore_")),
+        "{:?}",
+        api.actions()
+    );
+}
+
 /// CC-19: a withdrawal drops the table, then the dataset; a second one changes nothing.
 #[test]
 fn a_withdrawal_drops_the_table_and_the_dataset_once() {
