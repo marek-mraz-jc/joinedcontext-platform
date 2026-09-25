@@ -18,6 +18,7 @@ pub mod grid;
 pub mod group;
 pub mod mapping;
 pub mod model_projection;
+pub mod org_settings;
 pub mod organization;
 pub mod pipeline;
 pub mod policy;
@@ -70,6 +71,7 @@ pub use mapping::{
     VocabularyAlignment,
 };
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
+pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
     Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
 };

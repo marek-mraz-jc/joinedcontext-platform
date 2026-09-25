@@ -2,6 +2,7 @@
 
 use crate::envelope::{self, Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
+use crate::kinds::org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies};
 use crate::names;
 use crate::urn::Urn;
 use schemars::JsonSchema;
@@ -26,6 +27,14 @@ pub struct OrganizationSpec {
     /// How projects are opened and who sees them (PF-61, PF-65).
     #[serde(default)]
     pub projects: ProjectsPolicy,
+    /// The organization's choices: public apps, the password policy, the models agents may use
+    /// (ADR-N-035, PF-96).
+    #[serde(default, skip_serializing_if = "OrganizationPolicies::is_unset")]
+    pub policies: OrganizationPolicies,
+    /// The organization's numbers: edge rates, body sizes, sessions, invitations, model spend,
+    /// pipeline outcomes and uploads (ADR-N-035, PF-96).
+    #[serde(default, skip_serializing_if = "OrganizationLimits::is_unset")]
+    pub limits: OrganizationLimits,
 }
 
 /// The organization's rules for its projects (PF-61, PF-65).
@@ -211,6 +220,9 @@ impl OrganizationSpec {
         if let Some(quota) = self.projects.quota.as_ref() {
             quota.validate()?;
         }
+        // The ranges no operator may widen; the Portal checks the operator's file on every door
+        // (PF-97).
+        self.check_limits(&OrganizationBounds::safety())?;
 
         Ok(())
     }

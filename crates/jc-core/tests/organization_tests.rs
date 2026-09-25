@@ -188,6 +188,8 @@ fn organization_names_validators_smoke() {
             default_locale: "sk".to_string(),
             contacts: vec![],
             projects: Default::default(),
+            policies: Default::default(),
+            limits: Default::default(),
         }
     )
     .resource_path()
