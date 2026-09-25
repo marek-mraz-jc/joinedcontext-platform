@@ -100,6 +100,14 @@
           "description": "Whether this context space is an ephemeral sandbox (CC-67, PF-19).",
           "type": "boolean"
         },
+        "missingUnitCode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MissingUnitCode"
+            }
+          ],
+          "description": "What a write through an Endpoint does with a quantity Property of the model that carries no `unitCode`: `fill` writes the model's code and says so, `refuse` answers `400` (DM-06). A `unitCode` other than the model's is refused either way."
+        },
         "ttlDays": {
           "description": "Enforced time-to-live in days for ephemeral sandboxes (1..=14, PF-19).",
           "format": "uint32",
@@ -118,6 +126,25 @@
         }
       },
       "type": "object"
+    },
+    "MissingUnitCode": {
+      "description": "What a space does with a quantity written without its `unitCode` (DM-06).",
+      "oneOf": [
+        {
+          "description": "The gateway writes the model's code and names it in the answer.",
+          "enum": [
+            "fill"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The gateway refuses the write, naming the attribute and the code it needs.",
+          "enum": [
+            "refuse"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "MultiLanguageMap": {
       "additionalProperties": {

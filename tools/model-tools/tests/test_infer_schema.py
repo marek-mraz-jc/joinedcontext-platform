@@ -103,6 +103,21 @@ def test_units_come_from_the_header_as_cefact_codes():
     assert [op["value"] for op in units] == ["GQ", "CEL", "KMH", "MTR"]
 
 
+def test_a_bracketed_symbol_is_read_from_the_whole_code_list():
+    """T-2811, DM-06: any Rec 20 symbol in brackets is a unit, not only the aliases; `temp_C` is
+    Celsius; a symbol several rare units share names none rather than a guess."""
+    from infer_schema import _unit
+
+    assert _unit("PM10 (µg/m³)") == ("GQ", "PM10")
+    assert _unit("PM2.5 (μg/m³)") == ("GQ", "PM2.5")
+    assert _unit("rain (mm)") == ("MMT", "rain")
+    assert _unit("power [kW]") == ("KWT", "power")
+    assert _unit("pressure (hPa)") == ("A97", "pressure")
+    assert _unit("temp_C") == ("CEL", "temp")
+    assert _unit("charge_C") == (None, "charge_C")
+    assert _unit("count (zzz)") == (None, "count (zzz)")
+
+
 def test_a_mixed_column_stays_a_string_and_is_named_under_untyped():
     answer = infer("sensors.csv", SENSORS)
 

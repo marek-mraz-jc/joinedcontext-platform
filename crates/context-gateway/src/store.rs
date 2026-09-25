@@ -12,6 +12,7 @@ use crate::auth::dataspace_token::{agreements_of, Agreements};
 use crate::federation::{federations_of, Federations};
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::translators::view_mapping::ViewMapping;
+use crate::units::UnitRules;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
     ModelProjectionSpec, PolicySpec, Representation,
@@ -536,9 +537,10 @@ fn declared_types(
         if id.kind != "ContextSpace" {
             continue;
         }
-        let Some(named) =
-            spec_of::<ContextSpaceSpec>(&resource.manifest).and_then(|spec| spec.data_model_ref)
-        else {
+        let Some(space) = spec_of::<ContextSpaceSpec>(&resource.manifest) else {
+            continue;
+        };
+        let Some(named) = space.data_model_ref else {
             continue;
         };
         let key = (id.namespace.clone().unwrap_or_default(), id.name.clone());
@@ -552,6 +554,11 @@ fn declared_types(
                     DeclaredTypes {
                         model: model.name.clone(),
                         classes: model.classes.iter().cloned().collect(),
+                        units: model
+                            .json_schema
+                            .as_ref()
+                            .map(|schema| UnitRules::from_schema(schema, space.missing_unit_code))
+                            .unwrap_or_default(),
                     },
                 );
             }

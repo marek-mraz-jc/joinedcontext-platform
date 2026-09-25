@@ -268,9 +268,28 @@ def _unit(header: str) -> tuple[str | None, str]:
     token = bracketed.group(1) if bracketed else re.split(r"[\s_]+", text)[-1] if re.search(r"[\s_]", text) else ""
     key = token.strip().lower().replace("\u00b5", "u").replace("\u03bc", "u").replace("³", "3").replace("²", "2")
     code = UNITS.get(key)
+    stem = text[: bracketed.start()] if bracketed else re.split(r"[\s_]+" + re.escape(token) + r"$", text)[0]
+    if code is None and bracketed:
+        code = _by_symbol(token.strip())
+    # `temp_C`: a lone C after a temperature is degrees Celsius, not the coulomb its symbol is.
+    if code is None and key == "c" and re.search(r"temp", stem, re.IGNORECASE):
+        return "CEL", stem
     if code is None or (len(key) == 1 and key != "%" and not bracketed):
         return None, text
-    return code, text[: bracketed.start()] if bracketed else re.split(r"[\s_]+" + re.escape(token) + r"$", text)[0]
+    return code, stem
+
+
+def _by_symbol(symbol: str) -> str | None:
+    """The code whose Rec 20 symbol a bracketed header token is (`(µg/m³)`, `(mm)`, `(kW)`).
+
+    Symbols are compared exactly, with `μ` read as `µ`. Several units share some symbols; the
+    frequent one wins, and where none is frequent the token names no unit rather than a guess.
+    """
+    wanted = symbol.replace("\u03bc", "\u00b5")
+    found = [u for u in CODE_LIST.values() if not u["deprecated"] and u["symbol"] == wanted]
+    frequent = [u for u in found if u["frequent"]]
+    chosen = frequent if frequent else found
+    return chosen[0]["code"] if len(chosen) == 1 else None
 
 
 # ---------------------------------------------------------------------------------------------

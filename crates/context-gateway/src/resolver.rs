@@ -156,6 +156,10 @@ pub struct DeclaredTypes {
     pub model: String,
     /// Its classes, the only entity types the space takes.
     pub classes: BTreeSet<String>,
+    /// The unit each of its quantities is measured in, and what a write without one gets
+    /// (DM-06): read from the model's generated JSON Schema and the space's
+    /// `spec.missingUnitCode`.
+    pub units: crate::units::UnitRules,
 }
 
 impl DeclaredTypes {

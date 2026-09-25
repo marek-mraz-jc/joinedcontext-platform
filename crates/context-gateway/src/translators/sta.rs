@@ -156,6 +156,25 @@ pub fn location(endpoint: &str, entity: &Value) -> Option<Value> {
     }))
 }
 
+/// A datastream's `unitOfMeasurement` from the attribute's `unitCode` (EP-12, DM-06): the name
+/// and symbol the UN/CEFACT code list gives it, its definition the code's IRI. A code the list
+/// does not know keeps the code as its name and symbol, so the reader still sees what was
+/// stored; no code is an unknown unit.
+fn unit_of_measurement(code: Option<&str>) -> Value {
+    let Some(code) = code else {
+        return json!({ "name": "unknown", "symbol": "", "definition": "" });
+    };
+    let definition = format!("https://vocabulary.uncefact.org/UnitMeasureCode#{code}");
+    match jc_core::units::lookup(code) {
+        Some(unit) => json!({
+            "name": unit.name,
+            "symbol": if unit.symbol.is_empty() { code } else { unit.symbol },
+            "definition": definition,
+        }),
+        None => json!({ "name": code, "symbol": code, "definition": definition }),
+    }
+}
+
 /// One `Datastream` per measured attribute of the entity (EP-12).
 pub fn datastreams(endpoint: &str, entity: &Value) -> Vec<Value> {
     measurements(entity)
@@ -169,12 +188,7 @@ pub fn datastreams(endpoint: &str, entity: &Value) -> Vec<Value> {
                 "name": name,
                 "description": format!("{name} of {}", entity["id"].as_str().unwrap_or_default()),
                 "observationType": "http://www.opengis.net/def/observationType/OGC-OM/2.0/OM_Measurement",
-                "unitOfMeasurement": {
-                    "name": unit.unwrap_or("unknown"),
-                    "symbol": unit.unwrap_or(""),
-                    "definition": unit.map_or_else(String::new, |code|
-                        format!("https://vocabulary.uncefact.org/UnitMeasureCode#{code}")),
-                },
+                "unitOfMeasurement": unit_of_measurement(unit),
                 "Observations@iot.navigationLink":
                     format!("{}/Observations", self_link(endpoint, "Datastreams", &id)),
                 "Thing@iot.navigationLink":
