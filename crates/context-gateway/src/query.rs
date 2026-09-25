@@ -322,7 +322,11 @@ pub fn unselected(params: &[(String, String)]) -> bool {
 /// never supply a selector: after the PDP has spoken, the constraint set is the whole answer.
 pub fn selects(constraints: &Constraints) -> bool {
     !constraints.types.is_empty()
-        || !constraints.attrs.is_empty()
+        // What reaches the broker as `attrs`: an identity-only set selects nothing there (T-2963).
+        || constraints
+            .attrs
+            .iter()
+            .any(|name| !IDENTITY.contains(&name.as_str()))
         || constraints.q.is_some()
         || constraints.geo_q.is_some()
 }
@@ -344,8 +348,9 @@ pub fn upstream(
     if !constraints.types.is_empty() {
         out.push(("type".to_owned(), join_list(&constraints.types)));
     }
-    if !constraints.attrs.is_empty() {
-        out.push(("attrs".to_owned(), join_list(&constraints.attrs)));
+    let attrs = broker_attrs(params, &constraints.attrs);
+    if !attrs.is_empty() {
+        out.push(("attrs".to_owned(), join_list(&attrs)));
     }
     // The grants' scopes are not a `scopeQ` any more: each policy carries its own, folded
     // into its own `q` term, so no expression can pair one policy's filter with another
@@ -470,6 +475,24 @@ fn split_compound(compound: &str) -> Vec<(String, String)> {
         rest = rest.get(end + 1..).unwrap_or_default();
     }
     out
+}
+
+/// An entity's identity, which CIM 009 does not count among its attributes (clause 4.5).
+const IDENTITY: [&str; 2] = ["id", "type"];
+
+/// The `attrs` the broker is given (T-2963, R9): the constraint set without `id` and `type`,
+/// which the broker refuses as attribute names. A grant names them when an App's
+/// `dataNeeds.attrs` does, and `narrow_to_identity` uses them to mean "identity only". The
+/// projection keeps them on every entity anyway, and the grant's types still select, so nothing
+/// the grant does not cover comes back. A caller whose own `attrs` named one asked the broker
+/// that question, and gets its answer.
+fn broker_attrs(params: &[(String, String)], attrs: &BTreeSet<String>) -> BTreeSet<String> {
+    let asked = split_list(first(params, "attrs"));
+    attrs
+        .iter()
+        .filter(|name| !IDENTITY.contains(&name.as_str()) || asked.contains(*name))
+        .cloned()
+        .collect()
 }
 
 fn split_list(value: Option<&str>) -> BTreeSet<String> {
@@ -654,6 +677,55 @@ mod tests {
             None,
             "an unlisted parameter is dropped"
         );
+    }
+
+    /// T-2963, R9: `id` and `type` are an entity's identity, not attributes, and the broker
+    /// refuses them in `attrs`. A grant that names them (an App's `dataNeeds.attrs` often does)
+    /// or the identity-only set of `narrow_to_identity` reaches the broker without them; the
+    /// caller's own `attrs=id` still does, and its answer stays the broker's.
+    #[test]
+    fn a_grants_identity_members_never_reach_the_broker_as_attributes() {
+        let grant = |attrs: &[&str]| Constraints {
+            types: BTreeSet::from(["BikeHireDockingStation".to_owned()]),
+            attrs: attrs.iter().map(|name| (*name).to_owned()).collect(),
+            ..Constraints::default()
+        };
+        let sent =
+            |raw: &str, constraints: &Constraints| parse(&upstream(&parse(raw), constraints, &[]));
+
+        let named = sent("limit=10", &grant(&["id", "name", "availableBikeNumber"]));
+        assert_eq!(first(&named, "attrs"), Some("availableBikeNumber,name"));
+        assert_eq!(first(&named, "type"), Some("BikeHireDockingStation"));
+
+        // Identity alone: no attrs at all, the grant's types still select, projection keeps id/type.
+        for identity in [&["id"][..], &["id", "type"][..]] {
+            let only = sent("limit=10", &grant(identity));
+            assert_eq!(first(&only, "attrs"), None, "{identity:?}");
+            assert_eq!(
+                first(&only, "type"),
+                Some("BikeHireDockingStation"),
+                "{identity:?}"
+            );
+            let untyped = Constraints {
+                types: BTreeSet::new(),
+                ..grant(identity)
+            };
+            assert!(
+                !selects(&untyped),
+                "an identity-only set is no selector: {identity:?}"
+            );
+            // A download falls back to the space's types rather than an unselected query.
+            let fallback = parse(&upstream(
+                &parse("limit=10"),
+                &untyped,
+                &["Vehicle".to_owned()],
+            ));
+            assert_eq!(first(&fallback, "type"), Some("Vehicle"), "{identity:?}");
+        }
+
+        // The caller asked for `id` in their own words: that question is the broker's to answer.
+        let asked = sent("attrs=id&limit=10", &grant(&["id", "name"]));
+        assert_eq!(first(&asked, "attrs"), Some("id,name"));
     }
 
     /// T-0271, CIM 009 clause 4.10: `georel=near;maxDistance==2000` is one value with a `;`

@@ -221,6 +221,12 @@ impl BrokerStub {
                         return unselected_query().into_response();
                     }
 
+                    // AntaresBroker refuses an entity's identity named as an attribute, and
+                    // a stub that took it hid T-2963 until dev answered every App read 400.
+                    if let Some(name) = identity_in_attrs(&query) {
+                        return identity_attribute(&name).into_response();
+                    }
+
                     // Only a page request consumes a page, so a `/types` hop on the way in
                     // does not shift what the next entity query gets back.
                     let served_pages = hops
@@ -261,6 +267,30 @@ fn selects(query: &str) -> bool {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .any(|(name, value)| !value.is_empty() && matches!(name, "type" | "attrs" | "q" | "georel"))
+}
+
+/// `id` or `type` in the `attrs` of a query: not attributes, so a broker refuses them.
+fn identity_in_attrs(query: &str) -> Option<String> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(name, _)| *name == "attrs")
+        .flat_map(|(_, value)| value.split("%2C").flat_map(|part| part.split(',')))
+        .find(|attr| matches!(*attr, "id" | "type"))
+        .map(str::to_owned)
+}
+
+/// AntaresBroker's refusal of an identity member named as an attribute, as dev answered it.
+fn identity_attribute(name: &str) -> (axum::http::StatusCode, axum::Json<Value>) {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(json!({
+            "type": "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
+            "title": "BadRequestData",
+            "status": 400,
+            "detail": format!("invalid attribute name \"{name}\" in attrs"),
+        })),
+    )
 }
 
 /// The refusal a conformant broker sends for an unselected query, word for word.
