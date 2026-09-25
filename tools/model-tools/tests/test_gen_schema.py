@@ -151,3 +151,50 @@ def test_a_slot_with_an_unknown_kind_is_refused(tmp_path):
     )
     with pytest.raises(Exception, match="Telepathy"):
         compile_schema(str(source))
+
+
+ENUM_MODEL = """id: https://hel.fi/models/alerts
+name: alerts
+prefixes:
+  linkml: https://w3id.org/linkml/
+  hel: https://hel.fi/terms/
+default_prefix: hel
+imports: [linkml:types]
+classes:
+  Alert:
+    slots: [id, category]
+slots:
+  id: {identifier: true}
+  category: {range: AlertCategory}
+enums:
+  AlertCategory:
+    permissible_values:
+      traffic:
+        title: {en: Traffic, sk: Doprava}
+        description: Roads and public transport
+      weather:
+        title: Weather
+      health: {}
+"""
+
+
+def test_an_enum_carries_the_titles_of_its_values():
+    """UI-86: the grid and the forms show a value's title, so the schema has to carry it."""
+    schema = compile_schema(ENUM_MODEL)
+    enum = schema["definitions"]["AlertCategory"]
+    assert enum["enum"] == ["traffic", "weather", "health"]
+    assert enum["x-enum-titles"] == {"traffic": {"en": "Traffic", "sk": "Doprava"}, "weather": "Weather"}
+    assert enum["x-enum-descriptions"] == {"traffic": "Roads and public transport"}
+    # The slot still points at the enum, and the titles change nothing a validator enforces.
+    assert schema["definitions"]["Alert"]["properties"]["category"]["$ref"] == "#/definitions/AlertCategory"
+    Draft7Validator.check_schema(schema)
+    alert = {**schema, "$ref": "#/definitions/Alert"}
+    assert Draft7Validator(alert).is_valid({"id": "a", "category": "weather"})
+    assert not Draft7Validator(alert).is_valid({"id": "a", "category": "Weather"})
+
+
+def test_an_enum_without_titles_gets_no_title_keywords():
+    schema = compile_schema(ENUM_MODEL.replace("        title: {en: Traffic, sk: Doprava}\n", "").replace(
+        "        description: Roads and public transport\n", "").replace("        title: Weather\n", ""))
+    enum = schema["definitions"]["AlertCategory"]
+    assert "x-enum-titles" not in enum and "x-enum-descriptions" not in enum
