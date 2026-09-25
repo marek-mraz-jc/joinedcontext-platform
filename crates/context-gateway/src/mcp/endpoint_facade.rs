@@ -39,13 +39,13 @@
 //! the gateway can render; `describe_schema` renders the two formalisms the gateway
 //! compiles and names the rest as served beside the model.
 
-use crate::app::{ngsi_ld_request, sha256_hex, Gateway};
+use crate::app::{ngsi_ld_request, sha256_hex, Credential, Gateway};
 use crate::handlers::{access, schema};
 use crate::mcp::elicitation;
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
 use crate::resolver::{Endpoint, Model};
 use axum::body::Body;
-use axum::http::{HeaderValue, Method, Response, StatusCode};
+use axum::http::{Method, Response, StatusCode};
 use jc_core::kinds::Operation;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, LazyLock};
@@ -1285,6 +1285,110 @@ fn granted(
         })
 }
 
+/// Whether the caller may read anything on this Endpoint: a data tool its grants cover. An
+/// Endpoint that answers only the describing tools is not one the hub lists (ADR-N-025 2.1).
+pub(crate) fn reads_anything(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> bool {
+    TOOLS.iter().any(|tool| {
+        !tool.operations.is_empty() && granted(gateway, endpoint, subject, tool.operations)
+    })
+}
+
+/// The hub's catalogue (ADR-N-025 2.2, 2.8): each tool once, listed when at least one Endpoint of
+/// the caller's list grants it, with the one required `endpoint` argument whose enum is that list.
+/// `tools/list` never multiplies by Endpoint.
+pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Vec<Value> {
+    let slugs: Vec<&str> = reach
+        .iter()
+        .map(|(endpoint, _)| endpoint.slug.as_str())
+        .collect();
+    TOOLS
+        .iter()
+        .filter(|tool| {
+            reach
+                .iter()
+                .any(|(endpoint, subject)| granted(gateway, endpoint, subject, tool.operations))
+        })
+        .map(|tool| {
+            let mut schema = (tool.schema)();
+            if let Value::Object(object) = &mut schema {
+                if let Some(Value::Object(properties)) = object.get_mut("properties") {
+                    properties.insert(
+                        "endpoint".to_owned(),
+                        json!({
+                            "type": "string",
+                            "enum": slugs,
+                            "description": "The Endpoint this call reads or writes, by the slug \
+                                            list_endpoints answers. One per call.",
+                        }),
+                    );
+                }
+                match object.get_mut("required") {
+                    Some(Value::Array(required)) => required.push(json!("endpoint")),
+                    _ => {
+                        object.insert("required".to_owned(), json!(["endpoint"]));
+                    }
+                }
+            }
+            json!({
+                "name": tool.name,
+                "description": format!(
+                    "{} Name the Endpoint in `endpoint`; the call is that Endpoint's own.",
+                    tool.description
+                ),
+                "inputSchema": schema,
+                "outputSchema": output_schema(tool),
+                "annotations": {
+                    "readOnlyHint": tool.read_only(),
+                    "destructiveHint": !tool.read_only(),
+                },
+            })
+        })
+        .collect()
+}
+
+/// How the hub stands with one tool on the Endpoint a call names (ADR-N-025 2.8, SP-17, SP-20).
+pub(crate) enum HubTool {
+    /// No such tool, or none of the caller's Endpoints grants it: the hub never listed it.
+    Unknown,
+    /// Listed, because another Endpoint of the caller's list grants it, and not granted here:
+    /// the tool error that names the Endpoint and the operation.
+    Ungranted(Value),
+    /// The Endpoint grants it; the call goes on as that Endpoint's own.
+    Granted,
+}
+
+/// Where `name` stands on `endpoint` for a caller whose hub list is `reach`.
+pub(crate) fn hub_tool(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    reach: &[(Arc<Endpoint>, Subject)],
+    name: &str,
+) -> HubTool {
+    let Some(tool) = TOOLS.iter().find(|tool| tool.name == name) else {
+        return HubTool::Unknown;
+    };
+    if granted(gateway, endpoint, subject, tool.operations) {
+        return HubTool::Granted;
+    }
+    let listed = reach
+        .iter()
+        .any(|(other, holder)| granted(gateway, other, holder, tool.operations));
+    if !listed {
+        return HubTool::Unknown;
+    }
+    let operations: Vec<&str> = tool.operations.iter().map(Operation::as_str).collect();
+    HubTool::Ungranted(refused(
+        &format!(
+            "the Endpoint `{}` does not grant {} to this caller; `{name}` answers only on the \
+             Endpoints whose Policy grants it (SP-17)",
+            endpoint.slug,
+            operations.join(" or ")
+        ),
+        &Value::Null,
+    ))
+}
+
 /// Handles one JSON-RPC message of the endpoint's MCP instance.
 ///
 /// `Ok(None)` is a notification: nothing to answer, and the caller sends 202.
@@ -1292,7 +1396,7 @@ pub async fn handle(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
     subject: Subject,
-    authorization: Option<HeaderValue>,
+    credential: Credential,
     message: Value,
 ) -> Option<Value> {
     let params = message.get("params").cloned().unwrap_or(json!({}));
@@ -1337,9 +1441,7 @@ pub async fn handle(
             id,
             json!({ "tools": tools_for(&gateway, &endpoint, &subject) }),
         )),
-        "tools/call" => {
-            Some(call_tool(gateway, endpoint, subject, authorization, id, &params).await)
-        }
+        "tools/call" => Some(call_tool(gateway, endpoint, subject, credential, id, &params).await),
         "resources/list" => Some(result(id, resources(&endpoint, &subject))),
         "resources/templates/list" => Some(result(
             id,
@@ -1353,7 +1455,7 @@ pub async fn handle(
             }),
         )),
         "resources/read" => {
-            Some(read_resource(gateway, endpoint, subject, authorization, id, &params).await)
+            Some(read_resource(gateway, endpoint, subject, credential, id, &params).await)
         }
         _ => Some(error(id, -32601, "method not found")),
     }
@@ -1365,7 +1467,7 @@ async fn call_tool(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
     subject: Subject,
-    authorization: Option<HeaderValue>,
+    credential: Credential,
     id: Value,
     params: &Value,
 ) -> Value {
@@ -1494,7 +1596,7 @@ async fn call_tool(
         &path,
         &query,
         body,
-        authorization,
+        credential,
     )
     .await;
 
@@ -1610,7 +1712,7 @@ async fn read_resource(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
     subject: Subject,
-    authorization: Option<HeaderValue>,
+    credential: Credential,
     id: Value,
     params: &Value,
 ) -> Value {
@@ -1669,7 +1771,7 @@ async fn read_resource(
         &path,
         &query,
         body,
-        authorization,
+        credential,
     )
     .await;
     let status = answer.status();
@@ -1785,7 +1887,12 @@ fn contents(uri: &str, payload: &Value) -> Value {
 /// MCP defines the field as an object (T-0946). `restricted` says that the policy removed
 /// something, never what (AG-13, R20); unlike the REST header it is not asked for, because a
 /// tool result is read by a model, which has no request header to ask with.
-fn answered(payload: &Value, result_key: &str, restricted: bool, sources: &[String]) -> Value {
+pub(crate) fn answered(
+    payload: &Value,
+    result_key: &str,
+    restricted: bool,
+    sources: &[String],
+) -> Value {
     let mut structured = Map::new();
     structured.insert(result_key.to_owned(), payload.clone());
     if restricted {
@@ -1877,7 +1984,7 @@ fn warned(mut result: Value, warnings: &[String]) -> Value {
 ///
 /// The problem document rides along when there is one; nothing does when the refusal is the
 /// gateway's own words, because `structuredContent` is an object or it is absent.
-fn refused(text: &str, payload: &Value) -> Value {
+pub(crate) fn refused(text: &str, payload: &Value) -> Value {
     let mut result = json!({
         "isError": true,
         "content": [{ "type": "text", "text": text }],
@@ -2343,12 +2450,12 @@ fn percent_encode(value: &str) -> String {
 }
 
 /// A JSON-RPC result.
-fn result(id: Value, value: Value) -> Value {
+pub(crate) fn result(id: Value, value: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": value })
 }
 
 /// A JSON-RPC error.
-fn error(id: Value, code: i32, message: &str) -> Value {
+pub(crate) fn error(id: Value, code: i32, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 

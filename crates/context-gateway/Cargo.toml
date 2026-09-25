@@ -67,3 +67,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 hyper = { version = "1", features = ["http1", "server"] }
+# The hub's audit line is read back as it is written (ADR-N-025 section 3); already in the
+# graph through jc-core's `logs` feature.
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

@@ -2,3 +2,4 @@
 
 pub mod elicitation;
 pub mod endpoint_facade;
+pub mod hub;
