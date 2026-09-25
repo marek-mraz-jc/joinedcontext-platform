@@ -20,6 +20,7 @@ pub mod pipeline_test;
 pub mod pipelines;
 pub mod pipelines_derived;
 pub mod platform;
+pub mod portal;
 pub mod publish;
 pub mod roles;
 pub mod secrets;

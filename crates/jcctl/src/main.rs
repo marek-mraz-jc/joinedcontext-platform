@@ -1,10 +1,11 @@
 //! `jcctl`, the reconciler and repository CLI (API/03).
 //!
-//! `validate`, `plan`, `apply` and `schema export` are implemented. Configuration kinds are
-//! read from the repository by the component that serves them, so there is no configuration
-//! API to write them to (CC-72): the manifest half of `plan` and `apply` reports what the
-//! repository declares, and the live half is the seed entities, replayed into the broker
-//! through the Context Gateway `--gateway-url` names (T-0421, CC-50).
+//! The repository verbs read a checkout: configuration kinds are read from the repository by the
+//! component that serves them (CC-72), so the manifest half of `plan` and `apply` reports what
+//! the repository declares, and the live half is the seed entities, replayed into the broker
+//! through the Context Gateway `--gateway-url` names (T-0421, CC-50). The kubectl-shaped verbs
+//! (`get`, `describe`, `apply -f`, `diff -f`, `delete -f`) are a client of the Portal resource
+//! API instead, where every write is a proposed `Change` (MF-14, API/03 §2a).
 
 use jcctl::commands;
 use jcctl::loader::Repository;
@@ -14,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]...\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]...\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]\n       jcctl get <plural> [<name>] --project <slug> [-o name|yaml|json] [-l <labelSelector>] [--server <url>] [--token-file <path>]\n       jcctl describe <plural> <name> --project <slug> [--server <url>] [--token-file <path>]\n       jcctl apply -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl diff -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl delete -f <file> [--project <slug>] [--server <url>] [--token-file <path>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -178,7 +179,140 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        ["get" | "describe", ..] | ["apply" | "diff" | "delete", "-f", ..] => client(&words),
         _ => usage(),
+    }
+}
+
+/// The flags every client verb takes, and the positional words left over.
+#[derive(Debug, Default)]
+struct ClientOptions<'a> {
+    words: Vec<&'a str>,
+    project: Option<&'a str>,
+    output: Option<&'a str>,
+    selector: Option<&'a str>,
+    file: Option<&'a str>,
+    server: Option<&'a str>,
+    token_file: Option<&'a str>,
+}
+
+/// Reads `--project`, `-o`, `-l`, `-f`, `--server` and `--token-file` wherever they stand, as
+/// kubectl does; `None` on a flag without a value or one it does not know.
+fn client_options<'a>(args: &[&'a str]) -> Option<ClientOptions<'a>> {
+    let mut options = ClientOptions::default();
+    let mut rest = args;
+    while let [first, tail @ ..] = rest {
+        let slot = match *first {
+            "--project" => &mut options.project,
+            "-o" | "--output" => &mut options.output,
+            "-l" | "--selector" => &mut options.selector,
+            "-f" | "--filename" => &mut options.file,
+            "--server" => &mut options.server,
+            "--token-file" => &mut options.token_file,
+            flag if flag.starts_with('-') => return None,
+            word => {
+                options.words.push(word);
+                rest = tail;
+                continue;
+            }
+        };
+        let (value, tail) = tail.split_first()?;
+        *slot = Some(*value);
+        rest = tail;
+    }
+    Some(options)
+}
+
+/// The Portal the client verbs talk to: `--server` or `JC_SERVER`, with the token from
+/// `--token-file` or `JC_TOKEN_FILE` (API/03 §2a).
+fn portal(options: &ClientOptions) -> Result<jcctl::portal::Portal, String> {
+    let url = options
+        .server
+        .map(str::to_owned)
+        .or_else(|| non_empty("JC_SERVER"))
+        .ok_or("no Portal to talk to: pass --server <url> or set JC_SERVER")?;
+    let token_file = options
+        .token_file
+        .map(str::to_owned)
+        .or_else(|| non_empty("JC_TOKEN_FILE"))
+        .ok_or("no identity: pass --token-file <path> or set JC_TOKEN_FILE, a file holding an OIDC access token for the Portal")?;
+    let token =
+        jcctl::gateway::Gateway::token_from(Path::new(&token_file)).map_err(|e| e.to_string())?;
+    jcctl::portal::Portal::new(&url, token).map_err(|e| e.to_string())
+}
+
+/// `get`, `describe`, `apply -f`, `diff -f` and `delete -f` (MF-14).
+fn client(args: &[&str]) -> ExitCode {
+    let Some((verb, rest)) = args.split_first() else {
+        return usage();
+    };
+    let Some(options) = client_options(rest) else {
+        return usage();
+    };
+    let output = match options.output.map(jcctl::portal::Output::parse) {
+        None => jcctl::portal::Output::Name,
+        Some(Some(output)) if *verb == "get" => output,
+        Some(_) => return usage(),
+    };
+    let reads = matches!(*verb, "get" | "describe");
+    let shape_fits = match (*verb, options.words.as_slice(), options.file) {
+        ("get", [_] | [_, _], None) | ("describe", [_, _], None) => options.project.is_some(),
+        ("apply" | "diff" | "delete", [], Some(_)) => options.selector.is_none(),
+        _ => false,
+    };
+    if !shape_fits || (!reads && options.output.is_some()) {
+        return usage();
+    }
+    let targets = match options.file {
+        Some(file) => match std::fs::read_to_string(file)
+            .map_err(|e| format!("{file}: {e}"))
+            .and_then(|text| {
+                jcctl::portal::targets(&text, options.project).map_err(|e| e.to_string())
+            }) {
+            Ok(targets) => targets,
+            Err(e) => return fail(&e),
+        },
+        None => Vec::new(),
+    };
+    let portal = match portal(&options) {
+        Ok(portal) => portal,
+        Err(e) => return fail(&e),
+    };
+    let project = options.project.unwrap_or_default();
+    let printed = match (*verb, options.words.as_slice()) {
+        ("get", [plural, name @ ..]) => jcctl::portal::get(
+            &portal,
+            project,
+            plural,
+            name.first().copied(),
+            output,
+            options.selector,
+        ),
+        ("describe", [plural, name]) => jcctl::portal::describe(&portal, project, plural, name),
+        _ => {
+            let report = match *verb {
+                "apply" => jcctl::portal::apply(&portal, &targets),
+                "diff" => jcctl::portal::diff_file(&portal, &targets),
+                _ => jcctl::portal::delete(&portal, &targets),
+            };
+            for line in &report.lines {
+                println!("{line}");
+            }
+            return if report.failed {
+                ExitCode::FAILURE
+            } else if report.differs {
+                ExitCode::from(2)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+    };
+    match printed {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e.to_string()),
     }
 }
 
