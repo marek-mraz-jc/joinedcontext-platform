@@ -805,7 +805,9 @@ pub struct ScopeDefinitionSpec {
 
 impl Kind for ScopeDefinitionSpec {
     const KIND: &'static str = "ScopeDefinition";
-    const PLURAL: &'static str = "policies";
+    // A plural of its own (R19, T-2954): a shared `policies` made every route resolve Policy.
+    // The file stays beside the project's access files, so the path template does not follow it.
+    const PLURAL: &'static str = "scopedefinitions";
     const SCOPE: Scope = Scope::Project;
     const PATH_TEMPLATE: &'static str = "projects/{project}/policies/{name}.yaml";
 
