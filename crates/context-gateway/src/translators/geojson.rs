@@ -1,4 +1,4 @@
-//! NGSI-LD entities as an RFC 7946 `FeatureCollection` (T-0158, EP-09, EP-10).
+//! NGSI-LD entities as an RFC 7946 `FeatureCollection` (T-0158, EP-09, EP-10, T-2939).
 //!
 //! The translation runs after the policy projection, never before, so a GeoJSON property
 //! can only ever be an attribute the grant already allowed through: a second format is a
@@ -17,34 +17,23 @@ pub const MEDIA_TYPE: &str = "application/geo+json";
 /// The name NGSI-LD gives the primary `GeoProperty`.
 const PRIMARY: &str = "location";
 
-/// Entities were asked for as GeoJSON and not one of them has a geometry (EP-10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("no entity in the answer carries a geometry")]
-pub struct Untranslatable;
-
-/// A `FeatureCollection` of every entity that has a geometry.
+/// A `FeatureCollection` of every entity: its `location` as the geometry, `null` when it has
+/// none (EP-09, RFC 7946 §3.2).
 ///
-/// An empty answer translates to an empty collection: nothing to show is not a type
-/// error. An answer that has entities and no geometry at all is one, because the caller
-/// asked a non-spatial type for a spatial representation (EP-10).
-pub fn feature_collection(entities: &Value, lang: Option<&str>) -> Result<Value, Untranslatable> {
+/// Every Endpoint serves GeoJSON, a non-spatial one included, so a type without a geometry is
+/// not an error: its Features carry what the grant lets through and a map client skips them
+/// (EP-10, T-2939). An empty answer is an empty collection.
+pub fn feature_collection(entities: &Value, lang: Option<&str>) -> Value {
     let entities: Vec<&Value> = match entities {
         Value::Array(entities) => entities.iter().collect(),
         entity if entity.is_object() => vec![entity],
         _ => Vec::new(),
     };
-    if entities.is_empty() {
-        return Ok(json!({ "type": "FeatureCollection", "features": [] }));
-    }
-
     let features: Vec<Value> = entities
         .iter()
-        .filter_map(|entity| feature(entity, lang))
+        .map(|entity| ngsi_feature(entity, lang))
         .collect();
-    if features.is_empty() {
-        return Err(Untranslatable);
-    }
-    Ok(json!({ "type": "FeatureCollection", "features": features }))
+    json!({ "type": "FeatureCollection", "features": features })
 }
 
 /// One entity as a `Feature`, or nothing when it has no geometry.

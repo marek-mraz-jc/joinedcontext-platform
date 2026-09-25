@@ -61,30 +61,22 @@ pub(crate) async fn file_geojson(
         Err(problem) => return *problem,
     };
 
-    match geojson::feature_collection(&entities, accept_language(request.headers())) {
-        Ok(collection) => {
-            // The byte ceiling is the endpoint's own, measured on what would be sent (EP-44).
-            if serde_json::to_vec(&collection)
-                .is_ok_and(|bytes| bytes.len() as u64 > limits.max_bytes)
-            {
-                return too_large();
-            }
-            let mut response = json_response(&collection);
-            response.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static(geojson::MEDIA_TYPE),
-            );
-            if restricted {
-                response
-                    .headers_mut()
-                    .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
-            }
-            response
-        }
-        Err(untranslatable) => ProblemDetails::bad_request()
-            .with_detail(untranslatable.to_string())
-            .into_response(),
+    let collection = geojson::feature_collection(&entities, accept_language(request.headers()));
+    // The byte ceiling is the endpoint's own, measured on what would be sent (EP-44).
+    if serde_json::to_vec(&collection).is_ok_and(|bytes| bytes.len() as u64 > limits.max_bytes) {
+        return too_large();
     }
+    let mut response = json_response(&collection);
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(geojson::MEDIA_TYPE),
+    );
+    if restricted {
+        response
+            .headers_mut()
+            .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    }
+    response
 }
 
 /// `file.json`: the whole dataset as one JSON array of projected entities (EP-41, EP-44).

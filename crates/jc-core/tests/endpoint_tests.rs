@@ -449,19 +449,53 @@ fn every_endpoint_serves_mcp_unless_it_opts_out() {
     let already = listing("[mcp, ngsi-ld]", "");
     assert_eq!(
         already.spec.served_representations(),
-        [Representation::Mcp, Representation::NgsiLd],
+        [
+            Representation::Mcp,
+            Representation::NgsiLd,
+            Representation::GeoJson
+        ],
         "a listed mcp is not served twice"
     );
 
     let off = listing("[ngsi-ld]", "  mcp: false\n");
     off.validate().expect("an opt-out is valid");
-    assert_eq!(off.spec.served_representations(), [Representation::NgsiLd]);
+    assert_eq!(
+        off.spec.served_representations(),
+        [Representation::NgsiLd, Representation::GeoJson]
+    );
 
     let on = listing("[ngsi-ld]", "  mcp: true\n");
     assert!(on
         .spec
         .served_representations()
         .contains(&Representation::Mcp));
+}
+
+/// EP-10 (T-2939): NGSI-LD and GeoJSON are served without being listed, like MCP, so an
+/// endpoint that lists only a file format still serves the uniform surface.
+#[test]
+fn every_endpoint_serves_ngsi_ld_and_geojson_whatever_it_lists() {
+    let files = listing("[csv, json]", "");
+    files.validate().expect("valid");
+    assert_eq!(
+        files.spec.served_representations(),
+        [
+            Representation::Csv,
+            Representation::Json,
+            Representation::NgsiLd,
+            Representation::GeoJson,
+            Representation::Mcp
+        ]
+    );
+    let each_once = listing("[geojson, ngsi-ld, mcp]", "");
+    assert_eq!(
+        each_once.spec.served_representations(),
+        [
+            Representation::GeoJson,
+            Representation::NgsiLd,
+            Representation::Mcp
+        ]
+    );
 }
 
 /// EP-24: `mcp: false` beside a listed `mcp` says two things at once and is refused, with the

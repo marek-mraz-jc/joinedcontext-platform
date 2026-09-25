@@ -348,13 +348,20 @@ impl Kind for EndpointSpec {
 }
 
 impl EndpointSpec {
-    /// The representations this Endpoint serves: the ones it lists, and `mcp`, which every
-    /// Endpoint serves unless `mcp: false` (EP-24, T-2901). The gateway, the catalogue records
-    /// and the publishers all read this, never the list alone.
+    /// The representations this Endpoint serves: the ones it lists, then `ngsi-ld` and
+    /// `geojson`, which every Endpoint serves (EP-10, T-2939), and `mcp` unless `mcp: false`
+    /// (EP-24, T-2901). The gateway, the catalogue records and the publishers all read this,
+    /// never the list alone.
     pub fn served_representations(&self) -> Vec<Representation> {
         let mut served = self.enabled_representations.clone();
-        if self.mcp != Some(false) && !served.contains(&Representation::Mcp) {
-            served.push(Representation::Mcp);
+        let mut always = vec![Representation::NgsiLd, Representation::GeoJson];
+        if self.mcp != Some(false) {
+            always.push(Representation::Mcp);
+        }
+        for representation in always {
+            if !served.contains(&representation) {
+                served.push(representation);
+            }
         }
         served
     }

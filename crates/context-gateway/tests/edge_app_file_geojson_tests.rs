@@ -376,10 +376,10 @@ async fn a_caller_no_grant_names_is_refused_before_the_broker() {
     assert!(broker.hops().is_empty(), "{:?}", broker.hops());
 }
 
-/// A non-spatial answer is a bad request, and the refusal says only that: a caller asked a type
-/// with no geometry for a spatial representation (EP-10).
+/// A non-spatial answer is a `200` collection whose Features carry a `null` geometry: every
+/// endpoint serves GeoJSON and none advertises a surface that refuses (EP-10, T-2939).
 #[tokio::test]
-async fn an_answer_with_no_geometry_at_all_is_a_bad_request() {
+async fn an_answer_with_no_geometry_at_all_is_a_collection_of_null_geometries() {
     let mut flat = station("station-01", 0.0, 0.0);
     flat.as_object_mut().expect("an object").remove("location");
     let broker = BrokerStub::start(vec![json!([flat])]).await;
@@ -390,9 +390,14 @@ async fn an_answer_with_no_geometry_at_all_is_a_bad_request() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.contains("geometry"), "{body}");
-    assert!(!body.contains("127.0.0.1"), "no upstream address: {body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let collection: Value = serde_json::from_str(&body).expect("a GeoJSON document");
+    let features = collection["features"].as_array().expect("features");
+    assert_eq!(features.len(), 1);
+    assert_eq!(features[0]["geometry"], json!(null));
+    assert!(features[0]["id"]
+        .as_str()
+        .is_some_and(|id| id.ends_with("station-01")));
 }
 
 /// The answer's media type is GeoJSON's own, and the caller's `Accept` decides nothing about it:
@@ -460,17 +465,17 @@ async fn a_grant_that_reaches_nothing_is_an_empty_collection_and_no_question() {
 /// forwarded verbatim today, which is T-2340 (priority 1) and holds that red test.
 #[tokio::test]
 async fn a_refusal_the_gateway_builds_names_nothing_internal() {
-    let mut flat = station("station-01", 0.0, 0.0);
-    flat.as_object_mut().expect("an object").remove("location");
-    let broker = BrokerStub::start(vec![json!([flat])]).await;
+    let broker = BrokerStub::start(vec![json!([station("station-01", 0.0, 0.0)])]).await;
+    let mut ungranted = endpoint();
+    ungranted.policies = Vec::new();
 
     let (status, body) = get(
-        gateway(&broker.url, endpoint()),
+        gateway(&broker.url, ungranted),
         &format!("/api/endpoint/{SLUG}/file.geojson?type=AirQualityObserved"),
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     for internal in ["127.0.0.1", "ovzdusie", "/src/", "Bearer", "policy"] {
         assert!(!body.contains(internal), "{internal} came out in {body}");
     }

@@ -322,8 +322,8 @@ async fn an_endpoint_that_does_not_enable_the_bundle_answers_404() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// A non-spatial answer is still a bundle: the FeatureCollection is empty rather than the
-/// download failing, because the caller asked for every shape and not for GeoJSON.
+/// A non-spatial answer is still a bundle, and its GeoJSON is the one `file.geojson` answers:
+/// every entity a Feature with a `null` geometry (EP-09, T-2939).
 #[tokio::test]
 async fn a_dataset_without_geometry_still_bundles() {
     let flat = json!({
@@ -342,7 +342,9 @@ async fn a_dataset_without_geometry_still_bundles() {
     let members = members(&archive);
     let features: Value =
         serde_json::from_slice(member(&members, "data/entities.geojson")).expect("geojson");
-    assert_eq!(features["features"], json!([]));
+    assert_eq!(features["features"].as_array().map(Vec::len), Some(1));
+    assert_eq!(features["features"][0]["geometry"], json!(null));
+    assert_eq!(features["features"][0]["properties"]["pm10"], json!(12.0));
     let csv = String::from_utf8(member(&members, "data/entities.csv").to_vec()).expect("utf-8");
     assert_eq!(csv.lines().count(), 2, "the row is still there:\n{csv}");
 }
