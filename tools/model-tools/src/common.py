@@ -77,6 +77,18 @@ class ModelError(Exception):
     """A model the generators refuse. The message is shown to the person editing it."""
 
 
+class RelationshipError(ModelError):
+    """A model whose relationships break a rule of DM-68, one entry per broken rule.
+
+    Each entry is `{path}: {rule}: {message}`: `/generate` answers them one per error, which is
+    what the Portal's save route refuses with (DM-68, CC-24).
+    """
+
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__("; ".join(problems))
+        self.problems = problems
+
+
 @contextmanager
 def as_path(source: str | Path) -> Iterator[str]:
     """A file path for a schema given either as a path or as the YAML text itself.
@@ -105,7 +117,18 @@ def load(source: str | Path) -> SchemaView:
     with as_path(source) as path:
         view = _view(path)
     check_unit_prefixes(view)
+    check_relationships(view)
     return view
+
+
+def check_relationships(view: SchemaView) -> None:
+    """Refuse a model with a broken relationship, every rule at once (DM-68)."""
+    # Imported here: `relationships` reads this module's helpers.
+    from relationships import analyse
+
+    _, problems = analyse(view)
+    if problems:
+        raise RelationshipError(problems)
 
 
 def check_unit_prefixes(view: SchemaView) -> None:

@@ -37,7 +37,7 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import yaml
 
-from common import as_path, generator_version
+from common import RelationshipError, as_path, generator_version
 from gen_context import compile_context
 from gen_docs import compile_docs
 from gen_example import compile_example
@@ -109,6 +109,7 @@ def artifacts(
         rendered["example"] = example
 
     failures: dict[str, list[str]] = {}
+    broken: list[str] = []
     # Spooled once, so a parse error reads the same from all four and is reported once, and so
     # the temporary path never reaches the person editing the model.
     # ponytail: each generator still parses the file again, about a second for the four of
@@ -121,9 +122,15 @@ def artifacts(
                 continue
             try:
                 rendered[field] = render(path)
+            except RelationshipError as err:
+                # Every generator loads the model and refuses it the same way: said once, one
+                # entry per broken rule (DM-68).
+                broken = err.problems
             except Exception as err:  # noqa: BLE001 - a generator crash is a message, not a 500
                 failures.setdefault(str(err).replace(path, "<source>"), []).append(field)
 
+    if broken:
+        return {"generatorVersion": rendered["generatorVersion"], "errors": broken}
     rendered["errors"] = [
         message if len(fields) == len(RENDERERS) else f"{', '.join(fields)}: {message}"
         for message, fields in failures.items()

@@ -25,6 +25,7 @@ from linkml_runtime import SchemaView
 from linkml_runtime.linkml_model.meta import ClassDefinition, SlotDefinition
 
 from common import ModelError, load, ngsi_ld_kind, slots_of
+from relationships import analyse
 from gen_context import compile_context
 from gen_json_schema import compile_schema
 
@@ -181,10 +182,12 @@ def _object(view: SchemaView, cls: ClassDefinition, domain: str, depth: int) -> 
             f"`{cls.name}` nests inline objects more than {MAX_DEPTH} deep, which a model that "
             "terminates does not do"
         )
+    # The computed end of a relationship is a query, never an attribute (DM-67).
+    computed = {(rel.computed_end.cls, rel.computed_end.slot) for rel in analyse(view)[0]}
     body: dict[str, Any] = {}
     for slot in slots_of(view, cls):
         name = slot.alias or slot.name
-        if name in ("id", "type"):
+        if name in ("id", "type") or (cls.name, slot.name) in computed:
             continue
         body[name] = _value(view, slot, domain, depth)
     return body

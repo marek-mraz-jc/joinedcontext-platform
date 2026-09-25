@@ -1,0 +1,32 @@
+{
+  "School": {
+    "properties": {
+      "users": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^urn:ngsi-ld:User:"
+        },
+        "x-ngsi-ld-kind": "Relationship",
+        "x-ngsi-ld-relationship": {
+          "target": "User",
+          "inverse": "school",
+          "cardinality": "many-to-many",
+          "onDelete": "restrict",
+          "unique": false
+        }
+      }
+    },
+    "required": [
+      "id",
+      "type"
+    ]
+  },
+  "User": {
+    "properties": {},
+    "required": [
+      "id",
+      "type"
+    ]
+  }
+}
