@@ -288,6 +288,14 @@ impl SlugResolver {
         self.table.store(Arc::new(table));
     }
 
+    /// Every endpoint the table holds, sorted by slug, for the organization's feed (EP-84).
+    pub fn endpoints(&self) -> Vec<Arc<Endpoint>> {
+        let mut endpoints: Vec<Arc<Endpoint>> =
+            self.table.load().values().map(Arc::clone).collect();
+        endpoints.sort_by(|left, right| left.slug.cmp(&right.slug));
+        endpoints
+    }
+
     /// The space behind a name, or nothing (SP-06).
     pub fn resolve_space(&self, space: &str) -> Option<Arc<Space>> {
         self.spaces.load().get(space).map(Arc::clone)

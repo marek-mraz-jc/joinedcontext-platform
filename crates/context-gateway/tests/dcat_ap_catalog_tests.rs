@@ -12,7 +12,7 @@
 //! lane runs the two together; the assertions here run everywhere.
 
 use context_gateway::handlers::access_odrl;
-use context_gateway::handlers::endpoint_surface::{dataset, dataset_turtle};
+use context_gateway::handlers::endpoint_surface::{dataset, dataset_turtle, feed, feed_turtle};
 use context_gateway::pdp::evaluator::Subject;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, Catalog, Licence, PolicySpec, Representation};
@@ -171,6 +171,56 @@ fn every_variant_is_written_for_the_semic_check() {
         let turtle = dataset_turtle(&endpoint, None, &index(), BASE);
         std::fs::write(format!("{directory}/{name}.ttl"), turtle).expect("turtle written");
     }
+}
+
+/// The organization's feed of the public variants, and the feed of an organization that
+/// publishes nothing yet, for the same SEMIC check (EP-84): each record keeps its own slug, so
+/// the feed holds as many datasets as there are variants.
+#[test]
+fn the_feed_is_written_for_the_semic_check() {
+    let directory = std::env::var("DCAT_RECORDS_DIR")
+        .unwrap_or_else(|_| format!("{}/dcat-records", env!("CARGO_TARGET_TMPDIR")));
+    std::fs::create_dir_all(&directory).expect("the records directory");
+    let records: Vec<Value> = variants()
+        .into_iter()
+        .filter(|(_, endpoint)| endpoint.audience == Audience::Public)
+        .enumerate()
+        .map(|(i, (_, mut endpoint))| {
+            endpoint.slug = format!("{SLUG}{i}");
+            endpoint.base_path = format!("/api/endpoint/{}", endpoint.slug);
+            record(&endpoint)
+        })
+        .collect();
+    let count = records.len();
+    for (name, feed) in [
+        ("feed", feed(records, BASE, "city.example.org")),
+        ("feed-empty", feed(Vec::new(), BASE, "city.example.org")),
+    ] {
+        if name == "feed" {
+            assert_eq!(feed["dcat:dataset"].as_array().map(Vec::len), Some(count));
+        }
+        let json = serde_json::to_string_pretty(&feed).expect("json");
+        std::fs::write(format!("{directory}/{name}.jsonld"), json).expect("jsonld written");
+        std::fs::write(format!("{directory}/{name}.ttl"), feed_turtle(&feed))
+            .expect("turtle written");
+    }
+}
+
+#[test]
+fn the_feed_carries_each_record_once_and_their_typed_nodes_once() {
+    let one = record(&endpoint(Audience::Public, Some(catalog(FULL))));
+    let feed = feed(vec![one.clone(), one.clone()], BASE, "city.example.org");
+    assert_eq!(feed["@type"], "dcat:Catalog");
+    assert_eq!(feed["@id"], format!("{BASE}/catalog"));
+    assert_eq!(feed["dct:publisher"]["@id"], "https://city.example.org/");
+    let included = feed["@included"].as_array().expect("included nodes");
+    let rights = included
+        .iter()
+        .filter(|node| node["@type"] == "dct:RightsStatement")
+        .count();
+    assert_eq!(rights, 1, "a node shared by two records is written once");
+    assert!(included.iter().all(|node| node.get("@context").is_none()));
+    assert!(included.iter().all(|node| node.get("@included").is_none()));
 }
 
 #[test]

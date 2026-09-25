@@ -640,6 +640,56 @@ pub fn dataset(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: 
     record
 }
 
+/// The organization's catalogue for harvesters, one `dcat:Catalog` of the given dataset records
+/// (EP-84, Architecture/21 §8).
+///
+/// The caller hands in the records of [`dataset`] as the anonymous caller reads them, one per
+/// public Endpoint; this only gathers them, so the feed says nothing a public read of each
+/// record would not. Each record's typed nodes move to the catalogue's `@included`, once.
+pub fn feed(records: Vec<Value>, base: &str, org_domain: &str) -> Value {
+    let mut included: Vec<Value> = Vec::new();
+    let mut datasets = Vec::new();
+    for mut record in records {
+        let Some(object) = record.as_object_mut() else {
+            continue;
+        };
+        object.remove("@context");
+        if let Some(Value::Array(nodes)) = object.remove("@included") {
+            for node in nodes {
+                // ponytail: a linear search per node; a feed of thousands of records wants a set.
+                if !included.contains(&node) {
+                    included.push(node);
+                }
+            }
+        }
+        if let Some(id) = object.get("@id").cloned() {
+            datasets.push(json!({ "@id": id }));
+            included.push(record);
+        }
+    }
+    json!({
+        "@context": context(),
+        "@id": format!("{base}/catalog"),
+        "@type": "dcat:Catalog",
+        "dct:title": format!("Open data of {org_domain}"),
+        "dct:description": format!(
+            "Every dataset {org_domain} serves to anyone, one record per public endpoint."
+        ),
+        "dct:publisher": {
+            "@id": format!("https://{org_domain}/"),
+            "@type": "foaf:Agent",
+            "foaf:name": org_domain,
+        },
+        "dcat:dataset": datasets,
+        "@included": included,
+    })
+}
+
+/// [`feed`] as Turtle: the same graph, written by the record's own writer (EP-84).
+pub fn feed_turtle(feed: &Value) -> String {
+    turtle(feed)
+}
+
 /// An empty language map, so a space that resolved to nothing takes the same path as one
 /// whose manifest named no title.
 static EMPTY: BTreeMap<String, String> = BTreeMap::new();
