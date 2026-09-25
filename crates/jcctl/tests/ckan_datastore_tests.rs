@@ -8,7 +8,7 @@ use jc_core::kinds::ckan::CkanPublication;
 use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan};
 use jcctl::publish::ckan_datastore::{
     drop_table, ensure, ensure_view, fields, mirrored, records, sync, table, touched, MirrorError,
-    Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY,
+    Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY, UPSERT_BATCH,
 };
 use serde_json::{json, Value};
 
@@ -341,6 +341,54 @@ fn the_first_publication_creates_the_table_and_loads_the_page() {
     assert!(synced.deleted.is_empty());
     assert_eq!(ckan.rows(&resource).expect("the table").len(), 2);
     assert_eq!(ckan.actions(), vec!["datastore_create", "datastore_upsert"]);
+}
+
+/// T-2931: a large table goes up in bounded batches, every row of it, so no single call
+/// outlives the request timeout and the grid view after the rows is reached.
+#[test]
+fn a_large_table_is_upserted_in_batches_and_keeps_every_row() {
+    let mut ckan = InMemoryCkan::new();
+    let (columns, page) = page();
+    let template = page[0].clone();
+    let count = UPSERT_BATCH * 2 + 1;
+    let rows: Vec<Vec<Value>> = (0..count)
+        .map(|n| {
+            let mut row = template.clone();
+            row[0] = json!(format!("urn:ngsi-ld:AirQualityObserved:bb:ovzdusie:s-{n}"));
+            row
+        })
+        .collect();
+    let fields = fields(&columns, &rows, &[schema()]);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &fields).expect("created");
+    let records = records(&columns, &rows).expect("records");
+
+    let synced = sync(&mut ckan, &resource, &[], &records).expect("synced");
+
+    assert_eq!(synced.upserted.len(), count);
+    assert_eq!(ckan.rows(&resource).expect("the table").len(), count);
+    assert_eq!(
+        ckan.actions(),
+        vec![
+            "datastore_create",
+            "datastore_upsert",
+            "datastore_upsert",
+            "datastore_upsert"
+        ]
+    );
+    assert!(ensure_view(&mut ckan, &resource).expect("the view"));
+}
+
+#[test]
+fn an_empty_answer_writes_no_rows() {
+    let mut ckan = InMemoryCkan::new();
+    let (columns, rows) = page();
+    let fields = fields(&columns, &rows, &[schema()]);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &fields).expect("created");
+
+    let synced = sync(&mut ckan, &resource, &[], &[]).expect("synced");
+
+    assert!(synced.upserted.is_empty());
+    assert_eq!(ckan.actions(), vec!["datastore_create"]);
 }
 
 #[test]

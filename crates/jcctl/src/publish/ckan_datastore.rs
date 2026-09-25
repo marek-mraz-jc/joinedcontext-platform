@@ -33,6 +33,12 @@ pub const ID_COLUMN: &str = "id";
 /// The resource view that shows a DataStore table as a sortable, searchable grid.
 pub const GRID_VIEW: &str = "datatables_view";
 
+/// Rows per `datastore_upsert` call. CKAN writes an upsert row by row in one transaction,
+/// so one call for a whole large table outlived the client's request timeout on every
+/// run: the table kept an old partial load and the grid view, made after the rows, never
+/// came (T-2931). A batch this size finishes in seconds and keeps each body small.
+pub const UPSERT_BATCH: usize = 500;
+
 /// What one run did to the table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -249,13 +255,13 @@ pub fn sync(
         .filter_map(|record| record[PRIMARY_KEY].as_str())
         .map(str::to_owned)
         .collect();
-    if !records.is_empty() {
+    for batch in records.chunks(UPSERT_BATCH) {
         api.action(
             "datastore_upsert",
             &json!({
                 "resource_id": resource_id,
                 "method": "upsert",
-                "records": records,
+                "records": batch,
                 "force": true,
             }),
         )?;
