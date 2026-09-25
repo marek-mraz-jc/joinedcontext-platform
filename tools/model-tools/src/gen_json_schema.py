@@ -26,6 +26,7 @@ from linkml_runtime import SchemaView
 import yaml
 
 from common import ModelError, as_path, generator_version, load, ngsi_ld_kind, slots_of, unit_of
+from relationships import analyse
 
 DRAFT_07 = "http://json-schema.org/schema#"
 DRAFT_07_ID = "http://json-schema.org/draft-07/schema#"
@@ -198,6 +199,55 @@ def _enum_titles(schema: dict[str, Any], raw: Any) -> dict[str, Any]:
     return schema
 
 
+def _relationships(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
+    """Carry every relationship into the schema the gateway validates writes with (DM-72).
+
+    The stored end is a URN of the target type, one or a list of them as its cardinality says,
+    at least one when required, and it carries `x-ngsi-ld-relationship`: the target, the
+    inverse, the cardinality read from this end, the delete rule and whether a target may be held by one source
+    only. The computed end is dropped: it is a query and never an attribute (DM-67), so the
+    closed schema refuses a write that carries it.
+    """
+    definitions = schema.get("definitions", {})
+    relationships, _ = analyse(view)
+    for rel in relationships:
+        stored, computed = rel.stored_end, rel.computed_end
+        holder = definitions.get(computed.cls, {})
+        holder.get("properties", {}).pop(computed.slot, None)
+        if computed.slot in holder.get("required", []):
+            holder["required"].remove(computed.slot)
+
+        prop = definitions.get(stored.cls, {}).get("properties", {}).get(stored.slot)
+        if not isinstance(prop, dict):
+            continue
+        other = computed
+        urn = {"type": "string", "pattern": f"^urn:ngsi-ld:{other.cls}:"}
+        description = prop.get("description")
+        kind = prop.get("x-ngsi-ld-kind")
+        prop.clear()
+        if stored.multivalued:
+            prop.update({"type": "array", "items": urn})
+            if stored.required:
+                prop["minItems"] = 1
+        else:
+            prop.update(urn)
+        if description:
+            prop["description"] = description
+        if kind:
+            prop["x-ngsi-ld-kind"] = kind
+        prop["x-ngsi-ld-relationship"] = {
+            "target": other.cls,
+            "inverse": other.slot,
+            # Read from this end to its target, which is what a write of this attribute is.
+            "cardinality": rel.cardinality if rel.stored == "source" else "many-to-one",
+            "onDelete": rel.on_delete,
+            # One target per source only where the target end is single too: one-to-one. A
+            # one-to-many is stored on its "many" end, where one value per entity already says it.
+            "unique": rel.cardinality == "one-to-one",
+        }
+    return schema
+
+
 def compile_schema(source: str | Path) -> dict[str, Any]:
     """Render one LinkML document as a draft-07 JSON Schema."""
     view = load(source)
@@ -209,7 +259,7 @@ def compile_schema(source: str | Path) -> dict[str, Any]:
     schema = _to_draft_07(json.loads(rendered))
     schema["$schema"] = DRAFT_07_ID
     schema["x-generator-version"] = generator_version()
-    return _enum_titles(_annotate(schema, view), raw)
+    return _enum_titles(_relationships(_annotate(schema, view), view), raw)
 
 
 def main(argv: list[str] | None = None) -> int:

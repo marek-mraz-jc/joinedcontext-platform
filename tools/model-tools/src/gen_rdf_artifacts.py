@@ -20,7 +20,7 @@ from linkml.generators.owlgen import OwlSchemaGenerator
 from linkml.generators.shaclgen import ShaclGenerator
 from linkml_runtime import SchemaView
 from rdflib import Graph, Literal, URIRef
-from rdflib.namespace import SH, XSD
+from rdflib.namespace import OWL, RDF, SH, XSD
 
 from common import (
     JSONLD_KEYWORD_ANNOTATION,
@@ -30,6 +30,7 @@ from common import (
     load,
     ngsi_ld_kind,
 )
+from relationships import analyse
 
 OPEN_WORLD_ANNOTATION = "open_world"
 
@@ -77,12 +78,30 @@ def _apply_ngsi_ld_kinds(view: SchemaView, graph: Graph) -> None:
                 graph.set((shape, SH.uniqueLang, Literal(True, datatype=XSD.boolean)))
 
 
+def _drop_computed_ends(view: SchemaView, graph: Graph) -> None:
+    """The computed end of a relationship is a query, never an attribute (DM-67).
+
+    Its property shape goes, so the closed shape of its class refuses an entity carrying it; the
+    stored end keeps the `sh:class`, `sh:nodeKind sh:IRI` and counts LinkML rendered (DM-72).
+    """
+    relationships, _ = analyse(view)
+    for rel in relationships:
+        computed = rel.computed_end
+        node = URIRef(view.get_uri(view.get_class(computed.cls), expand=True))
+        path = URIRef(view.get_uri(view.induced_slot(computed.slot, computed.cls), expand=True))
+        for shape in list(graph.objects(node, SH.property)):
+            if (shape, SH.path, path) in graph:
+                graph.remove((node, SH.property, shape))
+                graph.remove((shape, None, None))
+
+
 def compile_shacl(source: str | Path) -> str:
     """Render one LinkML document as closed SHACL shapes, in Turtle."""
     view = load(source)
     graph = Graph()
     graph.parse(data=ShaclGenerator(view.schema, closed=True).serialize(), format="turtle")
     _apply_ngsi_ld_kinds(view, graph)
+    _drop_computed_ends(view, graph)
 
     # The generator's `closed` flag is schema-wide, so the per-class opt-out is applied to the
     # rendered graph: the shape of an open class stops being closed, every other shape stays.
@@ -112,7 +131,20 @@ def compile_owl(source: str | Path) -> str:
         skip_vacuous_local_range_axioms=True,
         consolidate_cardinality_axioms=True,
     )
-    return generator.serialize()
+    text = generator.serialize()
+    # LinkML writes `owl:inverseOf` for the pair; a single end is also functional (DM-72).
+    single = [
+        end
+        for rel in analyse(view)[0]
+        for end in (rel.source, rel.target)
+        if not end.multivalued
+    ]
+    if not single:
+        return text
+    graph = Graph().parse(data=text, format="turtle")
+    for end in single:
+        graph.add((URIRef(view.get_uri(view.induced_slot(end.slot, end.cls), expand=True)), RDF.type, OWL.FunctionalProperty))
+    return graph.serialize(format="turtle")
 
 
 def main(argv: list[str] | None = None) -> int:

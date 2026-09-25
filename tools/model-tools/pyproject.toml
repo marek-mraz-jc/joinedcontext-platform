@@ -47,6 +47,7 @@ py-modules = [
   "gen_typescript",
   "import_sdm",
   "infer_schema",
+  "relationships",
   "service",
   "test_mapping_parity",
 ]

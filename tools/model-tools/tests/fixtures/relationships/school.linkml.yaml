@@ -1,0 +1,38 @@
+# School and User, one relationship between them; the tests set its cardinality and flags.
+id: https://rozvoj.sk/models/school
+name: school
+prefixes:
+  linkml: https://w3id.org/linkml/
+  rozvoj: https://rozvoj.sk/terms/
+default_prefix: rozvoj
+default_range: string
+imports:
+  - linkml:types
+  - ngsi-ld-core
+classes:
+  School:
+    class_uri: rozvoj:School
+    is_a: Entity
+    slots: [name, users]
+  User:
+    class_uri: rozvoj:User
+    is_a: Entity
+    slots: [name, school]
+slots:
+  name:
+    slot_uri: rozvoj:name
+  users:
+    range: User
+    inverse: school
+    inlined: false
+    slot_uri: rozvoj:users
+    annotations:
+      ngsi_ld_kind: Relationship
+      on_delete: restrict
+  school:
+    range: School
+    inverse: users
+    inlined: false
+    slot_uri: rozvoj:school
+    annotations:
+      ngsi_ld_kind: Relationship
