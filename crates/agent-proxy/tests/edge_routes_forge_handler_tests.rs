@@ -375,6 +375,42 @@ async fn reading_a_pull_request_or_a_commit_is_allowed() {
     }
 }
 
+/// AG-86, T-3021: a read of a pull request or a commit stays inside the run's repository. The
+/// target is parsed with its dot segments resolved, so without a check `pulls/../../other/repo`
+/// would reach another repository, or any forge GET, with the platform's token.
+#[tokio::test]
+async fn a_read_that_would_leave_the_runs_repository_is_refused() {
+    let forge = forge_answering(200, "{}").await;
+    for rest in [
+        "pulls/../../other/repo/contents/secrets.yaml",
+        "pulls/1/../../../../../admin/users",
+        "commits/../../configuration/raw/values.yaml",
+        "commits/%2e%2e/%2e%2e/other/repo",
+        "pulls/%2F..%2F..%2Fother",
+        "pulls/1/..",
+        "pulls//1",
+        "commits/a\\..\\b",
+    ] {
+        let response = proxy(&forge.uri())
+            .oneshot(
+                authed("GET", &format!("/v1/forge/{rest}"))
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "GET {rest}");
+    }
+    let reached: Vec<String> = forge
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect();
+    assert!(reached.is_empty(), "the forge was asked for {reached:?}");
+}
+
 /// AG-35: the forge is told the platform's token and the workspace is told none of it, whatever
 /// the forge answers.
 #[tokio::test]
