@@ -2942,6 +2942,14 @@ fn subject_of(
         }
         if let Some(account) = account.filter(|_| via.is_none()) {
             if !endpoint.admits(Some(&account.project)) {
+                // No decision line follows a refusal here, so this is the one that names it
+                // (T-3033): the account, the endpoint, the project; never the token.
+                tracing::warn!(
+                    azp,
+                    slug = %endpoint.slug,
+                    project = %account.project,
+                    "the account's project is not one this endpoint admits"
+                );
                 return Err(Box::new(ProblemDetails::forbidden()));
             }
             return Ok(Subject {
@@ -2976,6 +2984,15 @@ fn subject_of(
         .cloned()
         .unwrap_or_default();
     if !endpoint.admits(Some(&project)) {
+        // T-3033: an App's client minted tokens with no `groups` claim, and every project-bound
+        // read was a 403 with no line anywhere. The person, the client, the endpoint; never the
+        // token or its groups.
+        tracing::warn!(
+            user = %user,
+            azp = claims.azp.as_deref().unwrap_or_default(),
+            slug = %endpoint.slug,
+            "the token names no project this endpoint admits"
+        );
         return Err(Box::new(ProblemDetails::forbidden()));
     }
 
