@@ -128,7 +128,13 @@ pub async fn handler(
         pinned = Some(map);
     } else if (rest.starts_with("pulls/") || rest.starts_with("commits/")) && method == Method::GET
     {
-        // Read-only inspection allowed
+        // Read-only inspection of what the run proposed, and nothing past it: a dot segment would
+        // walk out of the repository with the platform's token (AG-86, T-3021).
+        if super::escapes(&rest) {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail("a forge read names its pull request or commit, and no path out of it")
+                .into_response();
+        }
     } else {
         return jc_core::ProblemDetails::forbidden()
             .with_detail("forge operation not permitted")
@@ -153,12 +159,23 @@ pub async fn handler(
         }
         None => state.config.forge_repo.clone(),
     };
+    let base = state.config.forge_base.as_str().trim_end_matches('/');
     let target_url = format!(
-        "{}/api/v1/repos/{}/{}",
-        state.config.forge_base.as_str().trim_end_matches('/'),
-        repository,
+        "{base}/api/v1/repos/{repository}/{}",
         rest.trim_start_matches('/')
     );
+    // Whatever the operation, the URL the forge will see, after its parser had its say, is in
+    // the run's one repository or the request stops here (AG-86, T-3021). Both sides are parsed,
+    // so a base with a path of its own compares the same way.
+    let inside_repository = reqwest::Url::parse(&format!("{base}/api/v1/repos/{repository}/"))
+        .ok()
+        .zip(reqwest::Url::parse(&target_url).ok())
+        .is_some_and(|(root, target)| target.path().starts_with(root.path()));
+    if !inside_repository {
+        return jc_core::ProblemDetails::forbidden()
+            .with_detail("the forge operation leaves the run's repository")
+            .into_response();
+    }
     // The URL the forge will see, after its parser had its say, is inside the application
     // directory or the request stops here (T-0817).
     if rest.starts_with("contents/") {
