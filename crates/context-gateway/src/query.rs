@@ -502,7 +502,7 @@ pub fn compound_object(compound: &str) -> serde_json::Value {
 }
 
 /// The attributes a batch query's body may ask for (T-2995): with no `attrs` of its own, the
-/// granted ones as [`broker_attrs`] gives them to the URL; with its own, those of them the grants
+/// granted ones as `broker_attrs` gives them to the URL; with its own, those of them the grants
 /// cover. `None` when the grants name no attributes, so the body's own stand; an empty set when
 /// the body asked only for attributes it may not read.
 pub fn body_attrs(
