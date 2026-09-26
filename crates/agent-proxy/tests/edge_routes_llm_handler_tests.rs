@@ -32,8 +32,19 @@ fn proxy(model: &str, steps: u32, tokens: u64) -> axum::Router {
 /// failure of the platform's (`503`) rather than a bad credential (`401`). A case about a run id
 /// nobody holds has to ask a Portal that is there.
 fn proxy_asking(model: &str, portal: &wiremock::MockServer) -> axum::Router {
+    proxy_asking_at(model, portal, None)
+}
+
+/// [`proxy_asking`] for a run whose profile sets a reasoning effort (AG-72).
+fn proxy_asking_at(
+    model: &str,
+    portal: &wiremock::MockServer,
+    effort: Option<&str>,
+) -> axum::Router {
+    let mut run = sample_run(false);
+    run.reasoning_effort = effort.map(str::to_owned);
     app(
-        sample_run(false),
+        run,
         Bases {
             model: model.to_owned(),
             portal: portal.uri(),
@@ -550,17 +561,7 @@ async fn a_model_call_is_reported_with_its_latency_tokens_and_model() {
         .expect("an answer");
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The report is sent beside the answer, never before it: wait for it.
-    let mut reported = None;
-    for _ in 0..100 {
-        let seen = portal.received_requests().await.unwrap_or_default();
-        if let Some(request) = seen.first() {
-            reported = serde_json::from_slice::<serde_json::Value>(&request.body).ok();
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let reported = reported.expect("the usage reached the Portal");
+    let reported = reported_usage(&portal).await;
     assert_eq!(reported["kind"], "usage");
     let usage = &reported["payload"];
     assert_eq!(usage["tokensThisStep"], 4120);
@@ -570,4 +571,51 @@ async fn a_model_call_is_reported_with_its_latency_tokens_and_model() {
     assert_eq!(usage["model"], "google/gemini-3.8-flash");
     let latency = usage["latencyMs"].as_u64().expect("a latency");
     assert!((120..10_000).contains(&latency), "{latency}");
+    // A run whose profile sets no effort sends none, and its frame names none (T-2998).
+    assert!(usage.get("reasoningEffort").is_none(), "{usage}");
+}
+
+/// The first frame the proxy sent the Portal. It is sent beside the answer, never before it, so
+/// the test waits for it.
+async fn reported_usage(portal: &MockServer) -> serde_json::Value {
+    for _ in 0..100 {
+        let seen = portal.received_requests().await.unwrap_or_default();
+        if let Some(request) = seen.first() {
+            return serde_json::from_slice(&request.body).expect("a JSON frame");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the usage never reached the Portal");
+}
+
+/// T-2998, AG-72: the frame names the effort the call was sent with, beside the model, so a run
+/// shows which effort its model worked at.
+#[tokio::test]
+async fn a_model_call_is_reported_with_the_reasoning_effort_it_was_sent_with() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12 }
+        })))
+        .mount(&provider)
+        .await;
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/agent-runs/events"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({ "seq": 1 })))
+        .mount(&portal)
+        .await;
+
+    let response = proxy_asking_at(&provider.uri(), &portal, Some("medium"))
+        .oneshot(
+            authed("POST", "/v1/llm/v1/chat/completions")
+                .body(body(r#"{"model":"google/gemini-3.8-flash","messages":[]}"#))
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK);
+    let usage = &reported_usage(&portal).await["payload"];
+    assert_eq!(usage["model"], "google/gemini-3.8-flash");
+    assert_eq!(usage["reasoningEffort"], "medium");
 }

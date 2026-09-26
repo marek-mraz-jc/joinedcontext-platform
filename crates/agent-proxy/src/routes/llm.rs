@@ -15,11 +15,8 @@ use std::time::Instant;
 /// `max_tokens` grows by the budget so the answer keeps the room it asked for. A body that
 /// already carries a setting, is not a JSON object, or an effort outside the three is sent as is.
 fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
-    let budget = match effort {
-        "low" => 2048,
-        "medium" => 8192,
-        "high" => 24576,
-        _ => return body.clone(),
+    let Some(&(_, budget)) = BUDGETS.iter().find(|(name, _)| *name == effort) else {
+        return body.clone();
     };
     let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(body) else {
         return body.clone();
@@ -44,6 +41,9 @@ fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
         .map(Bytes::from)
         .unwrap_or_else(|_| body.clone())
 }
+
+/// Each reasoning effort and the thinking budget it is on Anthropic messages (AG-72).
+const BUDGETS: [(&str, u64); 3] = [("low", 2048), ("medium", 8192), ("high", 24576)];
 
 /// Whether the call asks for a stream (`"stream": true`, ADR-N-032).
 fn wants_stream(body: &Bytes) -> bool {
@@ -127,6 +127,8 @@ struct CallUsage {
     latency_ms: u64,
     /// The `model` the call named, cut to [`MODEL_NAME_MAX`] characters.
     model: Option<String>,
+    /// The reasoning effort the call was sent with (T-2998), one of [`BUDGETS`].
+    effort: Option<&'static str>,
 }
 
 /// The most of a call's `model` a usage frame repeats; the body is the run's to write.
@@ -144,8 +146,30 @@ impl CallUsage {
         if let Some(model) = &self.model {
             payload["model"] = json!(model);
         }
+        if let Some(effort) = self.effort {
+            payload["reasoningEffort"] = json!(effort);
+        }
         payload
     }
+}
+
+/// The reasoning effort the body as sent asks for (T-2998): the run's setting the proxy wrote, or
+/// the one the body carried itself, which the proxy leaves as it is. OpenRouter names it
+/// (`reasoning.effort`, `reasoning_effort`), Anthropic's messages give its thinking budget. Only
+/// one of [`BUDGETS`] is reported, so a frame never repeats what a body made up.
+fn effort_of(body: &Bytes) -> Option<&'static str> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let named = value
+        .pointer("/reasoning/effort")
+        .or_else(|| value.get("reasoning_effort"))
+        .and_then(Value::as_str);
+    let budget = value
+        .pointer("/thinking/budget_tokens")
+        .and_then(Value::as_u64);
+    BUDGETS
+        .iter()
+        .find(|(name, tokens)| named == Some(*name) || budget == Some(*tokens))
+        .map(|(name, _)| *name)
 }
 
 /// The `model` a call's body names, for its usage frame.
@@ -302,6 +326,7 @@ pub async fn handler(
     };
     let uncounted = uncounted_stream(&body_bytes);
     let model = model_of(&body_bytes);
+    let effort = effort_of(&body_bytes);
 
     let target_url = format!(
         "{}/{}",
@@ -347,6 +372,7 @@ pub async fn handler(
             start,
             sent,
             model,
+            effort,
         };
         return stream_through(state, call, status, upstream_resp);
     }
@@ -365,6 +391,7 @@ pub async fn handler(
             cached,
             latency_ms,
             model,
+            effort,
         };
         record_usage(&state, &run.id, usage).await;
     }
@@ -397,6 +424,7 @@ struct Streamed {
     /// When the call left for the provider: a usage frame's latency is counted from here.
     sent: Instant,
     model: Option<String>,
+    effort: Option<&'static str>,
 }
 
 /// A stream passed through chunk by chunk (ADR-N-032). Its usage is read as it passes and
@@ -417,6 +445,7 @@ fn stream_through(
         start,
         sent,
         model,
+        effort,
     } = call;
     use futures::StreamExt;
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
@@ -453,6 +482,7 @@ fn stream_through(
             cached: usage.cached,
             latency_ms: millis(sent),
             model,
+            effort,
         };
         record_usage(&state, &run.id, call).await;
         log_request(&AuditEntry {
@@ -566,12 +596,53 @@ mod tests {
             cached: 3200,
             latency_ms: 1830,
             model: Some("google/gemini-3.8-flash".into()),
+            effort: None,
         };
         assert_eq!(
             call.payload(),
             json!({ "tokensThisStep": 4120, "inputTokens": 3980, "outputTokens": 140, "cachedTokens": 3200, "latencyMs": 1830, "model": "google/gemini-3.8-flash" })
         );
         assert!(CallUsage::default().payload().get("model").is_none());
+        assert!(CallUsage::default()
+            .payload()
+            .get("reasoningEffort")
+            .is_none());
+        let at = CallUsage {
+            effort: Some("medium"),
+            ..CallUsage::default()
+        };
+        assert_eq!(at.payload()["reasoningEffort"], "medium");
+    }
+
+    /// T-2998: the effort the body as sent asks for, in either provider's shape, and only one of
+    /// the three.
+    #[test]
+    fn the_effort_is_read_from_the_body_as_sent() {
+        let sent = |json: Value| effort_of(&Bytes::from(json.to_string()));
+        let plain = Bytes::from(json!({ "model": "m", "max_tokens": 100 }).to_string());
+        // The run's setting as the proxy wrote it, on both endpoints.
+        assert_eq!(
+            effort_of(&with_reasoning(&plain, "v1/chat/completions", "medium")),
+            Some("medium")
+        );
+        assert_eq!(
+            effort_of(&with_reasoning(&plain, "v1/messages", "high")),
+            Some("high")
+        );
+        // A body that carried its own is sent as is, and reported as what it said.
+        assert_eq!(
+            sent(json!({ "reasoning": { "effort": "low" } })),
+            Some("low")
+        );
+        assert_eq!(sent(json!({ "reasoning_effort": "high" })), Some("high"));
+        // Nothing, a made-up effort or a budget of its own: nothing is reported.
+        assert_eq!(effort_of(&plain), None);
+        assert_eq!(sent(json!({ "reasoning": { "effort": "<script>" } })), None);
+        assert_eq!(
+            sent(json!({ "thinking": { "type": "enabled", "budget_tokens": 1234 } })),
+            None
+        );
+        assert_eq!(effort_of(&Bytes::from_static(b"not json")), None);
     }
 
     #[test]
