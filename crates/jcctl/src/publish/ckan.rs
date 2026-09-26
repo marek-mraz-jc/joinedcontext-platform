@@ -845,6 +845,22 @@ impl CkanApi for InMemoryCkan {
                 self.packages.remove(&self.key_of(payload, &name));
                 Ok(json!({}))
             }
+            "resource_delete" => {
+                let mut found = false;
+                for package in self.packages.values_mut() {
+                    if let Some(resources) = package["resources"].as_array_mut() {
+                        let before = resources.len();
+                        resources.retain(|resource| resource["id"] != json!(name));
+                        found |= resources.len() != before;
+                    }
+                }
+                if !found {
+                    return Err(Self::rejected(action, "unknown resource"));
+                }
+                self.tables.remove(&name);
+                self.views.remove(&name);
+                Ok(json!({}))
+            }
             other => Err(Self::rejected(other, "unknown action")),
         }
     }
@@ -879,6 +895,20 @@ impl InMemoryCkan {
                             .to_owned();
                         if self.tables.contains_key(&id) {
                             return Err(Self::rejected(action, "that table already exists"));
+                        }
+                        // CKAN lists the resource the table was created under on its dataset.
+                        let package = payload["resource"]["package_id"]
+                            .as_str()
+                            .unwrap_or_default();
+                        let key = self.key_of(&json!({ "id": package }), package);
+                        if let Some(resources) = self
+                            .packages
+                            .get_mut(&key)
+                            .and_then(|live| live["resources"].as_array_mut())
+                        {
+                            resources.push(
+                                json!({ "id": id, "name": id, "url_type": "datastore", "hash": "" }),
+                            );
                         }
                         self.tables.insert(id.clone(), (declared, BTreeMap::new()));
                         Ok(json!({ "resource_id": id }))

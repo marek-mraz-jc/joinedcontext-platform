@@ -9,7 +9,7 @@
 
 mod common;
 
-use jcctl::commands::publish_ckan::{publish_one, targets};
+use jcctl::commands::publish_ckan::{publish_one, targets, Rows};
 use jcctl::loader::Repository;
 use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan, Settings};
 use serde_json::{json, Value};
@@ -136,7 +136,11 @@ fn a_large_mirrored_table_is_published_within_a_bounded_heap() {
         .into_iter()
         .next()
         .expect("one target");
-    let csv = table(9813);
+    let rows = Rows {
+        csv: table(9813),
+        schema: None,
+    };
+    let csv = &rows.csv;
     let record =
         json!({ "@type": "dcat:Dataset", "dct:title": [{ "@value": "Waste", "@language": "en" }] });
     let mut api = Forgetful(InMemoryCkan::new().with_organization("mesto"));
@@ -146,7 +150,7 @@ fn a_large_mirrored_table_is_published_within_a_bounded_heap() {
             &mut api,
             &target,
             &record,
-            Some(&csv),
+            Some(&rows),
             &Settings::new("data.example.org"),
         )
     });

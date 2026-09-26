@@ -7,11 +7,11 @@
 mod common;
 
 use jcctl::commands::publish_ckan::{
-    csv_table, publish_one, targets, token, typed_cell, withdraw_one, Error, Line, Mirror,
-    TokenSource, DATASTORE_RESOURCE,
+    csv_table, publish_one, targets, token, typed_cell, withdraw_one, Error, Line, Mirror, Rows,
+    TokenSource,
 };
 use jcctl::loader::Repository;
-use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan, Outcome, Settings};
+use jcctl::publish::ckan::{self, CkanApi, CkanError, InMemoryCkan, Outcome, Settings};
 use jcctl::publish::ckan_datastore;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -90,6 +90,17 @@ fn record(name: &str) -> Value {
 const CSV: &str = "id,type,temperature.value,location.value,note\r\n\
 urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1,AirQualityObserved,12.5,\"{\"\"type\"\":\"\"Point\"\",\"\"coordinates\"\":[19.1,48.7]}\",\"a note, with a comma\"\r\n\
 urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:2,AirQualityObserved,13,,\r\n";
+
+/// The table the air-quality rows land in: the one named by their entity type (T-3012).
+const AIR: &str = "AirQualityObserved";
+
+/// The gateway's answer for a mirror: `csv`, and no model schema.
+fn answer(csv: &str) -> Rows {
+    Rows {
+        csv: csv.to_owned(),
+        schema: None,
+    }
+}
 
 fn settings() -> Settings {
     Settings::new("data.example.org")
@@ -209,7 +220,7 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         &mut api,
         target,
         &record("air-rows"),
-        Some(CSV),
+        Some(&answer(CSV)),
         &settings(),
     )
     .expect("the first run");
@@ -235,10 +246,10 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         ]
     );
     // EP-62: the sheet opens as a grid on the dataset page.
-    let views = api.views(DATASTORE_RESOURCE);
+    let views = api.views(AIR);
     assert_eq!(views.len(), 1);
     assert_eq!(views[0]["view_type"], json!(ckan_datastore::GRID_VIEW));
-    let fields = api.table_fields(DATASTORE_RESOURCE).expect("the table");
+    let fields = api.table_fields(AIR).expect("the table");
     let types: Vec<(&str, &str)> = fields
         .iter()
         .map(|f| (f["id"].as_str().unwrap(), f["type"].as_str().unwrap()))
@@ -253,7 +264,7 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
             ("note", "text"),
         ]
     );
-    let rows = api.rows(DATASTORE_RESOURCE).expect("rows");
+    let rows = api.rows(AIR).expect("rows");
     let first = &rows["urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1"];
     assert_eq!(first["temperature.value"], json!(12.5));
     assert_eq!(first["location.value"]["coordinates"][0], json!(19.1));
@@ -267,7 +278,7 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         &mut api,
         target,
         &record("air-rows"),
-        Some(CSV),
+        Some(&answer(CSV)),
         &settings(),
     )
     .expect("the second run");
@@ -287,7 +298,7 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         ],
         "a reload writes rows and nothing else"
     );
-    assert_eq!(api.views(DATASTORE_RESOURCE).len(), 1, "a second grid");
+    assert_eq!(api.views(AIR).len(), 1, "a second grid");
 }
 
 /// A catalogue that refuses one action and answers the rest as `InMemoryCkan` does.
@@ -329,12 +340,12 @@ fn a_row_sync_that_fails_still_leaves_the_grid_view() {
         &mut api,
         &found[1],
         &record("air-rows"),
-        Some(CSV),
+        Some(&answer(CSV)),
         &settings(),
     )
     .expect_err("the rows were refused");
     assert!(error.to_string().contains("datastore_upsert"), "{error}");
-    let views = api.ckan.views(DATASTORE_RESOURCE);
+    let views = api.ckan.views(AIR);
     assert_eq!(views.len(), 1, "the grid is there although no row is");
     assert_eq!(views[0]["view_type"], json!(ckan_datastore::GRID_VIEW));
 }
@@ -355,7 +366,7 @@ fn a_refused_view_still_lands_the_rows() {
         &mut api,
         &found[1],
         &record("air-rows"),
-        Some(CSV),
+        Some(&answer(CSV)),
         &settings(),
     )
     .expect_err("the view was refused");
@@ -363,11 +374,8 @@ fn a_refused_view_still_lands_the_rows() {
         error.to_string().contains("resource_view_create"),
         "{error}"
     );
-    assert_eq!(
-        api.ckan.rows(DATASTORE_RESOURCE).map(|rows| rows.len()),
-        Some(2)
-    );
-    assert!(api.ckan.views(DATASTORE_RESOURCE).is_empty());
+    assert_eq!(api.ckan.rows(AIR).map(|rows| rows.len()), Some(2));
+    assert!(api.ckan.views(AIR).is_empty());
 }
 
 /// A mirror without rows is an error, not a dataset without its table.
@@ -408,7 +416,7 @@ fn a_table_larger_than_one_upsert_is_written_in_batches_and_whole() {
         &mut api,
         &found[1],
         &record("air-rows"),
-        Some(&rows_csv(1201, None)),
+        Some(&answer(&rows_csv(1201, None))),
         &settings(),
     )
     .expect("published");
@@ -420,11 +428,8 @@ fn a_table_larger_than_one_upsert_is_written_in_batches_and_whole() {
         .map(|(_, payload)| payload["records"].as_array().map_or(0, Vec::len))
         .collect();
     assert_eq!(upserts, vec![500, 500, 201]);
-    assert_eq!(
-        api.rows(DATASTORE_RESOURCE).map(|rows| rows.len()),
-        Some(1201)
-    );
-    let fields = api.table_fields(DATASTORE_RESOURCE).expect("the table");
+    assert_eq!(api.rows(AIR).map(|rows| rows.len()), Some(1201));
+    let fields = api.table_fields(AIR).expect("the table");
     assert_eq!(fields[2]["type"], json!("float"));
 }
 
@@ -441,7 +446,7 @@ fn a_bad_row_in_a_later_batch_writes_no_row_at_all() {
         &mut api,
         &found[1],
         &record("air-rows"),
-        Some(&rows_csv(1201, Some(1100))),
+        Some(&answer(&rows_csv(1201, Some(1100)))),
         &settings(),
     )
     .expect_err("a ragged row is refused");
@@ -468,7 +473,7 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
         &mut api,
         target,
         &record("air-rows"),
-        Some(CSV),
+        Some(&answer(CSV)),
         &settings(),
     )
     .expect("published");
@@ -483,13 +488,15 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
             "datastore_create",
             "resource_view_create",
             "datastore_upsert",
+            "datastore_delete",
             "package_delete"
         ]
     );
+    assert!(api.rows(AIR).is_none(), "the table left with the dataset");
 
     let again = withdraw_one(&mut api, target).expect("nothing to withdraw");
     assert_eq!(again.outcome, Outcome::Unchanged);
-    assert_eq!(api.actions().len(), 5);
+    assert_eq!(api.actions().len(), 6);
 }
 
 // --- the CSV the gateway writes ------------------------------------------------------------
@@ -955,4 +962,276 @@ fn an_empty_default_locale_leaves_language_open() {
     if let Ok(found) = walked {
         assert!(found.iter().all(|t| t.language.is_none()), "{found:?}");
     }
+}
+
+// --- one table per entity type, its columns from the model (T-3012) --------------------------
+
+/// Two entity types in one answer, as praha-mesto serves them: points spread by index, a
+/// polygon as one JSON cell, a unit, a language map and a relationship.
+const MIXED: &str = "id,type,no2.value,no2.unitCode,no2.observedAt,name.languageMap.cs,location.value.type,location.value.coordinates[0],location.value.coordinates[1],refDistrict.object,location.value.coordinates\r\n\
+urn:ngsi-ld:AirQualityObserved:praha.eu:ovzdusie:1,AirQualityObserved,21.5,GQ,2026-09-26T08:00:00Z,Karlín,Point,14.45,50.09,,\r\n\
+urn:ngsi-ld:AirQualityObserved:praha.eu:ovzdusie:2,AirQualityObserved,,,,,,,,,\r\n\
+urn:ngsi-ld:WasteContainerIsle:praha.eu:ovzdusie:7,WasteContainerIsle,,,,,Polygon,,,urn:ngsi-ld:CityDistrict:praha.eu:ovzdusie:4,\"[[[14.1,50.1],[14.2,50.1],[14.2,50.2],[14.1,50.1]]]\"\r\n";
+
+/// The Endpoint's `model.schema.json` as the gateway serves it: `$defs`, one class per type.
+fn mixed_schema() -> Value {
+    let geo = json!({
+        "type": ["object", "null"],
+        "x-ngsi-ld-kind": "GeoProperty",
+        "properties": { "type": { "type": "string" }, "coordinates": { "type": "array" } }
+    });
+    json!({
+        "$defs": {
+            "AirQualityObserved": {
+                "properties": {
+                    "id": { "type": "string" },
+                    "type": { "type": "string" },
+                    "no2": { "type": ["number", "null"], "x-ngsi-ld-kind": "Property", "x-unit": { "ucumCode": "ug/m3" } },
+                    "name": { "type": ["object", "null"], "x-ngsi-ld-kind": "LanguageProperty" },
+                    "location": geo,
+                    "observedAt": { "type": ["string", "null"], "format": "date-time", "x-ngsi-ld-kind": "Property", "description": "When it was observed." },
+                    "dataProvider": { "type": ["string", "null"], "x-ngsi-ld-kind": "Property" }
+                }
+            },
+            "WasteContainerIsle": {
+                "properties": {
+                    "id": { "type": "string" },
+                    "type": { "type": "string" },
+                    "location": geo,
+                    "refDistrict": { "type": "string", "x-ngsi-ld-kind": "Relationship" },
+                    "accessRestriction": { "type": ["string", "null"], "x-ngsi-ld-kind": "Property" }
+                }
+            }
+        }
+    })
+}
+
+fn field_ids(api: &InMemoryCkan, table: &str) -> Vec<String> {
+    api.table_fields(table)
+        .expect("the table")
+        .iter()
+        .map(|field| field["id"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// T-3012: an Endpoint serving two entity types fills two tables, each named by its type,
+/// holding that type's rows only and a column for every attribute its model declares, the
+/// ones no entity carries today included; the single table an earlier run wrote for every
+/// type leaves with its resource; the row count is the answer's.
+#[test]
+fn every_entity_type_gets_its_own_table_with_every_model_attribute() {
+    let dir = repo("per-type");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let target = &found[1];
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+    // The dataset as a run before T-3012 left it: one table of every type, named DataStore.
+    ckan::publish(
+        &mut api,
+        &target.manifest,
+        &target.instance,
+        &record("air-rows"),
+        &settings(),
+    )
+    .expect("the dataset");
+    let package = api.package("air-rows").expect("the dataset")["id"].clone();
+    api.action(
+        "datastore_create",
+        &json!({ "resource": { "package_id": package, "name": "DataStore" }, "fields": [{ "id": "entity_id", "type": "text" }] }),
+    )
+    .expect("the old table");
+    let rows = Rows {
+        csv: MIXED.to_owned(),
+        schema: Some(mixed_schema()),
+    };
+
+    let line = publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&rows),
+        &settings(),
+    )
+    .expect("published");
+
+    assert_eq!(
+        line.mirror.map(|m| m.rows),
+        Some(3),
+        "every row of the answer"
+    );
+    assert_eq!(api.rows(AIR).map(|rows| rows.len()), Some(2));
+    assert_eq!(
+        api.rows("WasteContainerIsle").map(|rows| rows.len()),
+        Some(1)
+    );
+    assert!(api.rows("DataStore").is_none(), "the shared table is gone");
+    let resources: Vec<&str> = api.package("air-rows").expect("the dataset")["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .filter(|resource| resource["url_type"] == json!("datastore"))
+        .filter_map(|resource| resource["name"].as_str())
+        .collect();
+    assert_eq!(resources, vec![AIR, "WasteContainerIsle"]);
+
+    let schema = mixed_schema();
+    for table in [AIR, "WasteContainerIsle"] {
+        let definition = ckan_datastore::definition(&schema, table).expect("the class");
+        let missing = ckan_datastore::missing_attributes(definition, &field_ids(&api, table));
+        assert!(missing.is_empty(), "{table} has no column for {missing:?}");
+    }
+    let air = field_ids(&api, AIR);
+    assert_eq!(
+        air,
+        vec![
+            "entity_id",
+            "type",
+            "no2.value",
+            "no2.unitCode",
+            "no2.observedAt",
+            "name.languageMap.cs",
+            "location.value.type",
+            "location.value.coordinates[0]",
+            "location.value.coordinates[1]",
+            "dataProvider.value",
+            "observedAt.value",
+            "location.geojson",
+        ],
+        "a column another type fills is not in this table"
+    );
+    let fields = api.table_fields(AIR).expect("the table");
+    let observed_at = fields
+        .iter()
+        .find(|field| field["id"] == json!("observedAt.value"))
+        .expect("the model's column");
+    assert_eq!(
+        observed_at["type"],
+        json!("timestamp"),
+        "an empty column takes the model's type"
+    );
+    assert_eq!(observed_at["info"]["notes"], json!("When it was observed."));
+    assert_eq!(fields[2]["type"], json!("float"));
+
+    let point = &api.rows(AIR).expect("rows")["urn:ngsi-ld:AirQualityObserved:praha.eu:ovzdusie:1"];
+    let geometry: Value = serde_json::from_str(
+        point["location.geojson"]
+            .as_str()
+            .expect("a GeoJSON string"),
+    )
+    .expect("GeoJSON");
+    assert_eq!(
+        geometry,
+        json!({ "type": "Point", "coordinates": [14.45, 50.09] })
+    );
+    assert_eq!(point["observedAt.value"], Value::Null);
+    let bare = &api.rows(AIR).expect("rows")["urn:ngsi-ld:AirQualityObserved:praha.eu:ovzdusie:2"];
+    assert_eq!(
+        bare["location.geojson"],
+        Value::Null,
+        "no geometry, no GeoJSON"
+    );
+
+    let isle = field_ids(&api, "WasteContainerIsle");
+    assert!(isle.contains(&"refDistrict.object".to_owned()), "{isle:?}");
+    assert!(
+        isle.contains(&"accessRestriction.value".to_owned()),
+        "{isle:?}"
+    );
+    assert!(
+        !isle.iter().any(|field| field.starts_with("no2")),
+        "{isle:?}"
+    );
+    let polygon = &api.rows("WasteContainerIsle").expect("rows")
+        ["urn:ngsi-ld:WasteContainerIsle:praha.eu:ovzdusie:7"];
+    let geometry: Value = serde_json::from_str(
+        polygon["location.geojson"]
+            .as_str()
+            .expect("a GeoJSON string"),
+    )
+    .expect("GeoJSON");
+    assert_eq!(geometry["type"], json!("Polygon"));
+    assert_eq!(geometry["coordinates"][0][1], json!([14.2, 50.1]));
+
+    let calls = api.actions().len();
+    let again = publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&rows),
+        &settings(),
+    )
+    .expect("the second run");
+    assert_eq!(
+        again.mirror.map(|m| m.table),
+        Some(ckan_datastore::Outcome::Unchanged)
+    );
+    assert_eq!(
+        api.actions()[calls..],
+        ["datastore_upsert", "datastore_upsert"],
+        "a reload writes rows and nothing else"
+    );
+}
+
+/// T-3012: an answer without a row says nothing about which types are gone, so every table
+/// stays; a row without a type, or an answer without the column, writes nothing at all.
+#[test]
+fn an_empty_answer_keeps_the_tables_and_a_row_without_a_type_writes_nothing() {
+    let dir = repo("per-type-edges");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let target = &found[1];
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+    publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&answer(CSV)),
+        &settings(),
+    )
+    .expect("published");
+
+    let line = publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&answer("id,type,temperature.value\r\n")),
+        &settings(),
+    )
+    .expect("an empty answer is not an error");
+    assert_eq!(line.mirror.map(|m| m.rows), Some(0));
+    assert_eq!(
+        api.rows(AIR).map(|rows| rows.len()),
+        Some(2),
+        "the table stays"
+    );
+
+    let calls = api.actions().len();
+    let untyped = "id,type,temperature.value\r\n\
+urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:3,AirQualityObserved,1\r\n\
+urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:4,,2\r\n";
+    let error = publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&answer(untyped)),
+        &settings(),
+    )
+    .expect_err("a row without a type");
+    assert!(error.to_string().contains("row 1 has no type"), "{error}");
+    let error = publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&answer("id,temperature.value\r\nurn:x,1\r\n")),
+        &settings(),
+    )
+    .expect_err("no type column");
+    assert!(error.to_string().contains("'type' column"), "{error}");
+    assert!(
+        !api.actions()[calls..]
+            .iter()
+            .any(|action| action.starts_with("datastore_") || *action == "resource_delete"),
+        "{:?}",
+        &api.actions()[calls..]
+    );
 }

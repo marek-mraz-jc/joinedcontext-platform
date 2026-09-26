@@ -21,15 +21,11 @@ use jc_core::envelope::{Kind, Ref};
 use jc_core::i18n::Text;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
 use jc_core::kinds::{ContextSpaceSpec, EndpointSpec, Representation};
-use serde_json::Value;
-use std::collections::BTreeSet;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
-
-/// The name of the DataStore resource inside the dataset, which is how a later run finds
-/// the table it created (EP-65).
-pub const DATASTORE_RESOURCE: &str = "DataStore";
 
 /// The environment variable `sops` reads its age key file from, read here for the same
 /// purpose when `--age-key-file` is absent.
@@ -383,14 +379,36 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
     })
 }
 
-/// The rows of one target's mirror, read through the representation it declares (EP-65).
-pub fn rows(target: &Target, settings: &Settings) -> Result<Option<String>, Error> {
+/// What one target's mirror is filled from: the Endpoint's tabular answer, and the JSON Schema
+/// of its models that says which columns each entity type's table carries (EP-65, T-3012).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rows {
+    /// The CSV the gateway answers for the Endpoint.
+    pub csv: String,
+    /// The Endpoint's `model.schema.json`, narrowed to the same anonymous grant as the rows;
+    /// `None` leaves every table to the columns its rows fill.
+    pub schema: Option<Value>,
+}
+
+/// The rows of one target's mirror, read through the representation it declares, and the
+/// schema of its models (EP-65, T-3012).
+pub fn rows(target: &Target, settings: &Settings) -> Result<Option<Rows>, Error> {
     let Some(mirror) = &target.publication.datastore else {
         return Ok(None);
     };
     let (path, accept) = representation_file(mirror.representation)?;
-    let url = format!("{}/{path}", settings.endpoint_url(&target.slug));
-    fetch(&url, accept).map(Some)
+    let base = settings.endpoint_url(&target.slug);
+    let csv = fetch(&format!("{base}/{path}"), accept)?;
+    let url = format!("{base}/schema/v1/model.schema.json");
+    let text = fetch(&url, "application/schema+json")?;
+    let schema = serde_json::from_str(&text).map_err(|e| Error::Gateway {
+        url,
+        message: format!("the schema is not JSON: {e}"),
+    })?;
+    Ok(Some(Rows {
+        csv,
+        schema: Some(schema),
+    }))
 }
 
 /// The file the mirror's rows are read from.
@@ -413,21 +431,21 @@ fn representation_file(
 
 /// Publishes one Endpoint: the dataset, and the mirror when it declares one (EP-62, EP-65).
 ///
-/// `rows` is the tabular answer the mirror is filled from, `None` when the Endpoint
-/// declares no mirror. The mirror is a full reload on every run: every row the Endpoint
-/// answers is upserted, so the table equals the answer for every entity it carries. A
-/// dataset that already matches makes no writing call (CC-18).
+/// `rows` is the tabular answer the mirror is filled from and the schema of its models, `None`
+/// when the Endpoint declares no mirror. The mirror is a full reload on every run: every row the
+/// Endpoint answers is upserted into its entity type's table, so each table equals the answer
+/// for every entity it carries. A dataset that already matches makes no writing call (CC-18).
 pub fn publish_one(
     api: &mut impl CkanApi,
     target: &Target,
     record: &Value,
-    rows: Option<&str>,
+    rows: Option<&Rows>,
     settings: &Settings,
 ) -> Result<Line, Error> {
     let settings = target.settings(settings);
     let outcome = ckan::publish(api, &target.manifest, &target.instance, record, &settings)?;
     let mirror = match (&target.publication.datastore, rows) {
-        (Some(_), Some(text)) => Some(mirror(api, target, text)?),
+        (Some(_), Some(rows)) => Some(mirror(api, target, rows)?),
         (Some(_), None) => {
             return Err(Error::Rows(
                 "the endpoint declares a DataStore mirror and no rows were read".to_owned(),
@@ -451,11 +469,13 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
     let name = target.dataset_name().to_owned();
     let mirror = match &target.publication.datastore {
         Some(_) => {
-            let (_, resource) = live_table(api, &name)?;
-            let table = match resource {
-                Some(id) => datastore::drop_table(api, &id)?,
-                None => datastore::Outcome::Unchanged,
-            };
+            let (_, tables) = live_tables(api, &name)?;
+            let mut table = datastore::Outcome::Unchanged;
+            for resource_id in tables.values() {
+                if datastore::drop_table(api, resource_id)? == datastore::Outcome::NotMirrored {
+                    table = datastore::Outcome::NotMirrored;
+                }
+            }
             Some(Mirror { table, rows: 0 })
         }
         None => None,
@@ -469,99 +489,304 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
     })
 }
 
-/// Creates or extends the table and reloads it from `text` (EP-65).
+/// Where one column of an entity type's table takes its cells from (T-3012).
+enum Source {
+    /// The CSV column at this index.
+    Cell(usize),
+    /// Nothing yet: a column only the model brought, which a row fills once the data has it.
+    Empty,
+    /// One geometry as a GeoJSON string, built from the CSV columns of its `value.type` and of
+    /// its coordinates, whole (`value.coordinates`) or spread by index (`value.coordinates[0]`).
+    GeoJson {
+        kind: usize,
+        whole: Option<usize>,
+        indexed: Vec<usize>,
+    },
+}
+
+/// Creates or extends one table per entity type and reloads each from `rows` (EP-65, T-3012).
+///
+/// An Endpoint that serves several entity types gets a table per type, named by the type, with
+/// that type's rows only: one table of every type made each row a line of mostly empty cells of
+/// other types' attributes. A table's columns are the ones its rows fill, every column the
+/// type's model declares (an attribute no entity carries today still has its column), and a
+/// GeoJSON column per geometry. The table of a type the Endpoint no longer answers, and the one
+/// shared table a run before T-3012 wrote, are removed with their resource.
 ///
 /// The table is held once, as the text cells of the CSV, and every other shape of a row is
 /// built one batch at a time and dropped with it: a typed copy, a copy keeping the text columns
 /// and the records of every row at once came to 27 times the CSV, and the Portal runs this for
 /// every mirrored table on every pass (T-2968). Every row is checked before the catalogue is
 /// written, so a table with one bad row still changes nothing.
-fn mirror(api: &mut impl CkanApi, target: &Target, text: &str) -> Result<Mirror, Error> {
-    let (columns, raw) = csv_table(text)?;
-    let cell_of =
-        |row: &[String], index: usize| row.get(index).map_or(Value::Null, |c| typed_cell(c));
-    let fields = datastore::fields_by(&columns, &[], |index| {
-        datastore::observed_kind(raw.iter().map(|row| cell_of(row, index)))
-    });
-    // A column CKAN will hold as text keeps the cell as it was written: `42` in a text
-    // column is the text "42", not a number the database would refuse.
-    let text_columns: Vec<bool> = fields
+fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror, Error> {
+    let (columns, raw) = csv_table(&rows.csv)?;
+    let id = datastore::id_column(&columns)?;
+    let kind = columns
         .iter()
-        .map(|field| field.get("type") == Some(&Value::String("text".to_owned())))
-        .collect();
-    let values = |row: &[String]| -> Vec<Value> {
-        row.iter()
-            .enumerate()
-            .map(|(index, cell)| {
-                if text_columns.get(index).copied().unwrap_or(true) && !cell.is_empty() {
-                    Value::String(cell.clone())
-                } else {
-                    typed_cell(cell)
-                }
-            })
-            .collect()
-    };
-    datastore::id_column(&columns)?;
+        .position(|column| column == "type")
+        .ok_or_else(|| {
+            Error::Rows(
+                "the CSV has no 'type' column, so a row cannot go into its entity type's table"
+                    .to_owned(),
+            )
+        })?;
+    let mut by_type: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, row) in raw.iter().enumerate() {
-        datastore::record(&columns, index, values(row))?;
+        if row.len() != columns.len() {
+            return Err(MirrorError::RaggedRow {
+                row: index,
+                cells: row.len(),
+                columns: columns.len(),
+            }
+            .into());
+        }
+        for (column, what) in [(id, "id"), (kind, "type")] {
+            if row[column].is_empty() {
+                return Err(Error::Rows(format!("row {index} has no {what}")));
+            }
+        }
+        by_type.entry(row[kind].as_str()).or_default().push(index);
+    }
+    let languages = languages(&columns, target.language.as_deref());
+
+    let (package_id, live) = live_tables(api, target.dataset_name())?;
+    let mut table = datastore::Outcome::Unchanged;
+    let mut written = 0;
+    let mut refused_view = None;
+    for (entity_type, indices) in &by_type {
+        let definition = rows
+            .schema
+            .as_ref()
+            .and_then(|schema| datastore::definition(schema, entity_type));
+        let (names, sources) = layout(&columns, &raw, indices, [id, kind], definition, &languages);
+        let fields = datastore::table_fields(&names, definition, |index| match &sources[index] {
+            Source::Cell(column) => Some(datastore::observed_kind(
+                indices.iter().map(|&row| typed_cell(&raw[row][*column])),
+            )),
+            Source::Empty => None,
+            Source::GeoJson { .. } => Some("text".to_owned()),
+        });
+        // A column CKAN will hold as text keeps the cell as it was written: `42` in a text
+        // column is the text "42", not a number the database would refuse.
+        let text_columns: Vec<bool> = fields
+            .iter()
+            .map(|field| field.get("type") == Some(&Value::String("text".to_owned())))
+            .collect();
+        let values = |row: &[String]| -> Vec<Value> {
+            sources
+                .iter()
+                .zip(&text_columns)
+                .map(|(source, text)| match source {
+                    Source::Cell(column) => {
+                        let cell = &row[*column];
+                        if *text && !cell.is_empty() {
+                            Value::String(cell.clone())
+                        } else {
+                            typed_cell(cell)
+                        }
+                    }
+                    Source::Empty => Value::Null,
+                    Source::GeoJson {
+                        kind,
+                        whole,
+                        indexed,
+                    } => geojson(row, *kind, *whole, indexed),
+                })
+                .collect()
+        };
+
+        let resource = live.get(*entity_type).map_or(*entity_type, String::as_str);
+        let (resource_id, outcome) = datastore::ensure(api, &package_id, resource, &fields)?;
+        table = match (table, outcome) {
+            (datastore::Outcome::Created, _) | (_, datastore::Outcome::Created) => {
+                datastore::Outcome::Created
+            }
+            (datastore::Outcome::Extended, _) | (_, datastore::Outcome::Extended) => {
+                datastore::Outcome::Extended
+            }
+            _ => datastore::Outcome::Unchanged,
+        };
+        // The grid is asked for as soon as the table exists, and its refusal is reported after
+        // the rows: a sync that fails part-way or a pass cut off on a large table still leaves
+        // the view (T-2931), and a catalogue that refuses the view still holds today's data.
+        if let Err(error) = datastore::ensure_view(api, &resource_id) {
+            refused_view.get_or_insert(error);
+        }
+        for chunk in indices.chunks(datastore::UPSERT_BATCH) {
+            let batch = chunk
+                .iter()
+                .map(|&row| datastore::record(&names, row, values(&raw[row])))
+                .collect::<Result<Vec<_>, _>>()?;
+            written += batch.len();
+            datastore::upsert(api, &resource_id, batch)?;
+        }
     }
 
-    let name = target.dataset_name();
-    let (package_id, resource) = live_table(api, name)?;
-    let (resource_id, table) = datastore::ensure(
-        api,
-        &package_id,
-        resource.as_deref().unwrap_or(DATASTORE_RESOURCE),
-        &fields,
-    )?;
-    // The grid is asked for as soon as the table exists, and its refusal is reported after the
-    // rows: a sync that fails part-way or a pass cut off on a large table still leaves the view
-    // (T-2931), and a catalogue that refuses the view still holds today's data.
-    let view = datastore::ensure_view(api, &resource_id);
-    let mut rows = 0;
-    for (batch_index, chunk) in raw.chunks(datastore::UPSERT_BATCH).enumerate() {
-        let first = batch_index * datastore::UPSERT_BATCH;
-        let batch = chunk
-            .iter()
-            .enumerate()
-            .map(|(offset, row)| datastore::record(&columns, first + offset, values(row)))
-            .collect::<Result<Vec<_>, _>>()?;
-        rows += batch.len();
-        datastore::upsert(api, &resource_id, batch)?;
+    // An answer without a row says nothing about which types are gone, so it removes nothing.
+    if !by_type.is_empty() {
+        for (name, resource_id) in &live {
+            if by_type.contains_key(name.as_str()) {
+                continue;
+            }
+            datastore::drop_table(api, resource_id)?;
+            api.action("resource_delete", &json!({ "id": resource_id }))
+                .map_err(MirrorError::from)?;
+        }
     }
-    view?;
-    Ok(Mirror { table, rows })
+    if let Some(error) = refused_view {
+        return Err(error.into());
+    }
+    Ok(Mirror {
+        table,
+        rows: written,
+    })
 }
 
-/// The live dataset's id and the id of its DataStore resource, when the dataset has one.
+/// The columns of one entity type's table and where each takes its cells from (T-3012).
+///
+/// The CSV columns this type's rows fill come first, in the gateway's order, with `id` and
+/// `type` always; then every column the type's model declares that those do not carry; then a
+/// GeoJSON column per geometry the table holds.
+fn layout(
+    columns: &[String],
+    raw: &[Vec<String>],
+    indices: &[usize],
+    always: [usize; 2],
+    definition: Option<&Value>,
+    languages: &[String],
+) -> (Vec<String>, Vec<Source>) {
+    let mut names = Vec::new();
+    let mut sources = Vec::new();
+    for (column, name) in columns.iter().enumerate() {
+        if always.contains(&column) || indices.iter().any(|&row| !raw[row][column].is_empty()) {
+            names.push(name.clone());
+            sources.push(Source::Cell(column));
+        }
+    }
+    for column in definition.map_or_else(Vec::new, |definition| {
+        datastore::model_columns(definition, languages)
+    }) {
+        if !datastore::covered(&names, &column) {
+            names.push(column);
+            sources.push(Source::Empty);
+        }
+    }
+    let geometries: Vec<String> = names
+        .iter()
+        .filter_map(|name| name.strip_suffix(".value.type"))
+        .filter(|attribute| datastore::covered(&names, &format!("{attribute}.value.coordinates")))
+        .map(str::to_owned)
+        .collect();
+    for attribute in geometries {
+        let name = format!("{attribute}.geojson");
+        if names.contains(&name) {
+            continue;
+        }
+        let at = |wanted: &str| columns.iter().position(|column| column == wanted);
+        let whole = format!("{attribute}.value.coordinates");
+        let mut indexed: Vec<(usize, usize)> = columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column, name)| {
+                let index = name
+                    .strip_prefix(&whole)?
+                    .strip_prefix('[')?
+                    .strip_suffix(']')?;
+                Some((index.parse().ok()?, column))
+            })
+            .collect();
+        indexed.sort_unstable();
+        let source = match at(&format!("{attribute}.value.type")) {
+            Some(kind) => Source::GeoJson {
+                kind,
+                whole: at(&whole),
+                indexed: indexed.into_iter().map(|(_, column)| column).collect(),
+            },
+            None => Source::Empty,
+        };
+        names.push(name);
+        sources.push(source);
+    }
+    (names, sources)
+}
+
+/// One geometry as a GeoJSON string, or null when the row carries none (T-3012).
+fn geojson(row: &[String], kind: usize, whole: Option<usize>, indexed: &[usize]) -> Value {
+    let Some(kind) = row.get(kind).filter(|kind| !kind.is_empty()) else {
+        return Value::Null;
+    };
+    let coordinates = match whole
+        .and_then(|column| row.get(column))
+        .filter(|c| !c.is_empty())
+    {
+        Some(text) => typed_cell(text),
+        None => Value::Array(
+            indexed
+                .iter()
+                .map_while(|&column| {
+                    row.get(column)
+                        .filter(|c| !c.is_empty())
+                        .map(|c| typed_cell(c))
+                })
+                .collect(),
+        ),
+    };
+    if coordinates.as_array().is_some_and(Vec::is_empty) || coordinates.is_null() {
+        return Value::Null;
+    }
+    Value::String(json!({ "type": kind, "coordinates": coordinates }).to_string())
+}
+
+/// The languages a LanguageProperty's columns are spread over: every language the answer
+/// carries, and the space's own (EP-63).
+fn languages(columns: &[String], space: Option<&str>) -> Vec<String> {
+    columns
+        .iter()
+        .filter_map(|column| {
+            column
+                .split_once(".languageMap.")
+                .map(|(_, language)| language)
+        })
+        .chain(space)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// The live dataset's id and its DataStore resources by name, when the dataset exists.
 ///
 /// CKAN addresses a resource by id only, and the id was minted when the table was
 /// created; the dataset is where a later run finds it again, by the name it was given.
-fn live_table(api: &impl CkanApi, dataset: &str) -> Result<(String, Option<String>), Error> {
+fn live_tables(
+    api: &impl CkanApi,
+    dataset: &str,
+) -> Result<(String, BTreeMap<String, String>), Error> {
     let Some(live) = api
         .show("package_show", dataset)
         .map_err(PublishError::from)?
     else {
-        return Ok((dataset.to_owned(), None));
+        return Ok((dataset.to_owned(), BTreeMap::new()));
     };
     let package_id = live
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or(dataset)
         .to_owned();
-    let resource = live
+    let tables = live
         .get("resources")
         .and_then(Value::as_array)
-        .and_then(|resources| {
-            resources.iter().find(|resource| {
-                resource.get("url_type").and_then(Value::as_str) == Some("datastore")
-                    && resource.get("name").and_then(Value::as_str) == Some(DATASTORE_RESOURCE)
-            })
+        .into_iter()
+        .flatten()
+        .filter(|resource| resource.get("url_type").and_then(Value::as_str) == Some("datastore"))
+        .filter_map(|resource| {
+            Some((
+                resource.get("name")?.as_str()?.to_owned(),
+                resource.get("id")?.as_str()?.to_owned(),
+            ))
         })
-        .and_then(|resource| resource.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    Ok((package_id, resource))
+        .collect();
+    Ok((package_id, tables))
 }
 
 /// The header and the rows of one CSV file as the gateway writes it (RFC 4180): quoted

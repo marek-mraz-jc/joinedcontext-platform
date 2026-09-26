@@ -726,3 +726,87 @@ fn a_catalogue_that_refuses_the_view_is_an_error_naming_the_action() {
         MirrorError::Api(CkanError::Rejected { action, .. }) if action == "resource_view_create"
     ));
 }
+
+/// T-3012: a class is found under `$defs` or `definitions`, by its short name or the last
+/// segment of an expanded type, and a type the schema does not know has no class.
+#[test]
+fn a_class_is_found_by_short_name_or_expanded_type() {
+    use jcctl::publish::ckan_datastore::definition;
+    let current = json!({ "$defs": { "Parking": { "properties": {} } } });
+    assert!(definition(&current, "Parking").is_some());
+    assert!(definition(
+        &current,
+        "https://smartdatamodels.org/dataModel.Parking/Parking"
+    )
+    .is_some());
+    assert!(definition(&current, "urn:example:Parking").is_some());
+    assert!(definition(&current, "Bike").is_none());
+    assert!(
+        definition(&schema(), "AirQualityObserved").is_some(),
+        "an older document"
+    );
+    assert!(definition(&json!({}), "Parking").is_none());
+}
+
+/// T-3012: every kind of attribute becomes the columns the gateway's tabular answer names it
+/// by, and the completeness check names exactly the attributes no column carries.
+#[test]
+fn a_model_names_the_columns_of_every_attribute_kind() {
+    use jcctl::publish::ckan_datastore::{covered, missing_attributes, model_columns};
+    let class = json!({ "properties": {
+        "id": {}, "type": {}, "@context": {},
+        "speed": { "type": "number", "x-ngsi-ld-kind": "Property", "x-unit": { "ucumCode": "km/h" } },
+        "address": { "type": "object", "x-ngsi-ld-kind": "Property",
+                     "properties": { "street": {}, "city": {} } },
+        "name": { "x-ngsi-ld-kind": "LanguageProperty" },
+        "location": { "x-ngsi-ld-kind": "GeoProperty" },
+        "owner": { "x-ngsi-ld-kind": "Relationship" },
+        "extra": { "x-ngsi-ld-kind": "JsonProperty" },
+        "readings": { "x-ngsi-ld-kind": "ListProperty" },
+        "category": { "x-ngsi-ld-kind": "VocabProperty" },
+        "plain": { "type": "string" }
+    }});
+    let languages = vec!["cs".to_owned(), "en".to_owned()];
+    let columns = model_columns(&class, &languages);
+    assert_eq!(
+        columns,
+        vec![
+            "address.value.city",
+            "address.value.street",
+            "category.vocab",
+            "extra.json",
+            "location.value.type",
+            "location.value.coordinates",
+            "name.languageMap.cs",
+            "name.languageMap.en",
+            "owner.object",
+            "plain.value",
+            "readings.valueList",
+            "speed.value",
+            "speed.unitCode",
+        ]
+    );
+    assert_eq!(
+        model_columns(&class, &[])[6],
+        "name.languageMap",
+        "no language known"
+    );
+    assert!(missing_attributes(&class, &columns).is_empty());
+    assert_eq!(
+        missing_attributes(&class, &["entity_id".to_owned(), "speed.value".to_owned()]),
+        vec!["address", "category", "extra", "location", "name", "owner", "plain", "readings"]
+    );
+    assert!(
+        missing_attributes(&json!({}), &[]).is_empty(),
+        "no class, nothing to miss"
+    );
+
+    let spread = vec!["location.value.coordinates[0]".to_owned()];
+    assert!(covered(&spread, "location.value.coordinates"));
+    assert!(covered(&spread, "location"));
+    assert!(!covered(&spread, "location.value.type"));
+    assert!(
+        !covered(&spread, "locat"),
+        "a prefix of a name is not the attribute"
+    );
+}
