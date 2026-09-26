@@ -134,6 +134,146 @@ pub fn fields_by(
         .collect()
 }
 
+/// The DataStore fields of one entity type's table, whose columns come from its data and its
+/// model (T-3012).
+///
+/// `observed` is the type of a column read off the cells it holds, `None` for a column no row of
+/// the table fills. The cells win where there are any: CKAN refuses a whole upsert over one cell
+/// that does not parse as its field's type, and data written before a model tightened must not
+/// stop the mirror. An empty column, one only the model brought, takes the model's type, so a
+/// consumer sees the schema the rows will have. Every column of a declared attribute carries the
+/// attribute's description.
+pub fn table_fields(
+    columns: &[String],
+    definition: Option<&Value>,
+    observed: impl Fn(usize) -> Option<String>,
+) -> Vec<Value> {
+    let declared = definition
+        .map(|definition| declarations(&[json!({ "definitions": { "_": definition } })]))
+        .unwrap_or_default();
+    columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let declared = declared.get(stem(column));
+            let kind = observed(index)
+                .or_else(|| declared.and_then(|declaration| declaration.datastore_type(column)))
+                .unwrap_or_else(|| "text".to_owned());
+            let mut field = json!({ "id": field_name(column), "type": kind });
+            if let Some(notes) = declared.and_then(|declaration| declaration.description.clone()) {
+                field["info"] = json!({ "notes": notes });
+            }
+            field
+        })
+        .collect()
+}
+
+/// The definition of `entity_type` in an Endpoint's JSON Schema (T-3012).
+///
+/// The schema keys a class by its short name (`$defs`, or `definitions` in an older document);
+/// the rows may carry the type expanded, so an IRI is matched by its last segment.
+pub fn definition<'a>(schema: &'a Value, entity_type: &str) -> Option<&'a Value> {
+    let short = entity_type
+        .rsplit(['/', '#', ':'])
+        .next()
+        .unwrap_or(entity_type);
+    ["$defs", "definitions"]
+        .iter()
+        .filter_map(|key| schema.get(key).and_then(Value::as_object))
+        .find_map(|definitions| {
+            definitions
+                .get(entity_type)
+                .or_else(|| definitions.get(short))
+        })
+}
+
+/// The columns one entity type's model says its table carries, named as the gateway's tabular
+/// answer names them (T-3012, EP-08).
+///
+/// A Relationship is `<attr>.object`; a LanguageProperty one `<attr>.languageMap.<lang>` per
+/// language in `languages`; a GeoProperty its `value.type` and `value.coordinates`; a Property
+/// `<attr>.value`, one column per member when the model spells out a structured value, and
+/// `<attr>.unitCode` when the model gives a unit. `id` and `type` are the table's own columns
+/// and are not listed.
+pub fn model_columns(definition: &Value, languages: &[String]) -> Vec<String> {
+    let Some(properties) = definition.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut columns = Vec::new();
+    for (name, property) in properties {
+        if matches!(name.as_str(), "id" | "type") || name.starts_with('@') {
+            continue;
+        }
+        match property.get("x-ngsi-ld-kind").and_then(Value::as_str) {
+            Some("Relationship") => columns.push(format!("{name}.object")),
+            Some("LanguageProperty") if languages.is_empty() => {
+                columns.push(format!("{name}.languageMap"));
+            }
+            Some("LanguageProperty") => columns.extend(
+                languages
+                    .iter()
+                    .map(|language| format!("{name}.languageMap.{language}")),
+            ),
+            Some("GeoProperty") => {
+                columns.push(format!("{name}.value.type"));
+                columns.push(format!("{name}.value.coordinates"));
+            }
+            Some("JsonProperty") => columns.push(format!("{name}.json")),
+            Some("ListProperty") => columns.push(format!("{name}.valueList")),
+            Some("VocabProperty") => columns.push(format!("{name}.vocab")),
+            _ => {
+                match property.get("properties").and_then(Value::as_object) {
+                    Some(members) if !members.is_empty() => columns.extend(
+                        members
+                            .keys()
+                            .map(|member| format!("{name}.value.{member}")),
+                    ),
+                    _ => columns.push(format!("{name}.value")),
+                }
+                if property.get("x-unit").is_some() {
+                    columns.push(format!("{name}.unitCode"));
+                }
+            }
+        }
+    }
+    columns
+}
+
+/// Whether `column` is already carried by `columns`: by itself, or by the leaves the gateway
+/// spread it over (`location.value.coordinates` by `location.value.coordinates[0]`).
+pub fn covered(columns: &[String], column: &str) -> bool {
+    columns.iter().any(|known| {
+        known == column
+            || known
+                .strip_prefix(column)
+                .is_some_and(|rest| rest.starts_with(['.', '[']))
+    })
+}
+
+/// The attributes `definition` declares that no column of `columns` carries: the completeness
+/// check of one table against its model (T-3012). Empty when the table covers the model.
+pub fn missing_attributes(definition: &Value, columns: &[String]) -> Vec<String> {
+    let carried: BTreeSet<&str> = columns.iter().map(|column| stem(column)).collect();
+    definition
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| {
+            properties
+                .keys()
+                .filter(|name| !matches!(name.as_str(), "id" | "type") && !name.starts_with('@'))
+                .filter(|name| !carried.contains(name.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The attribute a column belongs to: `no2` of `no2.value`, `location` of
+/// `location.value.coordinates[0]`.
+fn stem(column: &str) -> &str {
+    column.split(['.', '[']).next().unwrap_or(column)
+}
+
 /// The `datastore_create` payload of a table that does not exist yet.
 ///
 /// `force` is set because the resource belongs to a dataset the publisher owns and CKAN

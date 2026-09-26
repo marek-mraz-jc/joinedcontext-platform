@@ -1275,7 +1275,7 @@ fn publish_ckan(options: &PublishCkanOptions) -> ExitCode {
         } else {
             command::record(target, &settings).and_then(|record| {
                 let rows = command::rows(target, &settings)?;
-                command::publish_one(api, target, &record, rows.as_deref(), &settings)
+                command::publish_one(api, target, &record, rows.as_ref(), &settings)
             })
         };
         match line {
