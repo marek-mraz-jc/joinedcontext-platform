@@ -61,6 +61,10 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_RUNTIME, "SyncSource"),
     (WAVE_RUNTIME, "Dashboard"),
     (WAVE_RUNTIME, "Layer"),
+    // The assistant reads its sources and answers through the Endpoints above, so both come
+    // last; a deployment names the sources, which stand before it (MF-51, MF-52).
+    (WAVE_RUNTIME, "KnowledgeSource"),
+    (WAVE_RUNTIME, "AssistantDeployment"),
 ];
 
 /// Position of a kind in the convergence order, `None` if it is not reconciled.

@@ -1,0 +1,16 @@
+apiVersion: joinedcontext.com/v1alpha1
+kind: KnowledgeSource
+metadata: { name: bb-web, namespace: banskabystrica }
+spec:
+  source: website               # website | ckan
+  startUrls: [https://www.banskabystrica.sk/]
+  sitemap: true
+  include: ["/zivot-v-meste/**", "/samosprava/**"]
+  exclude: ["/**/tlac/**"]
+  maxDepth: 3
+  maxPages: 2000
+  pdf: { policy: include, maxBytes: 52428800, maxPages: 500 }
+  offDomainDocuments: false     # a PDF on another host is skipped unless this is true
+  schedule: "0 3 * * *"
+  languages: [sk]
+  visibility: public            # public | internal
