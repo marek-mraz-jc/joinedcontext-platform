@@ -18,6 +18,10 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub mod crawl;
 /// Text, language and passages out of what the crawl fetched.
 pub mod extract;
+/// When a source is read again: its cron, matched against the minute.
+pub mod schedule;
+/// The crawl worker: queueing due sources and working the queue.
+pub mod worker;
 
 /// The dimension of every embedding: `multilingual-e5-small` (ADR-N-040 §3.1).
 pub const DIMENSIONS: usize = 384;

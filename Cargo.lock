@@ -322,17 +322,23 @@ name = "assistant"
 version = "0.1.0"
 dependencies = [
  "agent-proxy",
+ "axum",
  "futures-util",
  "hex",
  "jc-core",
+ "jcctl",
  "kreuzberg",
  "quick-xml",
  "reqwest",
  "scraper",
+ "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "texting_robots",
+ "time",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "wiremock",
 ]

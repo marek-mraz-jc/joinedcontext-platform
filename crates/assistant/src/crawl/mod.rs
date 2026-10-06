@@ -735,7 +735,9 @@ async fn handle_document(
     Ok(())
 }
 
-async fn upsert_site(
+/// The site row of a source, created on its first crawl; its id is what [`crate::extract::Indexer`]
+/// stores chunks under.
+pub async fn upsert_site(
     pool: &PgPool,
     project: &str,
     organization: &str,

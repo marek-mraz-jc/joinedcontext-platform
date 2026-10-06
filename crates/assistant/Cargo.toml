@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "jc-assistant: the knowledge assistant's store, migrations and hybrid retrieval (ADR-N-040)"
 
+[[bin]]
+name = "jc-assistant"
+path = "src/bin/jc-assistant.rs"
+
 [dependencies]
 # The Portal's version. `macros` only for `migrate!`, which embeds the migration files at build
 # time; every query is a runtime one, checked by the tests against the cluster's own PostgreSQL
@@ -23,7 +27,15 @@ scraper = "0.27"
 quick-xml = "0.42"
 texting_robots = "0.2.2"
 futures-util = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
+# The worker: the organization's manifests read the way the gateway reads them (layout 1 and 2),
+# its schedule, its log and its health probe.
+jcctl = { path = "../jcctl", version = "0.1.0" }
+serde_json = "1"
+time = { version = "0.3", features = ["macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+axum = "0.8"
 # Text out of HTML and PDF, language detection and chunking (ADR-N-040 §3.1). PDFium is linked
 # from a prepared directory: `KREUZBERG_PDFIUM_PREBUILT` names an unpacked
 # bblanchon/pdfium-binaries chromium/7568 release whose SHA-256 the build checks first (CI, the

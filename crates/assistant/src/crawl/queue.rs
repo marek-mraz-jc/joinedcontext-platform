@@ -33,6 +33,19 @@ pub async fn enqueue(pool: &PgPool, project: &str, source: &str) -> Result<i64, 
     Ok(id)
 }
 
+/// Whether `project`'s `source` already has a job queued or running, so a minute's queueing adds
+/// no second one.
+pub async fn pending(pool: &PgPool, project: &str, source: &str) -> Result<bool, Error> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM crawl_jobs \
+         WHERE project = $1 AND source = $2 AND state IN ('queued', 'running'))",
+    )
+    .bind(project)
+    .bind(source)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Claims the next ready queued job using `FOR UPDATE SKIP LOCKED`.
 pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
     let row = sqlx::query(
