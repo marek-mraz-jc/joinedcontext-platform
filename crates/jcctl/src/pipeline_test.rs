@@ -74,6 +74,19 @@ pub enum HarnessError {
     NotABentoProcessor(ComputeKind),
 }
 
+/// How much of a message the harness keeps after each step: a stage's sample, not its record.
+pub const STAGE_SAMPLE_BYTES: usize = 4096;
+
+/// The mapping that keeps what step `at` made of the message, at most [`STAGE_SAMPLE_BYTES`] of
+/// it, in metadata; a failed message keeps nothing, so a stage after the failure shows none.
+/// `root` is left alone, so the message travels untouched.
+fn stage_snapshot(at: usize) -> String {
+    format!(
+        "let text = if errored() {{ \"\" }} else {{ content().string() }}\n\
+         meta jc_after_{at} = if errored() {{ deleted() }} else if $text.length() > {STAGE_SAMPLE_BYTES} {{ $text.slice(0, {STAGE_SAMPLE_BYTES}) }} else {{ $text }}"
+    )
+}
+
 /// The mapping that marks step `at` as the one being run, for a message that has not failed yet.
 /// `root` is left alone, so the message travels untouched — the same shape as `jc_input` above.
 fn step_marker(at: usize) -> String {
@@ -155,7 +168,8 @@ pub fn harness(
     // Before each one the harness stamps that step's index, unless the message has already
     // failed — a failed message runs through the rest of the chain, so the number that survives
     // is the step the failure happened at rather than the last step to run (PL-43, PL-56).
-    for (at, step) in spec.steps().into_iter().enumerate() {
+    let steps = spec.steps();
+    for (at, step) in steps.iter().enumerate() {
         processors.push(json!({ "mapping": step_marker(at) }));
         match step {
             Step::Processor(step) => processors.push(json!(step.processor)),
@@ -168,7 +182,14 @@ pub fn harness(
                 kind => return Err(HarnessError::NotABentoProcessor(kind)),
             },
         }
+        // What this step made of the message, so each stage of the flow shows its own sample
+        // and not only the end of the chain (T-3089).
+        processors.push(json!({ "mapping": stage_snapshot(at) }));
     }
+    let stage_list = (0..steps.len())
+        .map(|at| format!("meta(\"jc_after_{at}\").or(null)"))
+        .collect::<Vec<_>>()
+        .join(", ");
     // `let out = this` would read a failed message as JSON and fail again on a body that is
     // not JSON; the runner then posts the raw body to the capture route, is refused, and
     // retries until the stream is deleted (T-1192, Bento 1.21). Read only when it did not
@@ -180,8 +201,8 @@ pub fn harness(
         "root.input = meta(\"jc_input\")\n",
         "root.output = if $failed { null } else { $out }\n",
         "root.error = if $failed { meta(\"jc_fetch_error\").or(error()) } else { null }\n",
-        "root.step = if $failed { meta(\"jc_step\").or(null) } else { null }"
-    )}));
+        "root.step = if $failed { meta(\"jc_step\").or(null) } else { null }\n"
+    ).to_owned() + &format!("root.steps = [{stage_list}]") }));
     // The envelope replaces the failed message, so the flag must not follow it to the output.
     processors.push(json!({ "catch": [] }));
     // A mapping that yields an array is one entity per element (PL-48), the same split the
@@ -189,7 +210,7 @@ pub fn harness(
     // the same three seconds. A failed message has no array and passes through whole.
     processors.push(json!({ "mapping": format!(concat!(
         "root = if this.output.type() == \"array\" {{ ",
-        "this.output.slice(0, {}).map_each(o -> {{ \"input\": this.input, \"output\": o, \"error\": null }}) ",
+        "this.output.slice(0, {}).map_each(o -> {{ \"input\": this.input, \"output\": o, \"error\": null, \"steps\": this.steps }}) ",
         "}} else {{ [this] }}"
     ), MAX_MESSAGES) }));
     processors.push(json!({ "unarchive": { "format": "json_array" } }));
@@ -235,6 +256,24 @@ pub struct Captured {
     /// because Bento metadata is text. Absent when the message did not fail.
     #[serde(default)]
     pub step: Option<String>,
+    /// What each step of `spec.steps` made of the message, as text cut at
+    /// [`STAGE_SAMPLE_BYTES`]; `None` for a step it did not reach whole (T-3089).
+    #[serde(default)]
+    pub steps: Option<Vec<Option<String>>>,
+}
+
+/// One step of the pipeline as the test saw it (T-3089): what it made of the first message
+/// that reached it, so the flow shows a sample at every stage and not only at the end.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StageSample {
+    /// The step of `spec.steps`, in order.
+    pub step: usize,
+    /// Captured messages that reached this step whole. A step runs on the page before the split
+    /// into one entity per element, so each entity of a page counts the page's snapshot again.
+    pub reached: usize,
+    /// The first of them as data, or as text when it is not JSON (cut at the harness's limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<Value>,
 }
 
 /// The input stage of the trace: what the runner read and the first message as data.
@@ -287,12 +326,16 @@ pub struct TestTrace {
     pub validation: Vec<Validation>,
     /// What went wrong, at the stage it went wrong.
     pub errors: Vec<TestError>,
+    /// What every step of `spec.steps` made of the messages, one entry per step (T-3089).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageSample>,
 }
 
 /// The trace of what the harness sent back.
 pub fn trace(captured: &[Captured]) -> TestTrace {
     let mut trace = TestTrace::default();
     trace.input.events = captured.len();
+    trace.stages = stages(captured);
     for (index, message) in captured.iter().enumerate() {
         let input = message.input.as_deref().unwrap_or_default();
         trace.input.bytes += input.len();
@@ -320,6 +363,30 @@ pub fn trace(captured: &[Captured]) -> TestTrace {
         trace.mapping.push(output);
     }
     trace
+}
+
+/// One [`StageSample`] per step: how many captured messages reached it whole, and the first.
+fn stages(captured: &[Captured]) -> Vec<StageSample> {
+    let count = captured
+        .iter()
+        .filter_map(|message| message.steps.as_ref().map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    (0..count)
+        .map(|step| {
+            let seen: Vec<&str> = captured
+                .iter()
+                .filter_map(|message| message.steps.as_ref()?.get(step)?.as_deref())
+                .collect();
+            StageSample {
+                step,
+                reached: seen.len(),
+                sample: seen.first().map(|text| {
+                    serde_json::from_str(text).unwrap_or_else(|_| Value::String((*text).to_owned()))
+                }),
+            }
+        })
+        .collect()
 }
 
 /// The runner's refusal of the harness as lint errors, one per line that names a problem: a
@@ -620,18 +687,21 @@ mod tests {
                 ),
                 error: None,
                 step: None,
+                steps: None,
             },
             Captured {
                 input: Some(r#"{"station_id":"02"}"#.into()),
                 output: Some(json!({ "id": "station-02", "type": "AirQualityObserved" })),
                 error: None,
                 step: None,
+                steps: None,
             },
             Captured {
                 input: Some("garbage".into()),
                 output: None,
                 error: Some("failed assignment (line 2): expected number, got string".into()),
                 step: Some("2".into()),
+                steps: None,
             },
         ];
         let trace = trace(&captured);
@@ -751,6 +821,7 @@ mod tests {
                 output: None,
                 error: Some("failed assignment: no".into()),
                 step: step.map(str::to_owned),
+                steps: None,
             }])
             .errors
         };
@@ -798,6 +869,60 @@ mod tests {
             vec!["the mapping did not produce an object"]
         );
     }
+    /// T-3089: what Bento 1.21.1 (the runner's pinned image) posted for a two-step pipeline, once
+    /// green and once with the second step throwing: each step shows its own sample, and a step
+    /// at or after the failure shows none.
+    #[test]
+    fn each_step_shows_what_it_made_of_the_message() {
+        let posted =
+            |line: &str| serde_json::from_str::<Captured>(line).expect("a captured envelope");
+        let green = [posted(
+            r#"{"error":null,"input":"[{\"pm10\":\"18.2\",\"station_id\":\"01\"}]","output":{"id":"urn:ngsi-ld:AirQualityObserved:hel.fi:aq:01","type":"AirQualityObserved"},"steps":["[{\"pm10\":18.2,\"station_id\":\"01\"}]","[{\"id\":\"urn:ngsi-ld:AirQualityObserved:hel.fi:aq:01\",\"type\":\"AirQualityObserved\"}]"]}"#,
+        )];
+        let stages = trace(&green).stages;
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].step, 0);
+        assert_eq!(stages[0].reached, 1);
+        assert_eq!(
+            stages[0].sample,
+            Some(json!([{ "pm10": 18.2, "station_id": "01" }])),
+            "the number the first step parsed"
+        );
+        assert_eq!(
+            stages[1]
+                .sample
+                .as_ref()
+                .and_then(|s| s[0]["type"].as_str()),
+            Some("AirQualityObserved")
+        );
+
+        let failed = [posted(
+            r#"{"error":"failed assignment (line 1): no station","input":"x","output":null,"step":"1","steps":["[{\"pm10\":18.2}]",null]}"#,
+        )];
+        let traced = trace(&failed);
+        assert_eq!(traced.stages[0].reached, 1);
+        assert_eq!(
+            traced.stages[1],
+            StageSample {
+                step: 1,
+                reached: 0,
+                sample: None
+            }
+        );
+        assert_eq!(traced.errors[0].step, Some(1));
+        // A step's text that is not JSON is shown as text.
+        let text = [posted(
+            r#"{"error":null,"input":"a","output":{},"steps":["plain words"]}"#,
+        )];
+        assert_eq!(trace(&text).stages[0].sample, Some(json!("plain words")));
+        // An older runner that posts no `steps` gives no stages, not empty ones.
+        assert!(
+            trace(&[posted(r#"{"error":null,"input":"a","output":{}}"#)])
+                .stages
+                .is_empty()
+        );
+    }
+
     #[test]
     fn a_second_version_pipeline_runs_every_step_in_order_and_refuses_one_that_is_not_bento() {
         let second: PipelineSpec = serde_json::from_value(json!({
@@ -824,10 +949,20 @@ mod tests {
         let processors = config["pipeline"]["processors"]
             .as_array()
             .expect("processors");
+        // Each step between its marker and its snapshot (T-3089).
         assert_eq!(processors[2]["mapping"], step_marker(0));
         assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
-        assert_eq!(processors[4]["mapping"], step_marker(1));
-        assert_eq!(processors[5]["log"]["message"], "seen");
+        assert_eq!(processors[4]["mapping"], stage_snapshot(0));
+        assert_eq!(processors[5]["mapping"], step_marker(1));
+        assert_eq!(processors[6]["log"]["message"], "seen");
+        assert_eq!(processors[7]["mapping"], stage_snapshot(1));
+        let envelope = processors[8]["mapping"].as_str().expect("the envelope");
+        assert!(
+            envelope.ends_with(
+                r#"root.steps = [meta("jc_after_0").or(null), meta("jc_after_1").or(null)]"#
+            ),
+            "{envelope}"
+        );
 
         let mut wasm = second.clone();
         wasm.steps = vec![Step::Compute(
