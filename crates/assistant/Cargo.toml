@@ -43,11 +43,13 @@ axum = "0.8"
 # image's Dockerfile). Without it kreuzberg's build script would fetch whatever release is
 # newest, unpinned and unchecked. No OCR, office or embedding features: they bring ONNX Runtime.
 kreuzberg = { version = "=4.10.4", default-features = false, features = ["tokio-runtime", "pdf", "bundled-pdfium", "html", "chunking", "language-detection"] }
-# Passage and question embeddings (ADR-N-040 §3.1, T-3053): `multilingual-e5-small` int8 as a
-# user-defined model, its files read from a directory whose SHA-256s `embed.rs` pins
-# (`scripts/ci/e5-small.sh` fetches them). No hf-hub: nothing is downloaded at run time. ONNX
-# Runtime is loaded at start from ORT_DYLIB_PATH (`scripts/ci/onnxruntime.sh`, pinned and checked).
-fastembed = { version = "=7.1.0", default-features = false, features = ["ort-load-dynamic"] }
+# Passage and question embeddings (ADR-N-040 §3.1, T-3053): `multilingual-e5-small` int8, its
+# files read from a directory whose SHA-256s `embed.rs` pins (`scripts/ci/e5-small.sh` fetches
+# them); nothing is downloaded at run time. ONNX Runtime is loaded at start from ORT_DYLIB_PATH
+# (`scripts/ci/onnxruntime.sh`, pinned and checked): the static library `ort` would download
+# needs glibc 2.38. `ort` has no stable release; 2.0.0-rc.13 binds ONNX Runtime 1.28.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-24", "load-dynamic"] }
+tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
 
 [dev-dependencies]
 wiremock = "0.6"

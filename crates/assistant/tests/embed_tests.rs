@@ -15,19 +15,31 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm(a) * norm(b))
 }
 
+fn passages_text(i: usize) -> String {
+    [
+        "Knižnica je otvorená v pondelok až piatok od 9:00 do 18:00.",
+        "Zmesový odpad vyvážame z rodinných domov každý utorok.",
+        "Kaupunkibussit liikennöivät neljällä linjalla arkisin.",
+    ][i]
+        .to_owned()
+}
+
 #[tokio::test]
 async fn a_question_lands_nearest_the_passage_that_answers_it_across_languages() {
     let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
     let passages = embedder
-        .passages(&[
-            "Knižnica je otvorená v pondelok až piatok od 9:00 do 18:00.".into(),
-            "Zmesový odpad vyvážame z rodinných domov každý utorok.".into(),
-            "Kaupunkibussit liikennöivät neljällä linjalla arkisin.".into(),
-        ])
+        .passages(&(0..3).map(passages_text).collect::<Vec<_>>())
         .await
         .expect("passages");
     assert_eq!(passages.len(), 3);
     assert!(passages.iter().all(|v| v.len() == DIMENSIONS));
+    for vector in &passages {
+        let length = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((length - 1.0).abs() < 1e-4, "normalized, not {length}");
+    }
+    // One text at a time: the same passage gets the same vector whatever it is embedded beside.
+    let alone = embedder.passages(&[passages_text(1)]).await.expect("alone");
+    assert_eq!(alone[0], passages[1]);
     for (question, answer) in [
         ("Kedy môžem ísť do knižnice?", 0),
         ("Kdy se odváží odpad od rodinných domů?", 1),
@@ -50,21 +62,22 @@ fn a_model_file_that_is_not_the_pinned_one_is_refused_before_it_is_loaded() {
     for (file, _) in MODEL_FILES {
         std::fs::copy(source.join(file), copy.join(file)).expect("copy");
     }
-    std::fs::write(copy.join("tokenizer_config.json"), b"{}").expect("tamper");
+    std::fs::write(copy.join("tokenizer.json"), b"{}").expect("tamper");
     let refused = Embedder::load(&copy, 1).err().expect("refused");
     assert!(matches!(refused, Error::Model(_)));
     let message = refused.to_string();
     assert!(
-        message.contains("tokenizer_config.json") && message.contains("e5-small.sh"),
+        message.contains("tokenizer.json") && message.contains("e5-small.sh"),
         "{message}"
     );
 
-    std::fs::remove_file(copy.join("config.json")).expect("remove");
+    std::fs::copy(source.join("tokenizer.json"), copy.join("tokenizer.json")).expect("restore");
+    std::fs::remove_file(copy.join("model_qint8_avx512_vnni.onnx")).expect("remove");
     let missing = Embedder::load(&copy, 1).err().expect("refused");
     assert!(
         missing
             .to_string()
-            .contains("config.json could not be read"),
+            .contains("model_qint8_avx512_vnni.onnx could not be read"),
         "{missing}"
     );
     std::fs::remove_dir_all(&copy).expect("clean up");

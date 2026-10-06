@@ -20,8 +20,5 @@ while read -r sha file; do
 done <<'FILES'
 dd476dd0c2514e9b9be83aeb3853fac0763e0bdf4a71645407587d77c48a2d88 model_qint8_avx512_vnni.onnx
 0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39 tokenizer.json
-bbb7c1333fc4b3e27fbc9cd5d2070aabcc1d4dfb99917c3633e772f97545a6b6 config.json
-d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7 special_tokens_map.json
-a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b tokenizer_config.json
 FILES
 echo "multilingual-e5-small ($revision) in $dest"
