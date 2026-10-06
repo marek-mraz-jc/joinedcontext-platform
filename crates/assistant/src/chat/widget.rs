@@ -102,7 +102,10 @@ async fn page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>
     let Some(deployment) = deployment else {
         return (
             StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             "No assistant is published under this id.",
         )
             .into_response();

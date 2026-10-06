@@ -1047,5 +1047,10 @@ async fn an_internal_deployment_has_no_widget() {
     let (status, headers, _) = get(&w.app, "/d/hronov-obcania/widget").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(headers.get("content-security-policy").is_none());
+    // The edge leaves Cache-Control to the service on this host, so the refusal says it too.
+    assert_eq!(
+        headers.get("cache-control").and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
