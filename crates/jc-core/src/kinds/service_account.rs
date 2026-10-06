@@ -190,6 +190,14 @@ impl Kind for ServiceAccountSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
+        if crate::kinds::pipeline_identity::is_derived(&meta.name) {
+            return Err(Error::Name {
+                field: "metadata.name",
+                value: meta.name.clone(),
+                reason: "starts with `pl-`, the prefix of the account every Pipeline is given \
+                         (PL-19); a ServiceAccount written by hand must choose another name",
+            });
+        }
         if let Some(project) = meta.namespace.as_deref() {
             let id = keycloak_client_id(project, &meta.name);
             if PLATFORM_CLIENTS.contains(&id.as_str()) {

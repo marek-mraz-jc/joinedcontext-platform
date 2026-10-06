@@ -23,6 +23,7 @@ pub mod model_projection;
 pub mod org_settings;
 pub mod organization;
 pub mod pipeline;
+pub mod pipeline_identity;
 pub mod policy;
 pub mod role;
 pub mod service_account;

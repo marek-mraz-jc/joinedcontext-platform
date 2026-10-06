@@ -600,6 +600,15 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
                 .push((id.name.clone(), spec));
         }
     }
+    // Each Pipeline's Policies, granted to its own account and derived with it (PL-20).
+    for (project, derived) in jcctl::pipeline_identity::derived(repo) {
+        for (name, spec) in derived.policies {
+            policies
+                .entry((project.clone(), spec.context_space_ref.name().to_owned()))
+                .or_default()
+                .push((name, spec));
+        }
+    }
     policies
 }
 
