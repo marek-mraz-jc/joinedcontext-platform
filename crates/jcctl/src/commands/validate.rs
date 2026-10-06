@@ -851,12 +851,57 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
         })
         .collect();
 
+    // Every Endpoint as its kind reads it, for the named MCP servers' members (MF-53).
+    let endpoint_specs: BTreeMap<(Option<String>, String), jc_core::kinds::EndpointSpec> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Endpoint")
+        .filter_map(|(id, resource)| {
+            let spec = serde_json::from_value(resource.manifest.spec.clone()).ok()?;
+            Some(((id.namespace.clone(), id.name.clone()), spec))
+        })
+        .collect();
+
     let mut found = Vec::new();
     for (id, resource) in repo.iter() {
         let at = (resource.path.clone(), resource.document, resource.line);
         let spec = &resource.manifest.spec;
         let here = |name: &str| (id.namespace.clone(), name.to_owned());
         match id.kind.as_str() {
+            "McpServer" => {
+                // A spec the kind refuses is reported by the schema check; nothing more to say here.
+                let Ok(server) =
+                    serde_json::from_value::<jc_core::kinds::McpServerSpec>(spec.clone())
+                else {
+                    continue;
+                };
+                let namespace = id.namespace.clone().unwrap_or_default();
+                for (project, name) in server.member_ids(&namespace) {
+                    let Some(member) =
+                        endpoint_specs.get(&(Some(project.to_owned()), name.to_owned()))
+                    else {
+                        found.push((at.clone(), format!(
+                            "{id}: spec.members names Endpoint `{project}/{name}`, which no manifest declares (MF-53)"
+                        )));
+                        continue;
+                    };
+                    if !member
+                        .served_representations()
+                        .contains(&jc_core::kinds::Representation::Mcp)
+                    {
+                        found.push((at.clone(), format!(
+                            "{id}: member Endpoint `{project}/{name}` serves no MCP (`mcp: false`); a named server reads its members through their MCP surface (MF-53)"
+                        )));
+                    }
+                    if jc_core::kinds::mcp_server::breadth(member.audience)
+                        < jc_core::kinds::mcp_server::breadth(server.audience)
+                    {
+                        found.push((at.clone(), format!(
+                            "{id}: spec.audience is `{}`, wider than member Endpoint `{project}/{name}`, which admits `{}`; a server is no wider than its narrowest member (MF-53)",
+                            server.audience, member.audience
+                        )));
+                    }
+                }
+            }
             "KnowledgeSource" => {
                 if let Some(instance) = spec.get("ckanInstanceRef").and_then(|v| v.as_str()) {
                     if !instances.contains(&here(instance)) {
