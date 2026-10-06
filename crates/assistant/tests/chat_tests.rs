@@ -888,3 +888,51 @@ async fn no_script_runs_without_the_sandbox() {
         .is_empty());
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
+
+/// AG-98: a body past 64 KiB is refused before it is read, and a conversation id of another
+/// deployment or one older than a day is not continued.
+#[tokio::test]
+async fn an_oversized_body_and_a_foreign_or_expired_conversation_are_refused() {
+    let w = world("chatedges", deployment(Channel::Public, 50_000, 10)).await;
+    let huge = json!({"message": "a", "history": [{"role": "user", "text": "x".repeat(70_000)}]});
+    // API/05 §1.1: a refusal of the body is a 400 that says why, its size included.
+    let (status, refusal, _) = answer_of(&w.app, ask(huge, None)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refusal[0].1["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("length limit"),
+        "{refusal:?}"
+    );
+
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let other: String = sqlx::query_scalar(
+        "INSERT INTO conversations (project, deployment) VALUES ('hronov', 'another') RETURNING id::text",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("another deployment's conversation");
+    let old: String = sqlx::query_scalar(
+        "INSERT INTO conversations (project, deployment, created_at) VALUES ('hronov', 'obcania', now() - interval '25 hours') RETURNING id::text",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("an old conversation");
+    tx.commit().await.expect("commit");
+    for id in [other, old] {
+        let (status, _, _) = answer_of(
+            &w.app,
+            ask(json!({"message": "a", "conversation": id}), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+    }
+    assert!(
+        model_calls(&w.proxy).await.is_empty(),
+        "nothing was spent on a refused question"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}

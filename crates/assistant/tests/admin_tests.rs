@@ -470,3 +470,45 @@ async fn a_recrawl_is_queued_once() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
+
+/// AG-113: ids of another source of the project are not this source's to change, and including
+/// what was never excluded changes nothing it should not.
+#[tokio::test]
+async fn an_inclusion_touches_this_sources_items_alone() {
+    let w = world("adminforeign").await;
+    let t = Some(PORTAL_TOKEN);
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let other_site: i64 = sqlx::query_scalar("INSERT INTO sites (organization, project, source, visibility) VALUES ('hronov.example', 'hronov', 'other', 'public') RETURNING id")
+        .fetch_one(&mut *tx).await.expect("site");
+    let foreign: i64 = sqlx::query_scalar("INSERT INTO pages (site_id, project, url, depth, status) VALUES ($1, 'hronov', 'https://other.example/', 0, 'fetched') RETURNING id")
+        .bind(other_site).fetch_one(&mut *tx).await.expect("page");
+    tx.commit().await.expect("commit");
+
+    let (status, counts) = call(
+        &w.app,
+        "POST",
+        &format!("{BASE}/sources/web/inclusion"),
+        t,
+        Some(json!({"pages": [foreign], "included": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        counts,
+        json!({"pages": 0, "documents": 0, "passagesRemoved": 0})
+    );
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let excluded: bool = sqlx::query_scalar("SELECT excluded_by_admin FROM pages WHERE id = $1")
+        .bind(foreign)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("page");
+    tx.rollback().await.expect("rollback");
+    assert!(!excluded);
+    assert_eq!(passages_left(&w.pool).await, 4);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
