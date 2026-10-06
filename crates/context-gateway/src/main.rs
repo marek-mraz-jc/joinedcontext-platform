@@ -53,7 +53,9 @@ async fn main() -> ExitCode {
             projects,
             assembly: config.assembly_dir.clone(),
         });
-    let (endpoints, spaces, accounts, federations, agreements, limits) = match &config.repo_dir {
+    let (endpoints, spaces, accounts, federations, agreements, limits, servers) = match &config
+        .repo_dir
+    {
         None => (
             Vec::new(),
             Vec::new(),
@@ -61,6 +63,7 @@ async fn main() -> ExitCode {
             context_gateway::federation::Federations::new(),
             context_gateway::auth::dataspace_token::Agreements::new(),
             store::Limits::default(),
+            Vec::new(),
         ),
         Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
             Ok(loaded) => {
@@ -85,6 +88,7 @@ async fn main() -> ExitCode {
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
+    gateway.replace_servers(servers);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
     let gateway = match (&config.oidc_issuer, &config.oidc_jwks_url) {

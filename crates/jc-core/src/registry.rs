@@ -90,6 +90,7 @@ catalogue!(
     crate::kinds::CkanInstanceSpec,
     crate::kinds::KnowledgeSourceSpec,
     crate::kinds::AssistantDeploymentSpec,
+    crate::kinds::McpServerSpec,
     crate::kinds::BlueprintSpec,
     crate::kinds::AgentProfileSpec,
     crate::kinds::DataSpaceParticipantSpec,

@@ -266,6 +266,63 @@ fn the_first_run_creates_the_dataset_and_the_second_changes_nothing() {
     );
 }
 
+/// T-3152, EP-81: the MCP resource tells an AI client what it is: the endpoint it reads and
+/// that it needs no sign-in on a public one, its tools, the licence, and a client configuration
+/// whose url is the resource's own, shown as an indented block CKAN renders as code.
+#[test]
+fn the_mcp_resource_says_how_an_ai_client_uses_it() {
+    let dataset = package(
+        &endpoint("[ngsi-ld, mcp]", PUBLISH),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    let mcp = dataset["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .find(|resource| resource["format"] == "MCP")
+        .expect("the MCP resource");
+    let said = mcp["description"].as_str().expect("a description");
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    assert!(said.contains(&format!("endpoint {base}")), "{said}");
+    assert!(said.contains("no sign-in"), "{said}");
+    for tool in [
+        "query_entities",
+        "get_entity",
+        "describe_schema",
+        "describe_access",
+    ] {
+        assert!(said.contains(tool), "{tool}: {said}");
+    }
+    assert!(
+        said.contains("Licence: https://creativecommons.org/licenses/by/4.0/"),
+        "{said}"
+    );
+    let block = said
+        .lines()
+        .find_map(|line| line.strip_prefix("    "))
+        .expect("an indented code block");
+    let config: Value = serde_json::from_str(block).expect("the configuration is JSON");
+    assert_eq!(
+        config["mcpServers"]["kvalita-ovzdusia"]["url"],
+        json!(format!("{base}/mcp"))
+    );
+    assert_eq!(config["mcpServers"]["kvalita-ovzdusia"]["type"], "http");
+
+    // Only the MCP resource is described this way.
+    let others = dataset["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .filter(|r| r["format"] != "MCP");
+    assert!(others
+        .into_iter()
+        .all(|resource| resource.get("description").is_none()));
+}
+
 /// EP-24, EP-64: MCP is published for every Endpoint without being listed, because the
 /// gateway serves it; `mcp: false` takes the resource off the catalogue with the instance.
 #[test]
