@@ -367,6 +367,154 @@ pub struct Output {
     pub entity_type: String,
     /// Write mode applied to target context space.
     pub mode: OutputMode,
+    /// How the renderer sets each entity's id (ADR-N-041 §3.4, PF-44); absent, the mapping
+    /// sets it itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<IdMint>,
+}
+
+/// The mint option of a pipeline's output (ADR-N-041 §3.4, Architecture/08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct IdMint {
+    /// `prefixed`, `keep` or `template`.
+    pub mint: Mint,
+    /// The record field the id is made from (`prefixed`, `keep`): a path such as `a.b_c`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The id with `{field}` placeholders (`template`), starting `urn:ngsi-ld:{Type}:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+/// How an output's ids are made (ADR-N-041 §3.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mint {
+    /// `urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}`.
+    Prefixed,
+    /// The source's own id, an NGSI-LD URN of the type made of it when it is not one.
+    Keep,
+    /// A template over the record's fields.
+    Template,
+}
+
+/// A record path a mint reads: dot-separated identifiers, nothing a Bloblang query could read as
+/// an operator.
+static RECORD_PATH: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]{0,63}(\.[A-Za-z_][A-Za-z0-9_]{0,63}){0,7}$")
+        .expect("a valid regex")
+});
+
+/// The literal text a template may hold: RFC 8141 characters without `$`, which Bento would
+/// read as an interpolation when it loads the config.
+static TEMPLATE_TEXT: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^[A-Za-z0-9._~!&'()*+,;=:@/%-]*$").expect("a valid regex")
+});
+
+/// A template's parts: literal text and `{field}` names, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplatePart {
+    /// Text written as it is.
+    Text(String),
+    /// A record path.
+    Field(String),
+}
+
+impl IdMint {
+    /// The mint checked against the output's `entity_type`: the field it needs, a template that
+    /// starts `urn:ngsi-ld:{Type}:` and parses, and record paths only.
+    pub fn validate(&self, entity_type: &str) -> Result<()> {
+        let refuse = |reason: &'static str, value: &str| Error::Name {
+            field: "spec.output.id",
+            value: value.to_string(),
+            reason,
+        };
+        match self.mint {
+            Mint::Prefixed | Mint::Keep => {
+                let from = self.from.as_deref().ok_or_else(|| {
+                    refuse("`from` names the record field the id is made from", "")
+                })?;
+                if !RECORD_PATH.is_match(from) {
+                    return Err(refuse(
+                        "`from` is a record path such as `station.code`",
+                        from,
+                    ));
+                }
+                if self.template.is_some() {
+                    return Err(refuse("`template` belongs to `mint: template` only", ""));
+                }
+            }
+            Mint::Template => {
+                let template = self
+                    .template
+                    .as_deref()
+                    .ok_or_else(|| refuse("`mint: template` needs a `template`", ""))?;
+                if self.from.is_some() {
+                    return Err(refuse(
+                        "`from` belongs to `mint: prefixed` or `keep`",
+                        template,
+                    ));
+                }
+                let parts = self.template_parts()?;
+                let head = format!("urn:ngsi-ld:{entity_type}:");
+                match parts.first() {
+                    Some(TemplatePart::Text(text)) if text.starts_with(&head) => {}
+                    _ => {
+                        return Err(refuse(
+                            "a template starts `urn:ngsi-ld:` and the output's type, then a colon",
+                            template,
+                        ))
+                    }
+                }
+                if !parts
+                    .iter()
+                    .any(|part| matches!(part, TemplatePart::Field(_)))
+                {
+                    return Err(refuse("a template names at least one `{field}`", template));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The template split into text and `{field}` names, each checked (ADR-N-041 §3.4).
+    pub fn template_parts(&self) -> Result<Vec<TemplatePart>> {
+        let template = self.template.as_deref().unwrap_or_default();
+        let refuse = |reason: &'static str| Error::Name {
+            field: "spec.output.id.template",
+            value: template.to_string(),
+            reason,
+        };
+        let mut parts = Vec::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            let (text, after) = rest.split_at(open);
+            let close = after
+                .find('}')
+                .ok_or_else(|| refuse("a `{` is closed by a `}`"))?;
+            let field = &after[1..close];
+            if !text.is_empty() {
+                parts.push(TemplatePart::Text(text.to_string()));
+            }
+            if !RECORD_PATH.is_match(field) {
+                return Err(refuse(
+                    "a `{field}` is a record path such as `station.code`",
+                ));
+            }
+            parts.push(TemplatePart::Field(field.to_string()));
+            rest = &after[close + 1..];
+        }
+        if !rest.is_empty() {
+            parts.push(TemplatePart::Text(rest.to_string()));
+        }
+        if parts.iter().any(|part| matches!(part, TemplatePart::Text(text) if text.contains('}') || !TEMPLATE_TEXT.is_match(text))) {
+            return Err(refuse(
+                "the text of a template holds RFC 8141 characters only, without `$`, `{` or `}`",
+            ));
+        }
+        Ok(parts)
+    }
 }
 
 /// Mutation mode for pipeline output writers (PL-32).
@@ -583,6 +731,9 @@ impl PipelineSpec {
             }
             if let Some(ref out) = self.output {
                 names::validate_entity_type(&out.entity_type)?;
+                if let Some(mint) = &out.id {
+                    mint.validate(&out.entity_type)?;
+                }
             }
         }
 

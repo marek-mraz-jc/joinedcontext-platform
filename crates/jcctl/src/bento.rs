@@ -10,7 +10,9 @@
 //! except for the decoder the GTFS-realtime type has to prepend.
 
 use jc_core::kinds::data_source::{check_class, env_var_of};
-use jc_core::kinds::{DataSourceSpec, DataSourceType, GtfsFeed, PipelineSpec};
+use jc_core::kinds::{
+    DataSourceSpec, DataSourceType, GtfsFeed, IdMint, Mint, PipelineSpec, TemplatePart,
+};
 use serde_norway::{Mapping, Value};
 
 /// The GTFS-realtime descriptors the runner image carries, so no pipeline ships a copy.
@@ -140,6 +142,9 @@ pub enum RenderError {
     /// The text does not parse as YAML.
     #[error("bento.yaml does not parse: {0}")]
     Parse(String),
+    /// The output's mint option cannot be rendered (ADR-N-041 §3.4).
+    #[error("spec.output.id: {0}")]
+    Mint(String),
 }
 
 /// The `input` block one connection becomes (PL-39).
@@ -231,6 +236,32 @@ pub fn render(
         config.insert(key("pipeline"), Value::Mapping(pipeline));
     }
 
+    // An output that declares how its ids are made gets one last processor that makes them
+    // (ADR-N-041 §3.4); without the declaration nothing is appended and the file is the author's.
+    if let Some(minting) = context
+        .pipeline_spec
+        .and_then(|pipeline| pipeline.output.as_ref())
+        .and_then(|output| {
+            output
+                .id
+                .as_ref()
+                .map(|mint| id_processor(mint, &output.entity_type))
+        })
+    {
+        let minting = minting?;
+        let mut pipeline = match config.remove(key("pipeline")) {
+            Some(Value::Mapping(existing)) => existing,
+            _ => Mapping::new(),
+        };
+        let mut processors = match pipeline.remove(key("processors")) {
+            Some(Value::Sequence(authored)) => authored,
+            _ => Vec::new(),
+        };
+        processors.push(minting);
+        pipeline.insert(key("processors"), Value::Sequence(processors));
+        config.insert(key("pipeline"), Value::Mapping(pipeline));
+    }
+
     // The input goes first, the way an author would write it, so the generated file reads like
     // a hand-written one: rebuild the mapping rather than appending at the end.
     let mut out = Mapping::new();
@@ -239,6 +270,45 @@ pub fn render(
         out.insert(k, v);
     }
     serde_norway::to_string(&Value::Mapping(out)).map_err(|e| RenderError::Parse(e.to_string()))
+}
+
+/// The `mapping` processor that sets `root.id` by the output's mint option (ADR-N-041 §3.4).
+///
+/// Every value that reaches the Bloblang was checked by [`IdMint::validate`]: the type is a
+/// PascalCase name, `from` and each `{field}` a dotted path of identifiers, a template's text RFC
+/// 8141 characters without `$` or a quote, so nothing written into a manifest becomes code.
+pub fn id_processor(mint: &IdMint, entity_type: &str) -> Result<Value, RenderError> {
+    mint.validate(entity_type)
+        .map_err(|e| RenderError::Mint(e.to_string()))?;
+    let field = |path: &str| format!("this.{path}.string()");
+    let id = match mint.mint {
+        Mint::Prefixed => format!(
+            "\"urn:ngsi-ld:{entity_type}:%s:%s:%s\".format(env(\"{ORG_DOMAIN_VAR}\"), env(\"{SPACE_VAR}\"), {}.re_replace_all(\"[^A-Za-z0-9._~-]\", \"-\"))",
+            field(mint.from.as_deref().unwrap_or_default())
+        ),
+        Mint::Keep => {
+            let from = field(mint.from.as_deref().unwrap_or_default());
+            format!(
+                "if {from}.has_prefix(\"urn:ngsi-ld:\") {{ {from} }} else {{ \"urn:ngsi-ld:{entity_type}:\" + {from} }}"
+            )
+        }
+        Mint::Template => mint
+            .template_parts()
+            .map_err(|e| RenderError::Mint(e.to_string()))?
+            .iter()
+            .map(|part| match part {
+                TemplatePart::Text(text) => format!("\"{text}\""),
+                TemplatePart::Field(path) => field(path),
+            })
+            .collect::<Vec<_>>()
+            .join(" + "),
+    };
+    let mut processor = Mapping::new();
+    processor.insert(
+        key("mapping"),
+        text(&format!("root = this\nroot.id = {id}\n")),
+    );
+    Ok(Value::Mapping(processor))
 }
 
 fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
