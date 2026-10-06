@@ -27,7 +27,7 @@ dependencies = [
   # external entities (DM-55); the test suite asserts it is in place.
   "openpyxl==3.1.5",
   "defusedxml==0.7.1",
-  "pypdf==6.14.2",
+  "pypdf==6.19.0",
 ]
 
 [project.optional-dependencies]
