@@ -1,6 +1,8 @@
 //! The embedding model and the passages it embeds (T-3053, ADR-N-040 §3.1), with the pinned
 //! model files and a real PostgreSQL (see `common`).
 
+#[path = "common/corpus.rs"]
+mod corpus;
 #[path = "common/db.rs"]
 mod db;
 #[path = "common/model.rs"]
@@ -97,8 +99,8 @@ async fn missing_embeddings_are_filled_for_the_project_alone_and_a_second_pass_f
         .collect();
     let rows: Vec<(&str, &str, &str)> =
         pages.iter().map(|(u, l, t)| (u.as_str(), *l, *t)).collect();
-    model::pages(&pool, "hronov", "web", &rows).await;
-    model::pages(
+    corpus::pages(&pool, "hronov", "web", &rows).await;
+    corpus::pages(
         &pool,
         "lipno",
         "web",

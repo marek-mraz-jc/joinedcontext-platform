@@ -119,6 +119,49 @@ impl Model {
         Ok(token)
     }
 
+    /// Whether `bearer` is an active token of `client`'s own service account whose audience names
+    /// this service (AG-113): the realm is asked with the service's own credentials, so a token
+    /// it revoked is refused at once.
+    pub async fn is_service_account(&self, bearer: &str, client: &str) -> Result<bool, CallError> {
+        let unavailable = |why: String| {
+            tracing::error!(%why, "a caller's token could not be judged");
+            CallError::Unavailable("The realm could not be reached; try again shortly.".into())
+        };
+        let answer = self
+            .http
+            .post(format!("{}/introspect", self.config.token_url))
+            .form(&[
+                ("client_id", self.config.client_id.as_str()),
+                ("client_secret", self.config.client_secret.as_str()),
+                ("token", bearer),
+            ])
+            .send()
+            .await
+            .map_err(|err| unavailable(err.without_url().to_string()))?;
+        if !answer.status().is_success() {
+            return Err(unavailable(format!(
+                "introspection answered {}",
+                answer.status()
+            )));
+        }
+        let seen: Value = answer
+            .json()
+            .await
+            .map_err(|err| unavailable(err.without_url().to_string()))?;
+        let audience = match seen.get("aud") {
+            Some(Value::String(one)) => vec![one.as_str()],
+            Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        Ok(seen.get("active").and_then(Value::as_bool) == Some(true)
+            && seen.get("azp").and_then(Value::as_str) == Some(client)
+            && seen
+                .get("username")
+                .and_then(Value::as_str)
+                .is_some_and(|u| u.eq_ignore_ascii_case(&format!("service-account-{client}")))
+            && audience.contains(&self.config.client_id.as_str()))
+    }
+
     /// One completion for `deployment` (`{project}/{name}`) under its day's `tokens_per_day`.
     pub async fn complete(
         &self,

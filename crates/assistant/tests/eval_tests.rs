@@ -3,6 +3,8 @@
 //! alone, the vector ranking alone and the hybrid query the service runs. The numbers print with
 //! `--nocapture`; the floors below are what reopens ADR-N-040 §4 (`pg_search`) when missed.
 
+#[path = "common/corpus.rs"]
+mod corpus;
 #[path = "common/db.rs"]
 mod db;
 #[path = "common/model.rs"]
@@ -113,7 +115,7 @@ async fn hybrid_retrieval_finds_the_answering_page_at_least_as_often_as_either_r
         .iter()
         .map(|(u, l, t)| (u.as_str(), l.as_str(), t.as_str()))
         .collect();
-    model::pages(&pool, "eval", "web", &rows).await;
+    corpus::pages(&pool, "eval", "web", &rows).await;
     assert_eq!(
         embed_missing(&pool, &embedder, "eval", 1_000)
             .await

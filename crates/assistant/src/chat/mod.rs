@@ -4,6 +4,7 @@
 //! This route serves the anonymous channels (`public`, `ckan`, `iframe`); an `internal`
 //! deployment answers `404` here.
 
+pub mod admin;
 pub mod agent;
 pub mod mcp;
 pub mod model;
@@ -53,6 +54,8 @@ pub struct ChatState {
     /// `jc-functions`, scheme and authority, for a deployment with `sandbox: true`; `None`
     /// offers no script anywhere.
     pub functions: Option<String>,
+    /// The Portal's Keycloak client, the one caller of the administration paths (AG-113).
+    pub portal_client: String,
     /// The manifests, replaced by the worker every minute.
     pub snapshot: RwLock<Arc<Snapshot>>,
     pub limits: Mutex<Limits>,
@@ -102,12 +105,13 @@ pub struct Question {
     pub connectors: Option<Vec<String>>,
 }
 
-/// The route, with its body limit.
+/// The chat route with its body limit, and the Portal's administration paths (admin.rs).
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(state)
+        .with_state(Arc::clone(&state))
+        .merge(admin::router(state))
 }
 
 fn problem(status: u16, title: &str, detail: impl Into<String>) -> Response {

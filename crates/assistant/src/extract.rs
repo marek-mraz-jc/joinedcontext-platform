@@ -243,6 +243,22 @@ impl Indexer {
         }
     }
 
+    /// Whether an administrator excluded the page or document (T-3057): it is fetched and kept
+    /// in the tree, and never indexed.
+    async fn excluded(&self, owner: Owner) -> Result<bool, Error> {
+        let (sql, id) = match owner {
+            Owner::Page(id) => ("SELECT excluded_by_admin FROM pages WHERE id = $1", id),
+            Owner::Document(id) => ("SELECT excluded_by_admin FROM documents WHERE id = $1", id),
+        };
+        let mut tx = crate::project_scope(&self.pool, &self.project).await?;
+        let excluded: Option<bool> = sqlx::query_scalar(sql)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.rollback().await?;
+        Ok(excluded.unwrap_or(false))
+    }
+
     async fn index(
         &mut self,
         owner: Owner,
@@ -251,6 +267,14 @@ impl Indexer {
         language: Option<&str>,
         bytes: &[u8],
     ) {
+        match self.excluded(owner).await {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(err) => {
+                self.failures.push(format!("{url}: {err}"));
+                return;
+            }
+        }
         let outcome = match extract(bytes, mime, language, self.max_pdf_pages).await {
             Ok(extracted) => {
                 if extracted.truncated {

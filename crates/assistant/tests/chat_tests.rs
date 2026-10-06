@@ -2,6 +2,8 @@
 //! token, a stub `jc-agent-proxy` plays the model, a stub MCP surface plays a public Endpoint,
 //! and the passages come from the real store and embedder (see `common`).
 
+#[path = "common/corpus.rs"]
+mod corpus;
 #[path = "common/db.rs"]
 mod db;
 #[path = "common/model.rs"]
@@ -78,7 +80,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
 async fn world(test: &str, deployment: Deployment) -> World {
     let embedder = Embedder::load(&model::model_dir(), 1).expect("the pinned model loads");
     let (admin, pool, name) = db::database(test).await;
-    model::pages(
+    corpus::pages(
         &pool,
         "hronov",
         "web",
@@ -96,7 +98,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         ],
     )
     .await;
-    model::pages(
+    corpus::pages(
         &pool,
         "hronov",
         "intranet",
@@ -173,6 +175,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         http,
         gateway: gateway.uri(),
         functions: Some(functions.uri()),
+        portal_client: "portal-api".into(),
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
     });
