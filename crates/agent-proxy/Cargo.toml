@@ -18,6 +18,7 @@ test-stub = []
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum", "logs"] }
 argon2 = "0.5"
+base64 = "0.22"
 axum = { version = "0.8", features = ["macros"] }
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
@@ -30,6 +31,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
