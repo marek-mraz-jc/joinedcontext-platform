@@ -24,6 +24,12 @@ quick-xml = "0.42"
 texting_robots = "0.2.2"
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Text out of HTML and PDF, language detection and chunking (ADR-N-040 §3.1). PDFium is linked
+# from a prepared directory: `KREUZBERG_PDFIUM_PREBUILT` names an unpacked
+# bblanchon/pdfium-binaries chromium/7568 release whose SHA-256 the build checks first (CI, the
+# image's Dockerfile). Without it kreuzberg's build script would fetch whatever release is
+# newest, unpinned and unchecked. No OCR, office or embedding features: they bring ONNX Runtime.
+kreuzberg = { version = "=4.10.4", default-features = false, features = ["tokio-runtime", "pdf", "bundled-pdfium", "html", "chunking", "language-detection"] }
 
 [dev-dependencies]
 wiremock = "0.6"

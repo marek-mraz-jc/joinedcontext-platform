@@ -16,6 +16,8 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// The knowledge assistant's website crawl core.
 pub mod crawl;
+/// Text, language and passages out of what the crawl fetched.
+pub mod extract;
 
 /// The dimension of every embedding: `multilingual-e5-small` (ADR-N-040 §3.1).
 pub const DIMENSIONS: usize = 384;
@@ -37,6 +39,8 @@ pub enum Error {
     Database(sqlx::Error),
     /// A crawl failure or invalid crawl specification.
     Crawl(String),
+    /// A page or document whose text could not be read.
+    Extract(String),
 }
 
 impl std::fmt::Display for Error {
@@ -46,6 +50,7 @@ impl std::fmt::Display for Error {
             Error::Project(name) => write!(f, "`{name}` is not a project name"),
             Error::Database(err) => write!(f, "the assistant's database: {err}"),
             Error::Crawl(why) => write!(f, "the crawl failed: {why}"),
+            Error::Extract(why) => write!(f, "the text could not be read: {why}"),
         }
     }
 }
