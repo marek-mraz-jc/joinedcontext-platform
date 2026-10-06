@@ -187,7 +187,7 @@ pub fn package(
         .or_else(|| text(record.get("dct:license")));
     describe_mcp(
         &mut payload["resources"],
-        &name,
+        name,
         &url,
         licence.as_deref(),
         spec.audience == Audience::Public,
