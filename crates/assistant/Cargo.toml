@@ -53,4 +53,5 @@ tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"
 
 [dev-dependencies]
 wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -14,6 +14,8 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 /// The store's migrations, reversible (`*.up.sql` and `*.down.sql`).
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// The chat route: one question, answered as Server-Sent Events (API/05).
+pub mod chat;
 /// A `ckan` source: a catalogue's public datasets.
 pub mod ckan;
 /// The knowledge assistant's website crawl core.

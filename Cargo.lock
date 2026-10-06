@@ -340,6 +340,7 @@ dependencies = [
  "time",
  "tokenizers",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",

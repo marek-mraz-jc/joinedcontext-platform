@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, SourceType};
+use jc_core::kinds::assistant::{AssistantDeploymentSpec, KnowledgeSourceSpec, SourceType};
 use jc_core::kinds::ckan::CkanInstanceSpec;
 use sqlx::PgPool;
 
@@ -35,9 +35,39 @@ pub struct Checkout {
     pub assembly: PathBuf,
 }
 
+/// One `AssistantDeployment` of the organization (T-3055).
+#[derive(Debug, Clone)]
+pub struct Deployment {
+    pub project: String,
+    pub name: String,
+    pub spec: AssistantDeploymentSpec,
+}
+
+/// What a connector needs of the Endpoint it names: where its MCP surface is and who may call it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointRef {
+    pub slug: String,
+    /// The Endpoint's `spec.audience`: `public`, `organization` or `project-list`.
+    pub audience: String,
+}
+
+/// The manifests the service works from, read in one pass every minute.
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    pub sources: Vec<Source>,
+    pub deployments: Vec<Deployment>,
+    /// Every Endpoint, by project and name.
+    pub endpoints: BTreeMap<(String, String), EndpointRef>,
+}
+
 /// Every `KnowledgeSource` of the organization, by project and name; a manifest that does not
 /// read as one is logged and left out, so one typo never stops the other sources.
 pub fn sources(checkout: &Checkout) -> Result<Vec<Source>, Error> {
+    snapshot(checkout).map(|snapshot| snapshot.sources)
+}
+
+/// The sources, the deployments and the Endpoints of the organization's checkout.
+pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
     let mut directories = BTreeMap::new();
     if let Some(projects) = &checkout.projects {
         if let Ok(listing) = std::fs::read_dir(projects) {
@@ -95,7 +125,52 @@ pub fn sources(checkout: &Checkout) -> Result<Vec<Source>, Error> {
             }
         }
     }
-    Ok(found)
+    let mut snapshot = Snapshot {
+        sources: found,
+        ..Snapshot::default()
+    };
+    for (id, resource) in assembly.repository.iter() {
+        let Some(project) = id.namespace.clone() else {
+            continue;
+        };
+        let spec = &resource.manifest.spec;
+        match id.kind.as_str() {
+            "Endpoint" => {
+                if let (Some(slug), Some(audience)) = (
+                    spec.get("slug").and_then(|v| v.as_str()),
+                    spec.get("audience").and_then(|v| v.as_str()),
+                ) {
+                    snapshot.endpoints.insert(
+                        (project, id.name.clone()),
+                        EndpointRef {
+                            slug: slug.to_owned(),
+                            audience: audience.to_owned(),
+                        },
+                    );
+                }
+            }
+            "AssistantDeployment" => {
+                match serde_json::from_value::<AssistantDeploymentSpec>(spec.clone())
+                    .map_err(|err| err.to_string())
+                    .and_then(|spec| {
+                        spec.validate()
+                            .map(|()| spec)
+                            .map_err(|err| err.to_string())
+                    }) {
+                    Ok(spec) => snapshot.deployments.push(Deployment {
+                        project,
+                        name: id.name.clone(),
+                        spec,
+                    }),
+                    Err(err) => {
+                        tracing::warn!(project = %project, deployment = %id.name, %err, "not a valid AssistantDeployment spec")
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Whether a source is due in the minute `now`: never read, or its schedule names it.
