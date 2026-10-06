@@ -378,7 +378,7 @@ fn every_published_example_carries_the_endpoint_its_pipeline_writes_into() {
         );
         assert_eq!(
             target.space(),
-            endpoint.spec.context_space_ref.name(),
+            Some(endpoint.spec.context_space_ref.name()),
             "{example}: the target URN and the Endpoint disagree about the space"
         );
         assert_eq!(

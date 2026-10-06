@@ -112,8 +112,9 @@ fn assert_ngsi_ld_error(status: StatusCode, content_type: &str, body: &Value, ex
 /// 403 — two statuses, so one hard-coded string cannot satisfy both.
 #[tokio::test]
 async fn gateway_refusals_are_ngsi_ld_errors() {
+    // An id that is no NGSI-LD URN (PF-43): a bad request whatever the grant (ADR-N-041).
     let foreign = json!({
-        "id": "urn:ngsi-ld:AirQualityObserved:other-city.sk:ovzdusie:s1",
+        "id": "urn:ngsi-ld:AirQualityObserved",
         "type": "AirQualityObserved",
         "pm10": { "type": "Property", "value": 12 },
     });
@@ -183,8 +184,9 @@ async fn an_unsupported_payload_media_type_is_415_and_the_accepted_ones_reach_th
         assert!(!body["detail"].is_null());
     }
 
+    // An id that is no NGSI-LD URN (PF-43): a bad request whatever the grant (ADR-N-041).
     let foreign = json!({
-        "id": "urn:ngsi-ld:AirQualityObserved:other-city.sk:ovzdusie:s1",
+        "id": "urn:ngsi-ld:AirQualityObserved",
         "type": "AirQualityObserved",
     });
     for content_type in [

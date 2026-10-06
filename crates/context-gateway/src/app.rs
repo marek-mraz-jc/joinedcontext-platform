@@ -820,13 +820,11 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
-    // The identifier in the path belongs to this organization and this space or the
-    // request is malformed, whichever verb carries it (PF-10, PF-42).
+    // The identifier in the path is an NGSI-LD URN or the request is malformed, whichever
+    // verb carries it (PF-43). Its segments name nothing: the space is the Endpoint's (PF-42).
     if let Some(raw) = operations::addressed_entity(&path) {
         let id = query::decode(raw);
-        if let Err(refusal) =
-            write_guard::check_identifier(&id, None, &endpoint.space, &gateway.org_domain)
-        {
+        if let Err(refusal) = write_guard::check_identifier(&id, None) {
             return ProblemDetails::from(refusal).into_response();
         }
         // A write to an id outside the grant's types and patterns is refused here, before a
@@ -899,14 +897,7 @@ pub(crate) async fn serve_ngsi_ld(
             .headers
             .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
     } else if operation.is_write() && !sent.is_empty() {
-        match judge_write(
-            &sent,
-            &path,
-            operation,
-            &constraints,
-            &endpoint,
-            &gateway.org_domain,
-        ) {
+        match judge_write(&sent, &path, operation, &constraints, &endpoint) {
             Err(problem) => return problem.into_response(),
             Ok(Judged::Whole) => {}
             // A batch the grants divide: the permitted entities go on, the refused ones are
@@ -2175,7 +2166,6 @@ fn judge_write(
     operation: Operation,
     constraints: &Constraints,
     endpoint: &Endpoint,
-    org_domain: &str,
 ) -> Result<Judged, Box<ProblemDetails>> {
     let Ok(payload) = serde_json::from_slice::<Value>(body) else {
         return Err(Box::new(
@@ -2193,24 +2183,12 @@ fn judge_write(
         Value::Array(entries) if divides(operation) => entries,
         Value::Array(entities) => {
             for entity in &entities {
-                refuse_entity(
-                    entity,
-                    addressed.as_deref(),
-                    constraints,
-                    endpoint,
-                    org_domain,
-                )?;
+                refuse_entity(entity, addressed.as_deref(), constraints, endpoint)?;
             }
             return Ok(Judged::Whole);
         }
         other => {
-            refuse_entity(
-                &other,
-                addressed.as_deref(),
-                constraints,
-                endpoint,
-                org_domain,
-            )?;
+            refuse_entity(&other, addressed.as_deref(), constraints, endpoint)?;
             return Ok(Judged::Whole);
         }
     };
@@ -2224,9 +2202,9 @@ fn judge_write(
     let mut permitted = Vec::with_capacity(entries.len());
     let mut refused = Vec::new();
     for entry in entries {
-        match refuse_entity(&entry, None, constraints, endpoint, org_domain) {
+        match refuse_entity(&entry, None, constraints, endpoint) {
             Ok(()) => permitted.push(entry),
-            // A malformed or foreign id is no grant decision but a malformed write, and a batch
+            // A malformed id is no grant decision but a malformed write, and a batch
             // half applied around it is the one outcome nobody asked for (PF-42, T-1697).
             Err(problem) if problem.status == StatusCode::BAD_REQUEST.as_u16() => {
                 return Err(problem);
@@ -2250,7 +2228,6 @@ fn refuse_entity(
     addressed: Option<&str>,
     constraints: &Constraints,
     endpoint: &Endpoint,
-    org_domain: &str,
 ) -> Result<(), Box<ProblemDetails>> {
     if let Some(problem) = undeclared_type(entity, endpoint) {
         return Err(Box::new(problem));
@@ -2264,13 +2241,8 @@ fn refuse_entity(
             ));
         }
         if let Some(kind) = object.get("type").or_else(|| object.get("@type")) {
-            write_guard::check_identifier(
-                path_id,
-                Some(kind.as_str().unwrap_or_default()),
-                &endpoint.space,
-                org_domain,
-            )
-            .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
+            write_guard::check_identifier(path_id, Some(kind.as_str().unwrap_or_default()))
+                .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
         }
     }
     // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
@@ -2286,10 +2258,10 @@ fn refuse_entity(
     // A batch delete is an array of URN strings: each is an identifier and nothing else
     // (T-0806).
     let outcome = if let Some(raw) = entity.as_str() {
-        write_guard::check_identifier(raw, None, &endpoint.space, org_domain)
+        write_guard::check_identifier(raw, None)
             .and_then(|()| write_guard::check_granted_id(raw, constraints))
     } else if entity.get("id").is_some() || entity.get("@id").is_some() {
-        write_guard::check(entity, constraints, &endpoint.space, org_domain)
+        write_guard::check(entity, constraints)
     } else {
         write_guard::check_fragment(entity, constraints)
     };

@@ -2,14 +2,13 @@
 //!
 //! `tenancy_middleware_tests.rs` and `edge_gateway_tenancy_strip_tests.rs` prove the header half
 //! on a read: whatever the caller spells `NGSILD-Tenant`, the broker is told the space the
-//! endpoint pins. `write_guard_tests.rs` proves the identifier half as a function: an id whose
-//! `{orgDomain}:{space}` segments are not this endpoint's is refused.
+//! endpoint pins. Since ADR-N-041 the identifier half is the same rule: an entity is its space and
+//! its URN, and a URN whose segments name another space or organization names nothing (PF-42).
 //!
-//! What neither plays is the attack itself — the foreign id sent through each write route of a
-//! live router, where the thing to prove is not only the status but that the broker was never
-//! asked. A write refused after the hop is a write that happened. So every case here asserts the
-//! refusal, its reason, and an empty hop log; the two control cases assert that the same routes
-//! carry an id of this space through, so the file fails if the surface simply stopped writing.
+//! What this plays is the attack itself — such an id sent through each write route of a live
+//! router — and what it proves is where the write landed: in this endpoint's space and no other,
+//! every hop of it. A URN cannot carry a write out of the space the endpoint pins. An id that is
+//! no NGSI-LD URN is still refused whole, before the broker is asked (PF-43).
 
 mod common;
 
@@ -181,38 +180,36 @@ fn device(id: &str) -> Value {
     })
 }
 
-/// The refusal a foreign id earns: a bad request that names the id, never a policy decision and
-/// never a silence the caller has to guess at (PF-42, GW16).
-fn assert_refused(status: StatusCode, problem: &Value, asked: &[(String, String)], id: &str) {
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {problem}");
-    let detail = problem["detail"].as_str().unwrap_or_default();
+/// Where a write naming another space in its URN lands: in this endpoint's space, every hop
+/// (ADR-N-041, PF-42).
+fn assert_lands_here(status: StatusCode, problem: &Value, asked: &[(String, String)], id: &str) {
+    assert!(status.is_success(), "{id}: {status} {problem}");
     assert!(
-        detail.contains(id) && detail.contains(SPACE),
-        "{id}: the refusal does not say which id was refused and which space it was refused for: {problem}"
+        !asked.is_empty(),
+        "{id}: the write never reached the broker"
     );
-    assert!(asked.is_empty(), "{id}: the broker was asked: {asked:?}");
-}
-
-#[tokio::test]
-async fn an_entity_created_under_another_space_or_organization_never_reaches_the_broker() {
-    for id in [OTHER_SPACE, OTHER_ORG, LOOKALIKE, OTHER_CASE] {
-        let (status, problem, asked) = send(Method::POST, "/entities", Some(device(id))).await;
-        assert_refused(status, &problem, &asked, id);
+    for (hop, tenant) in asked {
+        assert_eq!(tenant, SPACE, "{id}: {hop} was asked for another tenant");
     }
 }
 
 #[tokio::test]
-async fn one_foreign_id_refuses_a_whole_batch_and_nothing_of_it_is_written() {
-    // GW18 answers a batch per entity where the grant decides it; a foreign id is not a grant
-    // decision but a malformed write, and a batch half applied is the one outcome nobody asked
-    // for, so the whole call is refused before the broker sees any of it.
+async fn an_entity_created_under_another_spaces_urn_lands_in_this_space_only() {
+    for id in [OTHER_SPACE, OTHER_ORG, LOOKALIKE, OTHER_CASE] {
+        let (status, problem, asked) = send(Method::POST, "/entities", Some(device(id))).await;
+        assert_lands_here(status, &problem, &asked, id);
+    }
+}
+
+#[tokio::test]
+async fn a_batch_lands_in_this_space_and_one_malformed_id_refuses_all_of_it() {
     let (status, problem, asked) = send(
         Method::POST,
         "/entityOperations/upsert",
         Some(json!([device(OURS), device(OTHER_SPACE)])),
     )
     .await;
-    assert_refused(status, &problem, &asked, OTHER_SPACE);
+    assert_lands_here(status, &problem, &asked, OTHER_SPACE);
 
     let (status, problem, asked) = send(
         Method::POST,
@@ -220,11 +217,22 @@ async fn one_foreign_id_refuses_a_whole_batch_and_nothing_of_it_is_written() {
         Some(json!([OURS, OTHER_ORG])),
     )
     .await;
-    assert_refused(status, &problem, &asked, OTHER_ORG);
+    assert_lands_here(status, &problem, &asked, OTHER_ORG);
+
+    // A malformed id is no grant decision but a malformed write, and a batch half applied is
+    // the one outcome nobody asked for, so the whole call is refused before the broker sees it.
+    let (status, problem, asked) = send(
+        Method::POST,
+        "/entityOperations/upsert",
+        Some(json!([device(OURS), device("urn:ngsi-ld:Device")])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }
 
 #[tokio::test]
-async fn an_addressed_write_to_a_foreign_id_never_reaches_the_broker() {
+async fn an_addressed_write_to_another_spaces_urn_lands_in_this_space_only() {
     for id in [OTHER_SPACE, OTHER_ORG, LOOKALIKE] {
         let (status, problem, asked) = send(
             Method::PATCH,
@@ -232,10 +240,10 @@ async fn an_addressed_write_to_a_foreign_id_never_reaches_the_broker() {
             Some(json!({ "status": { "type": "Property", "value": "off" } })),
         )
         .await;
-        assert_refused(status, &problem, &asked, id);
+        assert_lands_here(status, &problem, &asked, id);
 
         let (status, problem, asked) = send(Method::DELETE, &format!("/entities/{id}"), None).await;
-        assert_refused(status, &problem, &asked, id);
+        assert_lands_here(status, &problem, &asked, id);
     }
 }
 

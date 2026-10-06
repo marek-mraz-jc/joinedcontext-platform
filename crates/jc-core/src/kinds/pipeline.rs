@@ -694,6 +694,14 @@ fn validate_source(src: &PipelineSource) -> Result<()> {
         if let Some(ref et) = q.entity_type {
             names::validate_entity_type(et)?;
         }
+        // The id list is comma-separated on the wire and the gateway splits it after decoding:
+        // an RFC 8141 id may hold a comma (ADR-N-041), and that one would read as two (PL-42).
+        if let Some(listed) = q.ids.iter().find(|id| id.id().contains(',')) {
+            return Err(Error::Kind {
+                expected: "query.ids without a comma, the separator of the id list",
+                got: listed.to_string(),
+            });
+        }
         if let Some(ref et) = q.entity_type {
             if let Some(other) = q.ids.iter().find(|id| id.entity_type() != et) {
                 return Err(Error::Kind {

@@ -649,8 +649,9 @@ fn the_fixed_limit_parameter_cannot_be_overridden_by_a_query_value() {
     }
 }
 
-/// PL-42: the ids are PF-42 URNs, which jc-core parses before they reach the renderer, so none
-/// can carry a separator; the list is exactly the ids, comma-joined.
+/// PL-42: the list is exactly the ids, comma-joined. Since ADR-N-041 an id may hold any RFC 8141
+/// character, so each goes in as one encoded component (an `&` cannot end the parameter), and an
+/// id holding a comma, the list's separator, is refused by validation.
 #[test]
 fn ids_are_joined_without_letting_one_id_break_out_of_the_list() {
     let url = fetch_url(
@@ -661,18 +662,29 @@ fn ids_are_joined_without_letting_one_id_break_out_of_the_list() {
         vec!["urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a,urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:b".to_owned()],
         "{url}"
     );
-    for smuggled in [
-        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a&limit=1",
-        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a,b",
-    ] {
-        let yaml = format!(
-            "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata: {{ name: p, namespace: ovzdusie }}\nspec:\n  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived\n  class: scheduled\n  schedule: \"10 0 * * *\"\n  source:\n    endpointRef: {{ kind: Endpoint, name: air-quality-internal }}\n    query: {{ type: AirQualityObserved, ids: [\"{smuggled}\"] }}\n  compute: {{ kind: wasm, module: ./compute, function: process }}\n  output: {{ type: AirQualityIndexDaily, mode: upsert }}\n"
-        );
-        let refused = Pipeline::from_yaml(&yaml)
-            .map_err(|e| e.to_string())
-            .and_then(|manifest| manifest.validate().map_err(|e| e.to_string()));
-        assert!(refused.is_err(), "{smuggled} was accepted as one id");
-    }
+    let ampersand = fetch_url(
+        "      type: AirQualityObserved\n      ids:\n        - urn:ngsi-ld:AirQualityObserved:station&limit=1",
+    );
+    assert_eq!(
+        values_of(&ampersand, "id"),
+        vec!["urn:ngsi-ld:AirQualityObserved:station&limit=1".to_owned()],
+        "one id, decoded whole: {ampersand}"
+    );
+    assert_eq!(
+        values_of(&ampersand, "limit"),
+        vec!["1000".to_owned()],
+        "{ampersand}"
+    );
+
+    let smuggled = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:air-quality:a,b";
+    let yaml = format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata: {{ name: p, namespace: ovzdusie }}\nspec:\n  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:ep-derived\n  class: scheduled\n  schedule: \"10 0 * * *\"\n  source:\n    endpointRef: {{ kind: Endpoint, name: air-quality-internal }}\n    query: {{ type: AirQualityObserved, ids: [\"{smuggled}\"] }}\n  compute: {{ kind: wasm, module: ./compute, function: process }}\n  output: {{ type: AirQualityIndexDaily, mode: upsert }}\n"
+    );
+    let refused = Pipeline::from_yaml(&yaml)
+        .map_err(|e| e.to_string())
+        .and_then(|manifest| manifest.validate().map_err(|e| e.to_string()));
+    let said = refused.expect_err("an id with a comma would read as two ids");
+    assert!(said.contains("comma"), "{said}");
 }
 
 /// An attribute name holding a comma would read as two at the gateway, which splits the decoded

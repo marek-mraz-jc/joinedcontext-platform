@@ -8,8 +8,8 @@
 //!   trimmed.
 //! - `check_granted_id`: an identifier alone is held to the grant's types and patterns, so a path
 //!   id and a bare URN in a batch delete get the same answer as a payload.
-//! - `check_identifier`: an id belongs to this organization and this space, and the type it
-//!   carries is the type the payload declares.
+//! - `check_identifier`: an id is an NGSI-LD URN whose type is the type the payload declares;
+//!   nothing else of it is read, because the space is the Endpoint's (ADR-N-041, PF-42, PF-43).
 //!
 //! `write_guard_tests.rs` covers the golden grant's happy path and one refusal of each kind.
 //! These are the shapes around them, where a wrong answer is a write landing somewhere it was
@@ -21,7 +21,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 const SPACE: &str = "ovzdusie";
-const ORG: &str = "banskabystrica.sk";
 const ID: &str = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-01";
 const CITY: &str = "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]";
 
@@ -65,40 +64,40 @@ fn entity() -> Value {
 // --- check_identifier (T-1941) --------------------------------------------------------------
 
 #[test]
-fn an_id_of_another_organization_or_another_space_is_refused() {
-    // PF-10: the endpoint pinned the space, and the URN carries its own. A write whose URN says
-    // somewhere else would land in this space under another space's name.
-    for foreign in [
+fn a_urn_naming_another_organization_or_space_is_an_id_and_reaches_nothing_it_names() {
+    // ADR-N-041, PF-42: identity is the space and the URN. The Endpoint pinned the space, so a
+    // URN whose segments name another organization or space is an id like any other, written
+    // into this space under this space's grant, and the copy of an entity keeps its URN.
+    for named_elsewhere in [
         "urn:ngsi-ld:AirQualityObserved:bbsk.sk:ovzdusie:station-01",
         "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:doprava:station-01",
+        "urn:ngsi-ld:AirQualityObserved:Helsinki-001",
     ] {
-        assert!(
-            matches!(
-                check_identifier(foreign, None, SPACE, ORG),
-                Err(Refusal::ForeignUrn { .. })
-            ),
-            "{foreign} was accepted into {SPACE}"
-        );
+        check_identifier(named_elsewhere, Some("AirQualityObserved"))
+            .unwrap_or_else(|refusal| panic!("{named_elsewhere} refused: {refusal}"));
+        let mut payload = entity();
+        payload["id"] = json!(named_elsewhere);
+        check(&payload, &grant()).unwrap_or_else(|refusal| panic!("{named_elsewhere}: {refusal}"));
     }
 }
 
 #[test]
-fn an_id_that_is_not_the_four_segment_urn_is_refused_rather_than_guessed_at() {
-    // PF-42. Each of these is a shape a client might send; none of them says which organization,
-    // space and type it belongs to, so none can be checked and none may pass.
+fn an_id_that_is_no_ngsi_ld_urn_is_refused_rather_than_guessed_at() {
+    // PF-43. Each of these is a shape a client might send, and none is an NGSI-LD URN.
     for malformed in [
         "",
         "station-01",
         "urn:ngsi-ld:AirQualityObserved",
-        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk",
-        "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie",
+        "urn:ngsi-ld:AirQualityObserved:",
+        "urn:ngsi-ld:airQualityObserved:station-01",
+        "urn:ngsi-ld:AirQualityObserved:station 01",
         "http://example.org/entities/station-01",
         "urn:example:AirQualityObserved:banskabystrica.sk:ovzdusie:station-01",
         "  urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-01",
     ] {
         assert!(
             matches!(
-                check_identifier(malformed, None, SPACE, ORG),
+                check_identifier(malformed, None),
                 Err(Refusal::MalformedId(_))
             ),
             "{malformed:?} was read as a usable id"
@@ -108,38 +107,43 @@ fn an_id_that_is_not_the_four_segment_urn_is_refused_rather_than_guessed_at() {
 
 #[test]
 fn the_type_in_the_urn_and_the_type_in_the_payload_have_to_agree() {
-    // PF-44: the URN carries the type, so a payload declaring another one would be stored under
+    // PF-43: the URN carries the type, so a payload declaring another one would be stored under
     // an id that says it is something else — and a later read by type would never find it.
-    check_identifier(ID, Some("AirQualityObserved"), SPACE, ORG).expect("they agree");
+    check_identifier(ID, Some("AirQualityObserved")).expect("they agree");
     assert!(matches!(
-        check_identifier(ID, Some("WeatherObserved"), SPACE, ORG),
+        check_identifier(ID, Some("WeatherObserved")),
         Err(Refusal::MalformedId(_))
     ));
     assert!(
         matches!(
-            check_identifier(ID, Some("airqualityobserved"), SPACE, ORG),
+            check_identifier(ID, Some("airqualityobserved")),
             Err(Refusal::MalformedId(_))
         ),
         "a type is compared as written, not case-folded"
     );
-    check_identifier(ID, None, SPACE, ORG).expect("a payload that declares none is not checked");
+    check_identifier(ID, None).expect("a payload that declares none is not checked");
 }
 
 #[test]
-fn a_caller_cannot_reach_another_space_by_shouting_its_name() {
-    // The name rules are lower case (PF-42), so an upper-case domain or space is not a second
-    // spelling of the granted one that a comparison might fold together: it is not a legal name
-    // at all, and it is refused before the space is ever compared.
-    for shouted in [
+fn a_grant_that_names_ids_still_bounds_a_write_whatever_its_urn_says() {
+    // GW16: an `idPattern` is a target the steward wrote, read against the URN as a string. An
+    // upper-case spelling of the granted prefix is a different string and falls outside it.
+    let mut narrowed = grant();
+    narrowed.id_patterns = BTreeSet::from([
+        "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:.*$".to_owned(),
+    ]);
+    check_granted_id(ID, &narrowed).expect("inside the pattern");
+    for outside in [
         "urn:ngsi-ld:AirQualityObserved:BANSKABYSTRICA.SK:ovzdusie:station-01",
         "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:OVZDUSIE:station-01",
+        "urn:ngsi-ld:AirQualityObserved:Helsinki-001",
     ] {
         assert!(
             matches!(
-                check_identifier(shouted, None, SPACE, ORG),
-                Err(Refusal::MalformedId(_))
+                check_granted_id(outside, &narrowed),
+                Err(Refusal::IdOutsideGrant(_))
             ),
-            "{shouted} was read as a name"
+            "{outside} passed a grant that names other ids"
         );
     }
 }
@@ -220,7 +224,7 @@ fn a_payload_with_no_id_at_all_is_refused() {
     let mut nameless = entity();
     nameless.as_object_mut().expect("an object").remove("id");
     assert!(matches!(
-        check(&nameless, &grant(), SPACE, ORG),
+        check(&nameless, &grant()),
         Err(Refusal::MalformedId(_))
     ));
 }
@@ -230,7 +234,7 @@ fn a_payload_that_is_not_an_object_is_refused() {
     // A caller can send anything; `check` is the gate and must answer rather than pass through.
     for payload in [json!(null), json!([]), json!(7), json!("text"), json!(true)] {
         assert!(
-            check(&payload, &grant(), SPACE, ORG).is_err(),
+            check(&payload, &grant()).is_err(),
             "{payload} was accepted as an entity"
         );
     }
@@ -255,7 +259,7 @@ fn access_control_smuggled_into_the_data_is_refused_whatever_else_is_right() {
             .insert(smuggled.to_owned(), json!("anything"));
         assert!(
             matches!(
-                check(&entity, &grant(), SPACE, ORG),
+                check(&entity, &grant()),
                 Err(Refusal::SmuggledPolicyAttribute(name)) if name == smuggled
             ),
             "{smuggled} was written into an entity"
@@ -272,7 +276,7 @@ fn the_smuggled_policy_check_runs_before_anything_that_could_pass_it() {
     object.insert("acl".to_owned(), json!(["everyone"]));
     object.insert("id".to_owned(), json!("not a urn"));
     assert!(matches!(
-        check(&entity, &grant(), SPACE, ORG),
+        check(&entity, &grant()),
         Err(Refusal::SmuggledPolicyAttribute(_))
     ));
 }
@@ -284,11 +288,11 @@ fn a_payload_declaring_no_type_is_refused_by_a_grant_that_names_one() {
     let mut typeless = entity();
     typeless.as_object_mut().expect("an object").remove("type");
     assert!(matches!(
-        check(&typeless, &grant(), SPACE, ORG),
+        check(&typeless, &grant()),
         Err(Refusal::TypeOutsideGrant(name)) if name.is_empty()
     ));
     // And under a grant that narrows no type it is fine: the id still places the entity.
-    check(&typeless, &wide(), SPACE, ORG).expect("nothing narrows the type");
+    check(&typeless, &wide()).expect("nothing narrows the type");
 }
 
 #[test]
@@ -301,7 +305,7 @@ fn one_ungranted_attribute_refuses_the_whole_write_and_names_it() {
         json!({ "type": "Property", "value": "hello" }),
     );
     assert!(matches!(
-        check(&entity, &grant(), SPACE, ORG),
+        check(&entity, &grant()),
         Err(Refusal::AttributeOutsideGrant(name)) if name == "stewardNote"
     ));
 }
@@ -315,7 +319,7 @@ fn a_grant_that_names_no_attribute_admits_every_attribute() {
         "anythingAtAll".to_owned(),
         json!({ "type": "Property", "value": 1 }),
     );
-    check(&entity, &wide(), SPACE, ORG).expect("nothing narrows the attributes");
+    check(&entity, &wide()).expect("nothing narrows the attributes");
 }
 
 #[test]
@@ -334,7 +338,7 @@ fn a_scope_outside_the_granted_tree_is_refused_and_a_sibling_prefix_is_not_a_par
         let mut entity = entity();
         entity.as_object_mut().expect("an object")["scope"] = json!(scope);
         assert_eq!(
-            check(&entity, &grant(), SPACE, ORG).is_ok(),
+            check(&entity, &grant()).is_ok(),
             granted,
             "{scope} was decided the wrong way"
         );
@@ -349,13 +353,13 @@ fn every_scope_of_a_list_has_to_be_granted_and_not_merely_one_of_them() {
     entity.as_object_mut().expect("an object")["scope"] =
         json!(["/geo/SK/BB/Radvan", "/geo/SK/ZA"]);
     assert!(matches!(
-        check(&entity, &grant(), SPACE, ORG),
+        check(&entity, &grant()),
         Err(Refusal::ScopeOutsideGrant(_))
     ));
 
     entity.as_object_mut().expect("an object")["scope"] =
         json!(["/geo/SK/BB/Radvan", "/geo/SK/BB/Sasova"]);
-    check(&entity, &grant(), SPACE, ORG).expect("both are inside the tree");
+    check(&entity, &grant()).expect("both are inside the tree");
 }
 
 #[test]
@@ -364,10 +368,7 @@ fn a_scope_that_is_not_a_string_or_a_list_of_them_is_refused() {
         let mut entity = entity();
         entity.as_object_mut().expect("an object")["scope"] = odd.clone();
         assert!(
-            matches!(
-                check(&entity, &grant(), SPACE, ORG),
-                Err(Refusal::ScopeOutsideGrant(_))
-            ),
+            matches!(check(&entity, &grant()), Err(Refusal::ScopeOutsideGrant(_))),
             "{odd} was accepted as a scope"
         );
     }
@@ -382,7 +383,7 @@ fn an_entity_that_says_nothing_about_where_it_is_is_not_outside_the_area() {
         .as_object_mut()
         .expect("an object")
         .remove("location");
-    check(&nowhere, &grant(), SPACE, ORG).expect("no location is not a location outside the area");
+    check(&nowhere, &grant()).expect("no location is not a location outside the area");
 }
 
 #[test]
@@ -399,10 +400,7 @@ fn a_location_the_parser_cannot_read_is_refused_rather_than_passed() {
         let mut entity = entity();
         entity.as_object_mut().expect("an object")["location"] = unreadable.clone();
         assert!(
-            matches!(
-                check(&entity, &grant(), SPACE, ORG),
-                Err(Refusal::LocationOutsideGrant)
-            ),
+            matches!(check(&entity, &grant()), Err(Refusal::LocationOutsideGrant)),
             "{unreadable} passed the area check"
         );
     }
@@ -417,7 +415,7 @@ fn one_unreadable_granted_area_refuses_the_write_rather_than_leaving_the_rest_to
         ..grant()
     };
     assert!(matches!(
-        check(&entity(), &broken, SPACE, ORG),
+        check(&entity(), &broken),
         Err(Refusal::LocationOutsideGrant)
     ));
 }
@@ -431,7 +429,7 @@ fn a_refusal_never_says_what_the_rule_was() {
         "type": "GeoProperty",
         "value": { "type": "Point", "coordinates": [21.25, 48.73] }
     });
-    let refusal = check(&outside, &grant(), SPACE, ORG).expect_err("outside the area");
+    let refusal = check(&outside, &grant()).expect_err("outside the area");
     let said = refusal.to_string();
     assert!(!said.contains("coordinates"), "{said}");
     assert!(!said.contains("19.1"), "{said}");
