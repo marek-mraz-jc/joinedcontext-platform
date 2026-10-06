@@ -138,6 +138,7 @@ async fn world(test: &str) -> World {
         gateway: "http://127.0.0.1:9".into(),
         functions: None,
         portal_client: "portal-api".into(),
+        public_origin: Some("https://assistant.example".into()),
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
     });

@@ -176,6 +176,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         gateway: gateway.uri(),
         functions: Some(functions.uri()),
         portal_client: "portal-api".into(),
+        public_origin: Some("https://assistant.example".into()),
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
     });
@@ -934,5 +935,117 @@ async fn an_oversized_body_and_a_foreign_or_expired_conversation_are_refused() {
         model_calls(&w.proxy).await.is_empty(),
         "nothing was spent on a refused question"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+async fn get(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    let (status, headers) = (response.status(), response.headers().clone());
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("a body");
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+/// AG-114: the widget page of a public deployment is framed by its origins alone, loads its own
+/// host's script and style, carries its configuration escaped and sets no cookie; an internal
+/// deployment has no widget.
+#[tokio::test]
+async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cookie() {
+    let mut public = deployment(Channel::Public, 50_000, 10);
+    public.spec.theme = Some(jc_core::kinds::assistant::Theme {
+        primary_color: Some("#0b5394".into()),
+        greeting: Some("Dobrý deň \"<b>\"".into()),
+    });
+    let w = world("widget", public).await;
+    let (status, headers, html) = get(&w.app, "/d/hronov-obcania/widget").await;
+    assert_eq!(status, StatusCode::OK);
+    let policy = headers
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        policy.ends_with(&format!("frame-ancestors {ORIGIN}")),
+        "{policy}"
+    );
+    assert!(
+        policy.contains("script-src 'self'")
+            && policy.contains("connect-src 'self'")
+            && policy.starts_with("default-src 'none'")
+    );
+    assert!(headers.get("set-cookie").is_none());
+    assert!(html.contains("src=\"/d/widget.js\"") && html.contains("href=\"/d/widget.css\""));
+    assert!(
+        html.contains("&quot;greeting&quot;:&quot;Dobrý deň \\&quot;&lt;b&gt;\\&quot;&quot;"),
+        "{html}"
+    );
+    assert!(!html.contains("<b>"));
+    assert!(
+        html.contains("ovzdusie"),
+        "the connectors the visitor may switch off"
+    );
+
+    let (status, headers, script) = get(&w.app, "/d/widget.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("text/javascript"));
+    assert!(script.contains("credentials: \"omit\""));
+    let (_, headers, _) = get(&w.app, "/d/widget.css").await;
+    assert!(headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("text/css"));
+    let (status, _, _) = get(&w.app, "/d/nikto/widget").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The widget's own origin may ask; another is refused before anything is spent.
+    script_answer(&w.proxy).await;
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Ahoj"}),
+            Some("https://assistant.example"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+async fn script_answer(proxy: &MockServer) {
+    script(
+        proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": "Dobrý deň."}),
+            50,
+        )],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_internal_deployment_has_no_widget() {
+    let w = world("widgetinternal", deployment(Channel::Internal, 50_000, 10)).await;
+    let (status, headers, _) = get(&w.app, "/d/hronov-obcania/widget").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(headers.get("content-security-policy").is_none());
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

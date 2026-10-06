@@ -12,7 +12,8 @@
 //! `JC_ASSISTANT_CLIENT_SECRET_FILE` (the service's own Keycloak client), `JC_ASSISTANT_LLM` (the
 //! model the completions name) and `JC_ASSISTANT_FUNCTIONS_URL` (`jc-functions`, for the scripts
 //! of a deployment with `sandbox: true`; none without it) and `JC_ASSISTANT_PORTAL_CLIENT` (the
-//! Portal's client, the one caller of the administration paths; default `portal-api`).
+//! Portal's client, the one caller of the administration paths; default `portal-api`) and
+//! `JC_ASSISTANT_PUBLIC_ORIGIN` (`https://assistant.{domain}`, whose widget may ask the chat).
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -155,6 +156,8 @@ async fn main() -> ExitCode {
             },
         },
         portal_client: env("JC_ASSISTANT_PORTAL_CLIENT").unwrap_or_else(|| "portal-api".into()),
+        public_origin: env("JC_ASSISTANT_PUBLIC_ORIGIN")
+            .map(|o| o.trim_end_matches('/').to_owned()),
         snapshot: RwLock::new(Arc::default()),
         limits: tokio::sync::Mutex::default(),
     });

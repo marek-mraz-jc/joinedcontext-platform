@@ -9,6 +9,7 @@ pub mod agent;
 pub mod mcp;
 pub mod model;
 pub mod script;
+pub mod widget;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -56,6 +57,9 @@ pub struct ChatState {
     pub functions: Option<String>,
     /// The Portal's Keycloak client, the one caller of the administration paths (AG-113).
     pub portal_client: String,
+    /// This service's own public origin, `https://assistant.{domain}`: the widget's requests
+    /// come from it, framed by an allowed origin (AG-114). `None` admits no widget.
+    pub public_origin: Option<String>,
     /// The manifests, replaced by the worker every minute.
     pub snapshot: RwLock<Arc<Snapshot>>,
     pub limits: Mutex<Limits>,
@@ -111,6 +115,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(Arc::clone(&state))
+        .merge(widget::router(Arc::clone(&state)))
         .merge(admin::router(state))
 }
 
@@ -138,13 +143,13 @@ enum Placed {
     Refused,
 }
 
-fn origin(headers: &HeaderMap, deployment: &Deployment) -> Placed {
+fn origin(headers: &HeaderMap, deployment: &Deployment, own: Option<&str>) -> Placed {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return Placed::Nowhere;
     };
     if origin
         .to_str()
-        .is_ok_and(|o| deployment.spec.allowed_origins.iter().any(|a| a == o))
+        .is_ok_and(|o| deployment.spec.allowed_origins.iter().any(|a| a == o) || own == Some(o))
     {
         Placed::Allowed(origin.clone())
     } else {
@@ -177,7 +182,7 @@ async fn preflight(
     let Some(deployment) = deployment_of(&state, &public_id) else {
         return problem(404, "Not Found", "No assistant is published under this id.");
     };
-    match origin(&headers, &deployment) {
+    match origin(&headers, &deployment, state.public_origin.as_deref()) {
         Placed::Allowed(origin) => {
             let mut response = StatusCode::NO_CONTENT.into_response();
             let h = response.headers_mut();
@@ -405,7 +410,7 @@ async fn chat(
     let Some(deployment) = deployment_of(&state, &public_id) else {
         return problem(404, "Not Found", "No assistant is published under this id.");
     };
-    let origin = match origin(&headers, &deployment) {
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
         Placed::Nowhere => None,
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
