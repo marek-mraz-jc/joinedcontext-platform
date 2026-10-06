@@ -6,6 +6,7 @@ pub mod config;
 pub mod delegation;
 pub mod inject;
 pub mod limits;
+pub mod model_key;
 pub mod public_dns;
 pub mod routes;
 pub mod runs;

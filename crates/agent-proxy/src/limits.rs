@@ -21,9 +21,36 @@ struct RunUsage {
 /// One minute, the window `requests_per_minute` is counted over.
 const WINDOW: Duration = Duration::from_secs(60);
 
+/// The tokens spent on one UTC day, per consumer and per person (AG-97).
+#[derive(Default)]
+struct DailySpend {
+    day: u64,
+    consumers: HashMap<&'static str, u64>,
+    people: HashMap<String, u64>,
+}
+
+/// Whose daily budget a run's calls count against (AG-97).
+pub fn consumer_of(kind: &str) -> &'static str {
+    match kind {
+        "conversation" => "assistant",
+        "application" => "app-builder",
+        _ => "other",
+    }
+}
+
+/// Days since the epoch, UTC: the day a daily budget belongs to.
+fn utc_day() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() / 86_400)
+}
+
 #[derive(Clone, Default)]
 pub struct LimitManager {
     runs: Arc<Mutex<HashMap<String, RunUsage>>>,
+    // ponytail: in memory, per replica; a restart or a second replica starts the day again from
+    // zero. Persist in the Portal when one replica's day is not the installation's.
+    daily: Arc<Mutex<DailySpend>>,
 }
 
 impl LimitManager {
@@ -103,6 +130,67 @@ impl LimitManager {
         budget.saturating_sub(entry.egress_bytes)
     }
 
+    /// Refuses a call of a `kind` run started by `person` once today's spend of its consumer or
+    /// of the person has reached its cap; the sentence says whose budget it is (AG-97).
+    pub async fn check_daily(
+        &self,
+        caps: &crate::config::DailyCaps,
+        kind: &str,
+        person: &str,
+    ) -> Result<(), String> {
+        self.check_daily_on(caps, kind, person, utc_day()).await
+    }
+
+    async fn check_daily_on(
+        &self,
+        caps: &crate::config::DailyCaps,
+        kind: &str,
+        person: &str,
+        day: u64,
+    ) -> Result<(), String> {
+        let mut daily = self.daily.lock().await;
+        if daily.day != day {
+            *daily = DailySpend {
+                day,
+                ..DailySpend::default()
+            };
+        }
+        let consumer = consumer_of(kind);
+        let (cap, whose) = match consumer {
+            "assistant" => (caps.assistant, "the assistant"),
+            "app-builder" => (caps.app_builder, "the app builder"),
+            _ => (caps.other, "agent runs"),
+        };
+        let again = "It starts again at 00:00 UTC; an administrator can raise it.";
+        if cap > 0 && daily.consumers.get(consumer).copied().unwrap_or(0) >= cap {
+            return Err(format!(
+                "Today's model budget for {whose} is spent. {again}"
+            ));
+        }
+        if caps.per_person > 0 && daily.people.get(person).copied().unwrap_or(0) >= caps.per_person
+        {
+            return Err(format!("Your model budget for today is spent. {again}"));
+        }
+        Ok(())
+    }
+
+    /// Counts one call's tokens against today's budgets of its consumer and its person.
+    pub async fn record_daily(&self, kind: &str, person: &str, tokens: u64) {
+        self.record_daily_on(kind, person, tokens, utc_day()).await;
+    }
+
+    async fn record_daily_on(&self, kind: &str, person: &str, tokens: u64, day: u64) {
+        let mut daily = self.daily.lock().await;
+        if daily.day != day {
+            *daily = DailySpend {
+                day,
+                ..DailySpend::default()
+            };
+        }
+        *daily.consumers.entry(consumer_of(kind)).or_default() += tokens;
+        *daily.people.entry(person.to_owned()).or_default() += tokens;
+    }
+
     pub async fn record_tokens(&self, run_id: &str, count: u64) {
         let mut map = self.runs.lock().await;
         map.entry(run_id.to_string()).or_default().tokens_consumed += count;
@@ -157,6 +245,73 @@ mod tests {
             limits.check_rpm_at("run-1", 3, later).await,
             Ok(()),
             "a new minute, a new count"
+        );
+    }
+
+    const CAPS: crate::config::DailyCaps = crate::config::DailyCaps {
+        assistant: 100,
+        app_builder: 0,
+        other: 50,
+        per_person: 150,
+    };
+
+    #[tokio::test]
+    async fn a_consumer_past_its_daily_cap_is_refused_with_whose_budget_and_the_next_day_is_new() {
+        let limits = LimitManager::default();
+        assert_eq!(
+            limits.check_daily_on(&CAPS, "conversation", "ana", 7).await,
+            Ok(())
+        );
+        limits.record_daily_on("conversation", "ana", 100, 7).await;
+        let refused = limits.check_daily_on(&CAPS, "conversation", "bo", 7).await;
+        assert_eq!(
+            refused,
+            Err("Today's model budget for the assistant is spent. It starts again at 00:00 UTC; an administrator can raise it.".to_owned())
+        );
+        // Another consumer has its own budget, and an uncapped one (0) none at all.
+        assert_eq!(
+            limits.check_daily_on(&CAPS, "application", "bo", 7).await,
+            Ok(())
+        );
+        assert_eq!(
+            limits.check_daily_on(&CAPS, "dashboard", "bo", 7).await,
+            Ok(())
+        );
+        // The next UTC day starts from nothing.
+        assert_eq!(
+            limits.check_daily_on(&CAPS, "conversation", "bo", 8).await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_past_the_per_person_cap_is_refused_in_every_consumer() {
+        let limits = LimitManager::default();
+        limits.record_daily_on("application", "ana", 150, 7).await;
+        assert_eq!(
+            limits.check_daily_on(&CAPS, "application", "ana", 7).await,
+            Err("Your model budget for today is spent. It starts again at 00:00 UTC; an administrator can raise it.".to_owned())
+        );
+        assert!(limits
+            .check_daily_on(&CAPS, "conversation", "ana", 7)
+            .await
+            .is_err());
+        assert_eq!(
+            limits.check_daily_on(&CAPS, "application", "bo", 7).await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn no_caps_refuse_nothing() {
+        let limits = LimitManager::default();
+        limits
+            .record_daily_on("conversation", "ana", u64::MAX / 2, 7)
+            .await;
+        let none = crate::config::DailyCaps::default();
+        assert_eq!(
+            limits.check_daily_on(&none, "conversation", "ana", 7).await,
+            Ok(())
         );
     }
 

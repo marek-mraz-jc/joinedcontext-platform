@@ -97,6 +97,8 @@ struct StreamUsage {
     input: u64,
     output: u64,
     cached: u64,
+    /// The call's cost, when the provider reports one (OpenRouter's `usage.cost`, AG-97).
+    cost: Option<f64>,
 }
 
 /// The counts of one `usage` object, OpenAI-compatible or Anthropic: the total when it is given,
@@ -129,6 +131,8 @@ struct CallUsage {
     model: Option<String>,
     /// The reasoning effort the call was sent with (T-2998), one of [`BUDGETS`].
     effort: Option<&'static str>,
+    /// What the provider says the call cost (AG-97).
+    cost: Option<f64>,
 }
 
 /// The most of a call's `model` a usage frame repeats; the body is the run's to write.
@@ -148,6 +152,9 @@ impl CallUsage {
         }
         if let Some(effort) = self.effort {
             payload["reasoningEffort"] = json!(effort);
+        }
+        if let Some(cost) = self.cost.filter(|cost| cost.is_finite() && *cost >= 0.0) {
+            payload["costUsd"] = json!(cost);
         }
         payload
     }
@@ -220,6 +227,9 @@ impl StreamUsage {
         self.input = self.input.max(input);
         self.output = self.output.max(output);
         self.cached = self.cached.max(cached);
+        if let Some(cost) = usage.get("cost").and_then(Value::as_f64) {
+            self.cost = Some(cost);
+        }
     }
 
     fn tokens(&self) -> Option<u64> {
@@ -232,16 +242,21 @@ impl StreamUsage {
 /// its cached input, its latency and its model (AG-41, AG-72).
 fn record_usage(
     state: &ProxyState,
-    run_id: &str,
+    run: &crate::runs::RunContext,
     usage: CallUsage,
 ) -> impl std::future::Future<Output = ()> {
     let state = state.clone();
-    let run_id = run_id.to_owned();
+    let run_id = run.id.clone();
+    let (kind, person) = (run.kind.clone(), run.created_by.clone());
     async move {
         if usage.tokens == 0 {
             return;
         }
         state.limits.record_tokens(&run_id, usage.tokens).await;
+        state
+            .limits
+            .record_daily(&kind, &person, usage.tokens)
+            .await;
         let payload = usage.payload();
         let portal_base = state.config.portal_base.clone();
         let http = state.http.clone();
@@ -309,6 +324,21 @@ pub async fn handler(
             .into_response();
     }
 
+    // The day's budgets of the run's consumer and its person (AG-97), before the provider is
+    // asked: a capped call costs nothing.
+    if let Err(detail) = state
+        .limits
+        .check_daily(&state.config.daily_caps, &run.kind, &run.created_by)
+        .await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            jc_core::ProblemDetails::new(429, "daily-budget", "Daily Budget Spent")
+                .with_detail(detail),
+        )
+            .into_response();
+    }
+
     let body_bytes = match super::body::bounded(req.into_body()).await {
         Ok(bytes) => bytes,
         Err(refusal) => return *refusal,
@@ -363,6 +393,9 @@ pub async fn handler(
     {
         return refusal;
     }
+    // A key the provider does not take, or one without credit, is the installation's problem and
+    // not the run's: the Portal hears of it now, not at the next probe (AG-96).
+    crate::model_key::refused(&state, status.as_u16());
     if streamed && status.is_success() {
         let call = Streamed {
             run,
@@ -392,8 +425,9 @@ pub async fn handler(
             latency_ms,
             model,
             effort,
+            cost: usage.get("cost").and_then(Value::as_f64),
         };
-        record_usage(&state, &run.id, usage).await;
+        record_usage(&state, &run, usage).await;
     }
 
     log_request(&AuditEntry {
@@ -483,8 +517,9 @@ fn stream_through(
             latency_ms: millis(sent),
             model,
             effort,
+            cost: usage.cost,
         };
-        record_usage(&state, &run.id, call).await;
+        record_usage(&state, &run, call).await;
         log_request(&AuditEntry {
             run_id: &run.id,
             user: &run.created_by,
@@ -597,6 +632,7 @@ mod tests {
             latency_ms: 1830,
             model: Some("google/gemini-3.8-flash".into()),
             effort: None,
+            cost: None,
         };
         assert_eq!(
             call.payload(),
@@ -612,6 +648,17 @@ mod tests {
             ..CallUsage::default()
         };
         assert_eq!(at.payload()["reasoningEffort"], "medium");
+        // AG-97: the provider's cost travels with the call; a nonsense figure does not.
+        let paid = CallUsage {
+            cost: Some(0.0042),
+            ..CallUsage::default()
+        };
+        assert_eq!(paid.payload()["costUsd"], 0.0042);
+        let nonsense = CallUsage {
+            cost: Some(-1.0),
+            ..CallUsage::default()
+        };
+        assert!(nonsense.payload().get("costUsd").is_none());
     }
 
     /// T-2998: the effort the body as sent asks for, in either provider's shape, and only one of

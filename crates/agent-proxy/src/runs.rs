@@ -27,6 +27,10 @@ pub struct RunContext {
     #[serde(default)]
     pub repository: Option<String>,
     pub status: String,
+    /// The run's kind (`conversation`, `application`, …): whose daily budget its calls count
+    /// against (AG-97). A Portal that does not send it counts as `other`.
+    #[serde(default)]
+    pub kind: String,
     pub ticket_hash: String,
     pub max_tokens: u64,
     pub allowed_hosts: Vec<String>,
