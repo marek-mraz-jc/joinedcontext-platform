@@ -1,6 +1,7 @@
-//! T-0108: deterministic NGSI-LD URN parser, validator and formatter (ADR 001, PF-10, PF-42, PF-43).
+//! T-0108, T-3081: NGSI-LD URN parser, validator and formatter (ADR-N-041, PF-10, PF-42, PF-43).
+//! Any NGSI-LD URN of a PascalCase type is valid; the prefixed shape is one of them.
 
-use jc_core::{Error, Urn, UrnError};
+use jc_core::{EntityRef, Error, Urn, UrnError};
 
 /// Every URN example of docs/Architecture/03-domain-model.md section 3.
 const DOC_EXAMPLES: &[&str] = &[
@@ -29,9 +30,10 @@ fn doc_examples_parse_and_round_trip_byte_identically() {
 fn segments_are_exposed_verbatim() {
     let urn = parse(DOC_EXAMPLES[0]);
     assert_eq!(urn.entity_type(), "AirQualityObserved");
-    assert_eq!(urn.org_domain(), "banskabystrica.sk");
-    assert_eq!(urn.space(), "ovzdusie");
+    assert_eq!(urn.org_domain(), Some("banskabystrica.sk"));
+    assert_eq!(urn.space(), Some("ovzdusie"));
     assert_eq!(urn.local_id(), "station-radvan-01");
+    assert_eq!(urn.id(), "banskabystrica.sk:ovzdusie:station-radvan-01");
 }
 
 #[test]
@@ -43,82 +45,88 @@ fn upper_case_prefix_parses_and_is_normalised_to_lower_case() {
     );
 }
 
-/// PF-12: a random UUID is not an entity identity; the id keeps its routable prefix.
+/// ADR-N-041: ids that arrive with their own shape are valid and kept byte for byte, with no
+/// prefix read into them.
 #[test]
-fn legacy_uuid_id_without_four_segments_is_rejected() {
-    // The classic NGSI-LD form `urn:ngsi-ld:{Type}:{uuid}` has two NSS segments, not four (R34).
-    let err = "urn:ngsi-ld:AirQualityObserved:550e8400-e29b-41d4-a716-446655440000"
-        .parse::<Urn>()
-        .expect_err("a two-segment UUID id must be rejected");
-    assert!(matches!(
-        err,
-        Error::Urn {
-            reason: UrnError::InvalidSegmentCount { got: 2 },
-            ..
-        }
-    ));
+fn unprefixed_ids_are_valid_and_carry_no_prefix() {
+    for (s, id) in [
+        // FIWARE style, as a source publishes it
+        ("urn:ngsi-ld:WeatherObserved:Helsinki-001", "Helsinki-001"),
+        // the classic NGSI-LD UUID form
+        (
+            "urn:ngsi-ld:AirQualityObserved:550e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ),
+        // more or fewer than three segments after the type
+        (
+            "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie",
+            "banskabystrica.sk:ovzdusie",
+        ),
+        ("urn:ngsi-ld:Vehicle:fleet:7:wheel:2", "fleet:7:wheel:2"),
+        // a segment that is no domain: not prefixed, still valid
+        (
+            "urn:ngsi-ld:Device:550e8400:ovzdusie:s1",
+            "550e8400:ovzdusie:s1",
+        ),
+        // RFC 8141 characters beyond the prefixed local id's charset
+        (
+            "urn:ngsi-ld:Building:Bratislava/Stare-Mesto;%C5%BD@1",
+            "Bratislava/Stare-Mesto;%C5%BD@1",
+        ),
+    ] {
+        let urn = parse(s);
+        assert_eq!(urn.to_string(), s);
+        assert_eq!(urn.id(), id);
+        assert_eq!(urn.prefixed(), None, "{s} is not in the prefixed shape");
+        assert_eq!((urn.org_domain(), urn.space()), (None, None));
+        assert_eq!(urn.local_id(), id);
+    }
 }
 
-/// PF-12: randomness is allowed in the last segment only, after the prefix a registration matches.
 #[test]
-fn a_uuid_is_allowed_as_the_local_id() {
-    // Architecture/03 section 3 bans random UUIDs only OUTSIDE the final segment.
+fn a_uuid_is_allowed_as_the_local_id_of_a_prefixed_urn() {
     let urn = parse(
         "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:550e8400-e29b-41d4-a716-446655440000",
     );
     assert_eq!(urn.local_id(), "550e8400-e29b-41d4-a716-446655440000");
 }
 
-/// PF-12: a UUID never stands in for a prefix segment.
+/// PF-43: what is still refused, each with the reason a person can act on.
 #[test]
-fn a_uuid_in_the_org_domain_segment_is_rejected() {
-    let err = "urn:ngsi-ld:AirQualityObserved:550e8400-e29b-41d4-a716-446655440000:ovzdusie:s1"
-        .parse::<Urn>()
-        .expect_err("a UUID is not a verified internet domain");
-    assert!(matches!(
-        err,
-        Error::Urn {
-            reason: UrnError::InvalidOrgDomain { .. },
-            ..
-        }
-    ));
-}
-
-#[test]
-fn wrong_segment_counts_are_rejected() {
-    for (s, got) in [
+fn what_is_no_ngsi_ld_urn_is_refused_with_its_reason() {
+    for (s, expected) in [
         (
-            "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie",
-            3,
+            "urn:ngsi-ld:AirQualityObserved",
+            "nothing after the entity type",
         ),
         (
-            "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:a:b",
-            5,
+            "urn:ngsi-ld:AirQualityObserved:",
+            "nothing after the entity type",
         ),
+        ("urn:ngsi-ld:airQualityObserved:x-1", "invalid entity type"),
+        ("urn:ngsi-ld:A:x-1", "invalid entity type"),
+        ("urn:ngsi-ld:Device:sta tion", "RFC 8141"),
+        ("urn:ngsi-ld:Device:d#1", "RFC 8141"),
+        ("urn:ngsi-ld:Device:%zz", "RFC 8141"),
+        ("urn:ngsi-ld:Device:/leading-slash", "RFC 8141"),
     ] {
-        let err = s.parse::<Urn>().expect_err("segment count must be 4");
-        assert_eq!(
+        let err = s.parse::<Urn>().expect_err(s);
+        assert!(err.to_string().contains(expected), "{s}: {err}");
+    }
+    let long = format!("urn:ngsi-ld:Device:{}", "a".repeat(257));
+    let err = long.parse::<Urn>().expect_err("over 256 characters");
+    assert!(
+        matches!(
             err,
             Error::Urn {
-                urn: s.to_string(),
-                reason: UrnError::InvalidSegmentCount { got },
+                reason: UrnError::InvalidId { .. },
+                ..
             }
-        );
-    }
-}
-
-#[test]
-fn empty_segments_are_rejected() {
-    let err = "urn:ngsi-ld:AirQualityObserved::ovzdusie:station-01"
-        .parse::<Urn>()
-        .expect_err("an empty segment must be rejected");
-    assert!(matches!(
-        err,
-        Error::Urn {
-            reason: UrnError::EmptySegment { index: 1 },
-            ..
-        }
-    ));
+        ),
+        "{err}"
+    );
+    let edge = format!("urn:ngsi-ld:Device:{}", "a".repeat(256));
+    assert_eq!(parse(&edge).id().len(), 256);
 }
 
 #[test]
@@ -223,31 +231,23 @@ fn new_accepts_the_documented_examples() {
     );
 }
 
+/// ADR-N-041 §3.1: the same URN in two spaces is two entities, and the URN names neither space.
 #[test]
-fn matches_tenant_is_the_pf43_admission_check() {
-    let urn = parse(DOC_EXAMPLES[0]);
-    assert!(urn.matches_tenant("banskabystrica.sk", "ovzdusie"));
-    // foreign organization domain
-    assert!(!urn.matches_tenant("odpady-bb.sk", "ovzdusie"));
-    // sibling space of the same organization
-    assert!(!urn.matches_tenant("banskabystrica.sk", "doprava"));
-    // both wrong
-    assert!(!urn.matches_tenant("odpady-bb.sk", "kontajnery"));
-}
-
-#[test]
-fn id_pattern_prefix_escapes_the_domain_dots() {
-    let urn = parse(DOC_EXAMPLES[0]);
+fn the_same_urn_in_two_spaces_is_two_entity_refs() {
+    let urn = parse("urn:ngsi-ld:WeatherObserved:Helsinki-001");
+    let here = EntityRef::new("helsinki", urn.clone()).expect("a space");
+    let there = EntityRef::new("helsinki-kpi", urn.clone()).expect("a space");
+    assert_ne!(here, there);
+    assert_eq!(here.urn(), there.urn());
     assert_eq!(
-        urn.id_pattern_prefix(),
-        r"^urn:ngsi-ld:AirQualityObserved:banskabystrica\.sk:ovzdusie:.*$"
+        here.to_string(),
+        "/cs/helsinki/ngsi-ld/v1/entities/urn:ngsi-ld:WeatherObserved:Helsinki-001"
     );
-    let re = regex::Regex::new(&urn.id_pattern_prefix()).expect("prefix must be a valid regex");
-    assert!(re.is_match(DOC_EXAMPLES[0]));
-    // The escaped dot must not match an arbitrary character (banskabystricaXsk).
-    assert!(!re.is_match("urn:ngsi-ld:AirQualityObserved:banskabystricaXsk:ovzdusie:station-01"));
-    // A sibling space must not route to this registration (R33).
-    assert!(!re.is_match(DOC_EXAMPLES[1]));
+    // A prefixed URN naming one space can be an entity of another: the space is the ref's.
+    let prefixed = parse(DOC_EXAMPLES[0]);
+    let copied = EntityRef::new("ovzdusie-kpi", prefixed).expect("a space");
+    assert_eq!(copied.space(), "ovzdusie-kpi");
+    assert!(EntityRef::new("Not A Space", urn).is_err());
 }
 
 #[test]

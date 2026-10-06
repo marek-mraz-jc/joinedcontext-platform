@@ -236,11 +236,16 @@ impl KeyPerformanceIndicator {
                 reason: "an indicator is a KeyPerformanceIndicator, in its id and its type",
             });
         }
-        if !urn.space().ends_with(KPI_SPACE_SUFFIX) {
+        // The platform mints an indicator's id in the prefixed shape (`indicator_urn`); this
+        // checks that shape, it does not place the entity: its space is its address's (PF-42).
+        if !urn
+            .space()
+            .is_some_and(|space| space.ends_with(KPI_SPACE_SUFFIX))
+        {
             return Err(Error::Name {
                 field: "id",
                 value: self.id.clone(),
-                reason: "an indicator lives in the project's indicator space, named {project}-kpi",
+                reason: "an indicator's id is minted urn:ngsi-ld:KeyPerformanceIndicator:{orgDomain}:{project}-kpi:{name}",
             });
         }
         if self.name.value != urn.local_id() {

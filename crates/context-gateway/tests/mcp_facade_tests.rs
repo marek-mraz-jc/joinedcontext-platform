@@ -446,7 +446,7 @@ async fn a_refusal_comes_back_as_a_tool_error_and_never_as_an_empty_answer() {
             None,
             json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
                 "name": "get_entity",
-                "arguments": { "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:doprava:st-1" },
+                "arguments": { "id": "urn:ngsi-ld:AirQualityObserved" },
             }}),
         ),
     )
@@ -454,7 +454,7 @@ async fn a_refusal_comes_back_as_a_tool_error_and_never_as_an_empty_answer() {
 
     assert_eq!(
         answer["result"]["isError"], true,
-        "an entity of another space is refused, and the agent is told so"
+        "an id that is no NGSI-LD URN is refused, and the agent is told so"
     );
     assert!(answer["result"]["content"][0]["text"]
         .as_str()

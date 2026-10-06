@@ -9,7 +9,6 @@ const SPACE: &str = "ovzdusie";
 const CITY: &str = "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]";
 /// A second district of the same grant, well away from the first.
 const KOSICE: &str = "georel=within;geometry=Polygon;coordinates=[[[21.20,48.70],[21.30,48.70],[21.30,48.76],[21.20,48.76],[21.20,48.70]]]";
-const ORG: &str = "banskabystrica.sk";
 
 /// The grant the golden policy expresses: one type, four attributes, Radvaň and below,
 /// inside the bounding box of the city.
@@ -46,36 +45,36 @@ fn entity() -> Value {
 
 #[test]
 fn a_write_inside_the_grant_passes() {
-    check(&entity(), &grant(), SPACE, ORG).expect("everything about it is granted");
+    check(&entity(), &grant()).expect("everything about it is granted");
 }
 
-/// GW16, PF-10: a caller with a legitimate grant in this space cannot write an entity that
-/// belongs to another organization or another space.
+/// ADR-N-041, PF-42: a URN naming another organization or space is an id like any other: it is
+/// written into the space the Endpoint pinned, under this grant, and reaches nothing it names.
+/// What is still a bad request is an id that is no NGSI-LD URN (PF-43).
 #[test]
-fn a_cross_domain_urn_is_refused_as_a_bad_request() {
-    for foreign in [
+fn a_urn_naming_another_domain_is_an_id_and_a_malformed_one_a_bad_request() {
+    for named_elsewhere in [
         "urn:ngsi-ld:AirQualityObserved:zilina.sk:ovzdusie:station-01",
         "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:doprava:station-01",
     ] {
         let mut payload = entity();
-        payload["id"] = json!(foreign);
-
-        let refusal = check(&payload, &grant(), SPACE, ORG).expect_err("a foreign URN");
-        assert!(
-            matches!(&refusal, Refusal::ForeignUrn { id, space } if id == foreign && space == SPACE),
-            "{refusal:?}"
-        );
-
-        // The caller can see and fix what is wrong with an identifier, so this one is a
-        // 400 and says so, unlike a policy refusal (PF-42).
-        let problem = ProblemDetails::from(refusal);
-        assert_eq!(problem.status, 400);
-        assert!(
-            problem.type_uri.ends_with("urn-scheme"),
-            "{}",
-            problem.type_uri
-        );
+        payload["id"] = json!(named_elsewhere);
+        check(&payload, &grant()).unwrap_or_else(|refusal| panic!("{named_elsewhere}: {refusal}"));
     }
+
+    let mut payload = entity();
+    payload["id"] = json!("urn:ngsi-ld:AirQualityObserved");
+    let refusal = check(&payload, &grant()).expect_err("no id after the type");
+    assert!(matches!(&refusal, Refusal::MalformedId(_)), "{refusal:?}");
+    // The caller can see and fix what is wrong with an identifier, so this one is a 400 and
+    // says so, unlike a policy refusal (PF-43).
+    let problem = ProblemDetails::from(refusal);
+    assert_eq!(problem.status, 400);
+    assert!(
+        problem.type_uri.ends_with("urn-scheme"),
+        "{}",
+        problem.type_uri
+    );
 }
 
 #[test]
@@ -88,10 +87,7 @@ fn an_identifier_that_is_not_an_ngsi_ld_urn_is_refused() {
         let mut payload = entity();
         payload["id"] = bad.clone();
         assert!(
-            matches!(
-                check(&payload, &grant(), SPACE, ORG),
-                Err(Refusal::MalformedId(_))
-            ),
+            matches!(check(&payload, &grant()), Err(Refusal::MalformedId(_))),
             "{bad} was accepted as an entity id"
         );
     }
@@ -99,7 +95,7 @@ fn an_identifier_that_is_not_an_ngsi_ld_urn_is_refused() {
     // The type in the URN and the type in the body must agree (PF-44).
     let mut lying = entity();
     lying["type"] = json!("ParkingSpot");
-    assert!(check(&lying, &grant(), SPACE, ORG).is_err());
+    assert!(check(&lying, &grant()).is_err());
 }
 
 /// R29, R31: the grant is a scope subtree, and the entity has to sit inside it. The
@@ -109,7 +105,7 @@ fn a_scope_outside_the_granted_subtree_is_refused() {
     for illegal in ["/geo/SK/ZA", "/geo/SK/BBB", "/geo/SK", "/org/mesto"] {
         let mut payload = entity();
         payload["scope"] = json!(illegal);
-        let refusal = check(&payload, &grant(), SPACE, ORG).expect_err("an illegal scope");
+        let refusal = check(&payload, &grant()).expect_err("an illegal scope");
         assert_eq!(refusal, Refusal::ScopeOutsideGrant(illegal.to_owned()));
         assert_eq!(ProblemDetails::from(refusal).status, 403);
     }
@@ -121,13 +117,13 @@ fn a_scope_outside_the_granted_subtree_is_refused() {
     ] {
         let mut payload = entity();
         payload["scope"] = json!(legal);
-        check(&payload, &grant(), SPACE, ORG).unwrap_or_else(|e| panic!("{legal}: {e}"));
+        check(&payload, &grant()).unwrap_or_else(|e| panic!("{legal}: {e}"));
     }
 
     // Every scope of a multi-scope entity has to be inside the grant, not just one.
     let mut mixed = entity();
     mixed["scope"] = json!(["/geo/SK/BB/Radvan", "/geo/SK/ZA"]);
-    assert!(check(&mixed, &grant(), SPACE, ORG).is_err());
+    assert!(check(&mixed, &grant()).is_err());
 }
 
 /// GW16: "may edit only data in location X" is checked against the entity's own
@@ -137,7 +133,7 @@ fn coordinates_outside_the_granted_area_are_refused() {
     let mut outside = entity();
     outside["location"]["value"]["coordinates"] = json!([21.24, 48.72]); // Košice
     assert_eq!(
-        check(&outside, &grant(), SPACE, ORG),
+        check(&outside, &grant()),
         Err(Refusal::LocationOutsideGrant)
     );
     assert_eq!(
@@ -149,7 +145,7 @@ fn coordinates_outside_the_granted_area_are_refused() {
     // the district.
     let mut on_the_edge = entity();
     on_the_edge["location"]["value"]["coordinates"] = json!([19.10, 48.73]);
-    check(&on_the_edge, &grant(), SPACE, ORG).expect("the boundary counts as inside");
+    check(&on_the_edge, &grant()).expect("the boundary counts as inside");
 
     // An entity that says nothing about where it is cannot be placed outside the grant;
     // one whose location cannot be read must not pass a check that never ran.
@@ -158,12 +154,12 @@ fn coordinates_outside_the_granted_area_are_refused() {
         .as_object_mut()
         .expect("an object")
         .remove("location");
-    check(&nowhere, &grant(), SPACE, ORG).expect("no location is not a location outside");
+    check(&nowhere, &grant()).expect("no location is not a location outside");
 
     let mut unreadable = entity();
     unreadable["location"] = json!({ "type": "GeoProperty", "value": "somewhere in Radvaň" });
     assert_eq!(
-        check(&unreadable, &grant(), SPACE, ORG),
+        check(&unreadable, &grant()),
         Err(Refusal::LocationOutsideGrant),
         "an unparseable location fails closed"
     );
@@ -176,7 +172,7 @@ fn a_write_touching_an_ungranted_attribute_or_type_is_refused_whole() {
     let mut extra = entity();
     extra["operatorPhone"] = json!({ "type": "Property", "value": "+421 900 000 000" });
     assert_eq!(
-        check(&extra, &grant(), SPACE, ORG),
+        check(&extra, &grant()),
         Err(Refusal::AttributeOutsideGrant("operatorPhone".to_owned()))
     );
 
@@ -184,7 +180,7 @@ fn a_write_touching_an_ungranted_attribute_or_type_is_refused_whole() {
     wrong_type["id"] = json!("urn:ngsi-ld:ParkingSpot:banskabystrica.sk:ovzdusie:spot-01");
     wrong_type["type"] = json!("ParkingSpot");
     assert_eq!(
-        check(&wrong_type, &grant(), SPACE, ORG),
+        check(&wrong_type, &grant()),
         Err(Refusal::TypeOutsideGrant("ParkingSpot".to_owned()))
     );
 }
@@ -205,7 +201,7 @@ fn an_entity_carrying_its_own_access_control_is_refused() {
         let mut payload = entity();
         payload[smuggled] = json!({ "type": "Property", "value": "public" });
         assert_eq!(
-            check(&payload, &grant(), SPACE, ORG),
+            check(&payload, &grant()),
             Err(Refusal::SmuggledPolicyAttribute(smuggled.to_owned()))
         );
     }
@@ -264,7 +260,7 @@ fn an_identifier_outside_the_granted_type_or_pattern_is_refused_on_its_own() {
     traffic["id"] = json!("urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1");
     traffic["type"] = json!("Device");
     assert_eq!(
-        check(&traffic, &lamps, SPACE, ORG),
+        check(&traffic, &lamps),
         Err(Refusal::IdOutsideGrant(
             "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1".to_owned()
         ))
@@ -293,7 +289,7 @@ fn coordinates_outside_every_granted_area_are_refused_when_the_grant_draws_sever
     let mut outside = entity();
     outside["location"]["value"]["coordinates"] = json!([22.5, 48.5]);
     assert_eq!(
-        check(&outside, &two_districts, SPACE, ORG),
+        check(&outside, &two_districts),
         Err(Refusal::LocationOutsideGrant),
         "inside the caller's own polygon is not inside a grant"
     );
@@ -301,7 +297,7 @@ fn coordinates_outside_every_granted_area_are_refused_when_the_grant_draws_sever
     // Inside the second of the two granted districts: one of them is enough.
     let mut inside = entity();
     inside["location"]["value"]["coordinates"] = json!([21.25, 48.73]);
-    check(&inside, &two_districts, SPACE, ORG).expect("the second district is granted too");
+    check(&inside, &two_districts).expect("the second district is granted too");
 
     // An area this parser cannot read is an area no write can be shown to be inside, even
     // when another area of the same grant would admit it.
@@ -310,7 +306,7 @@ fn coordinates_outside_every_granted_area_are_refused_when_the_grant_draws_sever
         ..grant()
     };
     assert_eq!(
-        check(&entity(), &unreadable, SPACE, ORG),
+        check(&entity(), &unreadable),
         Err(Refusal::LocationOutsideGrant)
     );
 }

@@ -569,7 +569,7 @@ fn bound_policy(
 ) -> Vec<PolicySpec> {
     let bound: Vec<PolicySpec> = named
         .iter()
-        .filter(|(name, _)| policy_ref.space() == space && name == policy_ref.local_id())
+        .filter(|(name, _)| policy_ref.space() == Some(space) && name == policy_ref.local_id())
         .map(|(_, spec)| spec.clone())
         .collect();
     if bound.is_empty() {

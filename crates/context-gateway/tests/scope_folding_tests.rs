@@ -182,13 +182,7 @@ scopeQ: "/geo/SK/BB"
         "scope": "/geo/SK/ZA",
     });
     assert!(
-        context_gateway::pdp::write_guard::check(
-            &entity,
-            constraints,
-            "ovzdusie",
-            "banskabystrica.sk"
-        )
-        .is_err(),
+        context_gateway::pdp::write_guard::check(&entity, constraints).is_err(),
         "a write into a district the caller only named itself is refused"
     );
 }

@@ -15,17 +15,10 @@ use serde_json::Value;
 /// Why a write was refused (GW16, GW17).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
-    /// The payload carries no usable entity id, or one that is not an NGSI-LD URN (PF-42).
+    /// The payload carries no usable entity id, or one that is not an NGSI-LD URN of its type
+    /// (PF-43).
     #[error("entity id is not a valid NGSI-LD URN: {0}")]
     MalformedId(String),
-    /// The id belongs to another organization or another space (PF-10, GW16).
-    #[error("entity id `{id}` does not belong to space `{space}`")]
-    ForeignUrn {
-        /// The id the payload carried.
-        id: String,
-        /// The space the endpoint pinned.
-        space: String,
-    },
     /// The entity's type is outside every grant (GW11).
     #[error("entity type `{0}` is outside the grant")]
     TypeOutsideGrant(String),
@@ -49,9 +42,9 @@ pub enum Refusal {
 impl From<Refusal> for ProblemDetails {
     fn from(refusal: Refusal) -> Self {
         match refusal {
-            // A malformed or foreign identifier is a bad request: the caller can see and
-            // fix what is wrong with it (PF-42).
-            Refusal::MalformedId(_) | Refusal::ForeignUrn { .. } => {
+            // A malformed identifier is a bad request: the caller can see and fix what is
+            // wrong with it (PF-43).
+            Refusal::MalformedId(_) => {
                 ProblemDetails::urn_scheme().with_detail(refusal.to_string())
             }
             // Everything else is a policy decision, and the body never says which rule
@@ -76,14 +69,9 @@ const POLICY_VOCABULARY: &[&str] = &[
 ///
 /// The payload must be a single NGSI-LD entity; a batch is checked per entity by the
 /// caller, so a mixed outcome can answer 207 (GW18).
-pub fn check(
-    entity: &Value,
-    constraints: &Constraints,
-    space: &str,
-    org_domain: &str,
-) -> Result<(), Refusal> {
+pub fn check(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {
     check_no_smuggled_policy(entity)?;
-    check_id(entity, space, org_domain)?;
+    check_id(entity)?;
     check_type(entity, constraints)?;
     if let Some(raw) = entity_id(entity) {
         check_granted_id(raw, constraints)?;
@@ -130,26 +118,16 @@ pub fn check_fragment(fragment: &Value, constraints: &Constraints) -> Result<(),
     check_location(fragment, constraints)
 }
 
-/// Checks one entity identifier against the organization and the space (PF-10, PF-42).
+/// Checks one entity identifier (PF-43): an NGSI-LD URN, and of the type the payload states.
 ///
-/// `declared_type` is the `type` the payload states, when it states one: the URN carries
-/// the type too, and the two must agree (PF-44).
-pub fn check_identifier(
-    raw: &str,
-    declared_type: Option<&str>,
-    space: &str,
-    org_domain: &str,
-) -> Result<(), Refusal> {
+/// Nothing else of the URN is read (ADR-N-041, PF-42): the space the write lands in is the one
+/// the path or the Endpoint resolved, and the Policy of that space decides it, so a URN naming
+/// another organization or space reaches nothing it names. `declared_type` is the `type` the
+/// payload states, when it states one.
+pub fn check_identifier(raw: &str, declared_type: Option<&str>) -> Result<(), Refusal> {
     let urn: Urn = raw
         .parse()
         .map_err(|_| Refusal::MalformedId(raw.to_owned()))?;
-
-    if urn.org_domain() != org_domain || urn.space() != space {
-        return Err(Refusal::ForeignUrn {
-            id: raw.to_owned(),
-            space: space.to_owned(),
-        });
-    }
     if declared_type.is_some_and(|declared| declared != urn.entity_type()) {
         return Err(Refusal::MalformedId(raw.to_owned()));
     }
@@ -195,15 +173,10 @@ fn check_location(entity: &Value, constraints: &Constraints) -> Result<(), Refus
     }
 }
 
-/// The id the payload carries must be an NGSI-LD URN of this organization and this space.
-fn check_id(entity: &Value, space: &str, org_domain: &str) -> Result<(), Refusal> {
+/// The id the payload carries must be an NGSI-LD URN of its type (PF-43).
+fn check_id(entity: &Value) -> Result<(), Refusal> {
     let raw = entity_id(entity).ok_or_else(|| Refusal::MalformedId(String::new()))?;
-    check_identifier(
-        raw,
-        entity.get("type").and_then(Value::as_str),
-        space,
-        org_domain,
-    )
+    check_identifier(raw, entity.get("type").and_then(Value::as_str))
 }
 
 fn check_type(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {

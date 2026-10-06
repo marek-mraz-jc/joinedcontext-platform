@@ -436,10 +436,19 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
         );
     }
 
-    // A write into another organization's URN space is a bad request (PF-10, PF-42).
-    let mut foreign = station(None);
-    foreign["id"] = json!("urn:ngsi-ld:AirQualityObserved:zilina.sk:ovzdusie:station-01");
-    let (status, body) = call(&app, post(PUBLIC_SLUG, "/entities", &foreign)).await;
+    // An id that is no NGSI-LD URN is a bad request (PF-43). A URN naming another organization
+    // is not: it is an id like any other, and this caller's grant decides it (ADR-N-041).
+    let mut named_elsewhere = station(None);
+    named_elsewhere["id"] = json!("urn:ngsi-ld:AirQualityObserved:zilina.sk:ovzdusie:station-01");
+    let (status, _) = call(&app, post(PUBLIC_SLUG, "/entities", &named_elsewhere)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the public grant writes nothing, whatever the URN says"
+    );
+    let mut malformed = station(None);
+    malformed["id"] = json!("urn:ngsi-ld:AirQualityObserved");
+    let (status, body) = call(&app, post(PUBLIC_SLUG, "/entities", &malformed)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let problem: Value = serde_json::from_slice(&body).expect("problem+json");
     // CIM 009 clause 5.5.3: the type is an ETSI one, so a client that tells BadRequestData
