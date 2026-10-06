@@ -362,6 +362,15 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
         });
     }
 
+    for (location, message) in assistant_references(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     let (refused, warned) = one_model_per_space(repo_dir, &repo);
     for (location, message) in refused {
         report.findings.push(Finding {
@@ -810,6 +819,94 @@ fn dangling_data_sources(repo: &Repository) -> Vec<(String, Location, String)> {
         }
     }
     dangling
+}
+
+/// The knowledge assistant's references, each resolved inside its own project (MF-51, MF-52): a
+/// `ckan` source's `CkanInstance`, a deployment's sources and its connectors' Endpoints, and no
+/// `internal` source behind a channel that answers people nobody signed in. Each finding names
+/// the field to change, so the person who wrote it does not meet the gap at crawl or chat time.
+fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
+    use std::collections::BTreeMap;
+    let declared = |kind: &str| -> std::collections::BTreeSet<(Option<String>, String)> {
+        repo.iter()
+            .filter(|(id, _)| id.kind == kind)
+            .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+            .collect()
+    };
+    let instances = declared("CkanInstance");
+    let endpoints = declared("Endpoint");
+    // A source's visibility, `internal` when the manifest leaves it out (MF-51).
+    let sources: BTreeMap<(Option<String>, String), String> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "KnowledgeSource")
+        .map(|(id, resource)| {
+            let visibility = resource
+                .manifest
+                .spec
+                .get("visibility")
+                .and_then(|v| v.as_str())
+                .unwrap_or("internal")
+                .to_owned();
+            ((id.namespace.clone(), id.name.clone()), visibility)
+        })
+        .collect();
+
+    let mut found = Vec::new();
+    for (id, resource) in repo.iter() {
+        let at = (resource.path.clone(), resource.document, resource.line);
+        let spec = &resource.manifest.spec;
+        let here = |name: &str| (id.namespace.clone(), name.to_owned());
+        match id.kind.as_str() {
+            "KnowledgeSource" => {
+                if let Some(instance) = spec.get("ckanInstanceRef").and_then(|v| v.as_str()) {
+                    if !instances.contains(&here(instance)) {
+                        found.push((at.clone(), format!(
+                            "{id}: spec.ckanInstanceRef names CkanInstance `{instance}`, which no manifest of this project declares (MF-51)"
+                        )));
+                    }
+                }
+            }
+            "AssistantDeployment" => {
+                let channel = spec
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                for name in spec
+                    .get("sources")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                {
+                    match sources.get(&here(name)) {
+                        None => found.push((at.clone(), format!(
+                            "{id}: spec.sources names KnowledgeSource `{name}`, which no manifest of this project declares (MF-52)"
+                        ))),
+                        Some(visibility) if visibility != "public" && channel != "internal" => found.push((at.clone(), format!(
+                            "{id}: spec.sources names KnowledgeSource `{name}`, which is `{visibility}`; a `{channel}` channel answers people nobody signed in, so it reads public sources only. Make the source `visibility: public` or use channel `internal` (MF-52)"
+                        ))),
+                        Some(_) => {}
+                    }
+                }
+                for connector in spec
+                    .get("connectors")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(endpoint) = connector.get("endpoint").and_then(|v| v.as_str()) {
+                        if !endpoints.contains(&here(endpoint)) {
+                            found.push((at.clone(), format!(
+                                "{id}: spec.connectors names Endpoint `{endpoint}`, which no manifest of this project declares (MF-52)"
+                            )));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 /// The federation topology the registrations declare, checked as a whole (CC-13). Per project:

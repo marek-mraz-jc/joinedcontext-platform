@@ -2,6 +2,7 @@
 
 pub mod agent_profile;
 pub mod app;
+pub mod assistant;
 pub mod bento_inputs;
 pub mod bento_processors;
 pub mod blueprint;
@@ -37,6 +38,10 @@ pub use app::{
     AppAccess, AppBuild, AppClass, AppEgress, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
     AppVisibility, ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource,
     TemporalConstraint,
+};
+pub use assistant::{
+    AssistantDeploymentSpec, Budget, Channel, Connector, KnowledgeSourceSpec, PdfPolicy,
+    PdfPolicyKind, RateLimit, SourceType, Theme, Visibility,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use catalog::{
@@ -128,6 +133,10 @@ pub type Mapping = crate::envelope::ResourceEnvelope<MappingSpec>;
 /// `kind: App` as a whole manifest.
 pub type App = crate::envelope::ResourceEnvelope<AppSpec>;
 
+/// `kind: KnowledgeSource` as a whole manifest (MF-51).
+pub type KnowledgeSource = crate::envelope::ResourceEnvelope<KnowledgeSourceSpec>;
+/// `kind: AssistantDeployment` as a whole manifest (MF-52).
+pub type AssistantDeployment = crate::envelope::ResourceEnvelope<AssistantDeploymentSpec>;
 /// `kind: CkanInstance` as a whole manifest.
 pub type CkanInstance = crate::envelope::ResourceEnvelope<CkanInstanceSpec>;
 /// `kind: Blueprint` as a whole manifest.

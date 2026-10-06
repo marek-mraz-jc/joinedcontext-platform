@@ -88,6 +88,8 @@ catalogue!(
     crate::kinds::DataSourceSpec,
     crate::kinds::AppSpec,
     crate::kinds::CkanInstanceSpec,
+    crate::kinds::KnowledgeSourceSpec,
+    crate::kinds::AssistantDeploymentSpec,
     crate::kinds::BlueprintSpec,
     crate::kinds::AgentProfileSpec,
     crate::kinds::DataSpaceParticipantSpec,

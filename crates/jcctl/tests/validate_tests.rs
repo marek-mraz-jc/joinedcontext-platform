@@ -1002,3 +1002,136 @@ fn two_projects_spaces_rendering_one_id_segment_are_refused_naming_both() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- T-3051: the knowledge assistant's references, resolved in the project (MF-51, MF-52) ---
+
+fn knowledge_source(dir: &Path, name: &str, visibility: &str, ckan: Option<&str>) {
+    let source = match ckan {
+        Some(instance) => format!("source: ckan\n  ckanInstanceRef: {instance}"),
+        None => "source: website\n  startUrls: [https://www.banskabystrica.sk/]".to_owned(),
+    };
+    write(
+        dir,
+        &format!("projects/ovzdusie/assistant/sources/{name}.yaml"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  {source}\n  visibility: {visibility}\n"),
+    );
+}
+
+fn assistant_deployment(dir: &Path, channel: &str, sources: &str, endpoint: &str) {
+    write(
+        dir,
+        "projects/ovzdusie/assistant/deployments/chat.yaml",
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: AssistantDeployment\nmetadata:\n  name: chat\n  namespace: ovzdusie\nspec:\n  publicId: bb-chat\n  channel: {channel}\n  sources: [{sources}]\n  connectors:\n    - {{ endpoint: {endpoint}, tools: [query_entities] }}\n  allowedOrigins: [https://www.banskabystrica.sk]\n  rateLimit: {{ requestsPerMinute: 60, perClientPerMinute: 10 }}\n  budget: {{ tokensPerDay: 1000000, tokensPerConversation: 20000 }}\n"
+        ),
+    );
+}
+
+fn with_assistant(report: &validate::Report) -> Vec<&str> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("MF-51") || f.message.contains("MF-52"))
+        .map(|f| f.message.as_str())
+        .collect()
+}
+
+/// MF-51, MF-52: a deployment whose sources and Endpoint the project declares is no finding.
+#[test]
+fn an_assistant_whose_references_resolve_is_valid() {
+    let dir = valid_repo("assistant-ok");
+    knowledge_source(&dir, "web", "public", None);
+    assistant_deployment(&dir, "public", "web", "public-air");
+    let report = validate::run(&dir);
+    assert!(with_assistant(&report).is_empty(), "{:?}", report.findings);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-52: an unknown source and an unknown Endpoint are each named, with the field to change.
+#[test]
+fn an_assistant_naming_what_the_project_does_not_declare_is_refused() {
+    let dir = valid_repo("assistant-dangling");
+    assistant_deployment(&dir, "internal", "nowhere", "no-such-endpoint");
+    let report = validate::run(&dir);
+    let found = with_assistant(&report);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("spec.sources") && m.contains("`nowhere`")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("spec.connectors") && m.contains("`no-such-endpoint`")),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-52: an internal source never answers through a channel nobody signs in to; the same
+/// source behind the internal channel is fine. A source that names no visibility is internal.
+#[test]
+fn an_internal_source_is_refused_behind_a_public_channel() {
+    for (visibility, channel, refused) in [
+        ("internal", "public", true),
+        ("internal", "iframe", true),
+        ("internal", "ckan", true),
+        ("internal", "internal", false),
+        ("public", "public", false),
+    ] {
+        let dir = valid_repo(&format!("assistant-{visibility}-{channel}"));
+        knowledge_source(&dir, "intranet", visibility, None);
+        assistant_deployment(&dir, channel, "intranet", "public-air");
+        let report = validate::run(&dir);
+        let found = with_assistant(&report);
+        assert_eq!(
+            !found.is_empty(),
+            refused,
+            "{visibility} behind {channel}: {found:?}"
+        );
+        if refused {
+            assert!(
+                found[0].contains("visibility: public") && found[0].contains("channel `internal`"),
+                "{}",
+                found[0]
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let dir = valid_repo("assistant-default-visibility");
+    write(
+        &dir,
+        "projects/ovzdusie/assistant/sources/plain.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: plain\n  namespace: ovzdusie\nspec:\n  source: website\n  startUrls: [https://www.banskabystrica.sk/]\n",
+    );
+    assistant_deployment(&dir, "public", "plain", "public-air");
+    let report = validate::run(&dir);
+    assert_eq!(with_assistant(&report).len(), 1, "{:?}", report.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-51: a ckan source names a CkanInstance of its own project.
+#[test]
+fn a_ckan_source_names_a_catalogue_the_project_declares() {
+    let dir = valid_repo("assistant-ckan");
+    knowledge_source(&dir, "catalogue", "public", Some("open-data"));
+    let report = validate::run(&dir);
+    let found = with_assistant(&report);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("spec.ckanInstanceRef") && found[0].contains("`open-data`"),
+        "{}",
+        found[0]
+    );
+    write(
+        &dir,
+        "projects/ovzdusie/ckan/open-data.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: CkanInstance\nmetadata:\n  name: open-data\n  namespace: ovzdusie\nspec:\n  url: https://data.banskabystrica.sk\n  apiTokenRef: { name: ckan-token, key: apiToken }\n",
+    );
+    let report = validate::run(&dir);
+    assert!(with_assistant(&report).is_empty(), "{:?}", report.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
