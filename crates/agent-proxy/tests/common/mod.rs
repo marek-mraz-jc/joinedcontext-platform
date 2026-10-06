@@ -46,6 +46,7 @@ pub fn sample_run(allows_write: bool) -> RunContext {
         repository: None,
         status: "building".to_owned(),
         ticket_hash: ticket_hash(TICKET),
+        kind: String::new(),
         max_tokens: 1000,
         allowed_hosts: vec!["crates.io".to_owned()],
         requests_per_minute: 100,

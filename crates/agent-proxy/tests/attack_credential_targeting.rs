@@ -58,6 +58,7 @@ fn sample_run(status: &str) -> RunContext {
         repository: None,
         status: status.to_owned(),
         ticket_hash: test_hash(TICKET),
+        kind: String::new(),
         max_tokens: 100_000,
         allowed_hosts: vec!["crates.io".to_owned()],
         requests_per_minute: 1000,

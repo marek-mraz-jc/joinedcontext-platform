@@ -32,6 +32,7 @@ fn sample_run(allows_write: bool, status: &str) -> RunContext {
         repository: None,
         status: status.to_string(),
         ticket_hash: test_hash("secret-ticket-123"),
+        kind: String::new(),
         max_tokens: 1000,
         allowed_hosts: vec!["crates.io".to_string()],
         requests_per_minute: 100,

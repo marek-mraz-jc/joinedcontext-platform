@@ -63,6 +63,21 @@ pub struct Config {
     /// caller whose service-account token may hand this proxy a person's token for a run
     /// (`POST /internal/runs/{run}/identity`, ADR-N-038, AG-52, AG-94).
     pub portal_client_id: String,
+    /// Daily model token caps (AG-97): `JC_DAILY_TOKENS_ASSISTANT`, `JC_DAILY_TOKENS_APP_BUILDER`,
+    /// `JC_DAILY_TOKENS_OTHER` and `JC_DAILY_TOKENS_PER_PERSON`; absent or `0` is no cap.
+    pub daily_caps: DailyCaps,
+    /// Seconds between two probes of the model key (`JC_MODEL_PROBE_SECS`, default 900; `0` turns
+    /// the probe off, AG-96).
+    pub model_probe_secs: u64,
+}
+
+/// The daily token caps of AG-97, `0` for none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DailyCaps {
+    pub assistant: u64,
+    pub app_builder: u64,
+    pub other: u64,
+    pub per_person: u64,
 }
 
 impl std::fmt::Debug for Config {
@@ -83,6 +98,8 @@ impl std::fmt::Debug for Config {
             .field("oidc_token_url", &self.oidc_token_url)
             .field("require_mesh_identity", &self.require_mesh_identity)
             .field("portal_client_id", &self.portal_client_id)
+            .field("daily_caps", &self.daily_caps)
+            .field("model_probe_secs", &self.model_probe_secs)
             .finish()
     }
 }
@@ -95,6 +112,8 @@ pub enum ConfigError {
     InvalidUrl { var: &'static str, reason: String },
     #[error("invalid address for {var}: {reason}")]
     InvalidAddr { var: &'static str, reason: String },
+    #[error("invalid number for {var}: {reason}")]
+    InvalidNumber { var: &'static str, reason: String },
     #[error("failed to read secret file {path:?}: {source}")]
     SecretFile {
         path: PathBuf,
@@ -195,7 +214,28 @@ impl Config {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "portal-api".to_string());
 
+        let number = |var: &'static str, default: u64| -> Result<u64, ConfigError> {
+            match lookup(var).filter(|v| !v.trim().is_empty()) {
+                None => Ok(default),
+                Some(v) => v.trim().parse().map_err(|e: std::num::ParseIntError| {
+                    ConfigError::InvalidNumber {
+                        var,
+                        reason: e.to_string(),
+                    }
+                }),
+            }
+        };
+        let daily_caps = DailyCaps {
+            assistant: number("JC_DAILY_TOKENS_ASSISTANT", 0)?,
+            app_builder: number("JC_DAILY_TOKENS_APP_BUILDER", 0)?,
+            other: number("JC_DAILY_TOKENS_OTHER", 0)?,
+            per_person: number("JC_DAILY_TOKENS_PER_PERSON", 0)?,
+        };
+        let model_probe_secs = number("JC_MODEL_PROBE_SECS", 900)?;
+
         Ok(Self {
+            daily_caps,
+            model_probe_secs,
             bind,
             portal_base,
             oidc_token_url,

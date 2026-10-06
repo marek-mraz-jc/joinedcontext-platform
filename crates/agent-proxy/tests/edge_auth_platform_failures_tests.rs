@@ -51,6 +51,7 @@ fn run_with(ticket_hash: String) -> RunContext {
         repository: None,
         status: "building".to_owned(),
         ticket_hash,
+        kind: String::new(),
         max_tokens: 1_000,
         allowed_hosts: vec![],
         requests_per_minute: 100,

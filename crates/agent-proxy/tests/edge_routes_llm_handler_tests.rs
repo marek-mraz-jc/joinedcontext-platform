@@ -619,3 +619,113 @@ async fn a_model_call_is_reported_with_the_reasoning_effort_it_was_sent_with() {
     assert_eq!(usage["model"], "google/gemini-3.8-flash");
     assert_eq!(usage["reasoningEffort"], "medium");
 }
+
+/// The request the Portal received on `path`, once the proxy sent it beside its answer.
+async fn received_on(portal: &MockServer, on: &str) -> serde_json::Value {
+    for _ in 0..100 {
+        let seen = portal.received_requests().await.unwrap_or_default();
+        if let Some(request) = seen.iter().find(|request| request.url.path() == on) {
+            return serde_json::from_slice(&request.body).expect("a JSON body");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("nothing reached the Portal on {on}");
+}
+
+/// T-3065, AG-96: a key the provider refuses (401) or that has no credit left (402) is reported
+/// to the Portal as the key's state at once, and the refusal still reaches the caller unchanged.
+#[tokio::test]
+async fn a_refused_key_is_reported_to_the_portal_as_its_state() {
+    for (status, state) in [(401, "invalid"), (402, "out_of_credit")] {
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(
+                serde_json::json!({ "error": { "message": "No auth credentials found", "code": status } }),
+            ))
+            .mount(&provider)
+            .await;
+        let portal = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/model-key"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&portal)
+            .await;
+
+        let response = proxy_asking(&provider.uri(), &portal)
+            .oneshot(
+                authed("POST", "/v1/llm/v1/chat/completions")
+                    .body(body(r#"{"model":"m","messages":[]}"#))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status().as_u16(), status);
+
+        let reported = received_on(&portal, "/internal/model-key").await;
+        assert_eq!(reported["state"], state);
+        assert_eq!(reported["source"], "call");
+        assert!(
+            !reported.to_string().contains("mock-model-key"),
+            "{reported}"
+        );
+    }
+}
+
+/// T-3065, AG-97: the call after the assistant's daily cap is reached is refused with a sentence
+/// the person can act on, and the provider is asked only for the calls within it.
+#[tokio::test]
+async fn a_call_past_the_assistants_daily_cap_is_refused_before_the_provider_is_asked() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "usage": { "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "cost": 0.0042 }
+        })))
+        .expect(1)
+        .mount(&provider)
+        .await;
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/internal/agent-runs/events"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({ "seq": 1 })))
+        .mount(&portal)
+        .await;
+    let mut run = sample_run(false);
+    run.kind = "conversation".to_owned();
+    let state = common::state(
+        run,
+        common::Bases {
+            model: provider.uri(),
+            portal: portal.uri(),
+            ..common::Bases::default()
+        },
+    );
+    let mut config = (*state.config).clone();
+    config.daily_caps.assistant = 100;
+    let state = std::sync::Arc::new(agent_proxy::ProxyState {
+        config: std::sync::Arc::new(config),
+        ..(*state).clone()
+    });
+    let app = agent_proxy::router(state);
+    let ask = || {
+        authed("POST", "/v1/llm/v1/chat/completions")
+            .body(body(r#"{"model":"m","messages":[]}"#))
+            .expect("a request")
+    };
+
+    let first = app.clone().oneshot(ask()).await.expect("an answer");
+    assert_eq!(first.status(), StatusCode::OK);
+    body_of(first).await;
+    // The usage is counted beside the answer; the frame says what the provider charged.
+    let usage = received_on(&portal, "/internal/agent-runs/events").await;
+    assert_eq!(usage["payload"]["costUsd"], 0.0042);
+
+    let second = app.oneshot(ask()).await.expect("an answer");
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    let said = body_of(second).await;
+    assert!(said.contains("daily-budget"), "{said}");
+    assert!(
+        said.contains("Today's model budget for the assistant is spent"),
+        "{said}"
+    );
+    provider.verify().await;
+}
