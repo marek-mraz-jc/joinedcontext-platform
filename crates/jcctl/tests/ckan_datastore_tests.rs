@@ -895,3 +895,35 @@ fn a_model_names_the_columns_of_every_attribute_kind() {
         "a prefix of a name is not the attribute"
     );
 }
+
+/// T-3085, ADR-N-041: an entity is its space and its URN, so two spaces may publish the same URN.
+/// Each space's dataset has its own table keyed by `entity_id`: both rows are there, and a delete
+/// in one space leaves the other's row alone.
+#[test]
+fn the_same_urn_in_two_spaces_is_a_row_in_each_dataset_and_a_delete_touches_one() {
+    let mut ckan = InMemoryCkan::new();
+    let (columns, rows) = page();
+    let fields = fields(&columns, &rows, &[schema()]);
+    let (air, _) =
+        ensure(&mut ckan, "pkg-helsinki-air", "helsinki-air-rows", &fields).expect("created");
+    let (kpi, _) =
+        ensure(&mut ckan, "pkg-helsinki-kpi", "helsinki-kpi-rows", &fields).expect("created");
+    assert_ne!(air, kpi, "two datasets, two tables");
+
+    let records = records(&columns, &rows).expect("records");
+    let shared = records[0][PRIMARY_KEY].as_str().expect("an id").to_owned();
+    sync(&mut ckan, &air, &[shared.clone()], &records[..1]).expect("synced");
+    sync(&mut ckan, &kpi, &[shared.clone()], &records[..1]).expect("synced");
+    assert!(ckan.rows(&air).expect("table").contains_key(&shared));
+    assert!(ckan.rows(&kpi).expect("table").contains_key(&shared));
+
+    // The KPI space deleted its entity: the notification names the id, the endpoint no longer
+    // answers it, and only the KPI table loses the row.
+    let synced = sync(&mut ckan, &kpi, &[shared.clone()], &[]).expect("synced");
+    assert_eq!(synced.deleted, vec![shared.clone()]);
+    assert!(!ckan.rows(&kpi).expect("table").contains_key(&shared));
+    assert!(
+        ckan.rows(&air).expect("table").contains_key(&shared),
+        "the other space's row stays"
+    );
+}
