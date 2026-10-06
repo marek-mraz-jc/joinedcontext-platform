@@ -260,3 +260,27 @@ fn the_client_id_is_read_as_bento_encodes_it() {
     assert_eq!(percent_decoded("zilina%2Fdrepo"), "zilina/drepo");
     assert_eq!(percent_decoded("a+b%zz%2"), "a b%zz%2");
 }
+
+#[tokio::test]
+async fn the_probe_answers_without_minting() {
+    let world = world().await;
+    let probe = Request::get("/healthz")
+        .body(Body::empty())
+        .expect("a request");
+    assert_eq!(
+        world
+            .app
+            .clone()
+            .oneshot(probe)
+            .await
+            .expect("an answer")
+            .status(),
+        StatusCode::OK
+    );
+    assert!(world
+        .kubernetes
+        .received_requests()
+        .await
+        .expect("recorded")
+        .is_empty());
+}
