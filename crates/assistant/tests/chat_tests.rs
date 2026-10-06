@@ -691,3 +691,41 @@ async fn a_conversation_continues_with_its_id() {
     assert!(history.contains("<earlier-turn role=\"assistant\">Prvá.</earlier-turn>"));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
+
+/// A deployment without sources answers from its connectors alone: `search` is not offered, and
+/// asked for anyway it is refused like any made-up name (AG-105).
+#[tokio::test]
+async fn a_deployment_without_sources_offers_no_search() {
+    let mut connectors_only = deployment(Channel::Public, 50_000, 10);
+    connectors_only.spec.sources.clear();
+    let w = world("chatnosources", connectors_only).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(tool_call("c1", "search", json!({"query": "knižnica"})), 100),
+            completion(json!({"role": "assistant", "content": "Neviem."}), 100),
+        ],
+    )
+    .await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Dokedy je otvorená knižnica?"}), None),
+    )
+    .await;
+    assert!(events
+        .iter()
+        .all(|(n, d)| n != "tool" || d["name"] != "search"));
+    let calls = model_calls(&w.proxy).await;
+    let offered: Vec<&str> = calls[0].1["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(offered, ["ovzdusie__query_entities"]);
+    let refused = calls[1].1["messages"][3]["content"]
+        .as_str()
+        .expect("refusal");
+    assert!(refused.contains("no tool of that name"), "{refused}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}

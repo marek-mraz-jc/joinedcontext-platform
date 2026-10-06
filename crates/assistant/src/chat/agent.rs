@@ -120,8 +120,11 @@ fn tool_name(endpoint: &str, tool: &str) -> Option<String> {
     .then_some(name)
 }
 
-fn tool_specs(connectors: &[Connected]) -> Vec<Value> {
-    let mut tools = vec![json!({
+/// `search` when the deployment has sources, then the connectors' tools.
+fn tool_specs(searchable: bool, connectors: &[Connected]) -> Vec<Value> {
+    let mut tools = Vec::new();
+    if searchable {
+        tools.push(json!({
         "type": "function",
         "function": {
             "name": "search",
@@ -132,7 +135,8 @@ fn tool_specs(connectors: &[Connected]) -> Vec<Value> {
                 "required": ["query"]
             }
         }
-    })];
+    }));
+    }
     for connector in connectors {
         for tool in &connector.tools {
             if let Some(name) = tool_name(&connector.endpoint, &tool.name) {
@@ -214,7 +218,7 @@ pub async fn answer(
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
-    let tools = tool_specs(ask.connectors);
+    let tools = tool_specs(!ask.sources.is_empty(), ask.connectors);
     let mut messages = opening(ask.system_prompt, history, question);
     let mut citations: Vec<Citation> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -309,7 +313,7 @@ async fn run_tool(
     events: &Sender<Event>,
 ) -> String {
     let arguments: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
-    if name == "search" {
+    if name == "search" && !ask.sources.is_empty() {
         send(
             events,
             Event::Tool {
