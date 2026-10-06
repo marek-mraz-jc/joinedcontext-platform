@@ -1177,6 +1177,27 @@ fn broken_rule(error: &jsonschema::ValidationError<'_>) -> String {
             )
         }
         Rule::Required { property } => format!("{property} is required"),
+        // A list of alternatives, each one argument the call has to name (CIM 009 5.7.2.4): the
+        // names are what the caller needs, not the keyword (T-3044).
+        Rule::AnyOf { context } => {
+            let names: Vec<&str> = context
+                .iter()
+                .filter_map(|branch| match branch.as_slice() {
+                    [only] => match only.kind() {
+                        Rule::Required { property } => property.as_str(),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            match !names.is_empty() && names.len() == context.len() {
+                true => format!(
+                    "names none of {}: one of them is required",
+                    names.join(", ")
+                ),
+                false => "matches none of the shapes the schema allows".to_owned(),
+            }
+        }
         Rule::Type { .. } => "is not of the type the schema declares".to_owned(),
         Rule::Pattern { pattern } => format!("does not match {pattern}"),
         Rule::MaxLength { limit } => format!("is longer than {limit} characters"),
@@ -2507,6 +2528,23 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    /// T-3044: a query that names no selector is told which ones it may name. "breaks the
+    /// schema's anyOf" cost the assistant a call on dev to find out.
+    #[test]
+    fn a_query_without_a_selector_is_told_the_selectors_it_may_name() {
+        let index = TOOLS
+            .iter()
+            .position(|tool| tool.name == "query_entities")
+            .expect("query_entities");
+        let arguments = serde_json::json!({ "count": true, "limit": 2 });
+        let problem = super::validate(index, arguments.as_object().expect("an object"))
+            .expect_err("no selector");
+        assert_eq!(
+            problem,
+            "names none of type, id, attrs, q, georel: one of them is required"
+        );
     }
 
     /// A tool that stands for no operation describes the endpoint rather than its data, and

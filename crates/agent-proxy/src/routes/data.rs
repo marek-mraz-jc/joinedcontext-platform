@@ -66,17 +66,24 @@ async fn forward(
     }
 
     // A slug the cached run does not name is checked once more against the Portal's record: the
-    // assistant adds an endpoint to a conversation and calls it at once (AG-75).
-    let run = match &slug {
-        Some(slug) if !run.slugs().contains(&slug.as_str()) => {
-            match state.runs.resolve_fresh(&run.id).await {
-                Ok(fresh) => fresh,
-                Err(_) => run,
-            }
-        }
-        _ => run,
+    // assistant adds an endpoint to a conversation and calls it at once (AG-75). So is a run
+    // cached with no primary yet: a conversation starts with none, the identity hand-over caches
+    // it that way, and the first endpoint the assistant opens is its primary (T-3044).
+    let stale = match &slug {
+        Some(slug) => !run.slugs().contains(&slug.as_str()),
+        None => run.endpoint_slug.is_empty(),
+    };
+    let run = if stale {
+        state.runs.resolve_fresh(&run.id).await.unwrap_or(run)
+    } else {
+        run
     };
     let slug = match slug {
+        None if run.endpoint_slug.is_empty() => {
+            return jc_core::ProblemDetails::conflict()
+                .with_detail("this run reads no endpoint yet: open one in the conversation first")
+                .into_response()
+        }
         None => run.endpoint_slug.clone(),
         Some(slug) if run.slugs().contains(&slug.as_str()) => slug,
         Some(slug) => {
