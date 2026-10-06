@@ -77,7 +77,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
 }
 
 /// `Err` unless the bearer is the Portal's service account (AG-113).
-async fn the_portal(state: &ChatState, headers: &HeaderMap) -> Result<(), Refusal> {
+pub(super) async fn the_portal(state: &ChatState, headers: &HeaderMap) -> Result<(), Refusal> {
     let Some(bearer) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

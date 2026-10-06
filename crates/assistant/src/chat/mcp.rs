@@ -1,6 +1,8 @@
 //! A connector's tools: the MCP surface of one Endpoint on the Context Gateway,
 //! `POST /api/endpoint/{slug}/mcp`, one JSON-RPC message per request (EP-37, AG-106). On the
-//! anonymous channels it is called without a token, so the gateway answers as it answers anyone.
+//! anonymous channels it is called without a token, so the gateway answers as it answers anyone;
+//! an `internal` deployment's non-public Endpoint is called with the asking person's own token
+//! (API/05 §1.7, AG-115).
 
 use std::time::Duration;
 
@@ -21,6 +23,16 @@ pub struct Tool {
     pub input_schema: Value,
 }
 
+/// A person's access token, for the one question it came with: never printed, never stored.
+#[derive(Clone)]
+pub struct PersonToken(pub String);
+
+impl std::fmt::Debug for PersonToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PersonToken(..)")
+    }
+}
+
 /// The MCP surface of one Endpoint.
 #[derive(Debug, Clone)]
 pub struct Surface {
@@ -28,6 +40,8 @@ pub struct Surface {
     pub gateway: String,
     pub slug: String,
     pub timeout: Duration,
+    /// The person the call reads as; `None` calls as anyone.
+    pub token: Option<PersonToken>,
 }
 
 impl Surface {
@@ -37,10 +51,14 @@ impl Surface {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
-        let answer = http
+        let mut request = http
             .post(format!("{}/api/endpoint/{}/mcp", self.gateway, self.slug))
             .timeout(self.timeout)
-            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}));
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(&token.0);
+        }
+        let answer = request
             .send()
             .await
             .map_err(|err| err.without_url().to_string())?;

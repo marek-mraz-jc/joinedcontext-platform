@@ -2,7 +2,9 @@
 //! `POST /api/v1/d/{publicId}/chat`, one question per request, answered as Server-Sent Events.
 //!
 //! This route serves the anonymous channels (`public`, `ckan`, `iframe`); an `internal`
-//! deployment answers `404` here.
+//! deployment answers `404` here and is asked through the Portal on
+//! `/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat` (API/05 §1.7,
+//! AG-115).
 
 pub mod admin;
 pub mod agent;
@@ -29,7 +31,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use self::agent::{Ask, Connected, Event, Spent, Turn};
-use self::mcp::Surface;
+use self::mcp::{PersonToken, Surface};
 use self::model::Model;
 use crate::embed::Embedder;
 use crate::worker::{Deployment, Snapshot};
@@ -113,6 +115,10 @@ pub struct Question {
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
+        .route(
+            "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat",
+            post(chat_in_portal),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(Arc::clone(&state))
         .merge(widget::router(Arc::clone(&state)))
@@ -315,12 +321,15 @@ async fn record(
     Ok(())
 }
 
-/// The connectors switched on for this question whose Endpoint is public, with their tools; a
-/// connector whose tools cannot be listed is reported and left out (AG-104, AG-106).
+/// The connectors switched on for this question whose Endpoint the asker may reach, with their
+/// tools: a public Endpoint without a token; on an `internal` deployment, any other Endpoint
+/// with the person's token, when there is one (AG-106, AG-115). A connector whose tools cannot be
+/// listed is reported and left out (AG-104).
 async fn connected(
     state: &ChatState,
     deployment: &Deployment,
     chosen: Option<&[String]>,
+    person: Option<&PersonToken>,
     failed: &mut Vec<Event>,
 ) -> Vec<Connected> {
     let Ok(snapshot) = state.snapshot.read().map(|s| s.clone()) else {
@@ -334,15 +343,26 @@ async fn connected(
         let Some(endpoint) = snapshot
             .endpoints
             .get(&(deployment.project.clone(), connector.endpoint.clone()))
-            .filter(|e| e.audience == "public")
         else {
-            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names no public Endpoint of the project; not offered");
+            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names no Endpoint of the project; not offered");
+            continue;
+        };
+        let token = if endpoint.audience == "public" {
+            None
+        } else if deployment.spec.channel.is_anonymous() {
+            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a public deployment's connector names a non-public Endpoint; not offered");
+            continue;
+        } else if let Some(person) = person {
+            Some(person.clone())
+        } else {
+            tracing::info!(deployment = %deployment.name, endpoint = %connector.endpoint, "no person's token for a non-public Endpoint; not offered");
             continue;
         };
         let surface = Surface {
             gateway: state.gateway.clone(),
             slug: endpoint.slug.clone(),
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
+            token,
         };
         match surface.tools(&state.http, &connector.tools).await {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
@@ -415,30 +435,90 @@ async fn chat(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
-    let answer = |response: Response| with_cors(response, origin.clone());
-    let question = match body {
-        Ok(Json(question)) => question,
-        Err(rejection) => return answer(problem(400, "Bad Request", rejection.body_text())),
-    };
-    if let Err(why) = validate(&question, &deployment) {
-        return answer(problem(400, "Bad Request", why));
-    }
-    let (Some(rate), Some(budget)) = (&deployment.spec.rate_limit, &deployment.spec.budget) else {
-        // jc-core refuses such a manifest; one that slipped through is not served.
-        return answer(problem(
-            404,
-            "Not Found",
-            "No assistant is published under this id.",
-        ));
-    };
     let client = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .unwrap_or("unknown");
-    {
+        .unwrap_or("unknown")
+        .to_owned();
+    let response = ask(&state, deployment, body, &client, None).await;
+    with_cors(response, origin)
+}
+
+/// The Portal asking for a signed-in person (API/05 §1.7, AG-115): any channel by its name, the
+/// person's username for the per-client window and their token for an internal deployment's
+/// non-public connectors.
+async fn chat_in_portal(
+    State(state): State<Arc<ChatState>>,
+    Path((project, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<Question>, JsonRejection>,
+) -> Response {
+    if let Err(refusal) = admin::the_portal(&state, &headers).await {
+        return *refusal;
+    }
+    let Some(person) = headers
+        .get("x-jc-person")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.len() <= 256)
+        .map(str::to_owned)
+    else {
+        return problem(400, "Bad Request", "X-JC-Person names the person who asks");
+    };
+    let token = headers
+        .get("x-jc-person-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| PersonToken(v.to_owned()));
+    let deployment = state.snapshot.read().ok().and_then(|snapshot| {
+        snapshot
+            .deployments
+            .iter()
+            .find(|d| d.project == project && d.name == name)
+            .cloned()
+    });
+    let Some(deployment) = deployment else {
+        return problem(404, "Not Found", "The project declares no such assistant.");
+    };
+    let token = token.filter(|_| !deployment.spec.channel.is_anonymous());
+    ask(&state, deployment, body, &format!("person:{person}"), token).await
+}
+
+/// One question to `deployment` from `client`, answered as Server-Sent Events.
+async fn ask(
+    state: &Arc<ChatState>,
+    deployment: Deployment,
+    body: Result<Json<Question>, JsonRejection>,
+    client: &str,
+    person: Option<PersonToken>,
+) -> Response {
+    let question = match body {
+        Ok(Json(question)) => question,
+        Err(rejection) => return problem(400, "Bad Request", rejection.body_text()),
+    };
+    if let Err(why) = validate(&question, &deployment) {
+        return problem(400, "Bad Request", why);
+    }
+    let Some(budget) = deployment.spec.budget.clone() else {
+        if deployment.spec.channel.is_anonymous() {
+            // jc-core refuses such a manifest; one that slipped through is not served.
+            return problem(404, "Not Found", "No assistant is published under this id.");
+        }
+        return problem(
+            409,
+            "No Budget",
+            "This assistant has no budget yet: an administrator sets budget.tokensPerDay on it before anyone can ask.",
+        );
+    };
+    let rate = deployment.spec.rate_limit.clone();
+    if rate.is_none() && deployment.spec.channel.is_anonymous() {
+        return problem(404, "Not Found", "No assistant is published under this id.");
+    }
+    if let Some(rate) = rate {
         let now = Instant::now();
         let mut limits = state.limits.lock().await;
         let key = format!("{}/{}", deployment.project, deployment.name);
@@ -460,7 +540,7 @@ async fn chat(
             if let Ok(value) = HeaderValue::from_str(&retry.to_string()) {
                 response.headers_mut().insert(header::RETRY_AFTER, value);
             }
-            return answer(response);
+            return response;
         }
     }
     let (conversation, spent_before) = match conversation(
@@ -471,25 +551,25 @@ async fn chat(
     .await
     {
         Ok(Some(found)) => found,
-        Ok(None) => return answer(problem(
+        Ok(None) => return problem(
             400,
             "Bad Request",
             "conversation: not a current conversation of this assistant; send none to start one",
-        )),
+        ),
         Err(err) => {
             tracing::error!(%err, "the conversation could not be read");
-            return answer(problem(
+            return problem(
                 503,
                 "Service Unavailable",
                 "The assistant cannot answer right now. Try again in a minute.",
-            ));
+            );
         }
     };
 
     let (tokens_per_day, tokens_per_conversation) =
         (budget.tokens_per_day, budget.tokens_per_conversation);
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
-    let task_state = Arc::clone(&state);
+    let task_state = Arc::clone(state);
     let conversation_id = conversation.clone();
     tokio::spawn(async move {
         let state = task_state;
@@ -498,9 +578,12 @@ async fn chat(
             &state,
             &deployment,
             question.connectors.as_deref(),
+            person.as_ref(),
             &mut failed,
         )
         .await;
+        // The token reached the surfaces that need it; nothing else holds it past this point.
+        drop(person);
         for event in failed {
             let _ = tx.send(event).await;
         }
@@ -514,7 +597,7 @@ async fn chat(
             deployment: &name,
             system_prompt: deployment.spec.system_prompt.as_deref(),
             sources: &deployment.spec.sources,
-            public_only: true,
+            public_only: deployment.spec.channel.is_anonymous(),
             connectors: &connectors,
             tokens_per_day,
             tokens_per_conversation,
@@ -550,7 +633,7 @@ async fn chat(
     response
         .headers_mut()
         .insert("x-accel-buffering", HeaderValue::from_static("no"));
-    answer(response)
+    response
 }
 
 #[cfg(test)]

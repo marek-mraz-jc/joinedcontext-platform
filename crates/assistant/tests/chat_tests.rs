@@ -28,6 +28,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const ORIGIN: &str = "https://www.hronov.example";
 const SLUG: &str = "abcdefghijklmnopqrstuvwxyz234567";
 const HIDDEN_SLUG: &str = "zyxwvutsrqponmlkjihgfedcba765432";
+const PORTAL_TOKEN: &str = "the-portals-token";
+const PERSON_TOKEN: &str = "the-persons-own-token";
 
 struct World {
     admin: PgPool,
@@ -121,6 +123,15 @@ async fn world(test: &str, deployment: Deployment) -> World {
             ResponseTemplate::new(200)
                 .set_body_json(json!({"access_token": "svc-token", "expires_in": 300})),
         )
+        .mount(&realm)
+        .await;
+    Mock::given(method("POST")).and(path("/token/introspect")).and(body_string_contains(format!("token={PORTAL_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": true, "azp": "portal-api", "username": "service-account-portal-api", "aud": ["jc-assistant"]})))
+        .mount(&realm).await;
+    Mock::given(method("POST"))
+        .and(path("/token/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": false})))
+        .with_priority(10)
         .mount(&realm)
         .await;
     let proxy = MockServer::start().await;
@@ -1052,5 +1063,283 @@ async fn an_internal_deployment_has_no_widget() {
         headers.get("cache-control").and_then(|v| v.to_str().ok()),
         Some("no-store")
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+// --- API/05 §1.7, AG-115: the Portal asks for a signed-in person -------------------------------
+
+fn ask_in_portal(
+    body: Value,
+    portal: Option<&str>,
+    person: Option<&str>,
+    token: Option<&str>,
+) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/internal/v1/projects/hronov/knowledge/deployments/obcania/chat")
+        .header("content-type", "application/json");
+    if let Some(portal) = portal {
+        request = request.header("authorization", format!("Bearer {portal}"));
+    }
+    if let Some(person) = person {
+        request = request.header("x-jc-person", person);
+    }
+    if let Some(token) = token {
+        request = request.header("x-jc-person-token", token);
+    }
+    request
+        .body(Body::from(body.to_string()))
+        .expect("a request")
+}
+
+/// The organization's own Endpoint answers the person's token alone.
+async fn hidden_endpoint(gateway: &MockServer) {
+    Mock::given(method("POST")).and(path(format!("/api/endpoint/{HIDDEN_SLUG}/mcp")))
+        .and(header("authorization", format!("Bearer {PERSON_TOKEN}").as_str()))
+        .and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "query_entities", "description": "Reads the office's own records.", "inputSchema": {"type": "object"}}
+        ]}})))
+        .mount(gateway).await;
+    Mock::given(method("POST")).and(path(format!("/api/endpoint/{HIDDEN_SLUG}/mcp")))
+        .and(header("authorization", format!("Bearer {PERSON_TOKEN}").as_str()))
+        .and(body_string_contains("tools/call"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": "[{\"id\":\"urn:ngsi-ld:Record:1\",\"open\":3}]"}]
+        }})))
+        .mount(gateway).await;
+}
+
+fn internal_deployment(budget: bool) -> Deployment {
+    let mut d = deployment(Channel::Internal, 50_000, 10);
+    d.spec.sources = vec!["web".into(), "intranet".into()];
+    d.spec.rate_limit = None;
+    d.spec.allowed_origins = vec![];
+    if !budget {
+        d.spec.budget = None;
+    }
+    d
+}
+
+async fn make_intranet_internal(pool: &PgPool) {
+    let mut tx = assistant::project_scope(pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query("UPDATE chunks SET visibility = 'internal' WHERE url LIKE 'https://intranet.%'")
+        .execute(&mut *tx)
+        .await
+        .expect("internal");
+    tx.commit().await.expect("commit");
+}
+
+fn offered_tools(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// AG-115: an internal assistant searches internal passages and reads the organization's own
+/// Endpoint with the person's token, and with nothing else; the public Endpoint gets no token.
+#[tokio::test]
+async fn the_portal_asks_an_internal_assistant_as_the_person() {
+    let w = world("chatportal", internal_deployment(true)).await;
+    make_intranet_internal(&w.pool).await;
+    hidden_endpoint(&w.gateway).await;
+    script(&w.proxy, vec![
+        completion(tool_call("c1", "search", json!({"query": "platové tabuľky zamestnancov"})), 400),
+        completion(tool_call("c2", "interne__query_entities", json!({})), 500),
+        completion(json!({"role": "assistant", "content": "Tabuľky sú na intranete [1], otvorené sú 3 [2]."}), 600),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask_in_portal(
+            json!({"message": "Kde nájdem platové tabuľky?"}),
+            Some(PORTAL_TOKEN),
+            Some("jana"),
+            Some(PERSON_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"answer"), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "tool" && d["endpoint"] == "interne" && d["status"] == "done"),
+        "{events:?}"
+    );
+    let (_, citations) = events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations");
+    assert!(
+        citations
+            .to_string()
+            .contains("https://intranet.hronov.example/platy"),
+        "{citations}"
+    );
+    let calls = model_calls(&w.proxy).await;
+    let tools = offered_tools(&calls[0].1);
+    assert!(
+        tools.contains(&"interne__query_entities".to_owned())
+            && tools.contains(&"ovzdusie__query_entities".to_owned()),
+        "{tools:?}"
+    );
+    // The person's token went to the organization's Endpoint alone, and to no model call.
+    for request in w.gateway.received_requests().await.unwrap_or_default() {
+        let bearer = request
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap_or_default().to_owned());
+        if request.url.path().contains(HIDDEN_SLUG) {
+            assert_eq!(
+                bearer.as_deref(),
+                Some(format!("Bearer {PERSON_TOKEN}").as_str())
+            );
+        } else {
+            assert_eq!(bearer, None, "a public Endpoint is called without a token");
+        }
+    }
+    for (headers, body) in &calls {
+        assert!(!body.to_string().contains(PERSON_TOKEN));
+        assert!(headers
+            .values()
+            .all(|v| !v.to_str().unwrap_or_default().contains(PERSON_TOKEN)));
+    }
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// AG-115: without the person's token the organization's Endpoint is not offered at all.
+#[tokio::test]
+async fn without_the_persons_token_the_organizations_endpoint_is_not_offered() {
+    let w = world("chatportalnotoken", internal_deployment(true)).await;
+    hidden_endpoint(&w.gateway).await;
+    script(
+        &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": "Neviem."}),
+            300,
+        )],
+    )
+    .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask_in_portal(
+            json!({"message": "Koľko je otvorených spisov?"}),
+            Some(PORTAL_TOKEN),
+            Some("jana"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let tools = offered_tools(&model_calls(&w.proxy).await[0].1);
+    assert!(
+        !tools.iter().any(|t| t.starts_with("interne__")),
+        "{tools:?}"
+    );
+    assert!(
+        tools.contains(&"ovzdusie__query_entities".to_owned()),
+        "{tools:?}"
+    );
+    assert!(w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .all(|r| !r.url.path().contains(HIDDEN_SLUG)));
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// AG-115, AG-106: a public assistant answers the Portal as it answers a visitor: public
+/// passages, public Endpoints, and the person's token goes nowhere.
+#[tokio::test]
+async fn a_public_assistant_answers_the_portal_as_it_answers_a_visitor() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.sources = vec!["web".into(), "intranet".into()];
+    let w = world("chatportalpublic", d).await;
+    make_intranet_internal(&w.pool).await;
+    hidden_endpoint(&w.gateway).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                tool_call(
+                    "c1",
+                    "search",
+                    json!({"query": "platové tabuľky zamestnancov"}),
+                ),
+                400,
+            ),
+            completion(json!({"role": "assistant", "content": "Neviem."}), 300),
+        ],
+    )
+    .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask_in_portal(
+            json!({"message": "Kde nájdem platové tabuľky?"}),
+            Some(PORTAL_TOKEN),
+            Some("jana"),
+            Some(PERSON_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let calls = model_calls(&w.proxy).await;
+    assert!(!offered_tools(&calls[0].1)
+        .iter()
+        .any(|t| t.starts_with("interne__")));
+    assert!(
+        !calls[1].1.to_string().contains("Platové tabuľky"),
+        "an internal passage reached a public channel"
+    );
+    for request in w.gateway.received_requests().await.unwrap_or_default() {
+        assert!(request.headers.get("authorization").is_none());
+    }
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// AG-113, AG-115: the Portal's path answers the Portal's account alone, names the person, finds
+/// the deployment by its name, and an internal one without a budget says who fixes it.
+#[tokio::test]
+async fn the_portals_path_refuses_before_it_spends() {
+    let w = world("chatportalrefuse", internal_deployment(false)).await;
+    let body = json!({"message": "Ahoj"});
+    for (portal, person, expected) in [
+        (None, Some("jana"), StatusCode::UNAUTHORIZED),
+        (
+            Some("someone-elses-token"),
+            Some("jana"),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (Some(PORTAL_TOKEN), None, StatusCode::BAD_REQUEST),
+        (Some(PORTAL_TOKEN), Some("jana"), StatusCode::CONFLICT),
+    ] {
+        let (status, events, _) =
+            answer_of(&w.app, ask_in_portal(body.clone(), portal, person, None)).await;
+        assert_eq!(status, expected, "{portal:?} {person:?} {events:?}");
+        if expected == StatusCode::CONFLICT {
+            assert!(events[0].1["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("budget.tokensPerDay"));
+        }
+    }
+    let unknown = Request::builder()
+        .method("POST")
+        .uri("/internal/v1/projects/hronov/knowledge/deployments/nikto/chat")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {PORTAL_TOKEN}"))
+        .header("x-jc-person", "jana")
+        .body(Body::from(body.to_string()))
+        .expect("a request");
+    assert_eq!(answer_of(&w.app, unknown).await.0, StatusCode::NOT_FOUND);
+    assert!(model_calls(&w.proxy).await.is_empty(), "nothing was spent");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
