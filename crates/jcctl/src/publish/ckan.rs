@@ -881,10 +881,12 @@ impl InMemoryCkan {
                     .unwrap_or_default();
                 match payload.get("resource_id").and_then(Value::as_str) {
                     Some(id) => {
+                        // A resource whose table was dropped gets a new one, as CKAN does: the
+                        // resource outlives `datastore_delete` without filters.
                         let (fields, _) = self
                             .tables
-                            .get_mut(id)
-                            .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                            .entry(id.to_owned())
+                            .or_insert_with(|| (Vec::new(), BTreeMap::new()));
                         fields.extend(declared);
                         Ok(json!({ "resource_id": id }))
                     }
@@ -942,6 +944,40 @@ impl InMemoryCkan {
                     rows.insert(key, record.clone());
                 }
                 Ok(json!({}))
+            }
+            "datastore_search" => {
+                let id = Self::resource_of(action, payload)?;
+                let (_, rows) = self
+                    .tables
+                    .get(&id)
+                    .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                let count = |key: &str| {
+                    payload
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|n| usize::try_from(n).ok())
+                };
+                let fields: Option<Vec<&str>> = payload
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(|fields| fields.iter().filter_map(Value::as_str).collect());
+                let records: Vec<Value> = rows
+                    .values()
+                    .skip(count("offset").unwrap_or(0))
+                    .take(count("limit").unwrap_or(100))
+                    .map(|row| match &fields {
+                        Some(fields) => Value::Object(
+                            fields
+                                .iter()
+                                .filter_map(|field| {
+                                    Some(((*field).to_owned(), row.get(*field)?.clone()))
+                                })
+                                .collect(),
+                        ),
+                        None => row.clone(),
+                    })
+                    .collect();
+                Ok(json!({ "records": records, "total": rows.len() }))
             }
             "datastore_delete" => {
                 let id = Self::resource_of(action, payload)?;
