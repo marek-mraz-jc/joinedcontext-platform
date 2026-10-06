@@ -14,6 +14,8 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 /// The store's migrations, reversible (`*.up.sql` and `*.down.sql`).
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// A `ckan` source: a catalogue's public datasets.
+pub mod ckan;
 /// The knowledge assistant's website crawl core.
 pub mod crawl;
 /// Passage and question embeddings with `multilingual-e5-small`.

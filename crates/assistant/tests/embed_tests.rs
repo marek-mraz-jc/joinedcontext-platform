@@ -1,7 +1,10 @@
 //! The embedding model and the passages it embeds (T-3053, ADR-N-040 §3.1), with the pinned
 //! model files and a real PostgreSQL (see `common`).
 
-mod common;
+#[path = "common/db.rs"]
+mod db;
+#[path = "common/model.rs"]
+mod model;
 
 use assistant::embed::{embed_missing, Embedder, MODEL_FILES};
 use assistant::{Error, DIMENSIONS};
@@ -14,7 +17,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 #[tokio::test]
 async fn a_question_lands_nearest_the_passage_that_answers_it_across_languages() {
-    let embedder = Embedder::load(&common::model_dir(), 2).expect("the pinned model loads");
+    let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
     let passages = embedder
         .passages(&[
             "Knižnica je otvorená v pondelok až piatok od 9:00 do 18:00.".into(),
@@ -41,7 +44,7 @@ async fn a_question_lands_nearest_the_passage_that_answers_it_across_languages()
 
 #[test]
 fn a_model_file_that_is_not_the_pinned_one_is_refused_before_it_is_loaded() {
-    let source = common::model_dir();
+    let source = model::model_dir();
     let copy = std::env::temp_dir().join(format!("e5-tampered-{}", std::process::id()));
     std::fs::create_dir_all(&copy).expect("dir");
     for (file, _) in MODEL_FILES {
@@ -69,8 +72,8 @@ fn a_model_file_that_is_not_the_pinned_one_is_refused_before_it_is_loaded() {
 
 #[tokio::test]
 async fn missing_embeddings_are_filled_for_the_project_alone_and_a_second_pass_finds_none() {
-    let embedder = Embedder::load(&common::model_dir(), 2).expect("the pinned model loads");
-    let (admin, pool, name) = common::database("embed").await;
+    let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
+    let (admin, pool, name) = db::database("embed").await;
     let texts: Vec<String> = (0..20)
         .map(|i| format!("Odstavec číslo {i} o meste."))
         .collect();
@@ -81,8 +84,8 @@ async fn missing_embeddings_are_filled_for_the_project_alone_and_a_second_pass_f
         .collect();
     let rows: Vec<(&str, &str, &str)> =
         pages.iter().map(|(u, l, t)| (u.as_str(), *l, *t)).collect();
-    common::pages(&pool, "hronov", "web", &rows).await;
-    common::pages(
+    model::pages(&pool, "hronov", "web", &rows).await;
+    model::pages(
         &pool,
         "lipno",
         "web",
@@ -133,5 +136,5 @@ async fn missing_embeddings_are_filled_for_the_project_alone_and_a_second_pass_f
         embed_missing(&pool, &embedder, "Not A Project", 10).await,
         Err(Error::Project(_))
     ));
-    common::drop_database(admin, pool, &name).await;
+    db::drop_database(admin, pool, &name).await;
 }

@@ -3,7 +3,10 @@
 //! alone, the vector ranking alone and the hybrid query the service runs. The numbers print with
 //! `--nocapture`; the floors below are what reopens ADR-N-040 §4 (`pg_search`) when missed.
 
-mod common;
+#[path = "common/db.rs"]
+mod db;
+#[path = "common/model.rs"]
+mod model;
 
 use std::collections::BTreeMap;
 
@@ -104,13 +107,13 @@ async fn hybrid_retrieval_finds_the_answering_page_at_least_as_often_as_either_r
         );
     }
 
-    let embedder = Embedder::load(&common::model_dir(), 2).expect("the pinned model loads");
-    let (admin, pool, name) = common::database("eval").await;
+    let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
+    let (admin, pool, name) = db::database("eval").await;
     let rows: Vec<(&str, &str, &str)> = documents
         .iter()
         .map(|(u, l, t)| (u.as_str(), l.as_str(), t.as_str()))
         .collect();
-    common::pages(&pool, "eval", "web", &rows).await;
+    model::pages(&pool, "eval", "web", &rows).await;
     assert_eq!(
         embed_missing(&pool, &embedder, "eval", 1_000)
             .await
@@ -206,5 +209,5 @@ async fn hybrid_retrieval_finds_the_answering_page_at_least_as_often_as_either_r
         "hybrid recall@5 {:.3} is below the floor {HYBRID_RECALL_AT_5_FLOOR}",
         report[&("hybrid", 5)]
     );
-    common::drop_database(admin, pool, &name).await;
+    db::drop_database(admin, pool, &name).await;
 }

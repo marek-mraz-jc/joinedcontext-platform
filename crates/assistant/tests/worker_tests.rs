@@ -165,8 +165,8 @@ fn a_source_is_due_before_its_first_crawl_then_when_its_schedule_names_the_minut
     let mut ckan = unscheduled.clone();
     ckan.source = SourceType::Ckan;
     assert!(
-        !worker::due(&ckan, None, three),
-        "a ckan source is not this worker's"
+        worker::due(&ckan, None, three),
+        "a catalogue is read before its first run like a website"
     );
 }
 
@@ -176,6 +176,12 @@ fn the_sources_are_read_from_the_organizations_checkout_and_a_broken_one_is_left
     let _ = std::fs::remove_dir_all(&dir);
     write(&dir, "projects/ovzdusie/assistant/sources/bb-web.yaml",
         "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: bb-web\n  namespace: ovzdusie\nspec:\n  source: website\n  startUrls: [https://www.banskabystrica.sk/]\n  schedule: \"0 3 * * *\"\n");
+    write(&dir, "projects/ovzdusie/ckan/data.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: CkanInstance\nmetadata:\n  name: data\n  namespace: ovzdusie\nspec:\n  url: https://data.banskabystrica.sk\n  apiTokenRef: { name: ckan-api-token, key: token }\n");
+    write(&dir, "projects/ovzdusie/assistant/sources/bb-data.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: bb-data\n  namespace: ovzdusie\nspec:\n  source: ckan\n  ckanInstanceRef: data\n");
+    write(&dir, "projects/ovzdusie/assistant/sources/bb-other.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: bb-other\n  namespace: ovzdusie\nspec:\n  source: ckan\n  ckanInstanceRef: undeclared\n");
     write(&dir, "projects/ovzdusie/assistant/sources/broken.yaml",
         "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: broken\n  namespace: ovzdusie\nspec:\n  source: website\n  startUrls: 7\n");
     let found = worker::sources(&Checkout {
@@ -188,8 +194,31 @@ fn the_sources_are_read_from_the_organizations_checkout_and_a_broken_one_is_left
         .iter()
         .map(|s| (s.project.as_str(), s.name.as_str()))
         .collect();
-    assert_eq!(names, [("ovzdusie", "bb-web")]);
-    assert_eq!(found[0].spec.schedule.as_deref(), Some("0 3 * * *"));
+    assert_eq!(
+        names,
+        [
+            ("ovzdusie", "bb-data"),
+            ("ovzdusie", "bb-other"),
+            ("ovzdusie", "bb-web")
+        ]
+    );
+    let url = |name: &str| {
+        found
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.ckan_url.clone())
+    };
+    assert_eq!(
+        url("bb-data").as_deref(),
+        Some("https://data.banskabystrica.sk")
+    );
+    assert_eq!(
+        url("bb-other"),
+        None,
+        "an instance the project does not declare"
+    );
+    assert_eq!(url("bb-web"), None);
+    assert_eq!(found[2].spec.schedule.as_deref(), Some("0 3 * * *"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -219,6 +248,7 @@ async fn a_due_source_is_queued_once_and_its_job_crawls_and_indexes_the_site() {
         project: "helsinki".into(),
         name: "city-web".into(),
         spec: spec(&format!("http://www.city.test:{port}/"), Some("0 3 * * *")),
+        ckan_url: None,
     }];
     let now = datetime!(2026-10-06 14:12 UTC);
 
@@ -286,5 +316,95 @@ async fn a_job_whose_source_went_away_is_closed_without_a_crawl() {
         .await
         .expect("job");
     assert_eq!(state, "done");
+    drop_database(admin, pool, &name).await;
+}
+
+#[tokio::test]
+async fn a_catalogue_job_indexes_its_datasets_and_one_naming_no_instance_fails_with_why() {
+    let (admin, pool, name) = database("catalogue").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    Mock::given(method("GET"))
+        .and(path("/api/3/action/package_search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "result": {"count": 1, "results": [{
+                "name": "ovzdusie-merania",
+                "title": "Merania kvality ovzdušia",
+                "notes": "Hodinové merania oxidu dusičitého a prachových častíc PM10 z piatich staníc v meste.",
+                "metadata_modified": "2026-10-06T08:00:00",
+                "resources": [{"name": "Merania", "format": "CSV"}]
+            }]}
+        })))
+        .mount(&server)
+        .await;
+    let crawler = Crawler::new(
+        Arc::new(FixtureResolver::new(&[("data.city.test", port)])),
+        CrawlPolicy {
+            allow_plain_http: true,
+            max_page_bytes: 1024 * 1024,
+        },
+    )
+    .expect("crawler");
+    let mut catalogue = spec("https://unused.test/", None);
+    catalogue.source = SourceType::Ckan;
+    catalogue.start_urls.clear();
+    catalogue.ckan_instance_ref = Some("data".into());
+    catalogue.languages = vec!["sk".into()];
+    let sources = vec![
+        Source {
+            project: "helsinki".into(),
+            name: "catalogue".into(),
+            spec: catalogue.clone(),
+            ckan_url: Some(format!("http://data.city.test:{port}")),
+        },
+        Source {
+            project: "helsinki".into(),
+            name: "orphan".into(),
+            spec: catalogue,
+            ckan_url: None,
+        },
+    ];
+    let now = datetime!(2026-10-06 14:12 UTC);
+    assert_eq!(
+        worker::enqueue_due(&pool, &sources, now)
+            .await
+            .expect("queued"),
+        2
+    );
+    for _ in 0..2 {
+        assert!(
+            worker::work_one(&pool, &crawler, "hel.fi", "worker-a", &sources)
+                .await
+                .expect("worked")
+        );
+    }
+    let jobs: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT source, state, error FROM crawl_jobs ORDER BY source")
+            .fetch_all(&pool)
+            .await
+            .expect("jobs");
+    assert_eq!(jobs[0].0, "catalogue");
+    assert_eq!(jobs[0].1, "done");
+    assert_eq!(jobs[1].0, "orphan");
+    assert_ne!(jobs[1].1, "done");
+    let why = jobs[1].2.clone().unwrap_or_default();
+    assert!(
+        why.contains("CkanInstance `data`") && why.contains("does not declare"),
+        "{why}"
+    );
+
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    let cited: Vec<String> = sqlx::query_scalar("SELECT DISTINCT url FROM chunks")
+        .fetch_all(&mut *tx)
+        .await
+        .expect("chunks");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(
+        cited,
+        [format!(
+            "http://data.city.test:{port}/dataset/ovzdusie-merania"
+        )]
+    );
     drop_database(admin, pool, &name).await;
 }

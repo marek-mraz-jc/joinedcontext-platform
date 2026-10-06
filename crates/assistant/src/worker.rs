@@ -1,14 +1,16 @@
 //! The crawl worker of `jc-assistant` (Architecture/22 §1, T-3052): once a minute it reads the
-//! `KnowledgeSource` manifests from the organization's checkout, queues every website source
-//! whose schedule names this minute (or that was never read), and works the queue one job at a
-//! time: claim, crawl, extract, index, done or retried.
+//! `KnowledgeSource` manifests from the organization's checkout, queues every source whose
+//! schedule names this minute (or that was never read), and works the queue one job at a time:
+//! claim, crawl a website or read a catalogue (T-3054), extract, index, done or retried.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use jc_core::kinds::assistant::{KnowledgeSourceSpec, SourceType};
+use jc_core::kinds::ckan::CkanInstanceSpec;
 use sqlx::PgPool;
 
+use crate::ckan::{sync_ckan, Catalogue};
 use crate::crawl::{crawl_site, queue, Crawler};
 use crate::extract::Indexer;
 use crate::{schedule, Error};
@@ -19,6 +21,9 @@ pub struct Source {
     pub project: String,
     pub name: String,
     pub spec: KnowledgeSourceSpec,
+    /// For a `ckan` source, the URL of the project's `CkanInstance` it names; `None` when the
+    /// project declares no such instance.
+    pub ckan_url: Option<String>,
 }
 
 /// Where the manifests are: the organization's checkout and, in layout 2, the project
@@ -52,6 +57,18 @@ pub fn sources(checkout: &Checkout) -> Result<Vec<Source>, Error> {
         None,
     )
     .map_err(|err| Error::Crawl(format!("the manifests could not be read: {err}")))?;
+    let mut catalogues = BTreeMap::new();
+    for (id, resource) in assembly.repository.iter() {
+        if id.kind != "CkanInstance" {
+            continue;
+        }
+        if let (Some(project), Ok(spec)) = (
+            id.namespace.clone(),
+            serde_json::from_value::<CkanInstanceSpec>(resource.manifest.spec.clone()),
+        ) {
+            catalogues.insert((project, id.name.clone()), spec.url);
+        }
+    }
     let mut found = Vec::new();
     for (id, resource) in assembly.repository.iter() {
         if id.kind != "KnowledgeSource" {
@@ -61,11 +78,18 @@ pub fn sources(checkout: &Checkout) -> Result<Vec<Source>, Error> {
             continue;
         };
         match serde_json::from_value::<KnowledgeSourceSpec>(resource.manifest.spec.clone()) {
-            Ok(spec) => found.push(Source {
-                project,
-                name: id.name.clone(),
-                spec,
-            }),
+            Ok(spec) => {
+                let ckan_url = spec
+                    .ckan_instance_ref
+                    .as_ref()
+                    .and_then(|name| catalogues.get(&(project.clone(), name.clone())).cloned());
+                found.push(Source {
+                    project,
+                    name: id.name.clone(),
+                    spec,
+                    ckan_url,
+                })
+            }
             Err(err) => {
                 tracing::warn!(project = %project, source = %id.name, %err, "not a KnowledgeSource spec")
             }
@@ -74,15 +98,12 @@ pub fn sources(checkout: &Checkout) -> Result<Vec<Source>, Error> {
     Ok(found)
 }
 
-/// Whether a website source is due in the minute `now`: never read, or its schedule names it.
+/// Whether a source is due in the minute `now`: never read, or its schedule names it.
 pub fn due(
     spec: &KnowledgeSourceSpec,
     last_crawl: Option<time::OffsetDateTime>,
     now: time::OffsetDateTime,
 ) -> bool {
-    if spec.source != SourceType::Website {
-        return false;
-    }
     let Some(last) = last_crawl else { return true };
     // Read at most once a minute, whatever a schedule of `* * * * *` says.
     if now - last < time::Duration::minutes(1) {
@@ -174,28 +195,66 @@ pub async fn work_one(
         visibility,
         source.spec.pdf.max_pages,
     );
-    match crawl_site(
-        pool,
-        crawler,
-        organization,
-        &source.project,
-        &source.name,
-        &source.spec,
-        &mut indexer,
-    )
-    .await
-    {
-        Ok(report) => {
+    let outcome = match source.spec.source {
+        SourceType::Website => crawl_site(
+            pool,
+            crawler,
+            organization,
+            &source.project,
+            &source.name,
+            &source.spec,
+            &mut indexer,
+        )
+        .await
+        .map(|report| {
+            format!(
+                "{} pages fetched, {} unchanged, {} documents",
+                report.pages_fetched, report.pages_unchanged, report.documents_fetched
+            )
+        }),
+        SourceType::Ckan => match &source.ckan_url {
+            Some(url) => {
+                let language = match source.spec.languages.as_slice() {
+                    [one] => Some(one.as_str()),
+                    _ => None,
+                };
+                sync_ckan(
+                    pool,
+                    crawler,
+                    Catalogue {
+                        project: &source.project,
+                        site_id: site,
+                        url,
+                        max_datasets: source.spec.max_pages,
+                        language,
+                    },
+                    &mut indexer,
+                )
+                .await
+                .map(|report| {
+                    format!(
+                        "{} datasets, {} changed, {} removed",
+                        report.datasets, report.changed, report.removed
+                    )
+                })
+            }
+            None => Err(Error::Crawl(format!(
+                "the source names CkanInstance `{}`, which project {} does not declare",
+                source.spec.ckan_instance_ref.as_deref().unwrap_or_default(),
+                source.project
+            ))),
+        },
+    };
+    match outcome {
+        Ok(summary) => {
             tracing::info!(
-                project = %source.project, source = %source.name,
-                pages = report.pages_fetched, unchanged = report.pages_unchanged,
-                documents = report.documents_fetched, passages = indexer.passages,
-                failures = indexer.failures.len(), "crawled"
+                project = %source.project, source = %source.name, %summary,
+                passages = indexer.passages, failures = indexer.failures.len(), "read"
             );
             queue::finish(pool, job.id).await?;
         }
         Err(err) => {
-            tracing::warn!(project = %source.project, source = %source.name, %err, "crawl failed, retried later");
+            tracing::warn!(project = %source.project, source = %source.name, %err, "read failed, retried later");
             queue::fail(pool, job.id, &err.to_string()).await?;
         }
     }

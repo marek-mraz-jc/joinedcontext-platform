@@ -32,6 +32,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # its schedule, its log and its health probe.
 jcctl = { path = "../jcctl", version = "0.1.0" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = ["macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
