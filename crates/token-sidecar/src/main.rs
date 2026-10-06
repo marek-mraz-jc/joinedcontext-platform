@@ -1,7 +1,11 @@
-//! `jc-token-sidecar`: the pipeline runner's token endpoint on `127.0.0.1` (PL-19, T-1508).
+//! `jc-token-sidecar`: the pipeline runner's token service (PL-19, T-1508).
+//!
+//! It runs in a pod of its own beside the runner, the one pod of the runner's namespace that may
+//! reach the Kubernetes API, so the runner keeps none; the deployment's NetworkPolicy and mesh
+//! authorization admit the runner alone to its port.
 //!
 //! Configuration is environment only:
-//! - `JC_SIDECAR_LISTEN`: where to listen, `127.0.0.1:4180` by default; never a public address.
+//! - `JC_SIDECAR_LISTEN`: where to listen, `0.0.0.0:4180` by default.
 //! - `JC_TOKEN_URL`: the realm's token endpoint.
 //! - `JC_TOKEN_AUDIENCE`: the realm issuer, the audience Keycloak's federated client authentication expects.
 //! - `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT`: set by the kubelet; the API the TokenRequests go to.

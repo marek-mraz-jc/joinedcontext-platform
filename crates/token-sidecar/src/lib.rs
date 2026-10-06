@@ -1,15 +1,16 @@
-//! The pipeline runner's token sidecar (PL-19, T-1508, Architecture/12 §3).
+//! The pipeline runner's token service (PL-19, T-1508, Architecture/12 §3).
 //!
-//! Every stream of the one runner pod asks this sidecar for its token on `127.0.0.1`, as Bento's
-//! OAuth 2 `token_url`, naming its pipeline as the client id `{project}/{pipeline}`. The sidecar
+//! Every stream of the one runner pod asks this service for its token, as Bento's OAuth 2
+//! `token_url`, naming its pipeline as the client id `{project}/{pipeline}`. The sidecar
 //! asks the Kubernetes API for a short token of that pipeline's own ServiceAccount (TokenRequest,
 //! audience the realm issuer), presents it to Keycloak as the client assertion of a
 //! `client_credentials` request, and hands back Keycloak's answer as it came. It holds no secret
 //! and stores no token: a token is minted per request and Bento keeps the access token until it
 //! expires.
 //!
-//! The ceiling is the shared process: anything in the runner that can reach `127.0.0.1` can ask
-//! for any of its pipelines' tokens. What it buys is a principal per pipeline (PL-19, PL-20).
+//! The service runs in a pod of its own, so the runner never reaches the Kubernetes API. The
+//! ceiling is the shared runner: anything running in it can ask for any of its pipelines'
+//! tokens. What it buys is a principal per pipeline (PL-19, PL-20).
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
