@@ -912,14 +912,26 @@ fn the_same_urn_in_two_spaces_is_a_row_in_each_dataset_and_a_delete_touches_one(
 
     let records = records(&columns, &rows).expect("records");
     let shared = records[0][PRIMARY_KEY].as_str().expect("an id").to_owned();
-    sync(&mut ckan, &air, &[shared.clone()], &records[..1]).expect("synced");
-    sync(&mut ckan, &kpi, &[shared.clone()], &records[..1]).expect("synced");
+    sync(
+        &mut ckan,
+        &air,
+        std::slice::from_ref(&shared),
+        &records[..1],
+    )
+    .expect("synced");
+    sync(
+        &mut ckan,
+        &kpi,
+        std::slice::from_ref(&shared),
+        &records[..1],
+    )
+    .expect("synced");
     assert!(ckan.rows(&air).expect("table").contains_key(&shared));
     assert!(ckan.rows(&kpi).expect("table").contains_key(&shared));
 
     // The KPI space deleted its entity: the notification names the id, the endpoint no longer
     // answers it, and only the KPI table loses the row.
-    let synced = sync(&mut ckan, &kpi, &[shared.clone()], &[]).expect("synced");
+    let synced = sync(&mut ckan, &kpi, std::slice::from_ref(&shared), &[]).expect("synced");
     assert_eq!(synced.deleted, vec![shared.clone()]);
     assert!(!ckan.rows(&kpi).expect("table").contains_key(&shared));
     assert!(
