@@ -36,6 +36,7 @@ fn invocation(files: &[(&str, &str)], entry: &str, gateway: &str) -> Invocation 
             gateway: gateway.to_owned(),
             slug: SLUG.to_owned(),
             token: None,
+            proxy: None,
         },
     }
 }

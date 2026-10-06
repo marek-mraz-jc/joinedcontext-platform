@@ -21,6 +21,10 @@ pub struct Endpoint {
     pub slug: String,
     /// The caller's access token; `None` calls the endpoint anonymously.
     pub token: Option<String>,
+    /// The agent proxy the request goes through instead, scheme and authority from the runtime's
+    /// own configuration: an editing agent's own call, whose token is the run's data credential
+    /// that only the proxy honours (ADR-N-038 decision 6). `None` calls the gateway.
+    pub proxy: Option<String>,
 }
 
 /// An endpoint slug as the Portal mints them (EP-02): base32, 26 to 32 characters.
@@ -94,9 +98,18 @@ pub async fn request(endpoint: &Endpoint, method: &str, path: &str, body: Option
     if !allowed(&endpoint.slug, path) {
         return problem(403, "a function may call its own endpoint only");
     }
+    // Checked above: the path is under `/api/endpoint/{slug}/`, so the rest is the endpoint's own.
+    let url = match &endpoint.proxy {
+        None => format!("{}{path}", endpoint.gateway),
+        Some(proxy) => format!(
+            "{proxy}/v1/data/endpoints/{}/{}",
+            endpoint.slug,
+            &path[format!("/api/endpoint/{}/", endpoint.slug).len()..]
+        ),
+    };
     let mut builder = endpoint
         .http
-        .request(method.clone(), format!("{}{path}", endpoint.gateway))
+        .request(method.clone(), url)
         .header(reqwest::header::ACCEPT, "application/json");
     if let Some(token) = &endpoint.token {
         builder = builder.bearer_auth(token);

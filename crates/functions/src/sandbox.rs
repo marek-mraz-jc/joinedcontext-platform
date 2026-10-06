@@ -349,6 +349,7 @@ export function createClient(config, transport) {
                 gateway: gateway.to_owned(),
                 slug: SLUG.to_owned(),
                 token: token.map(str::to_owned),
+                proxy: None,
             },
         }
     }

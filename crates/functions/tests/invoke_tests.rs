@@ -76,11 +76,17 @@ impl Realm {
     }
 
     fn app_with(&self, slots: usize, gateway: &str) -> axum::Router {
+        self.app_via(slots, gateway, None)
+    }
+
+    /// The runtime with an agent proxy configured (`JC_AGENT_PROXY_URL`, ADR-N-038 decision 6).
+    fn app_via(&self, slots: usize, gateway: &str, proxy: Option<&str>) -> axum::Router {
         router(Arc::new(AppState {
             verifier: Arc::clone(&self.verifier),
             audience: "jc-functions".to_owned(),
             caller: "joinedcontext-portal".to_owned(),
             gateway: gateway.to_owned(),
+            proxy: proxy.map(str::to_owned),
             http: reqwest::Client::new(),
             slots: Arc::new(Semaphore::new(slots)),
         }))
@@ -433,4 +439,76 @@ async fn files_map_absent_is_a_400_naming_files_not_a_function_with_no_code() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
     assert!(answer.to_string().contains("files"), "{answer}");
+}
+
+/// ADR-N-038 decision 6: a run's own call goes through this runtime's agent proxy, at the proxy's
+/// data route for the same endpoint and path, with the run's data credential; the gateway is not
+/// called, and the address is the runtime's, never the call's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runs_own_call_reads_through_the_agent_proxy_with_its_data_credential() {
+    use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+    let (gateway, proxy) = (MockServer::start().await, MockServer::start().await);
+    for server in [&gateway, &proxy] {
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(server)
+            .await;
+    }
+    let realm = Realm::new();
+    let mut call = calling(json!("jcd_run-1.secret"));
+    call["via"] = json!("proxy");
+    let (status, answer) = send(
+        realm.app_via(16, &gateway.uri(), Some(&proxy.uri())),
+        Some(&portal_token(&realm)),
+        call.to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
+    let sent = proxy.received_requests().await.unwrap_or_default();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].url.path(),
+        format!("/v1/data/endpoints/{SLUG}/access")
+    );
+    assert_eq!(
+        sent[0]
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer jcd_run-1.secret")
+    );
+}
+
+/// Without a proxy address a run's own call is refused, never sent to the gateway with a
+/// credential the gateway does not know; an unknown `via` is a 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_call_without_a_proxy_address_is_503_and_an_unknown_route_400() {
+    let realm = Realm::new();
+    let mut call = calling(json!("jcd_run-1.secret"));
+    call["via"] = json!("proxy");
+    let (status, answer) = send(
+        realm.app(16),
+        Some(&portal_token(&realm)),
+        call.to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert!(answer["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("JC_AGENT_PROXY_URL"));
+
+    call["via"] = json!("http://evil.example");
+    let (status, _) = send(
+        realm.app(16),
+        Some(&portal_token(&realm)),
+        call.to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
