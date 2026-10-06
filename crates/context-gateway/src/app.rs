@@ -105,6 +105,8 @@ pub struct Gateway {
     /// The data space agreements, swapped whole with the rest: a terminated agreement stops
     /// authorising reads in the same reconcile that withdraws its compiled grants (DS-12).
     agreements: ArcSwap<Agreements>,
+    /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
+    servers: ArcSwap<crate::mcp::server::McpServers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// The base a rewritten notification endpoint carries, when it is not the public one.
@@ -159,6 +161,8 @@ pub enum Door {
     Endpoint,
     /// `/api/mcp`, naming the Endpoint in the `endpoint` argument (EP-87).
     Hub,
+    /// `/api/mcp/{project}/{name}`, a named server over chosen Endpoints (EP-92, ADR-N-043).
+    Server,
 }
 
 impl Gateway {
@@ -173,6 +177,7 @@ impl Gateway {
             accounts: ArcSwap::from_pointee(ServiceAccounts::new()),
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
+            servers: ArcSwap::from_pointee(Vec::new()),
             public_url: None,
             egress_url: None,
             private_hosts: Vec::new(),
@@ -261,10 +266,58 @@ impl Gateway {
     /// What a token may be bound to on a call to `endpoint` through `door`.
     fn audiences_by(&self, endpoint: &Endpoint, door: Door) -> Vec<String> {
         let mut audiences = self.audiences_for(endpoint);
-        if door == Door::Hub {
-            audiences.extend(self.hub_audiences());
+        match door {
+            Door::Endpoint => {}
+            Door::Hub => audiences.extend(self.hub_audiences()),
+            // A server's token reaches the members of that server and nothing else (EP-94).
+            Door::Server => audiences.extend(
+                self.servers
+                    .load()
+                    .iter()
+                    .filter(|server| server.members.contains(&endpoint.slug))
+                    .flat_map(|server| self.server_audiences(server)),
+            ),
         }
         audiences
+    }
+
+    /// Every value that names a named server as an RFC 8707 resource: its Keycloak client
+    /// `mcp-{project}-{name}` and, when the deployment names its public URL, its address
+    /// (ADR-N-043 §2.2).
+    pub(crate) fn server_audiences(&self, server: &crate::mcp::server::McpServer) -> Vec<String> {
+        let mut audiences = vec![server.client()];
+        if let Some(base) = self.public_url.as_deref() {
+            audiences.push(format!("{base}{}", server.path()));
+        }
+        audiences
+    }
+
+    /// Replaces the named MCP servers (ADR-N-043): from the next request on.
+    pub fn replace_servers(&self, servers: crate::mcp::server::McpServers) {
+        self.servers.store(Arc::new(servers));
+    }
+
+    /// The named server at `/api/mcp/{project}/{name}`, if one is served.
+    pub(crate) fn server(
+        &self,
+        project: &str,
+        name: &str,
+    ) -> Option<crate::mcp::server::McpServer> {
+        self.servers
+            .load()
+            .iter()
+            .find(|server| server.project == project && server.name == name)
+            .cloned()
+    }
+
+    /// The project of the ServiceAccount a token's `azp` names, when it acts as itself rather
+    /// than for a person it exchanged a token for (PF-46, ADR-N-038).
+    pub(crate) fn account_project(&self, azp: &str) -> Option<String> {
+        self.accounts
+            .load()
+            .resolve(azp)
+            .filter(|account| !account.delegates)
+            .map(|account| account.project.clone())
     }
 
     /// Whether a verified token reaches `endpoint` through the hub (EP-88, PF-45, PF-46): its
@@ -376,6 +429,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route(
             "/api/mcp/.well-known/oauth-protected-resource",
             get(mcp::hub::protected_resource),
+        )
+        // A named server over chosen Endpoints (EP-92, ADR-N-043).
+        .route("/api/mcp/{project}/{name}", post(mcp::server::message))
+        .route(
+            "/api/mcp/{project}/{name}/.well-known/oauth-protected-resource",
+            get(mcp::server::protected_resource),
         )
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route(

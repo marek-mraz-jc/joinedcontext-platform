@@ -18,6 +18,7 @@ pub mod environment;
 pub mod grid;
 pub mod group;
 pub mod mapping;
+pub mod mcp_server;
 pub mod model_projection;
 pub mod org_settings;
 pub mod organization;
@@ -75,6 +76,7 @@ pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
     VocabularyAlignment,
 };
+pub use mcp_server::McpServerSpec;
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
@@ -137,6 +139,8 @@ pub type App = crate::envelope::ResourceEnvelope<AppSpec>;
 pub type KnowledgeSource = crate::envelope::ResourceEnvelope<KnowledgeSourceSpec>;
 /// `kind: AssistantDeployment` as a whole manifest (MF-52).
 pub type AssistantDeployment = crate::envelope::ResourceEnvelope<AssistantDeploymentSpec>;
+/// `kind: McpServer` as a whole manifest (MF-53).
+pub type McpServer = crate::envelope::ResourceEnvelope<McpServerSpec>;
 /// `kind: CkanInstance` as a whole manifest.
 pub type CkanInstance = crate::envelope::ResourceEnvelope<CkanInstanceSpec>;
 /// `kind: Blueprint` as a whole manifest.

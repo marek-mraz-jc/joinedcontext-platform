@@ -1135,3 +1135,124 @@ fn a_ckan_source_names_a_catalogue_the_project_declares() {
     assert!(with_assistant(&report).is_empty(), "{:?}", report.findings);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- T-3155: a named MCP server's members, resolved in the repository (MF-53, ADR-N-043) ---
+
+fn mcp_server(dir: &Path, audience: &str, members: &str) {
+    write(
+        dir,
+        "projects/ovzdusie/mcp/air.yaml",
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: McpServer\nmetadata:\n  name: air\n  namespace: ovzdusie\n  title: {{ en: Air in Banská Bystrica }}\nspec:\n  audience: {audience}\n  members:\n{members}"),
+    );
+}
+
+fn member(name: &str) -> String {
+    format!("    - {{ kind: Endpoint, name: {name} }}\n")
+}
+
+/// A project-list Endpoint beside the seed's public one, and one that serves no MCP.
+fn narrow_endpoints(dir: &Path) {
+    for (name, slug, extra) in [
+        (
+            "team-air",
+            "a4y7pq2mzt6vhx3nbwrs5cjd3f",
+            "audience: project-list\n  allowedProjects: [ovzdusie]",
+        ),
+        (
+            "no-mcp",
+            "b4y7pq2mzt6vhx3nbwrs5cjd3f",
+            "audience: public\n  mcp: false",
+        ),
+    ] {
+        write(
+            dir,
+            &format!("projects/ovzdusie/spaces/ovzdusie/endpoints/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  slug: {slug}\n  {extra}\n  enabledRepresentations: [\"ngsi-ld\"]\n"),
+        );
+    }
+}
+
+fn with_mcp_server(report: &validate::Report) -> Vec<&str> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("MF-53"))
+        .map(|f| f.message.as_str())
+        .collect()
+}
+
+/// MF-53: a server over Endpoints that exist, serve MCP and admit its audience is no finding.
+#[test]
+fn a_named_mcp_server_over_its_projects_endpoints_is_valid() {
+    let dir = valid_repo("mcp-server-ok");
+    narrow_endpoints(&dir);
+    mcp_server(
+        &dir,
+        "project-list",
+        &format!("{}{}", member("public-air"), member("team-air")),
+    );
+    let report = validate::run(&dir);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-53: an unknown member, a member without MCP and an audience wider than a member's are
+/// each named with the member and the rule.
+#[test]
+fn a_named_mcp_server_wider_than_its_members_or_naming_what_is_not_there_is_refused() {
+    let dir = valid_repo("mcp-server-refused");
+    narrow_endpoints(&dir);
+    mcp_server(
+        &dir,
+        "public",
+        &format!(
+            "{}{}{}",
+            member("team-air"),
+            member("no-mcp"),
+            member("nowhere")
+        ),
+    );
+    let report = validate::run(&dir);
+    let found = with_mcp_server(&report);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`ovzdusie/nowhere`") && m.contains("no manifest declares")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`ovzdusie/no-mcp`") && m.contains("serves no MCP")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`public`, wider than member Endpoint `ovzdusie/team-air`")),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-53: the kind refuses an empty member list and a member that is not an Endpoint.
+#[test]
+fn a_named_mcp_server_without_endpoint_members_is_refused_by_its_kind() {
+    let dir = valid_repo("mcp-server-kind");
+    mcp_server(
+        &dir,
+        "public",
+        "    - { kind: Policy, name: public-read }\n",
+    );
+    let report = validate::run(&dir);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.message.contains("a member is an Endpoint, not a Policy")),
+        "{:?}",
+        report.findings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
