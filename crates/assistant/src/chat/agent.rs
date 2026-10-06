@@ -3,13 +3,13 @@
 //! most [`MAX_CALLS`] model calls. The tools are `search` and the switched-on connectors' allowed
 //! tools; a name the model makes up is refused here and never called.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::sync::mpsc::Sender;
 
-use super::mcp::{Surface, Tool};
+use super::mcp::{cut, Surface, Tool, MAX_RESULT_CHARS};
 use super::model::{CallError, Model};
 use crate::embed::Embedder;
 use crate::{hybrid_search, Search};
@@ -79,6 +79,11 @@ pub enum Event {
         title: &'static str,
         detail: String,
     },
+    /// A script the model ran over a tool result, with its output or why there is none (AG-112).
+    Script {
+        code: String,
+        output: Result<String, String>,
+    },
     /// The last event: the tokens the question cost.
     Done(u64),
 }
@@ -100,6 +105,9 @@ pub struct Ask<'a> {
     pub tokens_per_conversation: u64,
     /// What the conversation spent before this question.
     pub spent_before: u64,
+    /// `jc-functions`, when the deployment has `sandbox: true` and the service knows where it is:
+    /// `run_script` is offered then and only then (AG-112).
+    pub functions: Option<&'a str>,
 }
 
 /// Data for the model: `<` and `>` escaped, so a passage cannot close its own block.
@@ -120,8 +128,9 @@ fn tool_name(endpoint: &str, tool: &str) -> Option<String> {
     .then_some(name)
 }
 
-/// `search` when the deployment has sources, then the connectors' tools.
-fn tool_specs(searchable: bool, connectors: &[Connected]) -> Vec<Value> {
+/// `search` when the deployment has sources, `run_script` when it has the sandbox, then the
+/// connectors' tools.
+fn tool_specs(searchable: bool, scripts: bool, connectors: &[Connected]) -> Vec<Value> {
     let mut tools = Vec::new();
     if searchable {
         tools.push(json!({
@@ -136,6 +145,23 @@ fn tool_specs(searchable: bool, connectors: &[Connected]) -> Vec<Value> {
             }
         }
     }));
+    }
+    if scripts {
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "run_script",
+                "description": "Run JavaScript over a tool result that was cut because it is long. The code is the body of an async function: `data` is the whole result (parsed JSON, or text), and what it returns is what you read. No network, no clock, at most 5 seconds.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "result": {"type": "integer", "description": "The number of the cut tool result."},
+                        "code": {"type": "string", "description": "The function body, e.g. return data.filter(e => e.place === 'X').map(e => e.name);"}
+                    },
+                    "required": ["result", "code"]
+                }
+            }
+        }));
     }
     for connector in connectors {
         for tool in &connector.tools {
@@ -218,7 +244,12 @@ pub async fn answer(
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
-    let tools = tool_specs(!ask.sources.is_empty(), ask.connectors);
+    let tools = tool_specs(
+        !ask.sources.is_empty(),
+        ask.functions.is_some(),
+        ask.connectors,
+    );
+    let mut kept: HashMap<usize, String> = HashMap::new();
     let mut messages = opening(ask.system_prompt, history, question);
     let mut citations: Vec<Citation> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -296,7 +327,7 @@ pub async fn answer(
                 repeated = true;
                 "This exact call was made already. Answer with what you have.".to_owned()
             } else {
-                run_tool(ask, name, arguments, &mut citations, events).await
+                run_tool(ask, name, arguments, &mut citations, &mut kept, events).await
             };
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
         }
@@ -310,9 +341,15 @@ async fn run_tool(
     name: &str,
     arguments: &str,
     citations: &mut Vec<Citation>,
+    kept: &mut HashMap<usize, String>,
     events: &Sender<Event>,
 ) -> String {
     let arguments: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    if name == "run_script" {
+        if let Some(functions) = ask.functions {
+            return run_script(ask, functions, &arguments, kept, events).await;
+        }
+    }
     if name == "search" && !ask.sources.is_empty() {
         send(
             events,
@@ -429,11 +466,21 @@ async fn run_tool(
                     tool: Some(tool.name.clone()),
                     endpoint,
                 });
-                format!(
+                // The model reads at most MAX_RESULT_CHARS of it; on a deployment with the sandbox
+                // the whole result is kept for run_script (AG-112).
+                let long = text.chars().count() > MAX_RESULT_CHARS;
+                let mut content = format!(
                     "<tool-result n=\"{n}\" tool=\"{}\">\n{}\n</tool-result>",
                     tool.name,
-                    quoted(&text)
-                )
+                    quoted(&cut(&text, MAX_RESULT_CHARS))
+                );
+                if long && ask.functions.is_some() {
+                    kept.insert(n, text);
+                    content.push_str(&format!(
+                        "\nThe whole result is kept as result {n}: call run_script with result {n} to filter or count it."
+                    ));
+                }
+                content
             }
             Err(why) => {
                 tracing::warn!(deployment = %ask.deployment, endpoint = %connector.endpoint, tool = %tool.name, %why, "a connector failed");
@@ -455,6 +502,62 @@ async fn run_tool(
     } else {
         tracing::warn!(deployment = %ask.deployment, tool = %name, "the model asked for a tool it was not offered");
         "There is no tool of that name. Use only the tools you were given.".into()
+    }
+}
+
+/// `run_script` over a kept result (AG-112): the code and its output reach the person too.
+async fn run_script(
+    ask: &Ask<'_>,
+    functions: &str,
+    arguments: &Value,
+    kept: &HashMap<usize, String>,
+    events: &Sender<Event>,
+) -> String {
+    let code = arguments
+        .get("code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let result = arguments
+        .get("result")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok());
+    let (Some(n), Some(data)) = (result, result.and_then(|n| kept.get(&n))) else {
+        return "run_script reads a tool result that was cut; name its number in `result`.".into();
+    };
+    if code.is_empty() || code.chars().count() > super::script::MAX_CODE_CHARS {
+        return format!(
+            "run_script takes code of 1 to {} characters.",
+            super::script::MAX_CODE_CHARS
+        );
+    }
+    let output = match ask.model.token().await {
+        Ok(token) => {
+            super::script::run(
+                ask.http,
+                functions,
+                &token,
+                code,
+                super::script::data_of(data),
+            )
+            .await
+        }
+        Err(err) => Err(err.to_string()),
+    };
+    send(
+        events,
+        Event::Script {
+            code: code.to_owned(),
+            output: output.clone(),
+        },
+    )
+    .await;
+    match output {
+        Ok(text) => format!(
+            "<script-output of=\"{n}\">\n{}\n</script-output>\nCite it as [{n}].",
+            quoted(&cut(&text, MAX_RESULT_CHARS))
+        ),
+        Err(why) => format!("{}. Fix the script or answer without it.", quoted(&why)),
     }
 }
 

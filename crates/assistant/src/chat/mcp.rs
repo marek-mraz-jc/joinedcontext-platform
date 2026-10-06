@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 /// The most of one tool result the model reads; the rest is cut and the cut is said.
 pub const MAX_RESULT_CHARS: usize = 20_000;
 
+/// The most of one tool result kept for a script to read (AG-112): `jc-functions` takes a
+/// request body of 256 KiB.
+pub const MAX_KEPT_CHARS: usize = 250_000;
+
 /// One tool of a connector, as the model is offered it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tool {
@@ -94,7 +98,7 @@ impl Surface {
             .collect())
     }
 
-    /// Calls `name` with `arguments` and returns its text content, cut at [`MAX_RESULT_CHARS`].
+    /// Calls `name` with `arguments` and returns its text content, cut at [`MAX_KEPT_CHARS`].
     pub async fn call(
         &self,
         http: &reqwest::Client,
@@ -123,7 +127,7 @@ impl Surface {
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             return Err(format!("the tool failed: {}", cut(&text, 500)));
         }
-        Ok(cut(&text, MAX_RESULT_CHARS))
+        Ok(cut(&text, MAX_KEPT_CHARS))
     }
 }
 

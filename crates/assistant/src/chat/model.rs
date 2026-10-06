@@ -71,7 +71,9 @@ impl Model {
         }
     }
 
-    async fn token(&self) -> Result<String, CallError> {
+    /// The service's own token, held until shortly before it expires; its audience names the
+    /// agent proxy and `jc-functions`.
+    pub async fn token(&self) -> Result<String, CallError> {
         let mut held = self.token.lock().await;
         if let Some((token, until)) = held.as_ref() {
             if Instant::now() < *until {

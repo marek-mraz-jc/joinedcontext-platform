@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod mcp;
 pub mod model;
+pub mod script;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -49,6 +50,9 @@ pub struct ChatState {
     pub http: reqwest::Client,
     /// The Context Gateway, scheme and authority.
     pub gateway: String,
+    /// `jc-functions`, scheme and authority, for a deployment with `sandbox: true`; `None`
+    /// offers no script anywhere.
+    pub functions: Option<String>,
     /// The manifests, replaced by the worker every minute.
     pub snapshot: RwLock<Arc<Snapshot>>,
     pub limits: Mutex<Limits>,
@@ -376,6 +380,13 @@ fn sse(event: &Event) -> SseEvent {
             "error",
             json!({"status": status, "title": title, "detail": detail}),
         ),
+        Event::Script { code, output } => (
+            "script",
+            match output {
+                Ok(output) => json!({"code": code, "output": output}),
+                Err(error) => json!({"code": code, "error": error}),
+            },
+        ),
         Event::Done(tokens) => ("done", json!({"tokens": tokens})),
     };
     SseEvent::default().event(name).data(data.to_string())
@@ -499,6 +510,10 @@ async fn chat(
             tokens_per_day,
             tokens_per_conversation,
             spent_before,
+            functions: state
+                .functions
+                .as_deref()
+                .filter(|_| deployment.spec.sandbox),
         };
         let spent = agent::answer(&ask, &question.history, &question.message, &tx).await;
         if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent).await {

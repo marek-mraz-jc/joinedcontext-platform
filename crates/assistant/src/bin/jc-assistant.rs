@@ -10,7 +10,8 @@
 //! `JC_ASSISTANT_PROXY_URL` (`jc-agent-proxy`), `JC_ASSISTANT_GATEWAY_URL` (the connectors' MCP
 //! surfaces), `JC_ASSISTANT_TOKEN_URL`, `JC_ASSISTANT_CLIENT_ID` (default `jc-assistant`) and
 //! `JC_ASSISTANT_CLIENT_SECRET_FILE` (the service's own Keycloak client), `JC_ASSISTANT_LLM` (the
-//! model the completions name).
+//! model the completions name) and `JC_ASSISTANT_FUNCTIONS_URL` (`jc-functions`, for the scripts
+//! of a deployment with `sandbox: true`; none without it).
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,6 +143,16 @@ async fn main() -> ExitCode {
         model: Model::new(model_config, http.clone()),
         http,
         gateway,
+        functions: match env("JC_ASSISTANT_FUNCTIONS_URL") {
+            None => None,
+            Some(_) => match base("JC_ASSISTANT_FUNCTIONS_URL") {
+                Ok(functions) => Some(functions),
+                Err(why) => {
+                    tracing::error!(%why, "the sandbox address is not usable");
+                    return ExitCode::FAILURE;
+                }
+            },
+        },
         snapshot: RwLock::new(Arc::default()),
         limits: tokio::sync::Mutex::default(),
     });

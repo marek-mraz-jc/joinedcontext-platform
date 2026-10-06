@@ -34,6 +34,7 @@ struct World {
     realm: MockServer,
     proxy: MockServer,
     gateway: MockServer,
+    functions: MockServer,
     app: axum::Router,
 }
 
@@ -154,6 +155,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             },
         ),
     ]);
+    let functions = MockServer::start().await;
     let http = reqwest::Client::new();
     let state = Arc::new(ChatState {
         pool: pool.clone(),
@@ -170,6 +172,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         ),
         http,
         gateway: gateway.uri(),
+        functions: Some(functions.uri()),
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
     });
@@ -180,6 +183,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         realm,
         proxy,
         gateway,
+        functions,
         app: router(state),
     }
 }
@@ -727,5 +731,157 @@ async fn a_deployment_without_sources_offers_no_search() {
         .as_str()
         .expect("refusal");
     assert!(refused.contains("no tool of that name"), "{refused}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// AG-112: on a deployment with the sandbox, a connector result too long for the model is kept
+/// whole, the model filters it with run_script in jc-functions (no network, the service's
+/// token), and the person sees the code and its output; without the sandbox no script is offered.
+#[tokio::test]
+async fn a_long_result_is_filtered_by_a_script_in_the_sandbox() {
+    let mut sandboxed = deployment(Channel::Public, 200_000, 10);
+    sandboxed.spec.sandbox = true;
+    let w = world("chatscript", sandboxed).await;
+    let events_json: Vec<Value> = (0..1000)
+        .map(|i| json!({"name": format!("event {i}"), "place": if i % 100 == 0 { "Námestie SNP" } else { "Radvaň" }}))
+        .collect();
+    let long = serde_json::to_string(&events_json).expect("json");
+    assert!(long.chars().count() > 20_000);
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{SLUG}/mcp")))
+        .and(body_string_contains("tools/call"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": long}]}})))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/invoke"))
+        .and(header("authorization", "Bearer svc-token"))
+        .and(body_string_contains("\"via\":\"none\""))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"status": 200, "body": ["event 0", "event 100"], "logs": []}),
+            ),
+        )
+        .mount(&w.functions)
+        .await;
+    let code = "return data.filter(e => e.place === 'Námestie SNP').slice(0, 2).map(e => e.name);";
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                tool_call("c1", "ovzdusie__query_entities", json!({"type": "Event"})),
+                500,
+            ),
+            completion(
+                tool_call("c2", "run_script", json!({"result": 1, "code": code})),
+                500,
+            ),
+            completion(
+                json!({"role": "assistant", "content": "Na Námestí SNP: event 0 a event 100 [1]."}),
+                500,
+            ),
+        ],
+    )
+    .await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Čo je na Námestí SNP?"}), None),
+    )
+    .await;
+    let script_event = events
+        .iter()
+        .find(|(n, _)| n == "script")
+        .expect("a script event")
+        .1
+        .clone();
+    assert_eq!(
+        script_event,
+        json!({"code": code, "output": "[\"event 0\",\"event 100\"]"})
+    );
+    let calls = model_calls(&w.proxy).await;
+    let offered: Vec<&str> = calls[0].1["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        offered,
+        ["search", "run_script", "ovzdusie__query_entities"]
+    );
+    let cut_result = calls[1].1["messages"][3]["content"]
+        .as_str()
+        .expect("the cut result");
+    assert!(cut_result.contains("[cut:") && cut_result.contains("call run_script with result 1"));
+    let output = calls[2].1["messages"][5]["content"]
+        .as_str()
+        .expect("the script output");
+    assert!(output.contains("<script-output of=\"1\">"));
+    let invoked = w.functions.received_requests().await.unwrap_or_default();
+    assert_eq!(invoked.len(), 1);
+    let sent: Value = serde_json::from_slice(&invoked[0].body).expect("json");
+    assert_eq!(
+        sent["request"]["body"].as_array().map(Vec::len),
+        Some(1000),
+        "the whole result, parsed"
+    );
+    assert!(sent["config"].as_object().is_some_and(|c| c.is_empty()));
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// AG-112: without `sandbox: true` the model is offered no script, and one asked for anyway is
+/// refused and never sent to jc-functions.
+#[tokio::test]
+async fn no_script_runs_without_the_sandbox() {
+    let w = world("chatnoscript", deployment(Channel::Public, 50_000, 10)).await;
+    let long = "x".repeat(30_000);
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{SLUG}/mcp")))
+        .and(body_string_contains("tools/call"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": long}]}}),
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    script(
+        &w.proxy,
+        vec![
+            completion(tool_call("c0", "ovzdusie__query_entities", json!({})), 100),
+            completion(
+                tool_call(
+                    "c1",
+                    "run_script",
+                    json!({"result": 1, "code": "return 1;"}),
+                ),
+                100,
+            ),
+            completion(json!({"role": "assistant", "content": "Neviem."}), 100),
+        ],
+    )
+    .await;
+    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), None)).await;
+    assert!(events.iter().all(|(n, _)| n != "script"));
+    let calls = model_calls(&w.proxy).await;
+    assert!(calls[0].1["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .all(|t| t.pointer("/function/name") != Some(&json!("run_script"))));
+    let shown = calls[1].1["messages"][3]["content"]
+        .as_str()
+        .expect("the result");
+    assert!(
+        shown.contains("[cut:") && shown.chars().count() < 21_000,
+        "cut for the model"
+    );
+    assert!(!shown.contains("run_script"));
+    assert!(w
+        .functions
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
