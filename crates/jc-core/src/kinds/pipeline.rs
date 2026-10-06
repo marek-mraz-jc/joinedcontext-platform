@@ -927,8 +927,38 @@ pub fn validate_processor(field: &'static str, processor: &serde_json::Value) ->
     config_strings(&config[name], &mut texts);
     for text in &texts {
         validate_author_bloblang(field, text)?;
+        if let Some(reason) = super::data_source::refused_target(text) {
+            return Err(refused(reason.to_owned()));
+        }
+    }
+    if message_url(&config[name]) {
+        return Err(refused(
+            "a step's `url` starts with its scheme and host, never with `${! … }`, so where it \
+             connects is known before it runs (PL-07)"
+                .to_owned(),
+        ));
     }
     Ok(())
+}
+
+/// Whether a `url` or `urls` anywhere in a configuration is taken whole from the message.
+fn message_url(value: &serde_json::Value) -> bool {
+    let from_message = |v: &serde_json::Value| {
+        v.as_str()
+            .is_some_and(|s| s.trim_start().starts_with("${!"))
+    };
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(message_url),
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, inner)| {
+            (key == "url" && from_message(inner))
+                || (key == "urls"
+                    && inner
+                        .as_array()
+                        .is_some_and(|urls| urls.iter().any(from_message)))
+                || message_url(inner)
+        }),
+        _ => false,
+    }
 }
 
 /// The first refused processor anywhere inside a configuration: a key of that name whose value

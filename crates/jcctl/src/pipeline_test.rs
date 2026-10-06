@@ -69,6 +69,9 @@ pub enum HarnessError {
     /// The sample URL is not http or https.
     #[error("sample: url '{0}' is not http or https")]
     BadUrl(String),
+    /// The sample URL reads the runner's environment or reaches its own pod (T-3162).
+    #[error("sample: {0}")]
+    RefusedUrl(&'static str),
     /// The pipeline's compute stage is not a Bento processor this harness can run.
     #[error("compute kind {0} is not tested as a Bento processor")]
     NotABentoProcessor(ComputeKind),
@@ -120,6 +123,16 @@ pub fn harness(
         (None, Some(url)) => {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
                 return Err(HarnessError::BadUrl(url.clone()));
+            }
+            // The runner fills `${NAME}` and `${! … }` in a URL from its own environment, which
+            // holds every project's credentials (PL-16): a sample URL is literal.
+            if url.contains('$') {
+                return Err(HarnessError::RefusedUrl(
+                    "a sample URL holds no `$`: the runner would fill it from its own environment; write it as `%24`",
+                ));
+            }
+            if let Some(reason) = jc_core::kinds::data_source::refused_target(url) {
+                return Err(HarnessError::RefusedUrl(reason));
             }
             // Not an `http_client` input: that one polls without pause, and a 1.2 MB feed
             // reached the capture route many times a second until the Portal was OOM-killed
@@ -651,6 +664,36 @@ mod tests {
             harness(&spec(None), &ftp, "http://p").unwrap_err(),
             HarnessError::BadUrl(_)
         ));
+        // T-3162: a sample URL is fetched on the runner, so it reaches neither the runner's own
+        // pod nor its environment; a public feed is still fetched.
+        for url in [
+            "http://127.0.0.1:4195/streams",
+            "http://localhost:4180/token",
+            "http://[::1]/",
+            "https://feed.example/?k=${JC_CLIENT_SECRET_BBSK}",
+            "https://feed.example/${! env(\"JC_CLIENT_SECRET\") }",
+        ] {
+            let sample = Sample {
+                text: None,
+                url: Some(url.into()),
+                format: SampleFormat::Json,
+            };
+            let refused = harness(&spec(None), &sample, "http://p").unwrap_err();
+            assert!(
+                matches!(refused, HarnessError::RefusedUrl(_)),
+                "{url}: {refused:?}"
+            );
+            assert!(
+                !refused.to_string().contains("JC_CLIENT_SECRET"),
+                "{url}: {refused}"
+            );
+        }
+        let public = Sample {
+            text: None,
+            url: Some("https://opendata.example/aq.json".into()),
+            format: SampleFormat::Json,
+        };
+        assert!(harness(&spec(None), &public, "http://p").is_ok());
         let big = Sample {
             text: Some("x".repeat(MAX_SAMPLE_BYTES + 1)),
             url: None,

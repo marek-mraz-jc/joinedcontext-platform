@@ -572,6 +572,12 @@ impl DataSourceSpec {
         let mut strings = Vec::new();
         strings_of(input_val, "spec.input".to_string(), &mut strings);
         for (path, text) in strings {
+            if let Some(reason) = refused_target(text) {
+                return Err(Error::Invalid {
+                    field: path,
+                    reason: reason.to_owned(),
+                });
+            }
             for caps in EMBEDDED_PASSWORD_RE.captures_iter(text) {
                 let password = caps
                     .get(1)
@@ -832,14 +838,151 @@ pub fn env_var_of(source_name: &str, reference: &SecretRef) -> String {
 }
 
 fn url(value: &str, schemes: &'static [&'static str], field: &'static str) -> Result<()> {
-    if schemes.iter().any(|s| value.starts_with(s)) && value.len() > 8 {
-        return Ok(());
+    let refuse = |reason| {
+        Err(Error::Name {
+            field,
+            value: value.to_owned(),
+            reason,
+        })
+    };
+    if !(schemes.iter().any(|s| value.starts_with(s)) && value.len() > 8) {
+        return refuse("the URL scheme is not one this connection type speaks");
     }
-    Err(Error::Name {
-        field,
-        value: value.to_owned(),
-        reason: "the URL scheme is not one this connection type speaks",
-    })
+    if let Some(reason) = refused_runner_read(value).or_else(|| refused_target(value)) {
+        return refuse(reason);
+    }
+    Ok(())
+}
+
+/// The runner variables a typed URL may name: where the gateway and the token service are, and
+/// the organisation's domain. None of them is a credential.
+const URL_VARIABLES: &[&str] = &[
+    "JC_GATEWAY_HOST",
+    "JC_GATEWAY_URL",
+    "JC_TOKEN_URL",
+    "JC_ORG_DOMAIN",
+];
+
+/// Why a typed URL reads the runner's environment, if it does (T-3162, PL-16).
+///
+/// The runner replaces every `${NAME}` in a stream with its own environment when the stream is
+/// loaded, and that environment holds every project's credentials, so `https://x/?k=${JC_…}`
+/// would send one of them to `x`. A URL names only [`URL_VARIABLES`]; a `$` the feed needs is
+/// written `%24`.
+pub fn refused_runner_read(url: &str) -> Option<&'static str> {
+    let mut rest = url;
+    while let Some(start) = rest.find('$') {
+        let tail = &rest[start + 1..];
+        let name = tail
+            .strip_prefix('{')
+            .and_then(|inner| inner.split_once('}'))
+            .map(|(name, _)| name);
+        match name {
+            Some(name) if URL_VARIABLES.contains(&name) => {
+                rest = &tail[name.len() + 2..];
+            }
+            _ => {
+                return Some(
+                    "a URL names no runner variable but JC_GATEWAY_HOST, JC_GATEWAY_URL, \
+                     JC_TOKEN_URL or JC_ORG_DOMAIN: the runner fills `${…}` from an environment \
+                     that holds every project's credentials; write a literal `$` as `%24` \
+                     (PL-16)",
+                )
+            }
+        }
+    }
+    None
+}
+
+/// Why a URL somewhere in `text` reaches the runner's own pod or a private address, if one does
+/// (T-3162, PL-07).
+///
+/// One runner pod runs every project's streams, and its stream API and token sidecar answer on
+/// loopback, where neither the NetworkPolicy nor the mesh sees the call. So a host that is
+/// loopback, unspecified, link-local, private or carrier-grade NAT, `localhost`, a numeric form
+/// other than a dotted quad, or one taken from the message (`${! … }`) is refused. Cluster
+/// Services by name stay allowed: the NetworkPolicy and the mesh decide those.
+// ponytail: a public name that resolves to loopback (`127.0.0.1.nip.io`) is not caught here; one
+// runner per project (T-1508 option c) is the boundary that covers it.
+pub fn refused_target(text: &str) -> Option<&'static str> {
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let after = &rest[at + 3..];
+        let end = after
+            .find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'' | '`') || c.is_whitespace())
+            .unwrap_or(after.len());
+        let authority = &after[..end];
+        let host_port = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
+        if let Some(reason) = refused_host(host_port) {
+            return Some(reason);
+        }
+        rest = &after[end..];
+    }
+    None
+}
+
+fn refused_host(host_port: &str) -> Option<&'static str> {
+    use std::net::{IpAddr, Ipv4Addr};
+    const OWN: &str = "a pipeline does not connect to the runner's own pod or a private address: \
+                       the runner's stream API and token sidecar answer there for every project \
+                       (PL-07)";
+    if host_port.contains("${!") {
+        return Some(
+            "the host of a URL is written out, never taken from a message, so where a step \
+             connects is known before it runs (PL-07)",
+        );
+    }
+    let host = match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host_port.split(':').next().unwrap_or_default(),
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.contains('%') {
+        return Some("a host is written without percent-encoding (PL-07)");
+    }
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "localhost.localdomain"
+        || host == "ip6-localhost"
+        || host == "ip6-loopback"
+    {
+        return Some(OWN);
+    }
+    let v4_refused = |ip: Ipv4Addr| {
+        let [a, b, ..] = ip.octets();
+        ip.is_loopback()
+            || ip.is_unspecified()
+            || ip.is_link_local()
+            || ip.is_private()
+            || ip.is_broadcast()
+            || a == 0
+            || (a == 100 && (64..128).contains(&b))
+    };
+    let refused = match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => v4_refused(ip),
+        Ok(IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || first & 0xfe00 == 0xfc00
+                || first & 0xffc0 == 0xfe80
+                || ip.to_ipv4().is_some_and(v4_refused)
+        }
+        // `127.1`, `2130706433`, `0x7f.0.0.1`: a C resolver reads them as addresses.
+        Err(_) => {
+            !host.is_empty()
+                && host.split('.').all(|label| {
+                    !label.is_empty()
+                        && (label.bytes().all(|b| b.is_ascii_digit())
+                            || label
+                                .strip_prefix("0x")
+                                .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit())))
+                })
+        }
+    };
+    refused.then_some(OWN)
 }
 
 /// An RFC 9110 field name: a non-empty token, so a manifest cannot smuggle a second header or
