@@ -58,10 +58,11 @@ impl Sidecar {
     }
 }
 
-/// The sidecar's one route: `POST /token`, the OAuth 2 token endpoint Bento calls.
+/// `POST /token`, the OAuth 2 token endpoint Bento calls, and `GET /healthz` for the probes.
 pub fn router(sidecar: Sidecar) -> Router {
     Router::new()
         .route("/token", post(token))
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
         .with_state(sidecar)
 }
 
