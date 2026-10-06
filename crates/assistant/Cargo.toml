@@ -1,0 +1,18 @@
+[package]
+name = "assistant"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "jc-assistant: the knowledge assistant's store, migrations and hybrid retrieval (ADR-N-040)"
+
+[dependencies]
+# The Portal's version. `macros` only for `migrate!`, which embeds the migration files at build
+# time; every query is a runtime one, checked by the tests against the cluster's own PostgreSQL
+# image, so building needs no database. No TLS feature: the service reaches the cluster's
+# PostgreSQL inside the mesh, which Linkerd already encrypts, and a TLS stack would bring
+# webpki-roots, whose CDLA-Permissive-2.0 licence deny.toml does not allow.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
