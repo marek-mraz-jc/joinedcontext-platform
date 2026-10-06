@@ -84,6 +84,8 @@ pub struct Mirror {
     pub table: datastore::Outcome,
     /// How many rows were written into it.
     pub rows: usize,
+    /// How many rows left it: entities the Endpoint no longer answers (T-3118).
+    pub removed: usize,
 }
 
 /// One printed line: what happened to one Endpoint.
@@ -111,10 +113,14 @@ impl fmt::Display for Line {
         if let Some(mirror) = &self.mirror {
             write!(
                 f,
-                ", DataStore {} ({} rows)",
+                ", DataStore {} ({} rows",
                 table_word(mirror.table),
                 mirror.rows
             )?;
+            if mirror.removed > 0 {
+                write!(f, ", {} gone", mirror.removed)?;
+            }
+            write!(f, ")")?;
         }
         Ok(())
     }
@@ -476,7 +482,11 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
                     table = datastore::Outcome::NotMirrored;
                 }
             }
-            Some(Mirror { table, rows: 0 })
+            Some(Mirror {
+                table,
+                rows: 0,
+                removed: 0,
+            })
         }
         None => None,
     };
@@ -552,6 +562,7 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
     let (package_id, live) = live_tables(api, target.dataset_name())?;
     let mut table = datastore::Outcome::Unchanged;
     let mut written = 0;
+    let mut removed = 0;
     let mut refused_view = None;
     for (entity_type, indices) in &by_type {
         let definition = rows
@@ -620,6 +631,9 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
             written += batch.len();
             datastore::upsert(api, &resource_id, batch)?;
         }
+        // The answer is the whole dataset, so a row it no longer holds is an entity gone.
+        let keep: BTreeSet<&str> = indices.iter().map(|&row| raw[row][id].as_str()).collect();
+        removed += datastore::prune(api, &resource_id, &keep)?.len();
     }
 
     // An answer without a row says nothing about which types are gone, so it removes nothing.
@@ -639,6 +653,7 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
     Ok(Mirror {
         table,
         rows: written,
+        removed,
     })
 }
 

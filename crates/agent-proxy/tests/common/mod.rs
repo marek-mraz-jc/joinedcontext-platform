@@ -46,6 +46,7 @@ pub fn sample_run(allows_write: bool) -> RunContext {
         repository: None,
         status: "building".to_owned(),
         ticket_hash: ticket_hash(TICKET),
+        kind: String::new(),
         max_tokens: 1000,
         allowed_hosts: vec!["crates.io".to_owned()],
         requests_per_minute: 100,
@@ -107,6 +108,7 @@ pub fn state(run: RunContext, bases: Bases) -> Arc<ProxyState> {
         runs: RunResolver::with_cached_at(portal_base, run),
         credentials,
         limits: LimitManager::default(),
+        data_credentials: Default::default(),
         http: reqwest::Client::new(),
         // No redirect of its own: the fetch route checks every hop against the allow-list.
         egress: reqwest::Client::builder()

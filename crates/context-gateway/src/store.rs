@@ -10,13 +10,14 @@
 use crate::auth::accounts::{accounts_of, ServiceAccounts};
 use crate::auth::dataspace_token::{agreements_of, Agreements};
 use crate::federation::{federations_of, Federations};
+use crate::mcp::server::{McpServer, McpServers};
 use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::translators::view_mapping::ViewMapping;
 use crate::units::UnitRules;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
-    ModelProjectionSpec, PolicySpec, PrincipalKind, Representation,
+    McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, Representation,
 };
 use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
@@ -32,6 +33,7 @@ pub type Tables = (
     Federations,
     Agreements,
     Limits,
+    McpServers,
 );
 
 const GATEWAY_BODY: &str = "spec.limits.gateway.maxRequestBodyMegabytes";
@@ -173,7 +175,67 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         federations_of(repo),
         agreements_of(repo),
         limits_of(repo),
+        servers_of(repo),
     )
+}
+
+/// The named MCP servers the repository declares, each member resolved to its Endpoint's slug
+/// (ADR-N-043). A member that names no Endpoint here is left out with a line in the log; a
+/// server keeps serving the members that remain, which `jcctl validate` refuses before merge.
+pub fn servers_of(repo: &Repository) -> McpServers {
+    let slugs: BTreeMap<(String, String), String> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Endpoint")
+        .filter_map(|(id, resource)| {
+            let spec = spec_of::<EndpointSpec>(&resource.manifest)?;
+            Some((
+                (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                spec.slug.to_string(),
+            ))
+        })
+        .collect();
+    let mut servers = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "McpServer" {
+            continue;
+        }
+        let Some(spec) = spec_of::<McpServerSpec>(&resource.manifest) else {
+            continue;
+        };
+        let project = id.namespace.clone().unwrap_or_default();
+        if let Err(error) = spec.validate(&project) {
+            tracing::warn!(server = %id.name, %error, "the McpServer is not served");
+            continue;
+        }
+        let members = spec
+            .member_ids(&project)
+            .filter_map(|(namespace, name)| {
+                let slug = slugs.get(&(namespace.to_owned(), name.to_owned()));
+                if slug.is_none() {
+                    tracing::warn!(server = %id.name, member = %name, project = %namespace, "the member names no Endpoint and is left out");
+                }
+                slug.cloned()
+            })
+            .collect();
+        let text = |key| {
+            let texts = language_map(&resource.manifest.metadata.rest, key);
+            texts
+                .get("")
+                .or_else(|| texts.get("en"))
+                .or_else(|| texts.values().next())
+                .cloned()
+        };
+        servers.push(McpServer {
+            title: text("title"),
+            description: text("description"),
+            name: id.name.clone(),
+            members,
+            audience: spec.audience,
+            allowed_projects: spec.allowed_projects,
+            project,
+        });
+    }
+    servers
 }
 
 /// [`load_from`], plus every preview under `previews` rendered with its prefix (CC-78). A preview
@@ -185,7 +247,7 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements, limits) =
+    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers) =
         load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -220,7 +282,15 @@ pub fn load_with_previews(
                 .filter(|space| !segments.contains(&space.endpoint.space)),
         );
     }
-    Ok((endpoints, spaces, accounts, federations, agreements, limits))
+    Ok((
+        endpoints,
+        spaces,
+        accounts,
+        federations,
+        agreements,
+        limits,
+        servers,
+    ))
 }
 
 /// The endpoint table a loaded repository describes.
@@ -569,7 +639,7 @@ fn bound_policy(
 ) -> Vec<PolicySpec> {
     let bound: Vec<PolicySpec> = named
         .iter()
-        .filter(|(name, _)| policy_ref.space() == space && name == policy_ref.local_id())
+        .filter(|(name, _)| policy_ref.space() == Some(space) && name == policy_ref.local_id())
         .map(|(_, spec)| spec.clone())
         .collect();
     if bound.is_empty() {

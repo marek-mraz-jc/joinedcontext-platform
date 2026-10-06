@@ -39,6 +39,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let state = Arc::new(ProxyState::new(config_arc, runs, credentials, limits));
+    // The model key's state reaches the Portal within a probe interval (AG-96).
+    tokio::spawn(agent_proxy::model_key::watch((*state).clone()));
 
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     axum::serve(listener, router(state))

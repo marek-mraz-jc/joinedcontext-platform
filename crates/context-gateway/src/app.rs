@@ -105,6 +105,8 @@ pub struct Gateway {
     /// The data space agreements, swapped whole with the rest: a terminated agreement stops
     /// authorising reads in the same reconcile that withdraws its compiled grants (DS-12).
     agreements: ArcSwap<Agreements>,
+    /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
+    servers: ArcSwap<crate::mcp::server::McpServers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// The base a rewritten notification endpoint carries, when it is not the public one.
@@ -159,6 +161,8 @@ pub enum Door {
     Endpoint,
     /// `/api/mcp`, naming the Endpoint in the `endpoint` argument (EP-87).
     Hub,
+    /// `/api/mcp/{project}/{name}`, a named server over chosen Endpoints (EP-92, ADR-N-043).
+    Server,
 }
 
 impl Gateway {
@@ -173,6 +177,7 @@ impl Gateway {
             accounts: ArcSwap::from_pointee(ServiceAccounts::new()),
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
+            servers: ArcSwap::from_pointee(Vec::new()),
             public_url: None,
             egress_url: None,
             private_hosts: Vec::new(),
@@ -261,10 +266,58 @@ impl Gateway {
     /// What a token may be bound to on a call to `endpoint` through `door`.
     fn audiences_by(&self, endpoint: &Endpoint, door: Door) -> Vec<String> {
         let mut audiences = self.audiences_for(endpoint);
-        if door == Door::Hub {
-            audiences.extend(self.hub_audiences());
+        match door {
+            Door::Endpoint => {}
+            Door::Hub => audiences.extend(self.hub_audiences()),
+            // A server's token reaches the members of that server and nothing else (EP-94).
+            Door::Server => audiences.extend(
+                self.servers
+                    .load()
+                    .iter()
+                    .filter(|server| server.members.contains(&endpoint.slug))
+                    .flat_map(|server| self.server_audiences(server)),
+            ),
         }
         audiences
+    }
+
+    /// Every value that names a named server as an RFC 8707 resource: its Keycloak client
+    /// `mcp-{project}-{name}` and, when the deployment names its public URL, its address
+    /// (ADR-N-043 §2.2).
+    pub(crate) fn server_audiences(&self, server: &crate::mcp::server::McpServer) -> Vec<String> {
+        let mut audiences = vec![server.client()];
+        if let Some(base) = self.public_url.as_deref() {
+            audiences.push(format!("{base}{}", server.path()));
+        }
+        audiences
+    }
+
+    /// Replaces the named MCP servers (ADR-N-043): from the next request on.
+    pub fn replace_servers(&self, servers: crate::mcp::server::McpServers) {
+        self.servers.store(Arc::new(servers));
+    }
+
+    /// The named server at `/api/mcp/{project}/{name}`, if one is served.
+    pub(crate) fn server(
+        &self,
+        project: &str,
+        name: &str,
+    ) -> Option<crate::mcp::server::McpServer> {
+        self.servers
+            .load()
+            .iter()
+            .find(|server| server.project == project && server.name == name)
+            .cloned()
+    }
+
+    /// The project of the ServiceAccount a token's `azp` names, when it acts as itself rather
+    /// than for a person it exchanged a token for (PF-46, ADR-N-038).
+    pub(crate) fn account_project(&self, azp: &str) -> Option<String> {
+        self.accounts
+            .load()
+            .resolve(azp)
+            .filter(|account| !account.delegates)
+            .map(|account| account.project.clone())
     }
 
     /// Whether a verified token reaches `endpoint` through the hub (EP-88, PF-45, PF-46): its
@@ -376,6 +429,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route(
             "/api/mcp/.well-known/oauth-protected-resource",
             get(mcp::hub::protected_resource),
+        )
+        // A named server over chosen Endpoints (EP-92, ADR-N-043).
+        .route("/api/mcp/{project}/{name}", post(mcp::server::message))
+        .route(
+            "/api/mcp/{project}/{name}/.well-known/oauth-protected-resource",
+            get(mcp::server::protected_resource),
         )
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route(
@@ -820,13 +879,11 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
-    // The identifier in the path belongs to this organization and this space or the
-    // request is malformed, whichever verb carries it (PF-10, PF-42).
+    // The identifier in the path is an NGSI-LD URN or the request is malformed, whichever
+    // verb carries it (PF-43). Its segments name nothing: the space is the Endpoint's (PF-42).
     if let Some(raw) = operations::addressed_entity(&path) {
         let id = query::decode(raw);
-        if let Err(refusal) =
-            write_guard::check_identifier(&id, None, &endpoint.space, &gateway.org_domain)
-        {
+        if let Err(refusal) = write_guard::check_identifier(&id, None) {
             return ProblemDetails::from(refusal).into_response();
         }
         // A write to an id outside the grant's types and patterns is refused here, before a
@@ -899,14 +956,7 @@ pub(crate) async fn serve_ngsi_ld(
             .headers
             .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
     } else if operation.is_write() && !sent.is_empty() {
-        match judge_write(
-            &sent,
-            &path,
-            operation,
-            &constraints,
-            &endpoint,
-            &gateway.org_domain,
-        ) {
+        match judge_write(&sent, &path, operation, &constraints, &endpoint) {
             Err(problem) => return problem.into_response(),
             Ok(Judged::Whole) => {}
             // A batch the grants divide: the permitted entities go on, the refused ones are
@@ -2175,7 +2225,6 @@ fn judge_write(
     operation: Operation,
     constraints: &Constraints,
     endpoint: &Endpoint,
-    org_domain: &str,
 ) -> Result<Judged, Box<ProblemDetails>> {
     let Ok(payload) = serde_json::from_slice::<Value>(body) else {
         return Err(Box::new(
@@ -2193,24 +2242,12 @@ fn judge_write(
         Value::Array(entries) if divides(operation) => entries,
         Value::Array(entities) => {
             for entity in &entities {
-                refuse_entity(
-                    entity,
-                    addressed.as_deref(),
-                    constraints,
-                    endpoint,
-                    org_domain,
-                )?;
+                refuse_entity(entity, addressed.as_deref(), constraints, endpoint)?;
             }
             return Ok(Judged::Whole);
         }
         other => {
-            refuse_entity(
-                &other,
-                addressed.as_deref(),
-                constraints,
-                endpoint,
-                org_domain,
-            )?;
+            refuse_entity(&other, addressed.as_deref(), constraints, endpoint)?;
             return Ok(Judged::Whole);
         }
     };
@@ -2224,9 +2261,9 @@ fn judge_write(
     let mut permitted = Vec::with_capacity(entries.len());
     let mut refused = Vec::new();
     for entry in entries {
-        match refuse_entity(&entry, None, constraints, endpoint, org_domain) {
+        match refuse_entity(&entry, None, constraints, endpoint) {
             Ok(()) => permitted.push(entry),
-            // A malformed or foreign id is no grant decision but a malformed write, and a batch
+            // A malformed id is no grant decision but a malformed write, and a batch
             // half applied around it is the one outcome nobody asked for (PF-42, T-1697).
             Err(problem) if problem.status == StatusCode::BAD_REQUEST.as_u16() => {
                 return Err(problem);
@@ -2250,7 +2287,6 @@ fn refuse_entity(
     addressed: Option<&str>,
     constraints: &Constraints,
     endpoint: &Endpoint,
-    org_domain: &str,
 ) -> Result<(), Box<ProblemDetails>> {
     if let Some(problem) = undeclared_type(entity, endpoint) {
         return Err(Box::new(problem));
@@ -2264,13 +2300,8 @@ fn refuse_entity(
             ));
         }
         if let Some(kind) = object.get("type").or_else(|| object.get("@type")) {
-            write_guard::check_identifier(
-                path_id,
-                Some(kind.as_str().unwrap_or_default()),
-                &endpoint.space,
-                org_domain,
-            )
-            .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
+            write_guard::check_identifier(path_id, Some(kind.as_str().unwrap_or_default()))
+                .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
         }
     }
     // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
@@ -2286,10 +2317,10 @@ fn refuse_entity(
     // A batch delete is an array of URN strings: each is an identifier and nothing else
     // (T-0806).
     let outcome = if let Some(raw) = entity.as_str() {
-        write_guard::check_identifier(raw, None, &endpoint.space, org_domain)
+        write_guard::check_identifier(raw, None)
             .and_then(|()| write_guard::check_granted_id(raw, constraints))
     } else if entity.get("id").is_some() || entity.get("@id").is_some() {
-        write_guard::check(entity, constraints, &endpoint.space, org_domain)
+        write_guard::check(entity, constraints)
     } else {
         write_guard::check_fragment(entity, constraints)
     };

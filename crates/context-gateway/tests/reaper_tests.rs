@@ -79,8 +79,7 @@ fn write(dir: &Path, name: &str, body: &str) {
 }
 
 fn gateway_on(dir: &Path) -> Arc<Gateway> {
-    let (endpoints, spaces, _accounts, _federations, _agreements, _) =
-        store::load(dir).expect("the repository loads");
+    let (endpoints, spaces, ..) = store::load(dir).expect("the repository loads");
     let gateway = Gateway::new(
         Broker::new("http://127.0.0.1:1".to_owned()),
         Box::new(PolicyPdp),
@@ -202,7 +201,7 @@ fn a_repository_that_cannot_be_read_keeps_the_table_that_is_serving() {
 fn withdrawing_a_service_account_stops_its_client_id_from_resolving() {
     let dir = repo("account-withdrawn");
     let gateway = gateway_on(&dir);
-    let (_, _, accounts, _, _, _) = store::load(&dir).expect("the repository loads");
+    let (_, _, accounts, ..) = store::load(&dir).expect("the repository loads");
     assert_eq!(accounts.len(), 1, "the repository declares one account");
     gateway.replace_accounts(accounts);
 
@@ -210,7 +209,7 @@ fn withdrawing_a_service_account_stops_its_client_id_from_resolving() {
     std::fs::remove_file(dir.join("serviceaccount.yaml")).expect("withdraw the account");
     assert!(reaper.tick());
 
-    let (_, _, after, _, _, _) = store::load(&dir).expect("the repository still loads");
+    let (_, _, after, ..) = store::load(&dir).expect("the repository still loads");
     assert_eq!(
         after.len(),
         0,

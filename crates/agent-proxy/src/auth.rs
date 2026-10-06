@@ -1,6 +1,7 @@
 //! Run ticket authentication and service mesh identity verification.
 
 use crate::config::Config;
+use crate::data_credential::DataCredentials;
 use crate::runs::{RunContext, RunError, RunResolver};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::http::HeaderMap;
@@ -114,24 +115,10 @@ pub async fn authenticate(
     // no ticket at all could read from the wording which ids are live, and a run id is a workspace's
     // branch name and its mesh identity (T-2285, EP-26, R20). Which of the two it was belongs in the
     // log, where an operator reads it and a caller cannot.
-    let run = resolver.resolve(run_id).await.map_err(|err| match err {
-        // The Portal was not reached, refused this proxy's own token, or answered something this
-        // proxy could not read. Nothing about the presented credential was judged, so answering
-        // `401` blamed the caller for a failure of ours (T-2418). `reason` is the transport or
-        // status message: it never carries a token, because the credential manager reports the
-        // status of the grant and not the grant.
-        RunError::Transport(reason) => {
-            tracing::error!(run = %run_id, %reason, "the run's context could not be read from the Portal");
-            unreadable()
-        }
-        // Both of these are facts about the caller's own credential: an id no run holds, and a run
-        // of theirs that has finished. They answer alike, because telling them apart is the oracle
-        // for live run ids that T-2285 closed.
-        RunError::NotFound(_) | RunError::NotActive(_) => {
-            tracing::warn!(run = %run_id, "no active run holds this id");
-            Box::new(jc_core::ProblemDetails::unauthorized().with_detail(REFUSED))
-        }
-    })?;
+    let run = resolver
+        .resolve(run_id)
+        .await
+        .map_err(|err| refusal(run_id, err))?;
 
     let parsed_hash = PasswordHash::new(&run.ticket_hash).map_err(|_| {
         // The stored hash is unusable, so no ticket can be verified against it. That is this
@@ -166,6 +153,70 @@ pub async fn authenticate(
     Ok(run)
 }
 
+/// What a run that could not be resolved is answered with.
+fn refusal(run_id: &str, err: RunError) -> Box<jc_core::ProblemDetails> {
+    match err {
+        // The Portal was not reached, refused this proxy's own token, or answered something this
+        // proxy could not read. Nothing about the presented credential was judged, so answering
+        // `401` blamed the caller for a failure of ours (T-2418). `reason` is the transport or
+        // status message: it never carries a token, because the credential manager reports the
+        // status of the grant and not the grant.
+        RunError::Transport(reason) => {
+            tracing::error!(run = %run_id, %reason, "the run's context could not be read from the Portal");
+            unreadable()
+        }
+        // Both of these are facts about the caller's own credential: an id no run holds, and a run
+        // of theirs that has finished. They answer alike, because telling them apart is the oracle
+        // for live run ids that T-2285 closed.
+        RunError::NotFound(_) | RunError::NotActive(_) => {
+            tracing::warn!(run = %run_id, "no active run holds this id");
+            Box::new(jc_core::ProblemDetails::unauthorized().with_detail(REFUSED))
+        }
+    }
+}
+
+/// The caller of a data route: a run's own ticket, or a run's short-lived data credential that the
+/// Portal asked for to test an App function (ADR-N-038 decision 6). Only the data routes call
+/// this; every other route takes the ticket alone.
+pub async fn authenticate_data(
+    headers: &HeaderMap,
+    resolver: &RunResolver,
+    config: &Config,
+    data: &DataCredentials,
+) -> Result<Arc<RunContext>, Box<jc_core::ProblemDetails>> {
+    let Some((run_id, secret)) = crate::data_credential::presented(headers) else {
+        return authenticate(headers, resolver, config).await;
+    };
+    if !run_id_is_well_formed(&run_id) || !data.verify(&run_id, &secret) {
+        tracing::warn!("a data credential that is not a live one was presented");
+        return Err(Box::new(
+            jc_core::ProblemDetails::unauthorized().with_detail(REFUSED),
+        ));
+    }
+    // The run must still be active: a credential outlives no run.
+    let run = resolver
+        .resolve(&run_id)
+        .await
+        .map_err(|err| refusal(&run_id, err))?;
+    if config.require_mesh_identity {
+        let client_id = headers
+            .get("l5d-client-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if !is_workload(client_id, &config.functions_identity) {
+            return Err(Box::new(
+                jc_core::ProblemDetails::forbidden().with_detail("mesh workload identity mismatch"),
+            ));
+        }
+    }
+    Ok(run)
+}
+
+/// Whether a Linkerd client identity is the workload `account`: its first label, compared whole.
+fn is_workload(client_id: &str, account: &str) -> bool {
+    !account.is_empty() && client_id.split('.').next() == Some(account)
+}
+
 /// Whether a Linkerd client identity is this run's own workload (AG-52).
 ///
 /// A mesh identity is `<serviceaccount>.<namespace>.serviceaccount.identity.linkerd.cluster.local`
@@ -183,7 +234,27 @@ fn is_runs_own_workload(client_id: &str, run_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::run_id_is_well_formed;
+    use super::{is_workload, run_id_is_well_formed};
+
+    /// ADR-N-038 decision 6: with mesh identity required, a data credential is honoured from the
+    /// functions workload alone, its account compared whole.
+    #[test]
+    fn only_the_functions_workload_is_the_functions_workload() {
+        let functions = "jc-functions.helsinki.serviceaccount.identity.linkerd.cluster.local";
+        assert!(is_workload(functions, "jc-functions"));
+        for other in [
+            "jc-functions-evil.helsinki.serviceaccount.identity.linkerd.cluster.local",
+            "agent-run-1.helsinki.serviceaccount.identity.linkerd.cluster.local",
+            "x-jc-functions.helsinki.serviceaccount.identity.linkerd.cluster.local",
+            "",
+        ] {
+            assert!(!is_workload(other, "jc-functions"), "{other}");
+        }
+        assert!(
+            !is_workload("", ""),
+            "no configured account matches nothing"
+        );
+    }
 
     /// T-1695: a run id is a name, so nothing that is a path, a second header or a query gets in.
     #[test]

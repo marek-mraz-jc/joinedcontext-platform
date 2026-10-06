@@ -2,6 +2,32 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "Audience": {
+      "description": "Target audience access control setting for an endpoint (EP-14).",
+      "oneOf": [
+        {
+          "description": "Restricted to explicitly listed projects within the organization.",
+          "enum": [
+            "project-list"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible to any authenticated member or service account of the organization.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Accessible publicly without authentication under the synthetic public role grant.",
+          "enum": [
+            "public"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -73,173 +99,38 @@
       ],
       "type": "object"
     },
-    "ContextSourceRegistrationSpec": {
+    "McpServerSpec": {
       "additionalProperties": false,
-      "description": "Desired specification of a `ContextSourceRegistration` resource (MF-36, SP-09).",
+      "description": "One named MCP server (MF-53).",
       "properties": {
-        "contextSpaceRef": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/Ref"
-            }
-          ],
-          "description": "The Context Space whose broker learns of the source. The registration is written into this space's tenant and no other (SP-08, SP-09)."
-        },
-        "endpoint": {
-          "description": "A source elsewhere, as the base URL of its NGSI-LD API. Mutually exclusive with `endpointRef`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "endpointRef": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Ref"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "A source on this platform, as an `Endpoint`. Mutually exclusive with `endpoint`."
-        },
-        "expiresAt": {
-          "description": "When the registration stops being used, if it is not open-ended.",
-          "format": "date-time",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "federation": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/Federation"
-            }
-          ],
-          "default": {
-            "identity": "serviceAccount"
-          },
-          "description": "Who this platform is when it forwards (PF-48)."
-        },
-        "information": {
-          "description": "What the source is claimed to hold, in CIM 009's own `information` shape: this is what the broker matches a query against, so it is the specification's member and not a shape of ours.",
-          "items": {
-            "$ref": "#/definitions/RegistrationInfo"
-          },
-          "type": "array"
-        },
-        "mode": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/RegistrationMode"
-            }
-          ],
-          "default": "inclusive",
-          "description": "How the source's answer relates to the broker's own data."
-        },
-        "operations": {
-          "description": "Which operations the source is registered for, as CIM 009 clause 5.2.9 names them: an operation (`retrieveEntity`) or one of its groups (`federationOps`). Left out means the specification's own default, which is why this is not an enum here: the vocabulary is the broker's and a list of ours would go stale the first time CIM 009 adds a member.",
+        "allowedProjects": {
+          "description": "The projects a `project-list` server admits; the server's own project when empty.",
           "items": {
             "type": "string"
           },
           "type": "array"
         },
-        "schedule": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Schedule"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "How often the source's schema surface is mirrored; 24 hours when absent (DM-49)."
-        }
-      },
-      "required": [
-        "contextSpaceRef",
-        "information"
-      ],
-      "type": "object"
-    },
-    "EntitySelector": {
-      "additionalProperties": false,
-      "description": "Entity type and id/pattern selector within a policy grant (R6).",
-      "properties": {
-        "id": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Urn"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Explicit target entity URN."
-        },
-        "idPattern": {
-          "description": "Anchored regular expression matching target entity URNs (R24, R33).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "type": {
-          "description": "Target entity type short name in PascalCase.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "type"
-      ],
-      "type": "object"
-    },
-    "Federation": {
-      "additionalProperties": false,
-      "description": "Who this platform is when it forwards to the source (PF-48).",
-      "properties": {
-        "identity": {
+        "audience": {
           "allOf": [
             {
-              "$ref": "#/definitions/FederationIdentity"
+              "$ref": "#/definitions/Audience"
             }
           ],
-          "default": "serviceAccount",
-          "description": "Which identity the forward carries."
+          "description": "Who may connect: `public`, `organization` or `project-list`. No wider than the narrowest member's own audience; `public` takes the red lane (EP-16)."
         },
-        "serviceAccountRef": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Ref"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The `ServiceAccount` the hub forwards as, required in `serviceAccount` mode."
+        "members": {
+          "description": "The Endpoints the server reads, one to ten, by typed reference (`kind: Endpoint`); a member of another project names its project in `namespace`.",
+          "items": {
+            "$ref": "#/definitions/TypedRef"
+          },
+          "type": "array"
         }
       },
+      "required": [
+        "audience",
+        "members"
+      ],
       "type": "object"
-    },
-    "FederationIdentity": {
-      "description": "Which identity a forwarded request carries (PF-48).\n\nNeither mode is a grant. `ServiceAccount` reads a source with the grants a `Policy` on that source gave the named account; `Caller` reads it with the caller's own. In both, the hub Endpoint's policy set applies as well and the narrower one wins.",
-      "oneOf": [
-        {
-          "description": "The hub forwards as a `ServiceAccount` of its own, named by `serviceAccountRef`.",
-          "enum": [
-            "serviceAccount"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "The caller's own token is forwarded, rewritten for the source's audience.",
-          "enum": [
-            "caller"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "MultiLanguageMap": {
       "additionalProperties": {
@@ -356,108 +247,6 @@
         }
       ]
     },
-    "Ref": {
-      "anyOf": [
-        {
-          "description": "Bare string resource name.",
-          "type": "string"
-        },
-        {
-          "allOf": [
-            {
-              "$ref": "#/definitions/TypedRef"
-            }
-          ],
-          "description": "Typed reference with kind, name, and optional namespace."
-        }
-      ],
-      "description": "Reference to another resource, either bare name or typed reference (MF-07)."
-    },
-    "RegistrationInfo": {
-      "additionalProperties": false,
-      "description": "Specification of target entity types, properties, and relationships (R6).",
-      "properties": {
-        "entities": {
-          "description": "Target entity selectors.",
-          "items": {
-            "$ref": "#/definitions/EntitySelector"
-          },
-          "type": "array"
-        },
-        "propertyNames": {
-          "description": "Whitelist of readable or writable property names (R6, R9).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "relationshipNames": {
-          "description": "Whitelist of readable or writable relationship names (R6, R9).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "entities"
-      ],
-      "type": "object"
-    },
-    "RegistrationMode": {
-      "description": "How the broker treats a source's answer relative to its own data (CIM 009 clause 5.2.9).",
-      "oneOf": [
-        {
-          "description": "The source is one of several answers and the broker merges it with the rest.",
-          "enum": [
-            "inclusive"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "The source is the only answer for what it covers.",
-          "enum": [
-            "exclusive"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "The source answers alongside the broker's own data without overriding it.",
-          "enum": [
-            "auxiliary"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "The caller is redirected to the source rather than the broker forwarding.",
-          "enum": [
-            "redirect"
-          ],
-          "type": "string"
-        }
-      ]
-    },
-    "Schedule": {
-      "additionalProperties": false,
-      "description": "How often a [`SyncSourceSpec`] runs (MF-28): `{ interval: 30m }` or `{ webhook: true }`.\n\nExactly one of the two members is set, for the same reason as [`SyncOrigin`].",
-      "properties": {
-        "interval": {
-          "description": "Fixed interval such as `30m`, `6h` or `1d` (suffixes `s`, `m`, `h`, `d`).",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "webhook": {
-          "description": "Driven by a webhook from the source instead of a timer; only `true` is a schedule.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "Status": {
       "additionalProperties": false,
       "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
@@ -543,11 +332,6 @@
         "name"
       ],
       "type": "object"
-    },
-    "Urn": {
-      "description": "NGSI-LD entity URN (ADR-N-041, PF-43): urn:ngsi-ld:{Type}:{id}; the prefixed shape urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId} is optional",
-      "pattern": "^urn:ngsi-ld:[A-Z][A-Za-z0-9]{1,63}:(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2}){0,255}$",
-      "type": "string"
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",
@@ -571,7 +355,7 @@
     "spec": {
       "allOf": [
         {
-          "$ref": "#/definitions/ContextSourceRegistrationSpec"
+          "$ref": "#/definitions/McpServerSpec"
         }
       ],
       "description": "Desired spec state."
@@ -594,6 +378,6 @@
     "metadata",
     "spec"
   ],
-  "title": "ResourceEnvelope_for_ContextSourceRegistrationSpec",
+  "title": "ResourceEnvelope_for_McpServerSpec",
   "type": "object"
 }

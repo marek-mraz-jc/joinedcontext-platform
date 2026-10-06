@@ -229,9 +229,11 @@ async fn an_endpoint_with_two_majors_names_four_documents() {
 async fn no_refusal_names_a_schema() {
     for uri in [
         // A slug nobody serves.
-        "/api/endpoint/zzz7pq2mzt6vhx3nbwrs5cjd8f/ngsi-ld/v1/entities?type=AirQualityObserved".to_owned(),
-        // An entity id of another space.
-        format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved:bb.sk:doprava:station-01"),
+        "/api/endpoint/zzz7pq2mzt6vhx3nbwrs5cjd8f/ngsi-ld/v1/entities?type=AirQualityObserved"
+            .to_owned(),
+        // An entity id that is no NGSI-LD URN (PF-43). A URN naming another space is an id of
+        // this one since ADR-N-041, read like any other.
+        format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved"),
         // A query naming no selector at all.
         format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities"),
     ] {

@@ -481,6 +481,192 @@ async fn a_finished_run_takes_no_identity() {
         .any(|b| b.contains("token-exchange")));
 }
 
+fn mint(bearer: Option<&str>) -> Request<Body> {
+    let builder = Request::builder()
+        .method("POST")
+        .uri(format!("/internal/runs/{RUN_ID}/data-credential"));
+    let builder = match bearer {
+        Some(bearer) => builder.header("authorization", format!("Bearer {bearer}")),
+        None => builder,
+    };
+    builder.body(Body::empty()).expect("a request")
+}
+
+fn with_credential(method: &str, uri: &str, credential: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {credential}"))
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .expect("a request")
+}
+
+/// ADR-N-038 decision 6: the Portal's data credential of a run reads as the run (its person's
+/// delegated token, its slugs, its write rule) on the data routes, and opens nothing else.
+#[tokio::test]
+async fn a_functions_data_credential_reads_as_the_run_and_nothing_else() {
+    let (realm, portal, gateway) = (realm(300).await, portal("building").await, gateway().await);
+    let proxy = proxy(&realm, &portal, &gateway);
+    let bound = proxy
+        .clone()
+        .oneshot(hand_over(PORTAL_TOKEN, PERSON_TOKEN))
+        .await
+        .expect("an answer");
+    assert_eq!(bound.status(), StatusCode::NO_CONTENT);
+
+    let minted = proxy
+        .clone()
+        .oneshot(mint(Some(PORTAL_TOKEN)))
+        .await
+        .expect("an answer");
+    assert_eq!(minted.status(), StatusCode::OK);
+    assert_eq!(
+        minted
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    let answer: serde_json::Value =
+        serde_json::from_str(&body_of(minted).await).expect("a JSON answer");
+    assert_eq!(answer["expiresIn"], 300);
+    let credential = answer["token"].as_str().expect("a token").to_owned();
+    assert!(credential.starts_with(&format!("jcd_{RUN_ID}.")));
+
+    let read = proxy
+        .clone()
+        .oneshot(with_credential(
+            "GET",
+            &format!("/v1/data/endpoints/{SLUG}/ngsi-ld/v1/entities?type=A"),
+            &credential,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(read.status(), StatusCode::OK);
+    assert_eq!(
+        bearers_at_gateway(&gateway).await,
+        vec![format!("Bearer {DELEGATED}")]
+    );
+
+    // The run is read-only: the credential does not write either.
+    let write = proxy
+        .clone()
+        .oneshot(with_credential(
+            "PATCH",
+            &format!("/v1/data/endpoints/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:A:x/attrs"),
+            &credential,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(write.status(), StatusCode::FORBIDDEN);
+    // An endpoint the run does not name is refused as for the run itself.
+    let elsewhere = proxy
+        .clone()
+        .oneshot(with_credential(
+            "GET",
+            "/v1/data/endpoints/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ngsi-ld/v1/entities",
+            &credential,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(elsewhere.status(), StatusCode::FORBIDDEN);
+
+    // The model, the forge, the registry and the run's events take the ticket alone.
+    for (method, uri) in [
+        ("POST", "/v1/llm/v1/messages"),
+        ("GET", "/v1/forge/repos/x/contents/a"),
+        ("POST", "/v1/mcp"),
+        ("POST", "/v1/runs/events"),
+        ("GET", "/v1/fetch?url=https://example.org"),
+    ] {
+        let answer = proxy
+            .clone()
+            .oneshot(with_credential(method, uri, &credential))
+            .await
+            .expect("an answer");
+        assert_eq!(answer.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+    }
+
+    // A secret that was never minted, or another run's id, reads nothing.
+    let secret = credential
+        .split_once('.')
+        .map(|(_, s)| s)
+        .unwrap_or_default();
+    for forged in [
+        format!("jcd_{RUN_ID}.not-the-secret"),
+        format!("jcd_00000000-0000-4000-8000-000000000000.{secret}"),
+    ] {
+        let answer = proxy
+            .clone()
+            .oneshot(with_credential(
+                "GET",
+                "/v1/data/ngsi-ld/v1/entities",
+                &forged,
+            ))
+            .await
+            .expect("an answer");
+        assert_eq!(answer.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        bearers_at_gateway(&gateway).await.len(),
+        1,
+        "only the one honoured read"
+    );
+}
+
+/// Without the run's delegated grant the credential reads nothing either: 401, no fallback.
+#[tokio::test]
+async fn a_data_credential_of_a_run_without_its_persons_grant_reads_nothing() {
+    let (realm, portal, gateway) = (realm(300).await, portal("building").await, gateway().await);
+    let proxy = proxy(&realm, &portal, &gateway);
+    let minted = proxy
+        .clone()
+        .oneshot(mint(Some(PORTAL_TOKEN)))
+        .await
+        .expect("an answer");
+    let answer: serde_json::Value =
+        serde_json::from_str(&body_of(minted).await).expect("a JSON answer");
+    let credential = answer["token"].as_str().expect("a token").to_owned();
+    let read = proxy
+        .oneshot(with_credential(
+            "GET",
+            "/v1/data/ngsi-ld/v1/entities",
+            &credential,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(read.status(), StatusCode::UNAUTHORIZED);
+    assert!(bearers_at_gateway(&gateway).await.is_empty());
+}
+
+/// AG-52: only the Portal's service account mints one, and a finished run gets none.
+#[tokio::test]
+async fn only_the_portal_mints_a_data_credential_of_an_active_run() {
+    let (realm, portal, gateway) = (realm(300).await, portal("building").await, gateway().await);
+    Mock::given(method("POST"))
+        .and(path(INTROSPECT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "active": false })))
+        .mount(&realm)
+        .await;
+    let proxy = proxy(&realm, &portal, &gateway);
+    for request in [
+        mint(None),
+        mint(Some("forged-token")),
+        mint(Some(PERSON_TOKEN)),
+    ] {
+        let answer = proxy.clone().oneshot(request).await.expect("an answer");
+        assert_eq!(answer.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let (fresh_realm, finished_portal) = (self::realm(300).await, self::portal("published").await);
+    let finished = self::proxy(&fresh_realm, &finished_portal, &gateway)
+        .oneshot(mint(Some(PORTAL_TOKEN)))
+        .await
+        .expect("an answer");
+    assert_eq!(finished.status(), StatusCode::CONFLICT);
+}
+
 /// Collects every log line of this suite's binary.
 #[derive(Clone, Default)]
 struct Lines(Arc<Mutex<Vec<u8>>>);

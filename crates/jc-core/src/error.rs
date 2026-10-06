@@ -6,17 +6,16 @@ pub enum UrnError {
     /// URN prefix is missing or does not match `urn:ngsi-ld:` (case-insensitive).
     #[error("missing or invalid prefix, expected `urn:ngsi-ld:`")]
     InvalidPrefix,
-    /// Colon-separated segment count after prefix is not exactly 4.
-    #[error("expected exactly 4 colon-separated segments, got {got}")]
-    InvalidSegmentCount {
-        /// Number of segments found.
-        got: usize,
-    },
-    /// A segment at the given index is empty.
-    #[error("empty segment at index {index}")]
-    EmptySegment {
-        /// Zero-based segment index.
-        index: usize,
+    /// Nothing follows the entity type: an NGSI-LD URN is `urn:ngsi-ld:{Type}:{id}` (ADR-N-041).
+    #[error("nothing after the entity type: an NGSI-LD URN is `urn:ngsi-ld:{{Type}}:{{id}}`")]
+    MissingId,
+    /// The part after the type is not an RFC 8141 namespace-specific string (ADR-N-041, PF-43).
+    #[error("invalid id part `{segment}`: {reason}")]
+    InvalidId {
+        /// Offending text after the type.
+        segment: String,
+        /// Reason for failure.
+        reason: &'static str,
     },
     /// The entity type segment failed validation.
     #[error("invalid entity type segment `{segment}`: {reason}")]

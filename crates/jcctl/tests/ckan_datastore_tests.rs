@@ -406,6 +406,91 @@ fn a_second_run_over_the_same_columns_writes_no_schema_call() {
     assert_eq!(ckan.actions(), vec!["datastore_create"]);
 }
 
+fn typed(columns: &[(&str, &str)]) -> Vec<Value> {
+    columns
+        .iter()
+        .map(|(id, kind)| json!({ "id": id, "type": kind }))
+        .collect()
+}
+
+/// T-3113: a KPI whose value the Endpoint now answers as text ("not measured") would make CKAN
+/// refuse every upsert into the number column, and the table would stay as it was while the
+/// Endpoint moved on. The table is built again with the answer's types; a change the column
+/// still holds (a whole number into a decimal one, anything into text) keeps it.
+#[test]
+fn a_column_that_can_no_longer_hold_the_answer_rebuilds_the_table_and_one_that_can_keeps_it() {
+    let mut ckan = InMemoryCkan::new();
+    let first = typed(&[("entity_id", "text"), ("currentValue.value", "float")]);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &first).expect("created");
+
+    for (kind, outcome) in [("int", Outcome::Unchanged), ("float", Outcome::Unchanged)] {
+        let next = typed(&[("entity_id", "text"), ("currentValue.value", kind)]);
+        assert_eq!(
+            ensure(&mut ckan, PACKAGE, TABLE, &next).expect("ensured").1,
+            outcome,
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        ckan.actions(),
+        vec!["datastore_create"],
+        "nothing rebuilt for what the column holds"
+    );
+
+    let text = typed(&[("entity_id", "text"), ("currentValue.value", "text")]);
+    let (again, outcome) = ensure(&mut ckan, PACKAGE, TABLE, &text).expect("rebuilt");
+    assert_eq!(outcome, Outcome::Created);
+    assert_eq!(again, resource, "the same resource, a new table");
+    assert_eq!(
+        ckan.actions(),
+        vec!["datastore_create", "datastore_delete", "datastore_create"]
+    );
+    let fields = ckan.table_fields(&resource).expect("the table");
+    assert_eq!(
+        fields
+            .iter()
+            .find(|f| f["id"] == "currentValue.value")
+            .map(|f| f["type"].clone()),
+        Some(json!("text"))
+    );
+    let rebuilt = ckan
+        .calls()
+        .last()
+        .map(|(_, payload)| payload.clone())
+        .expect("the create");
+    assert_eq!(
+        rebuilt["primary_key"],
+        json!(["entity_id"]),
+        "an upsert needs its key"
+    );
+
+    // A text column takes whatever comes next; an int column refuses a decimal.
+    let decimal = typed(&[("entity_id", "text"), ("currentValue.value", "float")]);
+    assert_eq!(
+        ensure(&mut ckan, PACKAGE, TABLE, &decimal).expect("kept").1,
+        Outcome::Unchanged
+    );
+    let mut counts = InMemoryCkan::new();
+    ensure(
+        &mut counts,
+        PACKAGE,
+        TABLE,
+        &typed(&[("entity_id", "text"), ("n", "int4")]),
+    )
+    .expect("created");
+    assert_eq!(
+        ensure(
+            &mut counts,
+            PACKAGE,
+            TABLE,
+            &typed(&[("entity_id", "text"), ("n", "float")])
+        )
+        .expect("rebuilt")
+        .1,
+        Outcome::Created
+    );
+}
+
 #[test]
 fn a_new_column_extends_the_table_instead_of_failing_the_upsert() {
     let mut ckan = InMemoryCkan::new();
@@ -808,5 +893,49 @@ fn a_model_names_the_columns_of_every_attribute_kind() {
     assert!(
         !covered(&spread, "locat"),
         "a prefix of a name is not the attribute"
+    );
+}
+
+/// T-3085, ADR-N-041: an entity is its space and its URN, so two spaces may publish the same URN.
+/// Each space's dataset has its own table keyed by `entity_id`: both rows are there, and a delete
+/// in one space leaves the other's row alone.
+#[test]
+fn the_same_urn_in_two_spaces_is_a_row_in_each_dataset_and_a_delete_touches_one() {
+    let mut ckan = InMemoryCkan::new();
+    let (columns, rows) = page();
+    let fields = fields(&columns, &rows, &[schema()]);
+    let (air, _) =
+        ensure(&mut ckan, "pkg-helsinki-air", "helsinki-air-rows", &fields).expect("created");
+    let (kpi, _) =
+        ensure(&mut ckan, "pkg-helsinki-kpi", "helsinki-kpi-rows", &fields).expect("created");
+    assert_ne!(air, kpi, "two datasets, two tables");
+
+    let records = records(&columns, &rows).expect("records");
+    let shared = records[0][PRIMARY_KEY].as_str().expect("an id").to_owned();
+    sync(
+        &mut ckan,
+        &air,
+        std::slice::from_ref(&shared),
+        &records[..1],
+    )
+    .expect("synced");
+    sync(
+        &mut ckan,
+        &kpi,
+        std::slice::from_ref(&shared),
+        &records[..1],
+    )
+    .expect("synced");
+    assert!(ckan.rows(&air).expect("table").contains_key(&shared));
+    assert!(ckan.rows(&kpi).expect("table").contains_key(&shared));
+
+    // The KPI space deleted its entity: the notification names the id, the endpoint no longer
+    // answers it, and only the KPI table loses the row.
+    let synced = sync(&mut ckan, &kpi, std::slice::from_ref(&shared), &[]).expect("synced");
+    assert_eq!(synced.deleted, vec![shared.clone()]);
+    assert!(!ckan.rows(&kpi).expect("table").contains_key(&shared));
+    assert!(
+        ckan.rows(&air).expect("table").contains_key(&shared),
+        "the other space's row stays"
     );
 }

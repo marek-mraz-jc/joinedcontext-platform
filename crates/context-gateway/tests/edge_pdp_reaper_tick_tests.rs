@@ -76,8 +76,7 @@ fn write(dir: &Path, name: &str, body: &str) {
 }
 
 fn gateway_on(dir: &Path) -> Arc<Gateway> {
-    let (endpoints, spaces, _accounts, _federations, _agreements, _limits) =
-        store::load(dir).expect("the repository loads");
+    let (endpoints, spaces, ..) = store::load(dir).expect("the repository loads");
     Arc::new(
         Gateway::new(
             Broker::new("http://127.0.0.1:1".to_owned()),

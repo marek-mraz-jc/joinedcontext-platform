@@ -11,6 +11,7 @@ use crate::app::{principal_of, subject_from, Credential, Door, Gateway, HUB_PATH
 use crate::auth::token;
 use crate::handlers::schema;
 use crate::mcp::endpoint_facade::{self, answered, error, refused, result, HubTool};
+use crate::mcp::server::{self, McpServer};
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -26,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Arguments that would choose a space some other way than `endpoint` (AG-05, SP-14).
-const SELECTORS: &[&str] = &["space", "tenant", "contextspace", "slug"];
+pub(crate) const SELECTORS: &[&str] = &["space", "tenant", "contextspace", "slug"];
 
 /// How many Endpoints one `list_endpoints` page answers unless the caller asks for fewer.
 const PAGE: usize = 50;
@@ -115,6 +116,7 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         reach,
         authorization,
         caller,
+        server: None,
     };
     let mut response = match hub.answer(message).await {
         Answer::Json(answer) => endpoint_facade::json_response(StatusCode::OK, &answer),
@@ -125,18 +127,22 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
     response
 }
 
-/// One request's view of the hub: who may be reached, with what.
-struct Hub {
-    gateway: Arc<Gateway>,
-    /// The caller's Endpoints and who the caller is on each, in slug order.
-    reach: Vec<(Arc<Endpoint>, Subject)>,
+/// One request's view of the hub, or of a named server: who may be reached, with what.
+#[derive(Clone)]
+pub(crate) struct Hub {
+    pub(crate) gateway: Arc<Gateway>,
+    /// The caller's Endpoints and who the caller is on each: in slug order on the hub, in the
+    /// order of `spec.members` on a named server.
+    pub(crate) reach: Vec<(Arc<Endpoint>, Subject)>,
     /// The caller's own header, handed to the Endpoint's façade and nothing else (EP-26).
-    authorization: Option<HeaderValue>,
+    pub(crate) authorization: Option<HeaderValue>,
     /// The key the Endpoint's own `(slug, caller)` bucket is spent under, the middleware's own.
-    caller: String,
+    pub(crate) caller: String,
+    /// The named server this request came in by, `None` on the hub (ADR-N-043).
+    pub(crate) server: Option<McpServer>,
 }
 
-enum Answer {
+pub(crate) enum Answer {
     Json(Value),
     Notification,
     /// An HTTP answer instead of a JSON-RPC one: a spent Endpoint bucket.
@@ -144,7 +150,7 @@ enum Answer {
 }
 
 impl Hub {
-    async fn answer(&self, message: Value) -> Answer {
+    pub(crate) async fn answer(&self, message: Value) -> Answer {
         let params = message.get("params").cloned().unwrap_or(json!({}));
         let Some(id) = message.get("id").cloned() else {
             return Answer::Notification;
@@ -161,6 +167,9 @@ impl Hub {
             ));
         };
         Answer::Json(match method {
+            "initialize" if self.server.is_some() => {
+                result(id, server::initialized(self.server.as_ref()))
+            }
             "initialize" => result(
                 id,
                 json!({
@@ -181,6 +190,9 @@ impl Hub {
             "tools/list" => {
                 let mut tools = vec![list_endpoints_tool()];
                 tools.extend(endpoint_facade::hub_tools(&self.gateway, &self.reach));
+                if self.server.is_some() {
+                    server::fan_out_schemas(&mut tools);
+                }
                 result(id, json!({ "tools": tools }))
             }
             "tools/call" => return self.call(id, params).await,
@@ -209,6 +221,10 @@ impl Hub {
                 -32602,
                 "`endpoint` names one Endpoint by its slug: a single string, never a list (EP-87)",
             )),
+            // A named server's read visits every member it may (ADR-N-043 §2.4).
+            None if self.server.is_some() && server::FAN_OUT.contains(&name) => {
+                return self.fan_out(id, name, &params, arguments).await;
+            }
             None => {
                 return Answer::Json(error(
                     id,
@@ -217,15 +233,8 @@ impl Hub {
                 ))
             }
         };
-        if let Some(selector) = arguments
-            .keys()
-            .find(|key| SELECTORS.contains(&key.to_ascii_lowercase().as_str()))
-        {
-            return Answer::Json(error(
-                id,
-                -32602,
-                &format!("`{selector}` is not an argument: the hub is routed by `endpoint` alone (AG-05, SP-14)"),
-            ));
+        if let Some(refusal) = misrouted(&id, &arguments) {
+            return Answer::Json(refusal);
         }
 
         // An Endpoint outside the caller's list and one that does not exist are the same answer,
@@ -243,31 +252,58 @@ impl Hub {
             HubTool::Granted => {}
         }
 
-        // The Endpoint's own bucket, as a call to its URL spends it (EP-20).
-        if let Some(limits) = endpoint.rate_limit.as_ref() {
-            let decision = self.gateway.rate_limiter.check(
-                &endpoint.slug,
-                &self.caller,
-                limits,
-                Instant::now(),
-            );
-            if !decision.allowed {
-                tracing::info!(slug = %endpoint.slug, "rate limit reached through the hub");
-                return Answer::Refused(rate_limit::too_many(
-                    &decision,
-                    "the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names",
-                ));
-            }
+        if let Err(decision) = self.spend(endpoint) {
+            return Answer::Refused(rate_limit::too_many(
+                &decision,
+                "the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names",
+            ));
         }
+        match self
+            .forward(endpoint, subject, name, id, &params, arguments)
+            .await
+        {
+            Some(answer) => Answer::Json(answer),
+            None => Answer::Notification,
+        }
+    }
 
+    /// Spends the Endpoint's own bucket, as a call to its URL spends it (EP-20).
+    pub(crate) fn spend(&self, endpoint: &Endpoint) -> Result<(), rate_limit::Decision> {
+        let Some(limits) = endpoint.rate_limit.as_ref() else {
+            return Ok(());
+        };
+        let decision =
+            self.gateway
+                .rate_limiter
+                .check(&endpoint.slug, &self.caller, limits, Instant::now());
+        if decision.allowed {
+            return Ok(());
+        }
+        tracing::info!(slug = %endpoint.slug, "rate limit reached through the hub");
+        Err(decision)
+    }
+
+    /// Hands one tool call to the Endpoint's own façade, which admits the caller again from
+    /// their token (EP-26). `None` is a notification.
+    pub(crate) async fn forward(
+        &self,
+        endpoint: &Arc<Endpoint>,
+        subject: &Subject,
+        name: &str,
+        id: Value,
+        params: &Value,
+        arguments: Map<String, Value>,
+    ) -> Option<Value> {
         // What a call to the Endpoint's URL logs, and which Endpoint and tool it was (ADR-N-025
-        // section 3). The Endpoint's own decision line follows from the re-entry.
+        // section 3, ADR-N-043 §2.8). The Endpoint's own decision line follows from the re-entry.
+        let server = self.server.as_ref().map(McpServer::path);
         tracing::info!(
             slug = %endpoint.slug,
             space = %endpoint.space,
             principal = %principal_of(subject),
             tool = %name,
-            door = "hub",
+            door = if server.is_some() { "server" } else { "hub" },
+            server = server.as_deref().unwrap_or_default(),
             "hub call"
         );
 
@@ -281,9 +317,13 @@ impl Hub {
         });
         let credential = Credential {
             authorization: self.authorization.clone(),
-            door: Door::Hub,
+            door: if self.server.is_some() {
+                Door::Server
+            } else {
+                Door::Hub
+            },
         };
-        match endpoint_facade::handle(
+        endpoint_facade::handle(
             Arc::clone(&self.gateway),
             Arc::clone(endpoint),
             subject.clone(),
@@ -291,10 +331,6 @@ impl Hub {
             message,
         )
         .await
-        {
-            Some(answer) => Answer::Json(answer),
-            None => Answer::Notification,
-        }
     }
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).
@@ -360,6 +396,21 @@ impl Hub {
         }
         result(id, answer)
     }
+}
+
+/// The refusal of an argument that would choose a space some other way than `endpoint`
+/// (AG-05, SP-14).
+pub(crate) fn misrouted(id: &Value, arguments: &Map<String, Value>) -> Option<Value> {
+    let selector = arguments
+        .keys()
+        .find(|key| SELECTORS.contains(&key.to_ascii_lowercase().as_str()))?;
+    Some(error(
+        id.clone(),
+        -32602,
+        &format!(
+            "`{selector}` is not an argument: the hub is routed by `endpoint` alone (AG-05, SP-14)"
+        ),
+    ))
 }
 
 /// One Endpoint as `list_endpoints` names it: only what this caller may see of it.

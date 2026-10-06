@@ -378,11 +378,43 @@ pub fn ensure(
         return Ok((id, Outcome::Created));
     };
     let id = resource_id(&live).unwrap_or_else(|| name.to_owned());
-    let known: BTreeSet<&str> = live
+    let live_fields: Vec<&Value> = live
         .get("fields")
         .and_then(Value::as_array)
-        .map(|fields| fields.iter().filter_map(|f| f["id"].as_str()).collect())
+        .map(|fields| fields.iter().collect())
         .unwrap_or_default();
+    // A column whose type can no longer hold this answer's cells (a number column the
+    // Endpoint now answers text for) would make CKAN refuse every upsert, and the table would
+    // stay as it was, silently, while the Endpoint moved on (T-3113). The mirror is a full
+    // reload, so the table is built again with this answer's types and refilled.
+    let retyped = fields.iter().any(|field| {
+        let wanted = field["type"].as_str().unwrap_or("text");
+        live_fields
+            .iter()
+            .find(|live| live["id"] == field["id"])
+            .and_then(|live| live["type"].as_str())
+            .is_some_and(|held| !holds(held, wanted))
+    });
+    if retyped {
+        api.action(
+            "datastore_delete",
+            &json!({ "resource_id": id, "force": true }),
+        )?;
+        api.action(
+            "datastore_create",
+            &json!({
+                "resource_id": id,
+                "fields": fields,
+                "primary_key": [PRIMARY_KEY],
+                "force": true,
+            }),
+        )?;
+        return Ok((id, Outcome::Created));
+    }
+    let known: BTreeSet<&str> = live_fields
+        .iter()
+        .filter_map(|f| f["id"].as_str())
+        .collect();
     let missing: Vec<Value> = fields
         .iter()
         .filter(|field| !known.contains(field["id"].as_str().unwrap_or_default()))
@@ -399,6 +431,24 @@ pub fn ensure(
     }
     api.action("datastore_create", &payload)?;
     Ok((id, Outcome::Extended))
+}
+
+/// Whether a column CKAN holds as `held` takes the cells of a column this answer types as
+/// `wanted`: the same kind, a whole number into a decimal one, anything into text (the mirror
+/// writes a text column's cells as text). CKAN names its types `int4`, `float8`, `numeric`…
+fn holds(held: &str, wanted: &str) -> bool {
+    fn kind(name: &str) -> &str {
+        match name {
+            "int" | "int2" | "int4" | "int8" | "integer" | "bigint" => "int",
+            "float" | "float4" | "float8" | "numeric" | "double precision" => "float",
+            "timestamp" | "timestamptz" => "timestamp",
+            "json" | "jsonb" => "json",
+            "bool" | "boolean" => "bool",
+            other => other,
+        }
+    }
+    let (held, wanted) = (kind(held), kind(wanted));
+    held == wanted || held == "text" || (held == "float" && wanted == "int")
 }
 
 /// Writes the rows the Endpoint answered with and deletes the ones it did not (EP-65).
@@ -440,6 +490,68 @@ pub fn sync(
         )?;
     }
     Ok(Synced { upserted, deleted })
+}
+
+/// Rows per `datastore_search` page when the mirror reads which entities a table holds, below
+/// CKAN's default `ckan.datastore.search.rows_max` of 32000.
+pub const ID_PAGE: usize = 10_000;
+
+/// Entities per `datastore_delete`: the filter is one SQL `IN` list.
+pub const DELETE_BATCH: usize = 1_000;
+
+/// Removes every row of the table whose entity is not in `keep`, the ids a complete answer of
+/// the Endpoint holds for this table's type (EP-65, T-3118). A full reload that only upserts
+/// keeps every entity the Endpoint ever served: a vehicle that left the feed stayed in the
+/// table, so the table no longer equalled the answer. Returns the ids removed.
+///
+/// Only for a complete answer: `file.csv` is the whole dataset or an error, never a page, so an
+/// id it does not hold is an entity the Endpoint no longer serves.
+pub fn prune(
+    api: &mut impl CkanApi,
+    resource_id: &str,
+    keep: &BTreeSet<&str>,
+) -> Result<Vec<String>, MirrorError> {
+    let mut gone = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = api.action(
+            "datastore_search",
+            &json!({
+                "resource_id": resource_id,
+                "fields": [PRIMARY_KEY],
+                "sort": "_id",
+                "limit": ID_PAGE,
+                "offset": offset,
+            }),
+        )?;
+        let records = page
+            .get("records")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        gone.extend(
+            records
+                .iter()
+                .filter_map(|record| record[PRIMARY_KEY].as_str())
+                .filter(|id| !keep.contains(id))
+                .map(str::to_owned),
+        );
+        if records.len() < ID_PAGE {
+            break;
+        }
+        offset += ID_PAGE;
+    }
+    for batch in gone.chunks(DELETE_BATCH) {
+        api.action(
+            "datastore_delete",
+            &json!({
+                "resource_id": resource_id,
+                "filters": { PRIMARY_KEY: batch },
+                "force": true,
+            }),
+        )?;
+    }
+    Ok(gone)
 }
 
 /// One `datastore_upsert` of `batch`, at most [`UPSERT_BATCH`] records (EP-65).

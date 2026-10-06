@@ -178,6 +178,64 @@
       ],
       "type": "object"
     },
+    "IdMint": {
+      "additionalProperties": false,
+      "description": "The mint option of a pipeline's output (ADR-N-041 §3.4, Architecture/08).",
+      "properties": {
+        "from": {
+          "description": "The record field the id is made from (`prefixed`, `keep`): a path such as `a.b_c`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mint": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Mint"
+            }
+          ],
+          "description": "`prefixed`, `keep` or `template`."
+        },
+        "template": {
+          "description": "The id with `{field}` placeholders (`template`), starting `urn:ngsi-ld:{Type}:`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mint"
+      ],
+      "type": "object"
+    },
+    "Mint": {
+      "description": "How an output's ids are made (ADR-N-041 §3.4).",
+      "oneOf": [
+        {
+          "description": "`urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}`.",
+          "enum": [
+            "prefixed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The source's own id, an NGSI-LD URN of the type made of it when it is not one.",
+          "enum": [
+            "keep"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A template over the record's fields.",
+          "enum": [
+            "template"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "MultiLanguageMap": {
       "additionalProperties": {
         "type": "string"
@@ -250,6 +308,17 @@
       "additionalProperties": false,
       "description": "Output specification for derived pipeline computations (PL-32).",
       "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IdMint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the renderer sets each entity's id (ADR-N-041 §3.4, PF-44); absent, the mapping sets it itself."
+        },
         "mode": {
           "allOf": [
             {
@@ -888,8 +957,8 @@
       "type": "object"
     },
     "Urn": {
-      "description": "NGSI-LD entity URN conforming to ADR 001 / PF-42: urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}",
-      "pattern": "^urn:ngsi-ld:[A-Z][A-Za-z0-9]{1,63}:[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+:[a-z0-9][a-z0-9-]{0,62}:[A-Za-z0-9._~-]{1,128}$",
+      "description": "NGSI-LD entity URN (ADR-N-041, PF-43): urn:ngsi-ld:{Type}:{id}; the prefixed shape urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId} is optional",
+      "pattern": "^urn:ngsi-ld:[A-Z][A-Za-z0-9]{1,63}:(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2}){0,255}$",
       "type": "string"
     }
   },

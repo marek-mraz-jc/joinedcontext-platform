@@ -174,7 +174,66 @@ pub fn package(
     if !tags.is_empty() {
         payload["tags"] = Value::Array(tags);
     }
+    // The licence by its name where the register knows it, else as the record names it.
+    let licence = payload["license_id"]
+        .as_str()
+        .map(|id| {
+            Licence::ALL
+                .iter()
+                .find(|known| known.ckan_id() == id)
+                .map_or(id, |known| known.title())
+                .to_owned()
+        })
+        .or_else(|| text(record.get("dct:license")));
+    describe_mcp(
+        &mut payload["resources"],
+        name,
+        &url,
+        licence.as_deref(),
+        spec.audience == Audience::Public,
+    );
     Ok(Some(payload))
+}
+
+/// Gives the MCP resource the words an AI client acts on (T-3152, EP-81): what the server is
+/// and which Endpoint it reads, its tools and what each returns, the licence, and a client
+/// configuration to copy, as an indented block CKAN's Markdown shows as code. The tools are the
+/// gateway's own (`query_entities`, `get_entity`, `describe_schema`, `describe_access`).
+fn describe_mcp(
+    resources: &mut Value,
+    dataset: &str,
+    url: &str,
+    licence: Option<&str>,
+    public: bool,
+) {
+    let Some(mcp) = resources
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .find(|resource| resource["format"] == "MCP")
+    else {
+        return;
+    };
+    let server = mcp["url"].as_str().unwrap_or_default().to_owned();
+    let who = if public {
+        "answers anyone, with no sign-in, what the endpoint serves the public"
+    } else {
+        "answers what the endpoint lets the signed-in caller read: the client sends the caller's token"
+    };
+    let config = json!({ "mcpServers": { dataset: { "type": "http", "url": server } } });
+    let licence = licence.map_or_else(
+        || "Licence: as the dataset states.".to_owned(),
+        |licence| format!("Licence: {licence}; the data is reused under it."),
+    );
+    mcp["description"] = json!(format!(
+        "For AI assistants: a Model Context Protocol server over this dataset's endpoint {url}. \
+         It {who}.\n\n\
+         Tools: `query_entities` (the rows of an entity type, with an NGSI-LD `q` filter, `attrs`, \
+         `count` and paging), `get_entity` (one entity by its URN), `describe_schema` (the data \
+         model: read it first) and `describe_access` (what you may read).\n\n\
+         {licence}\n\n\
+         An MCP client reaches it with this configuration:\n\n    {config}\n"
+    ));
 }
 
 /// Creates or updates the dataset of one Endpoint, and the organization it lands in.
@@ -881,10 +940,12 @@ impl InMemoryCkan {
                     .unwrap_or_default();
                 match payload.get("resource_id").and_then(Value::as_str) {
                     Some(id) => {
+                        // A resource whose table was dropped gets a new one, as CKAN does: the
+                        // resource outlives `datastore_delete` without filters.
                         let (fields, _) = self
                             .tables
-                            .get_mut(id)
-                            .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                            .entry(id.to_owned())
+                            .or_insert_with(|| (Vec::new(), BTreeMap::new()));
                         fields.extend(declared);
                         Ok(json!({ "resource_id": id }))
                     }
@@ -942,6 +1003,40 @@ impl InMemoryCkan {
                     rows.insert(key, record.clone());
                 }
                 Ok(json!({}))
+            }
+            "datastore_search" => {
+                let id = Self::resource_of(action, payload)?;
+                let (_, rows) = self
+                    .tables
+                    .get(&id)
+                    .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
+                let count = |key: &str| {
+                    payload
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|n| usize::try_from(n).ok())
+                };
+                let fields: Option<Vec<&str>> = payload
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(|fields| fields.iter().filter_map(Value::as_str).collect());
+                let records: Vec<Value> = rows
+                    .values()
+                    .skip(count("offset").unwrap_or(0))
+                    .take(count("limit").unwrap_or(100))
+                    .map(|row| match &fields {
+                        Some(fields) => Value::Object(
+                            fields
+                                .iter()
+                                .filter_map(|field| {
+                                    Some(((*field).to_owned(), row.get(*field)?.clone()))
+                                })
+                                .collect(),
+                        ),
+                        None => row.clone(),
+                    })
+                    .collect();
+                Ok(json!({ "records": records, "total": rows.len() }))
             }
             "datastore_delete" => {
                 let id = Self::resource_of(action, payload)?;

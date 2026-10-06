@@ -148,7 +148,7 @@ fn the_context_maps_every_term_and_relationships_are_ids() {
         .contains("ngsi-ld-core-context"));
     let kpi = indicator();
     let urn: Urn = kpi.id.parse().expect("a urn");
-    assert_eq!(urn.space(), "helsinki-kpi");
+    assert_eq!(urn.space(), Some("helsinki-kpi"));
 }
 
 /// The committed `schemas/kinds/KeyPerformanceIndicator.json` is what the generator renders,
