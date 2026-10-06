@@ -14,6 +14,9 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 /// The store's migrations, reversible (`*.up.sql` and `*.down.sql`).
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// The knowledge assistant's website crawl core.
+pub mod crawl;
+
 /// The dimension of every embedding: `multilingual-e5-small` (ADR-N-040 §3.1).
 pub const DIMENSIONS: usize = 384;
 
@@ -32,6 +35,8 @@ pub enum Error {
     Project(String),
     /// The database refused or could not be reached.
     Database(sqlx::Error),
+    /// A crawl failure or invalid crawl specification.
+    Crawl(String),
 }
 
 impl std::fmt::Display for Error {
@@ -40,6 +45,7 @@ impl std::fmt::Display for Error {
             Error::Embedding(why) => write!(f, "the query embedding is not usable: {why}"),
             Error::Project(name) => write!(f, "`{name}` is not a project name"),
             Error::Database(err) => write!(f, "the assistant's database: {err}"),
+            Error::Crawl(why) => write!(f, "the crawl failed: {why}"),
         }
     }
 }

@@ -13,6 +13,18 @@ description = "jc-assistant: the knowledge assistant's store, migrations and hyb
 # PostgreSQL inside the mesh, which Linkerd already encrypts, and a TLS stack would bring
 # webpki-roots, whose CDLA-Permissive-2.0 licence deny.toml does not allow.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+jc-core = { path = "../jc-core", version = "0.1.0" }
+agent-proxy = { path = "../agent-proxy", version = "0.1.0" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+url = "2.5"
+sha2 = "0.10"
+hex = "0.4"
+scraper = "0.27"
+quick-xml = "0.42"
+texting_robots = "0.2.2"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [dev-dependencies]
+wiremock = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
