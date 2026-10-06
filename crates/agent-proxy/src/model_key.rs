@@ -83,6 +83,34 @@ pub fn of_refusal(status: u16) -> Option<KeyState> {
     }
 }
 
+/// The account's balance from one answer of `GET {base}/credits`: OpenRouter's
+/// `data.total_credits − data.total_usage`, or nothing when the answer says no such thing.
+pub fn read_credits_answer(status: u16, body: &[u8]) -> Option<f64> {
+    if status != 200 {
+        return None;
+    }
+    let data = serde_json::from_slice::<Value>(body)
+        .ok()?
+        .get("data")?
+        .clone();
+    let total = data.get("total_credits")?.as_f64()?;
+    let used = data.get("total_usage")?.as_f64()?;
+    Some((total - used).max(0.0))
+}
+
+/// What is left to spend: the key's remaining limit, or the account's balance when that is less.
+/// A key with credit left under its own limit stops all the same when the account is empty: on
+/// dev the key read 45.80 of 50 while the account held 6.01 (T-3065).
+pub fn with_balance(mut report: Report, balance: Option<f64>) -> Report {
+    if report.state == KeyState::Valid {
+        report.remaining = match (report.remaining, balance) {
+            (Some(key), Some(account)) => Some(key.min(account)),
+            (key, account) => key.or(account),
+        };
+    }
+    report
+}
+
 /// Whether this proxy has a key endpoint to probe: OpenRouter's, and the probe not turned off.
 pub fn probes(config: &Config) -> bool {
     config.model_probe_secs > 0
@@ -94,25 +122,36 @@ pub fn probes(config: &Config) -> bool {
 
 /// Asks the provider about the key, without a completion.
 pub async fn probe(state: &ProxyState) -> Report {
+    let report = match ask(state, "key").await {
+        Some((status, body)) => read_key_answer(status, &body),
+        None => return Report::bare(KeyState::Unreachable, "probe"),
+    };
+    if report.state != KeyState::Valid {
+        return report;
+    }
+    let balance = ask(state, "credits")
+        .await
+        .and_then(|(status, body)| read_credits_answer(status, &body));
+    with_balance(report, balance)
+}
+
+/// One GET of the provider's `path` with the key: its status and body, or nothing when the
+/// provider did not answer.
+async fn ask(state: &ProxyState, path: &str) -> Option<(u16, axum::body::Bytes)> {
     let url = format!(
-        "{}/key",
+        "{}/{path}",
         state.config.model_base.as_str().trim_end_matches('/')
     );
-    let answer = state
+    let response = state
         .http
         .get(url)
         .bearer_auth(state.credentials.get_model_key())
         .timeout(PROBE_TIMEOUT)
         .send()
-        .await;
-    match answer {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let body = response.bytes().await.unwrap_or_default();
-            read_key_answer(status, &body)
-        }
-        Err(_) => Report::bare(KeyState::Unreachable, "probe"),
-    }
+        .await
+        .ok()?;
+    let status = response.status().as_u16();
+    Some((status, response.bytes().await.unwrap_or_default()))
 }
 
 /// Probes the key every `JC_MODEL_PROBE_SECS` and reports each answer, for as long as the proxy
@@ -205,6 +244,30 @@ mod tests {
         assert_eq!(report.state, KeyState::Valid);
         assert_eq!((report.limit, report.remaining), (None, None));
         assert_eq!(report.usage, Some(0.5));
+    }
+
+    #[test]
+    fn what_is_left_is_the_smaller_of_the_keys_limit_and_the_accounts_balance() {
+        let body = br#"{"data":{"total_credits":109.1632707,"total_usage":103.148872267}}"#;
+        let balance = read_credits_answer(200, body).expect("a balance");
+        assert!((balance - 6.0144).abs() < 0.001, "{balance}");
+        assert_eq!(read_credits_answer(403, body), None);
+        assert_eq!(read_credits_answer(200, br#"{"data":{}}"#), None);
+
+        let key = read_key_answer(
+            200,
+            br#"{"data":{"limit":50,"usage":4.2,"limit_remaining":45.8}}"#,
+        );
+        let spendable = with_balance(key.clone(), Some(balance));
+        assert_eq!(spendable.remaining, Some(balance));
+        assert_eq!(spendable.limit, Some(50.0));
+        // No balance known: the key's own figure stands. No limit: the balance is what is left.
+        assert_eq!(with_balance(key, None).remaining, Some(45.8));
+        let unlimited = read_key_answer(200, br#"{"data":{"limit":null,"usage":1}}"#);
+        assert_eq!(with_balance(unlimited, Some(3.0)).remaining, Some(3.0));
+        // A refused key keeps no figures.
+        let dead = read_key_answer(401, b"");
+        assert_eq!(with_balance(dead, Some(3.0)).remaining, None);
     }
 
     #[test]
