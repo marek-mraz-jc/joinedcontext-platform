@@ -702,8 +702,18 @@ impl PipelineSpec {
             .map(|out| out.target_endpoint)
     }
 
+    /// The runner variables this pipeline declares for its own steps: the `envVar` of each of
+    /// its `secretRefs` (PL-15, T-3163).
+    pub fn own_variables(&self) -> Vec<&str> {
+        self.secret_refs
+            .iter()
+            .filter_map(|reference| reference.env_var.as_deref())
+            .collect()
+    }
+
     /// Validates class scheduling, target endpoint, compute engine, and resource bounds.
     pub fn validate(&self) -> Result<()> {
+        let own = self.own_variables();
         if self.is_second_shape() && self.has_first_shape() {
             return Err(Error::Invalid {
                 field: "spec".to_owned(),
@@ -727,7 +737,7 @@ impl PipelineSpec {
                 validate_source(source)?;
             }
             if let Some(compute) = &self.compute {
-                validate_compute(compute)?;
+                validate_compute(compute, &own)?;
             }
             if let Some(ref out) = self.output {
                 names::validate_entity_type(&out.entity_type)?;
@@ -804,8 +814,8 @@ impl PipelineSpec {
             }
         }
 
-        for sref in &self.secret_refs {
-            names::validate_dns1123_label(&sref.name)?;
+        for (index, sref) in self.secret_refs.iter().enumerate() {
+            sref.validate(&format!("spec.secretRefs[{index}]"))?;
         }
 
         if let Some(expiry) = &self.expiry {
@@ -891,7 +901,20 @@ const REFUSED_PROCESSORS: &[&str] = &["command", "file", "subprocess", "wasm"];
 /// processor nested anywhere inside it (`try`, `branch`, `switch` and the others carry
 /// processors of their own), and every string through the Bloblang host check. The Portal runs
 /// the processors of an author's `bento.yaml` through it before a stream is rendered.
+///
+/// A step reads no runner variable but [`STEP_VARIABLES`]; [`validate_processor_reading`] also
+/// lets it read the variables its own pipeline declares.
 pub fn validate_processor(field: &'static str, processor: &serde_json::Value) -> Result<()> {
+    validate_processor_reading(field, processor, &[])
+}
+
+/// [`validate_processor`] for a step of a pipeline that declares `own` variables in its
+/// `secretRefs` (`envVar`), which the step may name as `${NAME}` beside [`STEP_VARIABLES`].
+pub fn validate_processor_reading(
+    field: &'static str,
+    processor: &serde_json::Value,
+    own: &[&str],
+) -> Result<()> {
     let refused = |reason: String| Error::Invalid {
         field: field.to_owned(),
         reason,
@@ -927,6 +950,7 @@ pub fn validate_processor(field: &'static str, processor: &serde_json::Value) ->
     config_strings(&config[name], &mut texts);
     for text in &texts {
         validate_author_bloblang(field, text)?;
+        validate_runner_reads(field, text, own)?;
         if let Some(reason) = super::data_source::refused_target(text) {
             return Err(refused(reason.to_owned()));
         }
@@ -992,13 +1016,60 @@ fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
                 config_strings(item, found);
             }
         }
+        // The runner fills `${NAME}` in keys too: it interpolates the raw configuration.
         serde_json::Value::Object(fields) => {
-            for field in fields.values() {
+            for (key, field) in fields {
+                found.push(key.clone());
                 config_strings(field, found);
             }
         }
         _ => {}
     }
+}
+
+/// The runner variables any author's step may name as `${NAME}` (PL-16, T-3163): where the
+/// gateway and the token service are, the organisation's domain, and the pipeline credential as
+/// `${JC_CLIENT_ID}` and `${JC_CLIENT_SECRET}`, which the renderer rewrites into the stream's own
+/// project's client. Every other variable of the runner is a credential of some project.
+pub const STEP_VARIABLES: &[&str] = &[
+    "JC_GATEWAY_URL",
+    "JC_GATEWAY_HOST",
+    "JC_TOKEN_URL",
+    "JC_ORG_DOMAIN",
+    "JC_CLIENT_ID",
+    "JC_CLIENT_SECRET",
+];
+
+/// Refuses a `${NAME}` in an author's text that names a runner variable outside
+/// [`STEP_VARIABLES`], the injected space names and the pipeline's `own` declared variables.
+///
+/// The runner replaces each one with its environment when the stream is loaded, and that
+/// environment holds every project's pipeline secret and every source's credential: one name in
+/// a step's oauth2 or URL is a write as another project or a credential sent away. `${! … }` is
+/// Bloblang and is checked by [`validate_author_bloblang`].
+fn validate_runner_reads(field: &'static str, text: &str, own: &[&str]) -> Result<()> {
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        let tail = &rest[start + 2..];
+        if tail.starts_with('!') {
+            rest = tail;
+            continue;
+        }
+        let end = tail.find(['}', ':']).unwrap_or(tail.len());
+        let name = &tail[..end];
+        if !(STEP_VARIABLES.contains(&name) || is_injected_env(name) || own.contains(&name)) {
+            return Err(Error::Name {
+                field,
+                value: format!("${{{name}}}"),
+                reason: "a step names no runner variable but JC_GATEWAY_URL, JC_GATEWAY_HOST, \
+                         JC_TOKEN_URL, JC_ORG_DOMAIN, JC_CLIENT_ID, JC_CLIENT_SECRET, the JC_SPACE \
+                         names and the envVar of its own pipeline's secretRefs: the rest of the \
+                         runner's environment is other projects' credentials (PL-16)",
+            });
+        }
+        rest = &tail[end..];
+    }
+    Ok(())
 }
 
 /// The names an author's mapping may read out of the runner (PL-57, PF-84).
@@ -1162,7 +1233,7 @@ fn literal_argument(mapping: &str, from: usize) -> Option<String> {
     Some(raw.to_owned())
 }
 
-fn validate_compute(c: &Compute) -> Result<()> {
+fn validate_compute(c: &Compute, own: &[&str]) -> Result<()> {
     if let Some(ref mapping) = c.bloblang {
         if c.kind != ComputeKind::Bloblang {
             return Err(Error::Name {
@@ -1179,6 +1250,7 @@ fn validate_compute(c: &Compute) -> Result<()> {
             });
         }
         validate_author_bloblang("spec.compute.bloblang", mapping)?;
+        validate_runner_reads("spec.compute.bloblang", mapping, own)?;
     }
     match c.kind {
         ComputeKind::Wasm => {
@@ -1242,6 +1314,7 @@ impl PipelineSpec {
     /// as its `v1alpha1` counterpart is; a processor the runner ships; a `container` step alone
     /// in a `scheduled` pipeline.
     fn validate_second_shape(&self) -> Result<()> {
+        let own = self.own_variables();
         if self.sources.is_empty() {
             return Err(Error::Name {
                 field: "spec.sources",
@@ -1268,7 +1341,7 @@ impl PipelineSpec {
         for step in &self.steps {
             match step {
                 Step::Compute(compute) => {
-                    validate_compute(compute)?;
+                    validate_compute(compute, &own)?;
                     if compute.kind == ComputeKind::Container
                         && (self.steps.len() > 1 || !self.is_scheduled())
                     {
@@ -1293,9 +1366,10 @@ impl PipelineSpec {
                             reason: "a processor step names exactly one processor (PL-52)",
                         });
                     };
-                    validate_processor(
+                    validate_processor_reading(
                         "spec.steps.processor",
                         &serde_json::json!({ name: step.processor[name] }),
+                        &own,
                     )?;
                 }
             }

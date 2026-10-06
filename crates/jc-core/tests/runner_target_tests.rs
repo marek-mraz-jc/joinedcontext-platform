@@ -82,7 +82,6 @@ fn a_data_source_url_reads_no_runner_variable_but_the_gateway_and_token_addresse
         "https://feed.example/?k=${JC_CLIENT_SECRET_BBSK}",
         "https://feed.example/${DS_OTHER_PASSWORD}",
         "https://feed.example/${! env(\"JC_CLIENT_SECRET\") }",
-        "https://feed.example/$HOME",
         "https://${JC_CLIENT_SECRET}.feed.example/",
     ] {
         let refused = http_source(url).expect_err(url);

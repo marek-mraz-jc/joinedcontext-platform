@@ -404,6 +404,25 @@ impl DataSourceSpec {
 
         self.validate_secret_references()?;
 
+        // Every string of a typed connection reaches the runner as written, and the runner fills
+        // `${NAME}` from its environment: a header or a topic is the same door as a URL (PL-16,
+        // T-3163). A runner input names only its own `spec.secrets`, checked below.
+        // Keys too: the runner interpolates the raw configuration, so the block is read as text.
+        let typed = [
+            ("spec.mqtt", serde_json::to_string(&self.mqtt)),
+            ("spec.http", serde_json::to_string(&self.http)),
+            ("spec.webSocket", serde_json::to_string(&self.web_socket)),
+            ("spec.gtfsRt", serde_json::to_string(&self.gtfs_rt)),
+        ];
+        for (field, text) in typed {
+            if let Some(reason) = text.ok().as_deref().and_then(refused_runner_read) {
+                return Err(Error::Invalid {
+                    field: field.to_owned(),
+                    reason: reason.to_owned(),
+                });
+            }
+        }
+
         match &self.source_type {
             DataSourceType::Mqtt => {
                 self.validate_typed_common()?;
@@ -867,11 +886,11 @@ const URL_VARIABLES: &[&str] = &[
 ///
 /// The runner replaces every `${NAME}` in a stream with its own environment when the stream is
 /// loaded, and that environment holds every project's credentials, so `https://x/?k=${JC_…}`
-/// would send one of them to `x`. A URL names only [`URL_VARIABLES`]; a `$` the feed needs is
-/// written `%24`.
+/// would send one of them to `x`. A URL names only [`URL_VARIABLES`]; a `${` the feed needs is
+/// written `%24{`. A `$` without a brace is left alone, as the runner leaves it.
 pub fn refused_runner_read(url: &str) -> Option<&'static str> {
     let mut rest = url;
-    while let Some(start) = rest.find('$') {
+    while let Some(start) = rest.find("${") {
         let tail = &rest[start + 1..];
         let name = tail
             .strip_prefix('{')
@@ -885,7 +904,7 @@ pub fn refused_runner_read(url: &str) -> Option<&'static str> {
                 return Some(
                     "a URL names no runner variable but JC_GATEWAY_HOST, JC_GATEWAY_URL, \
                      JC_TOKEN_URL or JC_ORG_DOMAIN: the runner fills `${…}` from an environment \
-                     that holds every project's credentials; write a literal `$` as `%24` \
+                     that holds every project's credentials; write a literal `${` as `%24{` \
                      (PL-16)",
                 )
             }

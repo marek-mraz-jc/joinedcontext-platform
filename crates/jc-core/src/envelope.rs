@@ -484,6 +484,19 @@ impl SecretRef {
                 ));
             }
         }
+        // The deployment sets the runner's own variables under `JC_`, each project's pipeline
+        // client secret among them, and a Secret the reconciler writes under one of those names
+        // would hand that value to whoever declared it (PL-16, T-3163).
+        if self
+            .env_var
+            .as_deref()
+            .is_some_and(|name| name.starts_with("JC_"))
+        {
+            return Err(refuse(
+                "envVar",
+                "`JC_` is the runner's own prefix; name the variable without it (PL-16)",
+            ));
+        }
         Ok(())
     }
 }
