@@ -519,11 +519,14 @@ async fn chat(
         Some((Ok::<_, Infallible>(sse(&event)), rx))
     });
     let stream = futures_util::StreamExt::chain(first, rest);
-    answer(
-        Sse::new(stream)
-            .keep_alive(KeepAlive::default())
-            .into_response(),
-    )
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    // The edge is nginx: without this it holds the events back until the answer is complete.
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    answer(response)
 }
 
 #[cfg(test)]

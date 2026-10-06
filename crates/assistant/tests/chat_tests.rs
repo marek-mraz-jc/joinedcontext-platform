@@ -310,6 +310,12 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         headers
+            .get("x-accel-buffering")
+            .map(|v| v.to_str().unwrap_or_default()),
+        Some("no")
+    );
+    assert_eq!(
+        headers
             .get("access-control-allow-origin")
             .map(|v| v.to_str().unwrap_or_default()),
         Some(ORIGIN)
