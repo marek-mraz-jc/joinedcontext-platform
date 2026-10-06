@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libs
 COPY scripts/ci/pdfium.sh /tmp/pdfium.sh
 RUN sh /tmp/pdfium.sh /opt/pdfium
 ENV KREUZBERG_PDFIUM_PREBUILT=/opt/pdfium
+# The assistant's embedding model and the ONNX Runtime it loads, pinned and checked (T-3053);
+# only the final image's jc-assistant reads them.
+COPY scripts/ci/e5-small.sh scripts/ci/onnxruntime.sh /tmp/
+RUN sh /tmp/e5-small.sh /opt/e5-small && sh /tmp/onnxruntime.sh /opt/onnxruntime
 # dependency layer first so source edits do not rebuild the world
 COPY Cargo.toml Cargo.lock ./
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml
@@ -50,6 +54,9 @@ COPY --from=build /src/target/release/jc-functions /usr/local/bin/jc-functions
 # The knowledge assistant's crawl worker (Architecture/22, T-3052); its Deployment names it as the
 # command, as the agent proxy's does.
 COPY --from=build /src/target/release/jc-assistant /usr/local/bin/jc-assistant
+COPY --from=build /opt/e5-small /opt/e5-small
+COPY --from=build /opt/onnxruntime/libonnxruntime.so /usr/local/lib/libonnxruntime.so
+ENV JC_ASSISTANT_MODEL_DIR=/opt/e5-small ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/context-gateway"]

@@ -19,6 +19,13 @@ jobs:
       # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
       # otherwise fetch the newest release unchecked (T-3052).
       - run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+      # The assistant's embedding model and the ONNX Runtime it runs on, both pinned and checked
+      # (T-3053): the embedder and retrieval eval suites load them.
+      - run: >-
+          sh scripts/ci/e5-small.sh "$RUNNER_TEMP/e5-small"
+          && sh scripts/ci/onnxruntime.sh "$RUNNER_TEMP/onnxruntime"
+          && echo "JC_ASSISTANT_TEST_MODEL_DIR=$RUNNER_TEMP/e5-small" >> "$GITHUB_ENV"
+          && echo "ORT_DYLIB_PATH=$RUNNER_TEMP/onnxruntime/libonnxruntime.so" >> "$GITHUB_ENV"
       # The knowledge assistant's store against the cluster's own PostgreSQL image, pinned in
       # deployment's components/postgres/images.yaml (pgvector 0.8.6, T-3050). The image has no
       # entrypoint of its own (CloudNativePG drives it), so the step initialises and starts it.
