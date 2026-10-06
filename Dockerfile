@@ -3,7 +3,11 @@
 # Published by .github/workflows/image.yml as ghcr.io/marek-mraz-jc/joinedcontext-platform, pinned by digest in the deployment.
 FROM rust:1.97-slim-bookworm AS build
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# The PDFium the assistant crate links, pinned and checked (scripts/ci/pdfium.sh, T-3052).
+COPY scripts/ci/pdfium.sh /tmp/pdfium.sh
+RUN sh /tmp/pdfium.sh /opt/pdfium
+ENV KREUZBERG_PDFIUM_PREBUILT=/opt/pdfium
 # dependency layer first so source edits do not rebuild the world
 COPY Cargo.toml Cargo.lock ./
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml

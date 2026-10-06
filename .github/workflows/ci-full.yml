@@ -16,6 +16,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
+      # otherwise fetch the newest release unchecked (T-3052).
+      - run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
       # The knowledge assistant's store against the cluster's own PostgreSQL image, pinned in
       # deployment's components/postgres/images.yaml (pgvector 0.8.6, T-3050). The image has no
       # entrypoint of its own (CloudNativePG drives it), so the step initialises and starts it.
