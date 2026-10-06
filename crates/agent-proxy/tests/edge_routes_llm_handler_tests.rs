@@ -729,3 +729,47 @@ async fn a_call_past_the_assistants_daily_cap_is_refused_before_the_provider_is_
     );
     provider.verify().await;
 }
+
+/// T-3065, AG-96: the probe asks the provider's /key and /credits with the key, makes no
+/// completion, and reports the key's limit with what the account can still spend.
+#[tokio::test]
+async fn the_probe_reports_the_keys_limit_and_what_the_account_can_still_spend() {
+    use wiremock::matchers::header;
+    let provider = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/key"))
+        .and(header("authorization", "Bearer mock-model-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "limit": 50, "usage": 4.2, "limit_remaining": 45.8 }
+        })))
+        .expect(1)
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "total_credits": 109.16, "total_usage": 103.15 }
+        })))
+        .expect(1)
+        .mount(&provider)
+        .await;
+    let state = common::state(
+        sample_run(false),
+        common::Bases {
+            model: provider.uri(),
+            ..common::Bases::default()
+        },
+    );
+
+    let report = agent_proxy::model_key::probe(&state).await;
+    assert_eq!(report.state, agent_proxy::model_key::KeyState::Valid);
+    assert_eq!(report.limit, Some(50.0));
+    let left = report.remaining.expect("what is left");
+    assert!((left - 6.01).abs() < 0.001, "{left}");
+    provider.verify().await;
+    let asked = provider.received_requests().await.unwrap_or_default();
+    assert!(
+        asked.iter().all(|request| request.method.as_str() == "GET"),
+        "no completion"
+    );
+}
