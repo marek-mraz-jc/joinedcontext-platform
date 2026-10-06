@@ -26,10 +26,11 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'pub fn _dep_cache() {}' > crates/functions/src/lib.rs \
  && echo 'fn main() {}' > crates/functions/src/main.rs \
  && echo 'pub fn _dep_cache() {}' > crates/assistant/src/lib.rs \
+ && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
  && cargo build --release --locked --workspace && rm -rf crates/*/src
 COPY . .
 RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace \
- && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions
+ && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant
 
 # `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
 # for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
@@ -46,6 +47,9 @@ COPY --from=build /src/target/release/context-gateway /usr/local/bin/context-gat
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
 COPY --from=build /src/target/release/jc-functions /usr/local/bin/jc-functions
+# The knowledge assistant's crawl worker (Architecture/22, T-3052); its Deployment names it as the
+# command, as the agent proxy's does.
+COPY --from=build /src/target/release/jc-assistant /usr/local/bin/jc-assistant
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/context-gateway"]
