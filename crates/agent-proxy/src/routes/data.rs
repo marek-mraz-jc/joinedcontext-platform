@@ -1,7 +1,7 @@
 //! Data route forwarding to Context Gateway (/v1/data/*).
 
 use crate::audit::{log_request, AuditEntry};
-use crate::auth::authenticate;
+use crate::auth::authenticate_data;
 use crate::delegation::GrantError;
 use crate::ProxyState;
 use axum::body::Body;
@@ -54,7 +54,14 @@ async fn forward(
     req: Request<Body>,
 ) -> Response {
     let start = Instant::now();
-    let run = match authenticate(&headers, &state.runs, &state.config).await {
+    let run = match authenticate_data(
+        &headers,
+        &state.runs,
+        &state.config,
+        &state.data_credentials,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(p) => return (*p).into_response(),
     };

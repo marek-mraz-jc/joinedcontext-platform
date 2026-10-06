@@ -108,6 +108,7 @@ pub fn state(run: RunContext, bases: Bases) -> Arc<ProxyState> {
         runs: RunResolver::with_cached_at(portal_base, run),
         credentials,
         limits: LimitManager::default(),
+        data_credentials: Default::default(),
         http: reqwest::Client::new(),
         // No redirect of its own: the fetch route checks every hop against the allow-list.
         egress: reqwest::Client::builder()

@@ -124,6 +124,7 @@ fn test_state_with_all(
         runs,
         credentials,
         limits,
+        data_credentials: Default::default(),
         http,
         egress,
     })
@@ -1556,6 +1557,7 @@ mod mesh_identity {
             credentials: CredentialManager::new(config.clone()),
             runs: RunResolver::with_cached(sample_run(false, "building")),
             limits: LimitManager::default(),
+            data_credentials: Default::default(),
             http: reqwest::Client::new(),
             egress: reqwest::Client::new(),
             config,
@@ -1692,6 +1694,7 @@ async fn a_callback_presents_a_minted_token_and_never_a_configured_string() {
         runs: RunResolver::with_cached(sample_run(false, "building")),
         credentials,
         limits: LimitManager::default(),
+        data_credentials: Default::default(),
         http: reqwest::Client::new(),
         egress: reqwest::Client::new(),
     });
@@ -1751,6 +1754,7 @@ async fn a_callback_with_no_token_answers_503_and_says_nothing_about_the_realm()
         runs: RunResolver::with_cached(sample_run(false, "building")),
         credentials,
         limits: LimitManager::default(),
+        data_credentials: Default::default(),
         http: reqwest::Client::new(),
         egress: reqwest::Client::new(),
     });

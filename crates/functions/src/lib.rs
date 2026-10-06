@@ -40,6 +40,9 @@ pub struct AppState {
     pub caller: String,
     /// Scheme and authority of the Context Gateway (`JC_GATEWAY_URL`).
     pub gateway: String,
+    /// Scheme and authority of the agent proxy (`JC_AGENT_PROXY_URL`), for a call `via: "proxy"`;
+    /// `None` refuses such a call (ADR-N-038 decision 6).
+    pub proxy: Option<String>,
     pub http: reqwest::Client,
     pub slots: Arc<Semaphore>,
 }
@@ -53,6 +56,18 @@ struct InvokeRequest {
     config: Value,
     #[serde(default)]
     token: Option<String>,
+    /// `proxy` for an editing agent's own call: its token is the run's data credential and its
+    /// requests go through this runtime's agent proxy, never an address the call names.
+    #[serde(default)]
+    via: Via,
+}
+
+#[derive(Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Via {
+    #[default]
+    Gateway,
+    Proxy,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -137,12 +152,23 @@ async fn invoke(
             "config.slug must be the endpoint's slug",
         );
     };
+    let proxy = match call.via {
+        Via::Gateway => None,
+        Via::Proxy => match &state.proxy {
+            Some(proxy) => Some(proxy.clone()),
+            None => return problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this runtime has no agent proxy address (JC_AGENT_PROXY_URL) for a run's own call",
+            ),
+        },
+    };
     let invocation = Invocation {
         endpoint: Endpoint {
             http: state.http.clone(),
             gateway: state.gateway.clone(),
             slug: slug.to_owned(),
             token: call.token.filter(|t| !t.is_empty()),
+            proxy,
         },
         files: call.files,
         entry: call.entry,

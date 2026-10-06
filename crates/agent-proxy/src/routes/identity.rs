@@ -30,12 +30,8 @@ fn unavailable(what: &str) -> Response {
         .into_response()
 }
 
-pub async fn handler(
-    State(state): State<ProxyState>,
-    Path(run_id): Path<String>,
-    headers: HeaderMap,
-    body: Result<Json<HandOver>, axum::extract::rejection::JsonRejection>,
-) -> Response {
+/// Nothing when the caller is the Portal's own service account, the refusal to answer otherwise.
+async fn portal_only(state: &ProxyState, headers: &HeaderMap, what: &str) -> Option<Response> {
     let bearer = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -44,22 +40,42 @@ pub async fn handler(
         .filter(|v| !v.is_empty());
     let refused = || {
         jc_core::ProblemDetails::unauthorized()
-            .with_detail("only the Portal hands a run the identity of its person")
+            .with_detail(what.to_owned())
             .into_response()
     };
     let Some(bearer) = bearer else {
-        return refused();
+        return Some(refused());
     };
     match state.credentials.grants().is_portal(bearer).await {
-        Ok(true) => {}
+        Ok(true) => None,
         Ok(false) => {
-            tracing::warn!("an identity hand-over not from the Portal's service account");
-            return refused();
+            tracing::warn!(
+                route = what,
+                "an internal call not from the Portal's service account"
+            );
+            Some(refused())
         }
         Err(error) => {
-            tracing::error!(%error, "the realm could not judge an identity hand-over");
-            return unavailable("the realm could not be reached");
+            tracing::error!(%error, "the realm could not judge an internal call");
+            Some(unavailable("the realm could not be reached"))
         }
+    }
+}
+
+pub async fn handler(
+    State(state): State<ProxyState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<HandOver>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Some(refusal) = portal_only(
+        &state,
+        &headers,
+        "only the Portal hands a run the identity of its person",
+    )
+    .await
+    {
+        return refusal;
     }
 
     let Json(HandOver { subject_token }) = match body {
@@ -109,6 +125,56 @@ pub async fn handler(
         Err(BindError::Transport(error)) => {
             tracing::error!(run = %run.id, %error, "the realm could not exchange a run's identity");
             unavailable("the realm could not be reached")
+        }
+    }
+}
+
+/// `POST /internal/runs/{run}/data-credential`: a five-minute credential of an active run for the
+/// data routes alone, which the Portal gives `jc-functions` when the editing agent tests an App
+/// function (ADR-N-038 decision 6). Never logged; kept here only as a digest.
+pub async fn data_credential(
+    State(state): State<ProxyState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = portal_only(
+        &state,
+        &headers,
+        "only the Portal asks for a run's data credential",
+    )
+    .await
+    {
+        return refusal;
+    }
+    if !run_id_is_well_formed(&run_id) {
+        return jc_core::ProblemDetails::not_found()
+            .with_detail("no run holds this id")
+            .into_response();
+    }
+    match state.runs.resolve_fresh(&run_id).await {
+        Ok(run) => {
+            let token = state.data_credentials.mint(&run.id);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "token": token,
+                    "expiresIn": crate::data_credential::TTL.as_secs(),
+                })),
+            )
+                .into_response()
+        }
+        Err(RunError::NotFound(_)) => jc_core::ProblemDetails::not_found()
+            .with_detail("no run holds this id")
+            .into_response(),
+        Err(RunError::NotActive(status)) => {
+            jc_core::ProblemDetails::new(409, "conflict", "Conflict")
+                .with_detail(format!("the run is {status} and reads no data"))
+                .into_response()
+        }
+        Err(RunError::Transport(reason)) => {
+            tracing::error!(run = %run_id, %reason, "the run could not be read from the Portal");
+            unavailable("the run could not be read from the Portal")
         }
     }
 }

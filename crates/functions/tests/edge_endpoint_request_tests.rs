@@ -26,6 +26,7 @@ fn endpoint(gateway: &str, token: Option<&str>) -> Endpoint {
         gateway: gateway.to_owned(),
         slug: SLUG.to_owned(),
         token: token.map(str::to_owned),
+        proxy: None,
     }
 }
 

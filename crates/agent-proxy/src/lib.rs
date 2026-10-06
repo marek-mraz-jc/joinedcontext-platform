@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod auth;
 pub mod config;
+pub mod data_credential;
 pub mod delegation;
 pub mod inject;
 pub mod limits;
@@ -21,6 +22,8 @@ pub struct ProxyState {
     pub runs: runs::RunResolver,
     pub credentials: inject::CredentialManager,
     pub limits: limits::LimitManager,
+    /// The runs' short-lived data credentials for their App functions (ADR-N-038 decision 6).
+    pub data_credentials: data_credential::DataCredentials,
     /// The client every credentialed upstream is called with: the gateway with a minted endpoint
     /// token, the forge with the forge token, the model with the model key, the Portal with this
     /// proxy's own. Built by [`no_redirect_client`], so none of those credentials can be carried
@@ -48,6 +51,7 @@ impl ProxyState {
             runs,
             credentials,
             limits,
+            data_credentials: data_credential::DataCredentials::default(),
             // No deadline: a long generation is not a hung model provider.
             http: no_redirect_client(None),
             egress: egress_client(),
@@ -121,6 +125,10 @@ pub fn router(state: Arc<ProxyState>) -> Router {
         .route(
             "/internal/runs/{run}/identity",
             post(routes::identity::handler),
+        )
+        .route(
+            "/internal/runs/{run}/data-credential",
+            post(routes::identity::data_credential),
         )
         .fallback(|| async {
             jc_core::ProblemDetails::forbidden().with_detail("endpoint not recognized by proxy")

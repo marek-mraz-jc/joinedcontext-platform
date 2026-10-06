@@ -14,6 +14,9 @@
 //! - `JC_GATEWAY_URL` — the Context Gateway a function's context call is forwarded to, scheme
 //!   and authority only; a path or a query is refused at startup, because the endpoint the
 //!   permission is checked against and the URL that is fetched would then differ. Required.
+//! - `JC_AGENT_PROXY_URL` — the agent proxy an editing agent's own call goes through
+//!   (`via: "proxy"`, ADR-N-038 decision 6), scheme and authority only for the same reason.
+//!   Optional: without it such a call answers `503`.
 //!
 //! None of them is a secret: the runtime holds no credential of its own, and every call it
 //! makes carries the caller's token.
@@ -48,6 +51,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if parsed.path() != "/" || parsed.query().is_some() {
         return Err("JC_GATEWAY_URL must be scheme and authority only".into());
     }
+    let proxy = match std::env::var("JC_AGENT_PROXY_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(proxy) => {
+            let proxy = proxy.trim_end_matches('/').to_owned();
+            let parsed = reqwest::Url::parse(&proxy)?;
+            if parsed.path() != "/" || parsed.query().is_some() {
+                return Err("JC_AGENT_PROXY_URL must be scheme and authority only".into());
+            }
+            Some(proxy)
+        }
+        None => None,
+    };
 
     let verifier = Arc::new(Verifier::new(issuer));
     if let Err(error) = jwks::refresh(&verifier, &jwks_url).await {
@@ -60,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audience,
         caller,
         gateway,
+        proxy,
         http: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()?,
