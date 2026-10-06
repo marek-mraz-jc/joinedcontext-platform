@@ -676,6 +676,121 @@ async fn an_endpoint_added_since_the_run_was_cached_is_reached_at_once() {
     portal.verify().await;
 }
 
+/// The Portal's record of `run` with `slug` as its primary endpoint, as `/internal/agent-runs`
+/// answers it.
+fn portal_record(run: &RunContext, slug: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": run.id,
+        "project": run.project,
+        "appName": run.app_name,
+        "endpointSlug": slug,
+        "endpointSlugs": if slug.is_empty() { vec![] } else { vec![slug] },
+        "allowsWrite": false,
+        "branch": run.branch,
+        "pathPrefix": run.path_prefix,
+        "status": "interviewing",
+        "ticketHash": run.ticket_hash,
+        "maxTokens": 1000,
+        "allowedHosts": [],
+        "requestsPerMinute": 100,
+        "maxResponseBytes": 1048576,
+        "createdBy": run.created_by,
+        "modelName": run.model_name,
+    })
+}
+
+/// A conversation starts with no endpoint, and the identity hand-over caches it that way. The
+/// first endpoint the assistant opens within the cache's five seconds is its primary: its
+/// `tools/list` through `/v1/data/mcp` reaches that endpoint, asked of the Portal again, never
+/// an empty slug (T-3044, AG-75).
+#[tokio::test]
+async fn the_first_endpoint_opened_since_the_run_was_cached_is_its_primary_at_once() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let gateway = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{KPIS}/mcp")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [] } }),
+        ))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    let mut cached = sample_run(false, "interviewing");
+    cached.endpoint_slug = String::new();
+    let portal = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/internal/agent-runs/{}", cached.id)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(portal_record(&cached, KPIS)))
+        .expect(1)
+        .mount(&portal)
+        .await;
+
+    let state = test_state_with_gateway(cached.clone(), &gateway.uri());
+    let state = Arc::new(ProxyState {
+        runs: RunResolver::with_cached_at(portal.uri().parse().unwrap(), cached),
+        ..(*state).clone()
+    });
+    let list = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let resp = router(state)
+        .oneshot(ticketed(
+            "POST",
+            "/v1/data/mcp",
+            Body::from(list.to_string()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    gateway.verify().await;
+    portal.verify().await;
+}
+
+/// A run that still reads no endpoint, by the Portal's own record, is told so; nothing goes to
+/// the gateway under an empty slug.
+#[tokio::test]
+async fn a_run_with_no_endpoint_yet_is_told_so_and_never_reaches_the_gateway() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let gateway = MockServer::start().await;
+    let mut cached = sample_run(false, "interviewing");
+    cached.endpoint_slug = String::new();
+    let portal = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/internal/agent-runs/{}", cached.id)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(portal_record(&cached, "")))
+        .mount(&portal)
+        .await;
+
+    let state = test_state_with_gateway(cached.clone(), &gateway.uri());
+    let state = Arc::new(ProxyState {
+        runs: RunResolver::with_cached_at(portal.uri().parse().unwrap(), cached),
+        ..(*state).clone()
+    });
+    let list = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let resp = router(state)
+        .oneshot(ticketed(
+            "POST",
+            "/v1/data/mcp",
+            Body::from(list.to_string()),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("reads no endpoint yet"));
+    assert!(gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
+}
+
 /// T-0817: axum decodes the path once, so a double-encoded dot segment reaches the guard as
 /// `%2e%2e`, which the URL parser on the way out would fold into `..`. Nothing encoded, no
 /// dot segment and no empty segment gets past the application directory, and the forge is
