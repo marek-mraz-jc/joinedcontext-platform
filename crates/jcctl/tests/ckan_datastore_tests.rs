@@ -406,6 +406,91 @@ fn a_second_run_over_the_same_columns_writes_no_schema_call() {
     assert_eq!(ckan.actions(), vec!["datastore_create"]);
 }
 
+fn typed(columns: &[(&str, &str)]) -> Vec<Value> {
+    columns
+        .iter()
+        .map(|(id, kind)| json!({ "id": id, "type": kind }))
+        .collect()
+}
+
+/// T-3113: a KPI whose value the Endpoint now answers as text ("not measured") would make CKAN
+/// refuse every upsert into the number column, and the table would stay as it was while the
+/// Endpoint moved on. The table is built again with the answer's types; a change the column
+/// still holds (a whole number into a decimal one, anything into text) keeps it.
+#[test]
+fn a_column_that_can_no_longer_hold_the_answer_rebuilds_the_table_and_one_that_can_keeps_it() {
+    let mut ckan = InMemoryCkan::new();
+    let first = typed(&[("entity_id", "text"), ("currentValue.value", "float")]);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &first).expect("created");
+
+    for (kind, outcome) in [("int", Outcome::Unchanged), ("float", Outcome::Unchanged)] {
+        let next = typed(&[("entity_id", "text"), ("currentValue.value", kind)]);
+        assert_eq!(
+            ensure(&mut ckan, PACKAGE, TABLE, &next).expect("ensured").1,
+            outcome,
+            "{kind}"
+        );
+    }
+    assert_eq!(
+        ckan.actions(),
+        vec!["datastore_create"],
+        "nothing rebuilt for what the column holds"
+    );
+
+    let text = typed(&[("entity_id", "text"), ("currentValue.value", "text")]);
+    let (again, outcome) = ensure(&mut ckan, PACKAGE, TABLE, &text).expect("rebuilt");
+    assert_eq!(outcome, Outcome::Created);
+    assert_eq!(again, resource, "the same resource, a new table");
+    assert_eq!(
+        ckan.actions(),
+        vec!["datastore_create", "datastore_delete", "datastore_create"]
+    );
+    let fields = ckan.table_fields(&resource).expect("the table");
+    assert_eq!(
+        fields
+            .iter()
+            .find(|f| f["id"] == "currentValue.value")
+            .map(|f| f["type"].clone()),
+        Some(json!("text"))
+    );
+    let rebuilt = ckan
+        .calls()
+        .last()
+        .map(|(_, payload)| payload.clone())
+        .expect("the create");
+    assert_eq!(
+        rebuilt["primary_key"],
+        json!(["entity_id"]),
+        "an upsert needs its key"
+    );
+
+    // A text column takes whatever comes next; an int column refuses a decimal.
+    let decimal = typed(&[("entity_id", "text"), ("currentValue.value", "float")]);
+    assert_eq!(
+        ensure(&mut ckan, PACKAGE, TABLE, &decimal).expect("kept").1,
+        Outcome::Unchanged
+    );
+    let mut counts = InMemoryCkan::new();
+    ensure(
+        &mut counts,
+        PACKAGE,
+        TABLE,
+        &typed(&[("entity_id", "text"), ("n", "int4")]),
+    )
+    .expect("created");
+    assert_eq!(
+        ensure(
+            &mut counts,
+            PACKAGE,
+            TABLE,
+            &typed(&[("entity_id", "text"), ("n", "float")])
+        )
+        .expect("rebuilt")
+        .1,
+        Outcome::Created
+    );
+}
+
 #[test]
 fn a_new_column_extends_the_table_instead_of_failing_the_upsert() {
     let mut ckan = InMemoryCkan::new();

@@ -205,6 +205,60 @@ fn a_second_run_over_an_unchanged_repository_writes_nothing() {
     assert_eq!(api.actions(), vec!["package_create"]);
 }
 
+/// T-3118, EP-65: the table equals the answer. An entity the Endpoint no longer answers (a
+/// vehicle that left the feed) leaves the table on the next reload, and the line says so; the
+/// rows that stayed are kept.
+#[test]
+fn an_entity_the_endpoint_no_longer_answers_leaves_the_table() {
+    let dir = repo("mirror-prune");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let target = &found[1];
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+    publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&answer(CSV)),
+        &settings(),
+    )
+    .expect("the first run");
+    assert_eq!(api.rows(AIR).expect("rows").len(), 2);
+
+    let one_left = "id,type,temperature.value,location.value,note\r\n\
+urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1,AirQualityObserved,12.5,,\r\n";
+    let line = publish_one(
+        &mut api,
+        target,
+        &record("air-rows"),
+        Some(&answer(one_left)),
+        &settings(),
+    )
+    .expect("the second run");
+    let rows = api.rows(AIR).expect("rows");
+    assert_eq!(
+        rows.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1"]
+    );
+    assert_eq!(line.mirror.as_ref().map(|m| m.removed), Some(1));
+    assert!(
+        line.to_string()
+            .ends_with("DataStore unchanged (1 rows, 1 gone)"),
+        "{line}"
+    );
+    let deleted: Vec<&Value> = api
+        .calls()
+        .filter(|(action, payload)| {
+            *action == "datastore_delete" && payload.get("filters").is_some()
+        })
+        .map(|(_, payload)| &payload["filters"]["entity_id"])
+        .collect();
+    assert_eq!(
+        deleted,
+        [&json!(["urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:2"])]
+    );
+}
+
 /// EP-65: a target with a mirror gets its table created and filled from the CSV the
 /// gateway answers, typed from the cells; a second run leaves the table's fields alone
 /// and reloads the rows.
@@ -229,7 +283,8 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
         line.mirror,
         Some(Mirror {
             table: ckan_datastore::Outcome::Created,
-            rows: 2
+            rows: 2,
+            removed: 0,
         })
     );
     assert_eq!(
@@ -242,7 +297,8 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
             "package_create",
             "datastore_create",
             "resource_view_create",
-            "datastore_upsert"
+            "datastore_upsert",
+            "datastore_search"
         ]
     );
     // EP-62: the sheet opens as a grid on the dataset page.
@@ -294,9 +350,11 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
             "datastore_create",
             "resource_view_create",
             "datastore_upsert",
-            "datastore_upsert"
+            "datastore_search",
+            "datastore_upsert",
+            "datastore_search"
         ],
-        "a reload writes rows and nothing else"
+        "a reload writes rows, reads which entities the table holds, and removes none that stayed"
     );
     assert_eq!(api.views(AIR).len(), 1, "a second grid");
 }
@@ -488,6 +546,7 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
             "datastore_create",
             "resource_view_create",
             "datastore_upsert",
+            "datastore_search",
             "datastore_delete",
             "package_delete"
         ]
@@ -496,7 +555,7 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
 
     let again = withdraw_one(&mut api, target).expect("nothing to withdraw");
     assert_eq!(again.outcome, Outcome::Unchanged);
-    assert_eq!(api.actions().len(), 6);
+    assert_eq!(api.actions().len(), 7, "a second withdrawal writes nothing");
 }
 
 // --- the CSV the gateway writes ------------------------------------------------------------
@@ -1167,8 +1226,8 @@ fn every_entity_type_gets_its_own_table_with_every_model_attribute() {
     );
     assert_eq!(
         api.actions()[calls..],
-        ["datastore_upsert", "datastore_upsert"],
-        "a reload writes rows and nothing else"
+        ["datastore_upsert", "datastore_search", "datastore_upsert", "datastore_search"],
+        "a reload writes rows and reads which entities each table holds, and removes none that stayed"
     );
 }
 
