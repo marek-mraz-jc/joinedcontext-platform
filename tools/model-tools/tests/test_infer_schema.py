@@ -167,6 +167,25 @@ def test_the_operations_build_the_same_slots_as_the_source():
     assert set_fields[("pm10", "maximum_value")] == 15
 
 
+def test_a_column_every_row_fills_is_required_once_the_sample_is_long_enough():
+    """T-3250: twelve rows with a name each make `name` required; the note some rows leave empty
+    stays optional; a two-row sample guesses nothing required."""
+    rows = "".join(f"{i},Station {i},{'' if i % 3 else 'ok'}\n" for i in range(12))
+    answer = infer("stations.csv", f"id,name,note\n{rows}".encode("utf-8"))
+
+    slots = slots_of(answer)
+    assert slots["name"]["required"] is True
+    assert "required" not in slots["note"]
+    set_fields = {(op["name"], op["field"]): op["value"] for op in answer["operations"] if op["op"] == "setSlot"}
+    assert set_fields[("name", "required")] is True
+    assert ("note", "required") not in set_fields
+    assert all("required" not in definition for definition in slots_of(infer("sensors.csv", SENSORS)).values())
+
+    status, body = call("POST", "/generate", {"source": answer["linkml"]})
+    assert status == 200
+    assert body["errors"] == [], body["errors"]
+
+
 def test_the_inferred_model_compiles():
     """The draft is a model the generators accept, not only YAML the editor shows."""
     answer = infer("sensors.csv", SENSORS, index=INDEX)
