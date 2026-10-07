@@ -639,6 +639,145 @@ async fn crawl_caps_exceeded() {
     drop_database(admin, pool, &db_name).await;
 }
 
+/// A CA, or an intermediate when `issuer` is given, minted per run (no key in the repository).
+fn authority(
+    name: &str,
+    issuer: Option<&rcgen::Issuer<'_, rcgen::KeyPair>>,
+) -> (rcgen::Certificate, rcgen::KeyPair, rcgen::CertificateParams) {
+    let key = rcgen::KeyPair::generate().expect("a key");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, name);
+    let cert = match issuer {
+        Some(issuer) => params.signed_by(&key, issuer),
+        None => params.self_signed(&key),
+    }
+    .expect("a certificate");
+    (cert, key, params)
+}
+
+/// An https server for www.city.test that sends only its leaf, as www.bbsk.sk does (T-3298).
+async fn leaf_only_server(issuer: &rcgen::Issuer<'_, rcgen::KeyPair>) -> u16 {
+    let key = rcgen::KeyPair::generate().expect("a server key");
+    let leaf = rcgen::CertificateParams::new(vec!["www.city.test".to_owned()])
+        .expect("the SAN")
+        .signed_by(&key, issuer)
+        .expect("a leaf");
+    let tls = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+        )
+        .expect("the leaf matches the key");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let port = listener.local_addr().expect("address").port();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls));
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                    )
+                    .await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+/// T-3298: a site that omits its intermediate is read once the crawler holds that intermediate;
+/// without it, or with another CA's, the TLS check still refuses, and trust ends at the root.
+#[tokio::test]
+async fn a_missing_intermediate_the_crawler_holds_completes_the_chain() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (root, root_key, root_params) = authority("test root", None);
+    let root_issuer = rcgen::Issuer::new(root_params, root_key);
+    let (intermediate, key, params) = authority("test intermediate", Some(&root_issuer));
+    let issuer = rcgen::Issuer::new(params, key);
+    let (stranger, _, _) = authority("another intermediate", Some(&root_issuer));
+    let port = leaf_only_server(&issuer).await;
+
+    let (other_root, _, _) = authority("another root", None);
+    let fetch_with = |root: &rcgen::Certificate,
+                      extra: Vec<rustls::pki_types::CertificateDer<'static>>| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(root.der().clone()).expect("the root");
+        let config = fetch::tls_config(roots, extra).expect("TLS config");
+        let client = fetch::client_with_tls(
+            Arc::new(FixtureResolver::new(&[("www.city.test", port)])),
+            config,
+        )
+        .expect("client");
+        async move {
+            client
+                .get(format!("https://www.city.test:{port}/"))
+                .send()
+                .await
+        }
+    };
+    assert!(
+        fetch_with(&root, vec![]).await.is_err(),
+        "a leaf alone builds no chain"
+    );
+    assert!(
+        fetch_with(&root, vec![stranger.der().clone()])
+            .await
+            .is_err(),
+        "another CA's intermediate builds no chain"
+    );
+    // The intermediate is offered, never trusted: under another root it reads nothing.
+    assert!(
+        fetch_with(&other_root, vec![intermediate.der().clone()])
+            .await
+            .is_err(),
+        "an offered intermediate is no trust anchor"
+    );
+    let answer = fetch_with(&root, vec![intermediate.der().clone()])
+        .await
+        .expect("the chain completes");
+    assert_eq!(answer.status(), 200);
+}
+
+#[test]
+fn the_shipped_intermediates_are_the_pinned_ones() {
+    use sha2::{Digest, Sha256};
+    let pinned: Vec<(&str, String)> = fetch::INTERMEDIATES
+        .iter()
+        .map(|(name, der)| (*name, hex::encode(Sha256::digest(der))))
+        .collect();
+    assert_eq!(
+        pinned,
+        vec![
+            (
+                "GeoTrust TLS RSA CA G1",
+                "c06e307f7cfc1d32fa72a4c033c87b90019af216f0775d64978a2eca6c8a230e".to_owned()
+            ),
+            (
+                "Thawte TLS RSA CA G1",
+                "4bcc5e234fe81ede4eaf883aa19c31335b0b26e85e066b9945e4cb6153eb20c2".to_owned()
+            ),
+        ]
+    );
+}
+
 /// Case 4: SSRF guard refusing loopback redirects, link literals, and PublicOnly egress check.
 #[tokio::test]
 async fn crawl_ssrf_protection() {

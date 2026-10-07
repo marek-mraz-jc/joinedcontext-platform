@@ -6,6 +6,10 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LOCATION};
 use reqwest::{Client, StatusCode};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use url::Url;
 
 use super::CrawlPolicy;
@@ -47,20 +51,132 @@ pub enum FetchOutcome {
     Failed(String),
 }
 
+/// Public intermediates some sites do not send with their certificate (T-3298): a browser fetches
+/// a missing one from the leaf's AIA address, rustls does not. Each is offered to the chain
+/// building beside what the server sent; trust still ends at a native root, and an expired or
+/// unrelated intermediate builds no chain. Downloaded from cacerts.digicert.com and pinned by
+/// SHA-256 in `the_shipped_intermediates_are_the_pinned_ones`; both expire 2027-11-02.
+pub const INTERMEDIATES: &[(&str, &[u8])] = &[
+    // www.bbsk.sk
+    (
+        "GeoTrust TLS RSA CA G1",
+        include_bytes!("intermediates/GeoTrustTLSRSACAG1.crt"),
+    ),
+    // www.praha.eu
+    (
+        "Thawte TLS RSA CA G1",
+        include_bytes!("intermediates/ThawteTLSRSACAG1.crt"),
+    ),
+];
+
+/// A webpki check that also offers `extra` intermediates when it builds the chain.
+#[derive(Debug)]
+struct WithIntermediates {
+    inner: Arc<WebPkiServerVerifier>,
+    extra: Vec<CertificateDer<'static>>,
+}
+
+impl ServerCertVerifier for WithIntermediates {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let mut offered = intermediates.to_vec();
+        offered.extend(self.extra.iter().cloned());
+        self.inner
+            .verify_server_cert(end_entity, &offered, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+/// The crawler's TLS: verified to `roots`, with `intermediates` offered beside the server's own.
+pub fn tls_config(
+    roots: RootCertStore,
+    intermediates: Vec<CertificateDer<'static>>,
+) -> Result<ClientConfig, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+        .build()
+        .map_err(|err| format!("no TLS verifier: {err}"))?;
+    let mut config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|err| format!("no TLS versions: {err}"))?
+        .dangerous() // a custom verifier; it only adds intermediates to webpki's own check
+        .with_custom_certificate_verifier(Arc::new(WithIntermediates {
+            inner,
+            extra: intermediates,
+        }))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+/// The production TLS: the native roots and [`INTERMEDIATES`].
+fn public_tls() -> Result<ClientConfig, String> {
+    let found = rustls_native_certs::load_native_certs();
+    let mut roots = RootCertStore::empty();
+    let (added, _) = roots.add_parsable_certificates(found.certs);
+    if added == 0 {
+        return Err(format!(
+            "no native root certificate could be read: {:?}",
+            found.errors
+        ));
+    }
+    let intermediates = INTERMEDIATES
+        .iter()
+        .map(|(_, der)| CertificateDer::from(der.to_vec()))
+        .collect();
+    tls_config(roots, intermediates)
+}
+
 /// Builds the crawl client: every name through `resolver` (production: `PublicOnly`), no
-/// redirect of its own (each hop passes [`is_url_allowed`] in [`fetch_url`]), no cookies, and
-/// the platform user agent. A client that cannot be built is an error, never a default client,
-/// which would carry no resolver and so no guard.
-pub fn client<R: reqwest::dns::Resolve + 'static>(
+/// redirect of its own (each hop passes [`is_url_allowed`] in [`fetch_url`]), no cookies, the
+/// platform user agent, and TLS verified to the native roots with [`INTERMEDIATES`] offered. A
+/// client that cannot be built is an error, never a default client, which would carry no
+/// resolver and so no guard.
+pub fn client<R: reqwest::dns::Resolve + 'static>(resolver: Arc<R>) -> Result<Client, String> {
+    client_with_tls(resolver, public_tls()?)
+}
+
+/// [`client`] with the TLS of `config`, for a test's own roots.
+pub fn client_with_tls<R: reqwest::dns::Resolve + 'static>(
     resolver: Arc<R>,
-) -> Result<Client, reqwest::Error> {
+    config: ClientConfig,
+) -> Result<Client, String> {
     Client::builder()
         .dns_resolver(resolver)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .user_agent("jc-assistant/0.1 (+https://joinedcontext.com/assistant)")
+        .use_preconfigured_tls(config)
         .build()
+        .map_err(|err| format!("the HTTP client could not be built: {err}"))
 }
 
 /// Checks whether a URL satisfies the crawler's SSRF guard rules.
@@ -131,7 +247,16 @@ pub async fn fetch_url(
                 if is_refused_error(&err) {
                     return FetchOutcome::Refused;
                 }
-                return FetchOutcome::Failed(err.to_string());
+                // The whole chain, so a TLS refusal names the certificate (T-3298).
+                let mut why = err.to_string();
+                let mut source = std::error::Error::source(&err);
+                while let Some(cause) = source {
+                    why.push_str(": ");
+                    why.push_str(&cause.to_string());
+                    source = cause.source();
+                }
+                tracing::warn!(url = %current_url, %why, "read failed");
+                return FetchOutcome::Failed(why);
             }
         };
 
