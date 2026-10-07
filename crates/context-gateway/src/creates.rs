@@ -71,7 +71,7 @@ pub fn share(per_day: u32) -> u32 {
 }
 
 /// The creates each Endpoint has taken today (UTC), keyed by slug, and each caller's part of
-/// them, keyed by slug and caller ([`crate::middleware::rate_limit::caller_key`]).
+/// them, keyed by slug and caller (`middleware::rate_limit::caller_key`, private).
 ///
 /// A create reserves its slot before the broker is asked, so concurrent creates cannot pass
 /// the cap together, and gives it back when the broker refuses it.
