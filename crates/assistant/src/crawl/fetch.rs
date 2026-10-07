@@ -216,3 +216,42 @@ fn is_refused_error(err: &reqwest::Error) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allowed(url: &str) -> bool {
+        is_url_allowed(&Url::parse(url).expect("a URL"), false)
+    }
+
+    /// T-3227: every address a crawled link or a start URL could aim inside the cluster or at the
+    /// node is refused before a request exists; a public https page is not.
+    #[test]
+    fn no_link_reaches_inside_the_cluster_the_node_or_another_scheme() {
+        assert!(allowed("https://www.banskabystrica.sk/odpad"));
+        for refused in [
+            // Cloud metadata, the node, the cluster's own ranges.
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1/",
+            "https://10.43.0.10/",
+            "https://172.16.0.1/",
+            "https://192.168.1.1/",
+            "https://100.64.0.1/",
+            // The same addresses in the forms a parser normalises: decimal, octal, IPv4-mapped.
+            "https://2130706433/",
+            "https://0177.0.0.1/",
+            "https://[::ffff:127.0.0.1]/",
+            "https://[::1]/",
+            "https://[fd00::1]/",
+            // Other schemes, plain http without the policy, and credentials in the URL.
+            "file:///etc/passwd",
+            "ftp://www.banskabystrica.sk/",
+            "gopher://www.banskabystrica.sk/",
+            "http://www.banskabystrica.sk/",
+            "https://user:secret@www.banskabystrica.sk/",
+        ] {
+            assert!(!allowed(refused), "{refused} must be refused");
+        }
+    }
+}
