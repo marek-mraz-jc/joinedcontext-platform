@@ -562,6 +562,29 @@ mod tests {
     }
 
     #[test]
+    fn a_text_sample_reaches_the_runner_as_bytes_it_never_interpolates() {
+        // T-3229: the runner fills `${NAME}` and `${! … }` in a stream's configuration from its
+        // own environment, which holds every project's credentials. A sample is the person's
+        // text, so none of it may stand in the configuration as text the runner reads.
+        let sample = Sample {
+            text: Some(
+                "${JC_CLIENT_SECRET} ${! env(\"JC_CLIENT_SECRET\") } ${JC_TOKEN_URL}".into(),
+            ),
+            url: None,
+            format: SampleFormat::Json,
+        };
+        let config = harness(&spec(None), &sample, "http://p").expect("a harness");
+        let written = config["input"]["generate"]["mapping"]
+            .as_str()
+            .expect("a mapping");
+        assert!(
+            !written.contains("JC_CLIENT_SECRET") && !written.contains("${"),
+            "{written}"
+        );
+        assert!(written.ends_with(".decode(\"base64\")"), "{written}");
+    }
+
+    #[test]
     fn a_url_sample_is_fetched_once_and_text_is_one_message() {
         let sample = Sample {
             text: None,
