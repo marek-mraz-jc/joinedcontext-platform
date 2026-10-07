@@ -727,10 +727,16 @@ fn render(value: &Value) -> String {
     match value {
         Value::String(text) if text.ends_with('\n') => text.clone(),
         Value::String(text) => format!("{text}\n"),
-        other => format!(
-            "{}\n",
-            serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string())
-        ),
+        other => {
+            // Keys sorted here, not by serde_json's default map: a crate in the workspace turns
+            // on `preserve_order`, and the bytes `diff` compares must not depend on the build.
+            let mut sorted = other.clone();
+            sorted.sort_all_objects();
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&sorted).unwrap_or_else(|_| sorted.to_string())
+            )
+        }
     }
 }
 
@@ -801,6 +807,11 @@ mod tests {
         assert_eq!(
             render(&serde_json::json!({"b": 1, "a": 2})),
             "{\n  \"a\": 2,\n  \"b\": 1\n}\n"
+        );
+        // Nested objects too, whatever order the map keeps.
+        assert_eq!(
+            render(&serde_json::json!({"z": {"d": 1, "c": [{"f": 1, "e": 2}]}})),
+            "{\n  \"z\": {\n    \"c\": [\n      {\n        \"e\": 2,\n        \"f\": 1\n      }\n    ],\n    \"d\": 1\n  }\n}\n"
         );
     }
 
