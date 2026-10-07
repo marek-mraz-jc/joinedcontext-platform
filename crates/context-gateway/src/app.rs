@@ -118,6 +118,8 @@ pub struct Gateway {
     pub delivery_key: Option<Arc<crate::egress::subject::DeliveryKey>>,
     /// One token bucket per endpoint and caller (EP-20).
     pub rate_limiter: RateLimiter,
+    /// The creates each form Endpoint has taken today (EP-97).
+    pub creates: crate::creates::DailyCreates,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -183,6 +185,7 @@ impl Gateway {
             private_hosts: Vec::new(),
             delivery_key: None,
             rate_limiter: RateLimiter::new(),
+            creates: Default::default(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
@@ -935,6 +938,28 @@ pub(crate) async fn serve_ngsi_ld(
         Operation::CreateSubscription | Operation::UpdateSubscription
     );
     let mut sent = sent.to_vec();
+    // A form Endpoint takes one entity per create, under an id the gateway mints (EP-97): a
+    // batch or an upsert would let the caller name the id, so neither passes.
+    if let Some(creates) = &endpoint.creates {
+        match operation {
+            Operation::CreateEntity if creates.mint_ids && !sent.is_empty() => {
+                sent = match crate::creates::minted(&sent) {
+                    Ok(minted) => minted,
+                    Err(problem) => return problem.into_response(),
+                };
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+            }
+            Operation::CreateBatch | Operation::UpsertBatch | Operation::UpsertTemporal => {
+                return ProblemDetails::bad_request()
+                    .with_detail("this endpoint takes one entity per create, at POST /entities")
+                    .into_response();
+            }
+            _ => {}
+        }
+    }
     // The ids a divided batch forwards and the entities it refused, merged into one answer once
     // the broker has spoken (GW18).
     let mut divided: Option<(Vec<String>, Refused)> = None;
@@ -1204,14 +1229,50 @@ pub(crate) async fn serve_ngsi_ld(
             .insert(ACCEPT, HeaderValue::from_static("application/json"));
     }
     let target = format!("/ngsi-ld/v1{path}?{sent_query}");
+    // The day's creates are counted last, so a create refused above spends none (EP-97).
+    let reserved = match endpoint
+        .creates
+        .as_ref()
+        .and_then(|creates| creates.per_day)
+    {
+        Some(per_day) if operation == Operation::CreateEntity => {
+            let now = crate::creates::now();
+            if let Err(retry_after) = gateway.creates.reserve(&endpoint.slug, per_day, now) {
+                tracing::info!(slug = %endpoint.slug, "the endpoint's creates for today are spent");
+                let mut refusal =
+                    ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
+                        .with_detail(
+                            "this form has taken all the entries it accepts today; retry after \
+                             the seconds Retry-After names",
+                        )
+                        .into_response();
+                refusal
+                    .headers_mut()
+                    .insert("retry-after", HeaderValue::from(retry_after));
+                return refusal;
+            }
+            Some(now)
+        }
+        _ => None,
+    };
     let answer = match gateway
         .broker
         .send(method, &target, parts.headers, Body::from(sent))
         .await
     {
         Ok(answer) => answer,
-        Err(error) => return ProblemDetails::from(error).into_response(),
+        Err(error) => {
+            if let Some(now) = reserved {
+                gateway.creates.release(&endpoint.slug, now);
+            }
+            return ProblemDetails::from(error).into_response();
+        }
     };
+    if let Some(now) = reserved {
+        if !answer.status().is_success() {
+            gateway.creates.release(&endpoint.slug, now);
+        }
+    }
 
     // The answer is judged in the model it arrives in: a view endpoint's grant names the class the
     // view serves, and the broker answers in the class it stores, exactly as `invert_query`

@@ -49,6 +49,7 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::Mcp],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

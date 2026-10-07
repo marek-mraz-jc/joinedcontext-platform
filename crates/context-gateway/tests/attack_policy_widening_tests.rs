@@ -127,6 +127,7 @@ fn endpoint() -> Endpoint {
             Representation::Sta,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: ["secretPin".to_owned()].into_iter().collect(),
         projection: Some(Arc::new(parsed.spec)),

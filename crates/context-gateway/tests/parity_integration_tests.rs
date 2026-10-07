@@ -88,6 +88,7 @@ fn endpoint(
             Representation::Sta,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         projection: None,

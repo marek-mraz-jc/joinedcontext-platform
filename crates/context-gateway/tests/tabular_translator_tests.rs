@@ -383,6 +383,7 @@ fn endpoint(representations: Vec<Representation>, file_limits: Option<FileLimits
         allowed_projects: Vec::new(),
         representations,
         rate_limit: None,
+        creates: None,
         file_limits,
         hidden_attributes: Default::default(),
         projection: None,

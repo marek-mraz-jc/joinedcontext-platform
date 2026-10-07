@@ -78,6 +78,7 @@ fn endpoint(audience: Audience) -> Endpoint {
             Representation::Csv,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

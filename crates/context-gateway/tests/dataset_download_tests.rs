@@ -46,6 +46,7 @@ fn unrestricted_endpoint() -> Endpoint {
             Representation::Csv,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         // Nothing narrows what the anonymous caller reads, which is the whole point of this
         // fixture: the endpoint hides no attribute either (EP-61).

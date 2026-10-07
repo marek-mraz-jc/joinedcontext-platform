@@ -73,6 +73,7 @@ fn space(
             allowed_projects: Vec::new(),
             representations,
             rate_limit: None,
+            creates: None,
             file_limits: limits,
             hidden_attributes: Default::default(),
             projection: None,

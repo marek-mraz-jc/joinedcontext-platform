@@ -34,6 +34,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,
@@ -312,6 +313,7 @@ information:
             representations: vec![Representation::NgsiLd, Representation::Mcp],
             // A space's record never carries one (store.rs builds it with none).
             rate_limit: None,
+            creates: None,
             policies: vec![policy],
             ..endpoint(None)
         }),

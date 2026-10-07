@@ -43,6 +43,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

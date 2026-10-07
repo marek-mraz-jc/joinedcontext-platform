@@ -86,6 +86,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
             Representation::Sta,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

@@ -101,6 +101,7 @@ fn endpoint(granted_types: &[&str]) -> Endpoint {
             Representation::Sta,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

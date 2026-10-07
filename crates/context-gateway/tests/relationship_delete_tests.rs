@@ -287,6 +287,7 @@ fn endpoint(writable: &[&str]) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

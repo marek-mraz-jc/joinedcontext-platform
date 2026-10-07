@@ -61,6 +61,7 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: ["operatorPhone".to_owned()].into_iter().collect(),
         projection: None,

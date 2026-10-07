@@ -40,6 +40,7 @@ fn endpoint(slug: &str, representations: Vec<Representation>) -> Endpoint {
         allowed_projects: Vec::new(),
         representations,
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

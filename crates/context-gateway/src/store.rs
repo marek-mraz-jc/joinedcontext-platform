@@ -399,6 +399,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             allowed_projects: spec.allowed_projects,
             representations,
             rate_limit: spec.rate_limits,
+            creates: spec.creates,
             file_limits: spec.file_limits,
             hidden_attributes: spec
                 .projection
@@ -531,6 +532,7 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                 // No limit of its own: the manifest has no field for one, and the limiter
                 // counts the canonical surface in its own default bucket (T-0813).
                 rate_limit: None,
+                creates: None,
                 file_limits: None,
                 // A space is the whole space: narrowing is a decision of a published
                 // endpoint, and the canonical surface publishes nothing of its own.

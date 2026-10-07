@@ -67,8 +67,8 @@ pub use dataspace::{
     DataOfferSpec, DataSpaceParticipantSpec, Did,
 };
 pub use endpoint::{
-    endpoint_role, Audience, Caching, EndpointRef, EndpointRole, EndpointSlug, EndpointSpec,
-    FileLimits, Projection, RateLimits, Representation, SharedSpaceReferenceSpec,
+    endpoint_role, Audience, Caching, Creates, EndpointRef, EndpointRole, EndpointSlug,
+    EndpointSpec, FileLimits, Projection, RateLimits, Representation, SharedSpaceReferenceSpec,
     ENDPOINT_ROLE_PREFIX,
 };
 pub use environment::{EnvironmentSpec, SecretBackend};
