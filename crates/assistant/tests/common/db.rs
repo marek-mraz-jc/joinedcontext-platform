@@ -6,6 +6,25 @@ use assistant::MIGRATOR;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, Executor, PgPool};
 
+/// Creates the NOLOGIN role `role` unless it exists. A role is the whole server's, and the test
+/// binaries run at once: two of them that both see it missing race to create it, and the loser's
+/// `CREATE ROLE` fails on the catalogue's unique index (23505) or as a duplicate (42710). Either
+/// means the role is there, which is all this asks.
+pub async fn ensure_role(pool: &PgPool, role: &str) -> Result<(), sqlx::Error> {
+    assert!(
+        role.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+        "a role name of the tests' own"
+    );
+    let statement = format!(
+        "DO $$ BEGIN CREATE ROLE {role} NOLOGIN; \
+         EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(statement))
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
 /// A new database with the migrations applied: the admin pool, a pool whose every connection
 /// is the non-superuser `assistant_app` (so row-level security holds for it, as for the
 /// service's own role), and the database's name.
@@ -37,12 +56,17 @@ pub async fn database(test: &str) -> (PgPool, PgPool, String) {
         .await
         .expect("connect to the test database");
     MIGRATOR.run(&owner).await.expect("the migrations apply");
+    ensure_role(&owner, "assistant_app")
+        .await
+        .expect("the app role exists");
     for statement in [
-        "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'assistant_app') THEN CREATE ROLE assistant_app NOLOGIN; END IF; END $$",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO assistant_app",
         "GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO assistant_app",
     ] {
-        sqlx::query(statement).execute(&owner).await.expect(statement);
+        sqlx::query(statement)
+            .execute(&owner)
+            .await
+            .expect(statement);
     }
     owner.close().await;
     let app = PgPoolOptions::new()
