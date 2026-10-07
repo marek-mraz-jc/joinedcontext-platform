@@ -404,6 +404,9 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
             body["messages"][0]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
+        // T-3203: a reasoning model thinks briefly, so the answer keeps its room.
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["max_tokens"], 3000);
     }
     let offered: Vec<&str> = calls[0].1["tools"]
         .as_array()
@@ -508,8 +511,9 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
 /// an error event with a sentence, and the stream still ends with `done`.
 #[tokio::test]
 async fn budgets_and_failures_reach_the_person_as_sentences() {
-    let w = world("chatbudget", deployment(Channel::Public, 2_000, 10)).await;
-    // The estimate of the first call alone is over a 2,000-token conversation.
+    // Room for a short question beside the answer's 3,000 tokens (T-3203), not for a long one.
+    let w = world("chatbudget", deployment(Channel::Public, 3_600, 10)).await;
+    // The estimate of the first call alone is over a 3,600-token conversation.
     let (_, events, _) = answer_of(&w.app, ask(json!({"message": "x".repeat(4000)}), None)).await;
     let error = events
         .iter()
