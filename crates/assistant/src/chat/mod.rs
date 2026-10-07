@@ -132,6 +132,46 @@ fn problem(status: u16, detail: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// A body the route could not read, in words (T-3243): which of the four it was and the member at
+/// fault, never the deserializer's sentence with its Rust type names.
+pub(crate) fn body_refused(rejection: &JsonRejection) -> Response {
+    match rejection {
+        JsonRejection::MissingJsonContentType(_) => {
+            problem(415, "send the body as application/json")
+        }
+        JsonRejection::JsonSyntaxError(_) => problem(400, "the body is not valid JSON"),
+        JsonRejection::JsonDataError(_) => {
+            // The member is the caller's own path into what they sent (`history[0].text`).
+            let text = rejection.body_text();
+            let member = text
+                .split_once("target type: ")
+                .and_then(|(_, rest)| rest.split_once(": "))
+                .map(|(member, _)| member)
+                .filter(|member| !member.is_empty() && !member.contains(' '));
+            match member {
+                Some(member) => jc_core::ProblemDetails::for_status(400)
+                    .with_field(member)
+                    .with_detail(format!(
+                        "`{member}` is missing or not of the documented type; see API/05"
+                    ))
+                    .into_response(),
+                None => problem(
+                    400,
+                    "the body does not have the documented shape: a member is missing or not of its type; see API/05",
+                ),
+            }
+        }
+        JsonRejection::BytesRejection(_) => problem(
+            400,
+            format!(
+                "the body exceeds the length limit of {} KiB this route takes",
+                MAX_BODY / 1024
+            ),
+        ),
+        _ => problem(400, "the body could not be read"),
+    }
+}
+
 /// The anonymous deployment `public_id` names.
 fn deployment_of(state: &ChatState, public_id: &str) -> Option<Deployment> {
     let snapshot = state.snapshot.read().ok()?.clone();
@@ -491,7 +531,7 @@ async fn ask(
 ) -> Response {
     let question = match body {
         Ok(Json(question)) => question,
-        Err(rejection) => return problem(400, rejection.body_text()),
+        Err(rejection) => return body_refused(&rejection),
     };
     if let Err(why) = validate(&question, &deployment) {
         return problem(400, why);
@@ -628,6 +668,75 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-3243: a body the chat cannot read is refused in words, naming the member at fault and
+    /// never a Rust type or the deserializer's sentence.
+    #[tokio::test]
+    async fn a_body_that_cannot_be_read_is_refused_in_words() {
+        use tower::ServiceExt;
+        let app = Router::new().route(
+            "/",
+            post(|body: Result<Json<Question>, JsonRejection>| async move {
+                match body {
+                    Ok(_) => StatusCode::OK.into_response(),
+                    Err(rejection) => body_refused(&rejection),
+                }
+            }),
+        );
+        for (content_type, body, status, said, field) in [
+            (
+                "text/plain",
+                r#"{"message":"a"}"#,
+                415,
+                "application/json",
+                None,
+            ),
+            ("application/json", "{not json", 400, "not valid JSON", None),
+            (
+                "application/json",
+                r#"{"message":7}"#,
+                400,
+                "`message`",
+                Some("message"),
+            ),
+            (
+                "application/json",
+                r#"{"message":"a","history":[{"role":"user","text":1}]}"#,
+                400,
+                "`history[0].text`",
+                Some("history[0].text"),
+            ),
+            ("application/json", "{}", 400, "documented", None),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::post("/")
+                        .header("content-type", content_type)
+                        .body(axum::body::Body::from(body))
+                        .expect("a request"),
+                )
+                .await
+                .expect("an answer");
+            assert_eq!(response.status().as_u16(), status, "{body}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("a body");
+            let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("a problem");
+            let detail = problem["detail"].as_str().unwrap_or_default();
+            assert!(detail.contains(said), "{body}: {problem}");
+            for raw in [
+                "invalid type",
+                "expected",
+                "Question",
+                "Turn",
+                "Failed to deserialize",
+            ] {
+                assert!(!detail.contains(raw), "{body}: {problem}");
+            }
+            assert_eq!(problem["field"].as_str(), field, "{body}: {problem}");
+        }
+    }
 
     #[test]
     fn a_window_admits_its_limit_then_says_when_to_come_back() {

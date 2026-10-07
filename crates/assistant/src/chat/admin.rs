@@ -100,7 +100,14 @@ pub(super) async fn the_portal(state: &ChatState, headers: &HeaderMap) -> Result
             401,
             "only the Portal's service account administers the assistant",
         ))),
-        Err(err) => Err(Box::new(problem(503, err.to_string()))),
+        Err(err) => {
+            // What failed stays in the log; the caller is told what to do (T-3243, R5).
+            tracing::warn!(%err, "the caller's token could not be checked");
+            Err(Box::new(problem(
+                503,
+                "the identity provider could not confirm the caller; try again in a minute",
+            )))
+        }
     }
 }
 
@@ -426,7 +433,7 @@ async fn inclusion(
     }
     let Json(change) = match body {
         Ok(body) => body,
-        Err(rejection) => return problem(400, rejection.body_text()),
+        Err(rejection) => return super::body_refused(&rejection),
     };
     if change.pages.is_empty() && change.documents.is_empty() {
         return problem(400, "name at least one page or document");
