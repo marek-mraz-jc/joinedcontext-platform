@@ -10,7 +10,7 @@ use axum::http::{header, Request, StatusCode};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::io::Write;
-use token_sidecar::{percent_decoded, router, Config, Sidecar, TOKEN_SECONDS};
+use token_sidecar::{listen_address, percent_decoded, router, Config, Sidecar, TOKEN_SECONDS};
 use tower::ServiceExt;
 use wiremock::matchers::{body_json, body_string_contains, header as has_header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -283,4 +283,25 @@ async fn the_probe_answers_without_minting() {
         .await
         .expect("recorded")
         .is_empty());
+}
+
+/// T-1508: the service runs in a pod of its own, so the address the deployment sets, every
+/// interface on 4180, is the default and is taken; nonsense stops it at start-up.
+#[test]
+fn the_service_listens_where_the_deployment_says_across_the_pod_network() {
+    assert_eq!(
+        listen_address(None).expect("default").to_string(),
+        "0.0.0.0:4180"
+    );
+    assert_eq!(
+        listen_address(Some(" ")).expect("blank").to_string(),
+        "0.0.0.0:4180"
+    );
+    assert_eq!(
+        listen_address(Some("0.0.0.0:4180"))
+            .expect("the deployment's")
+            .port(),
+        4180
+    );
+    assert!(listen_address(Some("everywhere")).is_err());
 }

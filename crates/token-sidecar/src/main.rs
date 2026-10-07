@@ -8,13 +8,15 @@
 //! - `JC_SIDECAR_LISTEN`: where to listen, `0.0.0.0:4180` by default.
 //! - `JC_TOKEN_URL`: the realm's token endpoint.
 //! - `JC_TOKEN_AUDIENCE`: the realm issuer, the audience Keycloak's federated client authentication expects.
+//! - `JC_PIPELINE_NAMESPACE`: the namespace that holds the pipelines' ServiceAccounts and nothing
+//!   else, the only one this service may mint tokens in.
 //! - `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT`: set by the kubelet; the API the TokenRequests go to.
 //!
-//! The runner's own ServiceAccount token, the cluster CA and the namespace are read from the
-//! standard mount, `/var/run/secrets/kubernetes.io/serviceaccount/`.
+//! Its own ServiceAccount token and the cluster CA are read from the standard mount,
+//! `/var/run/secrets/kubernetes.io/serviceaccount/`.
 
 use std::path::Path;
-use token_sidecar::{router, Config, Sidecar};
+use token_sidecar::{listen_address, router, Config, Sidecar};
 
 const MOUNT: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 
@@ -26,20 +28,11 @@ fn required(name: &str) -> Result<String, String> {
 }
 
 async fn run() -> Result<(), String> {
-    let listen = std::env::var("JC_SIDECAR_LISTEN").unwrap_or_else(|_| "127.0.0.1:4180".to_owned());
-    let address: std::net::SocketAddr = listen
-        .parse()
-        .map_err(|_| format!("JC_SIDECAR_LISTEN {listen} is no address"))?;
-    if !address.ip().is_loopback() {
-        return Err(format!("JC_SIDECAR_LISTEN {listen} is not a loopback address: the sidecar answers its own pod alone"));
-    }
+    let address = listen_address(std::env::var("JC_SIDECAR_LISTEN").ok().as_deref())?;
     let host = required("KUBERNETES_SERVICE_HOST")?;
     let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_owned());
     let mount = Path::new(MOUNT);
-    let namespace = std::fs::read_to_string(mount.join("namespace"))
-        .map_err(|error| format!("the namespace file: {error}"))?
-        .trim()
-        .to_owned();
+    let namespace = required("JC_PIPELINE_NAMESPACE")?;
     let ca =
         std::fs::read(mount.join("ca.crt")).map_err(|error| format!("the cluster CA: {error}"))?;
     let ca =

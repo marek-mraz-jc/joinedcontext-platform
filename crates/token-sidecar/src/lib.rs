@@ -31,14 +31,27 @@ pub const TOKEN_SECONDS: u64 = 600;
 pub struct Config {
     /// The Kubernetes API, `https://kubernetes.default.svc` in a pod.
     pub kubernetes_api: String,
-    /// The runner's namespace, where every pipeline's ServiceAccount lives.
+    /// The namespace that holds every pipeline's ServiceAccount and nothing else.
     pub namespace: String,
-    /// The file holding the runner's own projected token, which TokenRequest is authorized by.
+    /// The file holding this service's own projected token, which TokenRequest is authorized by.
     pub own_token_file: std::path::PathBuf,
     /// The realm's token endpoint.
     pub token_url: String,
     /// The audience Keycloak's federated client authentication expects: the realm issuer.
     pub audience: String,
+}
+
+/// Where the service listens: `JC_SIDECAR_LISTEN`, `0.0.0.0:4180` when unset or blank. It runs
+/// in a pod of its own and the runner calls it across the pod network, so any address is taken;
+/// who may reach it is the NetworkPolicy's and the mesh's to say.
+pub fn listen_address(value: Option<&str>) -> Result<std::net::SocketAddr, String> {
+    let listen = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("0.0.0.0:4180");
+    listen
+        .parse()
+        .map_err(|_| format!("JC_SIDECAR_LISTEN {listen} is no address"))
 }
 
 /// The sidecar's state: its configuration and its HTTP client.
