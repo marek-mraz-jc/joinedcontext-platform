@@ -418,7 +418,13 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
     let passages = calls[1].1["messages"][3]["content"]
         .as_str()
         .expect("the search result");
-    assert!(passages.contains("<passage n=\"1\" url=\"https://hronov.example/ovzdusie\">"));
+    // T-3204: the passages are a JSON object, never tagged text the model may set aside.
+    let parsed: Value = serde_json::from_str(passages).expect("the passages are JSON");
+    assert_eq!(parsed["passages"][0]["n"], 1);
+    assert_eq!(
+        parsed["passages"][0]["url"],
+        "https://hronov.example/ovzdusie"
+    );
     assert!(
         !passages.contains("intranet"),
         "another source is never searched"
@@ -853,7 +859,8 @@ async fn a_long_result_is_filtered_by_a_script_in_the_sandbox() {
     let output = calls[2].1["messages"][5]["content"]
         .as_str()
         .expect("the script output");
-    assert!(output.contains("<script-output of=\"1\">"));
+    let output: Value = serde_json::from_str(output).expect("the script output is JSON");
+    assert_eq!(output["of"], 1);
     let invoked = w.functions.received_requests().await.unwrap_or_default();
     assert_eq!(invoked.len(), 1);
     let sent: Value = serde_json::from_slice(&invoked[0].body).expect("json");
