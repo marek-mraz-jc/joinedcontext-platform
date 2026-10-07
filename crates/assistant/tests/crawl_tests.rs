@@ -19,7 +19,9 @@ use assistant::crawl::queue;
 use assistant::crawl::robots;
 use assistant::crawl::{crawl_site, CrawlPolicy, Crawler, Sink};
 use assistant::{project_scope, MIGRATOR};
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, PdfPolicy, SourceType, Visibility};
+use jc_core::kinds::assistant::{
+    KnowledgeSourceSpec, PdfPolicy, PdfPolicyKind, SourceType, Visibility,
+};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool, Row};
@@ -636,6 +638,99 @@ async fn crawl_caps_exceeded() {
 
     tx.rollback().await.expect("rollback");
 
+    drop_database(admin, pool, &db_name).await;
+}
+
+/// T-3293: a start address that is a document, by its name or by the content type it answers
+/// with, is read as one document of the site under the `pdf` policy, never as a page of its bytes.
+#[tokio::test]
+async fn a_start_address_that_is_a_pdf_is_read_as_a_document() {
+    let (admin, pool, db_name) = database("start_pdf").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&server)
+        .await;
+    let pdf = b"%PDF-1.4 the waste calendar".to_vec();
+    for at in ["/calendar.pdf", "/download"] {
+        Mock::given(method("GET"))
+            .and(path(at))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/pdf")
+                    .set_body_bytes(pdf.clone()),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let mut spec = test_spec(&format!("http://www.city.test:{port}/calendar.pdf"));
+    spec.start_urls
+        .push(format!("http://www.city.test:{port}/download"));
+    spec.sitemap = false;
+    let mut sink = RecordingSink::default();
+    let report = crawl_site(
+        &pool, &crawler, "hel", "helsinki", "pdf-src", &spec, &mut sink,
+    )
+    .await
+    .expect("crawl succeeds");
+
+    assert!(
+        sink.pages.is_empty(),
+        "no page of a PDF's bytes: {:?}",
+        sink.pages
+    );
+    let mut read: Vec<_> = sink
+        .documents
+        .iter()
+        .map(|(_, url, mime, bytes)| (url.clone(), mime.clone(), bytes.clone()))
+        .collect();
+    read.sort();
+    assert_eq!(
+        read,
+        vec![
+            (
+                format!("http://www.city.test:{port}/calendar.pdf"),
+                Some("application/pdf".into()),
+                pdf.clone()
+            ),
+            (
+                format!("http://www.city.test:{port}/download"),
+                Some("application/pdf".into()),
+                pdf.clone()
+            ),
+        ]
+    );
+    assert_eq!((report.documents_fetched, report.pages_fetched), (2, 0));
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    let pages: i64 = sqlx::query_scalar("SELECT count(*) FROM pages")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("pages");
+    let fetched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM documents WHERE status = 'fetched' AND page_id IS NULL",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("documents");
+    assert_eq!((pages, fetched), (0, 2));
+    tx.rollback().await.expect("rollback");
+
+    // `pdf.policy: exclude` reads nothing from either, by name or by content type.
+    let mut sink = RecordingSink::default();
+    spec.pdf.policy = PdfPolicyKind::Exclude;
+    let (admin2, pool2, db2) = database("start_pdf_excluded").await;
+    let report = crawl_site(
+        &pool2, &crawler, "hel", "helsinki", "pdf-src", &spec, &mut sink,
+    )
+    .await
+    .expect("crawl succeeds");
+    assert!(sink.pages.is_empty() && sink.documents.is_empty());
+    assert_eq!(report.documents_excluded, 2);
+    drop_database(admin2, pool2, &db2).await;
     drop_database(admin, pool, &db_name).await;
 }
 
