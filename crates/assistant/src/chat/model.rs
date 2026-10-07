@@ -59,8 +59,14 @@ pub struct Model {
     token: Mutex<Option<(String, Instant)>>,
 }
 
-/// The longest answer one call may write.
-const MAX_ANSWER_TOKENS: u64 = 1_500;
+/// The longest answer one call may write. A reasoning model counts its thinking inside it, so
+/// `REASONING_EFFORT` keeps the thinking short and the room is the answer's (T-3203).
+pub const MAX_ANSWER_TOKENS: u64 = 3_000;
+
+/// The reasoning effort every call asks for, which the proxy passes on as it is. Left to the
+/// provider, gemini-3.8-flash thought through 1,438 of 1,500 tokens and the last call of a
+/// question came back empty: "No Answer" on dev (T-3203).
+const REASONING_EFFORT: &str = "low";
 
 impl Model {
     pub fn new(config: ModelConfig, http: reqwest::Client) -> Self {
@@ -176,6 +182,7 @@ impl Model {
             "model": self.config.model,
             "messages": messages,
             "max_tokens": MAX_ANSWER_TOKENS,
+            "reasoning": {"effort": REASONING_EFFORT},
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());

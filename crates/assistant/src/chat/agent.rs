@@ -24,7 +24,7 @@ const PASSAGES: i64 = 8;
 const MAX_QUERY_CHARS: usize = 500;
 
 /// The model's room to answer, counted in the pre-call estimate.
-const ANSWER_ESTIMATE: u64 = 1_500;
+const ANSWER_ESTIMATE: u64 = super::model::MAX_ANSWER_TOKENS;
 
 /// What the model is told before anything else. It never changes, so every call of every
 /// question shares it as the cached prefix (AG-108).
