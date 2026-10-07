@@ -387,6 +387,14 @@ async fn run_tool(
         };
         match search(ask, query).await {
             Ok(hits) => {
+                // What a search found, never the visitor's words or the passages' text: whether
+                // an answer that cites nothing had nothing to cite is otherwise invisible (T-3204).
+                tracing::info!(
+                    deployment = %ask.deployment,
+                    hits = hits.len(),
+                    top = ?hits.iter().take(3).map(|(url, _)| url.as_str()).collect::<Vec<_>>(),
+                    "search answered"
+                );
                 send(
                     events,
                     Event::Tool {
