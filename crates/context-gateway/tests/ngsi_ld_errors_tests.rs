@@ -130,6 +130,14 @@ async fn gateway_refusals_are_ngsi_ld_errors() {
         body["type"],
         json!("https://uri.etsi.org/ngsi-ld/errors/BadRequestData")
     );
+    // T-3243: the platform's slug stays as `code`, with what to do and the member at fault.
+    assert_eq!(body["code"], json!("urn-scheme"), "{body}");
+    assert_eq!(
+        body["hint"],
+        json!("Use an entity id of the form urn:ngsi-ld:{Type}:{id}."),
+        "{body}"
+    );
+    assert_eq!(body["field"], json!("id"), "{body}");
 
     // PATCH is nothing the public grant covers: refused before any body is read.
     let patch = Request::builder()
@@ -167,6 +175,13 @@ async fn gateway_refusals_are_ngsi_ld_errors() {
     assert_eq!(
         body["type"],
         json!("https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound")
+    );
+    assert_eq!(body["code"], json!("resource-not-found"), "{body}");
+    assert!(
+        body["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.ends_with('.')),
+        "{body}"
     );
 }
 

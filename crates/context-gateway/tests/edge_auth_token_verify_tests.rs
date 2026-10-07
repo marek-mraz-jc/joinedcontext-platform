@@ -281,7 +281,9 @@ fn every_refusal_is_the_same_answer_to_the_caller() {
         assert_eq!(answer.title, answers[0].title);
         assert_eq!(answer.detail, answers[0].detail);
         assert_eq!(answer.type_uri, answers[0].type_uri);
-        assert!(answer.extensions.is_empty(), "nothing occurrence-specific");
+        // Nothing occurrence-specific: the type's hint is the one member, the same for all (T-3243).
+        assert_eq!(answer.extensions, answers[0].extensions);
+        assert_eq!(answer.extensions.keys().collect::<Vec<_>>(), vec!["hint"]);
     }
 
     let body = serde_json::to_string(&answers[2]).expect("the answer serialises");

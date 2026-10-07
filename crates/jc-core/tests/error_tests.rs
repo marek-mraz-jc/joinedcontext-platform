@@ -8,7 +8,8 @@ fn test_portal_api_not_found_byte_compatible() {
         "title": "Resource Not Found",
         "status": 404,
         "detail": "ContextSpace 'mobility-traffic' does not exist in project 'city-center'",
-        "instance": "/api/v1/projects/city-center/spaces/mobility-traffic"
+        "instance": "/api/v1/projects/city-center/spaces/mobility-traffic",
+        "hint": "Check the name in the address; it does not exist or is not shared with you."
     });
 
     let prob = ProblemDetails::not_found()
@@ -68,7 +69,12 @@ fn test_all_constructors_set_status_and_type_base() {
         assert!(pd.type_uri.starts_with(PROBLEM_TYPE_BASE));
         assert!(pd.detail.is_none());
         assert!(pd.instance.is_none());
-        assert!(pd.extensions.is_empty());
+        // What to do about it is the one member every catalogued type carries (T-3243).
+        assert_eq!(
+            pd.extensions.keys().collect::<Vec<_>>(),
+            vec!["hint"],
+            "{slug}"
+        );
     }
 }
 
@@ -93,14 +99,14 @@ fn test_internal_opaque_safety() {
         assert!(
             matches!(
                 k.as_str(),
-                "type" | "title" | "status" | "detail" | "instance" | "requestId"
+                "type" | "title" | "status" | "detail" | "instance" | "requestId" | "hint"
             ),
             "unexpected field `{k}` in internal_opaque response"
         );
     }
 
     assert_eq!(obj.get("requestId"), Some(&json!("req-94820-a8f")));
-    assert_eq!(obj.len(), 5);
+    assert_eq!(obj.len(), 6);
 }
 
 #[test]

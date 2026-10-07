@@ -374,6 +374,8 @@ async fn batch_207_mixed_outcomes() {
                 "type": "https://joinedcontext.com/errors/forbidden",
                 "title": "Access Denied by Policy",
                 "status": 403,
+                // What to do about it rides with every catalogued type (T-3243, API/00 §4).
+                "hint": "Ask a project owner or an organization administrator for the role this needs.",
             },
         }])
     );

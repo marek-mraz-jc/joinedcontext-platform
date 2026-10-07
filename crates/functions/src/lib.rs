@@ -89,19 +89,11 @@ struct FnRequest {
     user: Value,
 }
 
+/// The platform's own problem type for `status` (T-3243), never a slug made of its reason phrase.
 fn problem(status: StatusCode, detail: impl Into<String>) -> Response {
-    let slug = status
-        .canonical_reason()
-        .unwrap_or("error")
-        .to_lowercase()
-        .replace(' ', "-");
-    ProblemDetails::new(
-        status.as_u16(),
-        &slug,
-        status.canonical_reason().unwrap_or_default(),
-    )
-    .with_detail(detail)
-    .into_response()
+    ProblemDetails::for_status(status.as_u16())
+        .with_detail(detail)
+        .into_response()
 }
 
 async fn invoke(

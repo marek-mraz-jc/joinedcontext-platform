@@ -709,6 +709,16 @@ pub(crate) async fn as_ngsi_ld_error(response: Response<Body>) -> Response<Body>
 
     if let Some(members) = problem.as_object_mut() {
         if let Some(etsi) = ngsi_ld_error_type(parts.status.as_u16()) {
+            // The joinedcontext slug stays as `code`, so the hint and the Portal's translation
+            // still have their key once `type` is the ETSI one (T-3243, API/00 §4).
+            let code = members
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(|uri| uri.strip_prefix(jc_core::PROBLEM_TYPE_BASE))
+                .map(str::to_owned);
+            if let Some(code) = code {
+                members.insert("code".to_owned(), Value::String(code));
+            }
             members.insert("type".to_owned(), Value::String(etsi.to_owned()));
         }
         // Clause 6.3.3: `detail` is one of the three terms an error carries; a refusal that

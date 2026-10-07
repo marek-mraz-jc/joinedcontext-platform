@@ -44,9 +44,9 @@ impl From<Refusal> for ProblemDetails {
         match refusal {
             // A malformed identifier is a bad request: the caller can see and fix what is
             // wrong with it (PF-43).
-            Refusal::MalformedId(_) => {
-                ProblemDetails::urn_scheme().with_detail(refusal.to_string())
-            }
+            Refusal::MalformedId(_) => ProblemDetails::urn_scheme()
+                .with_field("id")
+                .with_detail(refusal.to_string()),
             // Everything else is a policy decision, and the body never says which rule
             // decided it (GW6).
             _ => ProblemDetails::forbidden(),
