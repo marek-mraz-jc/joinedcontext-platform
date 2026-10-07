@@ -258,8 +258,14 @@ pub(crate) async fn follow(
             // as an upstream that could not be reached (T-1304).
             match crate::public_dns::refused(&e) {
                 Some(private) => forbidden(private.to_string()).into_response(),
-                None => jc_core::ProblemDetails::new(502, "upstream-unavailable", e.to_string())
-                    .into_response(),
+                // The transport's own sentence carries the address and the resolver's words; the
+                // host the agent asked for is all it needs to choose another (T-3243).
+                None => {
+                    tracing::warn!(%host, error = %e.without_url(), "a fetch did not reach its host");
+                    jc_core::ProblemDetails::new(502, "upstream-unavailable", "Upstream Unavailable")
+                        .with_detail(format!("{host} did not answer; try again or fetch another source"))
+                        .into_response()
+                }
             }
         })?;
         if !response.status().is_redirection() {

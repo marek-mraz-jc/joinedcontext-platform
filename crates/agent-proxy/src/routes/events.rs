@@ -78,11 +78,18 @@ pub async fn handler(
     let body: EventPayload = match serde_json::from_slice(&raw) {
         Ok(body) => body,
         Err(err) => {
+            // Where in the text, not the deserializer's type names (T-3243).
             return (
                 StatusCode::BAD_REQUEST,
-                jc_core::ProblemDetails::new(400, "invalid-body", err.to_string()),
+                jc_core::ProblemDetails::new(400, "invalid-body", "Invalid Body").with_detail(
+                    format!(
+                        "the event is not of the documented shape (line {}, column {}): it is `{{\"kind\": …, \"payload\": {{…}}}}`",
+                        err.line(),
+                        err.column()
+                    ),
+                ),
             )
-                .into_response()
+                .into_response();
         }
     };
 

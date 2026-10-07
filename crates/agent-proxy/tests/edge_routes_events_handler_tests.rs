@@ -166,6 +166,17 @@ async fn a_body_that_is_not_an_event_is_refused_with_the_reason() {
             StatusCode::BAD_REQUEST,
             "'{sent}' passed"
         );
+        // The reason in words and where in the text, never the deserializer's type names (T-3243).
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("a body");
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).expect("a problem");
+        let detail = problem["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("documented shape"), "'{sent}': {problem}");
+        for raw in ["invalid type", "missing field", "expected", "EventPayload"] {
+            assert!(!detail.contains(raw), "'{sent}': {problem}");
+        }
+        assert!(problem["hint"].is_string(), "'{sent}': {problem}");
     }
     assert!(portal
         .received_requests()
