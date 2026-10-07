@@ -1,0 +1,79 @@
+{
+  "deployment": "knowledge",
+  "answers": {
+    "bb-01": {
+      "text": "Súhlas mesta na výrub stromu sa vyžaduje pri drevine s obvodom kmeňa **nad 40 cm**, pričom v prípade záhrad je to **nad 80 cm** [1, 2]. \n\nObvod sa meria vo výške **130 cm nad zemou** [1, 2]. Súhlas sa vyžaduje aj na výrub krovitých porastov s výmerou nad 10 m² [1, 2].",
+      "citations": []
+    },
+    "bb-02": {
+      "text": "Pobyt v zahraničí ste povinný ohlásiť vtedy, ak sa pripravujete na vycestovanie do zahraničia na dobu **dlhšiu ako 90 dní** [1]. \n\nTúto skutočnosť je potrebné ohlásiť pred vycestovaním ohlasovni v mieste vášho trvalého pobytu, pričom v ohlásení uvediete štát, miesto pobytu a predpokladanú dobu pobytu [1].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.banskabystrica.sk/agendy/pobyt-v-zahranici/"
+        }
+      ]
+    },
+    "bb-03": {
+      "text": "Zber komunálneho odpadu v Banskej Bystrici zabezpečuje spoločnosť **Marius Pedersen**, a to oficiálne od **1. augusta 2019** na základe zmluvy podpísanej na desať rokov [17].",
+      "citations": [
+        {
+          "n": 17,
+          "url": "https://www.banskabystrica.sk/aktuality/2019/odpadove-hospodarstvo-po-novom/"
+        }
+      ]
+    },
+    "bb-04": {
+      "text": "Mimoriadna 50-percentná zľava zo základného cestovného v banskobystrickej MHD platí od pondelka 12. októbra 2026 [2, 3].",
+      "citations": []
+    },
+    "bb-05": {
+      "text": "The kindergarten on Cesta k nemocnici in Banská Bystrica was built in **1965** [1].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.banskabystrica.sk/aktuality/2026/skolka-na-ceste-k-nemocnici-prechadza-obnovou/"
+        }
+      ]
+    },
+    "bb-06": {
+      "text": "Krytá plaváreň na Štiavničkách bola pre verejnosť po dočasnom zatvorení znovu sprístupnená od utorka **1. februára 2022** [1].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.banskabystrica.sk/aktuality/kategorie-aktualit/covid-19/"
+        }
+      ]
+    },
+    "bb-07": {
+      "text": "**Yes, you do [2].** \n\nAccording to the City of Banská Bystrica:\n- A domestic well equipped with an electric pump to extract groundwater is classified as a water construction (*vodná stavba*) and requires a building permit (*stavebné povolenie*), which is issued by the specialized building authority [2].\n- Before applying for the building permit, you must first obtain permission for the location of the water structure (*povolenie na umiestnenie vodnej stavby*) from the general building authority [1].\n- You also need a permit for groundwater extraction (*povolenie na odber podzemných vôd*), which is issued based on a hydrogeological survey either prior to or concurrently with the building permit [2].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.banskabystrica.sk/agendy/povolenie-domovej-studne-obcan/"
+        },
+        {
+          "n": 2,
+          "url": "https://www.banskabystrica.sk/agendy/povolenie-domovej-studne-obcan/"
+        }
+      ]
+    },
+    "bb-08": {
+      "text": "**Nie, mesto preplatok nevráti automaticky.** \n\nPreplatok na dani z nehnuteľností vráti správca dane **len na základe žiadosti** daňového subjektu (tlačivo *„Ž2 žiadosť o vrátenie preplatku na dani“*) [1, 2]. \n\nZároveň platí, že:\n- Mesto preplatok najskôr použije na prípadnú úhradu vašich iných daňových nedoplatkov alebo poplatkov [1, 8].\n- Ak nedoplatky nemáte (alebo nemožno preplatok takto použiť), mesto preplatok vráti na základe podanej žiadosti do 60 dní (ak je preplatok vyšší ako 5,00 €) [1, 8].\n- Žiadosť je potrebné podať najneskôr do piatich rokov od konca roka, v ktorom preplatok vznikol [2, 8].",
+      "citations": []
+    },
+    "bb-09": {
+      "text": "Under the new waste management arrangement, waste collection is carried out by **28 vehicles** meeting the latest emission standards, along with a specialized vehicle dedicated to washing and disinfecting waste containers [6].",
+      "citations": [
+        {
+          "n": 6,
+          "url": "https://www.banskabystrica.sk/aktuality/2019/odpadove-hospodarstvo-po-novom/"
+        }
+      ]
+    },
+    "bb-10": {
+      "text": "Webové sídlo mesta Banská Bystrica neobsahuje informácie o cestovných poriadkoch vlakov na trase Košice – Poprad. Pre vyhľadanie vlakových spojení je potrebné využiť stránky Železničnej spoločnosti Slovensko (ZSSK) alebo portál cp.sk.",
+      "citations": []
+    }
+  }
+}

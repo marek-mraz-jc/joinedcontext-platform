@@ -211,16 +211,19 @@ fn estimate(messages: &[Value]) -> u64 {
     (chars / 4) as u64 + ANSWER_ESTIMATE
 }
 
-/// The bracketed numbers an answer uses.
+/// The bracketed numbers an answer uses: `[1]`, and each of a list, `[1, 2]`. A bracket holding
+/// anything but numbers and commas is no marker.
 fn markers(answer: &str) -> HashSet<usize> {
     let mut found = HashSet::new();
     let mut rest = answer;
     while let Some(open) = rest.find('[') {
         rest = &rest[open + 1..];
         if let Some(close) = rest.find(']') {
-            if let Ok(n) = rest[..close].trim().parse::<usize>() {
-                found.insert(n);
-            }
+            let numbers: Option<Vec<usize>> = rest[..close]
+                .split(',')
+                .map(|n| n.trim().parse::<usize>().ok())
+                .collect();
+            found.extend(numbers.into_iter().flatten());
         }
     }
     found
@@ -637,6 +640,12 @@ mod tests {
             HashSet::from([1, 3, 2])
         );
         assert!(markers("no markers").is_empty());
+        // A list of sources in one bracket cites each of them (T-3067: the live answers wrote
+        // "[1, 2]", and both citations were dropped).
+        assert_eq!(
+            markers("A [1, 2], b [3,4] and [5][6]; not [1, x] nor [2 3]"),
+            HashSet::from([1, 2, 3, 4, 5, 6])
+        );
         assert_eq!(
             tool_name("ovzdusie", "query_entities").as_deref(),
             Some("ovzdusie__query_entities")
