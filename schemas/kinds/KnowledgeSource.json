@@ -84,6 +84,13 @@
             "null"
           ]
         },
+        "contextSpaces": {
+          "description": "The context spaces of this project a `catalogue` source reads; empty reads every one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "exclude": {
           "description": "Path patterns whose pages are skipped, each starting with `/`.",
           "items": {
@@ -155,7 +162,7 @@
               "$ref": "#/definitions/SourceType"
             }
           ],
-          "description": "`website` (pages and their PDFs) or `ckan` (a catalogue's datasets)."
+          "description": "`website` (pages and their PDFs), `ckan` (a catalogue's datasets) or `catalogue` (the project's own Endpoints and the models of their spaces)."
         },
         "startUrls": {
           "description": "Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.",
@@ -357,6 +364,13 @@
           "description": "The datasets of a `CkanInstance` of the project.",
           "enum": [
             "ckan"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The project's own NGSI-LD catalogue: one page per Endpoint of its context spaces, with the types and attributes of the space's model (AG-116).",
+          "enum": [
+            "catalogue"
           ],
           "type": "string"
         }

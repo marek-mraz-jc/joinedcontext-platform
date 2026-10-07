@@ -24,6 +24,9 @@ pub struct Source {
     /// For a `ckan` source, the URL of the project's `CkanInstance` it names; `None` when the
     /// project declares no such instance.
     pub ckan_url: Option<String>,
+    /// For a `catalogue` source, the pages of its Endpoints as the repository describes them
+    /// now; empty for any other source (AG-116).
+    pub catalogue: Vec<crate::catalogue::EndpointPage>,
 }
 
 /// Where the manifests are: the organization's checkout and, in layout 2, the project
@@ -113,11 +116,29 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
                     .ckan_instance_ref
                     .as_ref()
                     .and_then(|name| catalogues.get(&(project.clone(), name.clone())).cloned());
+                let catalogue = if spec.source == SourceType::Catalogue {
+                    let instances: BTreeMap<String, String> = catalogues
+                        .iter()
+                        .filter(|((owner, _), _)| *owner == project)
+                        .map(|((_, name), url)| (name.clone(), url.clone()))
+                        .collect();
+                    crate::catalogue::pages_of(
+                        &assembly.repository,
+                        &project,
+                        &spec.context_spaces,
+                        spec.visibility == jc_core::kinds::assistant::Visibility::Public,
+                        &spec.languages,
+                        &instances,
+                    )
+                } else {
+                    Vec::new()
+                };
                 found.push(Source {
                     project,
                     name: id.name.clone(),
                     spec,
                     ckan_url,
+                    catalogue,
                 })
             }
             Err(err) => {
@@ -232,10 +253,39 @@ pub async fn enqueue_due(
     Ok(queued)
 }
 
+/// Queues every `catalogue` source whose pages the repository now describes differently from
+/// the last minute (or that this process has not seen yet), so a change to an Endpoint or a
+/// model reaches the index within a minute, not at the next scheduled read (AG-116). `seen`
+/// holds each source's digest between minutes.
+pub async fn enqueue_changed(
+    pool: &PgPool,
+    sources: &[Source],
+    seen: &mut BTreeMap<(String, String), String>,
+) -> Result<usize, Error> {
+    let mut queued = 0;
+    for source in sources
+        .iter()
+        .filter(|source| source.spec.source == SourceType::Catalogue)
+    {
+        let digest = crate::catalogue::digest(&source.catalogue);
+        let key = (source.project.clone(), source.name.clone());
+        if seen.get(&key) == Some(&digest) {
+            continue;
+        }
+        if !queue::pending(pool, &source.project, &source.name).await? {
+            queue::enqueue(pool, &source.project, &source.name).await?;
+            queued += 1;
+        }
+        seen.insert(key, digest);
+    }
+    Ok(queued)
+}
+
 /// Claims and works one job; `false` when the queue had none ready.
 pub async fn work_one(
     pool: &PgPool,
     crawler: &Crawler,
+    reader: &crate::catalogue::Reader,
     organization: &str,
     worker: &str,
     sources: &[Source],
@@ -319,6 +369,23 @@ pub async fn work_one(
                 source.project
             ))),
         },
+        SourceType::Catalogue => {
+            let language = match source.spec.languages.as_slice() {
+                [one] => Some(one.as_str()),
+                _ => None,
+            };
+            crate::catalogue::sync_catalogue(
+                pool,
+                reader,
+                &source.project,
+                site,
+                &source.catalogue,
+                language,
+                &mut indexer,
+            )
+            .await
+            .map(|report| format!("{} endpoints, {} removed", report.endpoints, report.removed))
+        }
     };
     match outcome {
         Ok(summary) => {

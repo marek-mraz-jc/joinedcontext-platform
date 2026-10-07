@@ -270,3 +270,47 @@ fn a_deployment_is_refused_with_the_field_to_change() {
     );
     assert_eq!(refused(deployment(&long)), "systemPrompt");
 }
+
+/// AG-116 (T-3225): a catalogue source reads the project's own Endpoints, so it names no start
+/// URL and no CkanInstance, and only it names context spaces.
+#[test]
+fn a_catalogue_source_names_spaces_and_nothing_to_fetch() {
+    let catalogue = |extra: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\n\
+             metadata: {{ name: catalogue, namespace: banskabystrica }}\n\
+             spec:\n  source: catalogue\n  visibility: public\n  languages: [sk, en]\n{extra}"
+        )
+    };
+    let every = source(&catalogue("")).expect("every space");
+    assert!(every.spec.context_spaces.is_empty());
+    let some = source(&catalogue(
+        "  contextSpaces: [ovzdusie, banskabystrica-verejne]\n",
+    ))
+    .expect("named spaces");
+    assert_eq!(
+        some.spec.context_spaces,
+        ["ovzdusie", "banskabystrica-verejne"]
+    );
+    assert_eq!(
+        refused(source(&catalogue(
+            "  startUrls: [https://www.banskabystrica.sk/]\n"
+        ))),
+        "source"
+    );
+    assert_eq!(
+        refused(source(&catalogue("  ckanInstanceRef: bb\n"))),
+        "source"
+    );
+    assert_eq!(
+        refused(source(&catalogue("  contextSpaces: [Not A Space]\n"))),
+        "contextSpaces"
+    );
+    assert_eq!(
+        refused(source(&source_with(
+            "  visibility: public",
+            "  visibility: public\n  contextSpaces: [ovzdusie]"
+        ))),
+        "contextSpaces"
+    );
+}
