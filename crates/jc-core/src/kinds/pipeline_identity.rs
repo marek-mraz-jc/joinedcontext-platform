@@ -7,7 +7,7 @@
 //! and its Endpoint source reads, over the declared type, and nothing else.
 //!
 //! The gateway (from the loaded repository) and the Portal (from its mirror) both derive through
-//! [`derive`], so the principal the gateway decides for is the one whose client the Portal writes.
+//! [`derive()`], so the principal the gateway decides for is the one whose client the Portal writes.
 
 use crate::envelope::{Ref, TypedRef};
 use crate::kinds::pipeline::PipelineSpec;
