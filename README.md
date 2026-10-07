@@ -38,8 +38,13 @@ The fast checks, which are the ones the merge gate runs:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --lib --bins --locked
+cargo test --workspace --exclude assistant --lib --bins --locked
+cargo test -p assistant --lib --bins --locked
 ```
+
+The assistant is tested on its own: its kreuzberg dependency turns on serde_json's
+`preserve_order`, which in one cargo invocation would reorder every JSON object the other crates
+write (T-3206).
 
 An integration test is its own binary and is not in `--lib --bins`; run the one you touched:
 
