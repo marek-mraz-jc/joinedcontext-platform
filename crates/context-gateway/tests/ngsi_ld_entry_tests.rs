@@ -155,6 +155,7 @@ async fn the_advertised_access_url_answers_an_entry_document() {
                 }],
                 "access": format!("{root}/access"),
                 "schema": format!("{root}/schema/index.json"),
+                "openapi": format!("{root}/openapi.json"),
             }),
             "{path}"
         );
