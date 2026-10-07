@@ -14,6 +14,15 @@ use context_gateway::pdp::projection::project_entity;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
+/// An entity's member names, sorted: which members are left is what these cases assert, and
+/// serde_json keeps them in written order once a dependency turns on its `preserve_order` (one
+/// did, T-3206).
+fn members_of(entity: &Value) -> Vec<&String> {
+    let mut members: Vec<&String> = entity.as_object().expect("an entity").keys().collect();
+    members.sort();
+    members
+}
+
 fn names(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
@@ -54,7 +63,7 @@ fn an_attribute_name_is_matched_exactly_and_never_loosely() {
     });
     project_entity(&mut entity, &names(&["pm10"]), &nothing());
 
-    let members: Vec<&String> = entity.as_object().expect("an entity").keys().collect();
+    let members = members_of(&entity);
     assert_eq!(members, vec!["id", "pm10", "type"], "{entity}");
 }
 
@@ -113,7 +122,7 @@ fn a_member_that_only_looks_structural_is_stripped() {
     });
     project_entity(&mut entity, &names(&["weight"]), &nothing());
 
-    let members: Vec<&String> = entity.as_object().expect("an entity").keys().collect();
+    let members = members_of(&entity);
     assert_eq!(members, vec!["id", "type"]);
 }
 
@@ -206,7 +215,7 @@ fn unicode_and_empty_names_are_compared_as_written() {
     });
     project_entity(&mut entity, &names(&["teplota", ""]), &nothing());
 
-    let members: Vec<&String> = entity.as_object().expect("an entity").keys().collect();
+    let members = members_of(&entity);
     assert_eq!(members, vec!["", "id", "teplota", "type"]);
 }
 
@@ -229,7 +238,7 @@ fn a_whitelist_that_matches_nothing_leaves_the_identity_and_nothing_else() {
     let mut entity = station();
     project_entity(&mut entity, &names(&["no10", "nothing"]), &nothing());
 
-    let members: Vec<&String> = entity.as_object().expect("an entity").keys().collect();
+    let members = members_of(&entity);
     assert_eq!(
         members,
         vec!["@context", "createdAt", "id", "modifiedAt", "type"]

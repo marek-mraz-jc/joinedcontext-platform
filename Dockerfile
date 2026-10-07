@@ -36,9 +36,13 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'pub fn _dep_cache() {}' > crates/token-sidecar/src/lib.rs \
  && echo 'fn main() {}' > crates/token-sidecar/src/main.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
- && cargo build --release --locked --workspace && rm -rf crates/*/src
+ && cargo build --release --locked --workspace --exclude assistant \
+ && cargo build --release --locked -p assistant && rm -rf crates/*/src
 COPY . .
-RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace \
+# Two invocations, so kreuzberg's serde_json `preserve_order` stays in the assistant and never
+# reorders what the gateway and jcctl write (T-3206).
+RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace --exclude assistant \
+ && cargo build --release --locked -p assistant \
  && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant target/release/jc-token-sidecar
 
 # `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
