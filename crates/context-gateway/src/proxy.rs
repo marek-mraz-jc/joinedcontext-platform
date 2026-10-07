@@ -57,10 +57,16 @@ pub enum ProxyError {
     /// The broker did not answer.
     #[error("the broker did not answer: {0}")]
     Unreachable(String),
+    /// The request names a JSON-LD context other than the core one (T-3287).
+    #[error("{0}")]
+    Context(&'static str),
 }
 
 impl From<ProxyError> for ProblemDetails {
     fn from(error: ProxyError) -> Self {
+        if let ProxyError::Context(why) = error {
+            return ProblemDetails::bad_request().with_detail(why);
+        }
         // The caller learns that the platform, not their request, is at fault, and nothing
         // about the topology behind the endpoint.
         tracing::error!(%error, "forwarding failed");
@@ -165,6 +171,10 @@ impl Broker {
         let uri: Uri = format!("{}{path_and_query}", self.base)
             .parse()
             .map_err(|e: axum::http::uri::InvalidUri| ProxyError::Uri(e.to_string()))?;
+
+        // Whatever route forwards it: a context of the caller's own never reaches the broker,
+        // which would expand the names the gateway decided on to other IRIs (T-3287).
+        crate::context_guard::check_link(&headers).map_err(ProxyError::Context)?;
 
         let mut upstream = axum::http::Request::builder().method(method).uri(&uri);
         let out = upstream.headers_mut().expect("a fresh builder has headers");

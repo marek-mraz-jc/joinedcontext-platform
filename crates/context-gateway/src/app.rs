@@ -930,6 +930,18 @@ pub(crate) async fn serve_ngsi_ld(
         return unsupported_media_type().into_response();
     }
 
+    // The names every decision below is taken on are the space's, as the core context expands
+    // them; a context of the caller's own, in the body or a `Link`, would have the broker write
+    // or answer other IRIs under them (T-3287). Refused before anything is judged.
+    if let Err(why) = crate::context_guard::check_link(&parts.headers)
+        .and_then(|()| crate::context_guard::check_body(&sent))
+    {
+        tracing::info!(slug = %endpoint.slug, "refused: a context other than the core one");
+        return ProblemDetails::bad_request()
+            .with_detail(why)
+            .into_response();
+    }
+
     // A subscription is a standing query, not an entity: it is narrowed to the grants and
     // its delivery routed back through the gateway, rather than checked as a write payload
     // whose members would all read as ungranted attributes (GW27, R46).
