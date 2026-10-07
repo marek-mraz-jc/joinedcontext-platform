@@ -2,7 +2,7 @@
 //! ADR-N-040 §3.2).
 //!
 //! `kreuzberg` turns HTML and PDF into Markdown with page markers, detects the language and
-//! chunks with overlap. [`Indexer`] is the crawl's [`Sink`]: each included page or document that
+//! chunks with overlap. [`Indexer`](crate::extract::Indexer) is the crawl's [`Sink`](crate::crawl::Sink): each included page or document that
 //! changed replaces its own chunks, without an embedding yet (T-3053 adds those).
 
 use kreuzberg::{

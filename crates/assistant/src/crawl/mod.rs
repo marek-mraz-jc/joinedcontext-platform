@@ -2,7 +2,7 @@
 //!
 //! Discovers and fetches pages and linked documents breadth-first, enforcing SSRF egress guards,
 //! robots.txt rules, path glob patterns, and byte caps. Results are recorded in the store's
-//! tenant tables under project-scoped transactions and passed to the caller's [`Sink`].
+//! tenant tables under project-scoped transactions and passed to the caller's [`Sink`](crate::crawl::Sink).
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
