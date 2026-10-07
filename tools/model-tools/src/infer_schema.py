@@ -370,8 +370,24 @@ def _classify(value: Any) -> tuple[str, Any]:
     return "text", text
 
 
+# A column is guessed required only from this many rows with no empty value: a wrong `required`
+# makes the validation refuse every record that lacks it (PL-59), so a short sample guesses none.
+# ponytail: a fixed count, a share of the sample if bigger samples ask for it.
+REQUIRED_FROM_ROWS = 10
+
+
 def _column(values: list[Any]) -> dict[str, Any]:
-    """What one column's values say: the range, the kind, bounds, a pattern, or why not."""
+    """What one column's values say: the range, the kind, bounds, a pattern, whether every row
+    has it, or why not."""
+    column = _typed(values)
+    filled = sum(1 for raw in values if _classify(raw)[0] != "empty")
+    if len(values) >= REQUIRED_FROM_ROWS and filled == len(values):
+        column["required"] = True
+    return column
+
+
+def _typed(values: list[Any]) -> dict[str, Any]:
+    """The range, the kind, bounds and a pattern one column's values say, or why not."""
     kinds = Counter()
     numbers: list[float] = []
     shapes: set[str] = set()
@@ -481,7 +497,7 @@ def infer(
             definition: dict[str, Any] = {"range": column["range"]}
             if header != slot:
                 definition["title"] = {"en": header}
-            for key in ("pattern", "minimum_value", "maximum_value"):
+            for key in ("required", "pattern", "minimum_value", "maximum_value"):
                 if key in column:
                     definition[key] = column[key]
             if column.get("kind"):
@@ -506,7 +522,7 @@ def infer(
             operations.append(add)
             if header != slot:
                 operations.append({"op": "setTitle", "target": "slot", "name": slot, "locale": "en", "value": header})
-            for key in ("pattern", "minimum_value", "maximum_value"):
+            for key in ("required", "pattern", "minimum_value", "maximum_value"):
                 if key in column:
                     operations.append({"op": "setSlot", "name": slot, "field": key, "value": column[key]})
             if unit:
