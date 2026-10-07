@@ -875,7 +875,7 @@ fn url(value: &str, schemes: &'static [&'static str], field: &'static str) -> Re
 
 /// The runner variables a typed URL may name: where the gateway and the token service are, and
 /// the organisation's domain. None of them is a credential.
-const URL_VARIABLES: &[&str] = &[
+pub const URL_VARIABLES: &[&str] = &[
     "JC_GATEWAY_HOST",
     "JC_GATEWAY_URL",
     "JC_TOKEN_URL",
