@@ -23,6 +23,9 @@ const PASSAGES: i64 = 8;
 /// The longest search query the model may write.
 const MAX_QUERY_CHARS: usize = 500;
 
+/// What the last call is told beside `tool_choice: none`, so it answers from what it has (T-3205).
+const ANSWER_NOW: &str = "No more searches or tools: answer the question now from the passages and tool results above, citing them. If they do not answer it, say so.";
+
 /// The model's room to answer, counted in the pre-call estimate.
 const ANSWER_ESTIMATE: u64 = super::model::MAX_ANSWER_TOKENS;
 
@@ -266,6 +269,11 @@ pub async fn answer(
             return spent;
         }
         let allow_tools = call + 1 < MAX_CALLS && !repeated;
+        if !allow_tools && call > 0 {
+            // `tool_choice: none` alone is not obeyed: gemini-3.8-flash asked for another search
+            // on the last call and its text came back empty, "No Answer" on dev (T-3205).
+            messages.push(json!({"role": "user", "content": ANSWER_NOW}));
+        }
         let completion = match ask
             .model
             .complete(

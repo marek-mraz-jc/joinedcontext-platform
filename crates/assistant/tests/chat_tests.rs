@@ -493,6 +493,23 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
         calls[3].1["tool_choice"], "none",
         "after a repeat the model answers"
     );
+    // T-3205: the last call is told in words to answer, which `tool_choice: none` alone is not.
+    let last = calls[3].1["messages"]
+        .as_array()
+        .and_then(|m| m.last())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(last["role"], "user");
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("No more searches"),
+        "{last}"
+    );
+    assert!(calls[..3]
+        .iter()
+        .all(|(_, body)| !body.to_string().contains("No more searches")));
     let refused = calls[1].1["messages"][3]["content"]
         .as_str()
         .expect("refusal");
