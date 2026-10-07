@@ -220,7 +220,7 @@ fn tool_call(id: &str, name: &str, arguments: Value) -> Value {
 async fn script(proxy: &MockServer, answers: Vec<ResponseTemplate>) {
     for (i, answer) in answers.into_iter().enumerate() {
         Mock::given(method("POST"))
-            .and(path("/v1/llm/v1/chat/completions"))
+            .and(path("/v1/llm/chat/completions"))
             .respond_with(answer)
             .up_to_n_times(1)
             .with_priority(u8::try_from(i + 1).expect("few"))
@@ -526,7 +526,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
     assert!(model_calls(&w.proxy).await.is_empty(), "nothing was spent");
 
     Mock::given(method("POST"))
-        .and(path("/v1/llm/v1/chat/completions"))
+        .and(path("/v1/llm/chat/completions"))
         .and(header("x-jc-assistant-deployment", "hronov/obcania"))
         .respond_with(
             ResponseTemplate::new(429).set_body_json(json!({"title": "Daily Budget Spent"})),
@@ -550,7 +550,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
     );
 
     Mock::given(method("POST"))
-        .and(path("/v1/llm/v1/chat/completions"))
+        .and(path("/v1/llm/chat/completions"))
         .respond_with(ResponseTemplate::new(502))
         .mount(&w.proxy)
         .await;

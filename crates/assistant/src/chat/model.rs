@@ -191,7 +191,7 @@ impl Model {
         };
         let answer = self
             .http
-            .post(format!("{}/v1/llm/v1/chat/completions", self.config.proxy))
+            .post(format!("{}/v1/llm/chat/completions", self.config.proxy))
             .bearer_auth(token)
             .header("x-jc-assistant-deployment", deployment)
             .header("x-jc-assistant-tokens-per-day", tokens_per_day.to_string())
