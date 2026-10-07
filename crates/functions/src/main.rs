@@ -72,10 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tokio::spawn(jwks::keep_current(Arc::clone(&verifier), jwks_url));
 
+    let assistant_caller = std::env::var("JC_FUNCTIONS_ASSISTANT_CALLER")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let state = Arc::new(AppState {
         verifier,
         audience,
         caller,
+        assistant_caller,
         gateway,
         proxy,
         http: reqwest::Client::builder()

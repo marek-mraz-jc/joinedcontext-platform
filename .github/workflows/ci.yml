@@ -20,6 +20,9 @@ jobs:
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
+      # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
+      # otherwise fetch the newest release unchecked (T-3052).
+      - run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
       # --locked: a dependency added without its lock entry fails here, in the fast lane, and
       # not first in the image build (T-0616).
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings

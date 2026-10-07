@@ -85,6 +85,7 @@ impl Realm {
             verifier: Arc::clone(&self.verifier),
             audience: "jc-functions".to_owned(),
             caller: "joinedcontext-portal".to_owned(),
+            assistant_caller: Some("jc-assistant".to_owned()),
             gateway: gateway.to_owned(),
             proxy: proxy.map(str::to_owned),
             http: reqwest::Client::new(),
@@ -511,4 +512,133 @@ async fn a_proxy_call_without_a_proxy_address_is_503_and_an_unknown_route_400() 
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A script of the knowledge assistant (AG-112, T-3056): no endpoint, no SDK, the data in the
+/// request body.
+fn script(code: &str, data: Value) -> Value {
+    json!({
+        "files": { "script.js": format!("export default async (request) => {{ const data = request.body; const result = await (async () => {{ {code} }})(); return {{ body: result }}; }};") },
+        "entry": "script.js",
+        "request": { "method": "POST", "query": {}, "body": data, "user": null },
+        "config": {},
+        "via": "none",
+    })
+}
+
+/// AG-112: the assistant's token runs a script over the data it hands in, a thousand events
+/// filtered by date and place.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_runs_a_script_over_the_data_it_hands_in() {
+    let realm = Realm::new();
+    let token = realm.token("jc-assistant", "jc-functions");
+    let events: Vec<Value> = (0..1000)
+        .map(|i| json!({ "name": format!("event {i}"), "day": format!("2026-10-{:02}", 1 + i % 30), "place": if i % 7 == 0 { "Námestie SNP" } else { "Radvaň" }, "children": i % 2 == 0 }))
+        .collect();
+    let code = "return data.filter(e => e.day >= '2026-10-10' && e.day <= '2026-10-11' && e.place === 'Námestie SNP' && e.children).map(e => e.name);";
+    let (status, answer) = send(
+        realm.app(4),
+        Some(&token),
+        script(code, json!(events)).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let expected: Vec<String> = (0..1000)
+        .filter(|i| (1 + i % 30) >= 10 && (1 + i % 30) <= 11 && i % 7 == 0 && i % 2 == 0)
+        .map(|i| format!("event {i}"))
+        .collect();
+    assert_eq!(answer["body"], json!(expected));
+}
+
+/// AG-112: the assistant's token never reaches an endpoint, and the Portal's caller and nobody
+/// else is served otherwise.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_assistant_runs_nothing_with_a_network() {
+    let realm = Realm::new();
+    let assistant = realm.token("jc-assistant", "jc-functions");
+    let (status, answer) = send(
+        realm.app(4),
+        Some(&assistant),
+        invocation(json!({})).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+    assert!(answer["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("no network"));
+    let stranger = realm.token("somebody-else", "jc-functions");
+    let (status, _) = send(
+        realm.app(4),
+        Some(&stranger),
+        script("return 1;", json!(null)).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let wrong_audience = realm.token("jc-assistant", "jc-agent-proxy");
+    let (status, _) = send(
+        realm.app(4),
+        Some(&wrong_audience),
+        script("return 1;", json!(null)).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// AG-112: a loop that never ends, a memory bomb, an answer past the cap and every way to reach
+/// out are stopped with a sentence; none of them takes the runtime down.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_cannot_loop_hoard_flood_or_reach_out() {
+    let realm = Realm::new();
+    let token = realm.token("jc-assistant", "jc-functions");
+    let app = realm.app(4);
+    for (code, says) in [
+        ("while (true) {}", "longer than"),
+        (
+            "const a = []; while (true) { a.push('x'.repeat(1000000)); }",
+            "",
+        ),
+        ("return 'x'.repeat(2 * 1024 * 1024);", "larger than 1 MiB"),
+        ("return await fetch('https://example.com');", "fetch"),
+        ("return require('fs');", "require"),
+        (
+            "return globalThis.__jc_request('GET', '/api/endpoint/x/', undefined);",
+            "not a function",
+        ),
+        (
+            "return [typeof setTimeout, typeof process, typeof std, typeof os];",
+            "",
+        ),
+    ] {
+        let (status, answer) = send(
+            app.clone(),
+            Some(&token),
+            script(code, json!(null)).to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{code}: {answer}");
+        if code.starts_with("return [typeof") {
+            assert_eq!(
+                answer["body"],
+                json!(["undefined", "undefined", "undefined", "undefined"])
+            );
+            continue;
+        }
+        assert_eq!(answer["status"], 500, "{code}: {answer}");
+        let message = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains(says), "{code}: {message}");
+    }
+    // The runtime still answers.
+    let (status, answer) = send(
+        app,
+        Some(&token),
+        script("return data + 1;", json!(41))
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(
+        (status, answer["body"].clone()),
+        (StatusCode::OK, json!(42))
+    );
 }

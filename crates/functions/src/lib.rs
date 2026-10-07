@@ -1,7 +1,9 @@
 //! `jc-functions`: the runtime of application functions (SDK-22, SDK-23, Architecture/20 §3).
 //!
-//! One route, `POST /invoke`, for the Portal only: its Keycloak token must name the audience
-//! `jc-functions` and be issued to the Portal's client. The runtime holds no credential and no
+//! One route, `POST /invoke`, for the Portal: its Keycloak token must name the audience
+//! `jc-functions` and be issued to the Portal's client. The knowledge assistant may call it too,
+//! with its own client's token and only with `via: "none"`: a script over data it hands in, with
+//! no endpoint and no network (AG-112, T-3056). The runtime holds no credential and no
 //! code of its own; every call brings the files, the request and the caller's token, and runs in
 //! a fresh QuickJS runtime on a thread of its own, at most [`SLOTS`] at a time.
 
@@ -38,6 +40,9 @@ pub struct AppState {
     pub audience: String,
     /// The Keycloak client a caller's token must be issued to (`JC_FUNCTIONS_CALLER`).
     pub caller: String,
+    /// The knowledge assistant's client (`JC_FUNCTIONS_ASSISTANT_CALLER`), whose token may run a
+    /// script with no network and nothing else; `None` admits no such caller.
+    pub assistant_caller: Option<String>,
     /// Scheme and authority of the Context Gateway (`JC_GATEWAY_URL`).
     pub gateway: String,
     /// Scheme and authority of the agent proxy (`JC_AGENT_PROXY_URL`), for a call `via: "proxy"`;
@@ -68,6 +73,8 @@ enum Via {
     #[default]
     Gateway,
     Proxy,
+    /// No endpoint, no host function: the code reads what the request carries and nothing else.
+    None,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -102,7 +109,7 @@ async fn invoke(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let authorized = bearer(
+    let azp = bearer(
         headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok()),
@@ -112,8 +119,11 @@ async fn invoke(
             .verifier
             .verify(token, std::slice::from_ref(&state.audience))
     })
-    .is_ok_and(|claims| claims.azp.as_deref() == Some(state.caller.as_str()));
-    if !authorized {
+    .ok()
+    .and_then(|claims| claims.azp);
+    let portal = azp.as_deref() == Some(state.caller.as_str());
+    let assistant = azp.is_some() && azp.as_deref() == state.assistant_caller.as_deref();
+    if !portal && !assistant {
         return problem(
             StatusCode::UNAUTHORIZED,
             "a token for jc-functions issued to the Portal",
@@ -141,35 +151,48 @@ async fn invoke(
             "a function is called with GET or POST",
         );
     }
-    let Some(slug) = call
-        .config
-        .get("slug")
-        .and_then(Value::as_str)
-        .filter(|s| endpoint::is_slug(s))
-    else {
+    if assistant && call.via != Via::None {
         return problem(
-            StatusCode::BAD_REQUEST,
-            "config.slug must be the endpoint's slug",
+            StatusCode::FORBIDDEN,
+            "the assistant's scripts run with via: \"none\", no endpoint and no network",
         );
-    };
-    let proxy = match call.via {
-        Via::Gateway => None,
-        Via::Proxy => match &state.proxy {
-            Some(proxy) => Some(proxy.clone()),
-            None => return problem(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "this runtime has no agent proxy address (JC_AGENT_PROXY_URL) for a run's own call",
-            ),
-        },
+    }
+    let endpoint = match call.via {
+        Via::None => None,
+        via => {
+            let Some(slug) = call
+                .config
+                .get("slug")
+                .and_then(Value::as_str)
+                .filter(|s| endpoint::is_slug(s))
+            else {
+                return problem(
+                    StatusCode::BAD_REQUEST,
+                    "config.slug must be the endpoint's slug",
+                );
+            };
+            let proxy = if via == Via::Proxy {
+                match &state.proxy {
+                    Some(proxy) => Some(proxy.clone()),
+                    None => return problem(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "this runtime has no agent proxy address (JC_AGENT_PROXY_URL) for a run's own call",
+                    ),
+                }
+            } else {
+                None
+            };
+            Some(Endpoint {
+                http: state.http.clone(),
+                gateway: state.gateway.clone(),
+                slug: slug.to_owned(),
+                token: call.token.filter(|t| !t.is_empty()),
+                proxy,
+            })
+        }
     };
     let invocation = Invocation {
-        endpoint: Endpoint {
-            http: state.http.clone(),
-            gateway: state.gateway.clone(),
-            slug: slug.to_owned(),
-            token: call.token.filter(|t| !t.is_empty()),
-            proxy,
-        },
+        endpoint,
         files: call.files,
         entry: call.entry,
         request: serde_json::to_value(&call.request).unwrap_or_default(),

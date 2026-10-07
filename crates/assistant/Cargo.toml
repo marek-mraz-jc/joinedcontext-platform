@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "jc-assistant: the knowledge assistant's store, migrations and hybrid retrieval (ADR-N-040)"
 
+[[bin]]
+name = "jc-assistant"
+path = "src/bin/jc-assistant.rs"
+
 [dependencies]
 # The Portal's version. `macros` only for `migrate!`, which embeds the migration files at build
 # time; every query is a runtime one, checked by the tests against the cluster's own PostgreSQL
@@ -13,6 +17,41 @@ description = "jc-assistant: the knowledge assistant's store, migrations and hyb
 # PostgreSQL inside the mesh, which Linkerd already encrypts, and a TLS stack would bring
 # webpki-roots, whose CDLA-Permissive-2.0 licence deny.toml does not allow.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+jc-core = { path = "../jc-core", version = "0.1.0" }
+agent-proxy = { path = "../agent-proxy", version = "0.1.0" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+url = "2.5"
+sha2 = "0.10"
+hex = "0.4"
+scraper = "0.27"
+quick-xml = "0.42"
+texting_robots = "0.2.2"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
+# The worker: the organization's manifests read the way the gateway reads them (layout 1 and 2),
+# its schedule, its log and its health probe.
+jcctl = { path = "../jcctl", version = "0.1.0" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", features = ["macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+axum = "0.8"
+# Text out of HTML and PDF, language detection and chunking (ADR-N-040 §3.1). PDFium is linked
+# from a prepared directory: `KREUZBERG_PDFIUM_PREBUILT` names an unpacked
+# bblanchon/pdfium-binaries chromium/7568 release whose SHA-256 the build checks first (CI, the
+# image's Dockerfile). Without it kreuzberg's build script would fetch whatever release is
+# newest, unpinned and unchecked. No OCR, office or embedding features: they bring ONNX Runtime.
+kreuzberg = { version = "=4.10.4", default-features = false, features = ["tokio-runtime", "pdf", "bundled-pdfium", "html", "chunking", "language-detection"] }
+# Passage and question embeddings (ADR-N-040 §3.1, T-3053): `multilingual-e5-small` int8, its
+# files read from a directory whose SHA-256s `embed.rs` pins (`scripts/ci/e5-small.sh` fetches
+# them); nothing is downloaded at run time. ONNX Runtime is loaded at start from ORT_DYLIB_PATH
+# (`scripts/ci/onnxruntime.sh`, pinned and checked): the static library `ort` would download
+# needs glibc 2.38. `ort` has no stable release; 2.0.0-rc.13 binds ONNX Runtime 1.28.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-24", "load-dynamic"] }
+tokenizers = { version = "=0.23.2", default-features = false, features = ["onig"] }
 
 [dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -138,17 +138,30 @@ impl Grants {
     }
 
     /// Whether `bearer` is the Portal's own service-account token, issued for this proxy.
-    ///
-    /// A person's token of the Portal's client carries the same `azp`, so the subject must be
-    /// the client's service-account user as well (the rule the gateway applies, AG-95).
     pub async fn is_portal(&self, bearer: &str) -> Result<bool, String> {
+        self.is_service_account(bearer, &self.config.portal_client_id)
+            .await
+    }
+
+    /// Whether `bearer` is the knowledge assistant's service-account token, issued for this proxy
+    /// (AG-109).
+    pub async fn is_assistant(&self, bearer: &str) -> Result<bool, String> {
+        self.is_service_account(bearer, &self.config.assistant_client_id)
+            .await
+    }
+
+    /// Whether `bearer` is an active token of `client`'s own service account whose audience names
+    /// this proxy.
+    ///
+    /// A person's token of the same client carries the same `azp`, so the subject must be the
+    /// client's service-account user as well (the rule the gateway applies, AG-95).
+    async fn is_service_account(&self, bearer: &str, client: &str) -> Result<bool, String> {
         let seen = self.introspect(bearer).await?;
-        let portal = &self.config.portal_client_id;
         Ok(seen.active
-            && seen.azp.as_deref() == Some(portal.as_str())
+            && seen.azp.as_deref() == Some(client)
             && seen
                 .username
-                .is_some_and(|u| u.eq_ignore_ascii_case(&format!("service-account-{portal}")))
+                .is_some_and(|u| u.eq_ignore_ascii_case(&format!("service-account-{client}")))
             && seen
                 .aud
                 .is_some_and(|aud| aud.contains(&self.config.oidc_client_id)))
