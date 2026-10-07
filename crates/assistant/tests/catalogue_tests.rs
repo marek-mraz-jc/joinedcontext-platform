@@ -44,7 +44,7 @@ fn checkout(test: &str) -> Checkout {
         format!("  contextSpaceRef: {space}\n  slug: {slug}\n  audience: {audience}\n  enabledRepresentations: [ngsi-ld]\n{extra}")
     };
     write(&dir, "projects/bb/spaces/ovzdusie/datamodels/air.yaml", &manifest("DataModel", "air",
-        "  contextSpaceRef: ovzdusie\n  linkml: ./air.linkml.yaml\n  version: 1.0.0\n  lifecycle: draft\n  classes: [AirQualityObserved]\n  artifacts:\n    jsonSchema: ./air.v1.schema.json\n"));
+        "  contextSpaceRef: ovzdusie\n  linkml: ./air.linkml.yaml\n  version: 1.0.0\n  lifecycle: draft\n  classes: [AirQualityObserved, AirQualityStation]\n  artifacts:\n    jsonSchema: ./air.v1.schema.json\n"));
     write(&dir, "projects/bb/spaces/ovzdusie/datamodels/air.v1.schema.json", &serde_json::json!({
         "definitions": { "AirQualityObserved": {
             "description": "One air-quality reading of one station.",
@@ -53,6 +53,10 @@ fn checkout(test: &str) -> Checkout {
                 "pm10": { "description": "Particulate matter up to 10 µm.", "x-ngsi-ld-kind": "Property", "x-unit": { "ucumCode": "ug/m3" } },
                 "stationNote": { "description": "An internal remark of the station's keeper.", "x-ngsi-ld-kind": "Property" }
             }
+        },
+        "AirQualityStation": {
+            "description": "A station the city plans.",
+            "properties": { "id": { "type": "string" }, "type": { "type": "string" }, "plannedFor": { "x-ngsi-ld-kind": "Property" } }
         }}
     }).to_string());
     write(&dir, "projects/bb/spaces/ovzdusie/endpoints/public-air.yaml", &manifest("Endpoint", "public-air",
@@ -74,6 +78,22 @@ fn checkout(test: &str) -> Checkout {
             "Endpoint",
             "mesto-all",
             &endpoint("m2qz4tv6xh3n5jb2ryd3wcfak7", "mesto", "public", ""),
+        ),
+    );
+    write(&dir, "projects/bb/spaces/ovzdusie/projections/pm10-only.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ModelProjection\nmetadata:\n  name: pm10-only\n  namespace: bb\nspec:\n  contextSpaceRef: ovzdusie\n  dataModelRef: { name: air, version: \"1\" }\n  classes:\n    - { name: AirQualityObserved, slots: [pm10] }\n");
+    write(
+        &dir,
+        "projects/bb/spaces/ovzdusie/endpoints/air-app.yaml",
+        &manifest(
+            "Endpoint",
+            "air-app",
+            &endpoint(
+                "a7m2qz4tv6xh3n5jb2ryd3wcfk",
+                "ovzdusie",
+                "organization",
+                "  projectionRef: { kind: ModelProjection, name: pm10-only }\n",
+            ),
         ),
     );
     write(&dir, "projects/bb/ckan/data.yaml",
@@ -142,8 +162,23 @@ fn a_public_catalogue_holds_public_endpoints_alone_and_an_internal_one_its_space
     let names: Vec<&str> = staff.catalogue.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(
         names,
-        ["public-air", "staff-air"],
+        ["air-app", "public-air", "staff-air"],
         "every Endpoint of the named space"
+    );
+    let app = staff
+        .catalogue
+        .iter()
+        .find(|p| p.name == "air-app")
+        .expect("air-app");
+    let attributes: Vec<&str> = app.types[0]
+        .attributes
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(
+        attributes,
+        ["pm10"],
+        "a ModelProjection narrows the page to its slots"
     );
     let private = staff
         .catalogue
@@ -202,6 +237,20 @@ async fn a_public_endpoint_is_counted_anonymously_and_each_page_cites_where_a_vi
         .expect(2)
         .mount(&gateway)
         .await;
+    // A type a visitor finds no entity of is left off the public page.
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/endpoint/{PUBLIC_SLUG}/ngsi-ld/v1/entities"
+        )))
+        .and(query_param("type", "AirQualityStation"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("NGSILD-Results-Count", "0")
+                .set_body_string("[]"),
+        )
+        .expect(2)
+        .mount(&gateway)
+        .await;
     // The organization's Endpoint is never asked: its rows are not a visitor's to count.
     Mock::given(path(format!(
         "/api/endpoint/{PRIVATE_SLUG}/ngsi-ld/v1/entities"
@@ -251,6 +300,10 @@ async fn a_public_endpoint_is_counted_anonymously_and_each_page_cites_where_a_vi
                 "{air}"
             );
             assert!(air.contains("pm10 (Property), unit ug/m3"));
+            assert!(
+                !air.contains("AirQualityStation"),
+                "no entity of it reaches a visitor: {air}"
+            );
             for secret in [PRIVATE_SLUG, "staff-air", "stationNote"] {
                 assert!(
                     pages.0.iter().all(|(_, h)| !h.contains(secret)),
@@ -262,6 +315,10 @@ async fn a_public_endpoint_is_counted_anonymously_and_each_page_cites_where_a_vi
                 "https://platform.example.org/api/endpoint/{PRIVATE_SLUG}/schema/index.json"
             ));
             assert!(staff.contains("audience organization"));
+            assert!(
+                staff.contains("AirQualityStation"),
+                "not counted, so every type of the model"
+            );
             assert!(
                 !staff.contains("entities of type"),
                 "a private Endpoint is not counted"

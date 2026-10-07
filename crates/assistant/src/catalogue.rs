@@ -191,10 +191,34 @@ pub fn pages_of(
             .ok()
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         {
-            Some(schema) => types.entry(space).or_default().extend(types_of(&schema)),
+            // The classes the model declares: its schema also defines the root they specialise.
+            Some(schema) => types.entry(space).or_default().extend(
+                types_of(&schema)
+                    .into_iter()
+                    .filter(|t| spec.classes.contains(&t.class)),
+            ),
             None => {
                 tracing::warn!(project, model = %id.name, "the model's JSON Schema is not readable")
             }
+        }
+    }
+
+    // An Endpoint narrowed by a ModelProjection serves its classes and slots alone (MP-02).
+    let mut projections: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for (id, resource) in repository.iter() {
+        if id.kind != "ModelProjection" || id.namespace.as_deref() != Some(project) {
+            continue;
+        }
+        if let Ok(spec) = serde_json::from_value::<jc_core::kinds::ModelProjectionSpec>(
+            resource.manifest.spec.clone(),
+        ) {
+            projections.insert(
+                id.name.clone(),
+                spec.classes
+                    .into_iter()
+                    .map(|c| (c.name, c.slots))
+                    .collect(),
+            );
         }
     }
 
@@ -215,6 +239,10 @@ pub fn pages_of(
         if public_only && audience != "public" {
             continue;
         }
+        let projected = spec
+            .projection_ref
+            .as_ref()
+            .and_then(|named| projections.get(&named.name));
         let hidden: HashSet<&str> = spec
             .projection
             .as_ref()
@@ -245,14 +273,21 @@ pub fn pages_of(
                 .get(&space)
                 .map(|held| {
                     held.iter()
-                        .map(|t| EntityType {
-                            attributes: t
-                                .attributes
-                                .iter()
-                                .filter(|a| !hidden.contains(a.name.as_str()))
-                                .cloned()
-                                .collect(),
-                            ..t.clone()
+                        .filter_map(|t| {
+                            let slots = match projected {
+                                Some(classes) => Some(classes.get(&t.class)?),
+                                None => None,
+                            };
+                            Some(EntityType {
+                                attributes: t
+                                    .attributes
+                                    .iter()
+                                    .filter(|a| !hidden.contains(a.name.as_str()))
+                                    .filter(|a| slots.is_none_or(|kept| kept.contains(&a.name)))
+                                    .cloned()
+                                    .collect(),
+                                ..t.clone()
+                            })
                         })
                         .collect()
                 })
@@ -436,6 +471,24 @@ pub async fn sync_catalogue(
         let counts = match &reader.gateway {
             Some(gateway) => counts(&reader.http, gateway, page).await,
             None => BTreeMap::new(),
+        };
+        // A public Endpoint shows a visitor the types its Policy grants them: where the counts came
+        // back, the page names the types a visitor finds entities of and no other. With no count
+        // at all (the gateway did not answer) it keeps every type rather than say nothing.
+        let shown;
+        let page = if counts.is_empty() {
+            page
+        } else {
+            shown = EndpointPage {
+                types: page
+                    .types
+                    .iter()
+                    .filter(|t| counts.get(&t.class).is_some_and(|n| *n > 0))
+                    .cloned()
+                    .collect(),
+                ..page.clone()
+            };
+            &shown
         };
         let html = page_html(page, &address, &counts, counted_at.as_deref());
         let hash = hex::encode(Sha256::digest(html.as_bytes()));
