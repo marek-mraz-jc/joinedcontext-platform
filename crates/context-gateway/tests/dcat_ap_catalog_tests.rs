@@ -80,6 +80,7 @@ fn endpoint(audience: Audience, catalog: Option<Catalog>) -> Endpoint {
             Representation::Mcp,
         ],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

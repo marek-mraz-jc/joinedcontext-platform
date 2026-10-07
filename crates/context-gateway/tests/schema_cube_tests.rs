@@ -93,6 +93,7 @@ fn endpoint(model: Model, entity_type: &str, properties: &[&str]) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::Mcp],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

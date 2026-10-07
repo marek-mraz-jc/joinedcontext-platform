@@ -519,3 +519,30 @@ fn a_non_boolean_mcp_switch_is_refused() {
                enabledRepresentations: [ngsi-ld]\n  mcp: \"off\"\n";
     assert!(Endpoint::from_yaml(raw).is_err());
 }
+
+#[test]
+fn endpoint_creates_parses_and_bounds_per_day() {
+    let ep = Endpoint::from_yaml(GOLDEN).expect("valid golden YAML");
+    let yaml = "mintIds: true\nperDay: 200\n";
+    let creates: jc_core::kinds::Creates = serde_norway::from_str(yaml).expect("creates parses");
+    assert!(creates.mint_ids);
+    assert_eq!(creates.per_day, Some(200));
+    assert!(
+        serde_norway::from_str::<jc_core::kinds::Creates>("mintIds: true\nperHour: 3\n").is_err()
+    );
+
+    for (per_day, ok) in [
+        (Some(1), true),
+        (Some(10_000), true),
+        (None, true),
+        (Some(0), false),
+        (Some(10_001), false),
+    ] {
+        let mut spec = ep.spec.clone();
+        spec.creates = Some(jc_core::kinds::Creates {
+            mint_ids: true,
+            per_day,
+        });
+        assert_eq!(spec.validate().is_ok(), ok, "perDay {per_day:?}");
+    }
+}

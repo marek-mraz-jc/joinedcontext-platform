@@ -117,6 +117,8 @@ pub struct Endpoint {
     pub representations: Vec<Representation>,
     /// The token-bucket configuration, absent when the endpoint sets no limit (EP-20).
     pub rate_limit: Option<RateLimits>,
+    /// Minted ids and the daily cap on creates, absent for an ordinary Endpoint (EP-97).
+    pub creates: Option<jc_core::kinds::Creates>,
     /// The ceiling on one `file.*` download, absent when the endpoint sets none (EP-44).
     pub file_limits: Option<FileLimits>,
     /// Attributes this endpoint never serves, whatever the policies grant (EP-61).

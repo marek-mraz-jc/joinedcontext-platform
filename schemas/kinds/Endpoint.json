@@ -302,6 +302,26 @@
       ],
       "type": "object"
     },
+    "Creates": {
+      "additionalProperties": false,
+      "description": "How an Endpoint takes new entities from callers who do not choose their ids: a public form (EP-97).",
+      "properties": {
+        "mintIds": {
+          "description": "The gateway replaces the id a create names with one it mints, `urn:ngsi-ld:{Type}:{uuid}`, so a caller can neither pick nor overwrite one.",
+          "type": "boolean"
+        },
+        "perDay": {
+          "description": "At most this many creates through the Endpoint per UTC day, 1..=10000; past it the gateway answers 429 with `Retry-After` until midnight UTC.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "DataStore": {
       "additionalProperties": false,
       "description": "The optional row mirror in the CKAN DataStore (EP-65).",
@@ -523,6 +543,17 @@
             }
           ],
           "description": "Reference to the underlying ContextSpace."
+        },
+        "creates": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Creates"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the Endpoint takes new entities: minted ids and a daily cap (EP-97)."
         },
         "enabledRepresentations": {
           "description": "Set of enabled representation formats (EP-05).",

@@ -61,6 +61,7 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::Zip],
         rate_limit: None,
+        creates: None,
         file_limits: limits,
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         projection: None,

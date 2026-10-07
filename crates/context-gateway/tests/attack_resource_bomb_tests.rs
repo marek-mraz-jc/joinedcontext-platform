@@ -117,6 +117,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
             Representation::Xlsx,
         ],
         rate_limit,
+        creates: None,
         file_limits: Some(FileLimits {
             max_file_rows: Some(MAX_ROWS),
             max_file_bytes: None,

@@ -13,6 +13,7 @@
 pub mod app;
 pub mod auth;
 pub mod config;
+pub mod creates;
 pub mod domain_gate;
 pub mod egress;
 pub mod federation;

@@ -43,6 +43,7 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::GeoJson],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: BTreeSet::new(),
         projection: None,

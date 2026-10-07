@@ -28,6 +28,7 @@ fn endpoint(audience: Audience, allowed: &[&str]) -> Endpoint {
         allowed_projects: allowed.iter().map(|name| (*name).to_owned()).collect(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: std::collections::BTreeSet::new(),
         projection: None,

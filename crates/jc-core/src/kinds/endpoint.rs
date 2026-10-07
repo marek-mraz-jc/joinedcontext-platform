@@ -231,6 +231,38 @@ impl RateLimits {
     }
 }
 
+/// How an Endpoint takes new entities from callers who do not choose their ids: a public form
+/// (EP-97).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Creates {
+    /// The gateway replaces the id a create names with one it mints,
+    /// `urn:ngsi-ld:{Type}:{uuid}`, so a caller can neither pick nor overwrite one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mint_ids: bool,
+    /// At most this many creates through the Endpoint per UTC day, 1..=10000; past it the
+    /// gateway answers 429 with `Retry-After` until midnight UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_day: Option<u32>,
+}
+
+/// The largest `spec.creates.perDay` an Endpoint may name (EP-97).
+pub const MAX_CREATES_PER_DAY: u32 = 10_000;
+
+impl Creates {
+    /// Validates `perDay` is within 1..=[`MAX_CREATES_PER_DAY`].
+    pub fn validate(&self) -> Result<()> {
+        match self.per_day {
+            Some(n) if n == 0 || n > MAX_CREATES_PER_DAY => Err(Error::Name {
+                field: "creates.perDay",
+                value: n.to_string(),
+                reason: "perDay must be between 1 and 10000",
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
 /// HTTP caching configuration for endpoint responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -265,6 +297,9 @@ pub struct EndpointSpec {
     /// Optional rate limiting configuration (EP-20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
+    /// How the Endpoint takes new entities: minted ids and a daily cap (EP-97).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creates: Option<Creates>,
     /// Optional ceiling on one `file.*` download (EP-44).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_limits: Option<FileLimits>,
@@ -464,6 +499,10 @@ impl EndpointSpec {
 
         if let Some(ref limits) = self.rate_limits {
             limits.validate()?;
+        }
+
+        if let Some(ref creates) = self.creates {
+            creates.validate()?;
         }
 
         if let Some(ref limits) = self.file_limits {

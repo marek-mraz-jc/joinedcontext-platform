@@ -146,6 +146,7 @@ fn endpoint(policy: PolicySpec) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         // The endpoint publishes the space with less detail than the grant allows (EP-61).
         hidden_attributes: ["operatorPhone".to_owned()].into_iter().collect(),

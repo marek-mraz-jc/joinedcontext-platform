@@ -67,6 +67,7 @@ fn hub_endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd, Representation::Mcp],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: [HIDDEN.to_owned()].into_iter().collect(),
         projection: None,

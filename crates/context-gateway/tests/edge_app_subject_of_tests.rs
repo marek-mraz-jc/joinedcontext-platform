@@ -55,6 +55,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         allowed_projects: vec!["doprava".to_owned()],
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: Default::default(),
         projection: None,

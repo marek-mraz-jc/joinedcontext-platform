@@ -138,6 +138,7 @@ fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![Representation::NgsiLd],
         rate_limit: None,
+        creates: None,
         file_limits: None,
         hidden_attributes: hidden.iter().map(|name| (*name).to_owned()).collect(),
         projection: projected.then(projection),
