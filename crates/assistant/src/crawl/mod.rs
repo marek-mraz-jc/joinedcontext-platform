@@ -60,8 +60,7 @@ impl Crawler {
         resolver: Arc<R>,
         policy: CrawlPolicy,
     ) -> Result<Self, Error> {
-        let client = fetch::client(resolver)
-            .map_err(|err| Error::Crawl(format!("the HTTP client could not be built: {err}")))?;
+        let client = fetch::client(resolver).map_err(Error::Crawl)?;
         Ok(Self { client, policy })
     }
 
