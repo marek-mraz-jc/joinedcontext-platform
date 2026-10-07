@@ -331,7 +331,9 @@ fn every_refusal_tells_the_caller_the_same_thing() {
         assert_eq!(answer.title, answers[0].title);
         assert_eq!(answer.detail, answers[0].detail);
         assert_eq!(answer.type_uri, answers[0].type_uri);
-        assert!(answer.extensions.is_empty());
+        // The type's hint is the one member, the same for every refusal (T-3243).
+        assert_eq!(answer.extensions, answers[0].extensions);
+        assert_eq!(answer.extensions.keys().collect::<Vec<_>>(), vec!["hint"]);
     }
 
     let out: jc_core::ProblemDetails = Refused::OutOfProject(AGREEMENT.to_owned()).into();

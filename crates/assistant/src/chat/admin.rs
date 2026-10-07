@@ -23,8 +23,9 @@ type Refusal = Box<Response>;
 /// The most ids one inclusion call may name.
 pub const MAX_IDS: usize = 500;
 
-fn problem(status: u16, title: &str, detail: impl Into<String>) -> Response {
-    jc_core::ProblemDetails::new(status, &title.to_ascii_lowercase().replace(' ', "-"), title)
+/// The platform's own problem type for `status` (T-3243), never a slug made of a title.
+fn problem(status: u16, detail: impl Into<String>) -> Response {
+    jc_core::ProblemDetails::for_status(status)
         .with_detail(detail.into())
         .into_response()
 }
@@ -33,7 +34,6 @@ fn failed(err: impl std::fmt::Display) -> Response {
     tracing::error!(%err, "an administration read failed");
     problem(
         503,
-        "Service Unavailable",
         "The assistant's store could not be read; try again shortly.",
     )
 }
@@ -87,7 +87,6 @@ pub(super) async fn the_portal(state: &ChatState, headers: &HeaderMap) -> Result
     else {
         return Err(Box::new(problem(
             401,
-            "Unauthorized",
             "only the Portal's service account administers the assistant",
         )));
     };
@@ -99,14 +98,9 @@ pub(super) async fn the_portal(state: &ChatState, headers: &HeaderMap) -> Result
         Ok(true) => Ok(()),
         Ok(false) => Err(Box::new(problem(
             401,
-            "Unauthorized",
             "only the Portal's service account administers the assistant",
         ))),
-        Err(err) => Err(Box::new(problem(
-            503,
-            "Service Unavailable",
-            err.to_string(),
-        ))),
+        Err(err) => Err(Box::new(problem(503, err.to_string()))),
     }
 }
 
@@ -115,7 +109,7 @@ async fn site(state: &ChatState, project: &str, source: &str) -> Result<i64, Ref
     let mut tx = crate::project_scope(&state.pool, project)
         .await
         .map_err(|err| match err {
-            crate::Error::Project(_) => Box::new(problem(404, "Not Found", "no such project")),
+            crate::Error::Project(_) => Box::new(problem(404, "no such project")),
             other => Box::new(failed(other)),
         })?;
     let id: Option<i64> =
@@ -129,7 +123,6 @@ async fn site(state: &ChatState, project: &str, source: &str) -> Result<i64, Ref
     id.ok_or_else(|| {
         Box::new(problem(
             404,
-            "Not Found",
             format!("source `{source}` has not been crawled"),
         ))
     })
@@ -146,7 +139,7 @@ async fn sources(
         return *refused;
     }
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
-        return problem(404, "Not Found", "no such project");
+        return problem(404, "no such project");
     };
     let sql = format!(
         "SELECT s.source, s.visibility, to_char(s.last_crawl AT TIME ZONE 'UTC', {UTC}) AS last_crawl, \
@@ -223,7 +216,7 @@ async fn pages(
         Err(refused) => return *refused,
     };
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
-        return problem(404, "Not Found", "no such project");
+        return problem(404, "no such project");
     };
     let sql = format!(
         "SELECT p.id, p.url, p.depth::int AS depth, p.parent_id, p.status, p.included, p.excluded_by_admin, p.language, \
@@ -280,7 +273,7 @@ async fn documents(
         Err(refused) => return *refused,
     };
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
-        return problem(404, "Not Found", "no such project");
+        return problem(404, "no such project");
     };
     let rows = match sqlx::query(
         "SELECT d.id, d.url, d.page_id, d.mime, d.bytes, d.pages, d.off_domain, d.status, d.included, d.excluded_by_admin, \
@@ -331,7 +324,7 @@ async fn links(
         Err(refused) => return *refused,
     };
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
-        return problem(404, "Not Found", "no such project");
+        return problem(404, "no such project");
     };
     let found: Option<i64> =
         match sqlx::query_scalar("SELECT id FROM pages WHERE id = $1 AND site_id = $2")
@@ -344,7 +337,7 @@ async fn links(
             Err(err) => return failed(err),
         };
     if found.is_none() {
-        return problem(404, "Not Found", "no such page in this source");
+        return problem(404, "no such page in this source");
     }
     let rows: Vec<(String, String)> = match sqlx::query_as(
         "SELECT to_url, kind FROM links WHERE from_page = $1 ORDER BY to_url LIMIT 1000",
@@ -383,14 +376,10 @@ async fn passages(
         Err(refused) => return *refused,
     };
     if owner.page.is_some() == owner.document.is_some() {
-        return problem(
-            400,
-            "Bad Request",
-            "name one page or one document: ?page= or ?document=",
-        );
+        return problem(400, "name one page or one document: ?page= or ?document=");
     }
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
-        return problem(404, "Not Found", "no such project");
+        return problem(404, "no such project");
     };
     let rows: Vec<(i32, String, Option<String>, String)> = match sqlx::query_as(
         "SELECT ordinal, text, lang, url FROM chunks WHERE site_id = $1 \
@@ -437,15 +426,14 @@ async fn inclusion(
     }
     let Json(change) = match body {
         Ok(body) => body,
-        Err(rejection) => return problem(400, "Bad Request", rejection.body_text()),
+        Err(rejection) => return problem(400, rejection.body_text()),
     };
     if change.pages.is_empty() && change.documents.is_empty() {
-        return problem(400, "Bad Request", "name at least one page or document");
+        return problem(400, "name at least one page or document");
     }
     if change.pages.len() + change.documents.len() > MAX_IDS {
         return problem(
             400,
-            "Bad Request",
             format!("at most {MAX_IDS} pages and documents in one call"),
         );
     }
@@ -555,18 +543,11 @@ async fn recrawl(
     if !declared {
         return problem(
             404,
-            "Not Found",
             format!("project {project} declares no KnowledgeSource `{source}`"),
         );
     }
     match crate::crawl::queue::pending(&state.pool, &project, &source).await {
-        Ok(true) => {
-            return problem(
-                409,
-                "Conflict",
-                "a crawl of this source is already queued or running",
-            )
-        }
+        Ok(true) => return problem(409, "a crawl of this source is already queued or running"),
         Ok(false) => {}
         Err(err) => return failed(err),
     }
@@ -585,7 +566,7 @@ async fn usage(
         return *refused;
     }
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
-        return problem(404, "Not Found", "no such project");
+        return problem(404, "no such project");
     };
     let rows: Vec<(String, i64, i64, i64)> = match sqlx::query_as(
         "SELECT to_char(day, 'YYYY-MM-DD'), requests, tokens_in, tokens_out FROM usage \

@@ -125,8 +125,9 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .merge(admin::router(state))
 }
 
-fn problem(status: u16, title: &str, detail: impl Into<String>) -> Response {
-    jc_core::ProblemDetails::new(status, &title.to_ascii_lowercase().replace(' ', "-"), title)
+/// The platform's own problem type for `status` (T-3243), never a slug made of a title.
+fn problem(status: u16, detail: impl Into<String>) -> Response {
+    jc_core::ProblemDetails::for_status(status)
         .with_detail(detail.into())
         .into_response()
 }
@@ -160,11 +161,7 @@ fn origin(headers: &HeaderMap, deployment: &Deployment, own: Option<&str>) -> Pl
 }
 
 fn not_placed_here() -> Response {
-    problem(
-        403,
-        "Forbidden",
-        "This assistant is not placed on this site.",
-    )
+    problem(403, "This assistant is not placed on this site.")
 }
 
 fn with_cors(mut response: Response, origin: Option<HeaderValue>) -> Response {
@@ -182,7 +179,7 @@ async fn preflight(
     headers: HeaderMap,
 ) -> Response {
     let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "Not Found", "No assistant is published under this id.");
+        return problem(404, "No assistant is published under this id.");
     };
     match origin(&headers, &deployment, state.public_origin.as_deref()) {
         Placed::Allowed(origin) => {
@@ -202,7 +199,7 @@ async fn preflight(
             );
             with_cors(response, Some(origin))
         }
-        Placed::Nowhere => problem(403, "Forbidden", "A preflight names its origin."),
+        Placed::Nowhere => problem(403, "A preflight names its origin."),
         Placed::Refused => not_placed_here(),
     }
 }
@@ -424,7 +421,7 @@ async fn chat(
     body: Result<Json<Question>, JsonRejection>,
 ) -> Response {
     let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "Not Found", "No assistant is published under this id.");
+        return problem(404, "No assistant is published under this id.");
     };
     let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
         Placed::Nowhere => None,
@@ -462,7 +459,7 @@ async fn chat_in_portal(
         .filter(|v| !v.is_empty() && v.len() <= 256)
         .map(str::to_owned)
     else {
-        return problem(400, "Bad Request", "X-JC-Person names the person who asks");
+        return problem(400, "X-JC-Person names the person who asks");
     };
     let token = headers
         .get("x-jc-person-token")
@@ -478,7 +475,7 @@ async fn chat_in_portal(
             .cloned()
     });
     let Some(deployment) = deployment else {
-        return problem(404, "Not Found", "The project declares no such assistant.");
+        return problem(404, "The project declares no such assistant.");
     };
     let token = token.filter(|_| !deployment.spec.channel.is_anonymous());
     ask(&state, deployment, body, &format!("person:{person}"), token).await
@@ -494,25 +491,24 @@ async fn ask(
 ) -> Response {
     let question = match body {
         Ok(Json(question)) => question,
-        Err(rejection) => return problem(400, "Bad Request", rejection.body_text()),
+        Err(rejection) => return problem(400, rejection.body_text()),
     };
     if let Err(why) = validate(&question, &deployment) {
-        return problem(400, "Bad Request", why);
+        return problem(400, why);
     }
     let Some(budget) = deployment.spec.budget.clone() else {
         if deployment.spec.channel.is_anonymous() {
             // jc-core refuses such a manifest; one that slipped through is not served.
-            return problem(404, "Not Found", "No assistant is published under this id.");
+            return problem(404, "No assistant is published under this id.");
         }
         return problem(
             409,
-            "No Budget",
             "This assistant has no budget yet: an administrator sets budget.tokensPerDay on it before anyone can ask.",
         );
     };
     let rate = deployment.spec.rate_limit.clone();
     if rate.is_none() && deployment.spec.channel.is_anonymous() {
-        return problem(404, "Not Found", "No assistant is published under this id.");
+        return problem(404, "No assistant is published under this id.");
     }
     if let Some(rate) = rate {
         let now = Instant::now();
@@ -530,7 +526,6 @@ async fn ask(
         if let Err(retry) = admitted {
             let mut response = problem(
                 429,
-                "Too Many Requests",
                 "The assistant is answering many questions. Ask again in a moment.",
             );
             if let Ok(value) = HeaderValue::from_str(&retry.to_string()) {
@@ -549,14 +544,12 @@ async fn ask(
         Ok(Some(found)) => found,
         Ok(None) => return problem(
             400,
-            "Bad Request",
             "conversation: not a current conversation of this assistant; send none to start one",
         ),
         Err(err) => {
             tracing::error!(%err, "the conversation could not be read");
             return problem(
                 503,
-                "Service Unavailable",
                 "The assistant cannot answer right now. Try again in a minute.",
             );
         }
