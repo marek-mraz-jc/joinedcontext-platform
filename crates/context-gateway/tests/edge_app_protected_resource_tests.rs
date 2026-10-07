@@ -192,8 +192,12 @@ async fn a_hostile_slug_reaches_the_document_as_a_string_and_nothing_else() {
             "{slug} moved the authorization server: {body}",
         );
         let members = document.as_object().expect("an object");
+        // The members as a set: serde_json keeps them in written order once a dependency turns
+        // on its `preserve_order` (one did, T-3202), and the order is not what is asserted here.
+        let mut keys = members.keys().collect::<Vec<_>>();
+        keys.sort();
         assert_eq!(
-            members.keys().collect::<Vec<_>>(),
+            keys,
             vec![
                 "authorization_servers",
                 "bearer_methods_supported",
