@@ -1,0 +1,267 @@
+{
+  "about": "T-3067: ten questions per project, in the city's language and English, written from the passages jc-assistant indexed on dev in the first crawl (2026-10-07). `facts` holds groups of alternatives: every group must match the answer, any one alternative of a group will do. `evidence` is the wording of the indexed passages the facts come from, with the other numbers those pages give; a number in the answer that neither the evidence nor the question holds counts as invented. `refuse` marks a question the site does not cover. bbsk and praha follow once their crawl holds passages. Recordings (`recordings/{project}.json`) hold, per question id, the answer text and its citations as the Portal's chat stream gave them on one live run.",
+  "projects": {
+    "banskabystrica": {
+      "host": "banskabystrica.sk",
+      "questions": [
+        {
+          "id": "bb-01",
+          "lang": "sk",
+          "ask": "Od akého obvodu kmeňa potrebujem súhlas mesta na výrub stromu?",
+          "facts": [
+            [
+              "40 cm",
+              "40cm"
+            ]
+          ],
+          "evidence": "Na výrub každej dreviny s obvodom kmeňa nad 40 cm (v prípade záhrad 80 cm), meraným vo výške 130 cm nad zemou a na výrub krovitých porastov s výmerou nad 10 m2, sa vyžaduje súhlas obce"
+        },
+        {
+          "id": "bb-02",
+          "lang": "sk",
+          "ask": "Ako dlho musím byť v zahraničí, aby som musel pobyt ohlásiť?",
+          "facts": [
+            [
+              "90"
+            ]
+          ],
+          "evidence": "Občan, ktorý má trvalý pobyt na území Slovenskej republiky a ktorý sa pripravuje na vycestovanie do zahraničia na dobu dlhšiu ako 90 dní, pred vycestovaním ohlási túto skutočnosť ohlasovni v mieste trvalého pobytu"
+        },
+        {
+          "id": "bb-03",
+          "lang": "sk",
+          "ask": "Ktorá spoločnosť zbiera v Banskej Bystrici komunálny odpad a odkedy?",
+          "facts": [
+            [
+              "Marius Pedersen"
+            ],
+            [
+              "2019"
+            ]
+          ],
+          "evidence": "V prvý augustový deň oficiálne preberá službu zberu komunálneho odpadu v našom meste spoločnosť Marius Pedersen. Nová zmluva je podpísaná na desať rokov. (aktuality/2019, 1. 8. 2019) Po novom sa bude vývoz smetí zabezpečovať prostredníctvom 28 vozidiel"
+        },
+        {
+          "id": "bb-04",
+          "lang": "sk",
+          "ask": "Od kedy platí 50-percentná zľava v mestskej hromadnej doprave?",
+          "facts": [
+            [
+              "12. októbra",
+              "12. október",
+              "12.10",
+              "12. 10"
+            ]
+          ],
+          "evidence": "Od pondelka 12. októbra 2026 budú môcť cestujúci využívať mimoriadnu 50-percentnú zľavu zo základného cestovného v MHD Banská Bystrica. 07.10.2026"
+        },
+        {
+          "id": "bb-05",
+          "lang": "en",
+          "ask": "When was the kindergarten on Cesta k nemocnici in Banská Bystrica built?",
+          "facts": [
+            [
+              "1965"
+            ]
+          ],
+          "evidence": "Materská škola Cesta k nemocnici postavená v roku 1965 prechádza obnovou. Vďaka získaným financiám z Environmentálneho fondu sa 61-ročná budova dočká rekonštrukcie strechy (2026)"
+        },
+        {
+          "id": "bb-06",
+          "lang": "sk",
+          "ask": "Odkedy je krytá plaváreň na Štiavničkách znovu otvorená pre verejnosť?",
+          "facts": [
+            [
+              "1. február",
+              "1.2.2022",
+              "1. 2. 2022",
+              "1. februára"
+            ]
+          ],
+          "evidence": "28.01.2022 Od utorka, 1. februára 2022 (1. 2. 2022) bude plaváreň na Štiavničkách sprístupnená všetkým nadšencom plávania. Pondelok až piatok 7:00 – 22:00 hod., v sobotu 9:00 – 21:00 hod., v nedeľu alebo počas sviatkov 11:00 – 21:00 hod."
+        },
+        {
+          "id": "bb-07",
+          "lang": "en",
+          "ask": "Do I need a building permit for a domestic well with an electric pump in Banská Bystrica?",
+          "facts": [
+            [
+              "permit"
+            ],
+            [
+              "yes",
+              "need",
+              "requires",
+              "required"
+            ]
+          ],
+          "evidence": "Domová studňa v ktorej je umiestnené elektrické čerpacie zariadenie na čerpanie podzemných vôd je vodná stavba, ktorá potrebuje tak ako iné stavby stavebné povolenie. Zákon č. 364/2004 Z.z. o vodách, zákon č. 50/1976 Zb."
+        },
+        {
+          "id": "bb-08",
+          "lang": "sk",
+          "ask": "Vráti mi mesto preplatok na dani z nehnuteľností automaticky?",
+          "facts": [
+            [
+              "žiadost",
+              "žiadosť",
+              "požiada"
+            ]
+          ],
+          "evidence": "Správca dane vráti preplatok len na základe žiadosti daňového subjektu. Žiadosť musí podať daňový subjekt najneskoršie do piatich rokov od konca roka, v ktorom vznikol preplatok. § 99h, zákon č. 582/2004 Z.z., zákon č. 563/2009 Z.z."
+        },
+        {
+          "id": "bb-09",
+          "lang": "en",
+          "ask": "How many vehicles collect municipal waste in Banská Bystrica since the new contract?",
+          "facts": [
+            [
+              "28"
+            ]
+          ],
+          "evidence": "Po novom sa bude vývoz smetí zabezpečovať prostredníctvom 28 vozidiel spĺňajúcich najnovšie emisné normy. Marius Pedersen, 2019, zmluva na desať rokov (10)"
+        },
+        {
+          "id": "bb-10",
+          "lang": "sk",
+          "refuse": true,
+          "ask": "Aký je cestovný poriadok vlakov z Košíc do Popradu?",
+          "facts": [],
+          "evidence": ""
+        }
+      ]
+    },
+    "helsinki": {
+      "host": "hel.fi",
+      "questions": [
+        {
+          "id": "hel-01",
+          "lang": "fi",
+          "ask": "Kuinka vanha Suomenlinnan päiväkoti on?",
+          "facts": [
+            [
+              "100"
+            ]
+          ],
+          "evidence": "Suomenlinna is celebrating the 100th year of operation of the island’s daycare centre. The daycare centre, which is located in an old artillery depot"
+        },
+        {
+          "id": "hel-02",
+          "lang": "en",
+          "ask": "How many fourth graders celebrate Finnish independence at the Mayor's Independence Day celebration in Helsinki?",
+          "facts": [
+            [
+              "6,500",
+              "6 500",
+              "6500"
+            ]
+          ],
+          "evidence": "Finnish independence to be celebrated by 6,500 Helsinkian fourth graders at the Mayor’s Independence Day celebration on Tuesday 3 December at Messukeskus. A long history stretching back to 1997, the first celebration at Finlandia Hall; two celebrations"
+        },
+        {
+          "id": "hel-03",
+          "lang": "fi",
+          "ask": "Milloin Helsinki allekirjoitti Glasgow'n julistuksen matkailun ilmastotoimista?",
+          "facts": [
+            [
+              "2022"
+            ],
+            [
+              "1.6.",
+              "1. kesäkuuta",
+              "kesäkuun 1",
+              "1 June",
+              "1.6"
+            ]
+          ],
+          "evidence": "The City of Helsinki signed the Glasgow Declaration on Climate Action in Tourism on 1 June 2022 (1.6.2022). Reduce global emissions from tourism by at least half in the next decade (50, 10)"
+        },
+        {
+          "id": "hel-04",
+          "lang": "en",
+          "ask": "Since when has Helsinki held the Mayor's Independence Day celebration for fourth graders, and where was the first one?",
+          "facts": [
+            [
+              "1997"
+            ],
+            [
+              "Finlandia"
+            ]
+          ],
+          "evidence": "The Mayor's Independence Day celebration has a long history in Helsinki stretching back to 1997, which is when the City of Helsinki organised the first celebration at Finlandia Hall. 6,500 fourth graders, Tuesday 3 December"
+        },
+        {
+          "id": "hel-05",
+          "lang": "fi",
+          "ask": "Mitä OmaStadi-osallistuva budjetointi on tuonut Helsinkiin tänä kesänä?",
+          "facts": [
+            [
+              "sauna"
+            ],
+            [
+              "soutuvene",
+              "kaupunkivene",
+              "rowing",
+              "vene"
+            ]
+          ],
+          "evidence": "City rowing boats, a public sauna and a waterbus service are examples of the improvements brought to Helsinki this summer through participatory budgeting."
+        },
+        {
+          "id": "hel-06",
+          "lang": "en",
+          "ask": "Which anniversary does the Kinapori Senior Centre celebrate?",
+          "facts": [
+            [
+              "40"
+            ]
+          ],
+          "evidence": "Kinapori Senior Centre is celebrating its 40th anniversary on last week of February. I came to work here in 1986."
+        },
+        {
+          "id": "hel-07",
+          "lang": "fi",
+          "ask": "Kuinka paljon Glasgow'n julistuksen allekirjoittajat sitoutuvat vähentämään matkailun päästöjä?",
+          "facts": [
+            [
+              "puol",
+              "50"
+            ]
+          ],
+          "evidence": "Cities and tourism operators that sign the Glasgow Declaration commit themselves to reduce global emissions from tourism by at least half (50 %) in the next decade (10 years). 1 June 2022"
+        },
+        {
+          "id": "hel-08",
+          "lang": "en",
+          "ask": "In what kind of building is the Suomenlinna daycare centre located?",
+          "facts": [
+            [
+              "artillery depot",
+              "artillery"
+            ]
+          ],
+          "evidence": "The daycare centre, which is located in an old artillery depot, will be celebrating the anniversary throughout the year. 100th year of operation"
+        },
+        {
+          "id": "hel-09",
+          "lang": "en",
+          "ask": "Where does the Mayor's Independence Day celebration for Helsinki's fourth graders take place?",
+          "facts": [
+            [
+              "Messukeskus"
+            ]
+          ],
+          "evidence": "Mayor’s Independence Day celebration for Helsinki’s fourth graders will take place on Tuesday 3 December at Messukeskus. 6,500 fourth graders; since 1997; two celebrations"
+        },
+        {
+          "id": "hel-10",
+          "lang": "fi",
+          "refuse": true,
+          "ask": "Mihin aikaan Tampereen Kalevan uimahalli on auki sunnuntaisin?",
+          "facts": [],
+          "evidence": ""
+        }
+      ]
+    }
+  }
+}
