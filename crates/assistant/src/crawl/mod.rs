@@ -232,10 +232,34 @@ pub async fn crawl_site(
     let mut visited_urls = HashSet::new();
     let mut seen_documents = HashSet::new();
     let mut report = CrawlReport::default();
+    let run = DocRun {
+        pool,
+        crawler,
+        spec,
+        site_host: &site_host,
+        project,
+        site_id,
+        robots: &robots,
+    };
 
     for url_str in &spec.start_urls {
         if let Ok(u) = Url::parse(url_str) {
             let canon = canonicalise_url(u);
+            // A start address that names a document is one document of the site (T-3293),
+            // under the `pdf` policy and its bounds, not a page of its bytes.
+            if links::is_document_url(&canon) {
+                handle_document(
+                    run,
+                    None,
+                    &canon,
+                    &mut seen_documents,
+                    &mut report,
+                    sink,
+                    false,
+                )
+                .await?;
+                continue;
+            }
             let key = canon.to_string();
             if !visited_urls.contains(&key) {
                 visited_urls.insert(key);
@@ -432,6 +456,7 @@ pub async fn crawl_site(
                                         &mut seen_documents,
                                         &mut report,
                                         sink,
+                                        false,
                                     )
                                     .await?;
                                 }
@@ -447,6 +472,27 @@ pub async fn crawl_site(
                 body,
                 ..
             } => {
+                // An address without a document's name that answers with a document's type
+                // is read as that document, fetched again under the `pdf` bounds (T-3293).
+                // ponytail: one extra fetch per such address; pass the body on if they turn common.
+                let mime = headers
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.split(';').next().unwrap_or(s).trim());
+                if let Some(mime) = mime.filter(|m| links::is_document_type(m)) {
+                    let pdf = mime.eq_ignore_ascii_case("application/pdf");
+                    handle_document(
+                        run,
+                        item.parent_id,
+                        &final_url,
+                        &mut seen_documents,
+                        &mut report,
+                        sink,
+                        pdf,
+                    )
+                    .await?;
+                    continue;
+                }
                 let body_str = String::from_utf8_lossy(&body);
                 let hash = hex::encode(Sha256::digest(&body));
                 let language = links::extract_language(&body_str);
@@ -552,6 +598,7 @@ pub async fn crawl_site(
                                 &mut seen_documents,
                                 &mut report,
                                 sink,
+                                false,
                             )
                             .await?;
                         }
@@ -585,6 +632,7 @@ async fn handle_document(
     seen_documents: &mut HashSet<String>,
     report: &mut CrawlReport,
     sink: &mut impl Sink,
+    answered_pdf: bool,
 ) -> Result<(), Error> {
     let DocRun {
         pool,
@@ -603,7 +651,7 @@ async fn handle_document(
     }
 
     let off_domain = canon_doc_url.host_str() != Some(site_host);
-    let is_pdf = canon_doc_url.path().to_ascii_lowercase().ends_with(".pdf");
+    let is_pdf = answered_pdf || canon_doc_url.path().to_ascii_lowercase().ends_with(".pdf");
 
     let mut included = !off_domain || spec.off_domain_documents;
     if is_pdf && spec.pdf.policy == PdfPolicyKind::Exclude {

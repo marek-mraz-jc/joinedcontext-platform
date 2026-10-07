@@ -45,6 +45,21 @@ pub fn is_document_url(url: &Url) -> bool {
     DOCUMENT_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
 }
 
+/// Returns true if a `Content-Type` (without its parameters) names a document rather than a page.
+pub fn is_document_type(mime: &str) -> bool {
+    let mime = mime.to_ascii_lowercase();
+    matches!(
+        mime.as_str(),
+        "application/pdf"
+            | "application/msword"
+            | "application/rtf"
+            | "text/rtf"
+            | "application/vnd.ms-excel"
+            | "application/vnd.ms-powerpoint"
+    ) || mime.starts_with("application/vnd.openxmlformats-officedocument.")
+        || mime.starts_with("application/vnd.oasis.opendocument.")
+}
+
 /// Extracts the two-letter ISO language code from `<html lang="...">`.
 pub fn extract_language(html_text: &str) -> Option<String> {
     let document = Html::parse_document(html_text);
