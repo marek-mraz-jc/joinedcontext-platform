@@ -120,6 +120,30 @@ information:
 /// A second public endpoint over the same model with the wider grant.
 const WIDE: &str = "w8k3zq6nxv2htb5rjs9cyd4gpm";
 
+/// The wide grant through a projection that keeps one class with two of its slots, and an
+/// endpoint that hides one of those: the document narrows by all three (EP-61, EP-73).
+const PROJECTED: &str = "z7m4qk2nxr8wtd5hbvsc3jyf6p";
+const VIEW: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: ModelProjection
+metadata: { name: view, namespace: ovzdusie }
+spec:
+  contextSpaceRef: ovzdusie
+  dataModelRef: { kind: DataModel, name: bb-air-quality, version: "1" }
+  classes:
+    - name: AirQualityObserved
+      slots: [pm10, internalNote]
+"#;
+
+fn projected() -> Endpoint {
+    let view =
+        jc_core::envelope::ResourceEnvelope::<jc_core::kinds::ModelProjectionSpec>::from_yaml(VIEW)
+            .expect("the projection parses");
+    let mut endpoint = endpoint(PROJECTED, Audience::Public, wide_grant());
+    endpoint.projection = Some(Arc::new(view.spec));
+    endpoint.hidden_attributes = ["internalNote".to_owned()].into_iter().collect();
+    endpoint
+}
+
 fn app_of(realm: &common::Realm) -> axum::Router {
     router(Arc::new(
         Gateway::new(
@@ -131,6 +155,7 @@ fn app_of(realm: &common::Realm) -> axum::Router {
             endpoint(OPEN, Audience::Public, narrow_grant()),
             endpoint(WIDE, Audience::Public, wide_grant()),
             endpoint(CLOSED, Audience::Organization, narrow_grant()),
+            projected(),
         ])
         .authenticate(
             Arc::new(realm.verifier()),
@@ -210,15 +235,31 @@ async fn a_wider_grant_describes_both_types() {
 }
 
 #[tokio::test]
-async fn a_closed_endpoint_refuses_the_anonymous_caller_and_an_unknown_slug_is_404() {
-    let (status, _) = get(CLOSED).await;
-    assert!(
-        matches!(
-            status,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
-        ),
-        "{status}"
+async fn a_projection_and_a_hidden_attribute_narrow_the_document_as_they_narrow_the_data() {
+    let (status, document) = get(PROJECTED).await;
+    assert_eq!(status, StatusCode::OK);
+    let types =
+        &document["paths"]["/ngsi-ld/v1/entities"]["get"]["parameters"][0]["schema"]["enum"];
+    assert_eq!(
+        types,
+        &json!(["AirQualityObserved"]),
+        "the projection keeps one class"
     );
+    let text = document.to_string();
+    for hidden in ["InternalIncident", "internalNote", "severity"] {
+        assert!(!text.contains(hidden), "{hidden} is in the document");
+    }
+    assert!(
+        document["components"]["schemas"]["AirQualityObserved"]["properties"]["pm10"].is_object()
+    );
+    assert!(oas31().is_valid(&document));
+}
+
+#[tokio::test]
+async fn a_closed_endpoint_asks_the_anonymous_caller_to_sign_in_and_an_unknown_slug_is_404() {
+    // R20: the closed endpoint answers 401, as its schema index does.
+    let (status, _) = get(CLOSED).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = get("nosuchslugnosuchslugnosuch").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
