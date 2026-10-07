@@ -113,6 +113,12 @@ async fn form(per_day: Option<u32>) -> Form {
 
 impl Form {
     async fn post(&self, path: &str, body: Value) -> axum::response::Response {
+        self.post_from("203.0.113.7", path, body).await
+    }
+
+    /// A post from one anonymous address, as the edge forwards it: whatever the client sent,
+    /// then the address the edge saw.
+    async fn post_from(&self, address: &str, path: &str, body: Value) -> axum::response::Response {
         self.app
             .clone()
             .oneshot(
@@ -120,6 +126,7 @@ impl Form {
                     .method(Method::POST)
                     .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1{path}"))
                     .header("content-type", "application/ld+json")
+                    .header("x-forwarded-for", format!("10.0.0.1, {address}"))
                     .body(Body::from(body.to_string()))
                     .expect("a request"),
             )
@@ -181,14 +188,17 @@ async fn the_cap_answers_429_past_its_count_and_a_refused_create_spends_none() {
         form.post("/entities", spam).await.status(),
         StatusCode::FORBIDDEN
     );
-    for _ in 0..2 {
+    // Two senders, so neither runs into its own share first (T-3285).
+    for address in ["203.0.113.7", "198.51.100.4"] {
         let status = form
-            .post("/entities", report("urn:ngsi-ld:Report:x"))
+            .post_from(address, "/entities", report("urn:ngsi-ld:Report:x"))
             .await
             .status();
         assert_eq!(status, StatusCode::CREATED);
     }
-    let spent = form.post("/entities", report("urn:ngsi-ld:Report:x")).await;
+    let spent = form
+        .post_from("192.0.2.80", "/entities", report("urn:ngsi-ld:Report:x"))
+        .await;
     assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
     let retry: u64 = spent
         .headers()
@@ -211,4 +221,38 @@ async fn a_batch_create_or_upsert_cannot_name_its_ids() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
     }
     assert!(form.sent().is_empty());
+}
+
+/// EP-97, T-3285: one sender takes a tenth of the day and is told so, while another sender
+/// still creates; a client's own `X-Forwarded-For` entry changes nothing, the edge's does.
+#[tokio::test]
+async fn one_sender_takes_a_tenth_of_the_day_and_the_form_stays_open_to_others() {
+    let form = form(Some(20)).await;
+    for _ in 0..2 {
+        assert_eq!(
+            form.post_from("203.0.113.7", "/entities", report("urn:ngsi-ld:Report:x"))
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+    let mine = form
+        .post_from("203.0.113.7", "/entities", report("urn:ngsi-ld:Report:x"))
+        .await;
+    assert_eq!(mine.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = axum::body::to_bytes(mine.into_body(), 1 << 16)
+        .await
+        .expect("a body");
+    assert!(
+        String::from_utf8_lossy(&body).contains("as many entries as one sender may today"),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        form.post_from("198.51.100.4", "/entities", report("urn:ngsi-ld:Report:x"))
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(form.sent().len(), 3);
 }

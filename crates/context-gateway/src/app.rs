@@ -1229,7 +1229,9 @@ pub(crate) async fn serve_ngsi_ld(
             .insert(ACCEPT, HeaderValue::from_static("application/json"));
     }
     let target = format!("/ngsi-ld/v1{path}?{sent_query}");
-    // The day's creates are counted last, so a create refused above spends none (EP-97).
+    // The day's creates are counted last, so a create refused above spends none (EP-97), and
+    // per caller as the rate limit keys them, so one sender takes a tenth at most (T-3285).
+    let caller = crate::middleware::rate_limit::caller_key(&parts.headers);
     let reserved = match endpoint
         .creates
         .as_ref()
@@ -1237,14 +1239,26 @@ pub(crate) async fn serve_ngsi_ld(
     {
         Some(per_day) if operation == Operation::CreateEntity => {
             let now = crate::creates::now();
-            if let Err(retry_after) = gateway.creates.reserve(&endpoint.slug, per_day, now) {
-                tracing::info!(slug = %endpoint.slug, "the endpoint's creates for today are spent");
+            if let Err((retry_after, spent)) =
+                gateway
+                    .creates
+                    .reserve(&endpoint.slug, &caller, per_day, now)
+            {
+                let detail = match spent {
+                    crate::creates::Spent::Form => {
+                        tracing::info!(slug = %endpoint.slug, "the endpoint's creates for today are spent");
+                        "this form has taken all the entries it accepts today; retry after the \
+                         seconds Retry-After names"
+                    }
+                    crate::creates::Spent::Caller => {
+                        tracing::info!(slug = %endpoint.slug, "one caller's share of today's creates is spent");
+                        "you have sent this form as many entries as one sender may today; retry \
+                         after the seconds Retry-After names"
+                    }
+                };
                 let mut refusal =
                     ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
-                        .with_detail(
-                            "this form has taken all the entries it accepts today; retry after \
-                             the seconds Retry-After names",
-                        )
+                        .with_detail(detail)
                         .into_response();
                 refusal
                     .headers_mut()
@@ -1263,14 +1277,14 @@ pub(crate) async fn serve_ngsi_ld(
         Ok(answer) => answer,
         Err(error) => {
             if let Some(now) = reserved {
-                gateway.creates.release(&endpoint.slug, now);
+                gateway.creates.release(&endpoint.slug, &caller, now);
             }
             return ProblemDetails::from(error).into_response();
         }
     };
     if let Some(now) = reserved {
         if !answer.status().is_success() {
-            gateway.creates.release(&endpoint.slug, now);
+            gateway.creates.release(&endpoint.slug, &caller, now);
         }
     }
 

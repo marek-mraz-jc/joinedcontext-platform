@@ -170,7 +170,40 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
             _ => {}
         }
     }
+    for (public_id, owners) in snapshot.claimed_twice() {
+        tracing::warn!(%public_id, deployments = %owners.join(" and "), "a publicId is declared twice; neither deployment answers until one gives it up (MF-52)");
+    }
     Ok(snapshot)
+}
+
+impl Snapshot {
+    /// The anonymous deployment of `public_id`, when exactly one deployment of the organization
+    /// declares that id. Two that claim it answer neither: no load order decides which project
+    /// speaks on a public address (MF-52, T-3283).
+    pub fn public(&self, public_id: &str) -> Option<&Deployment> {
+        let mut claimants = self
+            .deployments
+            .iter()
+            .filter(|d| d.spec.public_id == public_id);
+        let only = claimants.next()?;
+        (claimants.next().is_none() && only.spec.channel.is_anonymous()).then_some(only)
+    }
+
+    /// Every publicId more than one deployment declares, with `{project}/{name}` of each.
+    pub fn claimed_twice(&self) -> Vec<(String, Vec<String>)> {
+        let mut by_id: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for deployment in &self.deployments {
+            by_id
+                .entry(&deployment.spec.public_id)
+                .or_default()
+                .push(format!("{}/{}", deployment.project, deployment.name));
+        }
+        by_id
+            .into_iter()
+            .filter(|(_, owners)| owners.len() > 1)
+            .map(|(id, owners)| (id.to_owned(), owners))
+            .collect()
+    }
 }
 
 /// Whether a source is due in the minute `now`: never read, or its schedule names it.
@@ -347,4 +380,60 @@ pub fn checkout_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Chec
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(&std::env::temp_dir()).join("jc-assistant-assembly")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deployment(project: &str, name: &str, public_id: &str, channel: &str) -> Deployment {
+        let spec: AssistantDeploymentSpec = serde_json::from_value(serde_json::json!({
+            "publicId": public_id,
+            "channel": channel,
+            "sources": ["web"],
+        }))
+        .expect("a spec");
+        Deployment {
+            project: project.into(),
+            name: name.into(),
+            spec,
+        }
+    }
+
+    /// MF-52, T-3283: a publicId two deployments declare answers neither, in any load order;
+    /// one alone answers when its channel is anonymous.
+    #[test]
+    fn a_public_id_claimed_twice_answers_neither() {
+        let mut snapshot = Snapshot {
+            deployments: vec![
+                deployment("banskabystrica", "public", "city", "public"),
+                deployment("praha", "lookalike", "city", "public"),
+                deployment("praha", "own", "praha", "public"),
+                deployment("praha", "staff", "staff", "internal"),
+            ],
+            ..Snapshot::default()
+        };
+        assert!(snapshot.public("city").is_none());
+        snapshot.deployments.swap(0, 1);
+        assert!(snapshot.public("city").is_none(), "no load order decides");
+        assert_eq!(
+            snapshot.public("praha").map(|d| d.name.as_str()),
+            Some("own")
+        );
+        assert!(
+            snapshot.public("staff").is_none(),
+            "an internal deployment is not public"
+        );
+        assert!(snapshot.public("nobody").is_none());
+        assert_eq!(
+            snapshot.claimed_twice(),
+            vec![(
+                "city".to_owned(),
+                vec![
+                    "praha/lookalike".to_owned(),
+                    "banskabystrica/public".to_owned()
+                ]
+            )]
+        );
+    }
 }

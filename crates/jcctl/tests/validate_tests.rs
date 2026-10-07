@@ -1256,3 +1256,42 @@ fn a_named_mcp_server_without_endpoint_members_is_refused_by_its_kind() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// MF-52, T-3283: a publicId is one public address for the organization. A second deployment
+/// declaring it, in this project or another, is refused at both, each naming the two.
+#[test]
+fn a_public_id_declared_twice_is_refused_naming_both_deployments() {
+    let dir = valid_repo("assistant-public-id-twice");
+    knowledge_source(&dir, "web", "public", None);
+    assistant_deployment(&dir, "public", "web", "public-air");
+    write(
+        &dir,
+        "projects/praha/project.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: praha\n  namespace: org\nspec:\n  organizationRef: banskabystrica\n",
+    );
+    write(
+        &dir,
+        "projects/praha/assistant/sources/web.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: web\n  namespace: praha\nspec:\n  source: website\n  startUrls: [https://www.praha.eu/]\n  visibility: public\n",
+    );
+    write(
+        &dir,
+        "projects/praha/assistant/deployments/lookalike.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: AssistantDeployment\nmetadata:\n  name: lookalike\n  namespace: praha\nspec:\n  publicId: bb-chat\n  channel: public\n  sources: [web]\n  allowedOrigins: [https://www.banskabystrica.sk]\n  rateLimit: { requestsPerMinute: 60, perClientPerMinute: 10 }\n  budget: { tokensPerDay: 1000000, tokensPerConversation: 20000 }\n",
+    );
+    let report = validate::run(&dir);
+    let twice: Vec<&str> = report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("publicId `bb-chat` is declared by"))
+        .map(|f| f.message.as_str())
+        .collect();
+    assert_eq!(twice.len(), 2, "{:?}", report.findings);
+    for message in &twice {
+        assert!(
+            message.contains("ovzdusie/chat") && message.contains("praha/lookalike"),
+            "{message}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

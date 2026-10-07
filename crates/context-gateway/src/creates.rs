@@ -53,7 +53,25 @@ fn uuid_v4() -> Result<String, Box<ProblemDetails>> {
     ))
 }
 
-/// The creates each Endpoint has taken today (UTC), keyed by slug.
+/// Whose part of the day a refused create ran out of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spent {
+    /// The Endpoint's whole `perDay`.
+    Form,
+    /// This caller's tenth of it (EP-97, T-3285).
+    Caller,
+}
+
+/// The most callers kept for one day before older days are dropped.
+const MAX_CALLERS: usize = 100_000;
+
+/// One caller's share of a day's `per_day`: a tenth, rounded up (EP-97).
+pub fn share(per_day: u32) -> u32 {
+    per_day.div_ceil(10).max(1)
+}
+
+/// The creates each Endpoint has taken today (UTC), keyed by slug, and each caller's part of
+/// them, keyed by slug and caller ([`crate::middleware::rate_limit::caller_key`]).
 ///
 /// A create reserves its slot before the broker is asked, so concurrent creates cannot pass
 /// the cap together, and gives it back when the broker refuses it.
@@ -62,30 +80,60 @@ fn uuid_v4() -> Result<String, Box<ProblemDetails>> {
 #[derive(Debug, Default)]
 pub struct DailyCreates {
     counts: Mutex<HashMap<String, (u64, u32)>>,
+    callers: Mutex<HashMap<(String, String), (u64, u32)>>,
 }
 
 impl DailyCreates {
-    /// Takes one of the day's `per_day` creates for `slug` at `now` (Unix seconds), or the
-    /// seconds until midnight UTC when they are spent.
-    pub fn reserve(&self, slug: &str, per_day: u32, now: u64) -> Result<(), u64> {
+    /// Takes one of the day's `per_day` creates for `slug` by `caller` at `now` (Unix seconds),
+    /// or the seconds until midnight UTC and whose part is spent: the caller's own share is
+    /// judged first, so one caller never empties the form for everyone.
+    pub fn reserve(
+        &self,
+        slug: &str,
+        caller: &str,
+        per_day: u32,
+        now: u64,
+    ) -> Result<(), (u64, Spent)> {
         let day = now / DAY;
+        let wait = DAY - now % DAY;
+        let mut callers = self.callers.lock().unwrap_or_else(|e| e.into_inner());
+        if callers.len() >= MAX_CALLERS {
+            callers.retain(|_, (when, _)| *when == day);
+        }
+        let mine = callers
+            .entry((slug.to_owned(), caller.to_owned()))
+            .or_insert((day, 0));
+        if mine.0 != day {
+            *mine = (day, 0);
+        }
+        if mine.1 >= share(per_day) {
+            return Err((wait, Spent::Caller));
+        }
         let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
         let entry = counts.entry(slug.to_owned()).or_insert((day, 0));
         if entry.0 != day {
             *entry = (day, 0);
         }
         if entry.1 >= per_day {
-            return Err(DAY - now % DAY);
+            return Err((wait, Spent::Form));
         }
         entry.1 += 1;
+        mine.1 += 1;
         Ok(())
     }
 
     /// Gives back a slot `reserve` took at `now` whose create the broker did not make.
-    pub fn release(&self, slug: &str, now: u64) {
+    pub fn release(&self, slug: &str, caller: &str, now: u64) {
+        let day = now / DAY;
+        let mut callers = self.callers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mine) = callers.get_mut(&(slug.to_owned(), caller.to_owned())) {
+            if mine.0 == day {
+                mine.1 = mine.1.saturating_sub(1);
+            }
+        }
         let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = counts.get_mut(slug) {
-            if entry.0 == now / DAY {
+            if entry.0 == day {
                 entry.1 = entry.1.saturating_sub(1);
             }
         }
@@ -134,12 +182,51 @@ mod tests {
     fn the_cap_counts_per_slug_per_day_and_gives_back() {
         let creates = DailyCreates::default();
         let noon = 10 * DAY + DAY / 2;
-        assert_eq!(creates.reserve("a", 2, noon), Ok(()));
-        assert_eq!(creates.reserve("a", 2, noon), Ok(()));
-        assert_eq!(creates.reserve("a", 2, noon), Err(DAY / 2));
-        assert_eq!(creates.reserve("b", 2, noon), Ok(()));
-        creates.release("a", noon);
-        assert_eq!(creates.reserve("a", 2, noon), Ok(()));
-        assert_eq!(creates.reserve("a", 2, 11 * DAY), Ok(()));
+        // Two callers, a cap of 2: each one's share is 1.
+        assert_eq!(creates.reserve("a", "x", 2, noon), Ok(()));
+        assert_eq!(creates.reserve("a", "y", 2, noon), Ok(()));
+        assert_eq!(
+            creates.reserve("a", "z", 2, noon),
+            Err((DAY / 2, Spent::Form))
+        );
+        assert_eq!(creates.reserve("b", "x", 2, noon), Ok(()));
+        creates.release("a", "y", noon);
+        assert_eq!(creates.reserve("a", "z", 2, noon), Ok(()));
+        assert_eq!(creates.reserve("a", "x", 2, 11 * DAY), Ok(()));
+    }
+
+    /// T-3285: one caller takes a tenth of the day and no more, so a second caller still
+    /// creates after the first ran out; a refused create gives its share back.
+    #[test]
+    fn one_caller_never_spends_the_form_for_everyone() {
+        let creates = DailyCreates::default();
+        let noon = 10 * DAY + DAY / 2;
+        assert_eq!(share(500), 50);
+        assert_eq!(share(5), 1);
+        assert_eq!(share(0), 1);
+        for _ in 0..50 {
+            assert_eq!(
+                creates.reserve("form", "address:203.0.113.7", 500, noon),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            creates.reserve("form", "address:203.0.113.7", 500, noon),
+            Err((DAY / 2, Spent::Caller))
+        );
+        assert_eq!(
+            creates.reserve("form", "address:198.51.100.4", 500, noon),
+            Ok(())
+        );
+        creates.release("form", "address:203.0.113.7", noon);
+        assert_eq!(
+            creates.reserve("form", "address:203.0.113.7", 500, noon),
+            Ok(())
+        );
+        // The next day starts every share over.
+        assert_eq!(
+            creates.reserve("form", "address:203.0.113.7", 500, 11 * DAY),
+            Ok(())
+        );
     }
 }
