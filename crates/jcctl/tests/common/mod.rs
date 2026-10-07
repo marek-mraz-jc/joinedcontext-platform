@@ -55,7 +55,14 @@ pub fn temp_dir(test_name: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock after the epoch")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("jcctl-{test_name}-{}-{now}", std::process::id()));
+    // Tests run on parallel threads and the clock can hand two of them the same nanosecond: the
+    // counter keeps their directories apart, so one never truncates the other's files.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "jcctl-{test_name}-{}-{now}-{n}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp repo");
     dir
