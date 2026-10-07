@@ -45,6 +45,7 @@ fn source_spec() -> KnowledgeSourceSpec {
         source: SourceType::Website,
         start_urls: vec!["https://hronov.example/".into()],
         ckan_instance_ref: None,
+        context_spaces: Vec::new(),
         sitemap: true,
         include: vec![],
         exclude: vec![],
@@ -118,6 +119,7 @@ async fn world(test: &str) -> World {
             name: "web".into(),
             spec: source_spec(),
             ckan_url: None,
+            catalogue: Vec::new(),
         }],
         ..Snapshot::default()
     };

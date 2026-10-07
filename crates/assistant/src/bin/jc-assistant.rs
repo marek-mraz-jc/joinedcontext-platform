@@ -13,7 +13,9 @@
 //! model the completions name) and `JC_ASSISTANT_FUNCTIONS_URL` (`jc-functions`, for the scripts
 //! of a deployment with `sandbox: true`; none without it) and `JC_ASSISTANT_PORTAL_CLIENT` (the
 //! Portal's client, the one caller of the administration paths; default `portal-api`) and
-//! `JC_ASSISTANT_PUBLIC_ORIGIN` (`https://assistant.{domain}`, whose widget may ask the chat).
+//! `JC_ASSISTANT_PUBLIC_ORIGIN` (`https://assistant.{domain}`, whose widget may ask the chat) and
+//! `JC_ASSISTANT_ENDPOINT_URL` (the public origin `/api/endpoint/{slug}` is served under, which a
+//! `catalogue` source's pages cite when the Endpoint publishes no CKAN dataset, AG-116).
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,6 +141,22 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let reader = assistant::catalogue::Reader {
+        http: http.clone(),
+        gateway: url::Url::parse(&format!("{gateway}/")).ok(),
+        endpoint_base: match env("JC_ASSISTANT_ENDPOINT_URL") {
+            None => None,
+            Some(_) => match base("JC_ASSISTANT_ENDPOINT_URL")
+                .and_then(|value| url::Url::parse(&format!("{value}/")).map_err(|e| e.to_string()))
+            {
+                Ok(endpoint) => Some(endpoint),
+                Err(why) => {
+                    tracing::error!(%why, "the public Endpoint address is not usable");
+                    return ExitCode::FAILURE;
+                }
+            },
+        },
+    };
     let chat_state = Arc::new(ChatState {
         pool: pool.clone(),
         embedder: embedder.clone(),
@@ -204,6 +222,7 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    let mut catalogue_digests = std::collections::BTreeMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -239,9 +258,14 @@ async fn main() -> ExitCode {
             Ok(queued) => tracing::info!(queued, "sources due"),
             Err(err) => tracing::warn!(%err, "sources not queued this minute"),
         }
+        match worker::enqueue_changed(&pool, sources, &mut catalogue_digests).await {
+            Ok(0) => {}
+            Ok(queued) => tracing::info!(queued, "catalogues changed"),
+            Err(err) => tracing::warn!(%err, "changed catalogues not queued this minute"),
+        }
         // Work what is ready, one job at a time, then wait for the next minute.
         loop {
-            match worker::work_one(&pool, &crawler, &organization, &name, sources).await {
+            match worker::work_one(&pool, &crawler, &reader, &organization, &name, sources).await {
                 Ok(true) => continue,
                 Ok(false) => break,
                 Err(err) => {

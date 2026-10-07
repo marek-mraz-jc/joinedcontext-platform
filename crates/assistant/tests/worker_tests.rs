@@ -116,6 +116,7 @@ fn spec(start: &str, schedule: Option<&str>) -> KnowledgeSourceSpec {
         source: SourceType::Website,
         start_urls: vec![start.to_owned()],
         ckan_instance_ref: None,
+        context_spaces: Vec::new(),
         sitemap: false,
         include: Vec::new(),
         exclude: Vec::new(),
@@ -249,6 +250,7 @@ async fn a_due_source_is_queued_once_and_its_job_crawls_and_indexes_the_site() {
         name: "city-web".into(),
         spec: spec(&format!("http://www.city.test:{port}/"), Some("0 3 * * *")),
         ckan_url: None,
+        catalogue: Vec::new(),
     }];
     let now = datetime!(2026-10-06 14:12 UTC);
 
@@ -267,12 +269,12 @@ async fn a_due_source_is_queued_once_and_its_job_crawls_and_indexes_the_site() {
     );
 
     assert!(
-        worker::work_one(&pool, &crawler, "hel.fi", "worker-a", &sources)
+        worker::work_one(&pool, &crawler, &reader(), "hel.fi", "worker-a", &sources)
             .await
             .expect("worked")
     );
     assert!(
-        !worker::work_one(&pool, &crawler, "hel.fi", "worker-a", &sources)
+        !worker::work_one(&pool, &crawler, &reader(), "hel.fi", "worker-a", &sources)
             .await
             .expect("nothing left")
     );
@@ -308,9 +310,11 @@ async fn a_job_whose_source_went_away_is_closed_without_a_crawl() {
         .expect("queued");
     let crawler =
         Crawler::new(Arc::new(FixtureResolver::new(&[])), CrawlPolicy::default()).expect("crawler");
-    assert!(worker::work_one(&pool, &crawler, "hel.fi", "worker-a", &[])
-        .await
-        .expect("worked"));
+    assert!(
+        worker::work_one(&pool, &crawler, &reader(), "hel.fi", "worker-a", &[])
+            .await
+            .expect("worked")
+    );
     let state: String = sqlx::query_scalar("SELECT state FROM crawl_jobs")
         .fetch_one(&pool)
         .await
@@ -357,12 +361,14 @@ async fn a_catalogue_job_indexes_its_datasets_and_one_naming_no_instance_fails_w
             name: "catalogue".into(),
             spec: catalogue.clone(),
             ckan_url: Some(format!("http://data.city.test:{port}")),
+            catalogue: Vec::new(),
         },
         Source {
             project: "helsinki".into(),
             name: "orphan".into(),
             spec: catalogue,
             ckan_url: None,
+            catalogue: Vec::new(),
         },
     ];
     let now = datetime!(2026-10-06 14:12 UTC);
@@ -374,7 +380,7 @@ async fn a_catalogue_job_indexes_its_datasets_and_one_naming_no_instance_fails_w
     );
     for _ in 0..2 {
         assert!(
-            worker::work_one(&pool, &crawler, "hel.fi", "worker-a", &sources)
+            worker::work_one(&pool, &crawler, &reader(), "hel.fi", "worker-a", &sources)
                 .await
                 .expect("worked")
         );
@@ -407,4 +413,13 @@ async fn a_catalogue_job_indexes_its_datasets_and_one_naming_no_instance_fails_w
         )]
     );
     drop_database(admin, pool, &name).await;
+}
+
+/// No gateway and no public Endpoint address: what a test of the other sources needs.
+fn reader() -> assistant::catalogue::Reader {
+    assistant::catalogue::Reader {
+        http: reqwest::Client::new(),
+        gateway: None,
+        endpoint_base: None,
+    }
 }

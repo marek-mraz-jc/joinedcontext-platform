@@ -165,6 +165,7 @@ fn test_spec(start_url: &str) -> KnowledgeSourceSpec {
         source: SourceType::Website,
         start_urls: vec![start_url.to_string()],
         ckan_instance_ref: None,
+        context_spaces: Vec::new(),
         sitemap: true,
         include: Vec::new(),
         exclude: Vec::new(),

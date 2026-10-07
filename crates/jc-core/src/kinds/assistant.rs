@@ -41,6 +41,9 @@ pub enum SourceType {
     Website,
     /// The datasets of a `CkanInstance` of the project.
     Ckan,
+    /// The project's own NGSI-LD catalogue: one page per Endpoint of its context spaces, with the
+    /// types and attributes of the space's model (AG-116).
+    Catalogue,
 }
 
 /// Who may read what a source holds.
@@ -113,7 +116,8 @@ fn default_timeout() -> u16 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct KnowledgeSourceSpec {
-    /// `website` (pages and their PDFs) or `ckan` (a catalogue's datasets).
+    /// `website` (pages and their PDFs), `ckan` (a catalogue's datasets) or `catalogue` (the
+    /// project's own Endpoints and the models of their spaces).
     pub source: SourceType,
     /// Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -121,6 +125,9 @@ pub struct KnowledgeSourceSpec {
     /// The `CkanInstance` of this project a `ckan` source reads. Absent for `website`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ckan_instance_ref: Option<String>,
+    /// The context spaces of this project a `catalogue` source reads; empty reads every one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_spaces: Vec<String>,
     /// Whether the site's `sitemap.xml` is read before links are followed; default true.
     #[serde(default = "default_true")]
     pub sitemap: bool,
@@ -212,6 +219,31 @@ impl KnowledgeSourceSpec {
                     ));
                 }
             }
+            SourceType::Catalogue => {
+                if !self.start_urls.is_empty() || self.ckan_instance_ref.is_some() {
+                    return Err(name(
+                        "source",
+                        "catalogue".to_owned(),
+                        "a catalogue source reads the project's own Endpoints and names no start URLs and no CkanInstance",
+                    ));
+                }
+                for space in &self.context_spaces {
+                    names::validate_space_name(space).map_err(|_| {
+                        name(
+                            "contextSpaces",
+                            space.clone(),
+                            "a context space of this project, by its name",
+                        )
+                    })?;
+                }
+            }
+        }
+        if self.source != SourceType::Catalogue && !self.context_spaces.is_empty() {
+            return Err(name(
+                "contextSpaces",
+                self.context_spaces.join(", "),
+                "only a catalogue source names context spaces",
+            ));
         }
         for (field, patterns) in [("include", &self.include), ("exclude", &self.exclude)] {
             if patterns.len() > MAX_PATTERNS {
