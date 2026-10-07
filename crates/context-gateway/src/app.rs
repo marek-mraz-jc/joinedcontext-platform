@@ -488,6 +488,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             get(protected_resource),
         )
         .route("/api/endpoint/{slug}/schema/index.json", get(schema_index))
+        // The read surface as OpenAPI, generated per caller (EP-99).
+        .route(
+            "/api/endpoint/{slug}/openapi.json",
+            get(crate::handlers::openapi_doc::openapi),
+        )
         .route(
             "/api/endpoint/{slug}/schema/{version}/{artifact}",
             get(schema_artifact),
@@ -577,6 +582,7 @@ async fn ngsi_ld_entry(
         "types": types,
         "access": format!("{root}/access"),
         "schema": format!("{root}/schema/index.json"),
+        "openapi": format!("{root}/openapi.json"),
     }))
 }
 
