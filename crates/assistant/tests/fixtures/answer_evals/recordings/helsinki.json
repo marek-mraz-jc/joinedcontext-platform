@@ -1,0 +1,87 @@
+{
+  "deployment": "knowledge",
+  "answers": {
+    "hel-01": {
+      "text": "Suomenlinnan päiväkoti on 100-vuotias [1, 3]. Se aloitti toimintansa lastentarhana toimikaudella 1924–1925 [3].",
+      "citations": [
+        {
+          "n": 3,
+          "url": "https://www.hel.fi/fi/uutiset/suomenlinnan-paivakoti-viettaa-100-vuotisjuhlaa"
+        }
+      ]
+    },
+    "hel-02": {
+      "text": "Approximately 6,500 to 6,600 fourth-grade schoolchildren celebrate Finnish independence at the Mayor's Independence Day celebration in Helsinki each year [1, 5].",
+      "citations": []
+    },
+    "hel-03": {
+      "text": "Helsingin kaupunki allekirjoitti Glasgow'n julistuksen matkailun ilmastotoimista (*Glasgow Declaration on Climate Action in Tourism*) 1. kesäkuuta 2022 [1].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.hel.fi/en/news/helsinki-signs-tourism-industry-climate-declaration"
+        }
+      ]
+    },
+    "hel-04": {
+      "text": "The City of Helsinki has organized the Mayor’s Independence Day celebration for fourth graders since **1997** [2, 4]. The very first celebration was held at **Finlandia Hall** [2, 4].",
+      "citations": []
+    },
+    "hel-05": {
+      "text": "Kaupungin julkaisemien tietojen mukaan OmaStadi-hankkeina on tulossa tai toteutettu muun muassa:\n\n* **Kaivopuistoon hanhivapaa piknik-alue** väliaikaisena kokeiluna [5].\n* **Kukkaloistoa ja kaupunkiluonnon monimuotoisuutta**, kuten kukkivia niittyjä, monivuotisia perenna-alueita sekä toiveiden mukaisia istutuksia (esim. tyrnipensaita ja kirsikkapuita) [5].\n* **Uusia ulkoliikuntapaikkoja**, kuten ulkokuntosaleja Meripuistoon ja Pitäjänmäkeen, kuntoportaat Aino Actén puistoon sekä laajennuksia Paloheinän ja Aurinkolahden ulkokuntosaleille [8].\n* **Vesiliikuntaa ja rantoja**, kuten kunnostettuja uimarantoja [1], uimaportaat ja pukukopit Eiranrantaan sekä saunoja (kuten avattu Kotiluodon sauna ja useita uusia saunahankkeita) [8, 13].\n* Lisäksi OmaStadin kautta on rahoitettu esimerkiksi Arabian lippakioskin toimintaa ja nuorten kesätyöpaikkoja [16].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.hel.fi/fi/uutiset/omastadilla-omannakoisia-harrastamisen-paikkoja"
+        },
+        {
+          "n": 5,
+          "url": "https://www.hel.fi/fi/uutiset/omastadin-avulla-toteutetaan-monimuotoista-ja-toiminnallista-kaupunkiluontoa"
+        },
+        {
+          "n": 8,
+          "url": "https://www.hel.fi/fi/uutiset/tunnetko-alueesi-omastadi-kohteet"
+        },
+        {
+          "n": 16,
+          "url": "https://www.hel.fi/fi/uutiset/kohtaamisia-ja-yhdessa-kasvamista-omastadilla-on-tuotu-yhteisollisyytta-helsinkiin"
+        }
+      ]
+    },
+    "hel-06": {
+      "text": "Kinapori Senior Centre celebrates its **40th anniversary** [1].",
+      "citations": [
+        {
+          "n": 1,
+          "url": "https://www.hel.fi/en/news/celebrating-40-years-of-community-and-joy-of-life-kinapori-senior-centre-anniversary-in-february"
+        }
+      ]
+    },
+    "hel-07": {
+      "text": "Glasgow'n julistuksen (*Glasgow Declaration on Climate Action in Tourism*) allekirjoittajat sitoutuvat [9]:\n\n* vähentämään matkailun globaaleja päästöjä vähintään puoleen seuraavan vuosikymmenen aikana [9]\n* saavuttamaan matkailun nettonollapäästöt mahdollisimman pian ennen vuotta 2050 [9].",
+      "citations": [
+        {
+          "n": 9,
+          "url": "https://www.hel.fi/en/news/helsinki-signs-tourism-industry-climate-declaration"
+        }
+      ]
+    },
+    "hel-08": {
+      "text": "The Suomenlinna daycare centre is located in an old artillery depot (building C 31) [2, 4].",
+      "citations": []
+    },
+    "hel-09": {
+      "text": "The Mayor's Independence Day celebration takes place at **Finlandia Hall** [3]. \n\nWhile it was temporarily held at Messukeskus from 2022 to 2024 during renovations, the traditional celebration returned to Finlandia Hall, where the City of Helsinki has hosted it since 1997 [3].",
+      "citations": [
+        {
+          "n": 3,
+          "url": "https://www.hel.fi/en/news/mayors-independence-day-celebration-expects-to-welcome-close-to-6600-schoolchildren"
+        }
+      ]
+    },
+    "hel-10": {
+      "text": "Helsingin kaupungin verkkosivusto ei sisällä tietoa Tampereen uimahalleista tai Tampereen Kalevan uimahallin aukioloajoista.",
+      "citations": []
+    }
+  }
+}
