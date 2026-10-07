@@ -446,6 +446,7 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
     for (location, message) in app_names_claimed_twice(&repo)
         .into_iter()
         .chain(space_segments_claimed_twice(&repo))
+        .chain(public_ids_claimed_twice(&repo))
     {
         report.findings.push(Finding {
             path: location.0,
@@ -703,6 +704,50 @@ fn space_segments_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
             )
         },
     )
+}
+
+/// Every `AssistantDeployment` whose `publicId` another deployment also declares, in this project
+/// or another (MF-52, T-3283): the chat route and the widget answer one deployment per id, so a
+/// second one would take the first's public address.
+fn public_ids_claimed_twice(repo: &Repository) -> Vec<(Location, String)> {
+    let deployments: Vec<(String, Location, String)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "AssistantDeployment")
+        .filter_map(|(id, resource)| {
+            let public_id = resource.manifest.spec.get("publicId")?.as_str()?.to_owned();
+            let owner = format!(
+                "{}/{}",
+                id.namespace.as_deref().unwrap_or_default(),
+                id.name
+            );
+            Some((
+                public_id,
+                (resource.path.clone(), resource.document, resource.line),
+                owner,
+            ))
+        })
+        .collect();
+    let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (public_id, _, owner) in &deployments {
+        owners.entry(public_id).or_default().push(owner);
+    }
+    deployments
+        .iter()
+        .filter_map(|(public_id, location, owner)| {
+            let all = owners.get(public_id.as_str())?;
+            (all.len() > 1).then(|| {
+                (
+                    location.clone(),
+                    format!(
+                        "AssistantDeployment {owner}: spec.publicId `{public_id}` is declared by {}; \
+                         a publicId is one public address for the whole organization, give each \
+                         deployment its own (MF-52)",
+                        all.join(" and ")
+                    ),
+                )
+            })
+        })
+        .collect()
 }
 
 /// Every `kind` manifest whose `key` another project's manifest of that kind also has, located

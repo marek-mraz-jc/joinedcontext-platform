@@ -92,13 +92,11 @@ pub fn html(deployment: &Deployment) -> String {
 }
 
 async fn page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>) -> Response {
-    let deployment = state.snapshot.read().ok().and_then(|snapshot| {
-        snapshot
-            .deployments
-            .iter()
-            .find(|d| d.spec.public_id == public_id && d.spec.channel.is_anonymous())
-            .cloned()
-    });
+    let deployment = state
+        .snapshot
+        .read()
+        .ok()
+        .and_then(|snapshot| snapshot.public(&public_id).cloned());
     let Some(deployment) = deployment else {
         return (
             StatusCode::NOT_FOUND,

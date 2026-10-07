@@ -134,11 +134,7 @@ fn problem(status: u16, title: &str, detail: impl Into<String>) -> Response {
 /// The anonymous deployment `public_id` names.
 fn deployment_of(state: &ChatState, public_id: &str) -> Option<Deployment> {
     let snapshot = state.snapshot.read().ok()?.clone();
-    snapshot
-        .deployments
-        .iter()
-        .find(|d| d.spec.public_id == public_id && d.spec.channel.is_anonymous())
-        .cloned()
+    snapshot.public(public_id).cloned()
 }
 
 /// Where a request comes from, judged against the deployment's `allowedOrigins` (AG-100).
