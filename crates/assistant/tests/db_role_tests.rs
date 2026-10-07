@@ -45,3 +45,16 @@ async fn one_role_created_from_many_connections_at_once_is_created_once_and_nobo
         .await
         .expect("drop the role");
 }
+
+#[tokio::test]
+async fn test_databases_made_at_once_all_come_up_with_the_app_role() {
+    let made = futures_util::future::join_all((0..4).map(|_| db::database("roleconcurrent"))).await;
+    for (admin, app, name) in made {
+        let role: String = sqlx::query_scalar("SELECT current_user::text")
+            .fetch_one(&app)
+            .await
+            .expect("the app pool answers");
+        assert_eq!(role, "assistant_app");
+        db::drop_database(admin, app, &name).await;
+    }
+}
