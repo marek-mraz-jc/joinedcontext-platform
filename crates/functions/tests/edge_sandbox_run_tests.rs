@@ -31,13 +31,13 @@ fn invocation(files: &[(&str, &str)], entry: &str, gateway: &str) -> Invocation 
         entry: entry.to_owned(),
         request: json!({ "method": "POST", "query": {}, "body": null, "user": null }),
         config: json!({ "slug": SLUG }),
-        endpoint: Endpoint {
+        endpoint: Some(Endpoint {
             http: reqwest::Client::new(),
             gateway: gateway.to_owned(),
             slug: SLUG.to_owned(),
             token: None,
             proxy: None,
-        },
+        }),
     }
 }
 

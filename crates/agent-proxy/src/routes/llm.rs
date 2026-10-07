@@ -238,24 +238,63 @@ impl StreamUsage {
     }
 }
 
-/// The tokens of one call, counted against the run and reported to the Portal with its halves,
-/// its cached input, its latency and its model (AG-41, AG-72).
+/// Whose model call it is: a run's, or the knowledge assistant's for one `AssistantDeployment`
+/// (AG-109).
+#[derive(Clone)]
+enum Caller {
+    Run(std::sync::Arc<crate::runs::RunContext>),
+    Assistant {
+        /// `{project}/{deployment}`, the key its day is counted under (AG-110).
+        deployment: String,
+    },
+}
+
+impl Caller {
+    /// What the audit line names: the run, or the deployment (AG-111).
+    fn audit_id(&self) -> &str {
+        match self {
+            Caller::Run(run) => &run.id,
+            Caller::Assistant { deployment } => deployment,
+        }
+    }
+
+    fn audit_user(&self) -> &str {
+        match self {
+            Caller::Run(run) => &run.created_by,
+            Caller::Assistant { .. } => "jc-assistant",
+        }
+    }
+}
+
+/// The tokens of one call: a run's are counted against the run and reported to the Portal with
+/// their halves, their cached input, their latency and their model (AG-41, AG-72); an
+/// assistant's against its deployment's day (AG-110), and reported nowhere else.
 fn record_usage(
     state: &ProxyState,
-    run: &crate::runs::RunContext,
+    caller: &Caller,
     usage: CallUsage,
 ) -> impl std::future::Future<Output = ()> {
     let state = state.clone();
-    let run_id = run.id.clone();
-    let (kind, person) = (run.kind.clone(), run.created_by.clone());
+    let caller = caller.clone();
     async move {
         if usage.tokens == 0 {
             return;
         }
+        let run = match caller {
+            Caller::Assistant { deployment } => {
+                state
+                    .limits
+                    .record_deployment_day(&deployment, usage.tokens)
+                    .await;
+                return;
+            }
+            Caller::Run(run) => run,
+        };
+        let run_id = run.id.clone();
         state.limits.record_tokens(&run_id, usage.tokens).await;
         state
             .limits
-            .record_daily(&kind, &person, usage.tokens)
+            .record_daily(&run.kind, &run.created_by, usage.tokens)
             .await;
         let payload = usage.payload();
         let portal_base = state.config.portal_base.clone();
@@ -285,6 +324,162 @@ fn record_usage(
     }
 }
 
+/// The header naming the `AssistantDeployment` an assistant call is for, `{project}/{name}`.
+pub const ASSISTANT_DEPLOYMENT: &str = "x-jc-assistant-deployment";
+/// The header carrying that deployment's `budget.tokensPerDay` (AG-110).
+pub const ASSISTANT_TOKENS_PER_DAY: &str = "x-jc-assistant-tokens-per-day";
+
+/// A DNS label, which a project's and a deployment's `metadata.name` are.
+fn is_label(name: &str) -> bool {
+    (1..=63).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+/// A refusal answered before the provider is asked; boxed, it is a pointer on the happy path.
+type Refusal = Box<Response>;
+
+/// The knowledge assistant's call: its service account, the deployment it names and that
+/// deployment's day, all checked before the provider is asked (AG-109, AG-110).
+async fn assistant_caller(state: &ProxyState, headers: &HeaderMap) -> Result<Caller, Refusal> {
+    let refused = || {
+        Box::new(
+            jc_core::ProblemDetails::unauthorized()
+                .with_detail(
+                    "only the knowledge assistant's service account calls the model for a deployment",
+                )
+                .into_response(),
+        )
+    };
+    let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Err(refused());
+    };
+    match state.credentials.grants().is_assistant(bearer).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("an assistant model call not from the assistant's service account");
+            return Err(refused());
+        }
+        Err(error) => {
+            tracing::error!(%error, "the realm could not judge an assistant model call");
+            return Err(Box::new(
+                jc_core::ProblemDetails::new(503, "service-unavailable", "Service Unavailable")
+                    .with_detail("the realm could not be reached; try again shortly")
+                    .into_response(),
+            ));
+        }
+    }
+    let bad = |detail: &str| {
+        Box::new(
+            jc_core::ProblemDetails::new(400, "bad-request", "Bad Request")
+                .with_detail(detail.to_owned())
+                .into_response(),
+        )
+    };
+    let deployment = headers
+        .get(ASSISTANT_DEPLOYMENT)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            v.split_once('/')
+                .is_some_and(|(project, name)| is_label(project) && is_label(name))
+        })
+        .ok_or_else(|| bad("X-JC-Assistant-Deployment names the deployment as {project}/{name}"))?
+        .to_owned();
+    let cap = headers
+        .get(ASSISTANT_TOKENS_PER_DAY)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|cap| *cap > 0)
+        .ok_or_else(|| {
+            bad("X-JC-Assistant-Tokens-Per-Day carries the deployment's budget.tokensPerDay, a whole number above 0")
+        })?;
+    if let Err(detail) = state.limits.check_deployment_day(&deployment, cap).await {
+        return Err(Box::new(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                jc_core::ProblemDetails::new(429, "daily-budget", "Daily Budget Spent")
+                    .with_detail(detail),
+            )
+                .into_response(),
+        ));
+    }
+    Ok(Caller::Assistant { deployment })
+}
+
+/// A run's call, authenticated before the path is judged, as it always was: a caller without a
+/// ticket learns nothing about which paths exist.
+async fn run_caller_or_path(
+    state: &ProxyState,
+    headers: &HeaderMap,
+    completion: bool,
+) -> Result<Caller, Refusal> {
+    let run = authenticate(headers, &state.runs, &state.config)
+        .await
+        .map_err(|p| Box::new((*p).into_response()))?;
+    if !completion {
+        return Err(Box::new(
+            jc_core::ProblemDetails::forbidden()
+                .with_detail("only chat/messages completion endpoints permitted")
+                .into_response(),
+        ));
+    }
+    run_limits(state, run).await
+}
+
+/// A run's steps, its tokens and the day's budgets of its consumer and its person, before the
+/// provider is asked (AG-41, AG-51, AG-97).
+async fn run_limits(
+    state: &ProxyState,
+    run: std::sync::Arc<crate::runs::RunContext>,
+) -> Result<Caller, Refusal> {
+    let too_many = |msg: &str| {
+        Box::new(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                jc_core::ProblemDetails::new(429, "too-many-requests", msg),
+            )
+                .into_response(),
+        )
+    };
+    // One model call is one step (AG-51): the run stops here however its driver loops.
+    state
+        .limits
+        .check_steps(&run.id, run.steps_per_run)
+        .await
+        .map_err(too_many)?;
+    state
+        .limits
+        .check_tokens(&run.id, run.max_tokens)
+        .await
+        .map_err(too_many)?;
+    // The day's budgets of the run's consumer and its person (AG-97), before the provider is
+    // asked: a capped call costs nothing.
+    if let Err(detail) = state
+        .limits
+        .check_daily(&state.config.daily_caps, &run.kind, &run.created_by)
+        .await
+    {
+        return Err(Box::new(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                jc_core::ProblemDetails::new(429, "daily-budget", "Daily Budget Spent")
+                    .with_detail(detail),
+            )
+                .into_response(),
+        ));
+    }
+    Ok(Caller::Run(run))
+}
+
 pub async fn handler(
     State(state): State<ProxyState>,
     method: Method,
@@ -293,58 +488,38 @@ pub async fn handler(
     req: Request<Body>,
 ) -> Response {
     let start = Instant::now();
-    let run = match authenticate(&headers, &state.runs, &state.config).await {
-        Ok(r) => r,
-        Err(p) => return (*p).into_response(),
-    };
-
-    if !matches!(
+    let completion = matches!(
         rest.as_str(),
         "v1/chat/completions" | "v1/messages" | "chat/completions" | "messages"
-    ) {
-        return jc_core::ProblemDetails::forbidden()
-            .with_detail("only chat/messages completion endpoints permitted")
-            .into_response();
-    }
-
-    // One model call is one step (AG-51): the run stops here however its driver loops.
-    if let Err(msg) = state.limits.check_steps(&run.id, run.steps_per_run).await {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
-        )
-            .into_response();
-    }
-
-    if let Err(msg) = state.limits.check_tokens(&run.id, run.max_tokens).await {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
-        )
-            .into_response();
-    }
-
-    // The day's budgets of the run's consumer and its person (AG-97), before the provider is
-    // asked: a capped call costs nothing.
-    if let Err(detail) = state
-        .limits
-        .check_daily(&state.config.daily_caps, &run.kind, &run.created_by)
-        .await
-    {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            jc_core::ProblemDetails::new(429, "daily-budget", "Daily Budget Spent")
-                .with_detail(detail),
-        )
-            .into_response();
-    }
+    );
+    let caller = if headers.contains_key(ASSISTANT_DEPLOYMENT) {
+        // The assistant's door is the completion endpoints alone, refused before the realm is
+        // asked about its token (AG-111).
+        if !completion {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail("only chat/messages completion endpoints permitted")
+                .into_response();
+        }
+        assistant_caller(&state, &headers).await
+    } else {
+        // A run is authenticated first: a refused path tells nobody without a ticket anything.
+        run_caller_or_path(&state, &headers, completion).await
+    };
+    let caller = match caller {
+        Ok(caller) => caller,
+        Err(refusal) => return *refusal,
+    };
 
     let body_bytes = match super::body::bounded(req.into_body()).await {
         Ok(bytes) => bytes,
         Err(refusal) => return *refusal,
     };
 
-    let body_bytes = match run.reasoning_effort.as_deref() {
+    let effort_setting = match &caller {
+        Caller::Run(run) => run.reasoning_effort.as_deref(),
+        Caller::Assistant { .. } => None,
+    };
+    let body_bytes = match effort_setting {
         Some(effort) => with_reasoning(&body_bytes, &rest, effort),
         None => body_bytes,
     };
@@ -398,7 +573,7 @@ pub async fn handler(
     crate::model_key::refused(&state, status.as_u16());
     if streamed && status.is_success() {
         let call = Streamed {
-            run,
+            caller,
             method,
             rest,
             uncounted,
@@ -427,12 +602,12 @@ pub async fn handler(
             effort,
             cost: usage.get("cost").and_then(Value::as_f64),
         };
-        record_usage(&state, &run, usage).await;
+        record_usage(&state, &caller, usage).await;
     }
 
     log_request(&AuditEntry {
-        run_id: &run.id,
-        user: &run.created_by,
+        run_id: caller.audit_id(),
+        user: caller.audit_user(),
         upstream: "model-provider",
         method: method.as_str(),
         path: &rest,
@@ -450,7 +625,7 @@ pub async fn handler(
 
 /// One streamed call: whose it is, what it asked and what it counts as without a usage.
 struct Streamed {
-    run: std::sync::Arc<crate::runs::RunContext>,
+    caller: Caller,
     method: Method,
     rest: String,
     uncounted: u64,
@@ -472,7 +647,7 @@ fn stream_through(
     upstream: reqwest::Response,
 ) -> Response {
     let Streamed {
-        run,
+        caller,
         method,
         rest,
         uncounted,
@@ -519,10 +694,10 @@ fn stream_through(
             effort,
             cost: usage.cost,
         };
-        record_usage(&state, &run, call).await;
+        record_usage(&state, &caller, call).await;
         log_request(&AuditEntry {
-            run_id: &run.id,
-            user: &run.created_by,
+            run_id: caller.audit_id(),
+            user: caller.audit_user(),
             upstream: "model-provider",
             method: method.as_str(),
             path: &rest,

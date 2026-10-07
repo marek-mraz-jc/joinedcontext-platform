@@ -37,7 +37,9 @@ pub struct Invocation {
     pub request: Value,
     /// The SDK configuration `ctx.jc` is created with.
     pub config: Value,
-    pub endpoint: Endpoint,
+    /// The application's endpoint; `None` runs the code with no host function at all, no SDK
+    /// and no network: the knowledge assistant's scripts over data it hands in (AG-112, T-3056).
+    pub endpoint: Option<Endpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -105,6 +107,24 @@ impl Loader for Files {
             .ok_or_else(|| rquickjs::Error::new_loading(name))?;
         Module::declare(ctx.clone(), name, source.as_str())
     }
+}
+
+/// Calls the entry's default export with the request and `{log}` alone: nothing to reach.
+fn glue_without_network(entry: &str) -> String {
+    format!(
+        r#"import handler from {entry};
+const input = JSON.parse(globalThis.__jc_input);
+const hostLog = globalThis.__jc_log;
+const text = (part) => {{
+  if (typeof part === "string") return part;
+  try {{ return JSON.stringify(part) ?? String(part); }} catch {{ return String(part); }}
+}};
+const log = (...parts) => hostLog(parts.map(text).join(" "));
+const response = await handler(input.request, {{ log }});
+globalThis.__jc_output = JSON.stringify(response === undefined ? {{}} : response);
+"#,
+        entry = serde_json::to_string(entry).unwrap_or_default(),
+    )
 }
 
 /// Calls the entry's default export with the request and `{jc, log}`, where `jc` is the SDK's own
@@ -203,28 +223,32 @@ async fn execute(invocation: Invocation, logs: Arc<Mutex<Vec<String>>>) -> Resul
     runtime.set_loader(Files(files.clone()), Files(files)).await;
     let context = AsyncContext::full(&runtime).await.map_err(internal)?;
     let input = serde_json::json!({ "request": request, "config": config }).to_string();
-    let source = glue(&entry);
-    let endpoint = Arc::new(endpoint);
+    let source = match &endpoint {
+        Some(_) => glue(&entry),
+        None => glue_without_network(&entry),
+    };
+    let endpoint = endpoint.map(Arc::new);
 
     let work = context.async_with(async move |ctx| -> Result<String, Failure> {
         let globals = ctx.globals();
         let setup = || -> rquickjs::Result<()> {
             globals.set("__jc_input", input)?;
-            let host = endpoint.clone();
-            globals.set(
-                "__jc_request",
-                Function::new(
-                    ctx.clone(),
-                    Async(move |method: String, path: String, body: Option<String>| {
-                        let host = host.clone();
-                        async move {
-                            rquickjs::Result::Ok(Json(
-                                endpoint::request(&host, &method, &path, body).await,
-                            ))
-                        }
-                    }),
-                )?,
-            )?;
+            if let Some(host) = endpoint.clone() {
+                globals.set(
+                    "__jc_request",
+                    Function::new(
+                        ctx.clone(),
+                        Async(move |method: String, path: String, body: Option<String>| {
+                            let host = host.clone();
+                            async move {
+                                rquickjs::Result::Ok(Json(
+                                    endpoint::request(&host, &method, &path, body).await,
+                                ))
+                            }
+                        }),
+                    )?,
+                )?;
+            }
             globals.set(
                 "__jc_log",
                 Function::new(ctx.clone(), move |line: String| {
@@ -344,13 +368,13 @@ export function createClient(config, transport) {
             entry: "@app/functions/f.ts".to_owned(),
             request: json!({ "method": "POST", "query": {}, "body": { "n": 2 }, "user": null }),
             config: json!({ "slug": SLUG, "orgDomain": "hel.fi", "space": "mobility" }),
-            endpoint: Endpoint {
+            endpoint: Some(Endpoint {
                 http: reqwest::Client::new(),
                 gateway: gateway.to_owned(),
                 slug: SLUG.to_owned(),
                 token: token.map(str::to_owned),
                 proxy: None,
-            },
+            }),
         }
     }
 

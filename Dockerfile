@@ -1,10 +1,19 @@
-# joinedcontext-platform: one image, five binaries (context-gateway = entrypoint; jcctl, jc-agent-proxy,
-# jc-functions and jc-token-sidecar = `docker run … <binary>`, which is how the agent runner, the functions
-# component and the pipeline runner's token sidecar run them).
+# joinedcontext-platform: one image, six binaries (context-gateway = entrypoint; jcctl, jc-agent-proxy,
+# jc-functions, jc-assistant and jc-token-sidecar = `docker run … <binary>`, which is how the agent runner,
+# the functions component, the assistant's crawl worker and the pipelines' token service run them).
 # Published by .github/workflows/image.yml as ghcr.io/marek-mraz-jc/joinedcontext-platform, pinned by digest in the deployment.
 FROM rust:1.97-slim-bookworm AS build
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# g++: the tokenizer behind the assistant's embedder links C++ (esaxx, oniguruma; T-3053).
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ && rm -rf /var/lib/apt/lists/*
+# The PDFium the assistant crate links, pinned and checked (scripts/ci/pdfium.sh, T-3052).
+COPY scripts/ci/pdfium.sh /tmp/pdfium.sh
+RUN sh /tmp/pdfium.sh /opt/pdfium
+ENV KREUZBERG_PDFIUM_PREBUILT=/opt/pdfium
+# The assistant's embedding model and the ONNX Runtime it loads, pinned and checked (T-3053);
+# only the final image's jc-assistant reads them.
+COPY scripts/ci/e5-small.sh scripts/ci/onnxruntime.sh /tmp/
+RUN sh /tmp/e5-small.sh /opt/e5-small && sh /tmp/onnxruntime.sh /opt/onnxruntime
 # dependency layer first so source edits do not rebuild the world
 COPY Cargo.toml Cargo.lock ./
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml
@@ -26,10 +35,11 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'pub fn _dep_cache() {}' > crates/assistant/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/token-sidecar/src/lib.rs \
  && echo 'fn main() {}' > crates/token-sidecar/src/main.rs \
+ && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
  && cargo build --release --locked --workspace && rm -rf crates/*/src
 COPY . .
 RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace \
- && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-token-sidecar
+ && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant target/release/jc-token-sidecar
 
 # `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
 # for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
@@ -47,6 +57,12 @@ COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
 COPY --from=build /src/target/release/jc-functions /usr/local/bin/jc-functions
 COPY --from=build /src/target/release/jc-token-sidecar /usr/local/bin/jc-token-sidecar
+# The knowledge assistant's crawl worker (Architecture/22, T-3052); its Deployment names it as the
+# command, as the agent proxy's does.
+COPY --from=build /src/target/release/jc-assistant /usr/local/bin/jc-assistant
+COPY --from=build /opt/e5-small /opt/e5-small
+COPY --from=build /opt/onnxruntime/libonnxruntime.so /usr/local/lib/libonnxruntime.so
+ENV JC_ASSISTANT_MODEL_DIR=/opt/e5-small ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/context-gateway"]

@@ -14,6 +14,21 @@ use sqlx::{PgConnection, Postgres, Row, Transaction};
 /// The store's migrations, reversible (`*.up.sql` and `*.down.sql`).
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// The chat route: one question, answered as Server-Sent Events (API/05).
+pub mod chat;
+/// A `ckan` source: a catalogue's public datasets.
+pub mod ckan;
+/// The knowledge assistant's website crawl core.
+pub mod crawl;
+/// Passage and question embeddings with `multilingual-e5-small`.
+pub mod embed;
+/// Text, language and passages out of what the crawl fetched.
+pub mod extract;
+/// When a source is read again: its cron, matched against the minute.
+pub mod schedule;
+/// The crawl worker: queueing due sources and working the queue.
+pub mod worker;
+
 /// The dimension of every embedding: `multilingual-e5-small` (ADR-N-040 §3.1).
 pub const DIMENSIONS: usize = 384;
 
@@ -32,14 +47,23 @@ pub enum Error {
     Project(String),
     /// The database refused or could not be reached.
     Database(sqlx::Error),
+    /// A crawl failure or invalid crawl specification.
+    Crawl(String),
+    /// A page or document whose text could not be read.
+    Extract(String),
+    /// The embedding model could not be loaded or run.
+    Model(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Embedding(why) => write!(f, "the query embedding is not usable: {why}"),
+            Error::Embedding(why) => write!(f, "the embedding is not usable: {why}"),
             Error::Project(name) => write!(f, "`{name}` is not a project name"),
             Error::Database(err) => write!(f, "the assistant's database: {err}"),
+            Error::Crawl(why) => write!(f, "the crawl failed: {why}"),
+            Error::Extract(why) => write!(f, "the text could not be read: {why}"),
+            Error::Model(why) => write!(f, "the embedding model: {why}"),
         }
     }
 }
@@ -143,6 +167,9 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 /// The hybrid query: full-text and vector rankings of the deployment's sources, fused by
 /// reciprocal rank. The question is parsed with every configuration the store indexes with, so
 /// it matches a chunk in whatever language that chunk is, and the GIN index still serves it.
+/// Its words are OR-ed: a question asked in a person's words never has all of them in the
+/// passage that answers it (AND-ed, the lexical ranking found nothing for any of the forty eval
+/// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first.
 const HYBRID: &str = r#"
 WITH scope AS (
     SELECT c.id, c.fts, c.embedding
@@ -150,10 +177,8 @@ WITH scope AS (
     WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
 ),
 question AS (
-    SELECT websearch_to_tsquery('english', $1)
-        || websearch_to_tsquery('finnish', $1)
-        || websearch_to_tsquery('german', $1)
-        || websearch_to_tsquery('jc_simple_unaccent', $1) AS q
+    SELECT jc_any_word('english', $1) || jc_any_word('finnish', $1)
+        || jc_any_word('german', $1) || jc_any_word('jc_simple_unaccent', $1) AS q
 ),
 lexical AS (
     SELECT scope.id, row_number() OVER (ORDER BY ts_rank_cd(scope.fts, question.q) DESC, scope.id) AS rank

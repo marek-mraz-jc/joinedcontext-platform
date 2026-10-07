@@ -27,6 +27,8 @@ struct DailySpend {
     day: u64,
     consumers: HashMap<&'static str, u64>,
     people: HashMap<String, u64>,
+    /// The knowledge assistant's calls, per `{project}/{deployment}` (AG-110).
+    deployments: HashMap<String, u64>,
 }
 
 /// Whose daily budget a run's calls count against (AG-97).
@@ -191,6 +193,50 @@ impl LimitManager {
         *daily.people.entry(person.to_owned()).or_default() += tokens;
     }
 
+    /// Refuses an assistant call of `deployment` once today's spend has reached `cap` (AG-110).
+    pub async fn check_deployment_day(&self, deployment: &str, cap: u64) -> Result<(), String> {
+        self.check_deployment_day_on(deployment, cap, utc_day())
+            .await
+    }
+
+    async fn check_deployment_day_on(
+        &self,
+        deployment: &str,
+        cap: u64,
+        day: u64,
+    ) -> Result<(), String> {
+        let mut daily = self.daily.lock().await;
+        if daily.day != day {
+            *daily = DailySpend {
+                day,
+                ..DailySpend::default()
+            };
+        }
+        if daily.deployments.get(deployment).copied().unwrap_or(0) >= cap {
+            return Err(format!(
+                "Today's model budget of assistant {deployment} is spent. It starts again at 00:00 UTC; the deployment's budget.tokensPerDay sets it."
+            ));
+        }
+        Ok(())
+    }
+
+    /// Counts an assistant call's tokens against its deployment's day (AG-110).
+    pub async fn record_deployment_day(&self, deployment: &str, tokens: u64) {
+        self.record_deployment_day_on(deployment, tokens, utc_day())
+            .await;
+    }
+
+    async fn record_deployment_day_on(&self, deployment: &str, tokens: u64, day: u64) {
+        let mut daily = self.daily.lock().await;
+        if daily.day != day {
+            *daily = DailySpend {
+                day,
+                ..DailySpend::default()
+            };
+        }
+        *daily.deployments.entry(deployment.to_owned()).or_default() += tokens;
+    }
+
     pub async fn record_tokens(&self, run_id: &str, count: u64) {
         let mut map = self.runs.lock().await;
         map.entry(run_id.to_string()).or_default().tokens_consumed += count;
@@ -200,6 +246,39 @@ impl LimitManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AG-110: one deployment's day is its own, it is refused once spent, and the next day starts
+    /// from zero.
+    #[tokio::test]
+    async fn an_assistant_deployment_spends_its_own_day() {
+        let limits = LimitManager::default();
+        assert_eq!(
+            limits.check_deployment_day_on("bb/public", 100, 7).await,
+            Ok(())
+        );
+        limits.record_deployment_day_on("bb/public", 60, 7).await;
+        assert_eq!(
+            limits.check_deployment_day_on("bb/public", 100, 7).await,
+            Ok(())
+        );
+        limits.record_deployment_day_on("bb/public", 40, 7).await;
+        let spent = limits
+            .check_deployment_day_on("bb/public", 100, 7)
+            .await
+            .expect_err("spent");
+        assert!(
+            spent.contains("bb/public") && spent.contains("tokensPerDay"),
+            "{spent}"
+        );
+        assert_eq!(
+            limits.check_deployment_day_on("bb/ckan", 100, 7).await,
+            Ok(())
+        );
+        assert_eq!(
+            limits.check_deployment_day_on("bb/public", 100, 8).await,
+            Ok(())
+        );
+    }
 
     #[tokio::test]
     async fn the_model_call_past_the_step_limit_is_refused_and_the_run_next_to_it_is_not() {

@@ -67,6 +67,10 @@ pub struct Config {
     /// `jc-functions`): with mesh identity required, the one workload a run's data credential is
     /// honoured from (ADR-N-038 decision 6).
     pub functions_identity: String,
+    /// The knowledge assistant's Keycloak client (`JC_ASSISTANT_CLIENT_ID`, default
+    /// `jc-assistant`): its service account's token buys model calls for an `AssistantDeployment`,
+    /// counted against that deployment's day (AG-109, AG-110).
+    pub assistant_client_id: String,
     /// Daily model token caps (AG-97): `JC_DAILY_TOKENS_ASSISTANT`, `JC_DAILY_TOKENS_APP_BUILDER`,
     /// `JC_DAILY_TOKENS_OTHER` and `JC_DAILY_TOKENS_PER_PERSON`; absent or `0` is no cap.
     pub daily_caps: DailyCaps,
@@ -103,6 +107,7 @@ impl std::fmt::Debug for Config {
             .field("require_mesh_identity", &self.require_mesh_identity)
             .field("portal_client_id", &self.portal_client_id)
             .field("functions_identity", &self.functions_identity)
+            .field("assistant_client_id", &self.assistant_client_id)
             .field("daily_caps", &self.daily_caps)
             .field("model_probe_secs", &self.model_probe_secs)
             .finish()
@@ -221,6 +226,9 @@ impl Config {
         let functions_identity = lookup("JC_PROXY_FUNCTIONS_IDENTITY")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "jc-functions".to_string());
+        let assistant_client_id = lookup("JC_ASSISTANT_CLIENT_ID")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "jc-assistant".to_string());
 
         let number = |var: &'static str, default: u64| -> Result<u64, ConfigError> {
             match lookup(var).filter(|v| !v.trim().is_empty()) {
@@ -260,6 +268,7 @@ impl Config {
             require_mesh_identity,
             portal_client_id,
             functions_identity,
+            assistant_client_id,
         })
     }
 }
