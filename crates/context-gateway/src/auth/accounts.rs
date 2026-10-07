@@ -170,6 +170,41 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
             },
         );
     }
+    // Every Pipeline's own account (PL-19): derived, never a file, and the azp of its federated
+    // client `{project}-pl-{pipeline}`. A hand-written `pl-` account is refused at validation, so
+    // a collision here is a repository nobody could have committed; it resolves to nobody.
+    for (project, derived) in jcctl::pipeline_identity::derived(repo) {
+        let client = client_id(&project, &derived.name);
+        if ambiguous.contains(&client) || by_client_id.remove(&client).is_some() {
+            tracing::warn!(client = %client, "a pipeline's account and another derive one client id; it resolves to nobody");
+            ambiguous.insert(client);
+            continue;
+        }
+        let roles = derived
+            .account
+            .roles
+            .iter()
+            .map(|binding| ScopedRole {
+                role: binding.role.clone(),
+                context_space: binding
+                    .scope
+                    .context_space
+                    .as_deref()
+                    .map(|name| repo.space_segment(&project, name)),
+                project: None,
+                organization: false,
+            })
+            .collect();
+        by_client_id.insert(
+            client,
+            Account {
+                name: derived.name,
+                project,
+                roles,
+                delegates: false,
+            },
+        );
+    }
     ServiceAccounts {
         by_client_id,
         apps: apps_of(repo),

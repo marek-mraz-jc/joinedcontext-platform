@@ -1,5 +1,6 @@
-# joinedcontext-platform: one image, four binaries (context-gateway = entrypoint; jcctl, jc-agent-proxy
-# and jc-functions = `docker run … <binary>`, which is how the agent runner and functions components run them).
+# joinedcontext-platform: one image, six binaries (context-gateway = entrypoint; jcctl, jc-agent-proxy,
+# jc-functions, jc-assistant and jc-token-sidecar = `docker run … <binary>`, which is how the agent runner,
+# the functions component, the assistant's crawl worker and the pipelines' token service run them).
 # Published by .github/workflows/image.yml as ghcr.io/marek-mraz-jc/joinedcontext-platform, pinned by digest in the deployment.
 FROM rust:1.97-slim-bookworm AS build
 WORKDIR /src
@@ -21,7 +22,8 @@ COPY crates/jcctl/Cargo.toml crates/jcctl/Cargo.toml
 COPY crates/agent-proxy/Cargo.toml crates/agent-proxy/Cargo.toml
 COPY crates/functions/Cargo.toml crates/functions/Cargo.toml
 COPY crates/assistant/Cargo.toml crates/assistant/Cargo.toml
-RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src \
+COPY crates/token-sidecar/Cargo.toml crates/token-sidecar/Cargo.toml
+RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src \
  && echo 'pub fn _dep_cache() {}' > crates/jc-core/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/context-gateway/src/lib.rs \
  && echo 'fn main() {}' > crates/context-gateway/src/main.rs \
@@ -31,11 +33,13 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'pub fn _dep_cache() {}' > crates/functions/src/lib.rs \
  && echo 'fn main() {}' > crates/functions/src/main.rs \
  && echo 'pub fn _dep_cache() {}' > crates/assistant/src/lib.rs \
+ && echo 'pub fn _dep_cache() {}' > crates/token-sidecar/src/lib.rs \
+ && echo 'fn main() {}' > crates/token-sidecar/src/main.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
  && cargo build --release --locked --workspace && rm -rf crates/*/src
 COPY . .
 RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace \
- && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant
+ && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant target/release/jc-token-sidecar
 
 # `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
 # for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
@@ -52,6 +56,7 @@ COPY --from=build /src/target/release/context-gateway /usr/local/bin/context-gat
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
 COPY --from=build /src/target/release/jc-functions /usr/local/bin/jc-functions
+COPY --from=build /src/target/release/jc-token-sidecar /usr/local/bin/jc-token-sidecar
 # The knowledge assistant's crawl worker (Architecture/22, T-3052); its Deployment names it as the
 # command, as the agent proxy's does.
 COPY --from=build /src/target/release/jc-assistant /usr/local/bin/jc-assistant

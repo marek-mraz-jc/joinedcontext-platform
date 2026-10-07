@@ -215,3 +215,22 @@ fn an_account_that_derives_a_platform_client_id_is_refused() {
             .unwrap_or_else(|err| panic!("{project}/{name} is an ordinary account: {err}"));
     }
 }
+
+/// PL-19 (T-1508): `pl-` names the account every Pipeline is given; an account written by hand
+/// that takes the prefix could take a pipeline's client and grants, so it is refused, naming why.
+#[test]
+fn an_account_written_by_hand_cannot_take_a_pipelines_name() {
+    let named = |name: &str| GOLDEN.replace("name: vendorx-parking-push", &format!("name: {name}"));
+    let err = ServiceAccount::from_yaml(&named("pl-drepo"))
+        .expect("parses")
+        .validate()
+        .expect_err("a pipeline's name is refused")
+        .to_string();
+    assert!(err.contains("PL-19") && err.contains("pl-drepo"), "{err}");
+    for name in ["pipelines", "plan-push", "drepo-pl"] {
+        ServiceAccount::from_yaml(&named(name))
+            .expect("parses")
+            .validate()
+            .unwrap_or_else(|err| panic!("{name} is an ordinary account: {err}"));
+    }
+}
