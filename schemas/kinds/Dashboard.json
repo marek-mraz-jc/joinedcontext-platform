@@ -726,7 +726,7 @@
           ]
         },
         "entityType": {
-          "description": "The entity type a `grid` widget shows; the type decides its columns (UI-71).",
+          "description": "The entity type a `grid` widget shows, the type decides its columns (UI-71), or the type a `bar-chart` or `histogram` counts (UI-93).",
           "type": [
             "string",
             "null"
@@ -745,6 +745,13 @@
         },
         "property": {
           "description": "The property it shows.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "q": {
+          "description": "The NGSI-LD `q` a `bar-chart` or `histogram` reads the type with: the explorer's filter when the chart came from there (UI-93).",
           "type": [
             "string",
             "null"

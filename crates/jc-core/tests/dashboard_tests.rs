@@ -135,7 +135,7 @@ fn unknown_members_are_refused() {
 #[test]
 fn a_grid_widget_names_its_endpoint_its_type_and_a_configuration_that_holds() {
     let golden = dashboard("", "").expect("the golden dashboard validates");
-    let grid = &golden.spec.pages[1].widgets[1];
+    let grid = &golden.spec.pages[1].widgets[3];
     assert_eq!(grid.widget_type, "grid");
     assert_eq!(grid.entity_type.as_deref(), Some("AirQualityObserved"));
     let config = grid.grid.as_ref().expect("a configuration");
@@ -162,4 +162,34 @@ fn a_grid_widget_names_its_endpoint_its_type_and_a_configuration_that_holds() {
         reason(dashboard("widgetType: grid", "widgetType: temporal-chart"))
             .contains("belong to a widget of type `grid`")
     );
+}
+
+/// UI-93: a chart over a type names the Endpoint it reads, the type and the property it counts by,
+/// and carries the explorer's `q`; `q` and `entityType` belong to the widgets that read a type.
+#[test]
+fn a_chart_widget_names_its_endpoint_its_type_and_its_property() {
+    let golden = dashboard("", "").expect("the golden dashboard validates");
+    let bars = &golden.spec.pages[1].widgets[1];
+    assert_eq!(bars.widget_type, "bar-chart");
+    assert_eq!(bars.entity_type.as_deref(), Some("AirQualityObserved"));
+    assert_eq!(bars.property.as_deref(), Some("airQualityLevel"));
+    assert_eq!(bars.q.as_deref(), Some("pm10>0"));
+    assert_eq!(golden.spec.pages[1].widgets[2].widget_type, "histogram");
+
+    let bar = "        - widgetType: bar-chart\n          endpointRef: ep-air-quality\n          entityType: AirQualityObserved\n          property: airQualityLevel\n";
+    assert!(reason(dashboard(bar, "        - widgetType: bar-chart\n          entityType: AirQualityObserved\n          property: airQualityLevel\n")).contains("names the Endpoint"));
+    assert!(reason(dashboard(bar, "        - widgetType: bar-chart\n          endpointRef: ep-air-quality\n          property: airQualityLevel\n")).contains("names the entity type it counts"));
+    assert!(reason(dashboard(bar, "        - widgetType: bar-chart\n          endpointRef: ep-air-quality\n          entityType: airQuality\n          property: airQualityLevel\n")).contains("PascalCase"));
+    assert!(reason(dashboard(bar, "        - widgetType: bar-chart\n          endpointRef: ep-air-quality\n          entityType: AirQualityObserved\n")).contains("names the property"));
+    assert!(reason(dashboard(
+        "q: 'pm10>0'",
+        &format!("q: '{}'", "a".repeat(1025))
+    ))
+    .contains("at most 1024"));
+    // A temporal chart draws one entity: a filter or a type on it is a mistake.
+    assert!(reason(dashboard(
+        "          property: pm10\n        - widgetType: bar-chart",
+        "          property: pm10\n          q: 'pm10>0'\n        - widgetType: bar-chart"
+    ))
+    .contains("`q` belongs to"));
 }
