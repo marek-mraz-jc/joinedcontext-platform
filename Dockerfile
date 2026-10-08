@@ -23,7 +23,8 @@ COPY crates/agent-proxy/Cargo.toml crates/agent-proxy/Cargo.toml
 COPY crates/functions/Cargo.toml crates/functions/Cargo.toml
 COPY crates/assistant/Cargo.toml crates/assistant/Cargo.toml
 COPY crates/token-sidecar/Cargo.toml crates/token-sidecar/Cargo.toml
-RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src \
+COPY crates/wasm-host/Cargo.toml crates/wasm-host/Cargo.toml
+RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src \
  && echo 'pub fn _dep_cache() {}' > crates/jc-core/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/context-gateway/src/lib.rs \
  && echo 'fn main() {}' > crates/context-gateway/src/main.rs \
@@ -35,6 +36,8 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'pub fn _dep_cache() {}' > crates/assistant/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/token-sidecar/src/lib.rs \
  && echo 'fn main() {}' > crates/token-sidecar/src/main.rs \
+ && echo 'pub fn _dep_cache() {}' > crates/wasm-host/src/lib.rs \
+ && echo 'fn main() {}' > crates/wasm-host/src/main.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
  && cargo build --release --locked --workspace --exclude assistant \
  && cargo build --release --locked -p assistant && rm -rf crates/*/src
@@ -61,6 +64,8 @@ COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
 COPY --from=build /src/target/release/jc-functions /usr/local/bin/jc-functions
 COPY --from=build /src/target/release/jc-token-sidecar /usr/local/bin/jc-token-sidecar
+# The shared host of server WASM Apps (ADR-N-044): a shard runs this binary with `command`.
+COPY --from=build /src/target/release/jc-wasm-host /usr/local/bin/jc-wasm-host
 # The knowledge assistant's crawl worker (Architecture/22, T-3052); its Deployment names it as the
 # command, as the agent proxy's does.
 COPY --from=build /src/target/release/jc-assistant /usr/local/bin/jc-assistant

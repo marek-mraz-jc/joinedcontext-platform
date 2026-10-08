@@ -1,0 +1,73 @@
+/// What the shared host offers a server WASM App beside `wasi:http` (ADR-N-044, AP-144, AP-145).
+/// An App never holds a connection string, a password or an object-store key: it asks the host,
+/// and the host answers as the App's own database role and under the App's own storage prefix.
+package jc:app@0.1.0;
+
+/// The App's own Postgres schema, `app_<id>`, through bound parameters only (AP-144).
+interface sql {
+    /// One value of a parameter or a column. `json` carries JSON text; `numeric` and `timestamp`
+    /// columns come back as `text`.
+    variant value {
+        null,
+        boolean(bool),
+        int(s64),
+        float(f64),
+        text(string),
+        bytes(list<u8>),
+        json(string),
+    }
+
+    /// The rows of a query, column names once and one list of values per row.
+    record rows {
+        columns: list<string>,
+        values: list<list<value>>,
+    }
+
+    /// Why a statement did not run. `refused` is the host's or the database's no, with the reason;
+    /// the statement's text is never echoed back.
+    variant error {
+        refused(string),
+        invalid(string),
+        quota(string),
+        timeout,
+        unavailable(string),
+    }
+
+    /// A statement that reads rows; at most the host's row cap of them come back.
+    query: func(statement: string, params: list<value>) -> result<rows, error>;
+
+    /// A statement that writes; the number of rows it changed.
+    execute: func(statement: string, params: list<value>) -> result<u64, error>;
+}
+
+/// The App's own objects, under its prefix `apps/<shard>/<id>/` (AP-145). Keys are relative to
+/// that prefix; one that would leave it is refused.
+interface blob {
+    variant error {
+        refused(string),
+        not-found,
+        quota(string),
+        unavailable(string),
+    }
+
+    /// What a presigned URL lets the browser do with one key.
+    enum method {
+        get,
+        put,
+    }
+
+    get: func(key: string) -> result<list<u8>, error>;
+    put: func(key: string, data: list<u8>, content-type: option<string>) -> result<_, error>;
+    /// The keys under `prefix`, relative to the App's own prefix.
+    list-keys: func(prefix: string) -> result<list<string>, error>;
+    delete: func(key: string) -> result<_, error>;
+    /// A URL for one key and one method, valid for at most 300 seconds.
+    presign: func(key: string, method: method, expires-seconds: u32) -> result<string, error>;
+}
+
+/// What the host links into every App: its storage. The App itself exports
+/// `wasi:http/incoming-handler` (AP-143).
+world app-host {
+    import sql;
+    import blob;
+}

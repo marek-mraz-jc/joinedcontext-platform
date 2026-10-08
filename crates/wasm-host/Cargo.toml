@@ -1,0 +1,41 @@
+[package]
+name = "wasm-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The shared host of server WASM Apps (ADR-N-044, AP-143..AP-147): wasmtime with the component
+# model, one `wasi:http` handler per App, a fresh instance per request.
+[[bin]]
+name = "jc-wasm-host"
+path = "src/main.rs"
+
+[dependencies]
+wasmtime = { version = "=49.0.2", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "pooling-allocator", "parallel-compilation", "std"] }
+wasmtime-wasi = "=49.0.2"
+# No `default-send-request`: the host sends an App's calls itself, to the gateway alone, with the
+# workspace's reqwest (and without webpki-roots' CDLA licence).
+wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+anyhow = "1"
+url = "2"
+hmac = "0.12"
+time = { version = "0.3", features = ["formatting", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "json", "uuid", "time"] }
+futures-util = { version = "0.3", default-features = false }
+http = "1"
+
+[dev-dependencies]
+wiremock = "0.6"

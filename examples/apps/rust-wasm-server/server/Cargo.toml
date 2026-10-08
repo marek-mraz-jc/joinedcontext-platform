@@ -1,0 +1,22 @@
+# The server half of the SDK's server WASM example (T-3341, ADR-N-044): a component for
+# wasm32-wasip2 exporting wasi:http, its database and files through jc:app. Its own workspace and
+# lock, so this folder builds as an App's repository builds.
+[package]
+name = "rust-wasm-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jc-app-sdk = { path = "../../../../crates/app-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+[workspace]

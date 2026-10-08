@@ -1,0 +1,19 @@
+# The test App of jc-wasm-host's tests (T-3339): one component whose path says what it does.
+# Built for wasm32-wasip2 by tests/common; never part of the workspace or an image.
+[package]
+name = "wasm-host-test-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasip2 = "=2.0.1"
+wit-bindgen = "0.62"
+
+[profile.release]
+opt-level = "s"
+
+[workspace]
