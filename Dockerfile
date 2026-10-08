@@ -5,7 +5,8 @@
 FROM rust:1.97-slim-bookworm AS build
 WORKDIR /src
 # g++: the tokenizer behind the assistant's embedder links C++ (esaxx, oniguruma; T-3053).
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ && rm -rf /var/lib/apt/lists/*
+# libclang-dev: jc-wasm-host reads an App's SQL with libpg_query, whose bindings bindgen makes (T-3364).
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ libclang-dev && rm -rf /var/lib/apt/lists/*
 # The PDFium the assistant crate links, pinned and checked (scripts/ci/pdfium.sh, T-3052).
 COPY scripts/ci/pdfium.sh /tmp/pdfium.sh
 RUN sh /tmp/pdfium.sh /opt/pdfium
