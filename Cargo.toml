@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/jc-core", "crates/context-gateway", "crates/jcctl", "crates/agent-proxy", "crates/functions", "crates/assistant", "crates/token-sidecar", "crates/wasm-host"]
+members = ["crates/jc-core", "crates/context-gateway", "crates/jcctl", "crates/agent-proxy", "crates/functions", "crates/assistant", "crates/token-sidecar", "crates/wasm-host", "crates/app-sdk"]
 
 [workspace.package]
 edition = "2021"

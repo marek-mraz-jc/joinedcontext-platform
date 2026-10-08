@@ -364,7 +364,9 @@ impl PgStore {
         Ok(bytes)
     }
 
-    /// Runs `statement` as the App, in a transaction of its own; `None` rows for a write.
+    /// Runs `statement` as the App, in a transaction of its own: its rows when `want` is
+    /// [`Kind::Read`] (a write with `returning` too), else the rows it changed. Every write, read
+    /// back or not, is held to the quota.
     pub async fn run(
         &self,
         app: &Placed,
@@ -376,11 +378,6 @@ impl PgStore {
             tracing::warn!(app = %app.id, kind = "sql", %why, "refused");
             SqlError::Refused(why)
         })?;
-        if want == Kind::Read && kind == Kind::Write {
-            return Err(SqlError::Refused(
-                "query reads; use execute for a statement that writes".into(),
-            ));
-        }
         let role = role_of(&app.id);
         if kind == Kind::Write && self.size(&role).await? >= self.limits.quota_bytes {
             tracing::warn!(app = %app.id, kind = "sql", "refused: quota");
