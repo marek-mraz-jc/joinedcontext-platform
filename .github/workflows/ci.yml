@@ -16,6 +16,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: every action is a commit, and only a publishing job may publish (T-0851)
         run: python3 scripts/ci/check-workflow-pins.py
+      # Every workspace member is in the image's dependency layer (T-3366: crates/app-sdk was not,
+      # and the image build failed on main while this lane stayed green).
+      - name: the Dockerfile copies every workspace member
+        run: python3 scripts/ci/check-dockerfile-members.py
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
