@@ -980,3 +980,101 @@ fn three_projects_on_one_app_name_are_all_named_and_other_apps_are_untouched() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A wasm App as the repository holds it once published: its shard in `status.shard` (AP-149).
+fn wasm_app(name: &str, shard: Option<u32>, visibility: &str) -> String {
+    let status = shard
+        .map(|s| format!("status:\n  shard: {s}\n"))
+        .unwrap_or_default();
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: {name}\n  namespace: helsinki\nspec:\n  kind: wasm\n  \
+         source:\n    path: apps/{name}\n  build: {{}}\n  visibility: {visibility}\n{status}"
+    )
+}
+
+/// T-3344, AP-143, AP-149: a published wasm App's `/api/*` goes to its own shard of the WASM
+/// host, rewritten under `/apps/{name}/api/`, behind its login, with the token as the bearer;
+/// one upstream per shard; before its first publish, and for any other kind, no such route.
+#[test]
+fn a_wasm_apps_server_is_routed_to_the_shard_its_status_names() {
+    let dir = demo_repo("apisix-wasm");
+    write(
+        &dir,
+        "projects/helsinki/apps/notes/app.yaml",
+        &wasm_app("notes", Some(1), "project"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/apps/board/app.yaml",
+        &wasm_app("board", Some(1), "public"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/apps/fresh/app.yaml",
+        &wasm_app("fresh", None, "project"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/apps/plain/app.yaml",
+        &STATIC_APP
+            .replace("ovzdusie", "helsinki")
+            .replace("air-quality-map", "plain")
+            .replace(
+                "  visibility: project\n",
+                "  visibility: project\nstatus:\n  shard: 0\n",
+            ),
+    );
+    let doc = document(&dir);
+    let route = find(&doc, "routes", "app-notes-server");
+    assert_eq!(route["uris"], serde_json::json!(["/api/*"]));
+    assert_eq!(route["host"], "notes.apps.city.example.com");
+    assert_eq!(route["upstream_id"], "upstream-wasm-host-1");
+    let plugins = &route["plugins"];
+    assert_eq!(
+        plugins["proxy-rewrite"]["regex_uri"],
+        serde_json::json!(["^/api/(.*)$", "/apps/notes/api/$1"])
+    );
+    assert_eq!(plugins["openid-connect"]["unauth_action"], "deny");
+    assert_eq!(
+        plugins["openid-connect"]["access_token_in_authorization_header"],
+        true
+    );
+    assert_eq!(
+        plugins_of(&doc, "app-board-server")["openid-connect"]["unauth_action"],
+        "pass"
+    );
+    assert!(
+        route["priority"].as_u64() < Some(35),
+        "the App's own endpoint keeps its slugs"
+    );
+    let upstream = find(&doc, "upstreams", "upstream-wasm-host-1");
+    assert!(
+        upstream
+            .to_string()
+            .contains("jc-wasm-host-1.prod.svc.cluster.local:8080"),
+        "{upstream}"
+    );
+    let wasm_upstreams = doc["upstreams"]
+        .as_array()
+        .expect("upstreams")
+        .iter()
+        .filter(|u| {
+            u["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("upstream-wasm-host-"))
+        })
+        .count();
+    assert_eq!(wasm_upstreams, 1, "two Apps on shard 1 share its upstream");
+    assert!(
+        !has(&doc, "routes", "app-fresh-server"),
+        "no shard recorded yet, no server route"
+    );
+    assert!(
+        !has(&doc, "routes", "app-plain-server"),
+        "a ui App's status.shard means nothing"
+    );
+    assert!(
+        has(&doc, "routes", "app-fresh"),
+        "its interface is routed like any App's"
+    );
+}

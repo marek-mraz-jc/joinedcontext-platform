@@ -47,6 +47,14 @@ const EDGE_CLIENT_ID: &str = "edge";
 /// The port an app container listens on, the one its upstream points at (AP-26).
 const APP_PORT: u16 = 8080;
 
+/// The port a shard of the WASM host listens on (AP-143).
+const WASM_HOST_PORT: u16 = 8080;
+
+/// The Service of one shard of the WASM host, `jc-wasm-host-{shard}` (AP-143, T-3344).
+fn wasm_host_service(shard: u32) -> String {
+    format!("jc-wasm-host-{shard}")
+}
+
 /// The edge session idles out after an hour and rolls with use, within the realm's SSO
 /// idle time (AP-29).
 const SESSION_IDLE_SECONDS: u32 = 3600;
@@ -216,6 +224,19 @@ pub fn render(repo: &Repository, settings: &Settings) -> String {
         if let Some(route) = app_endpoint_route(settings, &app) {
             routes.push(route);
         }
+        if let Some(shard) = app.shard {
+            let id = format!("upstream-wasm-host-{shard}");
+            if !upstreams.iter().any(|u| u["id"] == id.as_str()) {
+                upstreams.push(upstream(
+                    &id,
+                    &settings.node(&wasm_host_service(shard), WASM_HOST_PORT),
+                    10,
+                    10,
+                    Some(30),
+                ));
+            }
+            routes.push(app_server_route(settings, &app, &id));
+        }
         routes.push(app_moved_route(settings, &app.name));
     }
 
@@ -241,6 +262,9 @@ struct RoutedApp {
     own_pod: bool,
     /// `visibility: public`: an anonymous request passes through to the app.
     public: bool,
+    /// A `wasm` App's shard, from its `status.shard` (AP-149): its `/api/*` goes to that shard of
+    /// the WASM host. `None` before its first publish, and for every other kind.
+    shard: Option<u32>,
     /// The slugs of the App's own Endpoint, `app-{name}` in its project: the only slugs its
     /// host routes to the gateway (AP-133). The Portal mints the slug and keeps it out of Git,
     /// so a repository usually holds none and the host then routes no endpoint at all.
@@ -265,6 +289,19 @@ fn routed_apps(repo: &Repository) -> Vec<RoutedApp> {
             .and_then(|kind| jc_core::kinds::AppClass::parse(kind).ok())
             == Some(jc_core::kinds::AppClass::UiRust);
         let public = spec.get("visibility").and_then(Value::as_str) == Some("public");
+        let wasm = spec
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(|kind| jc_core::kinds::AppClass::parse(kind).ok())
+            == Some(jc_core::kinds::AppClass::Wasm);
+        let shard = resource
+            .manifest
+            .status
+            .as_ref()
+            .and_then(|status| status.get("shard"))
+            .and_then(Value::as_u64)
+            .and_then(|shard| u32::try_from(shard).ok())
+            .filter(|_| wasm);
         let endpoint = format!("app-{}", id.name);
         let mut slugs: Vec<String> = repo
             .iter()
@@ -284,6 +321,7 @@ fn routed_apps(repo: &Repository) -> Vec<RoutedApp> {
                 name: id.name.clone(),
                 own_pod,
                 public,
+                shard,
                 slugs,
             },
         );
@@ -359,6 +397,31 @@ fn app_endpoint_route(settings: &Settings, app: &RoutedApp) -> Option<Value> {
             "response-rewrite": security_headers(&[("X-Frame-Options", "DENY")]),
         },
     }))
+}
+
+/// A `wasm` App's server on its own host: `/api/*` to its shard of the WASM host, rewritten to
+/// `/apps/{name}/api/*` so the host knows the App (AP-143, AP-149). The App's own Endpoint keeps
+/// its slugs (priority 35); a request without a session is a `401` for a non-public App, and the
+/// session's token reaches the host as the bearer it forwards to the gateway (AP-147).
+fn app_server_route(settings: &Settings, app: &RoutedApp, upstream_id: &str) -> Value {
+    let name = app.name.as_str();
+    let login = app_login(settings, app, if app.public { "pass" } else { "deny" });
+    let mut oidc = openid_connect_session(settings, &login);
+    oidc["access_token_in_authorization_header"] = json!(true);
+    json!({
+        "id": format!("app-{name}-server"),
+        "uris": ["/api/*"],
+        "host": settings.app_host(name),
+        "priority": 32,
+        "upstream_id": upstream_id,
+        "plugins": {
+            "request-id": { "include_in_response": true },
+            "serverless-pre-function": strip_forgeable_headers(),
+            "openid-connect": oidc,
+            "proxy-rewrite": { "regex_uri": ["^/api/(.*)$", format!("/apps/{name}/api/$1")] },
+            "response-rewrite": security_headers(&[("X-Frame-Options", "DENY")]),
+        },
+    })
 }
 
 /// The old address on the apex: a `308` to the App's host carrying no session, so a
