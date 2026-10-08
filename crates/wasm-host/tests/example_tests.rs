@@ -116,7 +116,7 @@ async fn the_example_keeps_notes_and_files_of_its_own() {
     let digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
     let dir = std::env::temp_dir().join(format!("wasm-host-example-{}", db.suffix));
     std::fs::create_dir_all(&dir).expect("dir");
-    std::fs::write(dir.join(format!("{}.wasm", &digest[7..])), &bytes).expect("component");
+    std::fs::write(dir.join(format!("sha256-{}.wasm", &digest[7..])), &bytes).expect("component");
 
     let (one, two) = (db.id("ex1"), db.id("ex2"));
     place(&db, &one).await;

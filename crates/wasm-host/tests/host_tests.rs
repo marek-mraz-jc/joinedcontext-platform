@@ -89,7 +89,11 @@ impl World {
     /// Places `bytes` as App `name` and returns its placement.
     fn place(&self, name: &str, bytes: &[u8]) -> Placed {
         let digest = digest(bytes);
-        std::fs::write(self.dir.join(format!("{}.wasm", &digest[7..])), bytes).expect("component");
+        std::fs::write(
+            self.dir.join(format!("sha256-{}.wasm", &digest[7..])),
+            bytes,
+        )
+        .expect("component");
         Placed {
             name: name.into(),
             id: format!("{name}-id"),
@@ -201,7 +205,7 @@ async fn a_component_that_does_not_match_its_digest_is_refused() {
     let mut app = world.place("swapped", guest());
     // The store holds other bytes under the recorded digest: a component swapped after its build.
     std::fs::write(
-        world.dir.join(format!("{}.wasm", &app.digest[7..])),
+        world.dir.join(format!("sha256-{}.wasm", &app.digest[7..])),
         variant(9),
     )
     .expect("swap");
