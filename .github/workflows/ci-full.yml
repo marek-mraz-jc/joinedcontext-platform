@@ -14,7 +14,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # wasm32-wasip2: jc-wasm-host's tests build their test App as a component (T-3339).
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with: { targets: wasm32-wasip2 }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
       # otherwise fetch the newest release unchecked (T-3052).
