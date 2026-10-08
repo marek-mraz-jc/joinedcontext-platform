@@ -8,52 +8,16 @@
 /// A source with no schedule is read once a day at 03:00, the example Architecture/22 gives.
 pub const DEFAULT: &str = "0 3 * * *";
 
-/// One field: `*`, `n`, `a-b`, `*/s`, `a-b/s` or a comma list of those, within `min..=max`.
-fn field_matches(field: &str, value: u32, min: u32, max: u32) -> Option<bool> {
-    let mut any = false;
-    for part in field.split(',') {
-        let (range, step) = match part.split_once('/') {
-            Some((range, step)) => (range, step.parse::<u32>().ok().filter(|s| *s > 0)?),
-            None => (part, 1),
-        };
-        let (low, high) = if range == "*" {
-            (min, max)
-        } else if let Some((a, b)) = range.split_once('-') {
-            (a.parse().ok()?, b.parse().ok()?)
-        } else {
-            let n: u32 = range.parse().ok()?;
-            // `n/s` starts at n and runs to the field's end, as Vixie cron reads it.
-            (n, if part.contains('/') { max } else { n })
-        };
-        if low < min || high > max || low > high {
-            return None;
-        }
-        any |= value >= low && value <= high && (value - low).is_multiple_of(step);
-    }
-    Some(any)
-}
-
 /// Whether `cron` names the minute `at`; `None` for an expression that is not five valid fields.
-/// Day of month and weekday follow cron's rule: when both are restricted, either one matching is
-/// enough. Sunday is 0 or 7.
+/// The reading is jc-core's, the one the manifest check uses (`jc_core::cron`).
 pub fn matches(cron: &str, at: time::OffsetDateTime) -> Option<bool> {
-    let fields: Vec<&str> = cron.split_whitespace().collect();
-    let [minute, hour, day, month, weekday] = fields.as_slice() else {
-        return None;
-    };
-    let weekday_now = at.weekday().number_days_from_sunday() as u32;
-    let weekday_ok = field_matches(weekday, weekday_now, 0, 7)?
-        || (weekday_now == 0 && field_matches(weekday, 7, 0, 7)?);
-    let day_ok = field_matches(day, at.day() as u32, 1, 31)?;
-    let day_and_weekday = match (*day == "*", *weekday == "*") {
-        (false, false) => day_ok || weekday_ok,
-        _ => day_ok && weekday_ok,
-    };
-    Some(
-        field_matches(minute, at.minute() as u32, 0, 59)?
-            && field_matches(hour, at.hour() as u32, 0, 23)?
-            && field_matches(month, at.month() as u32, 1, 12)?
-            && day_and_weekday,
+    jc_core::cron::matches(
+        cron,
+        at.minute() as u32,
+        at.hour() as u32,
+        at.day() as u32,
+        at.month() as u32,
+        at.weekday().number_days_from_sunday() as u32,
     )
 }
 
