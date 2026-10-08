@@ -667,7 +667,7 @@ fn a_static_app_with_an_empty_build_is_a_plain_html_app_ap83() {
     );
 }
 
-/// AP-83, AP-11: only a ui App may skip the build, and a ui App is never built by rust.
+/// AP-83, AP-11, AP-142: only a ui App may skip the build, and a ui App builds Rust only beside node.
 #[test]
 fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
     for class in ["ui-rust", "fullstack"] {
@@ -679,11 +679,18 @@ fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
         }
     }
 
-    let rust = PLAIN_HTML.replace("  build: {}", r#"  build: { rust: "1.90", node: "22" }"#);
+    // AP-142: Rust beside node compiles to WebAssembly for the browser; Rust alone builds no
+    // static bundle, and a Rust server is a ui-rust App.
+    let wasm = PLAIN_HTML.replace("  build: {}", r#"  build: { rust: "1.90", node: "22" }"#);
+    App::from_yaml(&wasm)
+        .expect("parses")
+        .validate()
+        .expect("a ui App may compile Rust to WebAssembly beside its node build");
+    let rust = PLAIN_HTML.replace("  build: {}", r#"  build: { rust: "1.90" }"#);
     let app = App::from_yaml(&rust).expect("parses");
     match app
         .validate()
-        .expect_err("a static bundle is not compiled from Rust")
+        .expect_err("a static bundle is not compiled from Rust alone")
     {
         Error::Name {
             field,
@@ -691,7 +698,10 @@ fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
             reason,
         } => {
             assert_eq!((field, value.as_str()), ("build", "rust"));
-            assert!(reason.contains("ui-rust"), "{reason}");
+            assert!(
+                reason.contains("node") && reason.contains("ui-rust"),
+                "{reason}"
+            );
         }
         other => panic!("unexpected error {other:?}"),
     }
