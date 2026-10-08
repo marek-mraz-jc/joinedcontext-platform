@@ -267,13 +267,15 @@ impl AppBuild {
                          have no build step (AP-11, AP-83)",
             });
         }
-        // A static bundle is HTML, CSS and JavaScript: nothing in it is compiled from Rust.
-        if class == AppClass::Ui && self.0.contains_key("rust") {
+        // A static bundle is built by node; Rust beside it compiles to WebAssembly the browser
+        // runs (AP-142), and Rust alone would build no bundle at all.
+        if class == AppClass::Ui && self.0.contains_key("rust") && !self.0.contains_key("node") {
             return Err(Error::Name {
                 field: "build",
                 value: "rust".to_owned(),
-                reason: "a ui app is built by node or by no build step (`build: {}`), never by \
-                         rust; a Rust server is a ui-rust app (AP-83)",
+                reason: "a ui app compiles rust to WebAssembly only beside its node build \
+                         (`build: { node: \"22\", rust: \"1.90\" }`); a Rust server is a ui-rust \
+                         app (AP-83, AP-142)",
             });
         }
         for (toolchain, version) in &self.0 {
