@@ -44,9 +44,14 @@ pub struct Widget {
     /// The property it shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub property: Option<String>,
-    /// The entity type a `grid` widget shows; the type decides its columns (UI-71).
+    /// The entity type a `grid` widget shows, the type decides its columns (UI-71), or the
+    /// type a `bar-chart` or `histogram` counts (UI-93).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entity_type: Option<String>,
+    /// The NGSI-LD `q` a `bar-chart` or `histogram` reads the type with: the explorer's filter
+    /// when the chart came from there (UI-93).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// The configuration of a `grid` widget: the same object the explorer and a generated
     /// application are configured by, without the source and the type those two fields decide
     /// (SDK-30, T-1440).
@@ -56,6 +61,13 @@ pub struct Widget {
 
 /// The widget type of the entity grid.
 pub const GRID_WIDGET: &str = "grid";
+
+/// The widget types that count an entity type's values (UI-93): how many entities hold each value,
+/// and how a number spreads.
+pub const TYPE_CHARTS: [&str; 2] = ["bar-chart", "histogram"];
+
+/// The longest `q` a chart widget carries, as long as a filter the explorer composes.
+const MAX_CHART_Q: usize = 1024;
 
 /// One page: a map of layers, or a grid of widgets, or both.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -98,6 +110,64 @@ impl Kind for DashboardSpec {
         names::validate_dns1123_label(&meta.name)?;
         self.validate()
     }
+}
+
+/// A `bar-chart` or `histogram` names the Endpoint it reads, the PascalCase type it counts and
+/// the property it counts by, and no grid configuration (UI-93).
+fn chart_widget(widget: &Widget) -> Result<()> {
+    if widget.endpoint_ref.is_none() {
+        return Err(Error::Name {
+            field: "spec.pages[].widgets[].endpointRef",
+            value: widget.widget_type.clone(),
+            reason: "a chart widget names the Endpoint it reads through",
+        });
+    }
+    match &widget.entity_type {
+        Some(entity_type) => {
+            names::validate_entity_type(entity_type).map_err(|_| Error::Name {
+                field: "spec.pages[].widgets[].entityType",
+                value: entity_type.clone(),
+                reason: "an entity type is PascalCase, as NGSI-LD writes it",
+            })?;
+        }
+        None => {
+            return Err(Error::Name {
+                field: "spec.pages[].widgets[].entityType",
+                value: widget.widget_type.clone(),
+                reason: "a chart widget names the entity type it counts",
+            });
+        }
+    }
+    if widget
+        .property
+        .as_deref()
+        .is_none_or(|p| p.trim().is_empty())
+    {
+        return Err(Error::Name {
+            field: "spec.pages[].widgets[].property",
+            value: widget.widget_type.clone(),
+            reason: "a chart widget names the property it counts by",
+        });
+    }
+    if widget.grid.is_some() {
+        return Err(Error::Name {
+            field: "spec.pages[].widgets[].grid",
+            value: widget.widget_type.clone(),
+            reason: "`entityType` and `grid` belong to a widget of type `grid`",
+        });
+    }
+    if widget
+        .q
+        .as_deref()
+        .is_some_and(|q| q.chars().count() > MAX_CHART_Q || q.chars().any(char::is_control))
+    {
+        return Err(Error::Name {
+            field: "spec.pages[].widgets[].q",
+            value: widget.widget_type.clone(),
+            reason: "a chart's `q` is one line of at most 1024 characters",
+        });
+    }
+    Ok(())
 }
 
 impl DashboardSpec {
@@ -170,11 +240,20 @@ impl DashboardSpec {
                     if let Some(config) = &widget.grid {
                         config.validate("spec.pages[].widgets[].grid")?;
                     }
+                } else if TYPE_CHARTS.contains(&widget.widget_type.as_str()) {
+                    chart_widget(widget)?;
                 } else if widget.entity_type.is_some() || widget.grid.is_some() {
                     return Err(Error::Name {
                         field: "spec.pages[].widgets[].widgetType",
                         value: widget.widget_type.clone(),
                         reason: "`entityType` and `grid` belong to a widget of type `grid`",
+                    });
+                }
+                if widget.q.is_some() && !TYPE_CHARTS.contains(&widget.widget_type.as_str()) {
+                    return Err(Error::Name {
+                        field: "spec.pages[].widgets[].q",
+                        value: widget.widget_type.clone(),
+                        reason: "`q` belongs to a `bar-chart` or a `histogram`",
                     });
                 }
             }

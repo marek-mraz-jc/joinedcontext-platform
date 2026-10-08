@@ -21,6 +21,15 @@ spec:
           endpointRef: ep-air-quality
           entityId: "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:station-01"
           property: pm10
+        - widgetType: bar-chart
+          endpointRef: ep-air-quality
+          entityType: AirQualityObserved
+          property: airQualityLevel
+          q: 'pm10>0'
+        - widgetType: histogram
+          endpointRef: ep-air-quality
+          entityType: AirQualityObserved
+          property: pm10
         - widgetType: grid
           endpointRef: ep-air-quality
           entityType: AirQualityObserved
