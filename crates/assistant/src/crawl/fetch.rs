@@ -287,7 +287,10 @@ pub async fn fetch_url(
                 Err(_) => return FetchOutcome::Failed(format!("invalid redirect URL: {loc_str}")),
             };
 
-            if target_url.host_str() != Some(site_host) {
+            // The same host on another port is another service (T-3059).
+            if target_url.host_str() != Some(site_host)
+                || target_url.port_or_known_default() != current_url.port_or_known_default()
+            {
                 return FetchOutcome::RedirectExternal { target_url };
             }
 

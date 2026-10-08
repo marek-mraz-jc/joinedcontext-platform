@@ -178,6 +178,7 @@ async fn main() -> ExitCode {
             .map(|o| o.trim_end_matches('/').to_owned()),
         snapshot: RwLock::new(Arc::default()),
         limits: tokio::sync::Mutex::default(),
+        questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
     });
 
     // Ready once the first look at the manifests went through; alive as long as the loop turns.

@@ -874,6 +874,59 @@ async fn a_start_address_that_is_a_pdf_is_read_as_a_document() {
 }
 
 /// Case 4: SSRF guard refusing loopback redirects, link literals, and PublicOnly egress check.
+/// T-3059: a redirect to the same host on another port is another service, and is not followed.
+#[tokio::test]
+async fn a_redirect_to_another_port_of_the_same_host_is_not_followed() {
+    let (admin, pool, db_name) = database("redirectport").await;
+    let site = MockServer::start().await;
+    let other = MockServer::start().await;
+    let port = site.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&site)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(r#"<a href="/moved">Moved</a>"#),
+        )
+        .mount(&site)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/moved"))
+        .respond_with(ResponseTemplate::new(302).insert_header(
+            "location",
+            format!("http://www.city.test:{}/elsewhere", other.address().port()),
+        ))
+        .mount(&site)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("another service"))
+        .mount(&other)
+        .await;
+
+    let spec = test_spec(&format!("http://www.city.test:{port}/"));
+    let mut sink = RecordingSink::default();
+    crawl_site(
+        &pool, &crawler, "hel", "helsinki", "port-src", &spec, &mut sink,
+    )
+    .await
+    .expect("crawl finishes");
+    assert!(
+        other
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "the other port was reached"
+    );
+    drop_database(admin, pool, &db_name).await;
+}
+
 #[tokio::test]
 async fn crawl_ssrf_protection() {
     let (admin, pool, db_name) = database("ssrf").await;

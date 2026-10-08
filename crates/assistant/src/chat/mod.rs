@@ -44,6 +44,11 @@ pub const MAX_TEXT_CHARS: usize = 4_000;
 pub const MAX_TURNS: usize = 6;
 /// How long a conversation may be continued.
 const CONVERSATION_HOURS: i64 = 24;
+/// The most questions answered at once, whatever the deployments' rate limits allow (T-3059):
+/// each one holds the history, up to 250,000 kept characters of tool results and a model call,
+/// so this is what keeps the service under its 1 GB. A question past it is refused, never queued.
+// ponytail: one number for the service; per deployment when one crowds out the others.
+pub const MAX_QUESTIONS: usize = 32;
 
 /// Everything the route answers with.
 pub struct ChatState {
@@ -65,6 +70,8 @@ pub struct ChatState {
     /// The manifests, replaced by the worker every minute.
     pub snapshot: RwLock<Arc<Snapshot>>,
     pub limits: Mutex<Limits>,
+    /// One permit per question being answered, [`MAX_QUESTIONS`] in all.
+    pub questions: Arc<tokio::sync::Semaphore>,
 }
 
 /// Requests per minute, per key, in fixed one-minute windows (AG-101).
@@ -468,14 +475,7 @@ async fn chat(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
-    let client = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .unwrap_or("unknown")
-        .to_owned();
+    let client = client_of(&headers);
     let response = ask(&state, deployment, body, &client, None).await;
     with_cors(response, origin)
 }
@@ -522,6 +522,46 @@ async fn chat_in_portal(
 }
 
 /// One question to `deployment` from `client`, answered as Server-Sent Events.
+/// The visitor as the edge saw them (T-3059): `X-Forwarded-For` read from the right, past the
+/// cluster's own proxies (private, loopback and link-local hops), to the first address the edge
+/// appended. The leftmost entry is whatever the caller wrote, so a per-client limit keyed on it
+/// would be a limit the caller chooses; behind no public hop at all, the first entry is used.
+fn client_of(headers: &HeaderMap) -> String {
+    let Some(chain) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) else {
+        return "unknown".to_owned();
+    };
+    let hops: Vec<&str> = chain
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    hops.iter()
+        .rev()
+        .find(|hop| {
+            hop.parse::<std::net::IpAddr>()
+                .map_or(true, |ip| !internal(ip))
+        })
+        .or(hops.first())
+        .map_or_else(|| "unknown".to_owned(), |hop| (*hop).to_owned())
+}
+
+/// An address of the cluster's own network: a proxy hop, never a visitor.
+fn internal(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [first, second, ..] = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || (first == 100 && second & 0xc0 == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let head = v6.segments()[0];
+            v6.is_loopback() || head & 0xfe00 == 0xfc00 || head & 0xffc0 == 0xfe80
+        }
+    }
+}
+
 async fn ask(
     state: &Arc<ChatState>,
     deployment: Deployment,
@@ -574,6 +614,16 @@ async fn ask(
             return response;
         }
     }
+    let Ok(permit) = Arc::clone(&state.questions).try_acquire_owned() else {
+        let mut response = problem(
+            503,
+            "The assistant is answering as many questions as it can at once. Ask again in a moment.",
+        );
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        return response;
+    };
     let (conversation, spent_before) = match conversation(
         &state.pool,
         &deployment,
@@ -601,6 +651,8 @@ async fn ask(
     let task_state = Arc::clone(state);
     let conversation_id = conversation.clone();
     tokio::spawn(async move {
+        // Held until the answer is done, whether or not anyone still reads it.
+        let _permit = permit;
         let state = task_state;
         let mut failed = Vec::new();
         let connectors = connected(
@@ -668,6 +720,30 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-3059: the per-client key is the address the edge appended, past the cluster's own
+    /// proxies, never one the caller wrote in front of it.
+    #[test]
+    fn the_client_is_the_address_the_edge_appended() {
+        let key = |chain: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_static(chain));
+            client_of(&headers)
+        };
+        assert_eq!(client_of(&HeaderMap::new()), "unknown");
+        assert_eq!(key("198.51.100.9"), "198.51.100.9");
+        // The edge appended the visitor, the ingress appended itself.
+        assert_eq!(key("198.51.100.9, 10.0.0.1"), "198.51.100.9");
+        // A caller who writes an address in front changes nothing.
+        assert_eq!(
+            key("6.6.6.6, 198.51.100.9, 10.42.0.7, 127.0.0.1"),
+            "198.51.100.9"
+        );
+        assert_eq!(key("2001:db8::1, fd00::1, fe80::1"), "2001:db8::1");
+        // Behind no public hop at all, the first address there is.
+        assert_eq!(key("10.0.0.5"), "10.0.0.5");
+        assert_eq!(key(" , "), "unknown");
+    }
 
     /// T-3243: a body the chat cannot read is refused in words, naming the member at fault and
     /// never a Rust type or the deserializer's sentence.

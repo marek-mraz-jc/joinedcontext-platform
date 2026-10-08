@@ -143,6 +143,7 @@ async fn world(test: &str) -> World {
         public_origin: Some("https://assistant.example".into()),
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
+        questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
     });
     World {
         admin,
