@@ -40,6 +40,8 @@ struct World {
     gateway: MockServer,
     functions: MockServer,
     app: axum::Router,
+    /// The service's question permits, to fill in a test of the limit.
+    questions: Arc<tokio::sync::Semaphore>,
 }
 
 fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deployment {
@@ -170,6 +172,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     ]);
     let functions = MockServer::start().await;
     let http = reqwest::Client::new();
+    let questions = Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS));
     let state = Arc::new(ChatState {
         pool: pool.clone(),
         embedder,
@@ -190,6 +193,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         public_origin: Some("https://assistant.example".into()),
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
+        questions: Arc::clone(&questions),
     });
     World {
         admin,
@@ -200,6 +204,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         gateway,
         functions,
         app: router(state),
+        questions,
     }
 }
 
@@ -593,6 +598,90 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
 }
 
 /// AG-98, AG-100, AG-101: what is refused before anything is spent.
+#[tokio::test]
+async fn questions_past_the_service_s_limit_are_refused_before_anything_is_spent() {
+    // T-3059: the service answers at most MAX_QUESTIONS at once and refuses, never queues, the rest.
+    let w = world("chatbusy", deployment(Channel::Public, 50_000, 10)).await;
+    let held = Arc::clone(&w.questions)
+        .acquire_many_owned(u32::try_from(assistant::chat::MAX_QUESTIONS).expect("few"))
+        .await
+        .expect("every permit");
+    let (status, _, headers) =
+        answer_of(&w.app, ask(json!({"message": "Kedy je trh?"}), None)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        headers.get("retry-after").and_then(|v| v.to_str().ok()),
+        Some("5")
+    );
+    assert!(
+        model_calls(&w.proxy).await.is_empty(),
+        "nothing reached the model"
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn one_reply_may_carry_four_calls_and_none_with_overlong_arguments() {
+    // T-3059: past four calls in one reply, or with arguments past 4,096 characters, the call is
+    // answered with a refusal instead of being run.
+    let w = world("chatcalls", deployment(Channel::Public, 50_000, 10)).await;
+    let many = json!({"role": "assistant", "content": null, "tool_calls": (1..=6)
+        .map(|n| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "search", "arguments": json!({"query": format!("trh {n}")}).to_string()}}))
+        .collect::<Vec<_>>()});
+    script(
+        &w.proxy,
+        vec![
+            completion(many, 100),
+            completion(
+                tool_call("c7", "search", json!({"query": "x".repeat(5_000)})),
+                100,
+            ),
+            completion(
+                json!({"role": "assistant", "content": "Trh je v sobotu."}),
+                100,
+            ),
+        ],
+    )
+    .await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kedy je trh?", "connectors": []}), None),
+    )
+    .await;
+    assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
+    let calls = model_calls(&w.proxy).await;
+    let tools = |at: usize| -> Vec<String> {
+        calls[at].1["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    let after_many = tools(1);
+    assert_eq!(after_many.len(), 6, "every call is answered");
+    assert!(
+        after_many[..4]
+            .iter()
+            .all(|t| !t.starts_with("Only 4 calls")),
+        "{after_many:?}"
+    );
+    assert!(
+        after_many[4..]
+            .iter()
+            .all(|t| t.starts_with("Only 4 calls")),
+        "{after_many:?}"
+    );
+    let after_long = tools(2);
+    assert!(
+        after_long
+            .last()
+            .is_some_and(|t| t.starts_with("The arguments are longer than 4096")),
+        "{after_long:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_route_refuses_before_it_spends() {
     let w = world("chatrefuse", deployment(Channel::Public, 50_000, 2)).await;

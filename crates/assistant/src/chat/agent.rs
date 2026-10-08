@@ -23,6 +23,13 @@ const PASSAGES: i64 = 8;
 /// The longest search query the model may write.
 const MAX_QUERY_CHARS: usize = 500;
 
+/// The most tool calls taken from one model reply; the rest are answered with a refusal (T-3059).
+pub const MAX_CALLS_PER_REPLY: usize = 4;
+
+/// The longest arguments one tool call may carry, as JSON (T-3059): a connector's tools take a
+/// type, a few filters and a limit, never a document.
+pub const MAX_ARGUMENTS: usize = 4_096;
+
 /// What the last call is told beside `tool_choice: none`, so it answers from what it has (T-3205).
 const ANSWER_NOW: &str = "No more searches or tools: answer the question now from the passages and tool results above, citing them. If they do not answer it, say so.";
 
@@ -333,8 +340,16 @@ pub async fn answer(
             .collect();
         messages
             .push(json!({"role": "assistant", "content": completion.text, "tool_calls": calls}));
-        for (id, name, arguments) in &completion.calls {
-            let content = if !seen.insert(format!("{name}\u{0}{arguments}")) {
+        for (at, (id, name, arguments)) in completion.calls.iter().enumerate() {
+            let content = if at >= MAX_CALLS_PER_REPLY {
+                // Every call is answered, so the model's history stays whole; past the cap it is
+                // answered with a refusal instead of being run (T-3059).
+                format!("Only {MAX_CALLS_PER_REPLY} calls are taken from one reply. Ask again for the rest, or answer.")
+            } else if arguments.to_string().len() > MAX_ARGUMENTS {
+                format!(
+                    "The arguments are longer than {MAX_ARGUMENTS} characters; call it with fewer."
+                )
+            } else if !seen.insert(format!("{name}\u{0}{arguments}")) {
                 repeated = true;
                 "This exact call was made already. Answer with what you have.".to_owned()
             } else {
