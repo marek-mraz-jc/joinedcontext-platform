@@ -29,16 +29,32 @@ pub fn shard(shard: &str) -> Result<Vec<String>, String> {
     )])
 }
 
-/// One App placed on `shard`: its NOLOGIN role, its schema (owned by the reconciler's role, so the
-/// App's role cannot change it), its rights on its schema alone, and the shard's membership of
-/// that one role.
-pub fn app(shard: &str, id: &str, owner: &str) -> Result<Vec<String>, String> {
-    if !is_id(shard) || !is_id(id) {
-        return Err("shard and App ids are lowercase letters, digits and `_`".into());
+/// The role that owns an App's schema and runs its migrations: `app_<id>_owner`. Each App has its
+/// own, so a view or a function an App's migration defines runs with that App's rights alone: an
+/// owner shared by every App would let one App's view read another App's tables (T-3342).
+pub fn owner_of(id: &str) -> String {
+    format!("{}_owner", role_of(id))
+}
+
+/// One App placed on `shard`: its NOLOGIN role and its own NOLOGIN owner, its schema (owned by
+/// the owner, so the App's role cannot change it), the App's rights on its schema alone, the
+/// shard's membership of the App's role, and `migrator`'s of the owner, so the reconciler can run
+/// the App's migrations as it.
+pub fn app(shard: &str, id: &str, migrator: &str) -> Result<Vec<String>, String> {
+    if !is_id(shard) || !is_id(id) || !is_id(migrator) {
+        return Err(
+            "shard and App ids and the migrator are lowercase letters, digits and `_`".into(),
+        );
     }
     let role = role_of(id);
+    let owner = owner_of(id);
+    let create = |name: &str| {
+        format!("do $$ begin if not exists (select from pg_roles where rolname = '{name}') then create role {name} nologin noinherit; end if; end $$")
+    };
     Ok(vec![
-        format!("do $$ begin if not exists (select from pg_roles where rolname = '{role}') then create role {role} nologin noinherit; end if; end $$"),
+        create(&role),
+        create(&owner),
+        format!("grant {owner} to {migrator}"),
         format!("create schema if not exists {role} authorization {owner}"),
         format!("revoke all on schema {role} from public"),
         format!("grant usage on schema {role} to {role}"),

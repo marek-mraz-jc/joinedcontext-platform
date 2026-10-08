@@ -23,6 +23,7 @@ fn limits() -> SqlLimits {
     SqlLimits {
         statement_timeout: Duration::from_millis(500),
         row_cap: 5,
+        result_bytes: 8 << 20,
         per_app_statements: 4,
         quota_bytes: 100 << 20,
     }
@@ -160,6 +161,29 @@ async fn postgres_itself_refuses_another_apps_schema_and_another_shards_app() {
     assert!(err.to_string().contains("permission denied"), "{err}");
 }
 
+/// T-3342: a migration runs as the App's own owner, so a view (or a function) it defines reads
+/// with that App's rights: one App's migration cannot publish another App's table.
+#[tokio::test]
+async fn a_migration_cannot_reach_another_apps_tables() {
+    let db = Db::new().await;
+    let mut admin = PgConnection::connect(&db.url).await.expect("db");
+    let (a, b) = (db.id("a"), db.id("b"));
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "set role {}",
+        wasm_host::provision::owner_of(&a)
+    )))
+    .execute(&mut admin)
+    .await
+    .expect("as a's owner");
+    let err = sqlx::raw_sql(AssertSqlSafe(format!(
+        "create view app_{a}.leak as select * from app_{b}.notes"
+    )))
+    .execute(&mut admin)
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("permission denied"), "{err}");
+}
+
 #[tokio::test]
 async fn nothing_one_app_set_reaches_the_next_on_the_same_connection() {
     let db = Db::new().await;
@@ -222,6 +246,26 @@ async fn the_row_cap_the_timeout_and_the_quota_stop_a_call_with_a_reason() {
             .unwrap_err(),
         SqlError::Timeout
     );
+    // A result larger than its byte cap, with fewer rows than the row cap (T-3342).
+    let heavy = PgStore::with_pool(
+        db.pool("s1", 1).await,
+        SqlLimits {
+            result_bytes: 1_000,
+            ..limits()
+        },
+    );
+    match heavy
+        .run(
+            &a,
+            "select repeat('x', 600) from notes limit 2".into(),
+            vec![],
+            Kind::Read,
+        )
+        .await
+    {
+        Err(SqlError::Refused(why)) => assert!(why.contains("larger than 1000 bytes"), "{why}"),
+        other => panic!("{other:?}"),
+    }
     let full = PgStore::with_pool(
         db.pool("s1", 1).await,
         SqlLimits {

@@ -279,6 +279,29 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     );
 }
 
+/// T-3342: the wall time holds while the App waits on the host, not only while it computes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_gateway_call_ends_with_the_requests_wall_time() {
+    let gateway = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(8)))
+        .mount(&gateway)
+        .await;
+    let world = World::new("slow", fast(), Some(&gateway.uri()));
+    let app = world.place("waiter", guest());
+    let started = Instant::now();
+    let path = format!("/api/fetch?{}/x", gateway.uri());
+    assert_eq!(
+        world.get(&app, &path, None).await.unwrap_err(),
+        Failure::Timeout
+    );
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(3),
+        "the 1 s wall time and its grace, not the gateway's 8 s: {took:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_app_past_its_concurrency_is_busy_and_a_large_body_is_refused() {
     let world = World::new(

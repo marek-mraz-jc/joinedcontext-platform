@@ -92,6 +92,15 @@ impl Shard {
             );
         };
         let started = Instant::now();
+        // Admitted before the body is read (T-3342).
+        let admission = match self.host.admit(&app) {
+            Ok(admission) => admission,
+            Err(failure) => {
+                self.metrics
+                    .record(&app.name, Outcome::Busy, started.elapsed());
+                return problem(failure.status(), "Application Error", failure.detail());
+            }
+        };
         let token = bearer(request.headers());
         let (parts, body) = request.into_parts();
         let limit = self.host.limits().request_bytes;
@@ -105,7 +114,12 @@ impl Shard {
         };
         let outcome = self
             .host
-            .serve(&app, http::Request::from_parts(parts, body), token)
+            .serve_admitted(
+                &app,
+                admission,
+                http::Request::from_parts(parts, body),
+                token,
+            )
             .await;
         match outcome {
             Ok(response) => {

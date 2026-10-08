@@ -23,6 +23,8 @@ use crate::storage::{Rows, SqlError, Value};
 pub struct SqlLimits {
     pub statement_timeout: Duration,
     pub row_cap: usize,
+    /// The bytes of one result, so a thousand large rows cannot fill the host (T-3342).
+    pub result_bytes: usize,
     /// Statements of one App running at once, so one App cannot hold the shard's whole pool.
     pub per_app_statements: usize,
     /// The bytes an App's schema may hold before writes are refused.
@@ -34,6 +36,7 @@ impl Default for SqlLimits {
         Self {
             statement_timeout: Duration::from_secs(2),
             row_cap: 1_000,
+            result_bytes: 8 << 20,
             per_app_statements: 4,
             quota_bytes: 100 << 20,
         }
@@ -50,9 +53,10 @@ pub enum Kind {
 /// Words that may begin an App's statement.
 const FIRST: &[&str] = &["select", "with", "insert", "update", "delete", "values"];
 
-/// Function names an App's statement may not name, anywhere: role and setting changes, locks held
-/// past the transaction, notifications, large objects, server files, and the built-ins that run
-/// a query given as text (they would run a `SET ROLE` this guard never saw).
+/// Function names an App's statement may not name, anywhere, quoted or not: role and setting
+/// changes, locks held past the transaction, notifications, large objects, server files, and the
+/// built-ins that run a query given as text (`query_to_xml`, `ts_stat`, `ts_rewrite`: they would
+/// run a `set_config` this guard never saw).
 fn refused_word(word: &str) -> bool {
     matches!(
         word,
@@ -71,6 +75,8 @@ fn refused_word(word: &str) -> bool {
             | "cursor_to_xml"
             | "cursor_to_xmlschema"
             | "dblink"
+            | "ts_stat"
+            | "ts_rewrite"
     ) || word.starts_with("pg_advisory")
         || word.starts_with("pg_try_advisory")
         || word.starts_with("lo_")
@@ -96,14 +102,26 @@ fn words(statement: &str) -> Result<(Vec<String>, bool), String> {
             }
             i += 1;
         } else if c == '"' {
+            // A quoted name is still a name: `"set_config"` calls set_config (T-3342). Its text is
+            // a word as written, `""` an escaped quote inside it.
+            let mut name = String::new();
             i += 1;
-            while chars.get(i).is_some_and(|c| *c != '"') {
-                i += 1;
-            }
-            if i >= chars.len() {
-                return Err("a quoted name is not closed".into());
+            loop {
+                match chars.get(i) {
+                    None => return Err("a quoted name is not closed".into()),
+                    Some('"') if chars.get(i + 1) == Some(&'"') => {
+                        name.push('"');
+                        i += 2;
+                    }
+                    Some('"') => break,
+                    Some(c) => {
+                        name.push(*c);
+                        i += 1;
+                    }
+                }
             }
             i += 1;
+            words.push(name);
         } else if c == '-' && chars.get(i + 1) == Some(&'-') {
             while chars.get(i).is_some_and(|c| *c != '\n') {
                 i += 1;
@@ -149,6 +167,12 @@ fn words(statement: &str) -> Result<(Vec<String>, bool), String> {
         } else if c == ';' {
             semicolon = true;
             i += 1;
+        } else if (c == 'u' || c == 'U')
+            && chars.get(i + 1) == Some(&'&')
+            && matches!(chars.get(i + 2), Some('"' | '\''))
+        {
+            // `U&"\0073et_config"` spells a name the guard could not read (T-3342).
+            return Err("unicode-escaped names and strings are not taken".into());
         } else if c.is_alphanumeric() || c == '_' {
             let start = i;
             while chars
@@ -299,6 +323,15 @@ fn value_of(row: &PgRow, index: usize) -> Result<Value, SqlError> {
     })
 }
 
+/// About what a value weighs in the host's memory.
+fn weight(value: &Value) -> usize {
+    match value {
+        Value::Text(v) | Value::Json(v) => v.len() + 16,
+        Value::Bytes(v) => v.len() + 16,
+        _ => 16,
+    }
+}
+
 /// A Postgres error as the App reads it: a refusal for a missing right, a timeout for a cancelled
 /// statement, else the database's own message. Never the statement, never another App's name.
 fn from_db(err: sqlx::Error) -> SqlError {
@@ -422,6 +455,7 @@ impl PgStore {
             let mut stream = query.fetch(&mut *tx);
             let mut columns = Vec::new();
             let mut values = Vec::new();
+            let mut size = 0usize;
             while let Some(row) = stream.try_next().await.map_err(from_db)? {
                 if values.len() == self.limits.row_cap {
                     return Err(SqlError::Refused(format!(
@@ -432,11 +466,17 @@ impl PgStore {
                 if columns.is_empty() {
                     columns = row.columns().iter().map(|c| c.name().to_owned()).collect();
                 }
-                values.push(
-                    (0..row.len())
-                        .map(|i| value_of(&row, i))
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
+                let decoded = (0..row.len())
+                    .map(|i| value_of(&row, i))
+                    .collect::<Result<Vec<_>, _>>()?;
+                size += decoded.iter().map(weight).sum::<usize>();
+                if size > self.limits.result_bytes {
+                    return Err(SqlError::Refused(format!(
+                        "the result is larger than {} bytes; narrow the query",
+                        self.limits.result_bytes
+                    )));
+                }
+                values.push(decoded);
             }
             drop(stream);
             (Some(Rows { columns, values }), 0)
@@ -471,10 +511,7 @@ mod tests {
                 Kind::Write,
             ),
             ("select 'set role x; drop table y' as text_only", Kind::Read),
-            (
-                "select $tag$ set_config $tag$, \"set_config\" from t",
-                Kind::Read,
-            ),
+            ("select $tag$ set_config $tag$, \"body\" from t", Kind::Read),
             ("select 1 -- set_config\n", Kind::Read),
             ("select /* set_config /* nested */ */ 1", Kind::Read),
         ] {
@@ -490,6 +527,14 @@ mod tests {
             "reset role",
             "select set_config('role', 'app_b', true)",
             "select pg_catalog.set_config('search_path', 'app_b', true)",
+            // T-3342: a quoted name is the same function, and an escaped one hides it.
+            "select \"set_config\"('role', 'app_b', true)",
+            "select \"pg_catalog\".\"set_config\"('role', 'app_b', true)",
+            "select U&\"\\0073et_config\"('role', 'app_b', true)",
+            "select \"query_to_xml\"('select 1', true, true, '')",
+            // Text search runs a query given as text too.
+            "select ts_stat('select set_config(''role'', ''app_b'', true)::tsvector')",
+            "select ts_rewrite('a'::tsquery, 'select ''a''::tsquery, ''b''::tsquery')",
             "create table x (i int)",
             "drop table notes",
             "alter role app_a superuser",

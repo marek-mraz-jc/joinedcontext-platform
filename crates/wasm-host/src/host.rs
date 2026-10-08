@@ -168,6 +168,12 @@ impl WasiHttpHooks for GatewayOnly {
     }
 }
 
+/// A request's place among those its App and its tenant may run at once; released when dropped.
+pub struct Admission {
+    _tenant: OwnedSemaphorePermit,
+    _app: OwnedSemaphorePermit,
+}
+
 /// Why a request got no answer from its App, as the edge reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
@@ -401,12 +407,33 @@ impl Host {
         request: http::Request<Bytes>,
         token: Option<String>,
     ) -> Result<http::Response<HyperOutgoingBody>, Failure> {
-        let _tenant = Self::permit(
+        let admission = self.admit(app)?;
+        self.serve_admitted(app, admission, request, token).await
+    }
+
+    /// A place among the requests the App and its tenant may run at once, taken before anything of
+    /// the request is read, so a flood of bodies to one App waits on that App's cap alone (T-3342).
+    pub fn admit(&self, app: &Placed) -> Result<Admission, Failure> {
+        let tenant = Self::permit(
             &self.tenants,
             &app.tenant,
             self.limits.per_tenant_concurrency,
         )?;
-        let _app = Self::permit(&self.apps, &app.id, self.limits.per_app_concurrency)?;
+        let own = Self::permit(&self.apps, &app.id, self.limits.per_app_concurrency)?;
+        Ok(Admission {
+            _tenant: tenant,
+            _app: own,
+        })
+    }
+
+    /// [`Host::serve`] for a request already admitted.
+    pub async fn serve_admitted(
+        &self,
+        app: &Placed,
+        _admission: Admission,
+        request: http::Request<Bytes>,
+        token: Option<String>,
+    ) -> Result<http::Response<HyperOutgoingBody>, Failure> {
         if request.body().len() > self.limits.request_bytes {
             return Err(Failure::TooLarge);
         }
@@ -493,7 +520,22 @@ impl Host {
                 .call_handle(&mut store, incoming, out)
                 .await
         });
-        match receiver.await {
+        // The wall time holds while the App waits on the host too (a slow gateway call): past it,
+        // and a second's grace, the request is over and its instance is dropped (T-3342).
+        let receiver = match tokio::time::timeout(
+            self.limits.wall_time + std::time::Duration::from_secs(1),
+            receiver,
+        )
+        .await
+        {
+            Ok(received) => received,
+            Err(_) => {
+                task.abort();
+                tracing::warn!(app = %app.id, "an App ran past its wall time while waiting on the host");
+                return Err(Failure::Timeout);
+            }
+        };
+        match receiver {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(code)) => Err(Failure::Failed(format!("{code:?}"))),
             Err(_) => Err(match task.await {

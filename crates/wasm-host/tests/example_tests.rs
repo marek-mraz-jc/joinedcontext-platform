@@ -52,14 +52,13 @@ fn example() -> Vec<u8> {
 /// owner, as the reconciler does it.
 async fn place(db: &Db, id: &str) {
     let mut conn = PgConnection::connect(&db.url).await.expect("db");
-    let owner = format!("apps_owner_{}", db.suffix);
     let migration = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/apps/rust-wasm-server/migrations/0001_notes.sql"),
     )
     .expect("migration");
-    let mut statements = provision::app(&format!("s1_{}", db.suffix), id, &owner).expect("app");
-    statements.push(format!("set role {owner}"));
+    let mut statements = provision::app(&format!("s1_{}", db.suffix), id, "postgres").expect("app");
+    statements.push(format!("set role {}", provision::owner_of(id)));
     statements.push(format!("set search_path = app_{id}"));
     statements.push(migration);
     statements.push("reset role".into());

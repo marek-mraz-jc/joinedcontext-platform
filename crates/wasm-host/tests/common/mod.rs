@@ -55,8 +55,7 @@ impl Db {
             .map(|(base, _)| format!("{base}/{name}"))
             .expect("a URL with a database");
         let mut db = PgConnection::connect(&url).await.expect("the new database");
-        let owner = format!("apps_owner_{suffix}");
-        let mut statements = vec![format!("create role {owner} nologin")];
+        let mut statements = Vec::new();
         statements.extend(provision::database(&name));
         for shard in [format!("s1_{suffix}"), format!("s2_{suffix}")] {
             statements.extend(provision::shard(&shard).expect("shard"));
@@ -66,9 +65,9 @@ impl Db {
         }
         for (shard, id) in [("s1", "a"), ("s1", "b"), ("s2", "c")] {
             let (shard, id) = (format!("{shard}_{suffix}"), format!("{id}_{suffix}"));
-            statements.extend(provision::app(&shard, &id, &owner).expect("app"));
-            // The App's migration, as the reconciler runs it: as the owner, never as the App.
-            statements.push(format!("set role {owner}"));
+            statements.extend(provision::app(&shard, &id, "postgres").expect("app"));
+            // The App's migration, as the reconciler runs it: as the App's owner, never the App.
+            statements.push(format!("set role {}", provision::owner_of(&id)));
             statements.push(format!(
                 "create table app_{id}.notes (id serial primary key, body text not null)"
             ));
@@ -125,6 +124,7 @@ impl Store {
             region: "us-east-1".into(),
             key_id: var("JC_WASM_TEST_S3_KEY"),
             secret: var("JC_WASM_TEST_S3_SECRET"),
+            public_endpoint: None,
             http: reqwest::Client::new(),
         };
         let store = Self {

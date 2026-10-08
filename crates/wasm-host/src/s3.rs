@@ -19,6 +19,9 @@ pub struct Bucket {
     pub region: String,
     pub key_id: String,
     pub secret: String,
+    /// The address a browser reaches the store at, when it differs from the shard's own
+    /// (in-cluster) one: presigned URLs are signed for it, so they open from the browser (T-3342).
+    pub public_endpoint: Option<String>,
     pub http: reqwest::Client,
 }
 
@@ -74,6 +77,14 @@ fn stamps(at: OffsetDateTime) -> (String, String) {
     )
 }
 
+/// The `host[:port]` of an endpoint.
+fn host_of(endpoint: &str) -> &str {
+    endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest)
+        .trim_end_matches('/')
+}
+
 /// The SigV4 signature of a canonical request, and the scope it was signed for.
 fn sign(
     secret: &str,
@@ -99,10 +110,7 @@ fn sign(
 
 impl Bucket {
     fn host(&self) -> &str {
-        self.endpoint
-            .split_once("://")
-            .map_or(self.endpoint.as_str(), |(_, rest)| rest)
-            .trim_end_matches('/')
+        host_of(&self.endpoint)
     }
 
     /// `/{bucket}/{key}`, encoded; `/{key}` when the endpoint is the bucket's own host.
@@ -177,14 +185,16 @@ impl Bucket {
             .map(|(k, v)| format!("{}={}", encode(k, false), encode(v, false)))
             .collect::<Vec<_>>()
             .join("&");
+        // Signed for the address the browser uses, which is the one it sends as `Host`.
+        let endpoint = self.public_endpoint.as_deref().unwrap_or(&self.endpoint);
         let canonical = format!(
             "{method}\n{path}\n{canonical_query}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
-            self.host()
+            host_of(endpoint)
         );
         let (signature, _) = sign(&self.secret, &self.region, &amz_date, &date, &canonical);
         format!(
             "{}{path}?{canonical_query}&X-Amz-Signature={signature}",
-            self.endpoint.trim_end_matches('/')
+            endpoint.trim_end_matches('/')
         )
     }
 
@@ -379,6 +389,7 @@ mod tests {
             region: "us-east-1".into(),
             key_id: "AKIAIOSFODNN7EXAMPLE".into(),
             secret: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+            public_endpoint: None,
             http: reqwest::Client::new(),
         }
     }
@@ -425,6 +436,41 @@ mod tests {
         assert!(path_style
             .presign("PUT", "s1/a1/x.png", 300, may_24_2013())
             .starts_with("http://rustfs:9000/apps/s1/a1/x.png?"));
+    }
+
+    #[test]
+    fn a_presigned_url_names_the_address_a_browser_reaches() {
+        let internal = Bucket {
+            endpoint: "http://rustfs.store:9000".into(),
+            bucket: "apps".into(),
+            ..example()
+        };
+        let public = Bucket {
+            public_endpoint: Some("https://files.dev.example".into()),
+            ..internal.clone()
+        };
+        let at = may_24_2013();
+        let (inside, outside) = (
+            internal.presign("GET", "k", 60, at),
+            public.presign("GET", "k", 60, at),
+        );
+        assert!(
+            inside.starts_with("http://rustfs.store:9000/apps/k?"),
+            "{inside}"
+        );
+        assert!(
+            outside.starts_with("https://files.dev.example/apps/k?"),
+            "{outside}"
+        );
+        let signature = |url: &str| {
+            url.rsplit_once("X-Amz-Signature=")
+                .map(|(_, s)| s.to_owned())
+        };
+        assert_ne!(
+            signature(&inside),
+            signature(&outside),
+            "signed for the host the browser sends"
+        );
     }
 
     #[test]

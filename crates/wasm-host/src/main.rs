@@ -8,6 +8,7 @@
 //! | `JC_GATEWAY_URL` | the one origin an App may call, `https://host[:port]` |
 //! | `JC_WASM_S3_ENDPOINT`, `JC_WASM_S3_BUCKET` | the bucket of `components/<64 hex>.wasm` and `apps/<shard>/<id>/` |
 //! | `JC_WASM_S3_KEY_FILE`, `JC_WASM_S3_SECRET_FILE` | the shard's key, as mounted files, never variables |
+//! | `JC_WASM_S3_PUBLIC_ENDPOINT` | the store's address for a browser, which presigned URLs name |
 //! | `JC_WASM_COMPONENTS_DIR` | components from a directory instead of the bucket |
 //! | `JC_WASM_DB_URL_FILE` | the apps database URL as the shard's login role, a mounted file |
 //! | `JC_WASM_DB_POOL` | connections of the shard's pool, default 20 |
@@ -67,6 +68,7 @@ fn bucket() -> Result<Option<Bucket>, String> {
         region: var("JC_WASM_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
         key_id: secret("JC_WASM_S3_KEY_FILE")?,
         secret: secret("JC_WASM_S3_SECRET_FILE")?,
+        public_endpoint: var("JC_WASM_S3_PUBLIC_ENDPOINT"),
         http,
     }))
 }
