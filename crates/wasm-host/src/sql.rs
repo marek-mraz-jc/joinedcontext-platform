@@ -91,10 +91,16 @@ fn words(statement: &str) -> Result<(Vec<String>, bool), String> {
     while i < chars.len() {
         let c = chars[i];
         if c == '\'' {
+            // An `E'...'` string reads a backslash as an escape, so `E'\' '` is one string to
+            // Postgres; read it the same way or a call after it hides inside a "string".
+            let escapes = i > 0
+                && matches!(chars[i - 1], 'e' | 'E')
+                && (i < 2 || !(chars[i - 2].is_alphanumeric() || chars[i - 2] == '_'));
             i += 1;
             loop {
                 match chars.get(i) {
                     None => return Err("a string literal is not closed".into()),
+                    Some('\\') if escapes => i += 2,
                     Some('\'') if chars.get(i + 1) == Some(&'\'') => i += 2,
                     Some('\'') => break,
                     Some(_) => i += 1,
@@ -525,6 +531,9 @@ mod tests {
             "set role app_b",
             "SET search_path = app_b",
             "reset role",
+            // An E'' string's escaped quote keeps the call after it outside any string.
+            "select E'\\' ', set_config('role', 'app_b', true) --'",
+            "select e'\\\\', set_config('role', 'app_b', true)",
             "select set_config('role', 'app_b', true)",
             "select pg_catalog.set_config('search_path', 'app_b', true)",
             // T-3342: a quoted name is the same function, and an escaped one hides it.
