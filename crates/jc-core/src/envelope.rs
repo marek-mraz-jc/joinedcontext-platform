@@ -519,6 +519,10 @@ pub struct Status {
     /// App without it renders no pod, and no other principal may set it (AP-73).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<Build>,
+    /// The shard of the WASM host a `wasm` App runs on, recorded at its first publish and kept;
+    /// the edge's route to the App's server is rendered from it (AP-149).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard: Option<u32>,
 }
 
 impl Status {
@@ -545,6 +549,10 @@ pub struct Build {
     pub sdk_version: String,
     /// When the build lane published it.
     pub built_at: chrono::DateTime<chrono::Utc>,
+    /// The digest of a `wasm` App's server component, taken from the checked bundle and stored
+    /// by it in the object store; what the WASM host loads and checks (AP-151).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
 }
 
 impl Build {
@@ -554,15 +562,22 @@ impl Build {
             text.chars()
                 .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
         };
-        let digest = self
-            .digest
-            .strip_prefix("sha256:")
-            .filter(|rest| rest.len() == 64 && hex(rest));
-        if digest.is_none() {
+        let is_digest = |text: &str| {
+            text.strip_prefix("sha256:")
+                .is_some_and(|rest| rest.len() == 64 && hex(rest))
+        };
+        if !is_digest(&self.digest) {
             return Err(Error::Name {
                 field: "status.build.digest",
                 value: self.digest.clone(),
                 reason: "a digest is `sha256:` and 64 lowercase hexadecimal characters (AP-13a)",
+            });
+        }
+        if let Some(component) = self.component.as_deref().filter(|c| !is_digest(c)) {
+            return Err(Error::Name {
+                field: "status.build.component",
+                value: component.to_owned(),
+                reason: "a digest is `sha256:` and 64 lowercase hexadecimal characters (AP-151)",
             });
         }
         if !(7..=40).contains(&self.commit.len()) || !hex(&self.commit) {

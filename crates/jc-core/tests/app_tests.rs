@@ -1232,3 +1232,25 @@ fn an_unknown_shape_names_wasm_among_what_to_write() {
     let why = AppClass::parse("lambda").expect_err("refused");
     assert!(why.contains("`ui`, `ui-rust` or `wasm`"), "{why}");
 }
+
+/// AP-149, AP-151: a wasm App's status carries its component's digest and its shard; a component
+/// digest nothing could have built is refused like the bundle's.
+#[test]
+fn a_wasm_apps_status_names_its_component_and_its_shard() {
+    let digest = format!("sha256:{}", "a1b2c3d4".repeat(8));
+    let component = format!("sha256:{}", "0f".repeat(32));
+    let status = format!(
+        "status:\n  phase: Live\n  shard: 1\n  build:\n    digest: \"{digest}\"\n    commit: 8c56954a1f0e\n    \
+         sdkVersion: 0.4.1\n    builtAt: \"2026-10-08T06:00:00Z\"\n    component: \"{component}\"\n"
+    );
+    let app = checked(&format!("{WASM_APP}{status}")).expect("valid");
+    let held = app.status.as_ref().expect("status");
+    assert_eq!(held.shard, Some(1));
+    assert_eq!(
+        held.build.as_ref().and_then(|b| b.component.as_deref()),
+        Some(component.as_str())
+    );
+    let broken = format!("{WASM_APP}{}", status.replace(&component, "sha256:beef"));
+    let why = wasm_refusal(checked(&broken));
+    assert!(why.contains("status.build.component"), "{why}");
+}
