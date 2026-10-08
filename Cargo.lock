@@ -5710,10 +5710,12 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -5746,7 +5748,9 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx-core",
+ "sqlx-mysql",
  "sqlx-postgres",
+ "sqlx-sqlite",
  "syn 2.0.119",
  "thiserror 2.0.20",
  "tokio",
@@ -5776,7 +5780,9 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5810,7 +5816,9 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.20",
+ "time",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -5834,8 +5842,10 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6807,6 +6817,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "futures-util",
  "hex",
  "hmac 0.12.1",
  "http",
@@ -6817,6 +6828,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "time",
  "tokio",
  "tracing",

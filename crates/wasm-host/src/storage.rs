@@ -15,6 +15,7 @@ wasmtime::component::bindgen!({
     path: "wit",
     world: "jc:app/app-host",
     imports: { default: async },
+    additional_derives: [PartialEq],
 });
 
 pub use jc::app::blob::{Error as BlobError, Method};
@@ -144,4 +145,107 @@ impl jc::app::blob::Host for State {
 
 pub fn add_to_linker(linker: &mut Linker<State>) -> wasmtime::Result<()> {
     AppHost::add_to_linker::<State, HasSelf<State>>(linker, |state| state)
+}
+
+/// A shard's stores: the apps database and the bucket, each optional, a missing one answering
+/// `unavailable`.
+pub struct Stores {
+    pub sql: Option<crate::sql::PgStore>,
+    pub blob: Option<crate::blob::S3Blob>,
+}
+
+impl Storage for Stores {
+    fn query<'a>(
+        &'a self,
+        app: &'a Placed,
+        statement: String,
+        params: Vec<Value>,
+    ) -> Answer<'a, Rows, SqlError> {
+        Box::pin(async move {
+            let store = self
+                .sql
+                .as_ref()
+                .ok_or_else(|| SqlError::Unavailable(NONE.into()))?;
+            let (rows, _) = store
+                .run(app, statement, params, crate::sql::Kind::Read)
+                .await?;
+            Ok(rows.unwrap_or(Rows {
+                columns: Vec::new(),
+                values: Vec::new(),
+            }))
+        })
+    }
+    fn execute<'a>(
+        &'a self,
+        app: &'a Placed,
+        statement: String,
+        params: Vec<Value>,
+    ) -> Answer<'a, u64, SqlError> {
+        Box::pin(async move {
+            let store = self
+                .sql
+                .as_ref()
+                .ok_or_else(|| SqlError::Unavailable(NONE.into()))?;
+            let (_, changed) = store
+                .run(app, statement, params, crate::sql::Kind::Write)
+                .await?;
+            Ok(changed)
+        })
+    }
+    fn get<'a>(&'a self, app: &'a Placed, key: String) -> Answer<'a, Vec<u8>, BlobError> {
+        Box::pin(async move {
+            self.blob
+                .as_ref()
+                .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
+                .get(app, &key)
+                .await
+        })
+    }
+    fn put<'a>(
+        &'a self,
+        app: &'a Placed,
+        key: String,
+        data: Vec<u8>,
+        content_type: Option<String>,
+    ) -> Answer<'a, (), BlobError> {
+        Box::pin(async move {
+            self.blob
+                .as_ref()
+                .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
+                .put(app, &key, data, content_type)
+                .await
+        })
+    }
+    fn list<'a>(&'a self, app: &'a Placed, prefix: String) -> Answer<'a, Vec<String>, BlobError> {
+        Box::pin(async move {
+            self.blob
+                .as_ref()
+                .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
+                .list(app, &prefix)
+                .await
+        })
+    }
+    fn delete<'a>(&'a self, app: &'a Placed, key: String) -> Answer<'a, (), BlobError> {
+        Box::pin(async move {
+            self.blob
+                .as_ref()
+                .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
+                .delete(app, &key)
+                .await
+        })
+    }
+    fn presign<'a>(
+        &'a self,
+        app: &'a Placed,
+        key: String,
+        method: Method,
+        expires: u32,
+    ) -> Answer<'a, String, BlobError> {
+        Box::pin(async move {
+            self.blob
+                .as_ref()
+                .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
+                .presign(app, &key, method, expires)
+        })
+    }
 }

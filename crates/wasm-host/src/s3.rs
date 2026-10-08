@@ -242,6 +242,130 @@ impl Bucket {
     }
 }
 
+/// The text of every `<tag>…</tag>` in `xml`, entities decoded. S3's list answers are this plain.
+fn elements(xml: &str, tag: &str) -> Vec<String> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(&open) {
+        rest = &rest[start + open.len()..];
+        let Some(end) = rest.find(&close) else { break };
+        out.push(unescape(&rest[..end]));
+        rest = &rest[end + close.len()..];
+    }
+    out
+}
+
+fn unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let Some(end) = rest.find(';') else { break };
+        let entity = &rest[1..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            _ => entity
+                .strip_prefix("#x")
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .or_else(|| entity.strip_prefix('#').and_then(|d| d.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+impl Bucket {
+    /// Every key under `prefix` with its size, following S3's pages.
+    pub async fn list(&self, prefix: &str) -> Result<Vec<(String, u64)>, String> {
+        let path = if self.bucket.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{}", encode(&self.bucket, false))
+        };
+        let mut found = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut query = vec![
+                ("list-type".to_owned(), "2".to_owned()),
+                ("prefix".to_owned(), prefix.to_owned()),
+            ];
+            if let Some(token) = &token {
+                query.push(("continuation-token".to_owned(), token.clone()));
+            }
+            query.sort();
+            let canonical = query
+                .iter()
+                .map(|(k, v)| format!("{}={}", encode(k, false), encode(v, false)))
+                .collect::<Vec<_>>()
+                .join("&");
+            let (authorization, amz_date) = self.authorization(
+                "GET",
+                &path,
+                &canonical,
+                &[],
+                EMPTY_SHA256,
+                OffsetDateTime::now_utc(),
+            );
+            let response = self
+                .http
+                .get(format!(
+                    "{}{path}?{canonical}",
+                    self.endpoint.trim_end_matches('/')
+                ))
+                .header("authorization", authorization)
+                .header("x-amz-date", amz_date)
+                .header("x-amz-content-sha256", EMPTY_SHA256)
+                .send()
+                .await
+                .map_err(|err| format!("the object store: {err}"))?;
+            let status = response.status().as_u16();
+            let body = response
+                .text()
+                .await
+                .map_err(|err| format!("the object store: {err}"))?;
+            if status != 200 {
+                return Err(format!("the object store answered {status} to a listing"));
+            }
+            for contents in elements(&body, "Contents") {
+                let key = elements(&contents, "Key")
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                let size = elements(&contents, "Size")
+                    .into_iter()
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                found.push((key, size));
+            }
+            let truncated = elements(&body, "IsTruncated")
+                .first()
+                .is_some_and(|t| t == "true");
+            token = elements(&body, "NextContinuationToken").into_iter().next();
+            if !truncated || token.is_none() {
+                return Ok(found);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +431,18 @@ mod tests {
     fn a_key_is_encoded_as_sigv4_wants_it() {
         assert_eq!(encode("a b/c+d~é", true), "a%20b/c%2Bd~%C3%A9");
         assert_eq!(encode("a/b", false), "a%2Fb");
+    }
+
+    #[test]
+    fn a_listing_is_read_with_its_entities() {
+        let xml = "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>apps/s1/a/a&amp;b.txt</Key><Size>3</Size></Contents>\
+                   <Contents><Key>apps/s1/a/&#x3C;x&#62;</Key><Size>10</Size></Contents></ListBucketResult>";
+        let keys: Vec<String> = elements(xml, "Contents")
+            .iter()
+            .flat_map(|c| elements(c, "Key"))
+            .collect();
+        assert_eq!(keys, ["apps/s1/a/a&b.txt", "apps/s1/a/<x>"]);
+        assert_eq!(unescape("a &unknown; b &"), "a &unknown; b &");
     }
 
     #[test]

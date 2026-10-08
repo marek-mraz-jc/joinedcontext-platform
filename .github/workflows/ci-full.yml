@@ -42,7 +42,18 @@ jobs:
       # which turns on serde_json's `preserve_order`, and in one invocation that feature reaches
       # every crate, changing the order of every JSON object the gateway and jcctl write
       # (schemas, blueprints, CKAN columns; T-3206).
+      # jc-wasm-host's stores against the RustFS the deployment pins (components/artifact-store),
+      # with a throwaway root key; Postgres is the server above (T-3340).
+      - run: >-
+          docker run -d --name wasm-rustfs -p 19000:9000 -e RUSTFS_ACCESS_KEY=ci-root -e RUSTFS_SECRET_KEY=ci-root-secret
+          docker.io/rustfs/rustfs@sha256:c36b3efea3d1e503f1a2581abd0e7611e0e5820dd30e1850a52384b3fc52bda4
+          && for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:19000/ && break; sleep 1; done
       - run: cargo test --workspace --exclude assistant --all-targets --all-features
+        env:
+          JC_WASM_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+          JC_WASM_TEST_S3: http://127.0.0.1:19000
+          JC_WASM_TEST_S3_KEY: ci-root
+          JC_WASM_TEST_S3_SECRET: ci-root-secret
       - run: cargo test -p assistant --all-targets --all-features
         env:
           JC_ASSISTANT_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres

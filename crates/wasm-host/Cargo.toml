@@ -33,6 +33,8 @@ anyhow = "1"
 url = "2"
 hmac = "0.12"
 time = { version = "0.3", features = ["formatting", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "json", "uuid", "time"] }
+futures-util = { version = "0.3", default-features = false }
 http = "1"
 
 [dev-dependencies]

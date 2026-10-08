@@ -29,14 +29,24 @@ pub struct Placement {
     pub apps: Vec<Placed>,
 }
 
-/// A DNS-label-like id: lowercase letters, digits and `-`/`_`, 1 to 40 characters. It is part of a
-/// database role name and a storage prefix, so nothing else may reach either.
+/// An App's id: lowercase letters, digits and `_`, 1 to 40 characters. It is part of a database
+/// role name (`app_<id>`) and a storage prefix, so nothing else may reach either, and no two ids
+/// may name one role.
 pub fn is_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 40
         && id
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// An App's or a tenant's name: lowercase letters, digits and `-`, 1 to 63 characters.
+pub fn is_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// `sha256:` and 64 lowercase hex digits.
@@ -64,8 +74,8 @@ impl Placement {
         let mut apps = HashMap::new();
         let mut ids = std::collections::HashSet::new();
         for app in placement.apps {
-            if !is_id(&app.id) || !is_id(&app.name) || !is_id(&app.tenant) {
-                return Err(format!("the placement of `{}`: names and ids are lowercase letters, digits, `-` and `_`", app.name));
+            if !is_id(&app.id) || !is_name(&app.name) || !is_name(&app.tenant) {
+                return Err(format!("the placement of `{}`: an id is lowercase letters, digits and `_`, a name lowercase letters, digits and `-`", app.name));
             }
             if !is_digest(&app.digest) {
                 return Err(format!(
@@ -123,6 +133,8 @@ mod tests {
             one.replace("\"a1\"", "\"a1; drop\""),
             one.replace("\"a1\"", "\"A1\""),
             one.replace("\"a1\"", "\"../x\""),
+            one.replace("\"a1\"", "\"a-1\""),
+            one.replace("\"notes\"", "\"no_tes\""),
             one.replace("\"a1\"", "\"\""),
             one.replace(D, "sha256:xyz"),
             one.replace(D, &D.to_uppercase()),
