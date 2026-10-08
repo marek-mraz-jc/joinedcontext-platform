@@ -50,6 +50,9 @@ pub enum AppClass {
     /// The same UI and an axum server in a pod of its own (AP-105…AP-108). Read from `fullstack`
     /// for one release.
     UiRust,
+    /// The same UI and a server component in `server/`, run by the shared WASM host with a
+    /// database schema and a storage prefix of its own (AP-148, ADR-N-044).
+    Wasm,
 }
 
 /// The longest refused value an error quotes back.
@@ -63,6 +66,7 @@ impl AppClass {
         match value {
             "ui" | "static" => Ok(Self::Ui),
             "ui-rust" | "fullstack" => Ok(Self::UiRust),
+            "wasm" => Ok(Self::Wasm),
             "ui-node" => Err(
                 "`ui-node` is a declared App shape that is not built yet (AP-124): \
                               write `ui`, or `ui-rust` for a server of the App's own; a Node app \
@@ -75,8 +79,7 @@ impl AppClass {
                     .to_owned(),
             ),
             other => Err(format!(
-                "`{}` is not an App shape: write `ui`, or `ui-rust` for a server of the App's own \
-                 (AP-124)",
+                "`{}` is not an App shape: write `ui`, `ui-rust` or `wasm` (AP-124, AP-148)",
                 other.chars().take(QUOTED_MAX).collect::<String>()
             )),
         }
@@ -111,12 +114,13 @@ impl JsonSchema for AppClass {
         // The shapes a manifest is written with; the old names are only read (AP-124).
         let schema = schemars::schema::SchemaObject {
             instance_type: Some(schemars::schema::InstanceType::String.into()),
-            enum_values: Some(vec!["ui".into(), "ui-rust".into()]),
+            enum_values: Some(vec!["ui".into(), "ui-rust".into(), "wasm".into()]),
             metadata: Some(Box::new(schemars::schema::Metadata {
                 description: Some(
-                    "The App's shape (AP-124): `ui`, React on the SDK served statically, or \
-                     `ui-rust`, the same UI with an axum server in a pod. `ui-node` is declared \
-                     and not built yet."
+                    "The App's shape (AP-124, AP-148): `ui`, React on the SDK served statically, \
+                     `ui-rust`, the same UI with an axum server in a pod, or `wasm`, the same UI \
+                     with a server component on the shared WASM host. `ui-node` is declared and \
+                     not built yet."
                         .to_string(),
                 ),
                 ..Default::default()
@@ -259,6 +263,20 @@ pub struct AppBuild(pub BTreeMap<String, String>);
 
 impl AppBuild {
     fn validate(&self, class: AppClass) -> Result<()> {
+        // Its interface is built by node and its server component by rust (AP-148).
+        if class == AppClass::Wasm {
+            for toolchain in ["node", "rust"] {
+                if !self.0.contains_key(toolchain) {
+                    return Err(Error::Name {
+                        field: "build",
+                        value: toolchain.to_owned(),
+                        reason: "a wasm app builds its interface with node and its server \
+                                 component with rust: write `build: { node: \"22\", rust: \"1.90\" }` \
+                                 (AP-148)",
+                    });
+                }
+            }
+        }
         if self.0.is_empty() && class != AppClass::Ui {
             return Err(Error::Name {
                 field: "build",
@@ -674,6 +692,119 @@ pub struct AppSpec {
     /// the red lane (AP-134).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub egress: Vec<AppEgress>,
+    /// The database schema and the storage prefix of a `wasm` App (AP-148).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<AppStorage>,
+}
+
+/// The smallest and largest quota of either store, MiB (AP-148).
+pub const STORAGE_QUOTA_MIB: std::ops::RangeInclusive<u32> = 1..=10_240;
+
+/// What a `wasm` App stores: its own schema in `apps-db` and its own prefix in the object store
+/// (AP-148, ADR-N-044).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppStorage {
+    /// Its schema, migrated by the reconciler at publish (AP-149).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql: Option<SqlStorage>,
+    /// Its objects, under its own prefix (AP-145).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<BlobStorage>,
+}
+
+/// An App's schema (AP-148, AP-149).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SqlStorage {
+    /// The folder of the repository whose `.sql` files are run in the order of their names.
+    #[serde(default = "SqlStorage::default_migrations")]
+    pub migrations: String,
+    /// How much the schema may hold, MiB.
+    #[serde(default = "SqlStorage::default_quota", rename = "quotaMiB")]
+    pub quota_mib: u32,
+}
+
+impl SqlStorage {
+    fn default_migrations() -> String {
+        "migrations".to_owned()
+    }
+    fn default_quota() -> u32 {
+        100
+    }
+}
+
+impl Default for SqlStorage {
+    fn default() -> Self {
+        Self {
+            migrations: Self::default_migrations(),
+            quota_mib: Self::default_quota(),
+        }
+    }
+}
+
+/// An App's object prefix (AP-148).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BlobStorage {
+    /// How much the prefix may hold, MiB.
+    #[serde(default = "BlobStorage::default_quota", rename = "quotaMiB")]
+    pub quota_mib: u32,
+}
+
+impl BlobStorage {
+    fn default_quota() -> u32 {
+        1024
+    }
+}
+
+impl Default for BlobStorage {
+    fn default() -> Self {
+        Self {
+            quota_mib: Self::default_quota(),
+        }
+    }
+}
+
+impl AppStorage {
+    fn validate(&self) -> Result<()> {
+        let quota = |field: &str, mib: u32| -> Result<()> {
+            if STORAGE_QUOTA_MIB.contains(&mib) {
+                Ok(())
+            } else {
+                Err(Error::Invalid {
+                    field: field.to_owned(),
+                    reason: format!(
+                        "{mib} MiB: a quota is a whole number of MiB from {} to {} (AP-148)",
+                        STORAGE_QUOTA_MIB.start(),
+                        STORAGE_QUOTA_MIB.end()
+                    ),
+                })
+            }
+        };
+        if let Some(sql) = &self.sql {
+            quota("storage.sql.quotaMiB", sql.quota_mib)?;
+            let path = sql.migrations.as_str();
+            let refused = path.split('/').any(|part| matches!(part, "" | "." | ".."))
+                || !path
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b));
+            if refused {
+                return Err(Error::Invalid {
+                    field: "storage.sql.migrations".to_owned(),
+                    reason: format!(
+                        "`{}`: a folder of the App's repository, relative and without `..`, \
+                         such as `migrations` (AP-148)",
+                        path.chars().take(QUOTED_MAX).collect::<String>()
+                    ),
+                });
+            }
+        }
+        if let Some(blob) = &self.blob {
+            quota("storage.blob.quotaMiB", blob.quota_mib)?;
+        }
+        Ok(())
+    }
 }
 
 /// One destination a server pod reaches besides its endpoint (AP-134). A NetworkPolicy matches
@@ -760,7 +891,7 @@ impl Kind for AppSpec {
         // static App naming a folder of the configuration repository is an App it cannot build,
         // and it answers 404 to its whole audience. Only a bundle the Portal image ships is
         // served without the lane (AP-87); the Portal checks that it holds that bundle.
-        if self.class == AppClass::Ui
+        if matches!(self.class, AppClass::Ui | AppClass::Wasm)
             && self.lifecycle == AppLifecycle::Published
             && self.source.git.is_none()
             && meta
@@ -772,8 +903,8 @@ impl Kind for AppSpec {
             return Err(Error::Name {
                 field: "spec.source",
                 value: "path".to_owned(),
-                reason: "a published ui App names spec.source.git: the build lane builds a \
-                         repository at a commit, not a folder of the configuration repository; \
+                reason: "a published ui or wasm App names spec.source.git: the build lane builds \
+                         a repository at a commit, not a folder of the configuration repository; \
                          retire the App, or publish it again from its own repository (AP-87)",
             });
         }
@@ -928,6 +1059,17 @@ impl AppSpec {
         for destination in &self.egress {
             destination.validate()?;
         }
+        if let Some(storage) = &self.storage {
+            if self.class != AppClass::Wasm {
+                return Err(Error::Name {
+                    field: "storage",
+                    value: self.class.to_string(),
+                    reason: "only a wasm app has a schema and a storage prefix of the platform's: \
+                             write `kind: wasm`, or remove spec.storage (AP-148)",
+                });
+            }
+            storage.validate()?;
+        }
 
         if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {
             return Err(Error::Name {
@@ -1000,7 +1142,7 @@ impl AppSpec {
                     field: "visibility",
                     value: "roles".to_owned(),
                     reason: "visibility: roles is enforced by the static host, and a ui-rust \
-                             app's requests never pass it (AP-94)",
+                             or wasm app's server requests never pass it (AP-94, AP-148)",
                 });
             }
         }
@@ -1031,6 +1173,7 @@ impl fmt::Display for AppClass {
         f.write_str(match self {
             Self::Ui => "ui",
             Self::UiRust => "ui-rust",
+            Self::Wasm => "wasm",
         })
     }
 }

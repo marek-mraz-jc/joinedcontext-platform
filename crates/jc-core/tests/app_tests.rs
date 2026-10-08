@@ -1061,3 +1061,174 @@ fn the_shapes_are_ui_and_ui_rust_and_ui_node_is_refused_until_it_is_built_ap124(
         "ui-rust"
     );
 }
+
+/// A `wasm` App with a schema and a storage prefix (AP-148, ADR-N-044).
+const WASM_APP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: feedback-box
+  namespace: helsinki
+spec:
+  kind: wasm
+  source:
+    git: { url: "https://dev.joinedcontext.com/git/joinedcontext/helsinki_feedback-box.git", ref: main }
+  build: { node: "22", rust: "1.90" }
+  visibility: project
+  lifecycle: published
+  storage:
+    sql: { migrations: db/migrations, quotaMiB: 50 }
+    blob: {}
+  dataNeeds:
+    - contextSpaceRef: { kind: ContextSpace, name: helsinki }
+      types: [Event]
+      operations: [queryEntity]
+"#;
+
+/// The App read and validated, or why not, in words.
+fn checked(yaml: &str) -> Result<App, String> {
+    let app = App::from_yaml(yaml).map_err(|e| e.to_string())?;
+    app.validate().map_err(|e| e.to_string())?;
+    Ok(app)
+}
+
+fn wasm_app(edit: impl FnOnce(&mut String)) -> Result<App, String> {
+    let mut yaml = WASM_APP.to_owned();
+    edit(&mut yaml);
+    checked(&yaml)
+}
+
+fn wasm_refusal(result: Result<App, String>) -> String {
+    result.expect_err("refused")
+}
+
+#[test]
+fn a_wasm_app_declares_its_schema_and_prefix_and_round_trips_ap148() {
+    let app = wasm_app(|_| {}).expect("a wasm App validates");
+    assert_eq!(app.spec.class, AppClass::Wasm);
+    assert_eq!(app.spec.class.to_string(), "wasm");
+    let storage = app.spec.storage.clone().expect("storage");
+    let sql = storage.sql.expect("sql");
+    assert_eq!(
+        (sql.migrations.as_str(), sql.quota_mib),
+        ("db/migrations", 50)
+    );
+    assert_eq!(
+        storage.blob.expect("blob").quota_mib,
+        1024,
+        "the default blob quota"
+    );
+    assert_eq!(
+        app,
+        App::from_yaml(&app.to_yaml().expect("yaml")).expect("re-read")
+    );
+    // A sql store with nothing said takes its defaults.
+    let defaults = wasm_app(|y| {
+        *y = y.replace(
+            "sql: { migrations: db/migrations, quotaMiB: 50 }",
+            "sql: {}",
+        )
+    })
+    .expect("defaults");
+    let sql = defaults.spec.storage.and_then(|s| s.sql).expect("sql");
+    assert_eq!(
+        (sql.migrations.as_str(), sql.quota_mib),
+        ("migrations", 100)
+    );
+    // No storage at all is a wasm App with a server and no store.
+    assert!(wasm_app(|y| *y = y.replace(
+        "  storage:\n    sql: { migrations: db/migrations, quotaMiB: 50 }\n    blob: {}\n",
+        ""
+    ))
+    .is_ok());
+}
+
+#[test]
+fn a_wasm_app_builds_with_node_and_rust_ap148() {
+    for build in [
+        r#"build: { node: "22" }"#,
+        r#"build: { rust: "1.90" }"#,
+        "build: {}",
+    ] {
+        let why = wasm_refusal(wasm_app(|y| {
+            *y = y.replace(r#"build: { node: "22", rust: "1.90" }"#, build)
+        }));
+        assert!(
+            why.contains("node: \"22\", rust: \"1.90\""),
+            "{build}: {why}"
+        );
+    }
+}
+
+#[test]
+fn storage_is_refused_on_any_other_kind_and_quotas_and_folders_are_checked_ap148() {
+    for kind in ["ui", "ui-rust"] {
+        let why = wasm_refusal(wasm_app(|y| {
+            *y = y.replace("kind: wasm", &format!("kind: {kind}"))
+        }));
+        assert!(
+            why.contains("write `kind: wasm`, or remove spec.storage"),
+            "{kind}: {why}"
+        );
+    }
+    for quota in ["0", "10241"] {
+        let why = wasm_refusal(wasm_app(|y| {
+            *y = y.replace("quotaMiB: 50", &format!("quotaMiB: {quota}"))
+        }));
+        assert!(
+            why.contains("storage.sql.quotaMiB") && why.contains("from 1 to 10240"),
+            "{why}"
+        );
+    }
+    let why = wasm_refusal(wasm_app(|y| {
+        *y = y.replace("blob: {}", "blob: { quotaMiB: 0 }")
+    }));
+    assert!(why.contains("storage.blob.quotaMiB"), "{why}");
+    for folder in [
+        "../secrets",
+        "/etc",
+        "db//m",
+        "db/",
+        ".",
+        "db/../x",
+        "db\\\\m",
+        "db m",
+        "",
+    ] {
+        let why = wasm_refusal(wasm_app(|y| {
+            *y = y.replace(
+                "migrations: db/migrations",
+                &format!("migrations: \"{folder}\""),
+            )
+        }));
+        assert!(
+            why.contains("storage.sql.migrations") && why.contains("relative and without `..`"),
+            "{folder:?}: {why}"
+        );
+    }
+    assert!(
+        App::from_yaml(&WASM_APP.replace("blob: {}", "blob: { quota: 5 }")).is_err(),
+        "an unknown field"
+    );
+}
+
+#[test]
+fn a_wasm_app_is_never_visible_by_roles_and_published_from_its_own_repository_ap148() {
+    let roles = WASM_APP.replace(
+        "  visibility: project\n",
+        "  visibility: roles\n  roles:\n    - name: viewer\n      title: { en: Viewer }\n",
+    );
+    let why = wasm_refusal(checked(&roles));
+    assert!(why.contains("ui-rust or wasm app"), "{why}");
+    let path = WASM_APP.replace(
+        "    git: { url: \"https://dev.joinedcontext.com/git/joinedcontext/helsinki_feedback-box.git\", ref: main }",
+        "    path: ./src",
+    );
+    let why = wasm_refusal(checked(&path));
+    assert!(why.contains("spec.source.git"), "{why}");
+}
+
+#[test]
+fn an_unknown_shape_names_wasm_among_what_to_write() {
+    let why = AppClass::parse("lambda").expect_err("refused");
+    assert!(why.contains("`ui`, `ui-rust` or `wasm`"), "{why}");
+}
