@@ -1,0 +1,10 @@
+{
+  "about": "T-3325: the owner's question on the public assistant, in English, Slovak and Finnish. Each answer must list events, each with a start date and time, a place, none in a neighbouring municipality, none over by the day it was recorded. Recorded once on dev after the fix is deployed (recordings/helsinki-events.json, with the day in `recorded`).",
+  "project": "helsinki",
+  "elsewhere": ["Espoo", "Esbo", "Vantaa", "Vanda", "Kauniainen", "Grankulla", "Iso Omena", "Leppävaara", "Tapiola"],
+  "questions": [
+    {"id": "helsinki-events-en", "lang": "en", "ask": "What are the events in Helsinki?"},
+    {"id": "helsinki-events-sk", "lang": "sk", "ask": "Aké podujatia sú v Helsinkách?"},
+    {"id": "helsinki-events-fi", "lang": "fi", "ask": "Mitä tapahtumia Helsingissä on?"}
+  ]
+}

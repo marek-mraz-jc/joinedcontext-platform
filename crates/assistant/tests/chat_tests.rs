@@ -92,7 +92,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             (
                 "https://hronov.example/ovzdusie",
                 "sk",
-                "Meracie stanice kvality ovzdušia sú na Námestí SNP a pri železničnej stanici.",
+                "# Ovzdušie v Hronove\n\nMeracie stanice kvality ovzdušia sú na Námestí SNP a pri železničnej stanici.",
             ),
             (
                 "https://hronov.example/kniznica",
@@ -374,6 +374,9 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
         "only the numbers the answer uses: {citations:?}"
     );
     assert_eq!(citations[0]["url"], "https://hronov.example/ovzdusie");
+    // Named by its page's title for the visitor (T-3325).
+    assert_eq!(citations[0]["title"], "Ovzdušie v Hronove");
+    // No page of the sources gives this Endpoint's address: the live data stays unlinked.
     assert_eq!(
         citations[1],
         json!({"n": 3, "tool": "query_entities", "endpoint": "ovzdusie"})

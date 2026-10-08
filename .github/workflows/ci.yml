@@ -117,6 +117,14 @@ jobs:
       # different schema and are checked by `cargo test -p jcctl`.
       - run: bento lint ./examples/ingestion/*/bento.yaml ./examples/ingestion/gtfs-rt/tests/decoder.yaml
       - run: bento test ./examples/ingestion/...
+  widget:
+    # T-3325: the assistant widget's answer renderer, with the runner's own Node: no install,
+    # no dependency, the built-in test runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: node --test crates/assistant/widget/render.test.js
   gitleaks:
     runs-on: ubuntu-latest
     timeout-minutes: 3

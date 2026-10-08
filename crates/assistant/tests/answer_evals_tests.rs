@@ -28,6 +28,13 @@ const QUESTIONS_LATER: &[&str] = &["bbsk", "praha"];
 
 const FIXTURE: &str = include_str!("fixtures/answer_evals/questions.json");
 
+/// T-3325's event questions, judged by [`judge_events`].
+const EVENTS: &str = include_str!("fixtures/answer_evals/events.json");
+
+/// Whether the event questions still wait for their one live run, on the build that carries the
+/// fix. It only goes from true to false: the recording that lands sets it.
+const EVENTS_UNRECORDED: bool = true;
+
 /// Words frequent in one language and rare in the others. Slovak and Czech share most of theirs,
 /// so first a text is told Slavic, Finnish or English, then Czech from Slovak.
 const SK_WORDS: &[&str] = &[
@@ -618,6 +625,374 @@ async fn record_one_live_run() {
         .join("tests/fixtures/answer_evals/recordings")
         .join(format!("{project}.json"));
     std::fs::create_dir_all(path.parent().expect("dir")).expect("the recordings folder");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&recording).expect("json") + "\n",
+    )
+    .expect("the recording is written");
+}
+
+/// The month a word names, in English, Slovak (genitive) or Finnish (partitive), by its stem.
+fn month(word: &str) -> Option<u32> {
+    const STEMS: [&[&str]; 12] = [
+        &["jan", "tammi"],
+        &["feb", "helmi"],
+        &["mar", "maalis"],
+        &["apr", "huhti"],
+        &["may", "máj", "touko"],
+        &["jun", "jún", "kesä"],
+        &["jul", "júl", "heinä"],
+        &["aug", "elo"],
+        &["sep", "syys"],
+        &["oct", "okt", "loka"],
+        &["nov", "marras"],
+        &["dec", "joulu"],
+    ];
+    let word = word.to_lowercase();
+    // "marraskuuta" starts like "mar": the longer stem wins.
+    let mut best: Option<(usize, u32)> = None;
+    for (at, stems) in STEMS.iter().enumerate() {
+        for stem in stems.iter() {
+            if word.starts_with(stem) && best.is_none_or(|(len, _)| stem.len() > len) {
+                best = Some((stem.len(), at as u32 + 1));
+            }
+        }
+    }
+    best.map(|(_, m)| m)
+}
+
+/// The words and numbers of a line with what stands between each and the next.
+fn tokens(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut word = String::new();
+    let mut gap = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() {
+            if !gap.is_empty() || word.is_empty() {
+                if !word.is_empty() {
+                    out.push((std::mem::take(&mut word), std::mem::take(&mut gap)));
+                }
+                gap.clear();
+            }
+            word.push(c);
+        } else if !word.is_empty() {
+            gap.push(c);
+        }
+    }
+    if !word.is_empty() {
+        out.push((word, gap));
+    }
+    out
+}
+
+/// The first date a line names, as (year, month, day): `2026-10-11`, `11.10.2026`, `11.10.`,
+/// `11 Oct 2026`, `Oct 11`, `11. októbra`, `11. lokakuuta`. A date without a year takes `year`.
+fn date_in(line: &str, year: i32) -> Option<(i32, u32, u32)> {
+    let t = tokens(line);
+    let num = |i: usize| t.get(i).and_then(|(w, _)| w.parse::<u32>().ok());
+    for i in 0..t.len() {
+        let gap = t[i].1.trim();
+        if let (Some(y), Some(m), Some(d)) = (num(i), num(i + 1), num(i + 2)) {
+            if t[i].0.len() == 4
+                && gap == "-"
+                && t[i + 1].1.trim() == "-"
+                && (1..=12).contains(&m)
+                && (1..=31).contains(&d)
+            {
+                return Some((y as i32, m, d));
+            }
+        }
+        let Some(d) = num(i).filter(|d| (1..=31).contains(d)) else {
+            if let (Some(m), Some(d)) = (
+                month(&t[i].0)
+                    .filter(|_| t[i].0.len() >= 3 && t[i].0.chars().all(char::is_alphabetic)),
+                num(i + 1),
+            ) {
+                if (1..=31).contains(&d) {
+                    let y = num(i + 2).filter(|y| *y > 1999).map_or(year, |y| y as i32);
+                    return Some((y, m, d));
+                }
+            }
+            continue;
+        };
+        let year_after = |j: usize| num(j).filter(|y| *y > 1999).map_or(year, |y| y as i32);
+        if gap.starts_with('.') {
+            if let Some(m) = num(i + 1).filter(|m| (1..=12).contains(m)) {
+                if t[i + 1].1.starts_with('.') {
+                    return Some((year_after(i + 2), m, d));
+                }
+            }
+        }
+        if let Some(m) = t
+            .get(i + 1)
+            .and_then(|(w, _)| month(w).filter(|_| w.chars().all(char::is_alphabetic)))
+        {
+            return Some((year_after(i + 2), m, d));
+        }
+    }
+    None
+}
+
+/// Whether a line names a time of day: `19:00`, `18.30` (not the `11.10.` of a date), `klo 18`.
+fn has_time(line: &str) -> bool {
+    let t = tokens(line);
+    t.iter().enumerate().any(|(i, (w, gap))| {
+        let hour = w.parse::<u32>().ok().filter(|h| *h <= 23);
+        let minutes = t
+            .get(i + 1)
+            .filter(|(m, _)| m.len() == 2 && m.parse::<u32>().is_ok_and(|m| m <= 59));
+        match (hour, minutes) {
+            (Some(_), Some((_, after)))
+                if gap == ":" || (gap == "." && !after.starts_with('.')) =>
+            {
+                true
+            }
+            _ => {
+                w == "klo"
+                    && t.get(i + 1)
+                        .is_some_and(|(h, _)| h.parse::<u32>().is_ok_and(|h| h <= 23))
+            }
+        }
+    })
+}
+
+const WEEKDAYS: &[&str] = &[
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+    "sat",
+    "sun",
+];
+
+/// Why an answer to an event question fails, or nothing: in the asker's language, a list of
+/// events, each with a start date and time and a place, none in `elsewhere`, none over by
+/// `today`.
+fn judge_events(
+    lang: &str,
+    answer: &Value,
+    elsewhere: &[&str],
+    today: (i32, u32, u32),
+) -> Vec<String> {
+    let text = answer["text"].as_str().unwrap_or_default();
+    let mut why = Vec::new();
+    if language(text) != Some(lang) {
+        why.push(format!("not in {lang}"));
+    }
+    let items: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| {
+            l.strip_prefix("- ")
+                .or_else(|| l.strip_prefix("* "))
+                .or_else(|| {
+                    let (n, rest) = l.split_once(". ")?;
+                    n.chars().all(|c| c.is_ascii_digit()).then_some(rest)
+                })
+        })
+        .collect();
+    if items.is_empty() {
+        why.push("lists no event".into());
+    }
+    for item in items {
+        let plain = item.replace("**", "");
+        let short: String = plain.chars().take(40).collect();
+        match date_in(&plain, today.0) {
+            None => why.push(format!("no date: {short}")),
+            Some(date) if date < today => why.push(format!("over: {short}")),
+            Some(_) => {}
+        }
+        if !has_time(&plain) {
+            why.push(format!("no time: {short}"));
+        }
+        if let Some(place) = elsewhere.iter().find(|p| plain.contains(*p)) {
+            why.push(format!("in {place}: {short}"));
+        }
+        // A place: a capitalised word after the event's name that is no month or weekday.
+        let after_name = plain
+            .split_once([',', '–', '—', ':', '('])
+            .map_or("", |(_, rest)| rest);
+        let named = tokens(after_name).iter().any(|(w, _)| {
+            w.chars().count() >= 3
+                && w.chars().next().is_some_and(char::is_uppercase)
+                && month(w).is_none()
+                && !WEEKDAYS.contains(&w.to_lowercase().as_str())
+        });
+        if !named {
+            why.push(format!("no place: {short}"));
+        }
+    }
+    why
+}
+
+fn events() -> Value {
+    serde_json::from_str(EVENTS).expect("events.json is JSON")
+}
+
+#[test]
+fn an_event_answer_needs_a_date_a_time_and_a_place_upcoming_and_in_the_city() {
+    let elsewhere = ["Espoo", "Iso Omena"];
+    let today = (2026, 10, 8);
+    let answer = |text: &str| serde_json::json!({"text": text});
+    let good = "Here are the upcoming events in Helsinki [1]:\n- **Workshop for Families** – Sat 11 Oct 2026, 10:00–12:00, Oodi, Töölönlahdenkatu 4 [1]\n- **Jazz evening**, October 12, 19:00, Savoy-teatteri [2]";
+    assert_eq!(
+        judge_events("en", &answer(good), &elsewhere, today),
+        Vec::<String>::new()
+    );
+    let sk = "Toto sú podujatia v Helsinkách:\n- **Koncert** – 11. októbra o 18:00, Musiikkitalo\n- **Trh**, 12.10.2026 9.30, Kauppatori";
+    assert_eq!(
+        judge_events("sk", &answer(sk), &elsewhere, today),
+        Vec::<String>::new()
+    );
+    let fi = "Tässä ovat tapahtumat:\n1. **Konsertti**: 11. lokakuuta klo 18, Musiikkitalo\n2. **Tori** – 2026-10-12 klo 9.30, Kauppatori";
+    assert_eq!(
+        judge_events("fi", &answer(fi), &elsewhere, today),
+        Vec::<String>::new()
+    );
+
+    // What the owner got (T-3325): Espoo, no date, no time.
+    let owner = "The **Helsinki events** dataset [2, 3] lists:\n- **Workshop for Families** (Iso Omena, Leppävaarankatu 9) [9]";
+    let why = judge_events("en", &answer(owner), &elsewhere, today);
+    assert!(why.iter().any(|w| w.starts_with("no date")), "{why:?}");
+    assert!(why.iter().any(|w| w.starts_with("no time")), "{why:?}");
+    assert!(why.iter().any(|w| w.starts_with("in Iso Omena")), "{why:?}");
+    let past = judge_events(
+        "en",
+        &answer("These are the events:\n- **Old fair**, 1 Oct 2026, 10:00, Kauppatori"),
+        &elsewhere,
+        today,
+    );
+    assert_eq!(past, vec!["over: Old fair, 1 Oct 2026, 10:00, Kauppatori"]);
+    let nowhere = judge_events(
+        "en",
+        &answer("These are the events:\n- **Fair**, 11 Oct 2026, 10:00"),
+        &elsewhere,
+        today,
+    );
+    assert_eq!(nowhere, vec!["no place: Fair, 11 Oct 2026, 10:00"]);
+    assert_eq!(
+        judge_events(
+            "en",
+            &answer("There are no events in the data."),
+            &elsewhere,
+            today
+        ),
+        vec!["lists no event"]
+    );
+    assert!(judge_events("fi", &answer(good), &elsewhere, today).contains(&"not in fi".to_owned()));
+    // A date without a year is this year's; 11.10. is a date, never a time.
+    assert_eq!(date_in("11.10. Oodi", 2026), Some((2026, 10, 11)));
+    assert!(!has_time("11.10. Oodi"));
+    assert_eq!(date_in("15. marraskuuta", 2026), Some((2026, 11, 15)));
+}
+
+#[test]
+fn the_event_questions_are_recorded_once_and_pass_the_judge() {
+    let fixture = events();
+    let questions = fixture["questions"].as_array().expect("questions");
+    let langs: BTreeSet<&str> = questions
+        .iter()
+        .filter_map(|q| q["lang"].as_str())
+        .collect();
+    assert_eq!(langs, BTreeSet::from(["en", "fi", "sk"]));
+    for q in questions {
+        assert_eq!(
+            language(q["ask"].as_str().expect("ask")),
+            q["lang"].as_str(),
+            "{}",
+            q["id"]
+        );
+    }
+    let recorded = recording("helsinki-events");
+    assert_eq!(
+        recorded.is_none(),
+        EVENTS_UNRECORDED,
+        "the event questions were recorded (set EVENTS_UNRECORDED to false) or lost their recording"
+    );
+    let Some(recorded) = recorded else { return };
+    let day: Vec<i32> = recorded["recorded"]
+        .as_str()
+        .expect("the recording says the day it was made")
+        .split('-')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    let today = (day[0], day[1] as u32, day[2] as u32);
+    let elsewhere: Vec<&str> = fixture["elsewhere"]
+        .as_array()
+        .expect("elsewhere")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut failed = Vec::new();
+    for q in questions {
+        let id = q["id"].as_str().expect("id");
+        let why = judge_events(
+            q["lang"].as_str().expect("lang"),
+            &recorded["answers"][id],
+            &elsewhere,
+            today,
+        );
+        if !why.is_empty() {
+            failed.push(format!("{id}: {}", why.join("; ")));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The one live run of the event questions (T-3325), through the Portal's chat of the public
+/// deployment `JC_EVAL_DEPLOYMENT`, which answers as the widget does (AG-115). Same variables as
+/// [`record_one_live_run`].
+#[tokio::test]
+#[ignore = "a live run against dev: spends model tokens, owner-approved once"]
+async fn record_the_event_questions_live() {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is not set"));
+    let (portal, cookie, deployment) = (
+        var("JC_EVAL_PORTAL"),
+        var("JC_EVAL_COOKIE"),
+        var("JC_EVAL_DEPLOYMENT"),
+    );
+    let csrf = cookie
+        .split(';')
+        .find_map(|c| c.trim().strip_prefix("jc_csrf="))
+        .expect("the Cookie header holds jc_csrf")
+        .to_owned();
+    let fixture = events();
+    let project = fixture["project"].as_str().expect("project");
+    let client = reqwest::Client::new();
+    let mut answers = serde_json::Map::new();
+    for q in fixture["questions"].as_array().expect("questions") {
+        let id = q["id"].as_str().expect("id");
+        let body = client
+            .post(format!(
+                "{portal}/api/v1/projects/{project}/knowledge/deployments/{deployment}/chat"
+            ))
+            .header("cookie", &cookie)
+            .header("x-csrf-token", &csrf)
+            .json(&serde_json::json!({"message": q["ask"]}))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .expect("the Portal answers")
+            .text()
+            .await
+            .expect("the stream ends");
+        let answer = read_stream(&body);
+        println!("{id}: {}", answer["text"]);
+        answers.insert(id.to_owned(), answer);
+    }
+    let day = time::OffsetDateTime::now_utc().date().to_string();
+    let recording =
+        serde_json::json!({"deployment": deployment, "recorded": day, "answers": answers});
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/answer_evals/recordings/helsinki-events.json");
     std::fs::write(
         &path,
         serde_json::to_string_pretty(&recording).expect("json") + "\n",
