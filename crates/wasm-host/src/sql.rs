@@ -1,10 +1,14 @@
 //! `jc:app/sql` on the apps database (ADR-N-044 §2.3, §2.5, AP-144, AP-146). One pool per shard,
 //! logged in as `wasm_host_<shard>`, and every call one transaction that first takes the App's own
 //! role, `jc.app_id`, `search_path` and `statement_timeout` with transaction-local `set_config`, so
-//! nothing outlives it on the pooled connection. Before Postgres sees a statement the host refuses
-//! what an App never runs: more than one statement, DDL, `SET`, role and setting changes, advisory
-//! locks, listening, large objects, file access, and the built-ins that run a query given as text.
-//! Postgres refuses the rest: the App's role has rights on its own schema alone.
+//! nothing outlives it on the pooled connection. Before Postgres sees a statement the host reads it
+//! with PostgreSQL's own parser (libpg_query, T-3364): exactly one statement, a top-level
+//! `SELECT`, `INSERT`, `UPDATE`, `DELETE` or `VALUES`, naming none of the refused functions
+//! anywhere in its tree. A word scanner checks the same text a second time. So an App never runs
+//! DDL, `SET`, role and setting changes (`SET ROLE` cannot be refused by a grant while the shard
+//! login may take every App role of its shard), advisory locks, listening, large objects, file
+//! access, or the built-ins that run a query given as text. Postgres refuses the rest: the App's
+//! role has rights on its own schema alone.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -195,9 +199,105 @@ fn words(statement: &str) -> Result<(Vec<String>, bool), String> {
     Ok((words, semicolon))
 }
 
-/// Whether the host lets a statement reach Postgres, and what kind it is (AP-144). The reason of
-/// a refusal names the rule, never the statement.
+/// The function names a parse tree calls, anywhere in it: every `FuncCall` node's last name, in
+/// the case Postgres resolves it (`pg_catalog.set_config` and `"set_config"` are `set_config`).
+/// The tree is walked as a whole, not through the crate's own iterator, which visits a subset.
+fn called(tree: &serde_json::Value, names: &mut Vec<String>) {
+    match tree {
+        serde_json::Value::Object(fields) => {
+            if let Some(call) = fields.get("FuncCall") {
+                if let Some(name) = call
+                    .get("funcname")
+                    .and_then(|parts| parts.as_array())
+                    .and_then(|parts| parts.last())
+                    .and_then(|last| last.pointer("/node/String/sval"))
+                    .and_then(|name| name.as_str())
+                {
+                    names.push(name.to_lowercase());
+                }
+            }
+            for value in fields.values() {
+                called(value, names);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                called(item, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether any node of the tree is a statement that writes: a data-modifying `WITH` makes a
+/// `SELECT` a write.
+fn writes(tree: &serde_json::Value) -> bool {
+    match tree {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "InsertStmt" | "UpdateStmt" | "DeleteStmt" | "MergeStmt"
+            ) || writes(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(writes),
+        _ => false,
+    }
+}
+
+/// The verdict of PostgreSQL's own parser (T-3364): one top-level statement of the kinds an App
+/// runs, calling no refused function anywhere. A statement it cannot read is refused.
+fn parsed(statement: &str) -> Result<Kind, String> {
+    use pg_query::NodeEnum;
+    let tree = pg_query::parse(statement)
+        .map_err(|_| "the statement is not one PostgreSQL reads".to_string())?;
+    let statements = &tree.protobuf.stmts;
+    let node = match statements.as_slice() {
+        [] => return Err("the statement is empty".into()),
+        [one] => one.stmt.as_ref().and_then(|stmt| stmt.node.as_ref()),
+        _ => return Err("one statement per call".into()),
+    };
+    let kind = match node {
+        Some(NodeEnum::SelectStmt(select)) => {
+            if select.into_clause.is_some() {
+                return Err(
+                    "`select … into` creates a table, which an application does not".into(),
+                );
+            }
+            Kind::Read
+        }
+        Some(NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::DeleteStmt(_)) => {
+            Kind::Write
+        }
+        _ => return Err(
+            "only select, insert, update, delete and values statements are run for an application"
+                .into(),
+        ),
+    };
+    let json = serde_json::to_value(&tree.protobuf)
+        .map_err(|_| "the statement is not one PostgreSQL reads".to_string())?;
+    let mut names = Vec::new();
+    called(&json, &mut names);
+    if let Some(name) = names.iter().find(|name| refused_word(name)) {
+        return Err(format!("`{name}` is not available to an application"));
+    }
+    Ok(if kind == Kind::Read && writes(&json) {
+        Kind::Write
+    } else {
+        kind
+    })
+}
+
+/// Whether the host lets a statement reach Postgres, and what kind it is (AP-144). The parser
+/// decides (T-3364); the word scanner below must agree as a second check. The reason of a
+/// refusal names the rule, never the statement.
 pub fn check(statement: &str) -> Result<Kind, String> {
+    let kind = parsed(statement)?;
+    scanned(statement)?;
+    Ok(kind)
+}
+
+/// The word scanner's verdict, kept as a second check behind the parser's.
+fn scanned(statement: &str) -> Result<Kind, String> {
     let (words, semicolon) = words(statement)?;
     let trailing = statement
         .trim_end()
@@ -520,6 +620,13 @@ mod tests {
             ("select $tag$ set_config $tag$, \"body\" from t", Kind::Read),
             ("select 1 -- set_config\n", Kind::Read),
             ("select /* set_config /* nested */ */ 1", Kind::Read),
+            // T-3364: what the parser reads as one allowed statement.
+            ("select * from notes for update", Kind::Read),
+            ("select count(*), lower(body) from notes group by 2", Kind::Read),
+            (
+                "insert into notes (body) values ($1) on conflict (id) do update set body = excluded.body",
+                Kind::Write,
+            ),
         ] {
             assert_eq!(check(statement), Ok(kind), "{statement}");
         }
@@ -571,9 +678,55 @@ mod tests {
             "prepare p as select 1",
             "explain analyze delete from notes",
             "vacuum notes",
+            // T-3364: every form of a role switch, and calls the scanner never sees as words.
+            "SET ROLE app_b",
+            "set local role app_b",
+            "RESET ROLE; SET ROLE app_b",
+            "select 1; set role app_b",
+            "SET SESSION AUTHORIZATION app_b",
+            "reset session authorization",
+            "select * from pg_catalog.set_config('role', 'app_b', true)",
+            "with x as (select set_config('role', 'app_b', true)) select * from x",
+            "select (select set_config('role', 'app_b', true))",
+            "select 1 order by set_config('role', 'app_b', true)",
+            "select * from notes, lateral (select pg_advisory_lock(1)) l",
+            "insert into notes (body) select set_config('role', 'app_b', true)",
+            "update notes set body = set_config('role', 'app_b', true)",
+            "delete from notes where id = any (select pg_notify('x', 'y')::int)",
+            "select case when true then set_config('role', 'app_b', true) end",
+            "merge into notes using notes n on false when not matched then do nothing",
+            "table notes into x",
+            "select from from",
         ] {
             assert!(check(statement).is_err(), "{statement}");
         }
+    }
+
+    /// The parser holds on its own (T-3364): what it refuses does not depend on the scanner.
+    #[test]
+    fn the_parser_alone_refuses_a_role_switch_and_a_refused_call_anywhere() {
+        for statement in [
+            "SET ROLE app_b",
+            "set local role app_b",
+            "RESET ROLE; SET ROLE app_b",
+            "select 1; set role app_b",
+            "SET SESSION AUTHORIZATION app_b",
+            "select E'\\' ', set_config('role', 'app_b', true) --'",
+            "select \"pg_catalog\".\"set_config\"('role', 'app_b', true)",
+            "select U&\"\\0073et_config\"('role', 'app_b', true)",
+            "select * from pg_catalog.set_config('role', 'app_b', true)",
+            "with x as (select set_config('role', 'app_b', true)) select * from x",
+            "select * from notes, lateral (select pg_advisory_lock(1)) l",
+            "select * into notes_copy from notes",
+            "select 'unclosed",
+        ] {
+            assert!(parsed(statement).is_err(), "{statement}");
+        }
+        assert_eq!(
+            parsed("with gone as (delete from notes returning id) select count(*) from gone"),
+            Ok(Kind::Write)
+        );
+        assert_eq!(parsed("values (1), (2)"), Ok(Kind::Read));
     }
 
     #[test]

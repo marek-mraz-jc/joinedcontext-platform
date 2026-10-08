@@ -161,6 +161,57 @@ async fn postgres_itself_refuses_another_apps_schema_and_another_shards_app() {
     assert!(err.to_string().contains("permission denied"), "{err}");
 }
 
+/// T-3364: the shard's login may take every App role of its shard, so no grant refuses a role
+/// switch from App A to App B on the same shard: the host's parser does, in every spelling, and
+/// B's table stays unread.
+#[tokio::test]
+async fn no_spelling_of_a_role_switch_reaches_another_app_on_the_same_shard() {
+    let db = Db::new().await;
+    let store = PgStore::with_pool(db.pool("s1", 4).await, limits());
+    let a = app(&db.id("a"));
+    let b = db.id("b");
+    for statement in [
+        format!("SET ROLE app_{b}"),
+        format!("set local role app_{b}"),
+        format!("RESET ROLE; SET ROLE app_{b}"),
+        format!("select 1; set role app_{b}"),
+        format!("SET SESSION AUTHORIZATION app_{b}"),
+        format!("select E'\\' ', set_config('role', 'app_{b}', true) --'"),
+        format!("select * from pg_catalog.set_config('role', 'app_{b}', true)"),
+    ] {
+        for kind in [Kind::Read, Kind::Write] {
+            assert!(
+                matches!(
+                    store.run(&a, statement.clone(), vec![], kind).await,
+                    Err(SqlError::Refused(_))
+                ),
+                "{statement}"
+            );
+        }
+        // Whatever was sent, A still reads only its own notes, and B's table stays out of reach.
+        let (rows, _) = store
+            .run(&a, "select body from notes".into(), vec![], Kind::Read)
+            .await
+            .expect("own notes");
+        assert_eq!(
+            rows.expect("rows").values,
+            [vec![Value::Text(format!("{} first", db.id("a")))]]
+        );
+        assert_eq!(
+            store
+                .run(
+                    &a,
+                    format!("select * from app_{b}.notes"),
+                    vec![],
+                    Kind::Read
+                )
+                .await
+                .unwrap_err(),
+            SqlError::Refused("permission denied".into())
+        );
+    }
+}
+
 /// T-3342: a migration runs as the App's own owner, so a view (or a function) it defines reads
 /// with that App's rights: one App's migration cannot publish another App's table.
 #[tokio::test]
