@@ -15,7 +15,11 @@ use serde_json::json;
 use super::ChatState;
 use crate::worker::Deployment;
 
-const SCRIPT: &str = include_str!("../../widget/widget.js");
+/// The answer's renderer first (T-3325), then the widget that uses it, as one script.
+const SCRIPT: &str = concat!(
+    include_str!("../../widget/render.js"),
+    include_str!("../../widget/widget.js")
+);
 const STYLE: &str = include_str!("../../widget/widget.css");
 
 pub fn router(state: Arc<ChatState>) -> Router {

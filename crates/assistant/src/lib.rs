@@ -5,6 +5,7 @@
 //! `jc.project`, forced for the owner too), so the crawl worker and the chat API reach a
 //! project's rows through [`project_scope`] and nothing else.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use sqlx::migrate::Migrator;
@@ -236,9 +237,101 @@ pub async fn hybrid_search(
         .map_err(Error::from)
 }
 
+/// The first Markdown heading of a passage, the title of the page or document it opens: what a
+/// citation is named by instead of its address (T-3325). `None` when it opens with none.
+pub fn heading(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let title = line.strip_prefix('#')?.trim_start_matches('#');
+    if !title.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let title = title.trim().trim_end_matches('#').trim();
+    (!title.is_empty()).then(|| title.chars().take(200).collect())
+}
+
+/// The title of each page or document of `urls` the deployment's sources hold, from its first
+/// passage (T-3325). Read in the transaction's project scope, so another project's page is never
+/// named.
+pub async fn titles(
+    conn: &mut PgConnection,
+    urls: &[String],
+    sources: &[String],
+    public_only: bool,
+) -> Result<HashMap<String, String>, Error> {
+    if urls.is_empty() || sources.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (c.url) c.url, c.text FROM chunks c JOIN sites s ON s.id = c.site_id \
+         WHERE c.url = ANY($1) AND s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
+         ORDER BY c.url, c.ordinal, c.id",
+    )
+    .bind(urls)
+    .bind(sources)
+    .bind(public_only)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(url, text)| heading(&text).map(|title| (url, title)))
+        .collect())
+}
+
+/// The page the deployment's sources hold about an Endpoint: the catalogue's page, or its
+/// dataset's, which both give its address `…/api/endpoint/{slug}` (T-3325). A live-data citation
+/// links it, so a visitor reads where the data is described and never a tool's name. A slug that
+/// is no DNS label is never looked up.
+pub async fn endpoint_page(
+    conn: &mut PgConnection,
+    slug: &str,
+    sources: &[String],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    let label = !slug.is_empty()
+        && slug.len() <= 63
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !label || sources.is_empty() {
+        return Ok(None);
+    }
+    let url: Option<String> = sqlx::query_scalar(
+        "SELECT c.url FROM chunks c JOIN sites s ON s.id = c.site_id \
+         WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
+         AND c.text ~ ('/api/endpoint/' || $1 || '([^a-z0-9-]|$)') \
+         ORDER BY c.id LIMIT 1",
+    )
+    .bind(slug)
+    .bind(sources)
+    .bind(public_only)
+    .fetch_optional(conn)
+    .await?;
+    Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_passage_is_titled_by_the_heading_it_opens_with() {
+        assert_eq!(
+            heading("# Helsinki events\n\nWhat happens"),
+            Some("Helsinki events".into())
+        );
+        assert_eq!(
+            heading("\n  ## Tapahtumat ##\ntext"),
+            Some("Tapahtumat".into())
+        );
+        assert_eq!(heading("#hashtag is no heading"), None);
+        assert_eq!(heading("Text first\n# Later"), None);
+        assert_eq!(heading("#  \nx"), None);
+        assert_eq!(heading(""), None);
+        assert_eq!(
+            heading(&format!("# {}", "a".repeat(300))).map(|t| t.len()),
+            Some(200)
+        );
+    }
 
     #[test]
     fn an_embedding_is_384_finite_numbers() {

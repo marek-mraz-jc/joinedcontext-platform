@@ -9,19 +9,19 @@
   var WORDS = {
     en: { ask: "Your question", send: "Send", tools: "Live data the assistant may read", thinking: "Looking it up…",
       sources: "Sources", script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
-      you: "You", assistant: "Assistant", reading: "Reading" },
+      you: "You", assistant: "Assistant", reading: "Reading", live: "Live data", source: "Source" },
     sk: { ask: "Vaša otázka", send: "Odoslať", tools: "Živé dáta, ktoré smie asistent čítať", thinking: "Hľadám…",
       sources: "Zdroje", script: "Skript, ktorý asistent spustil", failed: "Odpoveď sa nepodarilo načítať. Skúste znova.",
-      you: "Vy", assistant: "Asistent", reading: "Čítam" },
+      you: "Vy", assistant: "Asistent", reading: "Čítam", live: "Živé dáta", source: "Zdroj" },
     cs: { ask: "Vaše otázka", send: "Odeslat", tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       sources: "Zdroje", script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste znovu.",
-      you: "Vy", assistant: "Asistent", reading: "Čtu" },
+      you: "Vy", assistant: "Asistent", reading: "Čtu", live: "Živá data", source: "Zdroj" },
     de: { ask: "Ihre Frage", send: "Senden", tools: "Live-Daten, die der Assistent lesen darf", thinking: "Ich suche…",
       sources: "Quellen", script: "Skript, das der Assistent ausgeführt hat", failed: "Die Antwort konnte nicht geladen werden. Bitte erneut versuchen.",
-      you: "Sie", assistant: "Assistent", reading: "Lese" },
+      you: "Sie", assistant: "Assistent", reading: "Lese", live: "Live-Daten", source: "Quelle" },
     fi: { ask: "Kysymyksesi", send: "Lähetä", tools: "Live-data, jota avustaja saa lukea", thinking: "Etsin…",
       sources: "Lähteet", script: "Avustajan ajama skripti", failed: "Vastausta ei voitu ladata. Yritä uudelleen.",
-      you: "Sinä", assistant: "Avustaja", reading: "Luen" }
+      you: "Sinä", assistant: "Avustaja", reading: "Luen", live: "Live-data", source: "Lähde" }
   };
   var languages = (navigator.languages || [navigator.language || "en"]).map(function (l) { return String(l).slice(0, 2); });
   var lang = languages.filter(function (l) { return WORDS[l]; })[0] || "en";
@@ -94,22 +94,61 @@
     return item;
   }
 
-  function cite(item, citations) {
-    if (!citations || citations.length === 0) return;
+  var turns = 0;
+  var ALLOWED = { p: 1, ul: 1, ol: 1, li: 1, strong: 1, em: 1, code: 1, br: 1 };
+
+  function link(href, text) {
+    var a = el("a", "", text);
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    return a;
+  }
+
+  // The renderer's tree as DOM nodes: text as text, only the elements it may produce.
+  function build(node, ids, position) {
+    if (typeof node === "string") return document.createTextNode(node);
+    var out;
+    if (node.tag === "a") {
+      out = link(node.href, "");
+    } else if (node.tag === "cite") {
+      out = el("sup", "jc-cite");
+      node.numbers.map(function (n) { return position[n]; })
+        .filter(function (p, i, all) { return p && all.indexOf(p) === i; })
+        .forEach(function (p, i) {
+          if (i > 0) out.appendChild(document.createTextNode(","));
+          var to = el("a", "", String(p));
+          to.href = "#" + ids + "-" + p;
+          to.setAttribute("aria-label", w.source + " " + p);
+          out.appendChild(to);
+        });
+      return out;
+    } else {
+      out = el(ALLOWED[node.tag] ? node.tag : "span");
+    }
+    (node.children || []).forEach(function (child) { out.appendChild(build(child, ids, position)); });
+    return out;
+  }
+
+  // The answer, formatted, with its markers linked to the sources listed under it (T-3325).
+  function show(item, text, citations) {
+    turns += 1;
+    var ids = "jc-src-" + turns;
+    var grouped = JCRender.sources(citations);
+    var body = el("div", "jc-answer");
+    JCRender.markdown(text, function (n) { return Boolean(grouped.position[n]); }).forEach(function (block) {
+      body.appendChild(build(block, ids, grouped.position));
+    });
+    item.insertBefore(body, item.children[1] || null);
+    if (grouped.list.length === 0) return;
     var list = el("ol", "jc-cites");
     list.setAttribute("aria-label", w.sources);
-    citations.forEach(function (c) {
+    grouped.list.forEach(function (source, i) {
       var li = el("li");
-      li.value = c.n;
-      if (c.url && /^https?:\/\//.test(c.url)) {
-        var a = el("a", "", c.url);
-        a.href = c.url;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        li.appendChild(a);
-      } else {
-        li.textContent = (c.tool || "") + (c.endpoint ? " · " + c.endpoint : "");
-      }
+      li.id = ids + "-" + (i + 1);
+      var name = (source.live ? w.live + ": " : "") + JCRender.label(source);
+      li.appendChild(source.url ? link(source.url, name) : document.createTextNode(name));
+      if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", " " + source.domain));
       list.appendChild(li);
     });
     item.appendChild(list);
@@ -127,11 +166,13 @@
       details.appendChild(el("pre", "", data.output !== undefined ? data.output : data.error));
       item.appendChild(details);
     } else if (name === "answer") {
+      // Shown with its citations, which come next; `ask` shows it alone if they never do.
       status.remove();
-      item.insertBefore(el("p", "", data.text), item.children[1] || null);
-      history.push({ role: "assistant", text: String(data.text).slice(0, 4000) });
+      item.pending = String(data.text);
+      history.push({ role: "assistant", text: item.pending.slice(0, 4000) });
     } else if (name === "citations") {
-      cite(item, data);
+      show(item, item.pending || "", Array.isArray(data) ? data : []);
+      item.pending = null;
     } else if (name === "error") {
       status.remove();
       item.classList.add("jc-error");
@@ -181,6 +222,10 @@
           try { handle(item, status, name, JSON.parse(data)); } catch (e) { /* a malformed event is skipped, the stream goes on */ }
         }
       }
+    }
+    if (item.pending) {
+      show(item, item.pending, []);
+      item.pending = null;
     }
     log.scrollTop = log.scrollHeight;
   }

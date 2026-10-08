@@ -12,7 +12,9 @@
 //! The fast `ci` lane runs `--lib --bins` only, so these never run without their database: a
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
-use assistant::{hybrid_search, project_scope, Search, DIMENSIONS, MIGRATOR};
+use assistant::{
+    endpoint_page, hybrid_search, project_scope, titles, Search, DIMENSIONS, MIGRATOR,
+};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
 
@@ -304,6 +306,139 @@ async fn a_public_channel_reads_public_chunks_of_its_own_sources_only() {
         found.contains(&internal[0]) && !found.contains(&other[0]),
         "{found:?}"
     );
+    drop_database(admin, pool, &name).await;
+}
+
+/// T-3325: a citation is named by its page's title and a live-data citation by the page about
+/// its Endpoint, from the deployment's own sources, public ones alone on a public channel, and
+/// never from another project.
+#[tokio::test]
+async fn a_citation_is_named_from_the_deployments_own_pages() {
+    let (admin, pool, name) = database("titles").await;
+    let v = || embedding(0, None);
+    site(
+        &pool,
+        "helsinki",
+        "hel-web",
+        &[
+            (
+                "# Helsinki events\n\nWhat happens in the city.",
+                "en",
+                "public",
+                v(),
+            ),
+            ("A passage with no heading.", "en", "public", v()),
+        ],
+    )
+    .await;
+    site(
+        &pool,
+        "helsinki",
+        "hel-catalogue",
+        &[(
+            "# Events of Helsinki\n\nEndpoint events. Address: https://gw.example/api/endpoint/helsinki-events",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    site(
+        &pool,
+        "helsinki",
+        "hel-intranet",
+        &[(
+            "# Staff plans\n\nAddress: https://gw.example/api/endpoint/helsinki-staff",
+            "en",
+            "internal",
+            v(),
+        )],
+    )
+    .await;
+    site(
+        &pool,
+        "praha",
+        "hel-catalogue",
+        &[(
+            "# Prague's page\n\nAddress: https://gw.example/api/endpoint/praha-odpad",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    let sources: Vec<String> = ["hel-web", "hel-catalogue", "hel-intranet"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let urls: Vec<String> = [
+        "https://hel-web.example/#0",
+        "https://hel-web.example/#1",
+        "https://hel-catalogue.example/#0",
+        "https://hel-intranet.example/#0",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+
+    let public = titles(&mut tx, &urls, &sources, true)
+        .await
+        .expect("titles");
+    assert_eq!(public.len(), 2, "{public:?}");
+    assert_eq!(public["https://hel-web.example/#0"], "Helsinki events");
+    assert_eq!(
+        public["https://hel-catalogue.example/#0"],
+        "Events of Helsinki"
+    );
+    let all = titles(&mut tx, &urls, &sources, false)
+        .await
+        .expect("titles");
+    assert_eq!(all["https://hel-intranet.example/#0"], "Staff plans");
+    let web_only = titles(&mut tx, &urls, &sources[..1], false)
+        .await
+        .expect("titles");
+    assert_eq!(
+        web_only.len(),
+        1,
+        "a source the deployment does not name is never read"
+    );
+
+    let found = endpoint_page(&mut tx, "helsinki-events", &sources, true)
+        .await
+        .expect("page");
+    assert_eq!(found.as_deref(), Some("https://hel-catalogue.example/#0"));
+    let prefix = endpoint_page(&mut tx, "helsinki", &sources, true)
+        .await
+        .expect("page");
+    assert_eq!(
+        prefix, None,
+        "a slug is matched whole, never as the start of another"
+    );
+    let hidden = endpoint_page(&mut tx, "helsinki-staff", &sources, true)
+        .await
+        .expect("page");
+    assert_eq!(
+        hidden, None,
+        "an internal page is never named on a public channel"
+    );
+    let staff = endpoint_page(&mut tx, "helsinki-staff", &sources, false)
+        .await
+        .expect("page");
+    assert_eq!(staff.as_deref(), Some("https://hel-intranet.example/#0"));
+    let other = endpoint_page(&mut tx, "praha-odpad", &sources, false)
+        .await
+        .expect("page");
+    assert_eq!(other, None, "another project's page is never read");
+    let odd = endpoint_page(&mut tx, "x|.*", &sources, false)
+        .await
+        .expect("page");
+    assert_eq!(odd, None, "a slug that is no DNS label is never looked up");
+    tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
 }
 
