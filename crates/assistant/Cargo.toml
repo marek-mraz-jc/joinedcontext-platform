@@ -48,6 +48,10 @@ axum = "0.8"
 # image's Dockerfile). Without it kreuzberg's build script would fetch whatever release is
 # newest, unpinned and unchecked. No OCR, office or embedding features: they bring ONNX Runtime.
 kreuzberg = { version = "=4.10.4", default-features = false, features = ["tokio-runtime", "pdf", "bundled-pdfium", "html", "chunking", "language-detection"] }
+# The version kreuzberg already links: cuts a PDF to `pdf.maxPages` before PDFium reads it.
+lopdf = { version = "=0.45.0", default-features = false }
+# Without resolve-http: a connector's schema never makes this service fetch a `$ref`.
+jsonschema = { version = "0.54", default-features = false }
 # Passage and question embeddings (ADR-N-040 §3.1, T-3053): `multilingual-e5-small` int8, its
 # files read from a directory whose SHA-256s `embed.rs` pins (`scripts/ci/e5-small.sh` fetches
 # them); nothing is downloaded at run time. ONNX Runtime is loaded at start from ORT_DYLIB_PATH

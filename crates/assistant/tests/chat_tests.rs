@@ -535,6 +535,153 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-3314: a visitor who leaves stops the question at the model's next call; the call already
+/// sent is let finish and counted.
+#[tokio::test]
+async fn a_question_stops_when_its_visitor_leaves() {
+    let w = world("chatgone", deployment(Channel::Public, 50_000, 10)).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(tool_call("c1", "search", json!({"query": "knižnica"})), 100)
+                .set_delay(std::time::Duration::from_millis(300)),
+            completion(
+                json!({"role": "assistant", "content": "Do 18:00 [1]."}),
+                100,
+            ),
+        ],
+    )
+    .await;
+    let response = w
+        .app
+        .clone()
+        .oneshot(ask(
+            json!({"message": "Dokedy je otvorená knižnica?"}),
+            None,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK);
+    // The visitor leaves while the first call is with the model.
+    for _ in 0..100 {
+        if !model_calls(&w.proxy).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    drop(response);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        model_calls(&w.proxy).await.len(),
+        1,
+        "no call after the visitor left"
+    );
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let (tokens,): (i64,) = sqlx::query_as("SELECT tokens FROM conversations")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("one");
+    assert_eq!(tokens, 100, "the call that was sent is counted");
+    drop(tx);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-3314, AG-99: a conversation past its 24 hours is deleted, in every project, and the
+/// deletion reaches no current one, of any project.
+#[tokio::test]
+async fn expired_conversations_are_deleted_and_current_ones_kept() {
+    let (admin, pool, name) = db::database("chatforget").await;
+    // Seeded as the owner: the app role writes only its own project's rows.
+    let url = std::env::var("JC_ASSISTANT_TEST_DATABASE_URL").expect("the test server");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("parses");
+    let owner = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.database(&name))
+        .await
+        .expect("the owner");
+    for (project, age) in [
+        ("hronov", 25),
+        ("hronov", 1),
+        ("trnava", 30),
+        ("trnava", 23),
+    ] {
+        sqlx::query(
+            "INSERT INTO conversations (project, deployment, created_at) \
+             VALUES ($1, 'obcania', now() - make_interval(hours => $2))",
+        )
+        .bind(project)
+        .bind(age)
+        .execute(&owner)
+        .await
+        .expect("seed");
+    }
+    assert_eq!(
+        assistant::chat::forget_expired(&pool)
+            .await
+            .expect("deleted"),
+        2
+    );
+    let left: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT project, extract(hour FROM now() - created_at)::bigint FROM conversations ORDER BY project",
+    )
+    .fetch_all(&owner)
+    .await
+    .expect("left");
+    assert_eq!(left, vec![("hronov".into(), 1), ("trnava".into(), 23)]);
+    assert_eq!(
+        assistant::chat::forget_expired(&pool).await.expect("again"),
+        0
+    );
+    owner.close().await;
+    db::drop_database(admin, pool, &name).await;
+}
+
+/// T-3314: arguments that break the tool's schema are refused to the model with the place and
+/// the rule, and nothing reaches the Endpoint.
+#[tokio::test]
+async fn arguments_that_break_the_tools_schema_are_never_sent() {
+    let w = world("chatschema", deployment(Channel::Public, 50_000, 10)).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                tool_call("c1", "ovzdusie__query_entities", json!({"type": 7})),
+                100,
+            ),
+            completion(json!({"role": "assistant", "content": "Neviem."}), 100),
+        ],
+    )
+    .await;
+    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Aké je ovzdušie?"}), None)).await;
+    assert!(
+        events
+            .iter()
+            .all(|(n, d)| n != "tool" || d["status"] != "started"),
+        "{events:?}"
+    );
+    let calls = model_calls(&w.proxy).await;
+    let refused = calls[1].1["messages"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["role"] == "tool"))
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        refused.starts_with("The call was not made: /type: breaks the schema's type"),
+        "{refused}"
+    );
+    assert!(w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .all(|r| !String::from_utf8_lossy(&r.body).contains("tools/call")));
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// AG-104, AG-107: a spent conversation, a spent day and a model that does not answer are each
 /// an error event with a sentence, and the stream still ends with `done`.
 #[tokio::test]
@@ -805,10 +952,11 @@ async fn a_conversation_continues_with_its_id() {
         ],
     )
     .await;
-    let (_, first, _) = answer_of(&w.app, ask(json!({"message": "Prvá otázka"}), None)).await;
+    let (_, first, _) =
+        answer_of(&w.app, ask(json!({"message": "Prvá otázka"}), Some(ORIGIN))).await;
     let id = first[0].1["id"].as_str().expect("an id").to_owned();
     let (_, second, _) = answer_of(&w.app, ask(json!({"message": "Druhá otázka", "conversation": id,
-        "history": [{"role": "user", "text": "Prvá otázka"}, {"role": "assistant", "text": "Prvá."}]}), None)).await;
+        "history": [{"role": "user", "text": "Prvá otázka"}, {"role": "assistant", "text": "Prvá."}]}), Some(ORIGIN))).await;
     assert_eq!(second[0].1["id"], json!(id));
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
@@ -1050,14 +1198,27 @@ async fn an_oversized_body_and_a_foreign_or_expired_conversation_are_refused() {
     .fetch_one(&mut *tx)
     .await
     .expect("an old conversation");
+    // T-3314, AG-100: started on the city's site, continued from nowhere else.
+    let placed: String = sqlx::query_scalar(
+        "INSERT INTO conversations (project, deployment, origin) VALUES ('hronov', 'obcania', $1) RETURNING id::text",
+    )
+    .bind(ORIGIN)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("a conversation on the city's site");
     tx.commit().await.expect("commit");
-    for id in [other, old] {
+    for (id, origin) in [
+        (other, None),
+        (old, None),
+        (placed.clone(), None),
+        (placed, Some("https://assistant.example")),
+    ] {
         let (status, _, _) = answer_of(
             &w.app,
-            ask(json!({"message": "a", "conversation": id}), None),
+            ask(json!({"message": "a", "conversation": id}), origin),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id} from {origin:?}");
     }
     assert!(
         model_calls(&w.proxy).await.is_empty(),

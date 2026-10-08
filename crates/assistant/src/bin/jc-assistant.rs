@@ -254,6 +254,9 @@ async fn main() -> ExitCode {
         let now = time::OffsetDateTime::now_utc()
             .replace_second(0)
             .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        if let Err(err) = chat::forget_expired(&pool).await {
+            tracing::warn!(%err, "expired conversations not deleted this minute");
+        }
         match worker::enqueue_due(&pool, sources, now).await {
             Ok(0) => {}
             Ok(queued) => tracing::info!(queued, "sources due"),

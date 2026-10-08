@@ -10,16 +10,33 @@ use assistant::{project_scope, MIGRATOR};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
 
-/// A one-page PDF whose page shows `text` in Helvetica, with a correct cross-reference table.
+/// A one-page PDF whose page shows `text` in Helvetica.
 fn pdf(text: &str) -> Vec<u8> {
-    let stream = format!("BT /F1 18 Tf 72 720 Td ({text}) Tj ET");
-    let objects = [
+    pages(&[text])
+}
+
+/// A PDF whose page n shows `texts[n]` in Helvetica, with a correct cross-reference table.
+fn pages(texts: &[&str]) -> Vec<u8> {
+    let kids: Vec<String> = (0..texts.len())
+        .map(|n| format!("{} 0 R", 4 + 2 * n))
+        .collect();
+    let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
-        format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            texts.len()
+        ),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
     ];
+    for (n, text) in texts.iter().enumerate() {
+        let stream = format!("BT /F1 18 Tf 72 720 Td ({text}) Tj ET");
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * n));
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{stream}\nendstream",
+            stream.len()
+        ));
+    }
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
     for (i, body) in objects.iter().enumerate() {
@@ -121,6 +138,31 @@ async fn a_pdf_page_becomes_a_passage_that_knows_its_page() {
         .await
         .expect("pdf extracts");
     assert!(capped.passages.is_empty() && capped.truncated);
+}
+
+/// T-3314: a PDF longer than `pdf.maxPages` keeps the passages of its first pages and says it
+/// was cut.
+#[tokio::test]
+async fn a_long_pdf_keeps_its_first_pages() {
+    let bytes = pages(&[
+        "Prva strana o doprave",
+        "Druha strana o skolach",
+        "Tretia strana o parkoch",
+    ]);
+    let extracted = extract(&bytes, "application/pdf", None, 2)
+        .await
+        .expect("pdf extracts");
+    let all: String = extracted.passages.iter().map(|p| p.text.as_str()).collect();
+    assert!(
+        all.contains("Prva strana") && all.contains("Druha strana"),
+        "{all:?}"
+    );
+    assert!(!all.contains("Tretia"), "{all:?}");
+    assert!(extracted.truncated);
+    let whole = extract(&bytes, "application/pdf", None, 3)
+        .await
+        .expect("pdf extracts");
+    assert!(!whole.truncated);
 }
 
 #[tokio::test]
