@@ -19,6 +19,20 @@ pub struct Placed {
     pub tenant: String,
     /// `sha256:<64 hex>` of the component its build recorded.
     pub digest: String,
+    /// Its scheduled jobs, `spec.server.jobs[]` as the reconciler checked them (AP-154).
+    #[serde(default)]
+    pub jobs: Vec<PlacedJob>,
+}
+
+/// One job of a placed App (AP-154).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlacedJob {
+    pub name: String,
+    /// Five-field cron, read in UTC.
+    pub schedule: String,
+    /// The function the component exports, called with no arguments.
+    pub export: String,
 }
 
 /// The placement file of one shard.

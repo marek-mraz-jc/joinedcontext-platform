@@ -99,6 +99,7 @@ impl World {
             id: format!("{name}-id"),
             tenant: "helsinki".into(),
             digest,
+            jobs: Vec::new(),
         }
     }
 

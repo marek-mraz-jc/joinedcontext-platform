@@ -36,8 +36,12 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "json", "uuid", "time"] }
 futures-util = { version = "0.3", default-features = false }
 http = "1"
+# The one cron reader of the platform, the one the manifest check uses (AP-154).
+jc-core = { path = "../jc-core", version = "0.1.0" }
 # PostgreSQL's own parser (libpg_query): an App statement is judged by its parse tree (T-3364).
 pg_query = "6.2.1"
 
 [dev-dependencies]
 wiremock = "0.6"
+# Paused time for the scheduler's tests (T-3372).
+tokio = { version = "1", features = ["test-util"] }
