@@ -332,7 +332,7 @@ async fn conversation(
     Ok(found.map(|(id, tokens)| (id, u64::try_from(tokens).unwrap_or(0))))
 }
 
-/// Deletes every conversation past [`CONVERSATION_HOURS`], of every project (T-3314, AG-99);
+/// Deletes every conversation past `CONVERSATION_HOURS`, of every project (T-3314, AG-99);
 /// returns how many. Run by the minute loop.
 pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     // No WHERE: the `conversations_expired` policy (migration 0006) is the whole selection, and a
