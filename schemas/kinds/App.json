@@ -57,6 +57,30 @@
       ],
       "type": "object"
     },
+    "AppJob": {
+      "additionalProperties": false,
+      "description": "One scheduled call of the App's component (AP-154).",
+      "properties": {
+        "export": {
+          "description": "The function the component exports, called with no arguments.",
+          "type": "string"
+        },
+        "name": {
+          "description": "`[a-z][a-z0-9-]{0,39}`, unique in the App, as a function's name (SDK-21).",
+          "type": "string"
+        },
+        "schedule": {
+          "description": "Five-field cron, `minute hour day month weekday`, read in UTC.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "export",
+        "name",
+        "schedule"
+      ],
+      "type": "object"
+    },
     "AppLifecycle": {
       "description": "Lifecycle state of an app (AP-18, AP-19, AP-20).",
       "oneOf": [
@@ -141,6 +165,20 @@
       "required": [
         "name"
       ],
+      "type": "object"
+    },
+    "AppServer": {
+      "additionalProperties": false,
+      "description": "The server part of a `wasm` App beyond its request handler (AP-154).",
+      "properties": {
+        "jobs": {
+          "description": "What the host calls on a schedule, each in a fresh instance (AP-154).",
+          "items": {
+            "$ref": "#/definitions/AppJob"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "AppSource": {
@@ -250,6 +288,17 @@
             "$ref": "#/definitions/AppRole"
           },
           "type": "array"
+        },
+        "server": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppServer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What a `wasm` App's server part runs on a schedule (AP-154)."
         },
         "source": {
           "allOf": [

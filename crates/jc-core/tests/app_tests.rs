@@ -1254,3 +1254,97 @@ fn a_wasm_apps_status_names_its_component_and_its_shard() {
     let why = wasm_refusal(checked(&broken));
     assert!(why.contains("status.build.component"), "{why}");
 }
+
+/// A `wasm` App's jobs (AP-154, T-3372).
+fn with_jobs(jobs: &str) -> impl FnOnce(&mut String) + '_ {
+    move |y: &mut String| {
+        *y = y.replace(
+            "  storage:\n",
+            &format!("  server:\n    jobs:\n{jobs}  storage:\n"),
+        )
+    }
+}
+
+#[test]
+fn a_wasm_app_declares_its_jobs_and_round_trips_ap154() {
+    let app = wasm_app(with_jobs(
+        "      - { name: hourly-kpi, schedule: \"0 * * * *\", export: compute-kpi }\n      - { name: nightly, schedule: \"30 2 * * 1-5\", export: tidy }\n",
+    ))
+    .expect("jobs validate");
+    let jobs = &app.spec.server.as_ref().expect("server").jobs;
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(
+        (
+            jobs[0].name.as_str(),
+            jobs[0].schedule.as_str(),
+            jobs[0].export.as_str()
+        ),
+        ("hourly-kpi", "0 * * * *", "compute-kpi")
+    );
+    let again = App::from_yaml(&app.to_yaml().expect("yaml")).expect("read back");
+    assert_eq!(again.spec.server, app.spec.server);
+    // No jobs at all is a wasm App with a request handler and no schedule.
+    assert!(wasm_app(|_| {}).expect("plain").spec.server.is_none());
+}
+
+#[test]
+fn jobs_are_refused_off_wasm_and_their_names_schedules_and_count_are_checked_ap154() {
+    let job = "      - { name: hourly, schedule: \"0 * * * *\", export: run }\n";
+    for kind in ["ui", "ui-rust"] {
+        let why = wasm_refusal(wasm_app(|y| {
+            with_jobs(job)(y);
+            *y = y.replace("kind: wasm", &format!("kind: {kind}")).replace(
+                "  storage:\n    sql: { migrations: db/migrations, quotaMiB: 50 }\n    blob: {}\n",
+                "",
+            );
+        }));
+        assert!(
+            why.contains("server.jobs") && why.contains("write `kind: wasm`"),
+            "{kind}: {why}"
+        );
+    }
+    for (schedule, said) in [
+        ("0 * * *", "five-field cron"),
+        ("61 * * * *", "five-field cron"),
+        ("every hour", "five-field cron"),
+        ("* * * * *", "at least 5 minutes apart"),
+        ("*/2 * * * *", "at least 5 minutes apart"),
+        ("1,58 0,23 * * *", "at least 5 minutes apart"),
+    ] {
+        let why = wasm_refusal(wasm_app(with_jobs(&format!(
+            "      - {{ name: j, schedule: \"{schedule}\", export: run }}\n"
+        ))));
+        assert!(
+            why.contains("server.jobs.schedule") && why.contains(said),
+            "{schedule}: {why}"
+        );
+    }
+    assert!(wasm_app(with_jobs(
+        "      - { name: j, schedule: \"*/5 * * * *\", export: run }\n"
+    ))
+    .is_ok());
+    for name in ["Hourly", "1st", "a_b", &"a".repeat(41)] {
+        let why = wasm_refusal(wasm_app(with_jobs(&format!(
+            "      - {{ name: \"{name}\", schedule: \"0 * * * *\", export: run }}\n"
+        ))));
+        assert!(why.contains("server.jobs.name"), "{name}: {why}");
+    }
+    let why = wasm_refusal(wasm_app(with_jobs(&job.repeat(2))));
+    assert!(why.contains("two jobs of one App share this name"), "{why}");
+    let why = wasm_refusal(wasm_app(with_jobs(
+        "      - { name: j, schedule: \"0 * * * *\", export: \"run()\" }\n",
+    )));
+    assert!(why.contains("server.jobs.export"), "{why}");
+    let eleven: String = (0..11)
+        .map(|i| format!("      - {{ name: j{i}, schedule: \"0 * * * *\", export: run }}\n"))
+        .collect();
+    let why = wasm_refusal(wasm_app(with_jobs(&eleven)));
+    assert!(
+        why.contains("server.jobs") && why.contains("at most 10"),
+        "{why}"
+    );
+    let why = wasm_refusal(wasm_app(with_jobs(
+        "      - { name: j, schedule: \"0 * * * *\", export: run, every: 1 }\n",
+    )));
+    assert!(why.contains("every"), "{why}");
+}

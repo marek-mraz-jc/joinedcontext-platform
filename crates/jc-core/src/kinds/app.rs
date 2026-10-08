@@ -695,6 +695,101 @@ pub struct AppSpec {
     /// The database schema and the storage prefix of a `wasm` App (AP-148).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<AppStorage>,
+    /// What a `wasm` App's server part runs on a schedule (AP-154).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<AppServer>,
+}
+
+/// The most jobs one App declares (AP-154).
+pub const MAX_APP_JOBS: usize = 10;
+
+/// The shortest time between two runs of one job, minutes (T-3372): a job is work done now and
+/// then, and a schedule tighter than this is a request handler in disguise.
+pub const MIN_JOB_INTERVAL_MINUTES: u32 = 5;
+
+/// The server part of a `wasm` App beyond its request handler (AP-154).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppServer {
+    /// What the host calls on a schedule, each in a fresh instance (AP-154).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<AppJob>,
+}
+
+/// One scheduled call of the App's component (AP-154).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AppJob {
+    /// `[a-z][a-z0-9-]{0,39}`, unique in the App, as a function's name (SDK-21).
+    pub name: String,
+    /// Five-field cron, `minute hour day month weekday`, read in UTC.
+    pub schedule: String,
+    /// The function the component exports, called with no arguments.
+    pub export: String,
+}
+
+static JOB_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9-]{0,39}$").expect("valid regex"));
+static JOB_EXPORT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z][a-z0-9-]{0,63}$").expect("valid regex"));
+
+impl AppServer {
+    fn validate(&self) -> Result<()> {
+        if self.jobs.len() > MAX_APP_JOBS {
+            return Err(Error::Name {
+                field: "server.jobs",
+                value: self.jobs.len().to_string(),
+                reason: "an App declares at most 10 jobs (AP-154)",
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for job in &self.jobs {
+            if !JOB_NAME_RE.is_match(&job.name) {
+                return Err(Error::Name {
+                    field: "server.jobs.name",
+                    value: job.name.clone(),
+                    reason: "a job's name is lowercase letters, digits and `-`, starting with a \
+                             letter, at most 40 characters, as a function's (AP-154, SDK-21)",
+                });
+            }
+            if !seen.insert(job.name.as_str()) {
+                return Err(Error::Name {
+                    field: "server.jobs.name",
+                    value: job.name.clone(),
+                    reason: "two jobs of one App share this name (AP-154)",
+                });
+            }
+            if !JOB_EXPORT_RE.is_match(&job.export) {
+                return Err(Error::Name {
+                    field: "server.jobs.export",
+                    value: job.export.clone(),
+                    reason: "the export is the name of a function the component exports, \
+                             lowercase letters, digits and `-` (AP-154)",
+                });
+            }
+            match crate::cron::shortest_gap_minutes(&job.schedule) {
+                None => {
+                    return Err(Error::Name {
+                        field: "server.jobs.schedule",
+                        value: job.schedule.clone(),
+                        reason: "a schedule is five-field cron read in UTC: minute hour day month \
+                                 weekday, such as `0 * * * *` for every hour (AP-154)",
+                    })
+                }
+                Some(gap) if gap < MIN_JOB_INTERVAL_MINUTES => {
+                    return Err(Error::Name {
+                        field: "server.jobs.schedule",
+                        value: job.schedule.clone(),
+                        reason:
+                            "two runs of a job are at least 5 minutes apart; work that answers \
+                                 sooner belongs in a request (AP-154, T-3372)",
+                    })
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The smallest and largest quota of either store, MiB (AP-148).
@@ -1069,6 +1164,17 @@ impl AppSpec {
                 });
             }
             storage.validate()?;
+        }
+        if let Some(server) = &self.server {
+            if self.class != AppClass::Wasm && !server.jobs.is_empty() {
+                return Err(Error::Name {
+                    field: "server.jobs",
+                    value: self.class.to_string(),
+                    reason: "only a wasm app runs jobs, on the shared host: write `kind: wasm`, \
+                             or remove spec.server.jobs (AP-154)",
+                });
+            }
+            server.validate()?;
         }
 
         if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {

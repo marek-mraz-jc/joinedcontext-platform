@@ -295,7 +295,7 @@ impl KnowledgeSourceSpec {
             ));
         }
         if let Some(schedule) = &self.schedule {
-            if !is_cron(schedule) {
+            if !crate::cron::is_valid(schedule) {
                 return Err(name(
                     "schedule",
                     schedule.clone(),
@@ -621,17 +621,6 @@ fn host_and_port(authority: &str) -> Option<&str> {
                 && !label.ends_with('-')
         });
     labels_ok.then_some(host)
-}
-
-/// Five fields of digits and `* , - /`.
-fn is_cron(text: &str) -> bool {
-    let fields: Vec<&str> = text.split_whitespace().collect();
-    fields.len() == 5
-        && fields.iter().all(|field| {
-            field
-                .chars()
-                .all(|c| c.is_ascii_digit() || matches!(c, '*' | ',' | '-' | '/'))
-        })
 }
 
 /// ISO 639-1: two lowercase letters each.
