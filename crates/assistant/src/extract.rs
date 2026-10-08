@@ -93,6 +93,28 @@ pub async fn extract(
     declared_language: Option<&str>,
     max_pages: u32,
 ) -> Result<Extracted, Error> {
+    let mut cut = false;
+    let shortened;
+    let bytes = if mime.starts_with("application/pdf") {
+        if max_pages == 0 {
+            // No page is kept: nothing is read at all.
+            return Ok(Extracted {
+                language: None,
+                passages: Vec::new(),
+                truncated: true,
+            });
+        }
+        match first_pages(bytes, max_pages) {
+            Some(fewer) => {
+                cut = true;
+                shortened = fewer;
+                &shortened[..]
+            }
+            None => bytes,
+        }
+    } else {
+        bytes
+    };
     let result = kreuzberg::extract_bytes(bytes, mime, &config())
         .await
         .map_err(|err| Error::Extract(format!("{mime}: {err}")))?;
@@ -106,7 +128,7 @@ pub async fn extract(
         .map(str::to_owned)
         .or_else(|| detected.map(str::to_owned));
 
-    let mut truncated = false;
+    let mut truncated = cut;
     let mut passages = Vec::new();
     for chunk in result.chunks.unwrap_or_default() {
         let first_page = chunk
@@ -130,6 +152,30 @@ pub async fn extract(
         passages,
         truncated,
     })
+}
+
+/// `bytes`, a PDF, cut to its first `max_pages` pages before PDFium reads it (T-3314), so a
+/// long PDF costs the pages kept and not the whole document. `None` when nothing is beyond the
+/// limit or the file is one this cannot rewrite (encrypted, unreadable): PDFium reads it whole,
+/// and the passages past the limit are still dropped.
+pub(crate) fn first_pages(bytes: &[u8], max_pages: u32) -> Option<Vec<u8>> {
+    let mut document = lopdf::Document::load_mem(bytes).ok()?;
+    if document.is_encrypted() {
+        return None;
+    }
+    let beyond: Vec<u32> = document
+        .get_pages()
+        .into_keys()
+        .filter(|page| *page > max_pages)
+        .collect();
+    if beyond.is_empty() {
+        return None;
+    }
+    document.delete_pages(&beyond);
+    document.prune_objects();
+    let mut cut = Vec::new();
+    document.save_to(&mut cut).ok()?;
+    Some(cut)
 }
 
 /// Whether a passage is headings and nothing else: its body lines empty or repeating a heading.
@@ -339,7 +385,66 @@ impl Sink for Indexer {
 
 #[cfg(test)]
 mod tests {
-    use super::only_headings;
+    use super::{first_pages, only_headings};
+
+    /// A PDF of `pages` pages, page n showing "Strana n", with a correct cross-reference table.
+    fn pdf(pages: usize) -> Vec<u8> {
+        let kids: Vec<String> = (0..pages).map(|n| format!("{} 0 R", 4 + 2 * n)).collect();
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+                kids.join(" ")
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        for n in 0..pages {
+            let stream = format!("BT /F1 18 Tf 72 720 Td (Strana {}) Tj ET", n + 1);
+            objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * n));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{stream}\nendstream",
+                stream.len()
+            ));
+        }
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// T-3314: PDFium is handed the pages within `pdf.maxPages` and no more.
+    #[test]
+    fn a_pdf_is_cut_to_its_page_limit_before_it_is_read() {
+        let cut = first_pages(&pdf(5), 2).expect("cut");
+        let document = lopdf::Document::load_mem(&cut).expect("still a PDF");
+        assert_eq!(document.get_pages().len(), 2);
+        assert!(cut.len() < pdf(5).len());
+        assert!(
+            first_pages(&pdf(2), 2).is_none(),
+            "nothing beyond the limit"
+        );
+        assert!(
+            first_pages(b"not a pdf", 2).is_none(),
+            "read whole, as before"
+        );
+    }
 
     #[test]
     fn a_passage_of_headings_alone_is_recognised() {

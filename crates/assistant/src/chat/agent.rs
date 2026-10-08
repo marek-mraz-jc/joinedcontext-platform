@@ -237,7 +237,7 @@ fn markers(answer: &str) -> HashSet<usize> {
 }
 
 async fn send(events: &Sender<Event>, event: Event) {
-    // A channel that went away stops reading; the question still finishes and is counted.
+    // A channel that went away stops reading; the loop stops at its next call.
     let _ = events.send(event).await;
 }
 
@@ -269,6 +269,11 @@ pub async fn answer(
     let mut spent = Spent::default();
     let mut repeated = false;
     for call in 0..MAX_CALLS {
+        // Nobody reads the answer any more (T-3314): stop before the next call spends. A call
+        // already sent is let finish, so what it spent is counted.
+        if events.is_closed() {
+            return spent;
+        }
         if ask.spent_before + spent.total + estimate(&messages) > ask.tokens_per_conversation {
             send(events, Event::Error {
                 status: 429,
@@ -359,6 +364,37 @@ pub async fn answer(
         }
     }
     spent
+}
+
+/// Whether `arguments` satisfy `schema`; else where and which rule they break, never the value,
+/// which goes back to the model. A schema that does not compile admits nothing.
+fn fits(schema: &Value, arguments: &Value) -> Result<(), String> {
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|_| "the tool's schema cannot be read, so no call is made to it".to_owned())?;
+    let problems: Vec<String> = validator
+        .iter_errors(arguments)
+        .take(5)
+        .map(|error| {
+            let rule = match error.kind() {
+                jsonschema::error::ValidationErrorKind::Required { property } => {
+                    format!("{} is required", property.as_str().unwrap_or("an argument"))
+                }
+                jsonschema::error::ValidationErrorKind::AdditionalProperties { unexpected } => {
+                    format!("no argument is called {}", unexpected.join(", "))
+                }
+                kind => format!("breaks the schema's {}", kind.keyword()),
+            };
+            match error.instance_path().to_string() {
+                at if at.is_empty() => rule,
+                at => format!("{at}: {rule}"),
+            }
+        })
+        .collect();
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
 }
 
 /// One tool call of the model, refused unless it names an offered tool (AG-105).
@@ -463,6 +499,17 @@ async fn run_tool(
             .map(|t| (c, t))
     }) {
         let endpoint = Some(connector.endpoint.clone());
+        let arguments = if arguments.is_object() {
+            arguments
+        } else {
+            json!({})
+        };
+        // Checked against the tool's own schema before anything is sent (T-3314).
+        if let Err(why) = fits(&tool.input_schema, &arguments) {
+            return format!(
+                "The call was not made: {why}. Correct the arguments, or answer without this tool."
+            );
+        }
         send(
             events,
             Event::Tool {
@@ -472,11 +519,6 @@ async fn run_tool(
             },
         )
         .await;
-        let arguments = if arguments.is_object() {
-            arguments
-        } else {
-            json!({})
-        };
         match connector
             .surface
             .call(ask.http, &tool.name, arguments)
@@ -619,6 +661,32 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<(String, String)>, cra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-3314: the refusal names the place and the rule, never the value the model wrote.
+    #[test]
+    fn arguments_are_checked_against_the_tools_schema() {
+        let schema = json!({"type": "object", "properties": {"type": {"type": "string"}, "limit": {"type": "integer", "maximum": 100}}, "required": ["type"], "additionalProperties": false});
+        assert_eq!(fits(&schema, &json!({"type": "Event", "limit": 5})), Ok(()));
+        assert_eq!(fits(&schema, &json!({})), Err("type is required".into()));
+        let why = fits(
+            &schema,
+            &json!({"type": "Event", "limit": 1000, "secretword": 1}),
+        )
+        .expect_err("two rules broken");
+        assert!(why.contains("/limit: breaks the schema's maximum"), "{why}");
+        assert!(why.contains("no argument is called secretword"), "{why}");
+        assert!(!why.contains("1000"), "{why}");
+        assert!(
+            fits(&json!({"type": "nonsense"}), &json!({})).is_err(),
+            "an unreadable schema admits nothing"
+        );
+        // A remote reference is never fetched.
+        assert!(fits(
+            &json!({"$ref": "https://example.org/schema.json"}),
+            &json!({})
+        )
+        .is_err());
+    }
 
     #[test]
     fn data_cannot_close_its_own_block_and_the_rules_come_first() {

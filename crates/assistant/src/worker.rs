@@ -156,20 +156,16 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
         };
         let spec = &resource.manifest.spec;
         match id.kind.as_str() {
-            "Endpoint" => {
-                if let (Some(slug), Some(audience)) = (
-                    spec.get("slug").and_then(|v| v.as_str()),
-                    spec.get("audience").and_then(|v| v.as_str()),
-                ) {
-                    snapshot.endpoints.insert(
-                        (project, id.name.clone()),
-                        EndpointRef {
-                            slug: slug.to_owned(),
-                            audience: audience.to_owned(),
-                        },
-                    );
+            "Endpoint" => match endpoint_ref(spec) {
+                Some(endpoint) => {
+                    snapshot
+                        .endpoints
+                        .insert((project, id.name.clone()), endpoint);
                 }
-            }
+                None => {
+                    tracing::warn!(project = %project, endpoint = %id.name, "an Endpoint without a valid slug and audience is not connected")
+                }
+            },
             "AssistantDeployment" => {
                 match serde_json::from_value::<AssistantDeploymentSpec>(spec.clone())
                     .map_err(|err| err.to_string())
@@ -449,9 +445,44 @@ pub fn checkout_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Chec
     })
 }
 
+/// An Endpoint's slug and audience, when its slug is one the platform mints (EP-02, T-3314): the
+/// slug becomes a path segment of the connector's address on the gateway, so a manifest can never
+/// steer the chat's client to another path or host.
+fn endpoint_ref(spec: &serde_json::Value) -> Option<EndpointRef> {
+    let slug = spec.get("slug").and_then(|v| v.as_str())?;
+    let audience = spec.get("audience").and_then(|v| v.as_str())?;
+    jc_core::kinds::endpoint::EndpointSlug::new(slug).ok()?;
+    Some(EndpointRef {
+        slug: slug.to_owned(),
+        audience: audience.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-3314: a slug that is not one the platform mints never becomes part of an address.
+    #[test]
+    fn only_a_minted_slug_is_connected() {
+        let minted = "abcdefghijklmnopqrstuvwxyz234567";
+        let of =
+            |slug: &str| endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public"}));
+        assert_eq!(of(minted).map(|e| e.slug), Some(minted.to_owned()));
+        for bad in [
+            "../../admin",
+            "abcdefghijklmnopqrstuvwxyz234567/../x",
+            "abcdefghijklmnopqrstuvwxyz23456?x",
+            "short",
+            "",
+        ] {
+            assert!(of(bad).is_none(), "{bad}");
+        }
+        assert!(
+            endpoint_ref(&serde_json::json!({"slug": minted})).is_none(),
+            "no audience"
+        );
+    }
 
     fn deployment(project: &str, name: &str, public_id: &str, channel: &str) -> Deployment {
         let spec: AssistantDeploymentSpec = serde_json::from_value(serde_json::json!({

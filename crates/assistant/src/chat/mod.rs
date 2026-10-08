@@ -42,7 +42,7 @@ pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_TEXT_CHARS: usize = 4_000;
 /// The most turns of `history` (AG-98).
 pub const MAX_TURNS: usize = 6;
-/// How long a conversation may be continued.
+/// How long a conversation may be continued; migration 0006's policy deletes it after as long.
 const CONVERSATION_HOURS: i64 = 24;
 /// The most questions answered at once, whatever the deployments' rate limits allow (T-3059):
 /// each one holds the history, up to 250,000 kept characters of tool results and a model call,
@@ -74,6 +74,9 @@ pub struct ChatState {
     pub questions: Arc<tokio::sync::Semaphore>,
 }
 
+/// The most keys [`Limits`] counts at once (T-3314).
+pub const MAX_KEYS: usize = 50_000;
+
 /// Requests per minute, per key, in fixed one-minute windows (AG-101).
 // ponytail: in memory, one replica; a second replica doubles every limit. Move to the database
 // when the assistant runs on more than one.
@@ -85,9 +88,14 @@ pub struct Limits {
 impl Limits {
     /// Counts one request under `key`; `Err(seconds)` until the window frees a place.
     pub fn admit(&mut self, key: &str, limit: u32, now: Instant) -> Result<(), u64> {
-        if self.windows.len() > 50_000 {
+        if self.windows.len() >= MAX_KEYS && !self.windows.contains_key(key) {
             self.windows
                 .retain(|_, (started, _)| now.duration_since(*started) < Duration::from_secs(60));
+            if self.windows.len() >= MAX_KEYS {
+                // A full table refuses a new key rather than grow or forget a counted one: a
+                // reset would hand every key already at its limit a fresh minute.
+                return Err(60);
+            }
         }
         let (started, count) = self.windows.entry(key.to_owned()).or_insert((now, 0));
         if now.duration_since(*started) >= Duration::from_secs(60) {
@@ -283,12 +291,14 @@ pub fn validate(question: &Question, deployment: &Deployment) -> Result<(), Stri
     Ok(())
 }
 
-/// A conversation of this deployment younger than a day, created when the request names none;
-/// its id and what it spent so far. `Ok(None)` when the named one is not this assistant's.
+/// A conversation of this deployment younger than a day and started from `origin`, created when
+/// the request names none; its id and what it spent so far. `Ok(None)` when the named one is not
+/// this assistant's or was started from another origin (AG-100).
 async fn conversation(
     pool: &PgPool,
     deployment: &Deployment,
     named: Option<&str>,
+    origin: Option<&str>,
 ) -> Result<Option<(String, u64)>, crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
     let found: Option<(String, i64)> = match named {
@@ -296,11 +306,13 @@ async fn conversation(
             if uuid_shaped(id) {
                 sqlx::query_as(
                     "SELECT id::text, tokens FROM conversations WHERE id = $1::uuid AND deployment = $2 \
-                     AND created_at > now() - make_interval(hours => $3)",
+                     AND created_at > now() - make_interval(hours => $3) \
+                     AND origin IS NOT DISTINCT FROM $4",
                 )
                 .bind(id)
                 .bind(&deployment.name)
                 .bind(CONVERSATION_HOURS as i32)
+                .bind(origin)
                 .fetch_optional(&mut *tx)
                 .await?
             } else {
@@ -308,15 +320,27 @@ async fn conversation(
             }
         }
         None => Some(
-            sqlx::query_as("INSERT INTO conversations (project, deployment) VALUES ($1, $2) RETURNING id::text, tokens")
+            sqlx::query_as("INSERT INTO conversations (project, deployment, origin) VALUES ($1, $2, $3) RETURNING id::text, tokens")
                 .bind(&deployment.project)
                 .bind(&deployment.name)
+                .bind(origin)
                 .fetch_one(&mut *tx)
                 .await?,
         ),
     };
     tx.commit().await?;
     Ok(found.map(|(id, tokens)| (id, u64::try_from(tokens).unwrap_or(0))))
+}
+
+/// Deletes every conversation past [`CONVERSATION_HOURS`], of every project (T-3314, AG-99);
+/// returns how many. Run by the minute loop.
+pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
+    // No WHERE: the `conversations_expired` policy (migration 0006) is the whole selection, and a
+    // column named here would need a SELECT policy across projects.
+    let gone = sqlx::query("DELETE FROM conversations")
+        .execute(pool)
+        .await?;
+    Ok(gone.rows_affected())
 }
 
 fn uuid_shaped(id: &str) -> bool {
@@ -476,7 +500,19 @@ async fn chat(
         Placed::Refused => return not_placed_here(),
     };
     let client = client_of(&headers);
-    let response = ask(&state, deployment, body, &client, None).await;
+    let started_at = origin
+        .as_ref()
+        .and_then(|o| o.to_str().ok())
+        .map(str::to_owned);
+    let response = ask(
+        &state,
+        deployment,
+        body,
+        &client,
+        None,
+        started_at.as_deref(),
+    )
+    .await;
     with_cors(response, origin)
 }
 
@@ -518,7 +554,15 @@ async fn chat_in_portal(
         return problem(404, "The project declares no such assistant.");
     };
     let token = token.filter(|_| !deployment.spec.channel.is_anonymous());
-    ask(&state, deployment, body, &format!("person:{person}"), token).await
+    ask(
+        &state,
+        deployment,
+        body,
+        &format!("person:{person}"),
+        token,
+        None,
+    )
+    .await
 }
 
 /// One question to `deployment` from `client`, answered as Server-Sent Events.
@@ -568,6 +612,7 @@ async fn ask(
     body: Result<Json<Question>, JsonRejection>,
     client: &str,
     person: Option<PersonToken>,
+    origin: Option<&str>,
 ) -> Response {
     let question = match body {
         Ok(Json(question)) => question,
@@ -628,6 +673,7 @@ async fn ask(
         &state.pool,
         &deployment,
         question.conversation.as_deref(),
+        origin,
     )
     .await
     {
@@ -831,6 +877,28 @@ mod tests {
         assert!(limits
             .admit("a", 2, start + Duration::from_secs(61))
             .is_ok());
+    }
+
+    /// T-3314: within one minute, a flood of new keys stops at [`MAX_KEYS`]; the keys already
+    /// counted keep their windows, and an expired window makes room again.
+    #[test]
+    fn the_table_of_keys_stays_bounded() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        for n in 0..MAX_KEYS {
+            assert!(limits.admit(&n.to_string(), 2, start).is_ok());
+        }
+        assert_eq!(limits.admit("one more", 2, start), Err(60));
+        assert_eq!(limits.windows.len(), MAX_KEYS);
+        assert!(
+            limits.admit("7", 2, start).is_ok(),
+            "a counted key still counts"
+        );
+        assert!(limits.admit("7", 2, start).is_err(), "and keeps its limit");
+        assert!(limits
+            .admit("one more", 2, start + Duration::from_secs(60))
+            .is_ok());
+        assert_eq!(limits.windows.len(), 1);
     }
 
     #[test]
