@@ -11,11 +11,12 @@
 //! | `JC_WASM_S3_PUBLIC_ENDPOINT` | the store's address for a browser, which presigned URLs name |
 //! | `JC_WASM_COMPONENTS_DIR` | components from a directory instead of the bucket |
 //! | `JC_WASM_DB_URL_FILE` | the apps database URL as the shard's login role, a mounted file |
+//! | `JC_WASM_DB_URL`, `JC_WASM_DB_PASSWORD_FILE` | instead: the URL without a password, and the password as a mounted file |
 //! | `JC_WASM_DB_POOL` | connections of the shard's pool, default 20 |
 //! | `JC_WASM_SQL_QUOTA_BYTES`, `JC_WASM_BLOB_QUOTA_BYTES` | per App, default 100 MiB and 1 GiB |
 //! | `JC_WASM_*` | the limits, each only lowered (`limits.rs`) |
 //!
-//! Without `JC_WASM_DB_URL_FILE` an App's SQL answers `unavailable`; without a bucket, its files.
+//! Without either an App's SQL answers `unavailable`; without a bucket, its files.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,7 +32,7 @@ use wasm_host::metrics::Metrics;
 use wasm_host::s3::Bucket;
 use wasm_host::server::Shard;
 use wasm_host::source::Source;
-use wasm_host::sql::{PgStore, SqlLimits};
+use wasm_host::sql::{connect_options, PgStore, SqlLimits};
 use wasm_host::storage::{Storage, Stores, Unconfigured};
 
 fn var(name: &str) -> Option<String> {
@@ -98,9 +99,23 @@ async fn run() -> Result<(), String> {
         (None, Some(bucket)) => Source::Store(bucket.clone()),
         (None, None) => return Err("set JC_WASM_S3_ENDPOINT or JC_WASM_COMPONENTS_DIR".into()),
     };
-    let sql = match var("JC_WASM_DB_URL_FILE") {
+    let database = match (var("JC_WASM_DB_URL_FILE"), var("JC_WASM_DB_URL")) {
+        (Some(_), Some(_)) => {
+            return Err("set JC_WASM_DB_URL_FILE or JC_WASM_DB_URL, not both".into())
+        }
+        (Some(_), None) => Some(connect_options(&secret("JC_WASM_DB_URL_FILE")?, None)?),
+        (None, Some(url)) => {
+            let password = match var("JC_WASM_DB_PASSWORD_FILE") {
+                Some(_) => Some(secret("JC_WASM_DB_PASSWORD_FILE")?),
+                None => None,
+            };
+            Some(connect_options(&url, password.as_deref())?)
+        }
+        (None, None) => None,
+    };
+    let sql = match database {
         None => None,
-        Some(_) => {
+        Some(options) => {
             let size = var("JC_WASM_DB_POOL").map_or(Ok(20), |v| {
                 v.trim()
                     .parse::<u32>()
@@ -110,7 +125,7 @@ async fn run() -> Result<(), String> {
                 quota_bytes: bytes("JC_WASM_SQL_QUOTA_BYTES", 100 << 20)?,
                 ..SqlLimits::default()
             };
-            Some(PgStore::connect(&secret("JC_WASM_DB_URL_FILE")?, size, sql_limits).await?)
+            Some(PgStore::connect(options, size, sql_limits).await?)
         }
     };
     let blob = match bucket {

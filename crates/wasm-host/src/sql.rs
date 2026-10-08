@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
-use sqlx::postgres::{PgArguments, PgPoolOptions, PgRow};
+use sqlx::postgres::{PgArguments, PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{Column, PgPool, Postgres, Row, TypeInfo};
 use tokio::sync::Semaphore;
 
@@ -460,13 +460,41 @@ pub struct PgStore {
     sizes: Mutex<HashMap<String, (Instant, u64)>>,
 }
 
+/// The shard's connection: a whole URL from a mounted file, or a URL that carries no password
+/// with the password from its own mounted file, so a deployment can name the database's address
+/// in the open and keep only the generated password secret. A URL that carries a password beside
+/// a password file is refused rather than guessed between.
+pub fn connect_options(url: &str, password: Option<&str>) -> Result<PgConnectOptions, String> {
+    let options: PgConnectOptions = url
+        .parse()
+        .map_err(|_| "the apps database URL is not a postgres URL".to_owned())?;
+    match password {
+        None => Ok(options),
+        Some(_) if url_has_password(url) => Err(
+            "the apps database URL carries a password and a password file is set too".to_owned(),
+        ),
+        Some(password) => Ok(options.password(password)),
+    }
+}
+
+/// Whether `postgresql://user:password@host/...` names a password.
+fn url_has_password(url: &str) -> bool {
+    url.split_once("://")
+        .and_then(|(_, rest)| rest.split_once('@'))
+        .is_some_and(|(credentials, _)| credentials.contains(':'))
+}
+
 impl PgStore {
     /// A pool on `url`, the shard's login role (`wasm_host_<shard>`).
-    pub async fn connect(url: &str, size: u32, limits: SqlLimits) -> Result<Self, String> {
+    pub async fn connect(
+        options: PgConnectOptions,
+        size: u32,
+        limits: SqlLimits,
+    ) -> Result<Self, String> {
         let pool = PgPoolOptions::new()
             .max_connections(size)
             .acquire_timeout(Duration::from_secs(3))
-            .connect(url)
+            .connect_with(options)
             .await
             .map_err(|err| format!("the apps database: {err}"))?;
         Ok(Self::with_pool(pool, limits))
@@ -598,6 +626,23 @@ impl PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_url_without_a_password_takes_the_password_file_and_one_with_both_is_refused() {
+        let url = "postgresql://wasm_host_0@apps-db-rw.dev-apps-db.svc:5432/apps?sslmode=require";
+        let options = connect_options(url, Some("s3cr3t")).expect("options");
+        assert_eq!(options.get_username(), "wasm_host_0");
+        assert_eq!(options.get_host(), "apps-db-rw.dev-apps-db.svc");
+        assert_eq!(options.get_database(), Some("apps"));
+        // The whole URL from one file still works, the password inside it.
+        assert!(connect_options("postgresql://wasm_host_0:pw@db:5432/apps", None).is_ok());
+        assert!(
+            connect_options("postgresql://wasm_host_0:pw@db:5432/apps", Some("other")).is_err()
+        );
+        assert!(connect_options("not a url", None).is_err());
+        assert!(!url_has_password("postgresql://db:5432/apps"));
+        assert!(!url_has_password("postgresql://user@db/apps"));
+    }
 
     #[test]
     fn what_an_app_may_send() {
