@@ -25,10 +25,11 @@
       "type": "object"
     },
     "AppClass": {
-      "description": "The App's shape (AP-124): `ui`, React on the SDK served statically, or `ui-rust`, the same UI with an axum server in a pod. `ui-node` is declared and not built yet.",
+      "description": "The App's shape (AP-124, AP-148): `ui`, React on the SDK served statically, `ui-rust`, the same UI with an axum server in a pod, or `wasm`, the same UI with a server component on the shared WASM host. `ui-node` is declared and not built yet.",
       "enum": [
         "ui",
-        "ui-rust"
+        "ui-rust",
+        "wasm"
       ],
       "type": "string"
     },
@@ -258,6 +259,17 @@
           ],
           "description": "Where the source lives (AP-02)."
         },
+        "storage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppStorage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The database schema and the storage prefix of a `wasm` App (AP-148)."
+        },
         "visibility": {
           "allOf": [
             {
@@ -274,6 +286,35 @@
         "kind",
         "source"
       ],
+      "type": "object"
+    },
+    "AppStorage": {
+      "additionalProperties": false,
+      "description": "What a `wasm` App stores: its own schema in `apps-db` and its own prefix in the object store (AP-148, ADR-N-044).",
+      "properties": {
+        "blob": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BlobStorage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its objects, under its own prefix (AP-145)."
+        },
+        "sql": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SqlStorage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its schema, migrated by the reconciler at publish (AP-149)."
+        }
+      },
       "type": "object"
     },
     "AppVisibility": {
@@ -316,6 +357,20 @@
         }
       ]
     },
+    "BlobStorage": {
+      "additionalProperties": false,
+      "description": "An App's object prefix (AP-148).",
+      "properties": {
+        "quotaMiB": {
+          "default": 1024,
+          "description": "How much the prefix may hold, MiB.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -328,6 +383,13 @@
         "commit": {
           "description": "The commit of the source the artifact was built from, 7 to 40 lowercase hexadecimal characters.",
           "type": "string"
+        },
+        "component": {
+          "description": "The digest of a `wasm` App's server component, taken from the checked bundle and stored by it in the object store; what the WASM host loads and checks (AP-151).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "digest": {
           "description": "The artifact's digest, `sha256:` and 64 lowercase hexadecimal characters. The reconciler deploys this and nothing else (AP-72).",
@@ -1131,6 +1193,25 @@
         }
       ]
     },
+    "SqlStorage": {
+      "additionalProperties": false,
+      "description": "An App's schema (AP-148, AP-149).",
+      "properties": {
+        "migrations": {
+          "default": "migrations",
+          "description": "The folder of the repository whose `.sql` files are run in the order of their names.",
+          "type": "string"
+        },
+        "quotaMiB": {
+          "default": 100,
+          "description": "How much the schema may hold, MiB.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "Status": {
       "additionalProperties": false,
       "description": "Server-computed lifecycle and reconciliation status (MF-04). Never stored in Git.",
@@ -1170,6 +1251,15 @@
             }
           ],
           "description": "Current lifecycle phase."
+        },
+        "shard": {
+          "description": "The shard of the WASM host a `wasm` App runs on, recorded at its first publish and kept; the edge's route to the App's server is rendered from it (AP-149).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"
