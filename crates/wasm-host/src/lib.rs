@@ -2,6 +2,7 @@
 
 pub mod blob;
 pub mod host;
+pub mod jobs;
 pub mod limits;
 pub mod metrics;
 pub mod placement;
