@@ -6,7 +6,7 @@
 //! | `JC_WASM_PLACEMENTS` | the placement file the reconciler renders for this shard |
 //! | `JC_WASM_LISTEN` | the address to serve on, default `0.0.0.0:8080` |
 //! | `JC_GATEWAY_URL` | the one origin an App may call, `https://host[:port]` |
-//! | `JC_WASM_S3_ENDPOINT`, `JC_WASM_S3_BUCKET` | the bucket of `components/<64 hex>.wasm` and `apps/<shard>/<id>/` |
+//! | `JC_WASM_S3_ENDPOINT`, `JC_WASM_S3_BUCKET` | the bucket of `components/sha256-<64 hex>.wasm` and `apps/<shard>/<id>/` |
 //! | `JC_WASM_S3_KEY_FILE`, `JC_WASM_S3_SECRET_FILE` | the shard's key, as mounted files, never variables |
 //! | `JC_WASM_S3_PUBLIC_ENDPOINT` | the store's address for a browser, which presigned URLs name |
 //! | `JC_WASM_COMPONENTS_DIR` | components from a directory instead of the bucket |
