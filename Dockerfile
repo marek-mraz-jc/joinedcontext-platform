@@ -24,7 +24,8 @@ COPY crates/functions/Cargo.toml crates/functions/Cargo.toml
 COPY crates/assistant/Cargo.toml crates/assistant/Cargo.toml
 COPY crates/token-sidecar/Cargo.toml crates/token-sidecar/Cargo.toml
 COPY crates/wasm-host/Cargo.toml crates/wasm-host/Cargo.toml
-RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src \
+COPY crates/app-sdk/Cargo.toml crates/app-sdk/Cargo.toml
+RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src \
  && echo 'pub fn _dep_cache() {}' > crates/jc-core/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/context-gateway/src/lib.rs \
  && echo 'fn main() {}' > crates/context-gateway/src/main.rs \
@@ -38,6 +39,7 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'fn main() {}' > crates/token-sidecar/src/main.rs \
  && echo 'pub fn _dep_cache() {}' > crates/wasm-host/src/lib.rs \
  && echo 'fn main() {}' > crates/wasm-host/src/main.rs \
+ && echo 'pub fn _dep_cache() {}' > crates/app-sdk/src/lib.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
  && cargo build --release --locked --workspace --exclude assistant \
  && cargo build --release --locked -p assistant && rm -rf crates/*/src
