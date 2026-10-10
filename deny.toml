@@ -14,10 +14,18 @@ allow = [
   # on T-3209 (T-3191, T-3202).
   "Unicode-DFS-2016",
 ]
+# Mozilla's CA bundle as data, no code: antares-ql -> antares-jsonld -> reqwest 0.13 ->
+# rustls-platform-verifier, a context loader the gateway never calls (T-3530). This crate only.
+exceptions = [{ allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" }]
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = ["https://github.com/marek-mraz-jc/joinedcontext-platform"]
+allow-git = [
+  "https://github.com/marek-mraz-jc/joinedcontext-platform",
+  # The default broker's query-language crates, which the gateway judges grant conditions with
+  # (T-3530); pinned by rev in crates/context-gateway/Cargo.toml.
+  "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker",
+]

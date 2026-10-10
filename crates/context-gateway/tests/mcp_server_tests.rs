@@ -74,6 +74,7 @@ fn endpoint(slug: &str, policies: Vec<PolicySpec>) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies,
     }
 }

@@ -83,6 +83,7 @@ fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoi
         models: vec![air_quality()],
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies,
     }
 }

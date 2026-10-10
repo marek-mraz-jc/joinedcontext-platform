@@ -92,6 +92,7 @@ fn endpoint(per_day: Option<u32>) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies: vec![form_policy()],
     }
 }

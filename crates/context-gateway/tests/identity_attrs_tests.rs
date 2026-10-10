@@ -44,6 +44,7 @@ fn app_endpoint(property_names: &str) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![serde_norway::from_str(&format!(
             r#"contextSpaceRef: helsinki
 assigner: did:web:hel.fi

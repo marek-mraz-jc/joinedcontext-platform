@@ -136,6 +136,7 @@ fn endpoint_with(
         models: vec![air_quality()],
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies,
     }
 }

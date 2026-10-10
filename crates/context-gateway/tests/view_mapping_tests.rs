@@ -152,6 +152,7 @@ fn endpoint(view: Option<ViewMapping>) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }

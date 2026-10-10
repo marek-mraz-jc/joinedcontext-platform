@@ -113,6 +113,7 @@ fn endpoint() -> Endpoint {
             })),
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
         }],
+        policy_names: Vec::new(),
         policies: vec![policy],
     }
 }
@@ -158,6 +159,7 @@ fn big_endpoint() -> Endpoint {
             })),
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
         }],
+        policy_names: Vec::new(),
         policies: vec![policy],
         ..endpoint()
     }

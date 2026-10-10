@@ -116,6 +116,7 @@ fn endpoint(granted_types: &[&str]) -> Endpoint {
             json_schema: None,
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
         }],
+        policy_names: Vec::new(),
         policies: vec![policy],
     }
 }
@@ -355,8 +356,8 @@ async fn a_grant_over_every_type_is_unchanged() {
     assert!(body.contains("Depot north"), "body was {body}");
 }
 
-/// A broker that answers a JSON-LD expanded type must be judged by the same rule: the term is
-/// read out of the IRI before it is compared with the grant.
+/// A broker that answers a JSON-LD expanded type must be judged by the same rule: the grant's
+/// term is read through the model's `@context` and compared as an IRI (T-3473).
 #[tokio::test]
 async fn an_expanded_type_iri_is_compacted_before_it_is_judged() {
     let mut expanded = entity(VEHICLE, "Depot");

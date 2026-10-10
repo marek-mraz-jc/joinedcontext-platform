@@ -99,6 +99,7 @@ fn endpoint(slug: &str, space: &str, representations: Vec<Representation>) -> En
         models: vec![air_quality()],
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: public_grant(space),
     }
 }

@@ -179,6 +179,7 @@ fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) ->
             json_schema: None,
             context: None,
         }],
+        policy_names: Vec::new(),
         policies: vec![policy],
     }
 }

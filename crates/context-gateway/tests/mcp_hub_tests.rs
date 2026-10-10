@@ -81,6 +81,7 @@ fn endpoint(slug: &str, policies: Vec<PolicySpec>) -> Endpoint {
             json_schema: None,
             context: None,
         }],
+        policy_names: Vec::new(),
         policies,
     }
 }

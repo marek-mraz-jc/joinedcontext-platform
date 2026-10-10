@@ -60,6 +60,7 @@ fn space_named(space: &str, role: &str) -> Space {
             models: Vec::new(),
             view_mapping: None,
             catalog: None,
+            policy_names: Vec::new(),
             policies: vec![granted_to(space, role)],
         }),
         title: BTreeMap::from([("en".to_owned(), format!("The {space} space"))]),

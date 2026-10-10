@@ -11,6 +11,7 @@
 //! against (GW10). The floor for an ordinary caller is always REWRITE: the tenant alone is
 //! pinned by the gateway, never chosen by the client (GW3, GW20).
 
+use crate::pdp::grants::GrantView;
 use crate::pdp::temporal::{self, Window};
 use crate::pdp::{geo, scope_folding};
 use chrono::{DateTime, Utc};
@@ -96,6 +97,16 @@ pub struct Constraints {
     pub tenant: String,
     /// The entity types the request is narrowed to; empty means every granted type.
     pub types: BTreeSet<String>,
+    /// What `types` names as IRIs under the space's own `@context`s (a model's term or its
+    /// `@vocab`); an answer's type is compared with these and with the core context's reading
+    /// of `types` (T-3473, [`crate::pdp::projection::type_named`]). Filled by the decision
+    /// point, which knows the endpoint's models.
+    pub type_iris: BTreeSet<String>,
+    /// What each attribute name of `served`, `hidden` and `attrs_by_type` (and each type that
+    /// map is keyed by) names under the space's own `@context`s, beside the core context's
+    /// reading; the discovery guard compares a listed or asked name with these as IRIs
+    /// (T-3533, [`crate::pdp::vocabulary`]). Filled by the decision point.
+    pub name_iris: BTreeMap<String, BTreeSet<String>>,
     /// The anchored id patterns of the matching grants (R24).
     pub id_patterns: BTreeSet<String>,
     /// The attributes the response is projected to; empty means no projection (R9).
@@ -166,6 +177,18 @@ pub struct Constraints {
     /// empty list with no explanation debugs it by asking the same question with more filters,
     /// which is the behaviour the rule exists to discourage.
     pub dropped: BTreeSet<String>,
+    /// Each grant as an entity is judged against it, so an entity shows only what the grants
+    /// it matches show and an entity none of them matches is not served (T-3530, EP-16).
+    ///
+    /// Empty when the set was not built from policies; it then narrows nothing.
+    pub grants: Vec<GrantView>,
+    /// The attributes the request selects or orders on, beyond the ones every entity carries
+    /// (T-1862, T-3530). An entity whose matched grants do not show one of them is not served:
+    /// whether it matched would say what the hidden value is.
+    pub referenced: BTreeSet<String>,
+    /// The caller's own `attrs`, narrowed to the grants: an entity carrying none of them is not
+    /// in the answer, as CIM 009 selects. Empty when the caller named none.
+    pub attrs_asked: BTreeSet<String>,
 }
 
 impl Constraints {
@@ -333,6 +356,12 @@ fn intersect(
     // An empty `attrs` downstream is "no projection", the opposite of what was decided.
     let no_attr_left = !request.attrs.is_empty() && !granted_attrs.is_empty() && attrs.is_empty();
 
+    let attrs_asked = if operation.is_write() || request.attrs.is_empty() {
+        BTreeSet::new()
+    } else {
+        attrs.clone()
+    };
+
     let filters: Vec<String> = grants
         .iter()
         .filter_map(|policy| policy_filter(policy))
@@ -367,25 +396,17 @@ fn intersect(
             || geo.restricted
             || clamped.restricted,
         types,
-        // An exact `id` is the pattern that matches only it; until T-0806 it was never
-        // compiled, so a selector naming one entity granted the whole type.
         id_patterns: grants
             .iter()
-            .flat_map(|policy| policy.information.iter())
-            .flat_map(|info| info.entities.iter())
-            .flat_map(|selector| {
-                selector.id_pattern.clone().into_iter().chain(
-                    selector
-                        .id
-                        .as_ref()
-                        .map(|urn| format!("^{}$", regex::escape(&urn.to_string()))),
-                )
-            })
+            .flat_map(|policy| id_patterns(policy))
             .collect(),
         attrs,
         // The grants alone say which attributes this caller may read, not which type each one
         // belongs to; a projection fills this in (MP-02, T-1862).
         attrs_by_type: BTreeMap::new(),
+        // the decision point reads the endpoint's models into this (T-3473)
+        type_iris: BTreeSet::new(),
+        name_iris: BTreeMap::new(),
         served: granted_attrs.clone(),
         hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
@@ -399,7 +420,34 @@ fn intersect(
         empty: clamped.empty || no_type_left || no_attr_left,
         // Filled by the filter rule, which runs after this and knows which types it took out.
         dropped: BTreeSet::new(),
+        grants: grants.iter().map(|policy| GrantView::of(policy)).collect(),
+        // CIM 009's `attrs` selects the entities that carry one of the names. The broker is
+        // asked for the grants' condition attributes beside them, so the selection is the
+        // gateway's to make again on the answer (T-3530).
+        attrs_asked,
+        // Filled by the filter rule, which reads the request's references.
+        referenced: BTreeSet::new(),
     }
+}
+
+/// The anchored id patterns one policy's selectors reach (R24).
+///
+/// An exact `id` is the pattern that matches only it; until T-0806 it was never compiled, so a
+/// selector naming one entity granted the whole type.
+pub fn id_patterns(policy: &PolicySpec) -> BTreeSet<String> {
+    policy
+        .information
+        .iter()
+        .flat_map(|info| info.entities.iter())
+        .flat_map(|selector| {
+            selector.id_pattern.clone().into_iter().chain(
+                selector
+                    .id
+                    .as_ref()
+                    .map(|urn| format!("^{}$", regex::escape(&urn.to_string()))),
+            )
+        })
+        .collect()
 }
 
 /// One policy's whole residual as one `q` conjunction (R12, R13).
@@ -470,8 +518,14 @@ pub fn effective<'a>(
 ) -> Vec<&'a PolicySpec> {
     policies
         .iter()
-        .filter(|policy| subject.is(&policy.assignee) && in_force(policy, now))
+        .filter(|policy| assigned_and_in_force(subject, policy, now))
         .collect()
+}
+
+/// Whether `policy` is assigned to `subject` and in force at `now`: the one test
+/// [`effective`] filters by.
+pub fn assigned_and_in_force(subject: &Subject, policy: &PolicySpec, now: DateTime<Utc>) -> bool {
+    subject.is(&policy.assignee) && in_force(policy, now)
 }
 
 /// Every operation a policy grants, by its CIM 009 name, with the Table 4.20-2 groups

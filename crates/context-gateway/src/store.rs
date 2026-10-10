@@ -342,13 +342,14 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
         let app_client = app_of(repo, &project, &id.name);
         let mut bound = match &spec.policy_ref {
             Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
-            None => named.iter().map(|(_, spec)| spec.clone()).collect(),
+            None => named.to_vec(),
         };
         if app_client.is_some() {
-            bound.retain(|policy| {
+            bound.retain(|(_, policy)| {
                 policy.effect.is_prohibition() || is_own_grant(policy, &project, &id.name)
             });
         }
+        let (policy_names, bound): (Vec<String>, Vec<PolicySpec>) = bound.into_iter().unzip();
         let projection = spec.projection_ref.as_ref().and_then(|reference| {
             let named = (
                 reference
@@ -391,6 +392,7 @@ pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endp
             title: language_map(&resource.manifest.metadata.rest, "title"),
             description: language_map(&resource.manifest.metadata.rest, "description"),
             policies: bound,
+            policy_names,
             models: models.get(&key).cloned().unwrap_or_default(),
             declared_types: declared.get(&key).cloned(),
             space,
@@ -542,6 +544,10 @@ pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
                     .get(&key)
                     .map(|named| named.iter().map(|(_, spec)| spec.clone()).collect())
                     .unwrap_or_default(),
+                policy_names: policies
+                    .get(&key)
+                    .map(|named| named.iter().map(|(name, _)| name.clone()).collect())
+                    .unwrap_or_default(),
                 models: models.get(&key).cloned().unwrap_or_default(),
                 declared_types: declared.get(&key).cloned(),
                 // A space's canonical surface serves the space's own model; a view is a
@@ -647,11 +653,11 @@ fn bound_policy(
     policy_ref: &Urn,
     space: &str,
     named: &[(String, PolicySpec)],
-) -> Vec<PolicySpec> {
-    let bound: Vec<PolicySpec> = named
+) -> Vec<(String, PolicySpec)> {
+    let bound: Vec<(String, PolicySpec)> = named
         .iter()
         .filter(|(name, _)| policy_ref.space() == Some(space) && name == policy_ref.local_id())
-        .map(|(_, spec)| spec.clone())
+        .cloned()
         .collect();
     if bound.is_empty() {
         tracing::warn!(

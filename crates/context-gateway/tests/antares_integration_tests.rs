@@ -155,6 +155,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![public_grant()],
     }
 }
@@ -547,6 +548,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

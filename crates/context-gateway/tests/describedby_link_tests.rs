@@ -94,6 +94,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models,
+        policy_names: Vec::new(),
         policies: vec![policy(
             "contextSpaceRef: ovzdusie\n\
              assigner: did:web:bb.sk\n\

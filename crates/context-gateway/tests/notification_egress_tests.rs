@@ -269,6 +269,7 @@ fn endpoint(hidden: &[&str]) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }
@@ -300,6 +301,7 @@ fn gateway_with(
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
                 roles: Default::default(),
+                policy_names: Vec::new(),
                 policies: vec![policy],
                 ..endpoint(hidden)
             }]),
@@ -1186,6 +1188,7 @@ async fn deliver_projected(
             .serve([Endpoint {
                 roles: Default::default(),
                 projection: Some(Arc::new(projection.spec)),
+                policy_names: Vec::new(),
                 policies: vec![two_class_policy()],
                 ..endpoint(hidden)
             }]),
@@ -1529,6 +1532,7 @@ async fn deliver_under(
             .seal_subscribers_with(common::delivery_key())
             .serve([Endpoint {
                 roles: Default::default(),
+                policy_names: Vec::new(),
                 policies,
                 ..endpoint(&[])
             }]),
@@ -1595,7 +1599,7 @@ async fn a_revoked_grant_stops_the_subscription_it_allowed() {
 async fn a_narrowed_grant_projects_the_delivery_by_what_it_still_allows() {
     let (status, delivered) = deliver_under(
         vec![public_grant("AirQualityObserved", &["location"])],
-        public_subscription,
+        |webhook| stored(webhook, json!(["location", "temperature"]), "((location))"),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -1608,6 +1612,21 @@ async fn a_narrowed_grant_projects_the_delivery_by_what_it_still_allows() {
         "an attribute the grant no longer names was delivered: {entity}"
     );
     assert!(entity.get(UNGRANTED).is_none(), "{entity}");
+
+    // A subscription still filtering on `temperature` would say, by delivering, that it is under
+    // 100: the entity is not considered at all (T-1862 owner's rule, per entity since T-3530).
+    let (status, delivered) = deliver_under(
+        vec![public_grant("AirQualityObserved", &["location"])],
+        public_subscription,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        delivered
+            .iter()
+            .all(|sent| sent["data"].as_array().is_none_or(Vec::is_empty)),
+        "a filter on an attribute the grant no longer shows decided a delivery: {delivered:?}"
+    );
 }
 
 #[tokio::test]
@@ -1678,4 +1697,99 @@ async fn a_gateway_without_a_delivery_key_stores_no_subscription_that_delivers()
         forwarded.lock().expect("the forwarding log").is_empty(),
         "a subscription nobody could decide again reached the broker"
     );
+}
+
+/// One grant of the two `notification_projected_by_the_grants_the_entity_matches` delivers under.
+fn grant_on_sensors(selector: &str, condition: &str, names: &str) -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: {SPACE}\n\
+         assigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [queryEntity, retrieveEntity, createSubscription, updateSubscription]\n\
+         {condition}\n\
+         information:\n\
+         \x20 - entities:\n\
+         \x20     - type: AirQualityObserved\n\
+         {selector}\
+         \x20   propertyNames: [{names}]\n"
+    ))
+    .expect("the policy spec parses")
+}
+
+/// T-3530: a delivered entity carries what the grants it matches show, as a read does. The public
+/// sensor the first grant admits never carries the `pm10` only the second grant, over the other
+/// sensor, names.
+#[tokio::test]
+async fn notification_projected_by_the_grants_the_entity_matches() {
+    let public = grant_on_sensors("", "q: \"public==true\"", "temperature");
+    let first = grant_on_sensors(
+        "\x20       idPattern: \"^urn:ngsi-ld:AirQualityObserved:banskabystrica\\\\.sk:ovzdusie:senzor-01$\"\n",
+        "",
+        "temperature, pm10",
+    );
+    let (webhook, seen, _) = sink().await;
+    let (upstream, _) = broker(BrokerState {
+        stored: Some(stored(
+            &webhook,
+            json!(["temperature", "pm10"]),
+            "((public==true)|(id==\"x\"))",
+        )),
+        matching: vec![SENSOR.to_owned(), OTHER.to_owned()],
+        forwarded: Arc::new(Mutex::new(Vec::new())),
+    })
+    .await;
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(PUBLIC_URL.to_owned()),
+            )
+            .seal_subscribers_with(common::delivery_key())
+            .deliver_privately_to(vec!["127.0.0.1".to_owned()])
+            .serve([Endpoint {
+                policies: vec![public, first],
+                ..endpoint(&[])
+            }]),
+    );
+    let reading = |id: &str, public: bool| {
+        json!({
+            "id": id,
+            "type": "AirQualityObserved",
+            "public": { "type": "Property", "value": public },
+            "temperature": { "type": "Property", "value": 19.5 },
+            "pm10": { "type": "Property", "value": 41 },
+        })
+    };
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/egress/notifications?to={}",
+                    percent(&webhook)
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    notification(vec![reading(SENSOR, false), reading(OTHER, true)]).to_string(),
+                ))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let delivered = seen.lock().expect("the delivery log").clone();
+    assert_eq!(delivered.len(), 1, "one delivery: {delivered:?}");
+    let data = delivered[0]["data"].as_array().cloned().unwrap_or_default();
+    let of = |id: &str| {
+        data.iter()
+            .find(|entity| entity["id"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is delivered: {data:?}"))
+    };
+    assert_eq!(of(SENSOR)["pm10"]["value"], json!(41));
+    assert!(of(OTHER).get("pm10").is_none(), "{data:?}");
+    assert_eq!(of(OTHER)["temperature"]["value"], json!(19.5));
 }

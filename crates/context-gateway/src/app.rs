@@ -15,7 +15,7 @@ use crate::auth::accounts::ServiceAccounts;
 use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
-use crate::handlers::access_routes::{access, access_check};
+use crate::handlers::access_routes::{access, access_check, access_simulate};
 use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
 use crate::handlers::ogc::ogc_features;
 use crate::handlers::schema_routes::{
@@ -440,6 +440,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             get(mcp::server::protected_resource),
         )
         .route("/api/endpoint/{slug}/access/check", post(access_check))
+        .route(
+            "/api/endpoint/{slug}/access/simulate",
+            post(access_simulate),
+        )
         .route(
             "/api/endpoint/{slug}/preview",
             post(crate::handlers::preview::preview),
@@ -2629,7 +2633,7 @@ fn narrowed_batch_query(
         if !decided.types.is_empty() {
             entities.retain(
                 |selector| match selector.get("type").and_then(Value::as_str) {
-                    Some(asked) => decided.types.contains(projection::term(asked)),
+                    Some(asked) => projection::type_named(&decided, asked),
                     None => true,
                 },
             );
@@ -2991,9 +2995,7 @@ pub(crate) fn authenticate_by(
         // No token at all: the anonymous caller, which only a public endpoint admits
         // (EP-16, GW22).
         Err(token::Rejected::NoToken) if endpoint.admits(None) => {
-            let mut subject = Subject::anonymous();
-            with_endpoint_roles(&mut subject, endpoint, &[]);
-            return Ok(subject);
+            return Ok(anonymous_on(endpoint));
         }
         Err(rejected) => return Err(Box::new(rejected.into())),
     };
@@ -3046,6 +3048,14 @@ pub(crate) fn subject_from(
 /// template and no other endpoint can carry an application's grant; then this endpoint's own
 /// are added for the caller it admitted: on an App's Endpoint, from `client_roles`, the roles
 /// the token of that App's own client carries (ADR-N-030).
+/// The anonymous caller on `endpoint`, with the roles the Endpoint hands everyone (GW22,
+/// AP-96). Only an Endpoint that admits nobody in particular admits it.
+pub(crate) fn anonymous_on(endpoint: &Endpoint) -> Subject {
+    let mut subject = Subject::anonymous();
+    with_endpoint_roles(&mut subject, endpoint, &[]);
+    subject
+}
+
 fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint, client_roles: &[String]) {
     subject
         .roles
@@ -3062,6 +3072,16 @@ fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint, client_roles:
 /// on every endpoint, because a session cannot name an endpoint approved after the login. The
 /// Policy decision stays per endpoint (PF-46).
 pub const EDGE_AUDIENCE: &str = "context-gateway";
+
+/// The audience of the Portal's token on `access/simulate` (EP-103), which no data path
+/// accepts: a token minted for it reaches that route and nothing else.
+pub const SIMULATE_AUDIENCE: &str = "context-gateway-simulate";
+
+/// The Portal's Keycloak client, the one caller `access/simulate` answers (EP-103, option A of
+/// T-3311), and only with its own service account's token.
+// ponytail: a constant, as the deployment names the client `portal-api`; an env var when a
+// deployment renames it.
+pub const PORTAL_CLIENT: &str = "portal-api";
 
 /// The hub's Keycloak client, which is also the audience of the tokens it obtains (ADR-N-025
 /// section 4, EP-88).

@@ -5,7 +5,9 @@
 //! is answer "what exists here": a type no grant names is absent, not listed as denied
 //! (EP-59, R20).
 
-use crate::pdp::evaluator::{effective, granted_attrs, granted_operations, granted_types, Subject};
+use crate::pdp::evaluator::{
+    assigned_and_in_force, effective, granted_attrs, granted_operations, granted_types, Subject,
+};
 use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
 use jc_core::kinds::PolicySpec;
@@ -46,6 +48,52 @@ pub fn permissions(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -
     Value::Object(document)
 }
 
+/// What decided one prospective request: the index into [`Endpoint::policies`] of the
+/// Policy that did, so [`check`] and [`simulate`] read one decision and cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// A permission covering the action and the type.
+    Granted(usize),
+    /// A prohibition covering the action, which ends it whatever any permission says (GW8).
+    Prohibited(usize),
+    /// Nothing grants it.
+    NoGrant,
+}
+
+/// The decision on one prospective request, from the policies in force for `subject`.
+pub fn decide(
+    subject: &Subject,
+    endpoint: &Endpoint,
+    action: &str,
+    entity_type: Option<&str>,
+    now: DateTime<Utc>,
+) -> Verdict {
+    let applicable: Vec<(usize, &PolicySpec)> = endpoint
+        .policies
+        .iter()
+        .enumerate()
+        .filter(|(_, policy)| assigned_and_in_force(subject, policy, now))
+        .collect();
+    let covers = |policy: &PolicySpec| granted_operations(policy).contains(action);
+
+    // GW8: a prohibition ends it, whatever any permission says.
+    if let Some((index, _)) = applicable
+        .iter()
+        .find(|(_, policy)| policy.effect.is_prohibition() && covers(policy))
+    {
+        return Verdict::Prohibited(*index);
+    }
+    applicable
+        .iter()
+        .find(|(_, policy)| {
+            !policy.effect.is_prohibition()
+                && covers(policy)
+                && entity_type
+                    .is_none_or(|wanted| granted_types(&policy.information).contains(wanted))
+        })
+        .map_or(Verdict::NoGrant, |(index, _)| Verdict::Granted(*index))
+}
+
 /// One AuthZEN decision for one prospective request (R51).
 ///
 /// A permitted decision may name who granted it: the caller holds that grant, so it is
@@ -57,29 +105,53 @@ pub fn check(
     entity_type: Option<&str>,
     now: DateTime<Utc>,
 ) -> Value {
-    let applicable = effective(subject, &endpoint.policies, now);
-    let covers = |policy: &&PolicySpec| granted_operations(policy).contains(action);
-
-    // GW8: a prohibition ends it, whatever any permission says.
-    if applicable
-        .iter()
-        .any(|policy| policy.effect.is_prohibition() && covers(policy))
-    {
-        return json!({ "decision": false });
-    }
-
-    let matched = applicable.iter().find(|policy| {
-        !policy.effect.is_prohibition()
-            && covers(policy)
-            && entity_type.is_none_or(|wanted| granted_types(&policy.information).contains(wanted))
-    });
-
-    match matched {
-        Some(policy) => json!({
+    match decide(subject, endpoint, action, entity_type, now) {
+        Verdict::Granted(index) => json!({
             "decision": true,
-            "context": { "reason": "policy_grant_matched", "assigner": policy.assigner }
+            "context": {
+                "reason": "policy_grant_matched",
+                "assigner": endpoint.policies[index].assigner,
+            }
         }),
-        None => json!({ "decision": false }),
+        Verdict::Prohibited(_) | Verdict::NoGrant => json!({ "decision": false }),
+    }
+}
+
+/// The same decision for a subject the Portal names, with why (EP-103, T-3311).
+///
+/// Its reader is an administrator who may read every Policy, so unlike [`check`] it names the
+/// Policy that decided a refusal too. `admitted` is the Endpoint's audience answer for the
+/// subject (EP-14): a subject it refuses never reaches a Policy.
+pub fn simulate(
+    subject: &Subject,
+    admitted: bool,
+    endpoint: &Endpoint,
+    action: &str,
+    entity_type: Option<&str>,
+    now: DateTime<Utc>,
+) -> Value {
+    if !admitted {
+        return json!({ "decision": false, "context": { "reason": "not_admitted" } });
+    }
+    let named = |index: usize| {
+        let mut context = json!({ "assigner": endpoint.policies[index].assigner });
+        if let Some(name) = endpoint.policy_names.get(index) {
+            context["policy"] = json!(name);
+        }
+        context
+    };
+    match decide(subject, endpoint, action, entity_type, now) {
+        Verdict::Granted(index) => {
+            let mut context = named(index);
+            context["reason"] = json!("policy_grant_matched");
+            json!({ "decision": true, "context": context })
+        }
+        Verdict::Prohibited(index) => {
+            let mut context = named(index);
+            context["reason"] = json!("prohibited");
+            json!({ "decision": false, "context": context })
+        }
+        Verdict::NoGrant => json!({ "decision": false, "context": { "reason": "no_grant" } }),
     }
 }
 

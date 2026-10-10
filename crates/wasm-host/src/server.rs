@@ -84,7 +84,7 @@ impl Shard {
             return text(
                 200,
                 "text/plain; version=0.0.4",
-                self.metrics.render(&self.id, self.host.cached()),
+                self.metrics.render(&self.id, self.host.cache_stats()),
             );
         }
         if path == "/jobs" {
