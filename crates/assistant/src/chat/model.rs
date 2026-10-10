@@ -46,8 +46,9 @@ pub struct ModelConfig {
     pub token_url: String,
     /// The service's Keycloak client.
     pub client_id: String,
-    /// Its secret, read from the file the deployment mounts.
-    pub client_secret: String,
+    /// How it proves that client: the pod's projected token, or a secret read from the file the
+    /// deployment mounts (PF-47).
+    pub credential: jc_core::ClientCredential,
     /// The model the completions name.
     pub model: String,
 }
@@ -92,14 +93,16 @@ impl Model {
                 "The assistant cannot reach its model right now. Try again in a minute.".into(),
             )
         };
+        let mut form = self
+            .config
+            .credential
+            .form(&self.config.client_id)
+            .map_err(unavailable)?;
+        form.push(("grant_type", "client_credentials".to_owned()));
         let answer = self
             .http
             .post(&self.config.token_url)
-            .form(&[
-                ("grant_type", "client_credentials"),
-                ("client_id", self.config.client_id.as_str()),
-                ("client_secret", self.config.client_secret.as_str()),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|err| unavailable(err.without_url().to_string()))?;
@@ -133,14 +136,16 @@ impl Model {
             tracing::error!(%why, "a caller's token could not be judged");
             CallError::Unavailable("The realm could not be reached; try again shortly.".into())
         };
+        let mut form = self
+            .config
+            .credential
+            .form(&self.config.client_id)
+            .map_err(unavailable)?;
+        form.push(("token", bearer.to_owned()));
         let answer = self
             .http
             .post(format!("{}/introspect", self.config.token_url))
-            .form(&[
-                ("client_id", self.config.client_id.as_str()),
-                ("client_secret", self.config.client_secret.as_str()),
-                ("token", bearer),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|err| unavailable(err.without_url().to_string()))?;

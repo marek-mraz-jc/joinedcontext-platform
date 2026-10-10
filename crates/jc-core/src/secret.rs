@@ -55,6 +55,113 @@ impl From<String> for Secret {
     }
 }
 
+/// How a workload proves its own Keycloak client in a request to the realm (PF-47).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientCredential {
+    /// A client secret, sent with the client id.
+    Secret(Secret),
+    /// The pod's projected ServiceAccount token, presented as `client_assertion` to a
+    /// `federated-jwt` client. The file is read at every request, because the kubelet rewrites
+    /// it before the token expires.
+    Assertion(std::path::PathBuf),
+}
+
+/// RFC 7523's `client_assertion_type` for a JWT.
+pub const JWT_BEARER: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+impl ClientCredential {
+    /// The client-authentication fields of a form posted to the realm. An assertion goes without
+    /// `client_id`: Keycloak finds a `federated-jwt` client by the token's subject and refuses a
+    /// request that names one beside it. A missing or empty token file is an error, so nothing
+    /// is asked of the realm without a credential; the error names the path, never a value.
+    pub fn form(&self, client_id: &str) -> Result<Vec<(&'static str, String)>, String> {
+        match self {
+            Self::Secret(secret) => Ok(vec![
+                ("client_id", client_id.to_owned()),
+                ("client_secret", secret.expose().to_owned()),
+            ]),
+            Self::Assertion(path) => {
+                let token = std::fs::read_to_string(path).map_err(|e| {
+                    format!(
+                        "the projected token {} is not readable: {e}",
+                        path.display()
+                    )
+                })?;
+                let token = token.trim();
+                if token.is_empty() {
+                    return Err(format!("the projected token {} is empty", path.display()));
+                }
+                Ok(vec![
+                    ("client_assertion_type", JWT_BEARER.to_owned()),
+                    ("client_assertion", token.to_owned()),
+                ])
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod client_credential_tests {
+    use super::{ClientCredential, Secret, JWT_BEARER};
+
+    fn file(name: &str, content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jc-core-cred-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch dir");
+        let path = dir.join("token");
+        std::fs::write(&path, content).expect("the token file");
+        path
+    }
+
+    #[test]
+    fn a_secret_goes_with_the_client_id() {
+        let form = ClientCredential::Secret(Secret::new("s3cret"))
+            .form("portal-api")
+            .expect("a form");
+        assert_eq!(
+            form,
+            vec![
+                ("client_id", "portal-api".to_owned()),
+                ("client_secret", "s3cret".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn an_assertion_is_read_at_every_call_and_names_no_client() {
+        let path = file("rotates", "eyJ.first\n");
+        let credential = ClientCredential::Assertion(path.clone());
+        let first = credential.form("portal-api").expect("a form");
+        std::fs::write(&path, "eyJ.second").expect("the rotated token");
+        let second = credential.form("portal-api").expect("a form");
+        for (form, token) in [(first, "eyJ.first"), (second, "eyJ.second")] {
+            assert_eq!(
+                form,
+                vec![
+                    ("client_assertion_type", JWT_BEARER.to_owned()),
+                    ("client_assertion", token.to_owned())
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_empty_token_file_is_an_error() {
+        let empty = file("empty", " \n");
+        for path in [empty.clone(), empty.with_file_name("absent")] {
+            let error = ClientCredential::Assertion(path)
+                .form("portal-api")
+                .expect_err("no form without a token");
+            assert!(error.contains("projected token"), "{error}");
+        }
+    }
+
+    #[test]
+    fn debug_prints_no_secret() {
+        let shown = format!("{:?}", ClientCredential::Secret(Secret::new("s3cret")));
+        assert!(!shown.contains("s3cret"), "{shown}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Secret;

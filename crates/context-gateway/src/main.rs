@@ -116,11 +116,11 @@ async fn main() -> ExitCode {
     // pollers send no token and the Portal refuses them, which says so in the log rather
     // than relying on the port's NetworkPolicy.
     let token = match (config.token_url(), config.oidc_client.as_ref()) {
-        (Some(token_url), Some((id, secret))) => Some(std::sync::Arc::new(
-            context_gateway::previews::WorkloadToken::new(
+        (Some(token_url), Some((id, credential))) => Some(std::sync::Arc::new(
+            context_gateway::previews::WorkloadToken::with_credential(
                 token_url,
                 id.clone(),
-                secret.expose().to_owned(),
+                credential.clone(),
             ),
         )),
         _ => None,
@@ -173,7 +173,8 @@ async fn main() -> ExitCode {
                 if token.is_none() {
                     tracing::warn!(
                         "previews are listed without a workload token: set JC_OIDC_ISSUER, \
-                         JC_OIDC_CLIENT_ID and JC_OIDC_CLIENT_SECRET"
+                         JC_OIDC_CLIENT_ID and JC_OIDC_CLIENT_ASSERTION_FILE (or \
+                         JC_OIDC_CLIENT_SECRET)"
                     );
                 }
                 tokio::spawn(mirror.follow(url, token.clone()));
