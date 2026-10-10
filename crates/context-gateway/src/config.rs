@@ -8,6 +8,17 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+/// How the gateway proves its own Keycloak client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// A client secret (`JC_OIDC_CLIENT_SECRET`).
+    Secret(jc_core::Secret),
+    /// The pod's projected ServiceAccount token, presented as `client_assertion` to a
+    /// `federated-jwt` client (`JC_OIDC_CLIENT_ASSERTION_FILE`, PF-47). Read at every grant,
+    /// because the kubelet rewrites the file before the token expires.
+    Assertion(PathBuf),
+}
+
 /// The gateway's runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -43,17 +54,17 @@ pub struct Config {
     /// its own cluster's public hostname leaves through the ingress or not at all. The realm's
     /// `openid-connect/token` under the issuer when the deployment names none.
     pub oidc_token_url: Option<String>,
-    /// The gateway's own Keycloak client and its secret (`JC_OIDC_CLIENT_ID`,
-    /// `JC_OIDC_CLIENT_SECRET`): the identity it presents when it calls the Portal's internal
-    /// listener (PF-46, AG-52). Absent means it presents none and that listener refuses it, which
-    /// is what an instance without previews looks like.
+    /// The gateway's own Keycloak client and how it proves it (`JC_OIDC_CLIENT_ID` with
+    /// `JC_OIDC_CLIENT_ASSERTION_FILE` or `JC_OIDC_CLIENT_SECRET`): the identity it presents when
+    /// it calls the Portal's internal listener (PF-46, PF-47, AG-52). Absent means it presents
+    /// none and that listener refuses it, which is what an instance without previews looks like.
     ///
     /// The secret is a [`jc_core::Secret`], so the derived `Debug` above cannot print it: this
     /// struct is the one a `tracing::debug!(?config)` during a startup problem would reach, and a
     /// client secret in the cluster's logs is forbidden outright (CC-06, OPS-12, T-2273). The
     /// client *id* is not a secret and stays readable, because a log that cannot say which client
     /// was refused is no use to an operator.
-    pub oidc_client: Option<(String, jc_core::Secret)>,
+    pub oidc_client: Option<(String, Credential)>,
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
@@ -134,6 +145,26 @@ impl Config {
             });
         }
 
+        let non_empty = |name| {
+            std::env::var(name)
+                .ok()
+                .filter(|v: &String| !v.trim().is_empty())
+        };
+        let credential = match (
+            non_empty("JC_OIDC_CLIENT_SECRET"),
+            non_empty("JC_OIDC_CLIENT_ASSERTION_FILE"),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::Invalid {
+                    name: "JC_OIDC_CLIENT_ASSERTION_FILE",
+                    reason: "a federated client holds no secret beside it; set JC_OIDC_CLIENT_SECRET or JC_OIDC_CLIENT_ASSERTION_FILE, not both".to_owned(),
+                })
+            }
+            (Some(secret), None) => Some(Credential::Secret(jc_core::Secret::new(secret))),
+            (None, Some(file)) => Some(Credential::Assertion(PathBuf::from(file))),
+            (None, None) => None,
+        };
+
         let delivery_key = std::env::var("JC_GATEWAY_DELIVERY_KEY")
             .ok()
             .filter(|key| !key.trim().is_empty())
@@ -199,17 +230,7 @@ impl Config {
             oidc_token_url: std::env::var("JC_OIDC_TOKEN_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
-            oidc_client: match (
-                std::env::var("JC_OIDC_CLIENT_ID")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty()),
-                std::env::var("JC_OIDC_CLIENT_SECRET")
-                    .ok()
-                    .filter(|value| !value.trim().is_empty()),
-            ) {
-                (Some(id), Some(secret)) => Some((id, jc_core::Secret::new(secret))),
-                _ => None,
-            },
+            oidc_client: non_empty("JC_OIDC_CLIENT_ID").zip(credential),
             public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
                 .ok()
                 .map(|url| url.trim_end_matches('/').to_owned()),
@@ -296,7 +317,7 @@ mod tests {
             oidc_token_url: None,
             oidc_client: Some((
                 "context-gateway".to_owned(),
-                jc_core::Secret::new("Kx7-the-realms-client-secret-9fQ"),
+                Credential::Secret(jc_core::Secret::new("Kx7-the-realms-client-secret-9fQ")),
             )),
             public_url: None,
             egress_url: None,
@@ -337,7 +358,9 @@ mod tests {
     #[test]
     fn the_secret_is_still_readable_by_asking_for_it() {
         let config = config_with_a_client_secret();
-        let (id, secret) = config.oidc_client.as_ref().expect("a client is configured");
+        let Some((id, Credential::Secret(secret))) = config.oidc_client.as_ref() else {
+            panic!("a client with a secret is configured");
+        };
         assert_eq!(id, "context-gateway");
         assert_eq!(secret.expose(), "Kx7-the-realms-client-secret-9fQ");
     }

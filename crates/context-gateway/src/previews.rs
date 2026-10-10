@@ -203,14 +203,15 @@ impl Mirror {
 
 /// The gateway's own identity when it asks the Portal for the previews (PF-46, AG-52).
 ///
-/// `client_credentials` on the gateway's confidential client, cached until shortly before it
+/// `client_credentials` on the gateway's own client, proved by its secret or by the pod's
+/// projected ServiceAccount token (PF-47), cached until shortly before it
 /// expires. The token is audience-bound to the Portal's internal listener by an audience mapper on
 /// that client, so it opens this one route and nothing else — and the Portal refuses the call
 /// without it, which is the whole point: the NetworkPolicy on port 9090 is the second control.
 pub struct WorkloadToken {
     token_url: String,
     client_id: String,
-    client_secret: String,
+    credential: crate::config::Credential,
     http: reqwest::Client,
     held: tokio::sync::Mutex<Option<(std::time::Instant, String)>>,
 }
@@ -224,10 +225,23 @@ impl WorkloadToken {
     /// (`Config::token_url`): the issuer is the address a browser uses, and on a single-node
     /// cluster a pod dialling that public hostname reaches nothing.
     pub fn new(token_url: String, client_id: String, client_secret: String) -> Self {
+        Self::with_credential(
+            token_url,
+            client_id,
+            crate::config::Credential::Secret(jc_core::Secret::new(client_secret)),
+        )
+    }
+
+    /// The same, with the client proved by `credential`.
+    pub fn with_credential(
+        token_url: String,
+        client_id: String,
+        credential: crate::config::Credential,
+    ) -> Self {
         Self {
             token_url,
             client_id,
-            client_secret,
+            credential,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -256,14 +270,36 @@ impl WorkloadToken {
             #[serde(default)]
             expires_in: u64,
         }
+        let mut form = vec![("grant_type", "client_credentials".to_owned())];
+        match &self.credential {
+            crate::config::Credential::Secret(secret) => {
+                form.push(("client_id", self.client_id.clone()));
+                form.push(("client_secret", secret.expose().to_owned()));
+            }
+            // A `federated-jwt` client is found by the token's subject, and Keycloak refuses a
+            // grant that names a `client_id` beside it.
+            crate::config::Credential::Assertion(path) => {
+                let assertion = std::fs::read_to_string(path).map_err(|error| {
+                    format!(
+                        "the projected token {} is not readable: {error}",
+                        path.display()
+                    )
+                })?;
+                let assertion = assertion.trim();
+                if assertion.is_empty() {
+                    return Err(format!("the projected token {} is empty", path.display()));
+                }
+                form.push((
+                    "client_assertion_type",
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_owned(),
+                ));
+                form.push(("client_assertion", assertion.to_owned()));
+            }
+        }
         let answer = self
             .http
             .post(&self.token_url)
-            .form(&[
-                ("grant_type", "client_credentials"),
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|error| error.to_string())?;
