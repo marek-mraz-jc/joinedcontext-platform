@@ -783,6 +783,14 @@ pub(crate) async fn serve_ngsi_ld(
     }
 
     let Some(operation) = operations::operation_of(&method, &path, details) else {
+        if let Some(attribute) = operations::sets_attribute_value(&method, &path) {
+            return ProblemDetails::for_status(422)
+                .with_detail(format!(
+                    "Set Attribute Value is not offered through an Endpoint; write the value \
+                     with PATCH /ngsi-ld/v1/entities/{{id}}/attrs/{attribute}"
+                ))
+                .into_response();
+        }
         return ProblemDetails::not_found().into_response();
     };
 

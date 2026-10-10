@@ -101,6 +101,18 @@ pub fn addressed_vocabulary(path: &str) -> Option<&str> {
     }
 }
 
+/// The attribute a Set Attribute Value write addresses (`PUT entities/{id}/attrs/{attr}/value`,
+/// CIM 009 10.2.6). No Endpoint offers it (T-3606): its body is a bare value, which the grant,
+/// unit and relationship checks cannot judge as an Attribute, so it names no operation and the
+/// gateway refuses it by name, pointing at the write that does the same.
+pub fn sets_attribute_value<'a>(method: &Method, path: &'a str) -> Option<&'a str> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match (segments.as_slice(), method) {
+        (["entities", _, "attrs", attr, "value"], &Method::PUT) => Some(attr),
+        _ => None,
+    }
+}
+
 /// The single attribute a path addresses, when it addresses one.
 ///
 /// The body of such a write is the bare attribute value, so the enforcement point has to
@@ -168,6 +180,18 @@ mod tests {
         assert_eq!(
             operation_of(&Method::GET, "types", true),
             Some(Operation::RetrieveEntityTypeDetails)
+        );
+    }
+
+    #[test]
+    fn set_attribute_value_names_its_attribute_and_no_operation() {
+        let path = "entities/urn:x/attrs/pm10/value";
+        assert_eq!(sets_attribute_value(&Method::PUT, path), Some("pm10"));
+        assert_eq!(operation_of(&Method::PUT, path, false), None);
+        assert_eq!(sets_attribute_value(&Method::PATCH, path), None);
+        assert_eq!(
+            sets_attribute_value(&Method::PUT, "entities/urn:x/attrs/pm10"),
+            None
         );
     }
 
