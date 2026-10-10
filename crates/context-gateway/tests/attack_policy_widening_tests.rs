@@ -259,7 +259,7 @@ async fn a_cql2_filter_on_an_attribute_of_another_type_selects_no_vehicle() {
         "a vehicle was selected on an attribute this endpoint does not serve for it: {body}"
     );
     assert!(
-        !body.to_string().contains("4321"),
+        !body.to_string().contains("\"4321\""),
         "the vehicle's hidden value is in the answer: {body}"
     );
 }

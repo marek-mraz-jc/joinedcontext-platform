@@ -89,7 +89,7 @@ fn invoice() -> Value {
     json!({
         "id": "urn:ngsi-ld:Invoice:banskabystrica.sk:ovzdusie:inv-1",
         "type": "Invoice",
-        "amount": { "type": "Property", "value": 4200 },
+        "amount": { "type": "Property", "value": 4200.25 },
         "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [19.15, 48.74] } }
     })
 }
@@ -140,7 +140,7 @@ async fn a_wanted_type_none_of_the_visible_models_declare_is_still_gated_by_the_
                 || (status == StatusCode::OK && !body.contains("inv-1")),
             "{path}: {status} {body}"
         );
-        assert!(!body.contains("4200"), "{path}: {body}");
+        assert!(!body.contains("4200.25"), "{path}: {body}");
         for hop in broker.hops() {
             assert!(
                 !hop.query.contains("type=Invoice"),
