@@ -1,0 +1,62 @@
+# The 10 000-App load test of jc-wasm-host (T-3345, ADR-N-044 §8): a throwaway rig sized as dev on
+# a runner of its own, never dev and never a shared host. On demand, and on a push that changes
+# the rig itself, so a change to it is proven before it is merged.
+name: wasm-host-10k
+
+on:
+  workflow_dispatch:
+    inputs:
+      apps: { description: "Apps to place", default: "10000" }
+      rate: { description: "Requests a second during the mix", default: "5" }
+      duration: { description: "Length of the mix, like 30m", default: "30m" }
+      cached: { description: "Compiled components a shard keeps", default: "700" }
+  push:
+    branches: ["agent/**"]
+    paths: ["crates/wasm-host/load/**", ".github/workflows/wasm-host-10k.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-host-10k-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with: { targets: wasm32-wasip2 }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the host, the provisioner and the example App
+        run: |
+          cargo build --release --locked -p wasm-host --bin jc-wasm-host --example fleet
+          (cd examples/apps/rust-wasm-server/server && cargo build --release --locked --target wasm32-wasip2)
+          mkdir -p "$RUNNER_TEMP/rig"
+          cp target/release/jc-wasm-host target/release/examples/fleet \
+             examples/apps/rust-wasm-server/server/target/wasm32-wasip2/release/rust_wasm_server.wasm \
+             examples/apps/rust-wasm-server/migrations/0001_notes.sql "$RUNNER_TEMP/rig/"
+      - name: Run the rig
+        env:
+          RIG_DIR: ${{ runner.temp }}/rig
+          APPS: ${{ inputs.apps || '10000' }}
+          RATE: ${{ inputs.rate || '5' }}
+          # A push proves the rig in ten minutes; the half-hour run is asked for by hand.
+          DURATION: ${{ inputs.duration || '10m' }}
+          CACHED: ${{ inputs.cached || '700' }}
+        run: crates/wasm-host/load/run.sh
+      - name: Keep what was measured, never the run's secrets
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          for f in results.txt samples.csv k6-summary.json fleet.log shard-0.log shard-1.log; do
+            [ -f "$RUNNER_TEMP/rig/$f" ] && cp "$RUNNER_TEMP/rig/$f" "$RUNNER_TEMP/out/"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: wasm-host-10k
+          path: ${{ runner.temp }}/out
+          retention-days: 30
