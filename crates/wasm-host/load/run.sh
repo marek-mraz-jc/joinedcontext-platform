@@ -39,7 +39,9 @@ for _ in $(seq 1 60); do
   docker compose -f "$here/compose.yaml" exec -T apps-db /usr/lib/postgresql/16/bin/pg_isready -qh 127.0.0.1 2>/dev/null && { ready=1; break; }; sleep 1
 done
 [ -n "$ready" ] || { compose logs apps-db | tail -20 >&2; echo "apps-db did not come up" >&2; exit 1; }
-psqlc() { docker compose -f "$here/compose.yaml" exec -T -e PGPASSWORD="$dbpass" apps-db /usr/lib/postgresql/16/bin/psql -qtAU postgres -h 127.0.0.1 -d apps -c "$1"; }
+# The rig's own reads and its one vacuum run without the database's 30 s statement timeout: over
+# 10 000 schemas on one CPU a catalog-wide statement takes longer (the first runner run, T-3345).
+psqlc() { docker compose -f "$here/compose.yaml" exec -T -e PGPASSWORD="$dbpass" -e PGOPTIONS="-c statement_timeout=0" apps-db /usr/lib/postgresql/16/bin/psql -qtAU postgres -h 127.0.0.1 -d apps -c "$1"; }
 catalog_sql="select pg_database_size('apps'), (select sum(pg_total_relation_size(c.oid)) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'pg_catalog'), (select count(*) from pg_class), (select count(*) from pg_namespace)"
 before=$(psqlc "$catalog_sql")
 

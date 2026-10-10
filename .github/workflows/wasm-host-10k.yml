@@ -52,7 +52,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/out"
           for f in results.txt samples.csv k6-summary.json fleet.log shard-0.log shard-1.log; do
-            [ -f "$RUNNER_TEMP/rig/$f" ] && cp "$RUNNER_TEMP/rig/$f" "$RUNNER_TEMP/out/"
+            if [ -f "$RUNNER_TEMP/rig/$f" ]; then cp "$RUNNER_TEMP/rig/$f" "$RUNNER_TEMP/out/"; fi
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
