@@ -4,6 +4,7 @@
 //! signed in never runs without explicit origins, a rate limit and a budget.
 
 use jc_core::error::Error;
+use jc_core::kinds::assistant::SourceType;
 use jc_core::kinds::{AssistantDeployment, Channel, KnowledgeSource, PdfPolicyKind, Visibility};
 use jc_core::registry;
 
@@ -313,4 +314,26 @@ fn a_catalogue_source_names_spaces_and_nothing_to_fetch() {
         ))),
         "contextSpaces"
     );
+}
+
+/// AG-118 (T-3226): a guide source reads the User Guide jc-assistant ships, so it names nothing to
+/// fetch and no context space.
+#[test]
+fn a_guide_source_names_nothing_to_fetch() {
+    let guide = |extra: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\n\
+             metadata: {{ name: guide, namespace: helsinki }}\n\
+             spec:\n  source: guide\n  visibility: public\n  languages: [en]\n{extra}"
+        )
+    };
+    let read = source(&guide("")).expect("a guide source");
+    assert_eq!(read.spec.source, SourceType::Guide);
+    for (extra, field) in [
+        ("  startUrls: [https://www.hel.fi/]\n", "source"),
+        ("  ckanInstanceRef: hel-fi\n", "source"),
+        ("  contextSpaces: [helsinki]\n", "source"),
+    ] {
+        assert_eq!(refused(source(&guide(extra))), field, "{extra}");
+    }
 }

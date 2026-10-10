@@ -282,7 +282,7 @@ pub async fn enqueue_due(
     Ok(queued)
 }
 
-/// Queues every `catalogue` source whose pages the repository now describes differently from
+/// Queues every `catalogue` or `guide` source whose pages the repository now describes differently from
 /// the last minute (or that this process has not seen yet), so a change to an Endpoint or a
 /// model reaches the index within a minute, not at the next scheduled read (AG-116). `seen`
 /// holds each source's digest between minutes.
@@ -292,11 +292,18 @@ pub async fn enqueue_changed(
     seen: &mut BTreeMap<(String, String), String>,
 ) -> Result<usize, Error> {
     let mut queued = 0;
-    for source in sources
-        .iter()
-        .filter(|source| source.spec.source == SourceType::Catalogue)
-    {
-        let digest = crate::catalogue::digest(&source.catalogue);
+    for source in sources.iter().filter(|source| {
+        matches!(
+            source.spec.source,
+            SourceType::Catalogue | SourceType::Guide
+        )
+    }) {
+        // A guide changes only with the image: the first minute of a process reads it, so a new
+        // release's guide is in the index without waiting for the source's schedule (AG-118).
+        let digest = match source.spec.source {
+            SourceType::Guide => crate::guide::stamp().to_owned(),
+            _ => crate::catalogue::digest(&source.catalogue),
+        };
         let key = (source.project.clone(), source.name.clone());
         if seen.get(&key) == Some(&digest) {
             continue;
@@ -415,6 +422,24 @@ pub async fn work_one(
             .await
             .map(|report| format!("{} endpoints, {} removed", report.endpoints, report.removed))
         }
+        SourceType::Guide => crate::guide::sync_guide(
+            pool,
+            &source.project,
+            site,
+            reader.portal.as_deref(),
+            crate::guide::PAGES,
+            &mut indexer,
+        )
+        .await
+        .map(|report| {
+            format!(
+                "{} sections of docs {}, {} changed, {} removed",
+                report.sections,
+                crate::guide::stamp(),
+                report.changed,
+                report.removed
+            )
+        }),
     };
     match outcome {
         Ok(summary) => {

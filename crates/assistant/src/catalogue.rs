@@ -379,6 +379,9 @@ pub struct Reader {
     /// `JC_ASSISTANT_ENDPOINT_URL`, the public origin `/api/endpoint/{slug}` is served under; a
     /// page with no CKAN dataset has no citation without it and is not indexed.
     pub endpoint_base: Option<Url>,
+    /// `JC_ASSISTANT_PORTAL_URL`, scheme and authority without a trailing slash: the Portal a
+    /// `guide` source's sections link into; a guide source is not read without it (AG-118).
+    pub portal: Option<String>,
 }
 
 /// The entities of each type a public Endpoint serves, as an anonymous caller counts them. A

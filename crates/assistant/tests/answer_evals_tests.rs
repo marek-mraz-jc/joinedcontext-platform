@@ -999,3 +999,234 @@ async fn record_the_event_questions_live() {
     )
     .expect("the recording is written");
 }
+
+/// T-3226's workflow questions, judged by [`judge_workflow`].
+const WORKFLOWS: &str = include_str!("fixtures/answer_evals/workflows.json");
+
+/// Whether the workflow questions still wait for their one live run, on a dev whose Helsinki
+/// assistant holds the guide source. It only goes from true to false: the recording sets it.
+const WORKFLOWS_UNRECORDED: bool = true;
+
+fn workflows() -> Value {
+    serde_json::from_str(WORKFLOWS).expect("the workflow eval is JSON")
+}
+
+/// Why `answer` fails a workflow question asked in `lang` whose form is the Portal page `form`
+/// on `portal` (a host), or nothing when it passes: the asker's language, citations on the
+/// Portal alone with every marker resolved, and a link into the form.
+fn judge_workflow(lang: &str, form: &str, portal: &str, answer: &Value) -> Vec<String> {
+    let text = answer["text"].as_str().unwrap_or_default();
+    if text.trim().is_empty() {
+        return vec!["no answer".into()];
+    }
+    let mut why = Vec::new();
+    match language(text) {
+        Some(found) if found == lang => {}
+        found => why.push(format!("answered in {found:?}, asked in {lang}")),
+    }
+    let citations = answer["citations"].as_array().cloned().unwrap_or_default();
+    if citations.is_empty() {
+        why.push("no citation".into());
+    }
+    let cited: BTreeMap<u64, &str> = citations
+        .iter()
+        .filter_map(|c| Some((c["n"].as_u64()?, c["url"].as_str().unwrap_or_default())))
+        .collect();
+    for n in markers(text) {
+        match cited.get(&n) {
+            None => why.push(format!("[{n}] has no citation")),
+            Some(url) if !on_host(url, portal) => {
+                why.push(format!("[{n}] cites {url}, not {portal}"))
+            }
+            Some(_) => {}
+        }
+    }
+    let links_form = text.contains(form)
+        || cited.values().any(|url| {
+            on_host(url, portal)
+                && url::Url::parse(url)
+                    .is_ok_and(|u| u.path() == form || u.path().starts_with(&format!("{form}/")))
+        });
+    if !links_form {
+        why.push(format!("no link into {form}"));
+    }
+    why
+}
+
+#[test]
+fn every_workflow_is_asked_in_slovak_and_english_and_names_its_form() {
+    let fixture = workflows();
+    let project = fixture["project"].as_str().expect("project");
+    let mut asked: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for q in fixture["questions"].as_array().expect("questions") {
+        let lang = q["lang"].as_str().expect("lang");
+        assert_eq!(
+            language(q["ask"].as_str().expect("ask")),
+            Some(lang),
+            "{}",
+            q["id"]
+        );
+        assert!(
+            q["form"]
+                .as_str()
+                .is_some_and(|form| form.starts_with(&format!("/projects/{project}/"))),
+            "{}",
+            q["id"]
+        );
+        asked
+            .entry(q["workflow"].as_str().expect("workflow"))
+            .or_default()
+            .insert(lang);
+    }
+    assert_eq!(
+        asked.keys().copied().collect::<Vec<_>>(),
+        [
+            "create-app",
+            "create-data-model",
+            "create-data-source",
+            "create-endpoint",
+            "create-pipeline",
+            "create-policy",
+            "create-workspace"
+        ]
+    );
+    assert!(asked
+        .values()
+        .all(|langs| *langs == BTreeSet::from(["en", "sk"])));
+}
+
+#[test]
+fn a_workflow_answer_needs_the_askers_language_portal_citations_and_the_form() {
+    let portal = "portal.dev.joinedcontext.com";
+    let form = "/projects/helsinki/endpoints";
+    let good = serde_json::json!({
+        "text": "Otvorte stránku Endpoints, vyplňte formulár a kliknite na Navrhnúť zmenu [1]. Schvaľovateľ ju potom zlúči.",
+        "citations": [{"n": 1, "url": "https://portal.dev.joinedcontext.com/projects/helsinki/endpoints#guide-05-endpoints-and-sharing-2"}]
+    });
+    assert_eq!(
+        judge_workflow("sk", form, portal, &good),
+        Vec::<String>::new()
+    );
+    let in_text = serde_json::json!({
+        "text": "Open https://portal.dev.joinedcontext.com/projects/helsinki/endpoints and fill in the form [1].",
+        "citations": [{"n": 1, "url": "https://portal.dev.joinedcontext.com/projects/helsinki#guide-00-intro-0"}]
+    });
+    assert_eq!(
+        judge_workflow("en", form, portal, &in_text),
+        Vec::<String>::new()
+    );
+    let elsewhere = serde_json::json!({
+        "text": "Open the Endpoints page and fill in the form [1] [2].",
+        "citations": [
+            {"n": 1, "url": "https://www.hel.fi/en/endpoints"},
+            {"n": 3, "url": "https://portal.dev.joinedcontext.com/projects/helsinki/apps"}
+        ]
+    });
+    let why = judge_workflow("sk", form, portal, &elsewhere);
+    assert!(why.iter().any(|w| w.starts_with("answered in")), "{why:?}");
+    assert!(
+        why.iter().any(|w| w.contains("cites https://www.hel.fi")),
+        "{why:?}"
+    );
+    assert!(why.iter().any(|w| w == "[2] has no citation"), "{why:?}");
+    assert!(why.iter().any(|w| w.starts_with("no link into")), "{why:?}");
+    let prefix_only = serde_json::json!({
+        "text": "Open the page and fill in the form [1].",
+        "citations": [{"n": 1, "url": "https://portal.dev.joinedcontext.com/projects/helsinki/endpointsx"}]
+    });
+    assert!(judge_workflow("en", form, portal, &prefix_only)
+        .iter()
+        .any(|w| w.starts_with("no link into")));
+    assert_eq!(
+        judge_workflow(
+            "en",
+            form,
+            portal,
+            &serde_json::json!({"text": " ", "citations": []})
+        ),
+        ["no answer"]
+    );
+    assert!(judge_workflow(
+        "en",
+        form,
+        portal,
+        &serde_json::json!({"text": "Open the page.", "citations": []})
+    )
+    .contains(&"no citation".to_owned()));
+}
+
+#[test]
+fn the_workflow_questions_are_recorded_once_and_pass_the_judge() {
+    let fixture = workflows();
+    let recorded = recording("helsinki-workflows");
+    assert_eq!(
+        recorded.is_none(),
+        WORKFLOWS_UNRECORDED,
+        "the workflow questions were recorded (set WORKFLOWS_UNRECORDED to false) or lost their recording"
+    );
+    let Some(recorded) = recorded else { return };
+    let portal = fixture["portal"].as_str().expect("portal");
+    let mut failed = Vec::new();
+    for q in fixture["questions"].as_array().expect("questions") {
+        let id = q["id"].as_str().expect("id");
+        let why = judge_workflow(
+            q["lang"].as_str().expect("lang"),
+            q["form"].as_str().expect("form"),
+            portal,
+            &recorded["answers"][id],
+        );
+        if !why.is_empty() {
+            failed.push(format!("{id}: {}", why.join("; ")));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+/// The one live run of the workflow questions (T-3226), through the Portal's chat of the
+/// fixture's deployment. Same variables as [`record_one_live_run`] without `JC_EVAL_PROJECT`.
+#[tokio::test]
+#[ignore = "a live run against dev: spends model tokens, once after the guide source is deployed"]
+async fn record_the_workflow_questions_live() {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is not set"));
+    let (portal, cookie) = (var("JC_EVAL_PORTAL"), var("JC_EVAL_COOKIE"));
+    let csrf = cookie
+        .split(';')
+        .find_map(|c| c.trim().strip_prefix("jc_csrf="))
+        .expect("the Cookie header holds jc_csrf")
+        .to_owned();
+    let fixture = workflows();
+    let project = fixture["project"].as_str().expect("project");
+    let deployment = fixture["deployment"].as_str().expect("deployment");
+    let client = reqwest::Client::new();
+    let mut answers = serde_json::Map::new();
+    for q in fixture["questions"].as_array().expect("questions") {
+        let id = q["id"].as_str().expect("id");
+        let body = client
+            .post(format!(
+                "{portal}/api/v1/projects/{project}/knowledge/deployments/{deployment}/chat"
+            ))
+            .header("cookie", &cookie)
+            .header("x-csrf-token", &csrf)
+            .json(&serde_json::json!({"message": q["ask"]}))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .expect("the Portal answers")
+            .text()
+            .await
+            .expect("the stream ends");
+        let answer = read_stream(&body);
+        println!("{id}: {}", answer["text"]);
+        answers.insert(id.to_owned(), answer);
+    }
+    let day = time::OffsetDateTime::now_utc().date().to_string();
+    let recording =
+        serde_json::json!({"deployment": deployment, "recorded": day, "answers": answers});
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/answer_evals/recordings/helsinki-workflows.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&recording).expect("json") + "\n",
+    )
+    .expect("the recording is written");
+}
