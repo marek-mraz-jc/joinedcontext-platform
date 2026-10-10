@@ -153,6 +153,7 @@ fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
             json_schema: None,
             context: None,
         }],
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }
@@ -161,6 +162,7 @@ fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
 fn endpoint_granting(names: &str) -> Endpoint {
     Endpoint {
         roles: Default::default(),
+        policy_names: Vec::new(),
         policies: vec![policy_granting(names)],
         ..endpoint(false, &[])
     }

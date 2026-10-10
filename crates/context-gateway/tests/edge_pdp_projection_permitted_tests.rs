@@ -1,7 +1,8 @@
 //! Edge cases of `pdp::projection::permitted` (T-1932, EP-26, MP-02).
 //!
 //! Contract, in one sentence: an entity may be returned only when the type it declares is one the
-//! grants name — compacted or expanded to an IRI — and its id matches at least one of the grants'
+//! grants name — compared as IRIs: compacted under the core context, expanded, or as the space's
+//! own models define it (T-3473) — and its id matches at least one of the grants'
 //! id patterns, and an entity that declares neither, or declares something that is not a string,
 //! is never returned under a grant that names either.
 //!
@@ -68,19 +69,65 @@ fn an_answer_without_a_type_is_not_served_under_a_type_grant() {
     }
 }
 
-/// A broker may answer the expanded IRI where the grant wrote the term; comparing the strings as
-/// they came would let the expanded form through unjudged.
+/// A broker may answer the expanded IRI where the grant wrote the term: the grant's term means
+/// the IRI the core context or the space's own models make of it, and only that IRI is the
+/// granted type. Another vocabulary's `Vehicle` is another type, whatever its last segment reads
+/// (T-3473).
 #[test]
-fn an_expanded_type_is_compared_by_its_term() {
+fn an_expanded_type_is_compared_as_an_iri() {
     let grant = types(&["Vehicle"]);
     for declared in [
         "Vehicle",
-        "https://uri.fiware.org/ns/data-models#Vehicle",
-        "https://smartdatamodels.org/dataModel.Transportation/Vehicle",
-        "http://example.org/ns/Vehicle",
+        "https://uri.etsi.org/ngsi-ld/default-context/Vehicle",
     ] {
         assert!(permitted(&entity(json!(declared)), &grant), "{declared}");
     }
+    for declared in [
+        "https://uri.fiware.org/ns/data-models#Vehicle",
+        "https://smartdatamodels.org/dataModel.Transportation/Vehicle",
+        "http://example.org/ns/Vehicle",
+        "other:Vehicle",
+    ] {
+        assert!(!permitted(&entity(json!(declared)), &grant), "{declared}");
+    }
+    let modelled = Constraints {
+        type_iris: set(&["https://smartdatamodels.org/dataModel.Transportation/Vehicle"]),
+        ..types(&["Vehicle"])
+    };
+    assert!(permitted(
+        &entity(json!(
+            "https://smartdatamodels.org/dataModel.Transportation/Vehicle"
+        )),
+        &modelled
+    ));
+    assert!(!permitted(
+        &entity(json!("https://uri.fiware.org/ns/data-models#Vehicle")),
+        &modelled
+    ));
+}
+
+/// What a model's `@context` makes of a granted name: its own definition, else its `@vocab`.
+#[test]
+fn model_contexts_expand_the_granted_names() {
+    use context_gateway::pdp::projection::model_type_iris;
+    let contexts = [
+        json!({ "@context": { "@vocab": "https://hel.fi/schema/" } }),
+        json!({ "@context": { "Depot": "https://depots.example/Depot",
+                              "Tram": { "@id": "https://trams.example/Tram" },
+                              "Bus": "relative/Bus" } }),
+    ];
+    let got = model_type_iris(&set(&["Vehicle", "Depot", "Tram", "Bus"]), contexts.iter());
+    assert_eq!(
+        got,
+        set(&[
+            "https://hel.fi/schema/Vehicle",
+            "https://hel.fi/schema/Depot",
+            "https://hel.fi/schema/Tram",
+            "https://hel.fi/schema/Bus",
+            "https://depots.example/Depot",
+            "https://trams.example/Tram",
+        ])
+    );
 }
 
 /// And a type that only looks like the granted one is another type.
@@ -109,6 +156,13 @@ fn an_entity_of_several_types_is_served_when_any_one_is_granted() {
     let grant = types(&["Vehicle"]);
     assert!(permitted(&entity(json!(["Vehicle", "Depot"])), &grant));
     assert!(permitted(
+        &entity(json!([
+            "Depot",
+            "https://uri.etsi.org/ngsi-ld/default-context/Vehicle"
+        ])),
+        &grant
+    ));
+    assert!(!permitted(
         &entity(json!(["Depot", "https://hel.fi/ns/Vehicle"])),
         &grant
     ));

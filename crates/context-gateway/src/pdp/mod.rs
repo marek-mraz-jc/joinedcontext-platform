@@ -83,9 +83,30 @@ impl Pdp for PolicyPdp {
         // The filter is the last thing narrowed, because it is narrowed by what the two steps
         // above decided: a type whose attributes do not cover every name the request filters or
         // orders on leaves the query before the broker is asked (T-1862).
-        match verdict {
+        let verdict = match verdict {
             Verdict::Rewrite(constraints) => {
                 drop_types_that_may_not_be_filtered(*constraints, request)
+            }
+            verdict => verdict,
+        };
+
+        // T-3473: an answer's type is judged as an IRI, so the granted names are read the way
+        // the space's own models define them, once, beside the core context's reading.
+        match verdict {
+            Verdict::Rewrite(mut constraints) => {
+                let contexts = || {
+                    endpoint
+                        .models
+                        .iter()
+                        .filter_map(|model| model.context.as_ref())
+                };
+                constraints.type_iris = projection::model_type_iris(&constraints.types, contexts());
+                // Each grant by its own names, so one grant's IRI never admits an entity to another
+                // (T-3530).
+                for grant in &mut constraints.grants {
+                    grant.type_iris = projection::model_type_iris(&grant.types, contexts());
+                }
+                Verdict::Rewrite(constraints)
             }
             verdict => verdict,
         }

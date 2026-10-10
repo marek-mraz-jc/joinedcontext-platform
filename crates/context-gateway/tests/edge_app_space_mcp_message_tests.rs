@@ -98,6 +98,7 @@ fn space(
             models: Vec::new(),
             view_mapping: None,
             catalog: None,
+            policy_names: Vec::new(),
             policies,
         }),
         title: Default::default(),

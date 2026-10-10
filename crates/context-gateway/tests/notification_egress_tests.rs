@@ -269,6 +269,7 @@ fn endpoint(hidden: &[&str]) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }
@@ -300,6 +301,7 @@ fn gateway_with(
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .serve([Endpoint {
                 roles: Default::default(),
+                policy_names: Vec::new(),
                 policies: vec![policy],
                 ..endpoint(hidden)
             }]),
@@ -1186,6 +1188,7 @@ async fn deliver_projected(
             .serve([Endpoint {
                 roles: Default::default(),
                 projection: Some(Arc::new(projection.spec)),
+                policy_names: Vec::new(),
                 policies: vec![two_class_policy()],
                 ..endpoint(hidden)
             }]),
@@ -1529,6 +1532,7 @@ async fn deliver_under(
             .seal_subscribers_with(common::delivery_key())
             .serve([Endpoint {
                 roles: Default::default(),
+                policy_names: Vec::new(),
                 policies,
                 ..endpoint(&[])
             }]),

@@ -1,0 +1,119 @@
+# The throwaway rig of the 10 000-App load test (T-3345), sized as dev's cpx42 runs these parts:
+# two jc-wasm-host shards at 1 CPU / 1 GiB each (deployment components/wasm-host/values/shard),
+# apps-db at 1 CPU / 768 MiB with max_connections 100 (components/apps-db, development values),
+# RustFS as components/artifact-store pins it. It runs on a GitHub-hosted runner
+# (.github/workflows/wasm-host-10k.yml), never on dev and never on a shared host, whose other work
+# would be in the numbers (owner, 2026-10-10).
+#
+# Deviations from dev, none of them on the measured path: no TLS between the shards and the
+# database (dev: hostssl), the shards use the store's root key (dev: one key per shard, policy
+# `apps/<shard>/*`), no Linkerd sidecar and no APISIX in front, so the latency is the host's own.
+name: wasm-host-10k
+
+x-shard: &shard
+  # The host binary built from the commit under test, on the runtime the platform image uses
+  # (distroless cc, Debian 12).
+  image: gcr.io/distroless/cc-debian12@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+  entrypoint: ["/rig/jc-wasm-host"]
+  cpus: 1
+  mem_limit: 1g
+  memswap_limit: 1g
+  read_only: true
+  # The uid that owns the rig directory, so the shard reads its mode-600 password file.
+  user: "${RIG_UID:?}:${RIG_GID:?}"
+  depends_on: [apps-db, store]
+
+services:
+  apps-db:
+    image: ghcr.io/cloudnative-pg/postgis@sha256:06e22a518417c6ecfec4c23f7c2f8a4608405e559b97143e98b54f363ac03507
+    user: "26:26"
+    cpus: 1
+    mem_limit: 768m
+    memswap_limit: 768m
+    environment:
+      PGDATA: /var/lib/postgresql/pgdata
+    volumes:
+      - db:/var/lib/postgresql
+      - ${RIG_DIR:?}/db.password:/run/db.password:ro
+    entrypoint: ["bash", "-ec"]
+    command:
+      - |
+        bin=/usr/lib/postgresql/16/bin
+        if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          $$bin/initdb -D "$$PGDATA" -U postgres --auth=scram-sha-256 --pwfile=/run/db.password >/dev/null
+          echo "host all all all scram-sha-256" >> "$$PGDATA/pg_hba.conf"
+          $$bin/pg_ctl -D "$$PGDATA" -w start -o "-c listen_addresses= -c unix_socket_directories=/tmp" >/dev/null
+          PGPASSWORD=$$(cat /run/db.password) $$bin/psql -qh /tmp -U postgres -d postgres -c "create database apps"
+          $$bin/pg_ctl -D "$$PGDATA" -w stop >/dev/null
+        fi
+        exec $$bin/postgres -D "$$PGDATA" -c listen_addresses='*' -c unix_socket_directories=/tmp -c max_connections=100 \
+          -c statement_timeout=30s -c idle_in_transaction_session_timeout=60s
+    ports: ["127.0.0.1:15432:5432"]
+
+  store:
+    image: docker.io/rustfs/rustfs@sha256:c36b3efea3d1e503f1a2581abd0e7611e0e5820dd30e1850a52384b3fc52bda4
+    environment:
+      RUSTFS_ACCESS_KEY: rig-root
+      RUSTFS_SECRET_KEY: ${STORE_SECRET:?}
+    volumes:
+      - store:/data
+    ports: ["127.0.0.1:19000:9000"]
+
+  shard-0:
+    <<: *shard
+    environment: &env
+      JC_WASM_SHARD: "0"
+      JC_WASM_PLACEMENTS: /rig/shard-0.json
+      JC_WASM_S3_ENDPOINT: http://store:9000
+      JC_WASM_S3_BUCKET: apps
+      JC_WASM_S3_KEY_FILE: /rig/store.key
+      JC_WASM_S3_SECRET_FILE: /rig/store.secret
+      JC_WASM_DB_URL: postgresql://wasm_host_0@apps-db:5432/apps
+      JC_WASM_DB_PASSWORD_FILE: /rig/shard-0.password
+      # As dev keeps it (deployment components/wasm-host, T-3345); CACHED tries another cap.
+      JC_WASM_CACHED_COMPONENTS: ${CACHED:-700}
+      RUST_LOG: warn
+    volumes: ["${RIG_DIR:?}:/rig:ro"]
+    ports: ["127.0.0.1:18080:8080"]
+
+  shard-1:
+    <<: *shard
+    environment:
+      <<: *env
+      JC_WASM_SHARD: "1"
+      JC_WASM_PLACEMENTS: /rig/shard-1.json
+      JC_WASM_DB_URL: postgresql://wasm_host_1@apps-db:5432/apps
+      JC_WASM_DB_PASSWORD_FILE: /rig/shard-1.password
+    volumes: ["${RIG_DIR:?}:/rig:ro"]
+    ports: ["127.0.0.1:18081:8080"]
+
+  # A shard with nothing placed: the baseline the idle cost per App is measured against.
+  shard-empty:
+    <<: *shard
+    profiles: [baseline]
+    environment:
+      <<: *env
+      JC_WASM_SHARD: "9"
+      JC_WASM_PLACEMENTS: /rig/shard-empty.json
+      JC_WASM_DB_URL: postgresql://wasm_host_0@apps-db:5432/apps
+      JC_WASM_DB_PASSWORD_FILE: /rig/shard-0.password
+    volumes: ["${RIG_DIR:?}:/rig:ro"]
+
+  k6:
+    image: grafana/k6@sha256:1f40432b1cbe7234e977f96c362c9bc550a2d2b583d014dd8669fe40d3e9e755
+    user: "${RIG_UID:?}:${RIG_GID:?}"
+    profiles: [load]
+    volumes:
+      - ./mix.js:/scripts/mix.js:ro
+      - ${RIG_DIR:?}:/out
+    environment:
+      SHARD_URLS: http://shard-0:8080,http://shard-1:8080
+      APPS: ${APPS:-10000}
+      RATE: ${RATE:-30}
+      DURATION: ${DURATION:-30m}
+      PROBE: ${PROBE:-500}
+    command: ["run", "--quiet", "--summary-export=/out/k6-summary.json", "/scripts/mix.js"]
+
+volumes:
+  db: {}
+  store: {}

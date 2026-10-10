@@ -23,6 +23,7 @@ use wasmtime_wasi_http::{
 };
 
 use crate::limits::{Limits, EPOCH_TICK};
+use crate::metrics::CacheStats;
 use crate::placement::Placed;
 use crate::source::Source;
 use crate::storage::Storage;
@@ -257,6 +258,9 @@ struct Cache {
     capacity: usize,
     order: VecDeque<String>,
     entries: HashMap<String, ProxyPre<State>>,
+    /// Lookups answered from the cache, and lookups that had to fetch and compile.
+    hits: u64,
+    misses: u64,
 }
 
 impl Cache {
@@ -342,6 +346,8 @@ impl Host {
                 capacity: limits.cached_components,
                 order: VecDeque::new(),
                 entries: HashMap::new(),
+                hits: 0,
+                misses: 0,
             }),
             engine,
             linker,
@@ -376,19 +382,34 @@ impl Host {
 
     /// How many components are compiled and kept.
     pub fn cached(&self) -> usize {
-        self.cache.lock().map(|c| c.entries.len()).unwrap_or(0)
+        self.cache_stats().cached
+    }
+
+    /// The compiled-component cache: its size and how its lookups went since the shard started.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.cache
+            .lock()
+            .map(|c| CacheStats {
+                cached: c.entries.len(),
+                hits: c.hits,
+                misses: c.misses,
+            })
+            .unwrap_or_default()
     }
 
     /// The App's component, compiled once: fetched by its digest and refused unless the bytes
     /// hash to it (AP-143).
     pub async fn component(&self, digest: &str) -> Result<ProxyPre<State>, Failure> {
-        if let Some(pre) = self
-            .cache
-            .lock()
-            .map_err(|_| Failure::Unavailable("cache".into()))?
-            .get(digest)
         {
-            return Ok(pre);
+            let mut cache = self
+                .cache
+                .lock()
+                .map_err(|_| Failure::Unavailable("cache".into()))?;
+            if let Some(pre) = cache.get(digest) {
+                cache.hits += 1;
+                return Ok(pre);
+            }
+            cache.misses += 1;
         }
         let bytes = self
             .source

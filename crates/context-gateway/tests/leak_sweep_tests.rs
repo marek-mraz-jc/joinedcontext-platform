@@ -203,6 +203,7 @@ fn endpoint() -> Endpoint {
                 "odometer": "https://hel.fi/schema/odometer", "secretPin": "https://hel.fi/schema/secretPin",
                 "Depot": "https://hel.fi/schema/Depot" } })),
         }],
+        policy_names: Vec::new(),
         policies: vec![policy],
     }
 }

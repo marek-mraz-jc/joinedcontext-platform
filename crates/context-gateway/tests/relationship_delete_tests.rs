@@ -294,6 +294,7 @@ fn endpoint(writable: &[&str]) -> Endpoint {
         view_mapping: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies: vec![
             policy(
                 "createEntity, createBatch, upsertBatch, appendAttrs, updateAttrs, deleteAttrs, \

@@ -63,6 +63,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![
             policy("role", "data-steward", "StewardView"),
             policy("role", "sensor-writer", "SensorWrite"),

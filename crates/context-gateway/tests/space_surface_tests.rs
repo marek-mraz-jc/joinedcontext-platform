@@ -83,6 +83,7 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
             models: Vec::new(),
             view_mapping: None,
             catalog: None,
+            policy_names: Vec::new(),
             policies,
         }),
         title,

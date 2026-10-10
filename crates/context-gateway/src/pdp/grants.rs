@@ -10,7 +10,7 @@
 //! lists of the grants it matches; an entity no grant matches is not served at all.
 
 use super::geo::Areas;
-use super::projection::{id_permitted, type_granted};
+use super::projection::{id_permitted, types_granted};
 use antares_jsonld::{expand_entity, Context, ExpandOpts};
 use jc_core::kinds::PolicySpec;
 use serde_json::Value;
@@ -22,6 +22,9 @@ use std::sync::OnceLock;
 pub struct GrantView {
     /// The types it names; empty is every type.
     pub types: BTreeSet<String>,
+    /// What the space's models make of those names, filled where the decision knows the models
+    /// (T-3473): one grant's IRIs, never another's.
+    pub type_iris: BTreeSet<String>,
     /// Its anchored id patterns; empty is every id.
     pub id_patterns: BTreeSet<String>,
     /// Its `q`, in the NGSI-LD query language.
@@ -39,6 +42,7 @@ impl GrantView {
     pub fn of(policy: &PolicySpec) -> Self {
         GrantView {
             types: super::evaluator::granted_types(&policy.information),
+            type_iris: BTreeSet::new(),
             id_patterns: super::evaluator::id_patterns(policy),
             q: policy.q.clone(),
             scope_q: policy.scope_q.clone(),
@@ -52,7 +56,7 @@ impl GrantView {
     /// Each condition fails closed: a `q` that does not parse, an area that is not a polygon
     /// and an entity that cannot be placed or read all answer no.
     pub fn matches(&self, entity: &Value) -> bool {
-        type_granted(entity, &self.types)
+        types_granted(entity, &self.types, &self.type_iris)
             && id_permitted(entity, &self.id_patterns)
             && self
                 .scope_q

@@ -65,6 +65,7 @@ fn endpoint(with_area: bool) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![serde_norway::from_str(&grant(with_area)).expect("the policy spec parses")],
     }
 }
