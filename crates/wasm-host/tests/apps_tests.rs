@@ -268,6 +268,7 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
 
     let http = reqwest::Client::new();
     let mut saved: BTreeMap<String, String> = BTreeMap::new();
+    let mut second_uploaded = false;
     for (n, step) in scenario.steps.iter().enumerate() {
         let (verb, mut target) = step
             .call
@@ -308,6 +309,7 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
             saved.insert(key.clone(), value);
         }
         if let Some(pointer) = &step.upload {
+            second_uploaded |= step.caller.is_some();
             let url = answer
                 .pointer(pointer)
                 .and_then(Value::as_str)
@@ -323,6 +325,17 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
             let got = http.get(url).send().await.expect("download");
             assert_eq!(got.text().await.expect("text"), BYTES, "{at}: the download");
         }
+    }
+    if !second_uploaded {
+        let theirs = store
+            .blob("s1", 1 << 20)
+            .list(&second, "")
+            .await
+            .expect("list");
+        assert!(
+            theirs.is_empty(),
+            "{name}: the second App's prefix holds {theirs:?}"
+        );
     }
 }
 
