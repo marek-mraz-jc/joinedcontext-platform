@@ -142,6 +142,7 @@ fn endpoint() -> Endpoint {
             json_schema: None,
             context: None,
         }],
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }

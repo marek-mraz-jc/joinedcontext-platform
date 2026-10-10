@@ -75,6 +75,7 @@ fn hub_endpoint() -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }

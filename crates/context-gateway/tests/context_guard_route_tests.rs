@@ -94,6 +94,7 @@ fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoi
         catalog: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies,
     }
 }

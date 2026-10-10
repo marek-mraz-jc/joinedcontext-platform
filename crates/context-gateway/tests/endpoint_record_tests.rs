@@ -86,6 +86,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![air_quality()],
+        policy_names: Vec::new(),
         policies: vec![policy(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

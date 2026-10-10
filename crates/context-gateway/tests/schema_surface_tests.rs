@@ -98,6 +98,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models,
+        policy_names: Vec::new(),
         policies: vec![policy(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk
@@ -118,6 +119,7 @@ information:
 fn keeping_nothing_back(models: Vec<Model>) -> Endpoint {
     Endpoint {
         roles: Default::default(),
+        policy_names: Vec::new(),
         policies: vec![policy(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

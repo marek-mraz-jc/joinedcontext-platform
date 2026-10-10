@@ -132,6 +132,10 @@ pub struct Endpoint {
     pub base_path: String,
     /// The policies the PDP evaluates for callers of this endpoint (GW8).
     pub policies: Vec<PolicySpec>,
+    /// The manifest name of each of `policies`, at the same index, so an answer can name the
+    /// Policy that decided it (EP-103). Shorter than `policies` only for an Endpoint built by
+    /// hand; a missing name is an unnamed Policy, never another one's.
+    pub policy_names: Vec<String>,
     /// The data models of the space, with whatever artifacts the repository carries
     /// beside them (EP-46, DM-02).
     pub models: Vec<Model>,

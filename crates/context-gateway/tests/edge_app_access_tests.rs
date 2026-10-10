@@ -93,6 +93,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: two_grants("ovzdusie"),
     }
 }

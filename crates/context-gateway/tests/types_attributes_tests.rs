@@ -224,6 +224,7 @@ fn endpoint() -> Endpoint {
             json_schema: None,
             context: None,
         }],
+        policy_names: Vec::new(),
         policies: vec![policy()],
     }
 }
@@ -243,6 +244,7 @@ fn whole_space_endpoint() -> Endpoint {
     Endpoint {
         roles: Default::default(),
         projection: None,
+        policy_names: Vec::new(),
         policies: vec![policy],
         ..endpoint()
     }
@@ -265,6 +267,7 @@ fn stranger_endpoint() -> Endpoint {
         roles: Default::default(),
         projection: None,
         hidden_attributes: Default::default(),
+        policy_names: Vec::new(),
         policies: vec![policy],
         ..endpoint()
     }
