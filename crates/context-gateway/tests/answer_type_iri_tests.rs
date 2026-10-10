@@ -92,6 +92,7 @@ fn endpoint(granted: &str) -> Endpoint {
         projection: None,
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),
