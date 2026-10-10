@@ -216,6 +216,28 @@ fn an_account_that_derives_a_platform_client_id_is_refused() {
     }
 }
 
+/// AP-159 (T-3372): `appjob-` names the account a wasm App's jobs run as; one written by hand
+/// could take an App's client and its Endpoint, so it is refused, naming why.
+#[test]
+fn an_account_written_by_hand_cannot_take_an_apps_job_principal() {
+    let named = |name: &str| GOLDEN.replace("name: vendorx-parking-push", &format!("name: {name}"));
+    let err = ServiceAccount::from_yaml(&named("appjob-kpi-forecast"))
+        .expect("parses")
+        .validate()
+        .expect_err("a job principal's name is refused")
+        .to_string();
+    assert!(
+        err.contains("AP-159") && err.contains("appjob-kpi-forecast"),
+        "{err}"
+    );
+    for name in ["app-builder", "appjobs", "kpi-appjob"] {
+        ServiceAccount::from_yaml(&named(name))
+            .expect("parses")
+            .validate()
+            .unwrap_or_else(|err| panic!("{name} is an ordinary account: {err}"));
+    }
+}
+
 /// PL-19 (T-1508): `pl-` names the account every Pipeline is given; an account written by hand
 /// that takes the prefix could take a pipeline's client and grants, so it is refused, naming why.
 #[test]

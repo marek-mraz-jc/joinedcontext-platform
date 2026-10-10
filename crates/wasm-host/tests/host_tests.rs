@@ -492,6 +492,133 @@ async fn a_thousand_different_components_load_and_answer_on_one_shard() {
     );
 }
 
+/// AP-154, AP-159 (T-3372): a job's export runs in a fresh instance, and its calls reach the
+/// App's own Endpoint with the job principal's token, which the component never holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_runs_its_export_and_writes_with_the_job_principals_token_alone() {
+    let gateway = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&gateway)
+        .await;
+    let world = World::new("job", Limits::default(), Some(&gateway.uri()));
+    let app = world.place("kpi", guest());
+    let wall = Duration::from_secs(5);
+
+    assert_eq!(
+        world
+            .host
+            .run_job(&app, "tick", "job-at".into(), wall)
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        world
+            .host
+            .run_job(&app, "call-gateway", "job-at".into(), wall)
+            .await,
+        Ok(())
+    );
+    let seen = gateway.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].url.path(), "/api/endpoint/ep1/ngsi-ld/v1/entities");
+    assert_eq!(
+        seen[0]
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok()),
+        Some("Bearer job-at")
+    );
+}
+
+/// AP-155: a run's failure is the export's own sentence; a missing export or one of another shape
+/// is named, not a trap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_says_why_and_a_missing_or_misshapen_export_is_named() {
+    let world = World::new("job-fail", Limits::default(), None);
+    let app = world.place("kpi", guest());
+    let wall = Duration::from_secs(5);
+    assert_eq!(
+        world.host.run_job(&app, "fail", "t".into(), wall).await,
+        Err("the indicator could not be computed: no readings in the last hour".into())
+    );
+    for export in ["hourly", "wrong-shape"] {
+        let why = world
+            .host
+            .run_job(&app, export, "t".into(), wall)
+            .await
+            .expect_err("refused");
+        assert!(
+            why.contains(&format!("`{export}: func() -> result<_, string>`")),
+            "{why}"
+        );
+    }
+}
+
+/// AP-154: a run past its wall time is stopped, and the App still answers requests after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_past_its_wall_time_is_stopped() {
+    let world = World::new("job-spin", Limits::default(), None);
+    let app = world.place("kpi", guest());
+    let started = Instant::now();
+    let why = world
+        .host
+        .run_job(&app, "spin", "t".into(), Duration::from_secs(1))
+        .await
+        .expect_err("stopped");
+    assert!(why.contains("wall time"), "{why}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
+}
+
+/// AP-159: the runner asks the token service for `{project}/{app}` and runs with its answer; with
+/// no service, or a refusal, the run fails saying so and the component is never started.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_takes_its_token_from_the_token_service_or_does_not_run() {
+    use wasm_host::jobs::{HostRunner, JobTokens, Runner};
+    use wiremock::matchers::{body_string_contains, method, path};
+
+    let sidecar = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .and(body_string_contains("client_id=helsinki%2Fkpi"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "job-at", "token_type": "Bearer", "expires_in": 300
+        })))
+        .mount(&sidecar)
+        .await;
+    let world = World::new("job-token", Limits::default(), None);
+    let app = world.place("kpi", guest());
+    let job = wasm_host::placement::PlacedJob {
+        name: "hourly".into(),
+        schedule: "0 * * * *".into(),
+        export: "tick".into(),
+    };
+    let runner = HostRunner {
+        host: world.host.clone(),
+        tokens: Some(JobTokens::new(format!("{}/token", sidecar.uri())).expect("client")),
+    };
+    assert_eq!(runner.run(&app, &job).await, Ok(()));
+
+    let other = Placed {
+        name: "other".into(),
+        ..app.clone()
+    };
+    let refused = runner.run(&other, &job).await.expect_err("no token");
+    assert!(refused.contains("got no token"), "{refused}");
+
+    let none = HostRunner {
+        host: world.host.clone(),
+        tokens: None,
+    };
+    let why = none.run(&app, &job).await.expect_err("no service");
+    assert!(why.contains("JC_WASM_JOB_TOKEN_URL"), "{why}");
+}
+
 /// T-3345: the shard counts how its compiled-component cache answered, so a load test reads the
 /// hit rate from `/metrics` instead of guessing it.
 #[tokio::test(flavor = "multi_thread")]
