@@ -203,7 +203,7 @@ async fn an_entity_of_an_ungranted_type_is_in_no_shape_of_the_bundle() {
     let mut intruder = station("invoice-1", 0.0);
     intruder["type"] = json!("Invoice");
     intruder["id"] = json!("urn:ngsi-ld:Invoice:banskabystrica.sk:ovzdusie:invoice-1");
-    intruder["amount"] = json!({ "type": "Property", "value": 4200 });
+    intruder["amount"] = json!({ "type": "Property", "value": 4200.25 });
     let broker = BrokerStub::start(vec![json!([station("station-01", 34.2), intruder])]).await;
 
     let mut narrowed = endpoint(None, &[]);
@@ -229,7 +229,7 @@ information:
     for (path, body) in stored(&answer.body) {
         let text = String::from_utf8_lossy(&body);
         assert!(!text.contains("Invoice"), "{path} names an ungranted type");
-        assert!(!text.contains("4200"), "{path} carries its value");
+        assert!(!text.contains("4200.25"), "{path} carries its value");
     }
 }
 
