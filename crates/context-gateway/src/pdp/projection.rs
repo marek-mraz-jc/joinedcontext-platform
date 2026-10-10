@@ -217,7 +217,7 @@ pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
     if !entity.is_object() {
         return false;
     }
-    type_granted(entity, &constraints.types) && id_permitted(entity, &constraints.id_patterns)
+    type_granted(entity, constraints) && id_permitted(entity, &constraints.id_patterns)
 }
 
 /// Whether the type the answer declares is one the grants name (EP-26).
@@ -225,27 +225,95 @@ pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
 /// An empty set is a grant over every type the endpoint serves. An entity carrying several
 /// types is granted when any one of them is, which is how NGSI-LD multi-typing works: the
 /// grant is a statement about a type, not about a type being the only one. An answer with no
-/// type at all cannot be judged, so under a type grant it is not served.
-fn type_granted(entity: &Value, types: &BTreeSet<String>) -> bool {
-    if types.is_empty() {
+/// type at all cannot be judged, so under a type grant it is not served. Types compare as IRIs
+/// ([`type_named`]), so another vocabulary's `Depot` is not the grant's (T-3473).
+fn type_granted(entity: &Value, constraints: &Constraints) -> bool {
+    if constraints.types.is_empty() {
         return true;
     }
     let declared = entity.get("type").or_else(|| entity.get("@type"));
     match declared {
-        Some(Value::String(one)) => types.contains(term(one)),
+        Some(Value::String(one)) => type_named(constraints, one),
         Some(Value::Array(several)) => several
             .iter()
             .filter_map(Value::as_str)
-            .any(|one| types.contains(term(one))),
+            .any(|one| type_named(constraints, one)),
         _ => false,
     }
 }
 
-/// The term of a type, whether the answer compacted it or left the IRI expanded.
+/// The NGSI-LD default vocabulary: where the core context puts a term it does not define.
+const DEFAULT_VOCAB: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
+
+/// A type name as the IRI it names under the NGSI-LD core context, the only context the
+/// gateway admits (T-3287): a term is in the default vocabulary, an absolute IRI is itself.
+/// `None` for a name the gateway cannot expand: a compact IRI (`other:Depot`) names a prefix
+/// the core context does not define, and an empty name names nothing.
+pub fn type_iri(name: &str) -> Option<String> {
+    if name.contains("://") || name.starts_with("urn:") {
+        return Some(name.to_owned());
+    }
+    if name.is_empty() || name.contains(':') || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("{DEFAULT_VOCAB}{name}"))
+}
+
+/// Whether `name`, compacted under the core context or expanded, is one of the granted types,
+/// compared as IRIs: the core context's reading of each granted name, and what the space's own
+/// `@context`s make of it (`type_iris`). A name the gateway cannot expand grants nothing.
+pub fn type_named(constraints: &Constraints, name: &str) -> bool {
+    type_iri(name).is_some_and(|asked| {
+        constraints.type_iris.contains(&asked)
+            || constraints
+                .types
+                .iter()
+                .any(|one| type_iri(one).is_some_and(|grant| grant == asked))
+    })
+}
+
+/// What the type names `types` stand for under the `@context` of each model: the term's own
+/// definition (an absolute IRI, or `{"@id": …}`), else the model's `@vocab` followed by the
+/// term. A definition that is not an absolute IRI adds nothing; the core context's reading
+/// is [`type_iri`]'s.
+pub fn model_type_iris<'a>(
+    types: &BTreeSet<String>,
+    contexts: impl Iterator<Item = &'a Value>,
+) -> BTreeSet<String> {
+    let absolute = |iri: &str| iri.contains("://") || iri.starts_with("urn:");
+    let mut out = BTreeSet::new();
+    for context in contexts {
+        let Some(terms) = crate::handlers::schema::inner_context(context) else {
+            continue;
+        };
+        let vocab = terms
+            .get("@vocab")
+            .and_then(Value::as_str)
+            .filter(|vocab| absolute(vocab));
+        for name in types {
+            let defined = terms.get(name).and_then(|definition| match definition {
+                Value::String(iri) => Some(iri.as_str()),
+                Value::Object(spec) => spec.get("@id").and_then(Value::as_str),
+                _ => None,
+            });
+            match (defined, vocab) {
+                (Some(iri), _) if absolute(iri) => {
+                    out.insert(iri.to_owned());
+                }
+                (None, Some(vocab)) if type_iri(name).is_some() && !absolute(name) => {
+                    out.insert(format!("{vocab}{name}"));
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The last segment of an IRI, after `#` or `/`; a plain term is returned unchanged.
 ///
-/// A broker may answer `https://hel.fi/schema/Depot` where the grant says `Depot`; comparing
-/// the strings as they come would let the expanded form through. Both JSON-LD delimiters are
-/// cut, and a plain term is returned unchanged.
+/// It picks attribute slots for a name, never an access decision: two vocabularies' `Depot`
+/// share it, so a type is granted by [`type_named`], which compares IRIs (T-3473).
 pub fn term(iri: &str) -> &str {
     iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
