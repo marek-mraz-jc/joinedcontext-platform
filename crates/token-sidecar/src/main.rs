@@ -10,13 +10,15 @@
 //! - `JC_TOKEN_AUDIENCE`: the realm issuer, the audience Keycloak's federated client authentication expects.
 //! - `JC_PIPELINE_NAMESPACE`: the namespace that holds the pipelines' ServiceAccounts and nothing
 //!   else, the only one this service may mint tokens in.
+//! - `JC_SIDECAR_IDENTITY`: `pipeline` (default) or `appjob`, a wasm App's job principal (AP-159),
+//!   which reads its namespace from `JC_APP_IDENTITY_NAMESPACE` instead.
 //! - `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT`: set by the kubelet; the API the TokenRequests go to.
 //!
 //! Its own ServiceAccount token and the cluster CA are read from the standard mount,
 //! `/var/run/secrets/kubernetes.io/serviceaccount/`.
 
 use std::path::Path;
-use token_sidecar::{listen_address, router, Config, Sidecar};
+use token_sidecar::{listen_address, router, Config, Identity, Sidecar};
 
 const MOUNT: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 
@@ -32,7 +34,11 @@ async fn run() -> Result<(), String> {
     let host = required("KUBERNETES_SERVICE_HOST")?;
     let port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_owned());
     let mount = Path::new(MOUNT);
-    let namespace = required("JC_PIPELINE_NAMESPACE")?;
+    let identity = Identity::parse(std::env::var("JC_SIDECAR_IDENTITY").ok().as_deref())?;
+    let namespace = match identity {
+        Identity::Pipeline => required("JC_PIPELINE_NAMESPACE")?,
+        Identity::AppJob => required("JC_APP_IDENTITY_NAMESPACE")?,
+    };
     let ca =
         std::fs::read(mount.join("ca.crt")).map_err(|error| format!("the cluster CA: {error}"))?;
     let ca =
@@ -48,6 +54,7 @@ async fn run() -> Result<(), String> {
         own_token_file: mount.join("token"),
         token_url: required("JC_TOKEN_URL")?,
         audience: required("JC_TOKEN_AUDIENCE")?,
+        identity,
     };
     let listener = tokio::net::TcpListener::bind(address)
         .await

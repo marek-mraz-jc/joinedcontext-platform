@@ -198,6 +198,15 @@ impl Kind for ServiceAccountSpec {
                          (PL-19); a ServiceAccount written by hand must choose another name",
             });
         }
+        if crate::kinds::app_identity::is_derived(&meta.name) {
+            return Err(Error::Name {
+                field: "metadata.name",
+                value: meta.name.clone(),
+                reason:
+                    "starts with `appjob-`, the prefix of the account a wasm App's jobs run as \
+                         (AP-159); a ServiceAccount written by hand must choose another name",
+            });
+        }
         if let Some(project) = meta.namespace.as_deref() {
             let id = keycloak_client_id(project, &meta.name);
             if PLATFORM_CLIENTS.contains(&id.as_str()) {

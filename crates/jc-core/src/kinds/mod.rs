@@ -2,6 +2,7 @@
 
 pub mod agent_profile;
 pub mod app;
+pub mod app_identity;
 pub mod assistant;
 pub mod bento_inputs;
 pub mod bento_processors;

@@ -1,6 +1,7 @@
 //! A test App: `/api/hello`, `/api/state` (a counter that a fresh instance starts at one),
 //! `/api/loop` (never ends), `/api/alloc` (asks for 128 MiB), `/api/fetch?<url>` (an outgoing
-//! GET, answering the status or the error), `/api/sql` (the host's `jc:app/sql`).
+//! GET, answering the status or the error), `/api/sql` (the host's `jc:app/sql`); and the jobs of
+//! `wit/jobs.wit`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,8 +9,8 @@ use wasip2::http::outgoing_handler;
 use wasip2::http::types::{Fields, IncomingRequest, OutgoingBody, OutgoingRequest, OutgoingResponse, ResponseOutparam, Scheme};
 
 wit_bindgen::generate!({
-    path: "../../wit",
-    world: "jc:app/app-host",
+    path: "wit",
+    world: "jc:test-guest/guest",
     generate_all,
 });
 
@@ -85,3 +86,35 @@ impl wasip2::exports::http::incoming_handler::Guest for App {
 }
 
 wasip2::http::proxy::export!(App);
+
+impl Guest for App {
+    fn tick() -> Result<(), String> {
+        Ok(())
+    }
+
+    fn fail() -> Result<(), String> {
+        Err("the indicator could not be computed: no readings in the last hour".into())
+    }
+
+    fn spin() -> Result<(), String> {
+        let mut n: u64 = 0;
+        loop {
+            n = std::hint::black_box(n.wrapping_add(1));
+        }
+    }
+
+    fn call_gateway() -> Result<(), String> {
+        let status = fetch("http://gateway/ngsi-ld/v1/entities");
+        if status.starts_with("status 2") {
+            Ok(())
+        } else {
+            Err(status)
+        }
+    }
+
+    fn wrong_shape(n: u32) -> u32 {
+        n
+    }
+}
+
+export!(App);

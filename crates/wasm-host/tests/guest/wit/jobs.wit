@@ -1,0 +1,18 @@
+/// The test App's jobs (T-3372): root-level exports beside `wasi:http/incoming-handler`, as an
+/// App's own world declares them (AP-159).
+package jc:test-guest;
+
+world guest {
+    include jc:app/app-host@0.1.0;
+
+    /// Succeeds.
+    export tick: func() -> result<_, string>;
+    /// Fails with its own sentence.
+    export fail: func() -> result<_, string>;
+    /// Never ends.
+    export spin: func() -> result<_, string>;
+    /// GETs its own Endpoint, `http://gateway/ngsi-ld/v1/entities`; fails unless the answer is 2xx.
+    export call-gateway: func() -> result<_, string>;
+    /// Not a job's shape.
+    export wrong-shape: func(n: u32) -> u32;
+}

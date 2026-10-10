@@ -10,7 +10,9 @@ use axum::http::{header, Request, StatusCode};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::io::Write;
-use token_sidecar::{listen_address, percent_decoded, router, Config, Sidecar, TOKEN_SECONDS};
+use token_sidecar::{
+    listen_address, percent_decoded, router, Config, Identity, Sidecar, TOKEN_SECONDS,
+};
 use tower::ServiceExt;
 use wiremock::matchers::{body_json, body_string_contains, header as has_header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -35,6 +37,10 @@ mod tempfile_free {
 }
 
 async fn world() -> World {
+    world_of(Identity::Pipeline, "pipeline-runner").await
+}
+
+async fn world_of(identity: Identity, namespace: &str) -> World {
     let kubernetes = MockServer::start().await;
     let keycloak = MockServer::start().await;
     let own = std::env::temp_dir().join(format!(
@@ -46,13 +52,14 @@ async fn world() -> World {
         .expect("the own token");
     let config = Config {
         kubernetes_api: kubernetes.uri(),
-        namespace: "pipeline-runner".to_owned(),
+        namespace: namespace.to_owned(),
         own_token_file: own.clone(),
         token_url: format!(
             "{}/realms/joinedcontext/protocol/openid-connect/token",
             keycloak.uri()
         ),
         audience: ISSUER.to_owned(),
+        identity,
     };
     let app = router(Sidecar::new(config, reqwest::Client::new()));
     World {
@@ -304,4 +311,52 @@ fn the_service_listens_where_the_deployment_says_across_the_pod_network() {
         4180
     );
     assert!(listen_address(Some("everywhere")).is_err());
+}
+
+/// AP-159: beside a WASM host the service mints the App's job principal's token, in the Apps'
+/// identities namespace, and never a pipeline's.
+#[tokio::test]
+async fn a_job_run_gets_the_token_of_its_apps_job_principal() {
+    let world = world_of(Identity::AppJob, "app-identities").await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/api/v1/namespaces/app-identities/serviceaccounts/appjob-zilina-kpi-forecast/token",
+        ))
+        .and(has_header("authorization", "Bearer runner-own-token"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(json!({ "status": { "token": "minted.for.kpi" } })),
+        )
+        .expect(1)
+        .mount(&world.kubernetes)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("client_assertion=minted.for.kpi"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({ "access_token": "job-at", "expires_in": 300, "token_type": "Bearer" }),
+        ))
+        .expect(1)
+        .mount(&world.keycloak)
+        .await;
+    let request = Request::post("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "grant_type=client_credentials&client_id=zilina%2Fkpi-forecast",
+        ))
+        .expect("a request");
+    let (status, body) = read(world.app.clone().oneshot(request).await.expect("an answer")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["access_token"], "job-at");
+}
+
+#[test]
+fn the_identity_is_pipeline_unless_appjob_is_named() {
+    assert_eq!(Identity::parse(None), Ok(Identity::Pipeline));
+    assert_eq!(Identity::parse(Some(" ")), Ok(Identity::Pipeline));
+    assert_eq!(Identity::parse(Some("appjob")), Ok(Identity::AppJob));
+    let err = Identity::parse(Some("app")).expect_err("refused");
+    assert!(
+        err.contains("JC_SIDECAR_IDENTITY") && err.contains("app"),
+        "{err}"
+    );
 }

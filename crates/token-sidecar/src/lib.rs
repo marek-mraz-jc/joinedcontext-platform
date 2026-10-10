@@ -11,6 +11,9 @@
 //! The service runs in a pod of its own, so the runner never reaches the Kubernetes API. The
 //! ceiling is the shared runner: anything running in it can ask for any of its pipelines'
 //! tokens. What it buys is a principal per pipeline (PL-19, PL-20).
+//!
+//! With [`Identity::AppJob`] the same service stands beside a WASM host's shards and mints, per
+//! job run, the token of the App's job principal `appjob-{project}-{app}` (AP-159).
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -18,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Form, Router};
 use base64::Engine;
-use jc_core::kinds::pipeline_identity::kubernetes_service_account;
+use jc_core::kinds::{app_identity, pipeline_identity};
 use jc_core::names::validate_dns1123_label;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +42,38 @@ pub struct Config {
     pub token_url: String,
     /// The audience Keycloak's federated client authentication expects: the realm issuer.
     pub audience: String,
+    /// Whose ServiceAccounts the namespace holds, so which name a client id maps to.
+    pub identity: Identity,
+}
+
+/// The principals one service mints for: a Pipeline's (PL-19) or a wasm App's jobs' (AP-159).
+/// One service serves one kind, in the one namespace that holds that kind alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Identity {
+    #[default]
+    Pipeline,
+    AppJob,
+}
+
+impl Identity {
+    /// `JC_SIDECAR_IDENTITY`: `pipeline` when unset or blank, or `appjob`.
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("pipeline") => Ok(Self::Pipeline),
+            Some("appjob") => Ok(Self::AppJob),
+            Some(other) => Err(format!(
+                "JC_SIDECAR_IDENTITY {other} is neither `pipeline` nor `appjob`"
+            )),
+        }
+    }
+
+    /// The Kubernetes ServiceAccount of `{project}/{name}`.
+    pub fn kubernetes_service_account(self, project: &str, name: &str) -> String {
+        match self {
+            Self::Pipeline => pipeline_identity::kubernetes_service_account(project, name),
+            Self::AppJob => app_identity::kubernetes_service_account(project, name),
+        }
+    }
 }
 
 /// Where the service listens: `JC_SIDECAR_LISTEN`, `0.0.0.0:4180` when unset or blank. It runs
@@ -183,7 +218,10 @@ async fn exchange(
     form: &HashMap<String, String>,
 ) -> Result<Response, Refusal> {
     let (project, pipeline) = pipeline_of(headers, form)?;
-    let account = kubernetes_service_account(&project, &pipeline);
+    let account = sidecar
+        .config
+        .identity
+        .kubernetes_service_account(&project, &pipeline);
     let config = &sidecar.config;
     // Read on every request: the kubelet rewrites the projected file before it expires.
     let own = std::fs::read_to_string(&config.own_token_file).map_err(|_| Refusal::OwnToken)?;

@@ -14,6 +14,7 @@
 //! | `JC_WASM_DB_URL`, `JC_WASM_DB_PASSWORD_FILE` | instead: the URL without a password, and the password as a mounted file |
 //! | `JC_WASM_DB_POOL` | connections of the shard's pool, default 20 |
 //! | `JC_WASM_SQL_QUOTA_BYTES`, `JC_WASM_BLOB_QUOTA_BYTES` | per App, default 100 MiB and 1 GiB |
+//! | `JC_WASM_JOB_TOKEN_URL` | the token service's `/token`, which mints a job principal's token per run (AP-159); unset, every job run fails saying so |
 //! | `JC_WASM_*` | the limits, each only lowered (`limits.rs`) |
 //!
 //! Without either an App's SQL answers `unavailable`; without a bucket, its files.
@@ -27,6 +28,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use wasm_host::blob::S3Blob;
 use wasm_host::host::Host;
+use wasm_host::jobs::{HostRunner, JobTokens, Scheduler, WALL_TIME};
 use wasm_host::limits::Limits;
 use wasm_host::metrics::Metrics;
 use wasm_host::s3::Bucket;
@@ -143,13 +145,40 @@ async fn run() -> Result<(), String> {
     };
     let host = Host::new(limits, source, storage, var("JC_GATEWAY_URL").as_deref())
         .map_err(|err| format!("{err:#}"))?;
+    let tokens = var("JC_WASM_JOB_TOKEN_URL")
+        .map(JobTokens::new)
+        .transpose()?;
+    if tokens.is_none() {
+        tracing::warn!("JC_WASM_JOB_TOKEN_URL is not set: every job run fails until it is");
+    }
+    let jobs = Arc::new(Scheduler::new(
+        HostRunner {
+            host: host.clone(),
+            tokens,
+        },
+        WALL_TIME,
+    ));
     let shard = Arc::new(Shard {
         id,
         host,
         apps: RwLock::new(HashMap::new()),
         metrics: Metrics::new(20),
+        jobs: jobs.clone(),
     });
     shard.watch(placements);
+    let placed = Arc::downgrade(&shard);
+    tokio::spawn(jobs.every_minute(move || {
+        placed
+            .upgrade()
+            .and_then(|shard| {
+                shard
+                    .apps
+                    .read()
+                    .ok()
+                    .map(|apps| apps.values().cloned().collect())
+            })
+            .unwrap_or_default()
+    }));
     let listen = var("JC_WASM_LISTEN").unwrap_or_else(|| "0.0.0.0:8080".into());
     let listener = TcpListener::bind(&listen)
         .await
