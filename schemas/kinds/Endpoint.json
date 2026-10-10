@@ -313,6 +313,13 @@
       "additionalProperties": false,
       "description": "How an Endpoint takes new entities from callers who do not choose their ids: a public form (EP-97).",
       "properties": {
+        "embedOrigins": {
+          "description": "The sites that may frame the form's page `/f/{slug}`, each an `https` origin exactly as a browser names it (`https://www.example.org`, an optional non-default port, no path, no wildcard), at most 20. The Portal sends them in that page's `frame-ancestors` and nowhere else; empty, only the Portal frames the form (EP-101).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "mintIds": {
           "description": "The gateway replaces the id a create names with one it mints, `urn:ngsi-ld:{Type}:{uuid}`, so a caller can neither pick nor overwrite one.",
           "type": "boolean"

@@ -233,7 +233,7 @@ impl RateLimits {
 
 /// How an Endpoint takes new entities from callers who do not choose their ids: a public form
 /// (EP-97).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Creates {
     /// The gateway replaces the id a create names with one it mints,
@@ -244,22 +244,89 @@ pub struct Creates {
     /// gateway answers 429 with `Retry-After` until midnight UTC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_day: Option<u32>,
+    /// The sites that may frame the form's page `/f/{slug}`, each an `https` origin exactly as a
+    /// browser names it (`https://www.example.org`, an optional non-default port, no path, no
+    /// wildcard), at most 20. The Portal sends them in that page's `frame-ancestors` and nowhere
+    /// else; empty, only the Portal frames the form (EP-101).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embed_origins: Vec<String>,
 }
 
 /// The largest `spec.creates.perDay` an Endpoint may name (EP-97).
 pub const MAX_CREATES_PER_DAY: u32 = 10_000;
 
+/// The most sites `spec.creates.embedOrigins` may name (EP-101).
+pub const MAX_EMBED_ORIGINS: usize = 20;
+
+/// Whether `origin` is an `https` origin as a browser serializes it, with a DNS host: lower case,
+/// ASCII (punycode), no default port, no path, no wildcard. Anything else could not match a
+/// framing page, or would carry more than one source into a `frame-ancestors` header.
+fn is_embed_origin(origin: &str) -> bool {
+    let Some(authority) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let label_ok = |label: &str| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    // A port as the browser writes it: digits without a leading zero, never the default 443.
+    let port_ok = port.is_none_or(|port| {
+        !port.starts_with('0')
+            && port.parse::<u16>().is_ok_and(|n| n != 0 && n != 443)
+            && port.bytes().all(|b| b.is_ascii_digit())
+    });
+    host.len() <= 253 && host.contains('.') && host.split('.').all(label_ok) && port_ok
+}
+
 impl Creates {
-    /// Validates `perDay` is within 1..=[`MAX_CREATES_PER_DAY`].
+    /// Validates `perDay` is within 1..=[`MAX_CREATES_PER_DAY`] and `embedOrigins` names at most
+    /// [`MAX_EMBED_ORIGINS`] distinct `https` origins.
     pub fn validate(&self) -> Result<()> {
-        match self.per_day {
-            Some(n) if n == 0 || n > MAX_CREATES_PER_DAY => Err(Error::Name {
-                field: "creates.perDay",
-                value: n.to_string(),
-                reason: "perDay must be between 1 and 10000",
-            }),
-            _ => Ok(()),
+        if let Some(n) = self.per_day {
+            if n == 0 || n > MAX_CREATES_PER_DAY {
+                return Err(Error::Name {
+                    field: "creates.perDay",
+                    value: n.to_string(),
+                    reason: "perDay must be between 1 and 10000",
+                });
+            }
         }
+        if self.embed_origins.len() > MAX_EMBED_ORIGINS {
+            return Err(Error::Name {
+                field: "creates.embedOrigins",
+                value: self.embed_origins.len().to_string(),
+                reason: "at most 20 sites may frame a form",
+            });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for origin in &self.embed_origins {
+            if !is_embed_origin(origin) {
+                return Err(Error::Name {
+                    field: "creates.embedOrigins",
+                    value: origin.clone(),
+                    reason: "a site is an https origin as the browser names it: \
+                             https://host or https://host:port, lower case, punycode for a \
+                             non-ASCII name, no path, no default port, no wildcard",
+                });
+            }
+            if !seen.insert(origin) {
+                return Err(Error::Name {
+                    field: "creates.embedOrigins",
+                    value: origin.clone(),
+                    reason: "a site is named once",
+                });
+            }
+        }
+        Ok(())
     }
 }
 
