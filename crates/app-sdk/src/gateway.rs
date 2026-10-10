@@ -1,7 +1,9 @@
 //! Reads from the Context Gateway, as the caller (AP-147): the host adds the caller's token, so an
 //! App reads what the person it serves may read and nothing more. A component has no environment
 //! to learn where the gateway runs; it calls the fixed origin `http://gateway` and the host sends
-//! the call on. Every other origin is refused before a connection is made.
+//! the call on, to the App's own Endpoint only: `/api/endpoint/<its slug>/…`, or for short
+//! `/ngsi-ld/v1/…` and `/schema/…` (AP-147). Every other origin and path is refused before a
+//! connection is made.
 
 use serde::de::DeserializeOwned;
 
@@ -66,6 +68,19 @@ pub fn checked(path: &str) -> Result<&str, Error> {
         return Err(Error::Invalid("it has a dot segment".into()));
     }
     Ok(path)
+}
+
+/// Percent-encodes a query value: everything but `A-Z a-z 0-9 - _ . ~` (T-3351).
+pub fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// The body of a `GET` of `path` on the gateway, `Accept: application/json`; a status outside
@@ -154,6 +169,12 @@ mod tests {
         }
         // A query may carry `//`, as a URL value does.
         assert!(checked("/a?q=http://x").is_ok());
+    }
+
+    #[test]
+    fn a_value_is_encoded_for_a_query() {
+        assert_eq!(encode("a,b c/é"), "a%2Cb%20c%2F%C3%A9");
+        assert_eq!(encode("Alert-1_.~"), "Alert-1_.~");
     }
 
     #[test]

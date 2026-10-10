@@ -255,6 +255,7 @@ mod tests {
             id: "helsinki_kpi_forecast".into(),
             tenant: "helsinki".into(),
             digest: format!("sha256:{}", "a".repeat(64)),
+            endpoint: None,
             jobs: vec![PlacedJob {
                 name: "hourly".into(),
                 schedule: schedule.into(),

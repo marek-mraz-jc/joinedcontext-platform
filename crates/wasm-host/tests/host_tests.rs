@@ -99,6 +99,7 @@ impl World {
             id: format!("{name}-id"),
             tenant: "helsinki".into(),
             digest,
+            endpoint: Some("ep1".into()),
             jobs: Vec::new(),
         }
     }
@@ -239,7 +240,7 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     let (_, answer) = world
         .get(
             &app,
-            &format!("/api/fetch?{}/ngsi-ld/v1/entities", gateway.uri()),
+            "/api/fetch?http://gateway/ngsi-ld/v1/entities?type=Alert",
             Some("tok-1"),
         )
         .await
@@ -247,6 +248,12 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     assert_eq!(answer, "status 200");
     let seen = gateway.received_requests().await.unwrap_or_default();
     assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].url.path(),
+        "/api/endpoint/ep1/ngsi-ld/v1/entities",
+        "the App's own Endpoint and no other"
+    );
+    assert_eq!(seen[0].url.query(), Some("type=Alert"));
     assert_eq!(
         seen[0]
             .headers
@@ -256,6 +263,21 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     );
     assert!(seen[0].headers.get("cookie").is_none());
 
+    for path in [
+        format!(
+            "/api/fetch?{}/api/endpoint/ep1/ngsi-ld/v1/entities",
+            gateway.uri()
+        ),
+        "/api/fetch?http://gateway/ngsi-ld/v1/../../other/ngsi-ld/v1/entities".to_owned(),
+    ] {
+        let (_, answer) = world.get(&app, &path, Some("tok-1")).await.unwrap();
+        assert!(answer.starts_with("refused"), "{path}: {answer}");
+    }
+    assert_eq!(
+        gateway.received_requests().await.unwrap_or_default().len(),
+        1,
+        "the gateway's own address and a step out of the Endpoint are refused"
+    );
     let (_, answer) = world
         .get(
             &app,
@@ -285,9 +307,11 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
 }
 
 /// AP-147: a component has no environment, so it calls the gateway as `http://gateway` and the
-/// host sends the call to the gateway it is configured with; a look-alike origin goes nowhere.
+/// host sends the call to the App's own Endpoint on the gateway it is configured with, in the long
+/// form (`/api/endpoint/<slug>/…`, T-3346) or the short one (T-3351); a look-alike origin and
+/// another Endpoint go nowhere.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_gateway_alias_reaches_the_configured_gateway_alone() {
+async fn the_gateway_alias_reaches_the_apps_own_endpoint_alone() {
     let gateway = MockServer::start().await;
     Mock::given(any())
         .respond_with(ResponseTemplate::new(200))
@@ -305,10 +329,21 @@ async fn the_gateway_alias_reaches_the_configured_gateway_alone() {
         .await
         .unwrap();
     assert_eq!(answer, "status 200");
+    let (_, answer) = world
+        .get(
+            &app,
+            "/api/fetch?http://gateway/api/endpoint/ep1/ngsi-ld/v1/entities?type=Road",
+            Some("tok-2"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer, "status 200");
     let seen = gateway.received_requests().await.unwrap_or_default();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].url.path(), "/ngsi-ld/v1/entities");
-    assert_eq!(seen[0].url.query(), Some("type=Road"));
+    assert_eq!(seen.len(), 2);
+    for request in &seen {
+        assert_eq!(request.url.path(), "/api/endpoint/ep1/ngsi-ld/v1/entities");
+        assert_eq!(request.url.query(), Some("type=Road"));
+    }
     assert_eq!(
         seen[0]
             .headers
@@ -317,20 +352,22 @@ async fn the_gateway_alias_reaches_the_configured_gateway_alone() {
         Some("Bearer tok-2")
     );
 
-    for origin in [
-        "https://gateway",
-        "http://gateway.evil",
-        "http://gateway:9999",
+    for target in [
+        "https://gateway/ngsi-ld/v1/entities",
+        "http://gateway.evil/ngsi-ld/v1/entities",
+        "http://gateway:9999/ngsi-ld/v1/entities",
+        "http://gateway/api/endpoint/other/ngsi-ld/v1/entities",
+        "http://gateway/x",
     ] {
         let (_, answer) = world
-            .get(&app, &format!("/api/fetch?{origin}/x"), None)
+            .get(&app, &format!("/api/fetch?{target}"), None)
             .await
             .unwrap();
-        assert!(answer.starts_with("refused"), "{origin}: {answer}");
+        assert!(answer.starts_with("refused"), "{target}: {answer}");
     }
     assert_eq!(
         gateway.received_requests().await.unwrap_or_default().len(),
-        1
+        2
     );
 
     let unconfigured = World::new("alias-none", Limits::default(), None);
@@ -353,7 +390,7 @@ async fn a_slow_gateway_call_ends_with_the_requests_wall_time() {
     let world = World::new("slow", fast(), Some(&gateway.uri()));
     let app = world.place("waiter", guest());
     let started = Instant::now();
-    let path = format!("/api/fetch?{}/x", gateway.uri());
+    let path = "/api/fetch?http://gateway/ngsi-ld/v1/entities".to_owned();
     assert_eq!(
         world.get(&app, &path, None).await.unwrap_err(),
         Failure::Timeout
