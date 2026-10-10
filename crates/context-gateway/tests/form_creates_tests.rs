@@ -83,6 +83,7 @@ fn endpoint(per_day: Option<u32>) -> Endpoint {
         creates: Some(Creates {
             mint_ids: true,
             per_day,
+            ..Default::default()
         }),
         file_limits: None,
         hidden_attributes: Default::default(),

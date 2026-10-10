@@ -542,7 +542,70 @@ fn endpoint_creates_parses_and_bounds_per_day() {
         spec.creates = Some(jc_core::kinds::Creates {
             mint_ids: true,
             per_day,
+            ..Default::default()
         });
         assert_eq!(spec.validate().is_ok(), ok, "perDay {per_day:?}");
     }
+}
+
+/// EP-101 (T-3266): the sites that may frame a public form are https origins, at most 20, each
+/// written once and exactly as a browser names it, because the Portal sends them as they are in a
+/// `frame-ancestors` header.
+#[test]
+fn a_form_names_the_sites_that_may_frame_it_as_https_origins() {
+    let ep = Endpoint::from_yaml(GOLDEN).expect("valid golden YAML");
+    let read: jc_core::kinds::Creates = serde_norway::from_str(
+        "mintIds: true\nembedOrigins: [https://www.banskabystrica.sk, https://forms.example.org:8443]\n",
+    )
+    .expect("creates parses");
+    assert_eq!(
+        read.embed_origins,
+        [
+            "https://www.banskabystrica.sk",
+            "https://forms.example.org:8443"
+        ]
+    );
+    let with = |origins: Vec<String>| {
+        let mut spec = ep.spec.clone();
+        spec.creates = Some(jc_core::kinds::Creates {
+            mint_ids: true,
+            embed_origins: origins,
+            ..Default::default()
+        });
+        spec.validate()
+    };
+    assert!(
+        with(Vec::new()).is_ok(),
+        "no list: only the Portal frames it"
+    );
+    assert!(with(vec!["https://www.banskabystrica.sk".into()]).is_ok());
+    for refused in [
+        "http://www.banskabystrica.sk",
+        "https://www.banskabystrica.sk/",
+        "https://www.banskabystrica.sk/forms",
+        "https://www.banskabystrica.sk?x=1",
+        "https://*.banskabystrica.sk",
+        "*",
+        "https://user:pw@banskabystrica.sk",
+        "https://WWW.BanskaBystrica.sk",
+        "https://banská.sk",
+        "https://a;b.sk",
+        "https://-a.sk",
+        "https://banskabystrica.sk:443",
+        "https://banskabystrica.sk 'unsafe-inline'",
+        "",
+    ] {
+        let err = with(vec![refused.into()]).expect_err(refused);
+        assert!(
+            err.to_string().contains("creates.embedOrigins"),
+            "{refused}: {err}"
+        );
+    }
+    let twice = vec!["https://a.sk".to_owned(), "https://a.sk".to_owned()];
+    assert!(with(twice).is_err(), "an origin written twice");
+    let many: Vec<String> = (0..21)
+        .map(|n| format!("https://s{n}.example.org"))
+        .collect();
+    assert!(with(many[..20].to_vec()).is_ok());
+    assert!(with(many).is_err(), "at most 20");
 }
