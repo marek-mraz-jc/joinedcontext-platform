@@ -27,6 +27,8 @@ pub mod crawl;
 pub mod embed;
 /// Text, language and passages out of what the crawl fetched.
 pub mod extract;
+/// A `guide` source: the platform's User Guide, shipped with this crate.
+pub mod guide;
 /// When a source is read again: its cron, matched against the minute.
 pub mod schedule;
 /// The crawl worker: queueing due sources and working the queue.

@@ -44,6 +44,9 @@ pub enum SourceType {
     /// The project's own NGSI-LD catalogue: one page per Endpoint of its context spaces, with the
     /// types and attributes of the space's model (AG-116).
     Catalogue,
+    /// The platform's User Guide as jc-assistant ships it: one passage per section, its Portal
+    /// paths pointing into the source's own project (AG-118).
+    Guide,
 }
 
 /// Who may read what a source holds.
@@ -116,8 +119,9 @@ fn default_timeout() -> u16 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct KnowledgeSourceSpec {
-    /// `website` (pages and their PDFs), `ckan` (a catalogue's datasets) or `catalogue` (the
-    /// project's own Endpoints and the models of their spaces).
+    /// `website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the
+    /// project's own Endpoints and the models of their spaces) or `guide` (the platform's User
+    /// Guide, AG-118).
     pub source: SourceType,
     /// Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -235,6 +239,18 @@ impl KnowledgeSourceSpec {
                             "a context space of this project, by its name",
                         )
                     })?;
+                }
+            }
+            SourceType::Guide => {
+                if !self.start_urls.is_empty()
+                    || self.ckan_instance_ref.is_some()
+                    || !self.context_spaces.is_empty()
+                {
+                    return Err(name(
+                        "source",
+                        "guide".to_owned(),
+                        "a guide source reads the User Guide jc-assistant ships and names no start URLs, no CkanInstance and no context spaces",
+                    ));
                 }
             }
         }

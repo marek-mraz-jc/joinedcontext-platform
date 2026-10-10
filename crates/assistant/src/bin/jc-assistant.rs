@@ -15,7 +15,9 @@
 //! Portal's client, the one caller of the administration paths; default `portal-api`) and
 //! `JC_ASSISTANT_PUBLIC_ORIGIN` (`https://assistant.{domain}`, whose widget may ask the chat) and
 //! `JC_ASSISTANT_ENDPOINT_URL` (the public origin `/api/endpoint/{slug}` is served under, which a
-//! `catalogue` source's pages cite when the Endpoint publishes no CKAN dataset, AG-116).
+//! `catalogue` source's pages cite when the Endpoint publishes no CKAN dataset, AG-116) and
+//! `JC_ASSISTANT_PORTAL_URL` (`https://portal.{domain}`, which a `guide` source's sections link
+//! into, AG-118).
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,6 +154,16 @@ async fn main() -> ExitCode {
                 Ok(endpoint) => Some(endpoint),
                 Err(why) => {
                     tracing::error!(%why, "the public Endpoint address is not usable");
+                    return ExitCode::FAILURE;
+                }
+            },
+        },
+        portal: match env("JC_ASSISTANT_PORTAL_URL") {
+            None => None,
+            Some(_) => match base("JC_ASSISTANT_PORTAL_URL") {
+                Ok(portal) => Some(portal),
+                Err(why) => {
+                    tracing::error!(%why, "the Portal address is not usable");
                     return ExitCode::FAILURE;
                 }
             },

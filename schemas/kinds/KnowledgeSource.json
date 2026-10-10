@@ -169,7 +169,7 @@
               "$ref": "#/definitions/SourceType"
             }
           ],
-          "description": "`website` (pages and their PDFs), `ckan` (a catalogue's datasets) or `catalogue` (the project's own Endpoints and the models of their spaces)."
+          "description": "`website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the project's own Endpoints and the models of their spaces) or `guide` (the platform's User Guide, AG-118)."
         },
         "startUrls": {
           "description": "Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.",
@@ -378,6 +378,13 @@
           "description": "The project's own NGSI-LD catalogue: one page per Endpoint of its context spaces, with the types and attributes of the space's model (AG-116).",
           "enum": [
             "catalogue"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The platform's User Guide as jc-assistant ships it: one passage per section, its Portal paths pointing into the source's own project (AG-118).",
+          "enum": [
+            "guide"
           ],
           "type": "string"
         }
