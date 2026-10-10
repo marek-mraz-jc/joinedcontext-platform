@@ -316,3 +316,82 @@ fn a_grant_without_an_id_pattern_reaches_ids_beside_one_with_a_pattern() {
     );
     assert!(by_id(&answer, "y").expect("y")["securityCode"].is_object());
 }
+
+/// The space's models make IRIs of the granted names (T-3473), and each grant is judged by its
+/// own: a depot typed by the model's Depot IRI never matches the Vehicle grant, so it never
+/// carries the odometer only that grant names.
+#[test]
+fn a_models_type_iri_admits_an_entity_to_its_own_grant_only() {
+    use context_gateway::pdp::{Pdp, PolicyPdp};
+    use context_gateway::resolver::{Endpoint, Model};
+    use jc_core::kinds::{Audience, Representation};
+
+    let typed = |kind: &str, names: &str| {
+        serde_norway::from_str::<PolicySpec>(&format!(
+            "contextSpaceRef: depots\n\
+             assigner: did:web:hel.fi\n\
+             assignee: {{ kind: role, id: public }}\n\
+             operations: [queryEntity]\n\
+             information:\n  \
+             - entities:\n      \
+             - type: {kind}\n    \
+             propertyNames: [{names}]\n"
+        ))
+        .expect("the policy spec parses")
+    };
+    let endpoint = Endpoint {
+        declared_types: None,
+        roles: Default::default(),
+        slug: "per-grant-iris".to_owned(),
+        title: Default::default(),
+        description: Default::default(),
+        space: "depots".to_owned(),
+        project: "helsinki".to_owned(),
+        audience: Audience::Public,
+        allowed_projects: Vec::new(),
+        representations: vec![Representation::NgsiLd],
+        rate_limit: None,
+        creates: None,
+        file_limits: None,
+        hidden_attributes: Default::default(),
+        projection: None,
+        view_mapping: None,
+        catalog: None,
+        policy_names: Vec::new(),
+        base_path: "/api/endpoint/per-grant-iris".to_owned(),
+        models: vec![Model {
+            name: "fleet".to_owned(),
+            version: "1.0.0".to_owned(),
+            major: 1,
+            classes: vec!["Depot".to_owned(), "Vehicle".to_owned()],
+            json_schema: None,
+            context: Some(json!({ "@context": {
+                "Depot": "https://hel.fi/ns/Depot",
+                "Vehicle": "https://hel.fi/ns/Vehicle"
+            } })),
+        }],
+        policies: vec![typed("Depot", "name"), typed("Vehicle", "name, odometer")],
+    };
+    let verdict = PolicyPdp.decide(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &Request::default(),
+        &endpoint,
+    );
+    let Verdict::Rewrite(constraints) = verdict else {
+        panic!("the grants permit the read");
+    };
+    let mut answer = json!([{
+        "id": "urn:ngsi-ld:Depot:north",
+        "type": "https://hel.fi/ns/Depot",
+        "name": { "type": "Property", "value": "North" },
+        "odometer": { "type": "Property", "value": 7 },
+    }]);
+    if let Value::Array(entities) = &mut answer {
+        entities.retain(|entity| projection::permitted(entity, &constraints));
+    }
+    projection::project_by_type(&mut answer, &constraints);
+
+    assert_eq!(answer[0]["name"]["value"], json!("North"), "{answer}");
+    assert!(answer[0].get("odometer").is_none(), "{answer}");
+}
