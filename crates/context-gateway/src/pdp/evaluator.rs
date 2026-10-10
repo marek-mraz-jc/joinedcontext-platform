@@ -477,8 +477,14 @@ pub fn effective<'a>(
 ) -> Vec<&'a PolicySpec> {
     policies
         .iter()
-        .filter(|policy| subject.is(&policy.assignee) && in_force(policy, now))
+        .filter(|policy| assigned_and_in_force(subject, policy, now))
         .collect()
+}
+
+/// Whether `policy` is assigned to `subject` and in force at `now`: the one test
+/// [`effective`] filters by.
+pub fn assigned_and_in_force(subject: &Subject, policy: &PolicySpec, now: DateTime<Utc>) -> bool {
+    subject.is(&policy.assignee) && in_force(policy, now)
 }
 
 /// Every operation a policy grants, by its CIM 009 name, with the Table 4.20-2 groups

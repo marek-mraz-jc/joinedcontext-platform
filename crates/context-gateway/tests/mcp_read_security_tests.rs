@@ -131,6 +131,7 @@ fn endpoint_with(policies: Vec<PolicySpec>, rate_limit: Option<RateLimits>) -> E
             json_schema: None,
             context: None,
         }],
+        policy_names: Vec::new(),
         policies,
     }
 }

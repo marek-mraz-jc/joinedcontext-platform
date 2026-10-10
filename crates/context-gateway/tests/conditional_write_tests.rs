@@ -164,6 +164,7 @@ fn endpoint(condition: Option<&str>) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![policy(condition)],
     }
 }
@@ -437,6 +438,7 @@ async fn through(
     let (upstream, calls) = broker(stored).await;
     let endpoint = Endpoint {
         roles: Default::default(),
+        policy_names: Vec::new(),
         policies,
         ..endpoint(None)
     };

@@ -49,6 +49,7 @@ information:
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![grant],
     }
 }

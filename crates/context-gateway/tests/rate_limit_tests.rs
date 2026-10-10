@@ -42,6 +42,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: Vec::new(),
     }
 }
@@ -314,6 +315,7 @@ information:
             // A space's record never carries one (store.rs builds it with none).
             rate_limit: None,
             creates: None,
+            policy_names: Vec::new(),
             policies: vec![policy],
             ..endpoint(None)
         }),

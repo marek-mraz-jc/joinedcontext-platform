@@ -727,6 +727,7 @@ mod visible_tests {
             catalog: None,
             base_path: "/api/endpoint/s".to_owned(),
             models: vec![model(&["AirQualityObserved", "Vehicle"])],
+            policy_names: Vec::new(),
             policies,
         }
     }

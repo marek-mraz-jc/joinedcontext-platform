@@ -106,6 +106,7 @@ fn endpoint(slug: &str, audience: Audience, roles: EndpointRoles) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: policies(),
     }
 }

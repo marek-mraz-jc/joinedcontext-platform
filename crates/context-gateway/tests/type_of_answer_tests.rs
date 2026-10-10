@@ -116,6 +116,7 @@ fn endpoint(granted_types: &[&str]) -> Endpoint {
             json_schema: None,
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
         }],
+        policy_names: Vec::new(),
         policies: vec![policy],
     }
 }
