@@ -25,7 +25,8 @@
 //!
 //! `gateway[].path` is below the Endpoint; a `file` is relative to `server/`. A step's `{name}`
 //! is what an earlier step's `save` took; `upload` puts bytes to the URL at that pointer and
-//! `download` reads them back; `as: "second"` calls as the second App.
+//! `download` reads them back (or, with `downloaded`, checks that what the App wrote holds that
+//! text); `as: "second"` calls as the second App.
 
 mod common;
 
@@ -96,6 +97,9 @@ struct Step {
     upload: Option<String>,
     #[serde(default)]
     download: Option<String>,
+    /// What the download holds, when the App wrote it; otherwise the bytes an `upload` put.
+    #[serde(default)]
+    downloaded: Option<String>,
     #[serde(default, rename = "as")]
     caller: Option<String>,
 }
@@ -268,7 +272,7 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
 
     let http = reqwest::Client::new();
     let mut saved: BTreeMap<String, String> = BTreeMap::new();
-    let mut second_uploaded = false;
+    let mut second_acted = false;
     for (n, step) in scenario.steps.iter().enumerate() {
         let (verb, mut target) = step
             .call
@@ -283,6 +287,19 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
             Some("second") => &second,
             Some(other) => panic!("{name} step {n}: unknown caller {other}"),
         };
+        if step.caller.is_some() && !second_acted {
+            // Before it acts, the second App holds nothing, whatever the first one wrote.
+            second_acted = true;
+            let theirs = store
+                .blob("s1", 1 << 20)
+                .list(&second, "")
+                .await
+                .expect("list");
+            assert!(
+                theirs.is_empty(),
+                "{name}: the second App's prefix holds {theirs:?}"
+            );
+        }
         let (status, answer) = call(&host, caller, &verb, &target, step.body.as_ref()).await;
         let at = format!("{name} step {n} ({verb} {target})");
         assert_eq!(status, step.status, "{at}: {answer}");
@@ -309,7 +326,6 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
             saved.insert(key.clone(), value);
         }
         if let Some(pointer) = &step.upload {
-            second_uploaded |= step.caller.is_some();
             let url = answer
                 .pointer(pointer)
                 .and_then(Value::as_str)
@@ -323,20 +339,21 @@ async fn play(apps: &Path, name: &str, db: &Db, store: &Store) {
                 .and_then(Value::as_str)
                 .expect("a download URL");
             let got = http.get(url).send().await.expect("download");
-            assert_eq!(got.text().await.expect("text"), BYTES, "{at}: the download");
+            assert_eq!(got.status(), 200, "{at}: the download");
+            let text = got.text().await.expect("text");
+            match &step.downloaded {
+                Some(part) => assert!(
+                    text.contains(part.as_str()),
+                    "{at}: the download holds {text}"
+                ),
+                None => assert_eq!(text, BYTES, "{at}: the download"),
+            }
         }
     }
-    if !second_uploaded {
-        let theirs = store
-            .blob("s1", 1 << 20)
-            .list(&second, "")
-            .await
-            .expect("list");
-        assert!(
-            theirs.is_empty(),
-            "{name}: the second App's prefix holds {theirs:?}"
-        );
-    }
+    assert!(
+        second_acted,
+        "{name}: no step runs `as: \"second\"`, so nothing shows the App's data is its own"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
