@@ -95,7 +95,7 @@ fn invoice() -> Value {
     json!({
         "id": "urn:ngsi-ld:Invoice:banskabystrica.sk:ovzdusie:inv-1",
         "type": "Invoice",
-        "amount": { "type": "Property", "value": 4200 },
+        "amount": { "type": "Property", "value": 4200.25 },
         "location": {
             "type": "GeoProperty",
             "value": { "type": "Point", "coordinates": [19.15, 48.74] }
@@ -222,7 +222,7 @@ async fn a_collection_name_cannot_carry_a_second_type_into_the_query() {
         .collect();
     assert_eq!(types, vec!["AirQualityObserved"], "{body}");
     assert!(
-        !body.contains("4200"),
+        !body.contains("4200.25"),
         "no value of the second type: {body}"
     );
     // The name the caller wrote is echoed in its own `self` and `collection` links, which is the

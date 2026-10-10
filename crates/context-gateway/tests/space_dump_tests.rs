@@ -124,7 +124,7 @@ fn invoice() -> Value {
     json!({
         "id": "urn:ngsi-ld:Invoice:banskabystrica.sk:ovzdusie:invoice-1",
         "type": "Invoice",
-        "amount": { "type": "Property", "value": 4200 }
+        "amount": { "type": "Property", "value": 4200.25 }
     })
 }
 
@@ -193,7 +193,7 @@ async fn the_dump_holds_what_the_callers_grants_read_and_nothing_else() {
             !text.contains("Invoice"),
             "{name} carries a type no grant reads"
         );
-        assert!(!text.contains("4200"), "{name} carries its value");
+        assert!(!text.contains("4200.25"), "{name} carries its value");
     }
 }
 
