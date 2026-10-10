@@ -32,6 +32,25 @@ pub struct ProjectSpec {
     /// Declarations in the project file, this deployment's values in a registry entry (CC-88).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, Parameter>,
+    /// What the project's Apps may use: a narrower service list and lower quotas than the
+    /// organization's (AP-163, AP-165).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apps: Option<ProjectApps>,
+}
+
+/// `spec.apps` of a Project (AP-163, AP-165, ADR-N-045).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProjectApps {
+    /// The platform services the project's Apps may use; absent is the organization's list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<crate::kinds::AppService>>,
+    /// The per-App quotas; an absent one is the organization's.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::kinds::AppServiceLimits::is_unset"
+    )]
+    pub limits: crate::kinds::AppServiceLimits,
 }
 
 impl Kind for ProjectSpec {

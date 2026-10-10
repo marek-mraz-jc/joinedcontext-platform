@@ -607,13 +607,57 @@ pub struct AppLimits {
     /// Rows a single file representation download may return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_file_rows: Option<u32>,
+    /// Messages the App may send a day through `email` (AP-165).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emails_per_day: Option<u32>,
+    /// Model tokens, in and out, the App may use a day through `ai` (AP-165).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_tokens_per_day: Option<u32>,
+    /// MiB the App may store through `files` (AP-165).
+    #[serde(default, rename = "filesMiB", skip_serializing_if = "Option::is_none")]
+    pub files_mib: Option<u32>,
 }
+
+/// The per-App quotas of the platform services an Organization (`spec.limits.apps`) or a Project
+/// (`spec.apps.limits`) sets; an absent one takes the layer above (AP-165, ADR-N-045).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AppServiceLimits {
+    /// Messages an App may send a day through `email`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emails_per_day: Option<u32>,
+    /// Model tokens, in and out, an App may use a day through `ai`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_tokens_per_day: Option<u32>,
+    /// MiB an App may store through `files`.
+    #[serde(default, rename = "filesMiB", skip_serializing_if = "Option::is_none")]
+    pub files_mib: Option<u32>,
+}
+
+impl AppServiceLimits {
+    /// Whether no quota is set.
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The services an Organization allows its Apps when `spec.policies.apps.services` is absent
+/// (AP-163): `email` and `ai` are switched on by a person, never by default.
+pub const DEFAULT_ORGANIZATION_SERVICES: [AppService; 4] = [
+    AppService::Identity,
+    AppService::Data,
+    AppService::Files,
+    AppService::Jobs,
+];
 
 impl AppLimits {
     fn validate(&self) -> Result<()> {
         for (field, value) in [
             ("limits.requestsPerMinute", self.requests_per_minute),
             ("limits.maxFileRows", self.max_file_rows),
+            ("limits.emailsPerDay", self.emails_per_day),
+            ("limits.aiTokensPerDay", self.ai_tokens_per_day),
+            ("limits.filesMiB", self.files_mib),
         ] {
             if value == Some(0) {
                 return Err(Error::Name {

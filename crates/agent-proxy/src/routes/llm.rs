@@ -247,6 +247,11 @@ enum Caller {
         /// `{project}/{deployment}`, the key its day is counted under (AG-110).
         deployment: String,
     },
+    /// An App's `ai` service, sent by the Portal, which counts the App's day itself (AP-169).
+    App {
+        /// `{project}/{app}`, what the audit line names.
+        app: String,
+    },
 }
 
 impl Caller {
@@ -255,6 +260,7 @@ impl Caller {
         match self {
             Caller::Run(run) => &run.id,
             Caller::Assistant { deployment } => deployment,
+            Caller::App { app } => app,
         }
     }
 
@@ -262,6 +268,7 @@ impl Caller {
         match self {
             Caller::Run(run) => &run.created_by,
             Caller::Assistant { .. } => "jc-assistant",
+            Caller::App { .. } => "jc-portal-app",
         }
     }
 }
@@ -288,6 +295,8 @@ fn record_usage(
                     .await;
                 return;
             }
+            // The Portal reads the usage from the answer and counts it against the App's day.
+            Caller::App { .. } => return,
             Caller::Run(run) => run,
         };
         let run_id = run.id.clone();
@@ -328,6 +337,8 @@ fn record_usage(
 pub const ASSISTANT_DEPLOYMENT: &str = "x-jc-assistant-deployment";
 /// The header carrying that deployment's `budget.tokensPerDay` (AG-110).
 pub const ASSISTANT_TOKENS_PER_DAY: &str = "x-jc-assistant-tokens-per-day";
+/// The header naming the App an `ai` service call is for, `{project}/{app}` (AP-169).
+pub const APP: &str = "x-jc-app";
 
 /// A DNS label, which a project's and a deployment's `metadata.name` are.
 fn is_label(name: &str) -> bool {
@@ -413,6 +424,56 @@ async fn assistant_caller(state: &ProxyState, headers: &HeaderMap) -> Result<Cal
         ));
     }
     Ok(Caller::Assistant { deployment })
+}
+
+/// An App's `ai` call (AP-169): the Portal's own service account, never an App's or a person's
+/// token, naming the App it calls for. The Portal has checked the App's layers and its day before.
+async fn app_caller(state: &ProxyState, headers: &HeaderMap) -> Result<Caller, Refusal> {
+    let refused = || {
+        Box::new(
+            jc_core::ProblemDetails::unauthorized()
+                .with_detail("only the Portal's service account calls the model for an App")
+                .into_response(),
+        )
+    };
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(refused)?;
+    match state.credentials.grants().is_portal(bearer).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("an App's model call not from the Portal's service account");
+            return Err(refused());
+        }
+        Err(error) => {
+            tracing::error!(%error, "the realm could not judge an App's model call");
+            return Err(Box::new(
+                jc_core::ProblemDetails::new(503, "service-unavailable", "Service Unavailable")
+                    .with_detail("the realm could not be reached; try again shortly")
+                    .into_response(),
+            ));
+        }
+    }
+    let app = headers
+        .get(APP)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            v.split_once('/')
+                .is_some_and(|(project, name)| is_label(project) && is_label(name))
+        })
+        .ok_or_else(|| {
+            Box::new(
+                jc_core::ProblemDetails::new(400, "bad-request", "Bad Request")
+                    .with_detail("X-JC-App names the App as {project}/{name}")
+                    .into_response(),
+            )
+        })?
+        .to_owned();
+    Ok(Caller::App { app })
 }
 
 /// A run's call, authenticated before the path is judged, as it always was: a caller without a
@@ -501,6 +562,14 @@ pub async fn handler(
                 .into_response();
         }
         assistant_caller(&state, &headers).await
+    } else if headers.contains_key(APP) {
+        // An App's door is the completion endpoints alone, refused before the realm is asked.
+        if !completion {
+            return jc_core::ProblemDetails::forbidden()
+                .with_detail("only chat/messages completion endpoints permitted")
+                .into_response();
+        }
+        app_caller(&state, &headers).await
     } else {
         // A run is authenticated first: a refused path tells nobody without a ticket anything.
         run_caller_or_path(&state, &headers, completion).await
@@ -517,7 +586,7 @@ pub async fn handler(
 
     let effort_setting = match &caller {
         Caller::Run(run) => run.reasoning_effort.as_deref(),
-        Caller::Assistant { .. } => None,
+        Caller::Assistant { .. } | Caller::App { .. } => None,
     };
     let body_bytes = match effort_setting {
         Some(effort) => with_reasoning(&body_bytes, &rest, effort),

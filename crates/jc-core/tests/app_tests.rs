@@ -303,7 +303,7 @@ fn limits_and_csp_ap12_ap17() {
     let mut zero = App::from_yaml(GOLDEN).expect("valid golden YAML");
     zero.spec.limits = Some(AppLimits {
         requests_per_minute: Some(0),
-        max_file_rows: None,
+        ..AppLimits::default()
     });
     assert!(matches!(
         zero.validate()

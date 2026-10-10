@@ -224,7 +224,7 @@ fn every_catalog_entry_is_readable_from_a_manifest_and_its_default_is_in_range()
         }
     }
     let full = org(
-        "  projects:\n    nameCooldownDays: 7\n    quota: { contextSpaces: 1, residentPipelines: 1, publicEndpoints: 1, ingestEventsPerSecond: 1, apps: 1, agentRunsPerDay: 1, entitiesPerSpace: 1, requestsPerMinute: 1 }\n  policies:\n    signIn:\n      password: { minLength: 13, history: 1 }\n  limits:\n    edge:\n      requestsPerMinute: { web: 1, api: 1, dataRead: 1, dataWrite: 1, publicEndpoint: 1 }\n      maxRequestBodyMegabytes: 1\n    gateway: { maxRequestBodyMegabytes: 1 }\n    signIn: { sessionIdleMinutes: 60, sessionMaxHours: 1 }\n    people: { invitationHours: 1 }\n    agents: { spendPerDay: 1, spendPerMonth: 1 }\n    pipelines: { rejectedKept: 1, sampleMegabytes: 1 }\n    data: { uploadMegabytes: 1 }\n",
+        "  projects:\n    nameCooldownDays: 7\n    quota: { contextSpaces: 1, residentPipelines: 1, publicEndpoints: 1, ingestEventsPerSecond: 1, apps: 1, agentRunsPerDay: 1, entitiesPerSpace: 1, requestsPerMinute: 1 }\n  policies:\n    signIn:\n      password: { minLength: 13, history: 1 }\n  limits:\n    edge:\n      requestsPerMinute: { web: 1, api: 1, dataRead: 1, dataWrite: 1, publicEndpoint: 1 }\n      maxRequestBodyMegabytes: 1\n    gateway: { maxRequestBodyMegabytes: 1 }\n    signIn: { sessionIdleMinutes: 60, sessionMaxHours: 1 }\n    people: { invitationHours: 1 }\n    agents: { spendPerDay: 1, spendPerMonth: 1 }\n    pipelines: { rejectedKept: 1, sampleMegabytes: 1 }\n    data: { uploadMegabytes: 1 }\n    apps: { emailsPerDay: 1, aiTokensPerDay: 1, filesMiB: 1 }\n",
     )
     .expect("every entry set");
     for entry in CATALOG {
