@@ -6,7 +6,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{app, body_of, sample_run, Bases, PROXY_CLIENT};
+use common::{app, authed, body_of, sample_run, Bases, PROXY_CLIENT};
 use serde_json::json;
 use tower::ServiceExt;
 use wiremock::matchers::{body_string_contains, method, path};
@@ -153,5 +153,21 @@ async fn nobody_but_the_portal_and_no_path_but_a_completion_reaches_the_provider
             .expect("an answer");
         assert_eq!(response.status(), status, "{token} {app} {rest}");
     }
+    assert_eq!(reached(&provider).await, 0);
+}
+
+#[tokio::test]
+async fn a_run_naming_an_app_is_not_the_portal() {
+    let (realm, provider) = (realm().await, provider().await);
+    let response = proxy(&realm, &provider)
+        .oneshot(
+            authed("POST", "/v1/llm/v1/chat/completions")
+                .header("x-jc-app", "roads/road-defects")
+                .body(Body::from(r#"{"model":"m","messages":[]}"#))
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(reached(&provider).await, 0);
 }
