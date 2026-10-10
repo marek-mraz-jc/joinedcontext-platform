@@ -1211,8 +1211,6 @@ impl AppSpec {
         Ok(())
     }
 
-    /// Roles, their members, the roles data needs name, and `visibility: roles` (AP-90, AP-91,
-    /// AP-94, AP-96).
     /// Each service once, and `jobs` only beside the jobs it names (AP-160, AP-162).
     fn validate_services(&self) -> Result<()> {
         for (i, service) in self.services.iter().enumerate() {
@@ -1236,6 +1234,8 @@ impl AppSpec {
         Ok(())
     }
 
+    /// Roles, their members, the roles data needs name, and `visibility: roles` (AP-90, AP-91,
+    /// AP-94, AP-96).
     fn validate_roles(&self) -> Result<()> {
         if self.roles.len() > MAX_APP_ROLES {
             return Err(Error::Name {
