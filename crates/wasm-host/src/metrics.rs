@@ -34,6 +34,17 @@ impl Counts {
     }
 }
 
+/// The shard's compiled-component cache, as `/metrics` reports it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CacheStats {
+    /// Components compiled and kept.
+    pub cached: usize,
+    /// Requests whose component was already compiled.
+    pub hits: u64,
+    /// Requests that fetched and compiled their component first.
+    pub misses: u64,
+}
+
 pub struct Metrics {
     top: usize,
     apps: Mutex<HashMap<String, Counts>>,
@@ -63,8 +74,8 @@ impl Metrics {
     }
 
     /// The Prometheus text: the top N Apps by requests, `_other` for the rest, and the shard's
-    /// totals; `cached` is how many components the shard keeps compiled.
-    pub fn render(&self, shard: &str, cached: usize) -> String {
+    /// totals; `cache` is the shard's compiled components and how their lookups went.
+    pub fn render(&self, shard: &str, cache: CacheStats) -> String {
         let apps = self.apps.lock().map(|a| a.clone()).unwrap_or_default();
         let mut ranked: Vec<(String, Counts)> = apps.into_iter().collect();
         ranked.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
@@ -77,7 +88,9 @@ impl Metrics {
             series.push(("_other".into(), other));
         }
         let mut out = String::new();
-        let _ = writeln!(out, "# TYPE jc_wasm_components_cached gauge\njc_wasm_components_cached{{shard=\"{shard}\"}} {cached}");
+        let _ = writeln!(out, "# TYPE jc_wasm_components_cached gauge\njc_wasm_components_cached{{shard=\"{shard}\"}} {}", cache.cached);
+        let _ = writeln!(out, "# TYPE jc_wasm_component_cache_hits_total counter\njc_wasm_component_cache_hits_total{{shard=\"{shard}\"}} {}", cache.hits);
+        let _ = writeln!(out, "# TYPE jc_wasm_component_cache_misses_total counter\njc_wasm_component_cache_misses_total{{shard=\"{shard}\"}} {}", cache.misses);
         for (name, help, pick) in [
             (
                 "jc_wasm_requests_total",
@@ -121,7 +134,14 @@ mod tests {
             }
         }
         metrics.record("d", Outcome::Timeout, Duration::from_secs(5));
-        let text = metrics.render("s1", 4);
+        let text = metrics.render(
+            "s1",
+            CacheStats {
+                cached: 4,
+                hits: 9,
+                misses: 4,
+            },
+        );
         assert!(
             text.contains("jc_wasm_requests_total{shard=\"s1\",app=\"a\"} 5"),
             "{text}"
@@ -143,5 +163,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("jc_wasm_components_cached{shard=\"s1\"} 4"));
+        assert!(text.contains("jc_wasm_component_cache_hits_total{shard=\"s1\"} 9"));
+        assert!(text.contains("jc_wasm_component_cache_misses_total{shard=\"s1\"} 4"));
     }
 }

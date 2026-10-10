@@ -491,3 +491,20 @@ async fn a_thousand_different_components_load_and_answer_on_one_shard() {
         warm[warm.len() * 99 / 100]
     );
 }
+
+/// T-3345: the shard counts how its compiled-component cache answered, so a load test reads the
+/// hit rate from `/metrics` instead of guessing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cache_counts_its_hits_and_misses() {
+    let world = World::new("cache-stats", Limits::default(), None);
+    let one = world.place("one", &variant(1));
+    let two = world.place("two", &variant(2));
+    for app in [&one, &one, &one, &two] {
+        assert_eq!(
+            world.get(app, "/api/hello", None).await.expect("answers").0,
+            200
+        );
+    }
+    let stats = world.host.cache_stats();
+    assert_eq!((stats.cached, stats.hits, stats.misses), (2, 2, 2));
+}
