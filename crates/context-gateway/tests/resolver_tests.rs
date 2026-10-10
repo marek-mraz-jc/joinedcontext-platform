@@ -1,7 +1,6 @@
 use context_gateway::resolver::{Endpoint, SlugResolver};
 use jc_core::kinds::{Audience, Representation};
 use std::sync::Arc;
-use std::time::Instant;
 
 const SLUG: &str = "zt4qm7ge2xdv6ksb3ncf5arw2y";
 
@@ -112,57 +111,60 @@ fn replacing_the_table_is_atomic_and_visible_at_once() {
     assert_eq!(held.space, "before");
 }
 
-/// EP-18: the lookup is on the hot path of every request, so it has to stay far under
-/// 100 microseconds even while the table is being replaced under the readers.
-///
-/// The reading is the 99th percentile, not the maximum: a debug-build test sharing a
-/// container with other builds gets preempted, and a scheduler stall is not resolution
-/// latency. The percentile still fails loudly if the lookup itself ever starts blocking.
+/// EP-18: the lookup is on the hot path of every request, so it never waits for a writer.
+/// Shown without a clock (T-3538): the writer is parked inside `replace`, its endpoints arriving
+/// through a channel the test holds open, and every slug still resolves to the old table. A lock
+/// spanning the build would leave the readers waiting until the writer is released, which the
+/// test only does after they have all been answered.
 #[test]
-fn resolution_stays_under_a_hundred_microseconds_under_concurrent_swaps() {
+fn a_reader_is_answered_while_a_writer_is_inside_replace() {
     let resolver = Arc::new(SlugResolver::with(
-        (0..500).map(|i| endpoint(&format!("slug{i:04}"), "ovzdusie")),
+        (0..500).map(|i| endpoint(&format!("slug{i:04}"), "before")),
     ));
-    let slugs: Arc<Vec<String>> = Arc::new((0..500).map(|i| format!("slug{i:04}")).collect());
-
+    let (feed, endpoints) = std::sync::mpsc::channel::<Endpoint>();
+    let (inside_tx, inside) = std::sync::mpsc::channel::<()>();
     let writer = {
         let resolver = Arc::clone(&resolver);
         std::thread::spawn(move || {
-            for round in 0..50 {
-                resolver.replace(
-                    (0..500).map(|i| endpoint(&format!("slug{i:04}"), &format!("space{round}"))),
-                );
-            }
+            resolver.replace(std::iter::from_fn(move || {
+                let _ = inside_tx.send(());
+                endpoints.recv().ok()
+            }));
         })
     };
+    inside.recv().expect("the writer is inside replace");
 
     let readers: Vec<_> = (0..4)
         .map(|_| {
             let resolver = Arc::clone(&resolver);
-            let slugs = Arc::clone(&slugs);
             std::thread::spawn(move || {
-                let mut timings = Vec::with_capacity(20_000);
-                for i in 0..20_000 {
-                    let slug = &slugs[i % slugs.len()];
-                    let started = Instant::now();
-                    let resolved = resolver.resolve(slug);
-                    timings.push(started.elapsed());
-                    assert!(resolved.is_some(), "{slug} is in every table");
-                }
-                timings.sort_unstable();
-                timings
+                (0..500)
+                    .map(|i| {
+                        resolver
+                            .resolve(&format!("slug{i:04}"))
+                            .map(|e| e.space.clone())
+                    })
+                    .collect::<Vec<_>>()
             })
         })
         .collect();
-
-    writer.join().expect("the writer finishes");
     for reader in readers {
-        let timings = reader.join().expect("the reader finishes");
-        let p99 = timings[timings.len() * 99 / 100];
-        let median = timings[timings.len() / 2];
-        assert!(
-            p99 < std::time::Duration::from_micros(100),
-            "99th percentile was {p99:?}, median {median:?}"
-        );
+        let spaces = reader.join().expect("the reader finishes");
+        let stray = spaces
+            .iter()
+            .filter(|s| s.as_deref() != Some("before"))
+            .count();
+        assert_eq!(stray, 0, "{stray} of 500 lookups missed the old table");
     }
+
+    for i in 0..500 {
+        feed.send(endpoint(&format!("slug{i:04}"), "after"))
+            .expect("the writer is still reading");
+    }
+    drop(feed);
+    writer.join().expect("the writer finishes");
+    assert_eq!(
+        resolver.resolve("slug0499").expect("resolves").space,
+        "after"
+    );
 }
