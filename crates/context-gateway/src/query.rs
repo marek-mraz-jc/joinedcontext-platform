@@ -530,7 +530,15 @@ pub fn body_attrs(
         None => allowed,
         Some(asked) => asked
             .iter()
-            .filter(|name| allowed.contains(crate::pdp::projection::term(name)))
+            .filter(|name| {
+                // T-3533: as IRIs under the core context, the only one a request is read in;
+                // `https://b.example/plate` is not a granted `plate`.
+                let iri = crate::pdp::projection::type_iri(name);
+                iri.is_some()
+                    && allowed
+                        .iter()
+                        .any(|one| crate::pdp::projection::type_iri(one) == iri)
+            })
             .cloned()
             .collect(),
     })
@@ -710,6 +718,23 @@ mod tests {
         for q in ["a==1)", "(a==1", "name==%22open", "a%20==%201"] {
             assert!(refused(&format!("type=A&q={q}")).is_some(), "{q}");
         }
+    }
+
+    /// T-3533: a batch query's `attrs` keeps a granted name, compacted or expanded under the
+    /// core context, and drops another vocabulary's attribute that ends in the same term.
+    #[test]
+    fn body_attrs_compare_as_iris() {
+        let granted: BTreeSet<String> = ["plate".to_owned()].into();
+        let asked = [
+            "plate".to_owned(),
+            "https://uri.etsi.org/ngsi-ld/default-context/plate".to_owned(),
+            "https://b.example/plate".to_owned(),
+            "other:plate".to_owned(),
+        ];
+        assert_eq!(
+            body_attrs(Some(&asked), &granted),
+            Some(asked[..2].iter().cloned().collect())
+        );
     }
 
     #[test]

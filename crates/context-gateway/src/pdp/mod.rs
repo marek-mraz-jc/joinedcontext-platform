@@ -106,6 +106,22 @@ impl Pdp for PolicyPdp {
                 for grant in &mut constraints.grants {
                     grant.type_iris = projection::model_type_iris(&grant.types, contexts());
                 }
+                // T-3533: the attribute names discovery compares, read the same way.
+                let names: BTreeSet<String> = constraints
+                    .served
+                    .iter()
+                    .chain(&constraints.hidden)
+                    .chain(constraints.attrs_by_type.keys())
+                    .chain(constraints.attrs_by_type.values().flatten())
+                    .cloned()
+                    .collect();
+                constraints.name_iris = names
+                    .into_iter()
+                    .map(|name| {
+                        let one = BTreeSet::from([name.clone()]);
+                        (name, projection::model_type_iris(&one, contexts()))
+                    })
+                    .collect();
                 Verdict::Rewrite(constraints)
             }
             verdict => verdict,
