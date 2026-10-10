@@ -381,7 +381,15 @@ fn narrowed(
     if with_type && !constraints.types.is_empty() {
         out.push(("type".to_owned(), join_list(&constraints.types)));
     }
-    let attrs = broker_attrs(params, attrs);
+    // The grants' conditions are judged per entity on the answer, so whatever they read is
+    // asked for too; an empty list already returns every attribute (T-3530).
+    let mut attrs = attrs.clone();
+    if !attrs.is_empty() {
+        attrs.extend(crate::pdp::grants::condition_attributes(
+            &constraints.grants,
+        ));
+    }
+    let attrs = broker_attrs(params, &attrs);
     if !attrs.is_empty() {
         out.push(("attrs".to_owned(), join_list(&attrs)));
     }

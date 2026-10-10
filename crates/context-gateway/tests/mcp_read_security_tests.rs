@@ -1049,3 +1049,59 @@ async fn dataset_and_contained_by_ids_of_another_space_read_nothing() {
         );
     }
 }
+
+/// T-3530: a tool's answer is projected per grant like the route's. The tram the public grant
+/// admits never carries the odometer only the bus grant names, and the bus keeps it.
+#[tokio::test]
+async fn mcp_answer_projected_per_grant() {
+    let public_trams = policy(&format!(
+        "contextSpaceRef: {SPACE}\n\
+         assigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [queryEntity, retrieveEntity]\n\
+         q: \"public==true\"\n\
+         information:\n  \
+         - entities:\n      \
+         - type: Vehicle\n    \
+         propertyNames: [name]\n"
+    ));
+    let buses = policy(&format!(
+        "contextSpaceRef: {SPACE}\n\
+         assigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: public }}\n\
+         operations: [queryEntity, retrieveEntity]\n\
+         information:\n  \
+         - entities:\n      \
+         - type: Vehicle\n        \
+         idPattern: \"^urn:ngsi-ld:Vehicle:hel\\\\.fi:fleet:bus-.*$\"\n    \
+         propertyNames: [name, odometer]\n"
+    ));
+    let tram = json!({
+        "id": TRAM,
+        "type": "Vehicle",
+        "public": { "type": "Property", "value": true },
+        "name": { "type": "Property", "value": "Tram 09" },
+        "odometer": { "type": "Property", "value": 880_000 },
+    });
+    let (_, answer, _) = tool_on(
+        endpoint_with(vec![public_trams, buses], None),
+        "query_entities",
+        json!({ "type": "Vehicle" }),
+        StatusCode::OK,
+        json!([bus(), tram]),
+        None,
+    )
+    .await;
+
+    let answered = entities(&answer["result"]);
+    let of = |id: &str| {
+        answered
+            .iter()
+            .find(|entity| entity["id"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is answered: {answer}"))
+    };
+    assert!(of(TRAM).get("odometer").is_none(), "{answer}");
+    assert_eq!(of(TRAM)["name"]["value"], json!("Tram 09"));
+    assert_eq!(of(BUS)["odometer"]["value"], json!(120_000));
+}

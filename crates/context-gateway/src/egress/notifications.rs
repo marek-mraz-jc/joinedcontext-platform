@@ -285,10 +285,26 @@ pub async fn deliver(
             .into_response();
     }
 
-    let Some(judged) = regranted(delivery_constraints(&stored, &endpoint), &granted) else {
+    let Some(mut judged) = regranted(delivery_constraints(&stored, &endpoint), &granted) else {
         // Nothing the subscription selects is granted any more: nothing leaves (GW27).
         return StatusCode::NO_CONTENT.into_response();
     };
+    // The subscription's own condition is the caller's filter: an entity is delivered only when
+    // the grants it matches show every attribute that condition reads (T-3530, T-1862). The
+    // stored `q` also carries the grants' own filters, which may read what they do not show, so
+    // their names are not held against the entity. ponytail: a subscriber filter on a name some
+    // grant's condition reads is not held per entity; storing the subscriber's own `q` apart is
+    // the upgrade.
+    if let Some(q) = stored.get("q").and_then(Value::as_str) {
+        let conditions = crate::pdp::grants::condition_attributes(&judged.grants);
+        judged.referenced = crate::pdp::selecting(&crate::query::referenced_attributes(&[(
+            "q".to_owned(),
+            q.to_owned(),
+        )]))
+        .into_iter()
+        .filter(|name| !conditions.contains(name))
+        .collect();
+    }
     if let Some(data) = notification.get_mut("data") {
         // An entity of a type this endpoint does not serve is not delivered, and what is
         // delivered keeps the slots of its own type (EP-26, MP-02, T-1862).
@@ -576,6 +592,8 @@ fn regranted(mut judged: Constraints, now: &Constraints) -> Option<Constraints> 
         }
     }
     judged.hidden.extend(now.hidden.iter().cloned());
+    // Each entity is delivered with what the grants it matches show, as they stand now (T-3530).
+    judged.grants = now.grants.clone();
     Some(judged)
 }
 

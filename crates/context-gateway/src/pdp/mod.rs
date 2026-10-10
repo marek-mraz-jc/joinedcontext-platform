@@ -3,6 +3,7 @@
 pub mod conditional;
 pub mod evaluator;
 pub mod geo;
+pub mod grants;
 pub mod projection;
 pub mod reaper;
 pub mod scope_folding;
@@ -161,6 +162,15 @@ const ALWAYS_SERVED: &[&str] = &[
     "observedAt",
 ];
 
+/// The referenced names a grant could withhold: every one but the members each entity carries.
+pub fn selecting(referenced: &BTreeSet<String>) -> BTreeSet<String> {
+    referenced
+        .iter()
+        .filter(|name| !ALWAYS_SERVED.contains(&name.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Takes out of the query every type that may not be filtered on what the request filters on
 /// (T-1862; owner's rule of 2026-09-18, MP-02, R9).
 ///
@@ -181,11 +191,9 @@ pub fn drop_types_that_may_not_be_filtered(
     mut constraints: evaluator::Constraints,
     request: &Request,
 ) -> Verdict {
-    let referenced: Vec<&String> = request
-        .referenced
-        .iter()
-        .filter(|name| !ALWAYS_SERVED.contains(&name.as_str()))
-        .collect();
+    // Kept for the answer, where each entity is held to what its own grants show (T-3530).
+    constraints.referenced = selecting(&request.referenced);
+    let referenced: Vec<&String> = constraints.referenced.iter().collect();
     if referenced.is_empty() {
         return Verdict::Rewrite(Box::new(constraints));
     }

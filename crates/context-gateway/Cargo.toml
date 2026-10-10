@@ -18,6 +18,10 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
 regex = "1"
+# The broker's own q/scopeQ evaluator, so a grant's condition is judged per entity exactly as the
+# broker judges it (T-3530, EP-16); pinned to a commit of the Antares main branch.
+antares-ql = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker", rev = "7185e1a1007b8853c5e4373c56e63be93aa365e9", version = "0.1.3" }
+antares-jsonld = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker", rev = "7185e1a1007b8853c5e4373c56e63be93aa365e9", version = "0.1.3" }
 # The preview list from the Portal (Architecture/06 §7.2); already in the tree through jcctl.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
