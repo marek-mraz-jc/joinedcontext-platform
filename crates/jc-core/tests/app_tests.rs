@@ -3,8 +3,8 @@
 use jc_core::envelope::Ref;
 use jc_core::error::Error;
 use jc_core::kinds::app::{
-    AppClass, AppLifecycle, AppLimits, AppVisibility, ContentSecurityPolicy, GeoConstraint,
-    GeoWithin, TemporalConstraint,
+    AppClass, AppLifecycle, AppLimits, AppService, AppVisibility, ContentSecurityPolicy,
+    GeoConstraint, GeoWithin, TemporalConstraint,
 };
 use jc_core::kinds::endpoint::Representation;
 use jc_core::kinds::policy::{Operation, OperationGroup, OperationRef};
@@ -1347,4 +1347,59 @@ fn jobs_are_refused_off_wasm_and_their_names_schedules_and_count_are_checked_ap1
         "      - { name: j, schedule: \"0 * * * *\", export: run, every: 1 }\n",
     )));
     assert!(why.contains("every"), "{why}");
+}
+
+/// The platform services an App lists (AP-160, ADR-N-045).
+fn with_services(list: &str) -> impl FnOnce(&mut String) + '_ {
+    move |y: &mut String| {
+        *y = y.replace("  storage:\n", &format!("  services: {list}\n  storage:\n"))
+    }
+}
+
+#[test]
+fn an_app_lists_its_platform_services_and_round_trips_ap160() {
+    let app = wasm_app(with_services("[files, email, ai]")).expect("services validate");
+    assert_eq!(
+        app.spec.services,
+        [AppService::Files, AppService::Email, AppService::Ai]
+    );
+    let again = App::from_yaml(&app.to_yaml().expect("yaml")).expect("read back");
+    assert_eq!(again.spec.services, app.spec.services);
+    // Absent is the empty list: identity and data are every App's without it (AP-161).
+    assert!(wasm_app(|_| {}).expect("plain").spec.services.is_empty());
+}
+
+#[test]
+fn an_unknown_or_repeated_service_is_refused_with_the_names_it_may_be_ap160() {
+    let why = wasm_refusal(wasm_app(with_services("[files, sms]")));
+    assert!(why.contains("sms"), "{why}");
+    for name in ["identity", "data", "files", "email", "jobs", "ai"] {
+        assert!(why.contains(name), "{name} missing from: {why}");
+    }
+    let why = wasm_refusal(wasm_app(with_services("[email, email]")));
+    assert!(why.contains("services") && why.contains("email"), "{why}");
+}
+
+#[test]
+fn the_jobs_service_needs_the_jobs_it_names_ap162() {
+    // Listed without a job: refused, naming where the jobs go.
+    let why = wasm_refusal(wasm_app(with_services("[jobs]")));
+    assert!(why.contains("spec.server.jobs"), "{why}");
+    // Listed beside its jobs, or not listed at all: the jobs are the listing.
+    let job = "      - { name: hourly, schedule: \"0 * * * *\", export: run }\n";
+    wasm_app(|y| {
+        with_jobs(job)(y);
+        with_services("[jobs]")(y);
+    })
+    .expect("jobs with its jobs");
+    wasm_app(with_jobs(job)).expect("jobs without the listing, as before AP-160");
+    // On a ui App there are no jobs to name.
+    let why = wasm_refusal(wasm_app(|y| {
+        with_services("[jobs]")(y);
+        *y = y.replace("kind: wasm", "kind: ui").replace(
+            "  storage:\n    sql: { migrations: db/migrations, quotaMiB: 50 }\n    blob: {}\n",
+            "",
+        );
+    }));
+    assert!(why.contains("spec.server.jobs"), "{why}");
 }
