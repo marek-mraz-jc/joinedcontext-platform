@@ -720,7 +720,15 @@ pub struct AppSpec {
     /// The platform services the App uses beyond identity and data, each once (AP-160).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<AppService>,
+    /// Names of the Organization's own domain the App also answers on, besides its host under
+    /// the installation (AP-172); the Portal checks each against the Organization's verified
+    /// domain and the other Apps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
 }
+
+/// The most hostnames one App lists (AP-172).
+pub const MAX_APP_HOSTNAMES: usize = 3;
 
 /// The most jobs one App declares (AP-154).
 pub const MAX_APP_JOBS: usize = 10;
@@ -1199,6 +1207,7 @@ impl AppSpec {
             server.validate()?;
         }
         self.validate_services()?;
+        self.validate_hostnames()?;
 
         if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {
             return Err(Error::Name {
@@ -1208,6 +1217,33 @@ impl AppSpec {
             });
         }
 
+        Ok(())
+    }
+
+    /// At most three lowercase DNS names, each once (AP-172).
+    fn validate_hostnames(&self) -> Result<()> {
+        if self.hostnames.len() > MAX_APP_HOSTNAMES {
+            return Err(Error::Name {
+                field: "hostnames",
+                value: self.hostnames.len().to_string(),
+                reason: "an App lists at most 3 hostnames (AP-172)",
+            });
+        }
+        for (i, hostname) in self.hostnames.iter().enumerate() {
+            crate::names::validate_org_domain(hostname).map_err(|_| Error::Name {
+                field: "hostnames",
+                value: hostname.clone(),
+                reason: "a hostname is a lowercase DNS name of at least two labels, such as \
+                         bikes.hel.fi, with no scheme, port or path (AP-172)",
+            })?;
+            if self.hostnames[..i].contains(hostname) {
+                return Err(Error::Name {
+                    field: "hostnames",
+                    value: hostname.clone(),
+                    reason: "a hostname is listed once (AP-172)",
+                });
+            }
+        }
         Ok(())
     }
 

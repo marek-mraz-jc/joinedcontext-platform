@@ -301,6 +301,13 @@
           "description": "Whether the Portal may embed the app in a frame (AP-12).",
           "type": "boolean"
         },
+        "hostnames": {
+          "description": "Names of the Organization's own domain the App also answers on, besides its host under the installation (AP-172); the Portal checks each against the Organization's verified domain and the other Apps.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "kind": {
           "allOf": [
             {
