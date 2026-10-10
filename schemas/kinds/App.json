@@ -181,6 +181,53 @@
       },
       "type": "object"
     },
+    "AppService": {
+      "description": "A platform service an App uses (AP-160, ADR-N-045): the closed set, so a name outside it is refused like any unknown field, with the six it may be.",
+      "oneOf": [
+        {
+          "description": "Who is signed in and what they may do; every App's (AP-161).",
+          "enum": [
+            "identity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The App's Endpoint; every App's (AP-161).",
+          "enum": [
+            "data"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Objects under the App's own storage prefix (AP-170).",
+          "enum": [
+            "files"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A message to people of the organization (AP-168).",
+          "enum": [
+            "email"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The schedules of a `wasm` App, `spec.server.jobs[]` (AP-162).",
+          "enum": [
+            "jobs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A completion from a model of the organization's (AP-169).",
+          "enum": [
+            "ai"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "AppSource": {
       "additionalProperties": false,
       "description": "Where the app's source lives; exactly one member is set (AP-02).",
@@ -299,6 +346,13 @@
             }
           ],
           "description": "What a `wasm` App's server part runs on a schedule (AP-154)."
+        },
+        "services": {
+          "description": "The platform services the App uses beyond identity and data, each once (AP-160).",
+          "items": {
+            "$ref": "#/definitions/AppService"
+          },
+          "type": "array"
         },
         "source": {
           "allOf": [
