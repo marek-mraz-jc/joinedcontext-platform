@@ -13,6 +13,7 @@
 //! every list of names narrowed to what this caller may read.
 
 use super::evaluator::Constraints;
+use super::projection::type_iri;
 use jc_core::kinds::Operation;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -48,22 +49,40 @@ pub fn reaches(operation: Operation, name: &str, constraints: &Constraints) -> b
 /// An empty set is a grant over every type the endpoint serves, which is the same rule
 /// [`super::projection::permitted`] applies to an entity's own type.
 fn reaches_type(name: &str, constraints: &Constraints) -> bool {
-    constraints.types.is_empty() || constraints.types.contains(term(name))
+    constraints.types.is_empty() || super::projection::type_named(constraints, name)
 }
 
 /// Whether an attribute name is one this endpoint serves, within one type or across all of them.
 ///
 /// `hidden` is a denial whatever the whitelists say (EP-61). A whitelist that is empty is a
-/// grant over the whole entity, so only the hidden names are withheld.
+/// grant over the whole entity, so only the hidden names are withheld. Names are compared as
+/// IRIs (T-3533): `https://b.example/plate` is not the `plate` a model defines as
+/// `https://a.example/plate`, though both end in the same term.
 fn reaches_attribute(name: &str, constraints: &Constraints, of_type: Option<&str>) -> bool {
-    let name = term(name);
-    if constraints.hidden.contains(name) {
+    if named_in(name, &constraints.hidden, constraints) {
         return false;
     }
     match served(constraints, of_type) {
-        Some(whitelist) => whitelist.contains(name),
+        Some(whitelist) => named_in(name, &whitelist, constraints),
         None => true,
     }
+}
+
+/// Whether `name` is one of `names`, compared as IRIs: the core context's reading of each, and
+/// what the space's models make of it ([`Constraints::name_iris`]). A name the gateway cannot
+/// expand is none of them.
+fn named_in(name: &str, names: &BTreeSet<String>, constraints: &Constraints) -> bool {
+    names.iter().any(|one| named(name, one, constraints))
+}
+
+fn named(name: &str, one: &str, constraints: &Constraints) -> bool {
+    type_iri(name).is_some_and(|asked| {
+        type_iri(one).is_some_and(|iri| iri == asked)
+            || constraints
+                .name_iris
+                .get(one)
+                .is_some_and(|iris| iris.contains(&asked))
+    })
 }
 
 /// The attributes this endpoint serves, of one type when the projection says so.
@@ -78,9 +97,10 @@ fn served(constraints: &Constraints, of_type: Option<&str>) -> Option<BTreeSet<S
             Some(class) => Some(
                 constraints
                     .attrs_by_type
-                    .get(term(class))
-                    .cloned()
-                    .unwrap_or_default(),
+                    .iter()
+                    .filter(|(key, _)| named(class, key, constraints))
+                    .flat_map(|(_, slots)| slots.iter().cloned())
+                    .collect(),
             ),
             None => Some(
                 constraints
@@ -196,9 +216,4 @@ fn narrow_document(document: &mut Value, constraints: &Constraints) {
     if constraints.restricted {
         members.retain(|name, _| !COUNTS.contains(&name.as_str()));
     }
-}
-
-/// The term of a name, whether the document compacted it or left the IRI expanded.
-fn term(name: &str) -> &str {
-    name.rsplit(['#', '/']).next().unwrap_or(name)
 }

@@ -101,6 +101,11 @@ pub struct Constraints {
     /// of `types` (T-3473, [`crate::pdp::projection::type_named`]). Filled by the decision
     /// point, which knows the endpoint's models.
     pub type_iris: BTreeSet<String>,
+    /// What each attribute name of `served`, `hidden` and `attrs_by_type` (and each type that
+    /// map is keyed by) names under the space's own `@context`s, beside the core context's
+    /// reading; the discovery guard compares a listed or asked name with these as IRIs
+    /// (T-3533, [`crate::pdp::vocabulary`]). Filled by the decision point.
+    pub name_iris: BTreeMap<String, BTreeSet<String>>,
     /// The anchored id patterns of the matching grants (R24).
     pub id_patterns: BTreeSet<String>,
     /// The attributes the response is projected to; empty means no projection (R9).
@@ -393,6 +398,7 @@ fn intersect(
         attrs_by_type: BTreeMap::new(),
         // the decision point reads the endpoint's models into this (T-3473)
         type_iris: BTreeSet::new(),
+        name_iris: BTreeMap::new(),
         served: granted_attrs.clone(),
         hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
