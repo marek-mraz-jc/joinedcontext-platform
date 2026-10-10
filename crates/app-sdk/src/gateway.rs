@@ -1,77 +1,76 @@
-//! The App's own Endpoint on the Context Gateway, read with the caller's token (AP-147). The
-//! component names neither the gateway's address nor its Endpoint: it asks for
-//! `http://gateway/ngsi-ld/v1/…` or the Endpoint's schema, `http://gateway/schema/…`, and the
-//! host sends that to the App's own Endpoint with the caller's token, refusing anything else.
-//! What the caller may not read, the gateway refuses.
-//!
-//! ```no_run
-//! let alerts = jc_app_sdk::gateway::get(&format!(
-//!     "/ngsi-ld/v1/entities?type=Alert&limit=100&options=keyValues&attrs={}",
-//!     jc_app_sdk::gateway::encode("location,validFrom"),
-//! ));
-//! ```
+//! Reads from the Context Gateway, as the caller (AP-147): the host adds the caller's token, so an
+//! App reads what the person it serves may read and nothing more. A component has no environment
+//! to learn where the gateway runs; it calls the fixed origin `http://gateway` and the host sends
+//! the call on, to the App's own Endpoint only: `/api/endpoint/<its slug>/…`, or for short
+//! `/ngsi-ld/v1/…` and `/schema/…` (AP-147). Every other origin and path is refused before a
+//! connection is made.
 
 use serde::de::DeserializeOwned;
 
-/// The origin the host maps to the App's own Endpoint.
-pub const ORIGIN: &str = "gateway";
+use crate::http::Response;
 
-/// The gateway's answer: its status and its body.
+/// Why a read from the gateway did not give an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Answer {
-    pub status: u16,
-    pub body: Vec<u8>,
+pub enum Error {
+    /// The path is not one the gateway serves: not absolute, or with `..`, `//`, `\` or `#`.
+    Invalid(String),
+    /// The gateway answered, with this status and body.
+    Status(u16, String),
+    /// The host refused the call or the gateway did not answer.
+    Unavailable(String),
+    /// The answer was not the JSON the App expected.
+    Decode(String),
 }
 
-impl Answer {
-    /// The body as JSON when the status is 2xx; otherwise a sentence with the status and the
-    /// gateway's own `detail` or `title`, when it gave one.
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T, String> {
-        if !(200..300).contains(&self.status) {
-            return Err(refusal(self.status, &self.body));
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Invalid(why) => write!(f, "not a gateway path: {why}"),
+            Error::Status(status, _) => write!(f, "the gateway answered {status}"),
+            Error::Unavailable(why) => write!(f, "the gateway is not reachable: {why}"),
+            Error::Decode(why) => write!(f, "the gateway's answer: {why}"),
         }
-        serde_json::from_slice(&self.body).map_err(|err| {
-            format!("the gateway answered something that is not the expected JSON: {err}")
-        })
     }
 }
 
-/// What a non-2xx answer says, as a sentence a person can act on.
-pub fn refusal(status: u16, body: &[u8]) -> String {
-    let said = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| {
-            ["detail", "title"]
-                .iter()
-                .find_map(|k| v.get(*k).and_then(|d| d.as_str()).map(str::to_owned))
-        });
-    let what = match status {
-        401 => "the gateway wants a login for this data",
-        403 => "the gateway does not let this caller read this data",
-        404 => "the gateway found nothing at this address",
-        429 => "the gateway is asking for fewer requests; try again shortly",
-        500..=599 => "the gateway could not answer right now; try again shortly",
-        _ => "the gateway refused the request",
-    };
-    match said {
-        Some(said) => format!("{what} ({status}: {said})"),
-        None => format!("{what} ({status})"),
+impl From<Error> for Response {
+    /// The caller's own 401/403 passes through; anything else is the gateway's fault, a 502.
+    fn from(err: Error) -> Self {
+        match &err {
+            Error::Status(401, _) => {
+                Response::problem(401, "Unauthorized", "sign in again to read the city's data")
+            }
+            Error::Status(403, _) => Response::problem(
+                403,
+                "Forbidden",
+                "your account may not read the data this needs",
+            ),
+            Error::Invalid(_) => Response::problem(500, "Internal Server Error", &err.to_string()),
+            _ => Response::problem(502, "Bad Gateway", &err.to_string()),
+        }
     }
 }
 
-/// `path` must be below `/ngsi-ld/v1/` or the Endpoint's schema, `/schema/` (the host refuses
-/// anything else); a query is part of it.
-pub fn check(path: &str) -> Result<(), String> {
-    if path.starts_with("/ngsi-ld/v1/") || path == "/ngsi-ld/v1" || path.starts_with("/schema/") {
-        Ok(())
-    } else {
-        Err(format!(
-            "a gateway path starts with /ngsi-ld/v1/ or /schema/, not `{path}`"
-        ))
+/// `path` as a gateway path: absolute, without a dot segment, an empty segment, a backslash or a
+/// fragment, so it can only name a resource of the gateway itself.
+pub fn checked(path: &str) -> Result<&str, Error> {
+    let bare = path.split('?').next().unwrap_or_default();
+    if !path.starts_with('/') {
+        return Err(Error::Invalid("it does not start with /".into()));
     }
+    if bare.contains("//") || path.contains('\\') || path.contains('#') {
+        return Err(Error::Invalid("it has //, \\ or #".into()));
+    }
+    if bare
+        .split('/')
+        .any(|s| s == "." || s == ".." || s.eq_ignore_ascii_case("%2e%2e"))
+    {
+        return Err(Error::Invalid("it has a dot segment".into()));
+    }
+    Ok(path)
 }
 
-/// Percent-encodes a query value: everything but `A-Z a-z 0-9 - _ . ~`.
+/// Percent-encodes a query value: everything but `A-Z a-z 0-9 - _ . ~` (T-3351).
 pub fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -84,63 +83,64 @@ pub fn encode(value: &str) -> String {
     out
 }
 
-/// One GET of the App's own Endpoint, `path` below it (`/ngsi-ld/v1/entities?type=…`), asking for
-/// JSON. An error is a sentence: the host's refusal, or why no answer came.
-pub fn get(path: &str) -> Result<Answer, String> {
-    check(path)?;
+/// The body of a `GET` of `path` on the gateway, `Accept: application/json`; a status outside
+/// 2xx is [`Error::Status`].
+pub fn get(path: &str) -> Result<Vec<u8>, Error> {
+    let path = checked(path)?;
     send(path)
 }
 
-#[cfg(target_arch = "wasm32")]
-fn send(path: &str) -> Result<Answer, String> {
-    use wasip2::http::outgoing_handler;
-    use wasip2::http::types::{Fields, IncomingBody, OutgoingRequest, Scheme};
+/// A `GET` of `path` read as `T`.
+pub fn get_json<T: DeserializeOwned>(path: &str) -> Result<T, Error> {
+    let body = get(path)?;
+    serde_json::from_slice(&body).map_err(|err| Error::Decode(err.to_string()))
+}
 
-    /// How much of an answer one read asks for; the host caps the whole answer (AP-146).
-    const READ_CHUNK: u64 = 64 * 1024;
+fn send(path: &str) -> Result<Vec<u8>, Error> {
+    use wasip2::http::outgoing_handler;
+    use wasip2::http::types::{Fields, IncomingBody, OutgoingBody, OutgoingRequest, Scheme};
 
     let headers = Fields::new();
-    headers
-        .append("accept", b"application/json")
-        .map_err(|err| format!("a request header: {err:?}"))?;
+    let _ = headers.append("accept", b"application/json");
     let request = OutgoingRequest::new(headers);
     let _ = request.set_scheme(Some(&Scheme::Http));
-    let _ = request.set_authority(Some(ORIGIN));
+    let _ = request.set_authority(Some("gateway"));
     request
         .set_path_with_query(Some(path))
-        .map_err(|()| format!("`{path}` is not a path the gateway can be asked for"))?;
+        .map_err(|()| Error::Invalid("the host refused the path".into()))?;
+    if let Ok(body) = request.body() {
+        let _ = OutgoingBody::finish(body, None);
+    }
     let future = outgoing_handler::handle(request, None)
-        .map_err(|code| format!("the host refused the call to the gateway: {code:?}"))?;
+        .map_err(|code| Error::Unavailable(format!("{code:?}")))?;
     future.subscribe().block();
     let response = match future.get() {
         Some(Ok(Ok(response))) => response,
-        Some(Ok(Err(code))) => return Err(format!("the gateway could not be reached: {code:?}")),
-        _ => return Err("the gateway gave no answer".into()),
+        Some(Ok(Err(code))) => return Err(Error::Unavailable(format!("{code:?}"))),
+        _ => return Err(Error::Unavailable("no answer".into())),
     };
     let status = response.status();
-    let mut body = Vec::new();
-    let incoming = response
-        .consume()
-        .map_err(|()| "the gateway's answer has no body".to_owned())?;
-    let stream = incoming
-        .stream()
-        .map_err(|()| "the gateway's answer could not be read".to_owned())?;
-    loop {
-        match stream.blocking_read(READ_CHUNK) {
-            Ok(chunk) => body.extend_from_slice(&chunk),
-            Err(wasip2::io::streams::StreamError::Closed) => break,
-            Err(err) => return Err(format!("the gateway's answer broke off: {err:?}")),
+    let mut bytes = Vec::new();
+    if let Ok(body) = response.consume() {
+        if let Ok(stream) = body.stream() {
+            while let Ok(chunk) = stream.blocking_read(64 * 1024) {
+                if chunk.is_empty() {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            drop(stream);
         }
+        let _ = IncomingBody::finish(body);
     }
-    drop(stream);
-    let _ = IncomingBody::finish(incoming);
-    Ok(Answer { status, body })
-}
-
-/// Off wasm32 there is no host: an App's native unit tests test what it does with an answer.
-#[cfg(not(target_arch = "wasm32"))]
-fn send(_: &str) -> Result<Answer, String> {
-    Err("the gateway is reached only from inside the host".into())
+    if (200..300).contains(&status) {
+        Ok(bytes)
+    } else {
+        Err(Error::Status(
+            status,
+            String::from_utf8_lossy(&bytes).chars().take(500).collect(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -148,13 +148,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_path_outside_ngsi_ld_is_refused_before_any_call() {
-        assert!(check("/ngsi-ld/v1/entities?type=Alert").is_ok());
-        assert!(check("/schema/index.json").is_ok());
-        assert!(check("/schema").is_err());
-        assert!(check("/api/endpoint/x/ngsi-ld/v1/entities").is_err());
-        assert!(check("http://elsewhere/ngsi-ld/v1/").is_err());
-        assert!(get("/other").unwrap_err().contains("/ngsi-ld/v1/"));
+    fn a_path_names_a_resource_of_the_gateway_alone() {
+        assert_eq!(
+            checked("/api/endpoint/abc/ngsi-ld/v1/entities?type=A&limit=10"),
+            Ok("/api/endpoint/abc/ngsi-ld/v1/entities?type=A&limit=10")
+        );
+        for bad in [
+            "",
+            "api/x",
+            "//evil/x",
+            "/a//b",
+            "/a/../b",
+            "/a/./b",
+            "/a/%2E%2E/b",
+            "/a\\b",
+            "/a#b",
+            "http://evil/x",
+        ] {
+            assert!(checked(bad).is_err(), "{bad}");
+        }
+        // A query may carry `//`, as a URL value does.
+        assert!(checked("/a?q=http://x").is_ok());
     }
 
     #[test]
@@ -164,32 +178,20 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_reads_as_json_or_says_why_not() {
-        let ok = Answer {
-            status: 200,
-            body: br#"[{"id":"a"}]"#.to_vec(),
-        };
-        assert_eq!(ok.json::<serde_json::Value>().unwrap()[0]["id"], "a");
-        let denied = Answer {
-            status: 403,
-            body: br#"{"title":"Forbidden","detail":"no policy grants Alert"}"#.to_vec(),
-        };
-        let why = denied.json::<serde_json::Value>().unwrap_err();
-        assert!(
-            why.contains("does not let") && why.contains("no policy grants Alert"),
-            "{why}"
-        );
-        let broken = Answer {
-            status: 200,
-            body: b"<html>".to_vec(),
-        };
-        assert!(broken
-            .json::<serde_json::Value>()
-            .unwrap_err()
-            .contains("not the expected JSON"));
+    fn the_callers_refusal_passes_through_and_the_rest_is_the_gateways() {
         assert_eq!(
-            refusal(502, b""),
-            "the gateway could not answer right now; try again shortly (502)"
+            Response::from(Error::Status(401, String::new())).status,
+            401
         );
+        assert_eq!(
+            Response::from(Error::Status(403, String::new())).status,
+            403
+        );
+        assert_eq!(
+            Response::from(Error::Status(500, String::new())).status,
+            502
+        );
+        assert_eq!(Response::from(Error::Unavailable("x".into())).status, 502);
+        assert_eq!(Response::from(Error::Decode("x".into())).status, 502);
     }
 }

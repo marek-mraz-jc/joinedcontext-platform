@@ -2747,7 +2747,13 @@ fn attrs_of_the_selected_types(payload: &Value, decided: &Constraints) -> BTreeS
 /// learn that it exists (R20).
 /// The answer to a read whose granted window the caller's request does not reach (GW26).
 fn empty_list(constraints: &Constraints) -> Response<Body> {
-    let mut response = json_response(&Value::Array(Vec::new()));
+    empty_answer(Value::Array(Vec::new()), constraints)
+}
+
+/// An empty `payload` as the narrowed answer it is: restricted when the grants narrowed it, and
+/// naming the types it did not query (R22, CIM 009 6.3.11).
+fn empty_answer(payload: Value, constraints: &Constraints) -> Response<Body> {
+    let mut response = json_response(&payload);
     if constraints.restricted {
         response
             .headers_mut()
@@ -2783,6 +2789,48 @@ fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) 
     }
 }
 
+/// Whether the broker's `404` says the tenant does not exist (CIM 009 5.5.2 `NonexistentTenant`)
+/// rather than that the thing asked for does not.
+fn names_no_tenant(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
+        problem
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.rsplit('/').next() == Some("NonexistentTenant"))
+    })
+}
+
+/// What an empty space answers `operation` with, or `None` for an operation that names one
+/// thing, whose miss stays a miss (EP-22, CIM 009 5.2.24, 5.2.27).
+fn empty_space(operation: Operation) -> Option<Value> {
+    // A list document's `id` only has to be a URI of its own; the broker mints a UUID, this a
+    // number that differs between two answers.
+    let minted = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    };
+    match operation {
+        Operation::QueryEntity
+        | Operation::QueryBatch
+        | Operation::QueryTemporal
+        | Operation::RetrieveEntityTypeDetails
+        | Operation::RetrieveAttrTypeDetails => Some(Value::Array(Vec::new())),
+        Operation::RetrieveEntityTypes => Some(serde_json::json!({
+            "id": format!("urn:ngsi-ld:EntityTypeList:{:x}", minted()),
+            "type": "EntityTypeList",
+            "typeList": [],
+        })),
+        Operation::RetrieveAttrTypes => Some(serde_json::json!({
+            "id": format!("urn:ngsi-ld:AttributeList:{:x}", minted()),
+            "type": "AttributeList",
+            "attributeList": [],
+        })),
+        _ => None,
+    }
+}
+
 async fn project_answer(
     answer: Response<Body>,
     operation: Operation,
@@ -2800,6 +2848,17 @@ async fn project_answer(
         // broker's wording — which names the id it could not find — cannot be told apart from
         // a refusal (R20, T-2130).
         if parts.status == StatusCode::NOT_FOUND && !operation.is_write() {
+            // A space nobody has written to yet has no tenant at the broker. The caller was
+            // admitted to the space, and an empty space answers a query with nothing, not with
+            // a miss (EP-22, GW33, T-3434).
+            let held = axum::body::to_bytes(body, MAX_BODY)
+                .await
+                .unwrap_or_default();
+            if names_no_tenant(&held) {
+                if let Some(empty) = empty_space(operation) {
+                    return empty_answer(empty, constraints);
+                }
+            }
             return ProblemDetails::not_found().into_response();
         }
         // What a broker says when it fails is whatever it was holding: an entity id in a

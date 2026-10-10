@@ -67,19 +67,20 @@ pub const GATEWAY_ALIAS: &str = "gateway";
 /// and never the App's own `Authorization` (AP-147). Anything else is refused before a connection
 /// is made.
 struct GatewayOnly {
-    /// `<gateway origin>/api/endpoint/<slug>`, when the host knows its gateway and the App's
-    /// placement names its Endpoint.
-    endpoint: Option<String>,
+    /// The gateway's origin and the App's Endpoint slug, when the host knows its gateway and the
+    /// App's placement names its Endpoint.
+    endpoint: Option<(String, String)>,
     token: Option<String>,
     client: reqwest::Client,
     response_bytes: usize,
 }
 
-/// Where `http://gateway/ngsi-ld/v1/…` and the Endpoint's schema, `http://gateway/schema/…`, go:
-/// `<endpoint>/ngsi-ld/v1/…` and `<endpoint>/schema/…`. Any other origin or path,
-/// and any path with a dot segment, an encoded dot or slash, or a backslash (which a URL parser
-/// could fold into a step out of the Endpoint), is refused.
-pub fn endpoint_target(endpoint: &str, uri: &http::Uri) -> Option<String> {
+/// Where a call of a component goes (AP-147): `http://gateway/api/endpoint/<slug>/…` with the
+/// App's own slug, or for short `http://gateway/ngsi-ld/v1/…` and the Endpoint's schema
+/// `http://gateway/schema/…`, all to `<gateway>/api/endpoint/<slug>/…`. Any other origin, path or
+/// Endpoint, and any path with a dot segment, an encoded dot or slash, or a backslash (which a URL
+/// parser could fold into a step out of the Endpoint), is refused.
+pub fn endpoint_target(gateway: &str, slug: &str, uri: &http::Uri) -> Option<String> {
     if uri.scheme_str() != Some("http")
         || !uri
             .authority()
@@ -88,7 +89,12 @@ pub fn endpoint_target(endpoint: &str, uri: &http::Uri) -> Option<String> {
         return None;
     }
     let target = uri.path_and_query()?.as_str();
-    let path = target.split('?').next().unwrap_or_default();
+    let own = format!("/api/endpoint/{slug}");
+    let below = target
+        .strip_prefix(own.as_str())
+        .filter(|rest| rest.starts_with('/'))
+        .unwrap_or(target);
+    let path = below.split('?').next().unwrap_or_default();
     if !(path == "/ngsi-ld/v1" || path.starts_with("/ngsi-ld/v1/") || path.starts_with("/schema/"))
     {
         return None;
@@ -104,7 +110,7 @@ pub fn endpoint_target(endpoint: &str, uri: &http::Uri) -> Option<String> {
     {
         return None;
     }
-    Some(format!("{endpoint}{target}"))
+    Some(format!("{gateway}{own}{below}"))
 }
 
 impl WasiHttpHooks for GatewayOnly {
@@ -130,10 +136,10 @@ impl WasiHttpHooks for GatewayOnly {
         _ = fut;
         let Some(url) = self
             .endpoint
-            .as_deref()
-            .and_then(|endpoint| endpoint_target(endpoint, request.uri()))
+            .as_ref()
+            .and_then(|(gateway, slug)| endpoint_target(gateway, slug, request.uri()))
         else {
-            tracing::warn!(to = %request.uri().authority().map(|a| a.as_str()).unwrap_or(""), "outgoing request refused: only the App's own Endpoint is reachable, as http://gateway/ngsi-ld/v1/");
+            tracing::warn!(to = %request.uri().authority().map(|a| a.as_str()).unwrap_or(""), "outgoing request refused: only the App's own Endpoint is reachable, as http://gateway");
             return Box::new(async { Err(wasmtime_wasi_http::Error::HttpRequestDenied) });
         };
         let client = self.client.clone();
@@ -490,9 +496,7 @@ impl Host {
                     .build(),
                 hooks: GatewayOnly {
                     endpoint: match (&self.gateway, &app.endpoint) {
-                        (Some(gateway), Some(slug)) => {
-                            Some(format!("{gateway}/api/endpoint/{slug}"))
-                        }
+                        (Some(gateway), Some(slug)) => Some((gateway.clone(), slug.clone())),
                         _ => None,
                     },
                     token,
@@ -609,35 +613,45 @@ pub fn capped(
 mod tests {
     use super::*;
 
-    const EP: &str = "http://gw:8080/api/endpoint/ep1";
-
     fn target(uri: &str) -> Option<String> {
-        endpoint_target(EP, &uri.parse().expect("uri"))
+        endpoint_target("http://gw:8080", "ep1", &uri.parse().expect("uri"))
     }
 
     #[test]
     fn the_alias_reaches_the_apps_own_endpoint() {
-        assert_eq!(
-            target("http://gateway/ngsi-ld/v1/entities?type=Alert&limit=100").as_deref(),
-            Some("http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities?type=Alert&limit=100")
-        );
-        assert_eq!(
-            target("http://GATEWAY/ngsi-ld/v1").as_deref(),
-            Some("http://gw:8080/api/endpoint/ep1/ngsi-ld/v1")
-        );
-        assert_eq!(
-            target("http://gateway/schema/v1/json-schema").as_deref(),
-            Some("http://gw:8080/api/endpoint/ep1/schema/v1/json-schema")
-        );
+        for (uri, to) in [
+            (
+                "http://gateway/ngsi-ld/v1/entities?type=Alert&limit=100",
+                "http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities?type=Alert&limit=100",
+            ),
+            (
+                "http://GATEWAY/ngsi-ld/v1",
+                "http://gw:8080/api/endpoint/ep1/ngsi-ld/v1",
+            ),
+            (
+                "http://gateway/schema/v1/json-schema",
+                "http://gw:8080/api/endpoint/ep1/schema/v1/json-schema",
+            ),
+            // The long form T-3346's Apps write, with the App's own slug.
+            (
+                "http://gateway/api/endpoint/ep1/ngsi-ld/v1/entities?type=A",
+                "http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities?type=A",
+            ),
+        ] {
+            assert_eq!(target(uri).as_deref(), Some(to), "{uri}");
+        }
     }
 
     #[test]
-    fn another_origin_path_or_a_step_out_is_refused() {
+    fn another_origin_path_endpoint_or_a_step_out_is_refused() {
         for uri in [
             "https://gateway/ngsi-ld/v1/entities",
             "http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities",
             "http://gateway:8080/ngsi-ld/v1/entities",
             "http://gateway/api/endpoint/other/ngsi-ld/v1/entities",
+            "http://gateway/api/endpoint/ep12/ngsi-ld/v1/entities",
+            "http://gateway/api/endpoint/ep1/mcp",
+            "http://gateway/api/endpoint/ep1",
             "http://gateway/ngsi-ld/v1x",
             "http://gateway/schema",
             "http://gateway/schemas/x",
