@@ -2633,7 +2633,7 @@ fn narrowed_batch_query(
         if !decided.types.is_empty() {
             entities.retain(
                 |selector| match selector.get("type").and_then(Value::as_str) {
-                    Some(asked) => decided.types.contains(projection::term(asked)),
+                    Some(asked) => projection::type_named(&decided, asked),
                     None => true,
                 },
             );

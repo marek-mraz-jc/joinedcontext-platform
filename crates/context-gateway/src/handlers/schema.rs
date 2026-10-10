@@ -677,7 +677,7 @@ pub fn context(models: &[&Model], visible: &Visible, redacted: &mut Vec<String>)
 
 /// The term map of a committed `@context`, whether the file is the map itself or the
 /// usual `{"@context": {…}}` wrapper.
-fn inner_context(document: &Value) -> Option<&Map<String, Value>> {
+pub(crate) fn inner_context(document: &Value) -> Option<&Map<String, Value>> {
     match document.get("@context") {
         Some(Value::Object(terms)) => Some(terms),
         Some(Value::Array(parts)) => parts.iter().rev().find_map(Value::as_object),

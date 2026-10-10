@@ -96,6 +96,11 @@ pub struct Constraints {
     pub tenant: String,
     /// The entity types the request is narrowed to; empty means every granted type.
     pub types: BTreeSet<String>,
+    /// What `types` names as IRIs under the space's own `@context`s (a model's term or its
+    /// `@vocab`); an answer's type is compared with these and with the core context's reading
+    /// of `types` (T-3473, [`crate::pdp::projection::type_named`]). Filled by the decision
+    /// point, which knows the endpoint's models.
+    pub type_iris: BTreeSet<String>,
     /// The anchored id patterns of the matching grants (R24).
     pub id_patterns: BTreeSet<String>,
     /// The attributes the response is projected to; empty means no projection (R9).
@@ -386,6 +391,8 @@ fn intersect(
         // The grants alone say which attributes this caller may read, not which type each one
         // belongs to; a projection fills this in (MP-02, T-1862).
         attrs_by_type: BTreeMap::new(),
+        // the decision point reads the endpoint's models into this (T-3473)
+        type_iris: BTreeSet::new(),
         served: granted_attrs.clone(),
         hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
