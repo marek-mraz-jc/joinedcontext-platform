@@ -203,7 +203,7 @@ impl<R: Runner> Scheduler<R> {
 
     /// Ticks at the start of every minute, for the Apps `apps` names at that minute. A minute
     /// already gone is never ticked: a host that was down misses its runs (AP-154).
-    pub async fn every_minute(self, apps: impl Fn() -> Vec<Placed>) {
+    pub async fn every_minute(self: Arc<Self>, apps: impl Fn() -> Vec<Placed>) {
         loop {
             let now = OffsetDateTime::now_utc();
             let next = (now
@@ -215,6 +215,122 @@ impl<R: Runner> Scheduler<R> {
             drop(self.tick(&apps(), next));
         }
     }
+}
+
+/// Where a run's token comes from (AP-159): the shard's token service, asked for the App's job
+/// principal by the client id `{project}/{app}`. The answer's access token is the only thing kept,
+/// for the one run, and never logged.
+pub struct JobTokens {
+    url: String,
+    http: reqwest::Client,
+}
+
+impl JobTokens {
+    /// `JC_WASM_JOB_TOKEN_URL`, the token service's `/token`.
+    pub fn new(url: String) -> Result<Self, String> {
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|err| format!("the token service client: {err}"))?;
+        Ok(Self { url, http })
+    }
+
+    /// A token of the job principal of `app`, minted for this run.
+    pub async fn token(&self, app: &Placed) -> Result<String, String> {
+        let client_id = format!("{}/{}", app.tenant, app.name);
+        let answer = self
+            .http
+            .post(&self.url)
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", client_id.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|err| {
+                format!(
+                    "the token service did not answer ({}); the job cannot act as its App",
+                    err.without_url()
+                )
+            })?;
+        let status = answer.status();
+        let body = answer.bytes().await.unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        if !status.is_success() {
+            // The service's own description names the account and why, never a token.
+            let why = parsed["error_description"]
+                .as_str()
+                .unwrap_or("no reason given");
+            return Err(format!(
+                "the App's job identity got no token (HTTP {}): {why}",
+                status.as_u16()
+            ));
+        }
+        parsed["access_token"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| "the token service answered without an access token".to_owned())
+    }
+}
+
+/// The shard's [`Runner`]: the job principal's token, then [`crate::host::Host::run_job`].
+pub struct HostRunner {
+    pub host: Arc<crate::host::Host>,
+    /// `None` when the shard has no token service: every run then fails, saying so.
+    pub tokens: Option<JobTokens>,
+}
+
+impl Runner for HostRunner {
+    fn run<'a>(
+        &'a self,
+        app: &'a Placed,
+        job: &'a PlacedJob,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let tokens = self.tokens.as_ref().ok_or_else(|| {
+                "the shard has no token service (JC_WASM_JOB_TOKEN_URL), so no job can act as its App"
+                    .to_owned()
+            })?;
+            let token = tokens.token(app).await?;
+            self.host.run_job(app, &job.export, token, WALL_TIME).await
+        })
+    }
+}
+
+/// The records as the shard's `/jobs` answers them, for `status.jobs[]` (AP-154): per App id its
+/// jobs' last run, sorted, with the failure's sentence and never a body or a credential (AP-155).
+pub fn records_json(records: &HashMap<JobKey, Record>) -> serde_json::Value {
+    let mut sorted: Vec<_> = records.iter().collect();
+    sorted.sort_by(|a, b| (&a.0.app, &a.0.job).cmp(&(&b.0.app, &b.0.job)));
+    let rows: Vec<serde_json::Value> = sorted
+        .into_iter()
+        .map(|(key, record)| {
+            let (outcome, message) = match &record.outcome {
+                Outcome::Succeeded => ("succeeded", None),
+                Outcome::Failed(why) => ("failed", Some(why.as_str())),
+                Outcome::TimedOut => (
+                    "timedOut",
+                    Some("the job ran past its wall time and was stopped"),
+                ),
+                Outcome::Skipped => ("skipped", Some("the run before it was still going")),
+            };
+            serde_json::json!({
+                "app": key.app,
+                "job": key.job,
+                "lastRun": record
+                    .at
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+                "outcome": outcome,
+                "message": message,
+                "durationMs": record.duration.as_millis() as u64,
+                "failuresInARow": record.failures_in_a_row,
+            })
+        })
+        .collect();
+    serde_json::json!({ "jobs": rows })
 }
 
 #[cfg(test)]
@@ -403,5 +519,42 @@ mod tests {
             .is_empty());
         assert_eq!(*runs.lock().expect("runs"), 0);
         assert!(scheduler.records().is_empty());
+    }
+
+    /// AP-154, AP-155: `/jobs` gives each job's last run with the sentence of a failure, sorted.
+    #[test]
+    fn the_records_read_as_status_jobs_with_the_failures_sentence() {
+        let key = |job: &str| JobKey {
+            app: "helsinki_kpi".into(),
+            job: job.into(),
+        };
+        let at = datetime!(2026-10-10 14:00 UTC);
+        let mut records = HashMap::new();
+        records.insert(
+            key("nightly"),
+            Record {
+                at,
+                outcome: Outcome::Failed("403 from the Endpoint".into()),
+                duration: Duration::from_millis(1250),
+                failures_in_a_row: 2,
+            },
+        );
+        records.insert(
+            key("hourly"),
+            Record {
+                at,
+                outcome: Outcome::Skipped,
+                duration: Duration::ZERO,
+                failures_in_a_row: 0,
+            },
+        );
+        let json = records_json(&records);
+        assert_eq!(json["jobs"][0]["job"], "hourly");
+        assert_eq!(json["jobs"][0]["outcome"], "skipped");
+        assert_eq!(json["jobs"][1]["outcome"], "failed");
+        assert_eq!(json["jobs"][1]["message"], "403 from the Endpoint");
+        assert_eq!(json["jobs"][1]["durationMs"], 1250);
+        assert_eq!(json["jobs"][1]["failuresInARow"], 2);
+        assert_eq!(json["jobs"][1]["lastRun"], "2026-10-10T14:00:00Z");
     }
 }

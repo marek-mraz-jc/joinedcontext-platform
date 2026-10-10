@@ -437,6 +437,104 @@ impl Host {
         semaphore.try_acquire_owned().map_err(|_| Failure::Busy)
     }
 
+    /// A fresh store for one instance of `app` under the request's limits, its calls to the
+    /// gateway carrying `token`, stopped after `deadline_ticks` epochs.
+    fn store(
+        &self,
+        app: &Placed,
+        token: Option<String>,
+        deadline_ticks: u64,
+    ) -> Result<Store<State>, Failure> {
+        let wasi = WasiCtx::builder()
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .build();
+        let mut store = Store::new(
+            &self.engine,
+            State {
+                wasi,
+                http: WasiHttpCtx::new(),
+                table: ResourceTable::new(),
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(self.limits.memory_bytes)
+                    .instances(64)
+                    .trap_on_grow_failure(true)
+                    .build(),
+                hooks: GatewayOnly {
+                    endpoint: match (&self.gateway, &app.endpoint) {
+                        (Some(gateway), Some(slug)) => Some((gateway.clone(), slug.clone())),
+                        _ => None,
+                    },
+                    token,
+                    client: self.client.clone(),
+                    response_bytes: self.limits.response_bytes,
+                },
+                app: app.clone(),
+                storage: self.storage.clone(),
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(self.limits.fuel)
+            .map_err(|err| Failure::Failed(err.to_string()))?;
+        store.set_epoch_deadline(deadline_ticks);
+        store.epoch_deadline_trap();
+        Ok(store)
+    }
+
+    /// One run of the job export `export` of `app` (AP-154, AP-159): a fresh instance under the
+    /// request's limits and `wall` of wall time, its calls to the App's own Endpoint carrying the
+    /// job principal's `token`, which the component never sees. The export is a root-level
+    /// `func() -> result<_, string>`; its `err` is the run's sentence.
+    pub async fn run_job(
+        &self,
+        app: &Placed,
+        export: &str,
+        token: String,
+        wall: std::time::Duration,
+    ) -> Result<(), String> {
+        let _admission = self.admit(app).map_err(|_| {
+            "the App was at its limit of concurrent requests; the run waits for its next time"
+                .to_owned()
+        })?;
+        let pre = self
+            .component(&app.digest)
+            .await
+            .map_err(|failure| match failure {
+                Failure::Unavailable(why) | Failure::Failed(why) => why,
+                other => other.detail().to_owned(),
+            })?;
+        let ticks = (wall.as_millis() / EPOCH_TICK.as_millis()).max(1) as u64;
+        let mut store = self
+            .store(app, Some(token), ticks)
+            .map_err(|f| f.detail().to_owned())?;
+        let export = export.to_owned();
+        let id = app.id.clone();
+        let task = tokio::spawn(async move {
+            let instance = pre.instance_pre().instantiate_async(&mut store).await?;
+            let Ok(func) =
+                instance.get_typed_func::<(), (Result<(), String>,)>(&mut store, export.as_str())
+            else {
+                return Ok(Err(format!(
+                    "the component exports no `{export}: func() -> result<_, string>`"
+                )));
+            };
+            let (outcome,) = func.call_async(&mut store, ()).await?;
+            wasmtime::Result::Ok(outcome)
+        });
+        match tokio::time::timeout(wall + std::time::Duration::from_secs(1), task).await {
+            Err(_) => Err("the job ran past its wall time and was stopped".to_owned()),
+            Ok(Err(err)) => Err(format!("the run ended abnormally: {err}")),
+            Ok(Ok(Ok(Ok(())))) => Ok(()),
+            Ok(Ok(Ok(Err(why)))) => Err(sentence(&why)),
+            Ok(Ok(Err(err))) => Err(match trapped(&id, &err) {
+                Failure::Timeout => "the job ran past its wall time and was stopped".to_owned(),
+                Failure::Failed(why) => format!("the job stopped: {}", sentence(&why)),
+                other => other.detail().to_owned(),
+            }),
+        }
+    }
     /// One request of one App, in a fresh instance under the request's limits. The App sees the
     /// path below `/apps/{name}`, and neither the caller's `Authorization` nor its cookies: the
     /// caller's token reaches the gateway through the host alone (AP-147).
@@ -477,42 +575,7 @@ impl Host {
             return Err(Failure::TooLarge);
         }
         let pre = self.component(&app.digest).await?;
-
-        let wasi = WasiCtx::builder()
-            .allow_tcp(false)
-            .allow_udp(false)
-            .allow_ip_name_lookup(false)
-            .build();
-        let mut store = Store::new(
-            &self.engine,
-            State {
-                wasi,
-                http: WasiHttpCtx::new(),
-                table: ResourceTable::new(),
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(self.limits.memory_bytes)
-                    .instances(64)
-                    .trap_on_grow_failure(true)
-                    .build(),
-                hooks: GatewayOnly {
-                    endpoint: match (&self.gateway, &app.endpoint) {
-                        (Some(gateway), Some(slug)) => Some((gateway.clone(), slug.clone())),
-                        _ => None,
-                    },
-                    token,
-                    client: self.client.clone(),
-                    response_bytes: self.limits.response_bytes,
-                },
-                app: app.clone(),
-                storage: self.storage.clone(),
-            },
-        );
-        store.limiter(|state| &mut state.limits);
-        store
-            .set_fuel(self.limits.fuel)
-            .map_err(|err| Failure::Failed(err.to_string()))?;
-        store.set_epoch_deadline(self.limits.deadline_ticks());
-        store.epoch_deadline_trap();
+        let mut store = self.store(app, token, self.limits.deadline_ticks())?;
 
         let (mut parts, body) = request.into_parts();
         parts.headers.remove(http::header::AUTHORIZATION);
@@ -586,6 +649,15 @@ impl Host {
                 Err(err) => Failure::Failed(err.to_string()),
             }),
         }
+    }
+}
+
+/// A job's own sentence, at most 300 characters on one line, so a record stays readable.
+fn sentence(why: &str) -> String {
+    let line: String = why.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(300) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line,
     }
 }
 

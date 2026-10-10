@@ -1,5 +1,5 @@
 //! The shard's HTTP side (ADR-N-044 §2.1): `/apps/{name}/api/*` to the App placed under that name,
-//! `/healthz`, `/metrics`. The edge has checked the login already; the host passes the caller's
+//! `/healthz`, `/metrics`, `/jobs` (the last run of each job, AP-154). The edge has checked the login already; the host passes the caller's
 //! token to the gateway on the App's behalf and never to the App.
 
 use std::collections::HashMap;
@@ -14,6 +14,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 
 use crate::host::{capped, Failure, Host};
+use crate::jobs::{records_json, HostRunner, Scheduler};
 use crate::metrics::{Metrics, Outcome};
 use crate::placement::{Placed, Placement};
 
@@ -25,6 +26,8 @@ pub struct Shard {
     pub host: Arc<Host>,
     pub apps: RwLock<HashMap<String, Placed>>,
     pub metrics: Metrics,
+    /// The scheduler of the placed Apps' jobs, whose records `/jobs` answers (AP-154).
+    pub jobs: Arc<Scheduler<HostRunner>>,
 }
 
 fn text(status: u16, content_type: &str, body: String) -> http::Response<Body> {
@@ -82,6 +85,13 @@ impl Shard {
                 200,
                 "text/plain; version=0.0.4",
                 self.metrics.render(&self.id, self.host.cached()),
+            );
+        }
+        if path == "/jobs" {
+            return text(
+                200,
+                "application/json",
+                records_json(&self.jobs.records()).to_string(),
             );
         }
         let Some(app) = self.route(&path) else {
