@@ -63,6 +63,7 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
                 "secret": "https://smartdatamodels.org/secret"
             } })),
         }],
+        policy_names: Vec::new(),
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

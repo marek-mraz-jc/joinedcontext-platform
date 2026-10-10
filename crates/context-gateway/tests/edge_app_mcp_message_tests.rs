@@ -75,6 +75,7 @@ fn endpoint(slug: &str, audience: Audience, representations: Vec<Representation>
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: public_grant(),
     }
 }

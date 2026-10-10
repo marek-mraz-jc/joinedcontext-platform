@@ -54,6 +54,7 @@ fn endpoint(slug: &str, space: &str, audience: Audience) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies: vec![policy],
     }
 }

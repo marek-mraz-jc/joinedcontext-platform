@@ -124,6 +124,7 @@ fn endpoint(slug: &str, base: &str, projection: Option<Arc<ModelProjectionSpec>>
         catalog: None,
         base_path: base.to_owned(),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies: vec![vehicles_for_everybody()],
     }
 }

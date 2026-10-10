@@ -101,6 +101,7 @@ fn endpoint(model: Model, entity_type: &str, properties: &[&str]) -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![model],
+        policy_names: Vec::new(),
         policies: vec![policy(&format!(
             "contextSpaceRef: banskabystrica-kpi\n\
              assigner: did:web:banskabystrica.sk\n\

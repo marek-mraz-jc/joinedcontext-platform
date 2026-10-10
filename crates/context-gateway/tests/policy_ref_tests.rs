@@ -150,6 +150,20 @@ fn an_endpoint_without_policy_ref_evaluates_every_policy_of_its_space() {
     }));
     // The canonical space surface is the whole space too.
     assert_eq!(spaces[0].endpoint.policies.len(), 3);
+    // Each Policy keeps its manifest name at its own index, so an answer can name it (EP-103).
+    for endpoint in [all, &spaces[0].endpoint] {
+        let mut names = endpoint.policy_names.clone();
+        names.sort();
+        assert_eq!(names, ["pipelines-write", "public-bikes", "public-events"]);
+        for (name, policy) in endpoint.policy_names.iter().zip(&endpoint.policies) {
+            let wanted = match name.as_str() {
+                "public-bikes" => vec!["BikeHireDockingStation".to_owned()],
+                "public-events" => vec!["Event".to_owned()],
+                _ => types_of(std::slice::from_ref(policy)),
+            };
+            assert_eq!(types_of(std::slice::from_ref(policy)), wanted, "{name}");
+        }
+    }
 }
 
 #[test]
@@ -162,6 +176,7 @@ fn an_endpoint_with_policy_ref_evaluates_that_policy_alone() {
         .expect("the bound endpoint");
     assert_eq!(bikes.policies.len(), 1);
     assert_eq!(types_of(&bikes.policies), ["BikeHireDockingStation"]);
+    assert_eq!(bikes.policy_names, ["public-bikes"]);
 }
 
 #[test]

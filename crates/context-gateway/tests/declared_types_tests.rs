@@ -91,6 +91,7 @@ fn endpoint(declared: Option<&[&str]>) -> Endpoint {
         view_mapping: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies: vec![both_types()],
     }
 }

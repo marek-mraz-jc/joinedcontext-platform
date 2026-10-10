@@ -70,6 +70,7 @@ fn endpoint_of(space: &str, policies: Vec<PolicySpec>) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        policy_names: Vec::new(),
         policies,
     }
 }

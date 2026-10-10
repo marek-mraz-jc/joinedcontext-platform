@@ -72,6 +72,7 @@ fn endpoint() -> Endpoint {
         catalog: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
+        policy_names: Vec::new(),
         policies: Vec::new(),
     }
 }
@@ -281,6 +282,7 @@ async fn a_redirect_from_the_subscriber_is_never_followed() {
             .deliver_privately_to(vec!["127.0.0.1".to_owned()])
             .seal_subscribers_with(common::delivery_key())
             .serve([Endpoint {
+                policy_names: Vec::new(),
                 policies: vec![common::public_subscribe_policy(
                     SPACE,
                     DOMAIN,
