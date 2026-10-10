@@ -38,9 +38,9 @@ pub use agent_profile::{
     AgentTool, AgentWorkspace, ModelProvider, DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use app::{
-    AppAccess, AppBuild, AppClass, AppEgress, AppLifecycle, AppLimits, AppRole, AppSource, AppSpec,
-    AppVisibility, ContentSecurityPolicy, DataNeed, GeoConstraint, GeoWithin, GitSource,
-    TemporalConstraint,
+    AppAccess, AppBuild, AppClass, AppEgress, AppLifecycle, AppLimits, AppRole, AppService,
+    AppServiceLimits, AppSource, AppSpec, AppVisibility, ContentSecurityPolicy, DataNeed,
+    GeoConstraint, GeoWithin, GitSource, TemporalConstraint, DEFAULT_ORGANIZATION_SERVICES,
 };
 pub use assistant::{
     AssistantDeploymentSpec, Budget, Channel, Connector, KnowledgeSourceSpec, PdfPolicy,
@@ -101,7 +101,7 @@ pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
-pub use space::{urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectSpec, Quotas};
+pub use space::{urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectApps, ProjectSpec, Quotas};
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
 };

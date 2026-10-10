@@ -118,6 +118,33 @@
       "additionalProperties": false,
       "description": "Per-app runtime limits enforced on its own endpoint (AP-17).",
       "properties": {
+        "aiTokensPerDay": {
+          "description": "Model tokens, in and out, the App may use a day through `ai` (AP-165).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "emailsPerDay": {
+          "description": "Messages the App may send a day through `email` (AP-165).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "filesMiB": {
+          "description": "MiB the App may store through `files` (AP-165).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxFileRows": {
           "description": "Rows a single file representation download may return.",
           "format": "uint32",

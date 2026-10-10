@@ -39,6 +39,10 @@ pub struct AppsPolicy {
     /// App public, and leaves the Apps already public as they are (PF-100, PF-103).
     #[serde(default, skip_serializing_if = "is_default")]
     pub public: PublicApps,
+    /// The platform services the organization's Apps may use (AP-163); absent is
+    /// [`DEFAULT_ORGANIZATION_SERVICES`][crate::kinds::DEFAULT_ORGANIZATION_SERVICES].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<crate::kinds::AppService>>,
 }
 
 /// Whether the organization's Apps may be public (PF-103).
@@ -123,6 +127,9 @@ pub struct OrganizationLimits {
     /// Uploads and imports.
     #[serde(default, skip_serializing_if = "is_default")]
     pub data: DataLimits,
+    /// The per-App quotas of the platform services (AP-165).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub apps: crate::kinds::AppServiceLimits,
 }
 
 /// `spec.limits.edge`.
@@ -502,6 +509,30 @@ pub const CATALOG: &[Entry] = &[
         None,
         BoundKind::Number,
     ),
+    entry(
+        "spec.limits.apps.emailsPerDay",
+        Section::Applications,
+        Some(100),
+        0,
+        None,
+        BoundKind::Number,
+    ),
+    entry(
+        "spec.limits.apps.aiTokensPerDay",
+        Section::Applications,
+        Some(200_000),
+        0,
+        None,
+        BoundKind::Number,
+    ),
+    entry(
+        "spec.limits.apps.filesMiB",
+        Section::Applications,
+        Some(512),
+        0,
+        None,
+        BoundKind::Number,
+    ),
 ];
 
 /// The entries that may not exceed the edge's body, since the edge refuses anything larger first.
@@ -647,6 +678,9 @@ impl OrganizationSpec {
             "spec.limits.pipelines.rejectedKept" => limits.pipelines.rejected_kept,
             "spec.limits.pipelines.sampleMegabytes" => limits.pipelines.sample_megabytes,
             "spec.limits.data.uploadMegabytes" => limits.data.upload_megabytes,
+            "spec.limits.apps.emailsPerDay" => limits.apps.emails_per_day,
+            "spec.limits.apps.aiTokensPerDay" => limits.apps.ai_tokens_per_day,
+            "spec.limits.apps.filesMiB" => limits.apps.files_mib,
             _ => None,
         }
     }

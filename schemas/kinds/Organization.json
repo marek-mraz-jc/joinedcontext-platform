@@ -44,6 +44,87 @@
       },
       "type": "object"
     },
+    "AppService": {
+      "description": "A platform service an App uses (AP-160, ADR-N-045): the closed set, so a name outside it is refused like any unknown field, with the six it may be.",
+      "oneOf": [
+        {
+          "description": "Who is signed in and what they may do; every App's (AP-161).",
+          "enum": [
+            "identity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The App's Endpoint; every App's (AP-161).",
+          "enum": [
+            "data"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Objects under the App's own storage prefix (AP-170).",
+          "enum": [
+            "files"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A message to people of the organization (AP-168).",
+          "enum": [
+            "email"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The schedules of a `wasm` App, `spec.server.jobs[]` (AP-162).",
+          "enum": [
+            "jobs"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A completion from a model of the organization's (AP-169).",
+          "enum": [
+            "ai"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AppServiceLimits": {
+      "additionalProperties": false,
+      "description": "The per-App quotas of the platform services an Organization (`spec.limits.apps`) or a Project (`spec.apps.limits`) sets; an absent one takes the layer above (AP-165, ADR-N-045).",
+      "properties": {
+        "aiTokensPerDay": {
+          "description": "Model tokens, in and out, an App may use a day through `ai`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "emailsPerDay": {
+          "description": "Messages an App may send a day through `email`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "filesMiB": {
+          "description": "MiB an App may store through `files`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "AppsPolicy": {
       "additionalProperties": false,
       "description": "`spec.policies.apps` (PF-103).",
@@ -55,6 +136,16 @@
             }
           ],
           "description": "Whether an App may be `public`; `refused` makes every door refuse a Change that sets an App public, and leaves the Apps already public as they are (PF-100, PF-103)."
+        },
+        "services": {
+          "description": "The platform services the organization's Apps may use (AP-163); absent is [`DEFAULT_ORGANIZATION_SERVICES`][crate::kinds::DEFAULT_ORGANIZATION_SERVICES].",
+          "items": {
+            "$ref": "#/definitions/AppService"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -399,6 +490,14 @@
             }
           ],
           "description": "Model spend of the assistant and agent runs."
+        },
+        "apps": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AppServiceLimits"
+            }
+          ],
+          "description": "The per-App quotas of the platform services (AP-165)."
         },
         "data": {
           "allOf": [
