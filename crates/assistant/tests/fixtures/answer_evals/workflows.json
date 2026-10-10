@@ -1,0 +1,120 @@
+{
+  "about": "T-3226 (AG-118): every platform workflow the owner named, asked in Slovak and English of Helsinki's internal assistant `knowledge` once its sources hold the User Guide (`source: guide`). An answer passes when it is in the asker's language, cites only the Portal (every [n] resolved), and links the form of the workflow (`form`, the Portal page the guide section in `section` cites, rewritten to the asker's project). Recorded once on dev after the guide source is deployed (recordings/helsinki-workflows.json).",
+  "project": "helsinki",
+  "deployment": "knowledge",
+  "portal": "portal.dev.joinedcontext.com",
+  "questions": [
+    {
+      "id": "create-app-sk",
+      "workflow": "create-app",
+      "lang": "sk",
+      "ask": "Ako si môžem v Portáli vytvoriť novú aplikáciu? Popíš kroky.",
+      "form": "/projects/helsinki/apps",
+      "section": "11-apps §1 Generating an Application"
+    },
+    {
+      "id": "create-app-en",
+      "workflow": "create-app",
+      "lang": "en",
+      "ask": "How do I create a new app in the Portal, step by step?",
+      "form": "/projects/helsinki/apps",
+      "section": "11-apps §1 Generating an Application"
+    },
+    {
+      "id": "create-endpoint-sk",
+      "workflow": "create-endpoint",
+      "lang": "sk",
+      "ask": "Ako sa vytvára a zverejňuje nový endpoint pre kontextový priestor?",
+      "form": "/projects/helsinki/endpoints",
+      "section": "05-endpoints-and-sharing §2 Publishing an Endpoint"
+    },
+    {
+      "id": "create-endpoint-en",
+      "workflow": "create-endpoint",
+      "lang": "en",
+      "ask": "How do I create and publish a new endpoint for a context space?",
+      "form": "/projects/helsinki/endpoints",
+      "section": "05-endpoints-and-sharing §2 Publishing an Endpoint"
+    },
+    {
+      "id": "create-pipeline-sk",
+      "workflow": "create-pipeline",
+      "lang": "sk",
+      "ask": "Ako si môžem postaviť a otestovať novú pipeline?",
+      "form": "/projects/helsinki/pipelines",
+      "section": "04-pipelines §3 Building and Testing Pipelines in the Studio"
+    },
+    {
+      "id": "create-pipeline-en",
+      "workflow": "create-pipeline",
+      "lang": "en",
+      "ask": "How do I build and test a new pipeline?",
+      "form": "/projects/helsinki/pipelines",
+      "section": "04-pipelines §3 Building and Testing Pipelines in the Studio"
+    },
+    {
+      "id": "create-data-source-sk",
+      "workflow": "create-data-source",
+      "lang": "sk",
+      "ask": "Ako sa pripája externý zdroj dát k projektu?",
+      "form": "/projects/helsinki/datasources",
+      "section": "04-pipelines §2 Connecting an External Data Source"
+    },
+    {
+      "id": "create-data-source-en",
+      "workflow": "create-data-source",
+      "lang": "en",
+      "ask": "How do I connect an external data source to my project?",
+      "form": "/projects/helsinki/datasources",
+      "section": "04-pipelines §2 Connecting an External Data Source"
+    },
+    {
+      "id": "create-data-model-sk",
+      "workflow": "create-data-model",
+      "lang": "sk",
+      "ask": "Ako sa importuje nový dátový model do projektu?",
+      "form": "/projects/helsinki/models",
+      "section": "03-data-models §2 Importing a Data Model"
+    },
+    {
+      "id": "create-data-model-en",
+      "workflow": "create-data-model",
+      "lang": "en",
+      "ask": "How do I import a new data model into the project?",
+      "form": "/projects/helsinki/models",
+      "section": "03-data-models §2 Importing a Data Model"
+    },
+    {
+      "id": "create-policy-sk",
+      "workflow": "create-policy",
+      "lang": "sk",
+      "ask": "Ako sa vytvára politika, ktorá určuje, kto môže čítať a zapisovať dáta endpointu?",
+      "form": "/projects/helsinki/policies",
+      "section": "05-endpoints-and-sharing §6 Deciding Who May Read and Write: Policies"
+    },
+    {
+      "id": "create-policy-en",
+      "workflow": "create-policy",
+      "lang": "en",
+      "ask": "How do I create a policy that decides who may read and write the data of an endpoint?",
+      "form": "/projects/helsinki/policies",
+      "section": "05-endpoints-and-sharing §6 Deciding Who May Read and Write: Policies"
+    },
+    {
+      "id": "create-workspace-sk",
+      "workflow": "create-workspace",
+      "lang": "sk",
+      "ask": "Ako si môžem vytvoriť pracovný priestor, kópiu projektu, na ktorej budem pracovať?",
+      "form": "/projects/helsinki/workspaces",
+      "section": "02-organizations-projects-spaces §5 Working on Project Copies"
+    },
+    {
+      "id": "create-workspace-en",
+      "workflow": "create-workspace",
+      "lang": "en",
+      "ask": "How do I create a workspace, a copy of the project to work on?",
+      "form": "/projects/helsinki/workspaces",
+      "section": "02-organizations-projects-spaces §5 Working on Project Copies"
+    }
+  ]
+}

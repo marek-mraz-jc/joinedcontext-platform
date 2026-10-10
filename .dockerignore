@@ -1,4 +1,6 @@
 target/
 .git/
 **/*.md
+# The User Guide jc-assistant embeds (AG-118, scripts/sync-user-guide.sh).
+!crates/assistant/guide/*.md
 schemas/

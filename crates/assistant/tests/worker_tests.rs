@@ -421,5 +421,149 @@ fn reader() -> assistant::catalogue::Reader {
         http: reqwest::Client::new(),
         gateway: None,
         endpoint_base: None,
+        portal: None,
     }
+}
+
+/// AG-118 (T-3226): a guide job indexes the shipped User Guide as sections that cite the
+/// project's own Portal pages, a second read changes nothing, and with no Portal address the job
+/// fails with the variable to set.
+#[tokio::test]
+async fn a_guide_job_indexes_the_user_guide_into_the_projects_portal_pages() {
+    let (admin, pool, name) = database("guide").await;
+    let crawler = Crawler::new(
+        Arc::new(FixtureResolver::new(&[])),
+        CrawlPolicy {
+            allow_plain_http: false,
+            max_page_bytes: 1024 * 1024,
+        },
+    )
+    .expect("crawler");
+    let mut guide = spec("https://unused.test/", None);
+    guide.source = SourceType::Guide;
+    guide.start_urls.clear();
+    let source = |project: &str| Source {
+        project: project.into(),
+        name: "guide".into(),
+        spec: guide.clone(),
+        ckan_url: None,
+        catalogue: Vec::new(),
+    };
+    let sources = vec![source("zilina"), source("praha")];
+    let portal = assistant::catalogue::Reader {
+        portal: Some("https://portal.city.test".into()),
+        ..reader()
+    };
+    let now = datetime!(2026-10-10 14:12 UTC);
+    assert_eq!(
+        worker::enqueue_due(&pool, &sources, now)
+            .await
+            .expect("queued"),
+        2
+    );
+    let mut seen = std::collections::BTreeMap::new();
+    for _ in 0..2 {
+        assert!(
+            worker::work_one(&pool, &crawler, &portal, "zilina.sk", "worker-a", &sources)
+                .await
+                .expect("worked")
+        );
+    }
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM crawl_jobs ORDER BY source, project")
+            .fetch_all(&pool)
+            .await
+            .expect("jobs");
+    assert_eq!(states, ["done", "done"]);
+
+    let pages = |project: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let mut tx = project_scope(&pool, project).await.expect("scope");
+            // The test connects as a superuser, which row-level security never narrows.
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "SELECT url, content_hash FROM pages WHERE project = $1 ORDER BY url",
+            )
+            .bind(project)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("pages");
+            tx.rollback().await.expect("rollback");
+            rows
+        }
+    };
+    let zilina = pages("zilina").await;
+    let expected: usize = assistant::guide::PAGES
+        .iter()
+        .map(|(file, text)| {
+            assistant::guide::sections(file, text, "https://portal.city.test", "zilina").len()
+        })
+        .sum();
+    assert_eq!(zilina.len(), expected);
+    assert!(zilina
+        .iter()
+        .all(|(url, _)| url.starts_with("https://portal.city.test/projects/zilina")));
+    assert!(zilina
+        .iter()
+        .any(|(url, _)| url.starts_with("https://portal.city.test/projects/zilina/endpoints#")));
+    assert!(pages("praha")
+        .await
+        .iter()
+        .all(|(url, _)| url.starts_with("https://portal.city.test/projects/praha")));
+
+    // A new process sees the guide once more: the read finds every section unchanged.
+    assert_eq!(
+        worker::enqueue_changed(&pool, &sources[..1], &mut seen)
+            .await
+            .expect("queued"),
+        1
+    );
+    assert!(
+        worker::work_one(&pool, &crawler, &portal, "zilina.sk", "worker-a", &sources)
+            .await
+            .expect("worked")
+    );
+    assert_eq!(pages("zilina").await, zilina);
+    assert_eq!(
+        worker::enqueue_changed(&pool, &sources[..1], &mut seen)
+            .await
+            .expect("queued"),
+        0,
+        "the same guide is not read twice by one process"
+    );
+
+    // No Portal address: nothing to cite, so the job fails and says what to set.
+    let mut tx = project_scope(&pool, "praha").await.expect("scope");
+    sqlx::query("DELETE FROM pages WHERE project = 'praha'")
+        .execute(&mut *tx)
+        .await
+        .expect("emptied");
+    tx.commit().await.expect("commit");
+    sqlx::query("DELETE FROM crawl_jobs")
+        .execute(&pool)
+        .await
+        .expect("emptied");
+    assert_eq!(
+        worker::enqueue_changed(&pool, &sources[1..], &mut std::collections::BTreeMap::new())
+            .await
+            .expect("queued"),
+        1
+    );
+    assert!(worker::work_one(
+        &pool,
+        &crawler,
+        &reader(),
+        "zilina.sk",
+        "worker-a",
+        &sources
+    )
+    .await
+    .expect("worked"));
+    let why: Option<String> = sqlx::query_scalar("SELECT error FROM crawl_jobs")
+        .fetch_one(&pool)
+        .await
+        .expect("job");
+    assert!(why.unwrap_or_default().contains("JC_ASSISTANT_PORTAL_URL"));
+    assert!(pages("praha").await.is_empty());
+    drop_database(admin, pool, &name).await;
 }

@@ -263,6 +263,7 @@ async fn a_public_endpoint_is_counted_anonymously_and_each_page_cites_where_a_vi
         http: reqwest::Client::new(),
         gateway: Url::parse(&format!("{}/", gateway.uri())).ok(),
         endpoint_base: Url::parse("https://platform.example.org/").ok(),
+        portal: None,
     };
     let sources = worker::sources(&checkout("index")).expect("reads");
 
