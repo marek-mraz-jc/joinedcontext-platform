@@ -9,6 +9,7 @@
 //! constraint set names it.
 
 use super::evaluator::Constraints;
+use super::grants::{self, Shown};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -128,7 +129,7 @@ fn narrow_joined(
                 continue;
             };
             if depth == 0
-                || !permitted(joined, constraints)
+                || !permitted_inline(joined, constraints)
                 || !areas.is_none_or(|areas| areas.admits(joined))
             {
                 attribute.remove("entity");
@@ -140,8 +141,15 @@ fn narrow_joined(
     }
 }
 
-/// One entity, stripped by the attributes its own types may serve.
+/// One entity, stripped by the attributes its own types may serve and by what the grants it
+/// matches show (T-3530).
 fn retain_by_type(entity: &mut Value, constraints: &Constraints) {
+    match grants::shown(entity, &constraints.grants) {
+        Some(Shown::Whole) => {}
+        Some(Shown::Only(names)) => project_entity_to(entity, &names, &BTreeSet::new()),
+        // Nothing it matches: its identity only, for whatever reached here without `permitted`.
+        None => project_entity_to(entity, &BTreeSet::new(), &BTreeSet::new()),
+    }
     if constraints.attrs_by_type.is_empty() {
         project_entity(entity, &constraints.attrs, &constraints.hidden);
         return;
@@ -217,7 +225,39 @@ pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
     if !entity.is_object() {
         return false;
     }
-    type_granted(entity, constraints) && id_permitted(entity, &constraints.id_patterns)
+    // The caller's `attrs` selects the entities that carry one of them (CIM 009).
+    let asked = constraints.attrs_asked.is_empty()
+        || constraints
+            .attrs_asked
+            .iter()
+            .any(|name| entity.get(name).is_some());
+    asked
+        && type_granted(entity, constraints)
+        && ids_permitted(entity, constraints)
+        // Served only under a grant whose own conditions it meets, and only when everything the
+        // request selects or orders on is something those grants show it with: whether it
+        // matched would otherwise say what the hidden value is (T-3530).
+        && grants::shown(entity, &constraints.grants).is_some_and(|shown| {
+            constraints
+                .referenced
+                .iter()
+                .all(|name| shown.shows(name))
+        })
+}
+
+/// [`permitted`] for an entity the broker inlined under a Relationship: judged by the grants
+/// like any other, but not by the request's selection, which is about the entities it lists.
+fn permitted_inline(entity: &Value, constraints: &Constraints) -> bool {
+    entity.is_object()
+        && type_granted(entity, constraints)
+        && ids_permitted(entity, constraints)
+        && grants::shown(entity, &constraints.grants).is_some()
+}
+
+/// The id patterns, judged per grant where the set carries its grants: a grant without a pattern
+/// reaches every id, which one union of every grant's patterns cannot say (T-3530).
+fn ids_permitted(entity: &Value, constraints: &Constraints) -> bool {
+    !constraints.grants.is_empty() || id_permitted(entity, &constraints.id_patterns)
 }
 
 /// Whether the type the answer declares is one the grants name (EP-26).
@@ -228,16 +268,26 @@ pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
 /// type at all cannot be judged, so under a type grant it is not served. Types compare as IRIs
 /// ([`type_named`]), so another vocabulary's `Depot` is not the grant's (T-3473).
 fn type_granted(entity: &Value, constraints: &Constraints) -> bool {
-    if constraints.types.is_empty() {
+    types_granted(entity, &constraints.types, &constraints.type_iris)
+}
+
+/// [`type_granted`] by one set of granted names and the IRIs the models make of them, which is
+/// also how one grant alone judges an entity (T-3530).
+pub(crate) fn types_granted(
+    entity: &Value,
+    types: &BTreeSet<String>,
+    type_iris: &BTreeSet<String>,
+) -> bool {
+    if types.is_empty() {
         return true;
     }
     let declared = entity.get("type").or_else(|| entity.get("@type"));
     match declared {
-        Some(Value::String(one)) => type_named(constraints, one),
+        Some(Value::String(one)) => named_in(types, type_iris, one),
         Some(Value::Array(several)) => several
             .iter()
             .filter_map(Value::as_str)
-            .any(|one| type_named(constraints, one)),
+            .any(|one| named_in(types, type_iris, one)),
         _ => false,
     }
 }
@@ -263,10 +313,13 @@ pub fn type_iri(name: &str) -> Option<String> {
 /// compared as IRIs: the core context's reading of each granted name, and what the space's own
 /// `@context`s make of it (`type_iris`). A name the gateway cannot expand grants nothing.
 pub fn type_named(constraints: &Constraints, name: &str) -> bool {
+    named_in(&constraints.types, &constraints.type_iris, name)
+}
+
+fn named_in(types: &BTreeSet<String>, type_iris: &BTreeSet<String>, name: &str) -> bool {
     type_iri(name).is_some_and(|asked| {
-        constraints.type_iris.contains(&asked)
-            || constraints
-                .types
+        type_iris.contains(&asked)
+            || types
                 .iter()
                 .any(|one| type_iri(one).is_some_and(|grant| grant == asked))
     })
