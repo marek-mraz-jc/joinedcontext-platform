@@ -1,7 +1,8 @@
 //! The App's own Endpoint on the Context Gateway, read with the caller's token (AP-147). The
 //! component names neither the gateway's address nor its Endpoint: it asks for
-//! `http://gateway/ngsi-ld/v1/…`, and the host sends that to the App's own Endpoint with the
-//! caller's token, refusing anything else. What the caller may not read, the gateway refuses.
+//! `http://gateway/ngsi-ld/v1/…` or the Endpoint's schema, `http://gateway/schema/…`, and the
+//! host sends that to the App's own Endpoint with the caller's token, refusing anything else.
+//! What the caller may not read, the gateway refuses.
 //!
 //! ```no_run
 //! let alerts = jc_app_sdk::gateway::get(&format!(
@@ -58,13 +59,14 @@ pub fn refusal(status: u16, body: &[u8]) -> String {
     }
 }
 
-/// `path` must start with `/ngsi-ld/v1/` (the host refuses anything else); a query is part of it.
+/// `path` must be below `/ngsi-ld/v1/` or the Endpoint's schema, `/schema/` (the host refuses
+/// anything else); a query is part of it.
 pub fn check(path: &str) -> Result<(), String> {
-    if path.starts_with("/ngsi-ld/v1/") || path == "/ngsi-ld/v1" {
+    if path.starts_with("/ngsi-ld/v1/") || path == "/ngsi-ld/v1" || path.starts_with("/schema/") {
         Ok(())
     } else {
         Err(format!(
-            "a gateway path starts with /ngsi-ld/v1/, not `{path}`"
+            "a gateway path starts with /ngsi-ld/v1/ or /schema/, not `{path}`"
         ))
     }
 }
@@ -148,6 +150,8 @@ mod tests {
     #[test]
     fn a_path_outside_ngsi_ld_is_refused_before_any_call() {
         assert!(check("/ngsi-ld/v1/entities?type=Alert").is_ok());
+        assert!(check("/schema/index.json").is_ok());
+        assert!(check("/schema").is_err());
         assert!(check("/api/endpoint/x/ngsi-ld/v1/entities").is_err());
         assert!(check("http://elsewhere/ngsi-ld/v1/").is_err());
         assert!(get("/other").unwrap_err().contains("/ngsi-ld/v1/"));

@@ -75,7 +75,8 @@ struct GatewayOnly {
     response_bytes: usize,
 }
 
-/// Where `http://gateway/ngsi-ld/v1/…` goes: `<endpoint>/ngsi-ld/v1/…`. Any other origin or path,
+/// Where `http://gateway/ngsi-ld/v1/…` and the Endpoint's schema, `http://gateway/schema/…`, go:
+/// `<endpoint>/ngsi-ld/v1/…` and `<endpoint>/schema/…`. Any other origin or path,
 /// and any path with a dot segment, an encoded dot or slash, or a backslash (which a URL parser
 /// could fold into a step out of the Endpoint), is refused.
 pub fn endpoint_target(endpoint: &str, uri: &http::Uri) -> Option<String> {
@@ -88,7 +89,8 @@ pub fn endpoint_target(endpoint: &str, uri: &http::Uri) -> Option<String> {
     }
     let target = uri.path_and_query()?.as_str();
     let path = target.split('?').next().unwrap_or_default();
-    if !(path == "/ngsi-ld/v1" || path.starts_with("/ngsi-ld/v1/")) {
+    if !(path == "/ngsi-ld/v1" || path.starts_with("/ngsi-ld/v1/") || path.starts_with("/schema/"))
+    {
         return None;
     }
     let lower = path.to_ascii_lowercase();
@@ -623,6 +625,10 @@ mod tests {
             target("http://GATEWAY/ngsi-ld/v1").as_deref(),
             Some("http://gw:8080/api/endpoint/ep1/ngsi-ld/v1")
         );
+        assert_eq!(
+            target("http://gateway/schema/v1/json-schema").as_deref(),
+            Some("http://gw:8080/api/endpoint/ep1/schema/v1/json-schema")
+        );
     }
 
     #[test]
@@ -633,6 +639,10 @@ mod tests {
             "http://gateway:8080/ngsi-ld/v1/entities",
             "http://gateway/api/endpoint/other/ngsi-ld/v1/entities",
             "http://gateway/ngsi-ld/v1x",
+            "http://gateway/schema",
+            "http://gateway/schemas/x",
+            "http://gateway/schema/../../other/schema/index.json",
+            "http://gateway/mcp",
             "http://gateway/ngsi-ld/v1/../../other/ngsi-ld/v1/entities",
             "http://gateway/ngsi-ld/v1/./entities",
             "http://gateway/ngsi-ld/v1/%2e%2e/%2E%2E/other",
