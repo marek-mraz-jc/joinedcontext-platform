@@ -28,6 +28,7 @@ pub fn app(id: &str) -> Placed {
         id: id.into(),
         tenant: "helsinki".into(),
         digest: String::new(),
+        endpoint: None,
         jobs: Vec::new(),
     }
 }

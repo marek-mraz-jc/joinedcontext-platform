@@ -59,24 +59,50 @@ impl WasiHttpView for State {
     }
 }
 
-/// Outgoing HTTP to the Context Gateway alone, with the caller's token and never the App's own
-/// `Authorization` (AP-147). Anything else is refused before a connection is made.
+/// The origin a component asks for when it calls its own Endpoint (AP-147): the host, never the
+/// component, knows where the gateway is and which Endpoint is the App's.
+pub const GATEWAY_ALIAS: &str = "gateway";
+
+/// Outgoing HTTP to the App's own Endpoint on the Context Gateway alone, with the caller's token
+/// and never the App's own `Authorization` (AP-147). Anything else is refused before a connection
+/// is made.
 struct GatewayOnly {
-    gateway: Option<(String, String)>,
+    /// `<gateway origin>/api/endpoint/<slug>`, when the host knows its gateway and the App's
+    /// placement names its Endpoint.
+    endpoint: Option<String>,
     token: Option<String>,
     client: reqwest::Client,
     response_bytes: usize,
 }
 
-impl GatewayOnly {
-    fn allows(&self, uri: &http::Uri) -> bool {
-        match (&self.gateway, uri.scheme_str(), uri.authority()) {
-            (Some((scheme, authority)), Some(s), Some(a)) => {
-                s == scheme && a.as_str().eq_ignore_ascii_case(authority)
-            }
-            _ => false,
-        }
+/// Where `http://gateway/ngsi-ld/v1/…` goes: `<endpoint>/ngsi-ld/v1/…`. Any other origin or path,
+/// and any path with a dot segment, an encoded dot or slash, or a backslash (which a URL parser
+/// could fold into a step out of the Endpoint), is refused.
+pub fn endpoint_target(endpoint: &str, uri: &http::Uri) -> Option<String> {
+    if uri.scheme_str() != Some("http")
+        || !uri
+            .authority()
+            .is_some_and(|a| a.as_str().eq_ignore_ascii_case(GATEWAY_ALIAS))
+    {
+        return None;
     }
+    let target = uri.path_and_query()?.as_str();
+    let path = target.split('?').next().unwrap_or_default();
+    if !(path == "/ngsi-ld/v1" || path.starts_with("/ngsi-ld/v1/")) {
+        return None;
+    }
+    let lower = path.to_ascii_lowercase();
+    if path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+        || lower.contains("%2e")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+        || path.contains('\\')
+    {
+        return None;
+    }
+    Some(format!("{endpoint}{target}"))
 }
 
 impl WasiHttpHooks for GatewayOnly {
@@ -100,10 +126,14 @@ impl WasiHttpHooks for GatewayOnly {
             > + Send,
     > {
         _ = fut;
-        if !self.allows(request.uri()) {
-            tracing::warn!(to = %request.uri().authority().map(|a| a.as_str()).unwrap_or(""), "outgoing request refused: only the gateway is reachable");
+        let Some(url) = self
+            .endpoint
+            .as_deref()
+            .and_then(|endpoint| endpoint_target(endpoint, request.uri()))
+        else {
+            tracing::warn!(to = %request.uri().authority().map(|a| a.as_str()).unwrap_or(""), "outgoing request refused: only the App's own Endpoint is reachable, as http://gateway/ngsi-ld/v1/");
             return Box::new(async { Err(wasmtime_wasi_http::Error::HttpRequestDenied) });
-        }
+        };
         let client = self.client.clone();
         let token = self.token.clone();
         let cap = self.response_bytes;
@@ -119,7 +149,7 @@ impl WasiHttpHooks for GatewayOnly {
             headers.remove(http::header::COOKIE);
             headers.remove(http::header::HOST);
             let mut call = client
-                .request(parts.method, parts.uri.to_string())
+                .request(parts.method, url)
                 .headers(headers)
                 .body(body);
             if let Some(token) = token {
@@ -248,7 +278,8 @@ pub struct Host {
     limits: Limits,
     source: Source,
     storage: Arc<dyn Storage>,
-    gateway: Option<(String, String)>,
+    /// The gateway's origin, `scheme://host[:port]`, without a trailing slash.
+    gateway: Option<String>,
     /// The client an App's calls to the gateway go through: no redirects, so a gateway answer
     /// can never send one elsewhere.
     client: reqwest::Client,
@@ -295,7 +326,7 @@ impl Host {
                     Some(port) => format!("{host}:{port}"),
                     None => host.to_owned(),
                 };
-                Some((url.scheme().to_owned(), authority))
+                Some(format!("{}://{authority}", url.scheme()))
             }
         };
         let host = Arc::new(Self {
@@ -456,7 +487,12 @@ impl Host {
                     .trap_on_grow_failure(true)
                     .build(),
                 hooks: GatewayOnly {
-                    gateway: self.gateway.clone(),
+                    endpoint: match (&self.gateway, &app.endpoint) {
+                        (Some(gateway), Some(slug)) => {
+                            Some(format!("{gateway}/api/endpoint/{slug}"))
+                        }
+                        _ => None,
+                    },
                     token,
                     client: self.client.clone(),
                     response_bytes: self.limits.response_bytes,
@@ -565,4 +601,51 @@ pub fn capped(
     cap: usize,
 ) -> http_body_util::combinators::UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>> {
     http_body_util::Limited::new(body, cap).boxed_unsync()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EP: &str = "http://gw:8080/api/endpoint/ep1";
+
+    fn target(uri: &str) -> Option<String> {
+        endpoint_target(EP, &uri.parse().expect("uri"))
+    }
+
+    #[test]
+    fn the_alias_reaches_the_apps_own_endpoint() {
+        assert_eq!(
+            target("http://gateway/ngsi-ld/v1/entities?type=Alert&limit=100").as_deref(),
+            Some("http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities?type=Alert&limit=100")
+        );
+        assert_eq!(
+            target("http://GATEWAY/ngsi-ld/v1").as_deref(),
+            Some("http://gw:8080/api/endpoint/ep1/ngsi-ld/v1")
+        );
+    }
+
+    #[test]
+    fn another_origin_path_or_a_step_out_is_refused() {
+        for uri in [
+            "https://gateway/ngsi-ld/v1/entities",
+            "http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities",
+            "http://gateway:8080/ngsi-ld/v1/entities",
+            "http://gateway/api/endpoint/other/ngsi-ld/v1/entities",
+            "http://gateway/ngsi-ld/v1x",
+            "http://gateway/ngsi-ld/v1/../../other/ngsi-ld/v1/entities",
+            "http://gateway/ngsi-ld/v1/./entities",
+            "http://gateway/ngsi-ld/v1/%2e%2e/%2E%2E/other",
+            "http://gateway/ngsi-ld/v1/a%2Fb",
+            "http://gateway/ngsi-ld/v1/a%5cb",
+            "http://169.254.169.254/latest/meta-data",
+        ] {
+            assert_eq!(target(uri), None, "{uri}");
+        }
+        assert_eq!(
+            target("http://gateway/ngsi-ld/v1/entities?q=name==%22a..b%22").as_deref(),
+            Some("http://gw:8080/api/endpoint/ep1/ngsi-ld/v1/entities?q=name==%22a..b%22"),
+            "dots in the query are data, not a path"
+        );
+    }
 }

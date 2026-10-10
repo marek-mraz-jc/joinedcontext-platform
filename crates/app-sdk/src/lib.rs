@@ -30,6 +30,7 @@ wit_bindgen::generate!({
 #[doc(hidden)]
 pub use wasip2 as __wasip2;
 
+pub mod gateway;
 pub mod http;
 
 /// The App's own Postgres schema, through bound parameters only (AP-144).

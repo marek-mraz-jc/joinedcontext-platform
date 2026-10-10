@@ -99,6 +99,7 @@ impl World {
             id: format!("{name}-id"),
             tenant: "helsinki".into(),
             digest,
+            endpoint: Some("ep1".into()),
             jobs: Vec::new(),
         }
     }
@@ -239,7 +240,7 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     let (_, answer) = world
         .get(
             &app,
-            &format!("/api/fetch?{}/ngsi-ld/v1/entities", gateway.uri()),
+            "/api/fetch?http://gateway/ngsi-ld/v1/entities?type=Alert",
             Some("tok-1"),
         )
         .await
@@ -247,6 +248,12 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     assert_eq!(answer, "status 200");
     let seen = gateway.received_requests().await.unwrap_or_default();
     assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].url.path(),
+        "/api/endpoint/ep1/ngsi-ld/v1/entities",
+        "the App's own Endpoint and no other"
+    );
+    assert_eq!(seen[0].url.query(), Some("type=Alert"));
     assert_eq!(
         seen[0]
             .headers
@@ -256,6 +263,21 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     );
     assert!(seen[0].headers.get("cookie").is_none());
 
+    for path in [
+        format!(
+            "/api/fetch?{}/api/endpoint/ep1/ngsi-ld/v1/entities",
+            gateway.uri()
+        ),
+        "/api/fetch?http://gateway/ngsi-ld/v1/../../other/ngsi-ld/v1/entities".to_owned(),
+    ] {
+        let (_, answer) = world.get(&app, &path, Some("tok-1")).await.unwrap();
+        assert!(answer.starts_with("refused"), "{path}: {answer}");
+    }
+    assert_eq!(
+        gateway.received_requests().await.unwrap_or_default().len(),
+        1,
+        "the gateway's own address and a step out of the Endpoint are refused"
+    );
     let (_, answer) = world
         .get(
             &app,
@@ -295,7 +317,7 @@ async fn a_slow_gateway_call_ends_with_the_requests_wall_time() {
     let world = World::new("slow", fast(), Some(&gateway.uri()));
     let app = world.place("waiter", guest());
     let started = Instant::now();
-    let path = format!("/api/fetch?{}/x", gateway.uri());
+    let path = "/api/fetch?http://gateway/ngsi-ld/v1/entities".to_owned();
     assert_eq!(
         world.get(&app, &path, None).await.unwrap_err(),
         Failure::Timeout

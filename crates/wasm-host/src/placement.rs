@@ -19,6 +19,10 @@ pub struct Placed {
     pub tenant: String,
     /// `sha256:<64 hex>` of the component its build recorded.
     pub digest: String,
+    /// The slug of the App's own Endpoint, the one gateway path its outgoing HTTP reaches
+    /// (`/api/endpoint/<slug>/ngsi-ld/v1/…`, AP-147); without one, every outgoing call is refused.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// Its scheduled jobs, `spec.server.jobs[]` as the reconciler checked them (AP-154).
     #[serde(default)]
     pub jobs: Vec<PlacedJob>,
@@ -63,6 +67,15 @@ pub fn is_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// An Endpoint's slug: lowercase letters and digits, 1 to 64 of them (the gateway's own rule).
+pub fn is_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 64
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
 /// `sha256:` and 64 lowercase hex digits.
 pub fn is_digest(digest: &str) -> bool {
     digest.strip_prefix("sha256:").is_some_and(|hex| {
@@ -94,6 +107,12 @@ impl Placement {
             if !is_digest(&app.digest) {
                 return Err(format!(
                     "the placement of `{}`: the digest is not sha256:<64 hex>",
+                    app.name
+                ));
+            }
+            if app.endpoint.as_deref().is_some_and(|slug| !is_slug(slug)) {
+                return Err(format!(
+                    "the placement of `{}`: an endpoint is 1 to 64 lowercase letters and digits",
                     app.name
                 ));
             }
@@ -135,6 +154,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(apps["notes"].id, "a1");
+        assert_eq!(apps["notes"].endpoint, None);
+    }
+
+    #[test]
+    fn an_endpoint_is_a_slug_or_the_file_is_refused() {
+        let with = |slug: &str| {
+            file(&format!(
+                r#"{{"name": "notes", "id": "a1", "tenant": "t", "digest": "{D}", "endpoint": "{slug}"}}"#
+            ))
+        };
+        let apps = Placement::parse(&with("ab12"), "s1").unwrap();
+        assert_eq!(apps["notes"].endpoint.as_deref(), Some("ab12"));
+        for bad in ["", "AB", "a-b", "a/b", "../x", "a%2f", &"a".repeat(65)] {
+            assert!(Placement::parse(&with(bad), "s1").is_err(), "{bad}");
+        }
     }
 
     #[test]

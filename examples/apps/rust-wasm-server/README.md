@@ -48,6 +48,9 @@ notes.
 - `jc_app_sdk::sql::query` and `execute`, with bound parameters. `objects` and `rows::<T>` read
   rows as JSON objects or as your own types. A `numeric` column is cast in the query
   (`::float8`, `::text`), and a `null` parameter binds as text (`$1::int` where the column is not).
+- `jc_app_sdk::gateway::get("/ngsi-ld/v1/entities?type=…")`: the App's own Endpoint, read with
+  the caller's token. The host sends `http://gateway/ngsi-ld/v1/…` there and refuses every other
+  origin and path, so the App names neither the gateway nor another Endpoint (AP-147).
 - `jc_app_sdk::blob`: `get`, `put`, `list`, `delete` and `presign`, with keys relative to the
   App's own prefix. A key with `..` or a leading `/` is refused.
 
