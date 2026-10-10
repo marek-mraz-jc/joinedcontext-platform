@@ -68,14 +68,20 @@ struct GatewayOnly {
     response_bytes: usize,
 }
 
+/// The origin a component calls the gateway by: it has no environment to learn the real one
+/// (AP-147).
+pub const GATEWAY_ALIAS: &str = "gateway";
+
 impl GatewayOnly {
-    fn allows(&self, uri: &http::Uri) -> bool {
-        match (&self.gateway, uri.scheme_str(), uri.authority()) {
-            (Some((scheme, authority)), Some(s), Some(a)) => {
-                s == scheme && a.as_str().eq_ignore_ascii_case(authority)
-            }
-            _ => false,
-        }
+    /// The URL a call goes to: the configured gateway itself, or `http://gateway` sent there;
+    /// `None` for any other origin.
+    fn target(&self, uri: &http::Uri) -> Option<String> {
+        let (scheme, authority) = self.gateway.as_ref()?;
+        let (s, a) = (uri.scheme_str()?, uri.authority()?.as_str());
+        let path = uri.path_and_query().map_or("/", |p| p.as_str());
+        let direct = s == scheme && a.eq_ignore_ascii_case(authority);
+        let alias = s == "http" && a.eq_ignore_ascii_case(GATEWAY_ALIAS);
+        (direct || alias).then(|| format!("{scheme}://{authority}{path}"))
     }
 }
 
@@ -100,10 +106,10 @@ impl WasiHttpHooks for GatewayOnly {
             > + Send,
     > {
         _ = fut;
-        if !self.allows(request.uri()) {
+        let Some(target) = self.target(request.uri()) else {
             tracing::warn!(to = %request.uri().authority().map(|a| a.as_str()).unwrap_or(""), "outgoing request refused: only the gateway is reachable");
             return Box::new(async { Err(wasmtime_wasi_http::Error::HttpRequestDenied) });
-        }
+        };
         let client = self.client.clone();
         let token = self.token.clone();
         let cap = self.response_bytes;
@@ -119,7 +125,7 @@ impl WasiHttpHooks for GatewayOnly {
             headers.remove(http::header::COOKIE);
             headers.remove(http::header::HOST);
             let mut call = client
-                .request(parts.method, parts.uri.to_string())
+                .request(parts.method, target)
                 .headers(headers)
                 .body(body);
             if let Some(token) = token {

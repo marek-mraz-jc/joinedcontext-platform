@@ -50,6 +50,10 @@ notes.
   (`::float8`, `::text`), and a `null` parameter binds as text (`$1::int` where the column is not).
 - `jc_app_sdk::blob`: `get`, `put`, `list`, `delete` and `presign`, with keys relative to the
   App's own prefix. A key with `..` or a leading `/` is refused.
+- `jc_app_sdk::gateway`: `get` and `get_json` of a gateway path such as
+  `/api/endpoint/{slug}/ngsi-ld/v1/entities?type=…`, as the caller: the host adds the caller's
+  token and sends `http://gateway` to the gateway it runs with. A `401` or `403` passes through to
+  the caller as `Response::from(err)`; anything else the gateway answers is a `502`.
 
 ## What the host refuses
 

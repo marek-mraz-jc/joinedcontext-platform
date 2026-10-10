@@ -284,6 +284,64 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     );
 }
 
+/// AP-147: a component has no environment, so it calls the gateway as `http://gateway` and the
+/// host sends the call to the gateway it is configured with; a look-alike origin goes nowhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_gateway_alias_reaches_the_configured_gateway_alone() {
+    let gateway = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&gateway)
+        .await;
+    let world = World::new("alias", Limits::default(), Some(&gateway.uri()));
+    let app = world.place("aliased", guest());
+
+    let (_, answer) = world
+        .get(
+            &app,
+            "/api/fetch?http://gateway/ngsi-ld/v1/entities?type=Road",
+            Some("tok-2"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer, "status 200");
+    let seen = gateway.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].url.path(), "/ngsi-ld/v1/entities");
+    assert_eq!(seen[0].url.query(), Some("type=Road"));
+    assert_eq!(
+        seen[0]
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap_or("")),
+        Some("Bearer tok-2")
+    );
+
+    for origin in [
+        "https://gateway",
+        "http://gateway.evil",
+        "http://gateway:9999",
+    ] {
+        let (_, answer) = world
+            .get(&app, &format!("/api/fetch?{origin}/x"), None)
+            .await
+            .unwrap();
+        assert!(answer.starts_with("refused"), "{origin}: {answer}");
+    }
+    assert_eq!(
+        gateway.received_requests().await.unwrap_or_default().len(),
+        1
+    );
+
+    let unconfigured = World::new("alias-none", Limits::default(), None);
+    let app = unconfigured.place("aliased", guest());
+    let (_, answer) = unconfigured
+        .get(&app, "/api/fetch?http://gateway/x", None)
+        .await
+        .unwrap();
+    assert!(answer.starts_with("refused"), "{answer}");
+}
+
 /// T-3342: the wall time holds while the App waits on the host, not only while it computes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_gateway_call_ends_with_the_requests_wall_time() {
