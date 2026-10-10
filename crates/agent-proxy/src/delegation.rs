@@ -117,14 +117,12 @@ impl Grants {
     }
 
     async fn introspect(&self, token: &str) -> Result<Introspection, String> {
+        let mut form = self.config.client_auth()?;
+        form.push(("token", token.to_owned()));
         let response = self
             .http
             .post(self.config.introspection_url())
-            .form(&[
-                ("client_id", self.config.oidc_client_id.as_str()),
-                ("client_secret", self.config.oidc_client_secret.as_str()),
-                ("token", token),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|e| e.without_url().to_string())?;
@@ -184,18 +182,18 @@ impl Grants {
             return Err(BindError::NotTheRunsPerson);
         }
 
+        let mut form = self.config.client_auth().map_err(BindError::Transport)?;
+        form.extend([
+            ("grant_type", TOKEN_EXCHANGE.to_owned()),
+            ("subject_token", subject_token.to_owned()),
+            ("subject_token_type", ACCESS_TOKEN_TYPE.to_owned()),
+            ("requested_token_type", REFRESH_TOKEN_TYPE.to_owned()),
+            ("audience", GATEWAY_AUDIENCE.to_owned()),
+        ]);
         let response = self
             .http
             .post(self.config.token_url())
-            .form(&[
-                ("grant_type", TOKEN_EXCHANGE),
-                ("client_id", self.config.oidc_client_id.as_str()),
-                ("client_secret", self.config.oidc_client_secret.as_str()),
-                ("subject_token", subject_token),
-                ("subject_token_type", ACCESS_TOKEN_TYPE),
-                ("requested_token_type", REFRESH_TOKEN_TYPE),
-                ("audience", GATEWAY_AUDIENCE),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|e| BindError::Transport(e.without_url().to_string()))?;
@@ -248,15 +246,15 @@ impl Grants {
             return Ok(grant.access.clone());
         }
 
+        let mut form = self.config.client_auth().map_err(GrantError::Transport)?;
+        form.extend([
+            ("grant_type", "refresh_token".to_owned()),
+            ("refresh_token", grant.refresh.clone()),
+        ]);
         let response = self
             .http
             .post(self.config.token_url())
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("client_id", self.config.oidc_client_id.as_str()),
-                ("client_secret", self.config.oidc_client_secret.as_str()),
-                ("refresh_token", grant.refresh.as_str()),
-            ])
+            .form(&form)
             .send()
             .await
             .map_err(|e| GrantError::Transport(e.without_url().to_string()))?;
@@ -293,15 +291,21 @@ impl Grants {
     }
 
     async fn revoke(&self, run_id: &str, refresh: &str) {
+        let mut form = match self.config.client_auth() {
+            Ok(form) => form,
+            Err(error) => {
+                tracing::warn!(run = %run_id, %error, "the run's grant could not be revoked");
+                return;
+            }
+        };
+        form.extend([
+            ("token", refresh.to_owned()),
+            ("token_type_hint", "refresh_token".to_owned()),
+        ]);
         let sent = self
             .http
             .post(self.config.revocation_url())
-            .form(&[
-                ("client_id", self.config.oidc_client_id.as_str()),
-                ("client_secret", self.config.oidc_client_secret.as_str()),
-                ("token", refresh),
-                ("token_type_hint", "refresh_token"),
-            ])
+            .form(&form)
             .send()
             .await;
         match sent {

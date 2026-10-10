@@ -36,6 +36,11 @@ pub struct Config {
     /// startup failure rather than a proxy that presents no credential (see
     /// `Config::require_secrets`).
     pub oidc_client_secret: String,
+    /// The pod's projected ServiceAccount token (`JC_OIDC_CLIENT_ASSERTION_FILE`), presented as
+    /// `client_assertion` to a `federated-jwt` client in place of a secret (PF-47, T-2868). Read
+    /// at every call, because the kubelet rewrites the file before the token expires; set beside
+    /// a secret it is a startup failure.
+    pub oidc_client_assertion_file: Option<PathBuf>,
     /// The forge token the proxy writes a run's branch with, read from the file named by
     /// `JC_FORGE_TOKEN_FILE` or from `JC_FORGE_TOKEN`. A secret, on the same terms as
     /// `oidc_client_secret`.
@@ -99,6 +104,10 @@ impl std::fmt::Debug for Config {
             .field("oidc_issuer", &self.oidc_issuer.as_str())
             .field("oidc_client_id", &self.oidc_client_id)
             .field("oidc_client_secret", &"[redacted]")
+            .field(
+                "oidc_client_assertion_file",
+                &self.oidc_client_assertion_file,
+            )
             .field("forge_token", &"[redacted]")
             .field("model_base", &self.model_base.as_str())
             .field("model_key", &"[redacted]")
@@ -122,6 +131,12 @@ pub enum ConfigError {
     InvalidUrl { var: &'static str, reason: String },
     #[error("invalid address for {var}: {reason}")]
     InvalidAddr { var: &'static str, reason: String },
+    #[error("{var} and {other} are both set: {reason}")]
+    Conflict {
+        var: &'static str,
+        other: &'static str,
+        reason: &'static str,
+    },
     #[error("invalid number for {var}: {reason}")]
     InvalidNumber { var: &'static str, reason: String },
     #[error("failed to read secret file {path:?}: {source}")]
@@ -139,8 +154,10 @@ impl Config {
     /// credential at all, which is a silent downgrade rather than an outage, so it is a startup
     /// failure instead (AG-35).
     pub fn require_secrets(&self) -> Result<(), ConfigError> {
+        if self.oidc_client_secret.is_empty() && self.oidc_client_assertion_file.is_none() {
+            return Err(ConfigError::Missing("JC_OIDC_CLIENT_ASSERTION_FILE"));
+        }
         for (value, var) in [
-            (&self.oidc_client_secret, "JC_OIDC_CLIENT_SECRET_FILE"),
             (&self.forge_token, "JC_FORGE_TOKEN_FILE"),
             (&self.model_key, "JC_MODEL_KEY_FILE"),
         ] {
@@ -203,6 +220,17 @@ impl Config {
             "JC_OIDC_CLIENT_SECRET",
         )?;
 
+        let oidc_client_assertion_file = lookup("JC_OIDC_CLIENT_ASSERTION_FILE")
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from);
+        if oidc_client_assertion_file.is_some() && !oidc_client_secret.is_empty() {
+            return Err(ConfigError::Conflict {
+                var: "JC_OIDC_CLIENT_ASSERTION_FILE",
+                other: "JC_OIDC_CLIENT_SECRET",
+                reason: "a federated client holds no secret beside it",
+            });
+        }
+
         let forge_token = read_secret(&lookup, "JC_FORGE_TOKEN_FILE", "JC_FORGE_TOKEN")?;
 
         let model_base =
@@ -261,6 +289,7 @@ impl Config {
             oidc_issuer,
             oidc_client_id,
             oidc_client_secret,
+            oidc_client_assertion_file,
             forge_token,
             model_base,
             model_key,
@@ -274,6 +303,40 @@ impl Config {
 }
 
 impl Config {
+    /// How this proxy proves its own client in a request to the realm: the projected token as
+    /// `client_assertion` and no `client_id` (Keycloak finds a `federated-jwt` client by the
+    /// token's subject and refuses one named beside it), else the id and the secret.
+    pub fn client_auth(&self) -> Result<Vec<(&'static str, String)>, String> {
+        let Some(path) = &self.oidc_client_assertion_file else {
+            return Ok(vec![
+                ("client_id", self.oidc_client_id.clone()),
+                ("client_secret", self.oidc_client_secret.clone()),
+            ]);
+        };
+        let token = std::fs::read_to_string(path).map_err(|e| {
+            format!(
+                "the projected token {} is not readable: {e}",
+                path.display()
+            )
+        })?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(format!("the projected token {} is empty", path.display()));
+        }
+        Ok(vec![
+            (
+                "client_assertion_type",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_owned(),
+            ),
+            ("client_assertion", token.to_owned()),
+        ])
+    }
+
+    /// Whether the proxy holds any credential for its client.
+    pub fn has_client_credential(&self) -> bool {
+        !self.oidc_client_secret.is_empty() || self.oidc_client_assertion_file.is_some()
+    }
+
     /// The realm's token endpoint: what the deployment named, else the issuer's own.
     pub fn token_url(&self) -> String {
         if let Some(url) = &self.oidc_token_url {

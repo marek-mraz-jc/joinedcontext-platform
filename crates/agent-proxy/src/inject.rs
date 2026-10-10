@@ -47,18 +47,15 @@ impl CredentialManager {
         // The suites' stub: compiled only with `test-stub`, which the image never builds with, and
         // a binary that has it refuses to start (see `main`), T-1480.
         #[cfg(feature = "test-stub")]
-        if self.config.oidc_client_secret.is_empty() {
+        if !self.config.has_client_credential() {
             return Ok(format!("mock-token-for-{endpoint_slug}"));
         }
 
         let token_url = self.config.token_url();
 
-        let params = [
-            ("grant_type", "client_credentials"),
-            ("client_id", &self.config.oidc_client_id),
-            ("client_secret", &self.config.oidc_client_secret),
-            ("audience", endpoint_slug),
-        ];
+        let mut params = self.config.client_auth()?;
+        params.push(("grant_type", "client_credentials".to_owned()));
+        params.push(("audience", endpoint_slug.to_owned()));
 
         let resp = self
             .http
@@ -98,7 +95,7 @@ impl CredentialManager {
     ) -> Result<String, crate::delegation::GrantError> {
         // The suites' stub, on the terms of `get_endpoint_token` (T-1480).
         #[cfg(feature = "test-stub")]
-        if self.config.oidc_client_secret.is_empty() {
+        if !self.config.has_client_credential() {
             return Ok(format!("mock-token-for-run-{run_id}"));
         }
         self.grants.token(run_id).await
