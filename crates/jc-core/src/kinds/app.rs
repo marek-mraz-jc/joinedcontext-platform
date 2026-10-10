@@ -148,6 +148,25 @@ pub enum AppVisibility {
     Roles,
 }
 
+/// A platform service an App uses (AP-160, ADR-N-045): the closed set, so a name outside it is
+/// refused like any unknown field, with the six it may be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppService {
+    /// Who is signed in and what they may do; every App's (AP-161).
+    Identity,
+    /// The App's Endpoint; every App's (AP-161).
+    Data,
+    /// Objects under the App's own storage prefix (AP-170).
+    Files,
+    /// A message to people of the organization (AP-168).
+    Email,
+    /// The schedules of a `wasm` App, `spec.server.jobs[]` (AP-162).
+    Jobs,
+    /// A completion from a model of the organization's (AP-169).
+    Ai,
+}
+
 /// Lifecycle state of an app (AP-18, AP-19, AP-20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -698,6 +717,9 @@ pub struct AppSpec {
     /// What a `wasm` App's server part runs on a schedule (AP-154).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<AppServer>,
+    /// The platform services the App uses beyond identity and data, each once (AP-160).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<AppService>,
 }
 
 /// The most jobs one App declares (AP-154).
@@ -1176,6 +1198,7 @@ impl AppSpec {
             }
             server.validate()?;
         }
+        self.validate_services()?;
 
         if self.lifecycle == AppLifecycle::Published && self.visibility == AppVisibility::Private {
             return Err(Error::Name {
@@ -1185,6 +1208,29 @@ impl AppSpec {
             });
         }
 
+        Ok(())
+    }
+
+    /// Each service once, and `jobs` only beside the jobs it names (AP-160, AP-162).
+    fn validate_services(&self) -> Result<()> {
+        for (i, service) in self.services.iter().enumerate() {
+            if self.services[..i].contains(service) {
+                return Err(Error::Name {
+                    field: "services",
+                    value: format!("{service:?}").to_lowercase(),
+                    reason: "a service is listed once (AP-160)",
+                });
+            }
+        }
+        let has_jobs = self.server.as_ref().is_some_and(|s| !s.jobs.is_empty());
+        if self.services.contains(&AppService::Jobs) && !has_jobs {
+            return Err(Error::Name {
+                field: "services",
+                value: "jobs".to_string(),
+                reason: "the jobs service is the jobs a wasm app declares: add them under \
+                         spec.server.jobs, or remove jobs from spec.services (AP-162)",
+            });
+        }
         Ok(())
     }
 
