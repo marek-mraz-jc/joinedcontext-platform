@@ -176,6 +176,36 @@ async fn a_refusal_is_rendered_the_way_an_ngsi_ld_client_reads_one() {
     assert!(problem["detail"].is_string(), "clause 6.3.3 wants one");
 }
 
+/// T-3606: Set Attribute Value (CIM 009 10.2.6) is not offered through an Endpoint: its body is
+/// a bare value the grant, unit and relationship checks cannot judge as an Attribute, so the
+/// gateway names the operation it does not support and the write that does the same, rather
+/// than answering as if the path were not there.
+#[tokio::test]
+async fn set_attribute_value_is_refused_by_name_with_the_write_that_does_the_same() {
+    let request = Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/endpoint/{OPEN}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved:a/attrs/pm10/value"
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from("12.5"))
+        .expect("a request");
+    let (status, media, body) = call(request).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(media, "application/json");
+    let problem: Value = serde_json::from_str(&body).expect("a JSON document");
+    assert_eq!(
+        problem["type"],
+        json!("https://uri.etsi.org/ngsi-ld/errors/OperationNotSupported")
+    );
+    assert!(
+        problem["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("PATCH") && detail.contains("/attrs/pm10")),
+        "{body}"
+    );
+}
+
 /// EP-03: every spelling of a slug that is not a slug is the same refusal. A slug is opaque,
 /// so nothing about it is normalised — an upper-cased or percent-encoded one is simply another
 /// name nothing answers to, and none of them is treated as the endpoint it resembles.
