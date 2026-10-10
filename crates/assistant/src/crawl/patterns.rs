@@ -12,7 +12,14 @@
 /// a pattern with several `*` or `**` backtrack exponentially: the work is at most
 /// `pattern.len() × path.len()`, and both are bounded (patterns by MF-51, paths by the URL).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
+    matched(pattern, path).0
+}
+
+/// The match and the cells it visited: one per path position per pattern step, so the work is
+/// bounded by `(pattern + 1) * (path + 1)` whatever the input (no backtracking).
+fn matched(pattern: &str, path: &str) -> (bool, usize) {
     let (p, s) = (pattern.as_bytes(), path.as_bytes());
+    let mut visited = 0;
     // `reach[j]`: the pattern consumed so far matches `s[..j]`.
     let mut reach = vec![false; s.len() + 1];
     reach[0] = true;
@@ -39,9 +46,10 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
             }
             i += 1;
         }
+        visited += next.len();
         reach = next;
     }
-    reach[s.len()]
+    (reach[s.len()], visited)
 }
 
 /// Checks whether a given path is included based on include and exclude patterns.
@@ -102,15 +110,15 @@ mod tests {
     fn a_hostile_path_cannot_make_a_pattern_backtrack() {
         // Twelve `**` against a long path of one letter: exponential for a backtracking matcher,
         // a few hundred thousand steps here.
+        // Counted, not timed (T-3538): the cells visited stay within the table's size.
         let pattern = format!("/{}b", "**a".repeat(12));
         let path = format!("/{}", "a".repeat(4_000));
-        let started = std::time::Instant::now();
-        assert!(!glob_match(&pattern, &path));
-        assert!(glob_match(&pattern, &format!("{path}b")));
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
+        let bound = (pattern.len() + 1) * (path.len() + 2);
+        let (hit, visited) = matched(&pattern, &path);
+        assert!(!hit);
+        assert!(visited <= bound, "{visited} cells for a {bound}-cell table");
+        let (hit, visited) = matched(&pattern, &format!("{path}b"));
+        assert!(hit);
+        assert!(visited <= bound, "{visited} cells for a {bound}-cell table");
     }
 }

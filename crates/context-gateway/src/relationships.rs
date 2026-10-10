@@ -848,10 +848,13 @@ mod tests {
         assert_eq!(first_missing(&targets, &all), None);
     }
 
+    /// The cost of the check is the targets it hands the gateway to look up, one broker read
+    /// each: a batch of ten thousand entities naming the same school and course is two
+    /// lookups, however large the batch (T-3538: counted, not timed).
     #[test]
-    fn a_batch_of_a_hundred_is_checked_in_under_five_milliseconds_at_p95() {
+    fn a_batch_names_each_target_once_however_many_entities_point_at_it() {
         let batch = Value::Array(
-            (0..100)
+            (0..10_000)
                 .map(|n| {
                     json!({ "id": format!("urn:ngsi-ld:User:hel.fi:schools:u{n}"), "type": "User",
                         "school": { "type": "Relationship", "object": SCHOOL },
@@ -860,18 +863,11 @@ mod tests {
                 })
                 .collect(),
         );
-        let rules = rules();
-        let mut took: Vec<std::time::Duration> = (0..50)
-            .map(|_| {
-                let started = std::time::Instant::now();
-                let targets = targets_of(&batch, whole(), &rules).expect("well formed");
-                assert_eq!(targets.len(), 2);
-                started.elapsed()
-            })
-            .collect();
-        took.sort();
-        let p95 = took[took.len() * 95 / 100];
-        assert!(p95 < std::time::Duration::from_millis(5), "p95 {p95:?}");
+        let targets = targets_of(&batch, whole(), &rules()).expect("well formed");
+        assert_eq!(
+            targets.keys().map(String::as_str).collect::<Vec<_>>(),
+            [COURSE, SCHOOL]
+        );
     }
 
     // --- target-taken and the delete rules (T-2858) ------------------------------------------
