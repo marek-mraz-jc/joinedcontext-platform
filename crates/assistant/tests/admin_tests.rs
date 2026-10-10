@@ -131,7 +131,7 @@ async fn world(test: &str) -> World {
                 proxy: "http://127.0.0.1:9".into(),
                 token_url: format!("{realm_uri}/token"),
                 client_id: "jc-assistant".into(),
-                client_secret: "s3cret".into(),
+                credential: jc_core::ClientCredential::Secret(jc_core::Secret::new("s3cret")),
                 model: "test/model".into(),
             },
             http.clone(),

@@ -270,32 +270,8 @@ impl WorkloadToken {
             #[serde(default)]
             expires_in: u64,
         }
-        let mut form = vec![("grant_type", "client_credentials".to_owned())];
-        match &self.credential {
-            crate::config::Credential::Secret(secret) => {
-                form.push(("client_id", self.client_id.clone()));
-                form.push(("client_secret", secret.expose().to_owned()));
-            }
-            // A `federated-jwt` client is found by the token's subject, and Keycloak refuses a
-            // grant that names a `client_id` beside it.
-            crate::config::Credential::Assertion(path) => {
-                let assertion = std::fs::read_to_string(path).map_err(|error| {
-                    format!(
-                        "the projected token {} is not readable: {error}",
-                        path.display()
-                    )
-                })?;
-                let assertion = assertion.trim();
-                if assertion.is_empty() {
-                    return Err(format!("the projected token {} is empty", path.display()));
-                }
-                form.push((
-                    "client_assertion_type",
-                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_owned(),
-                ));
-                form.push(("client_assertion", assertion.to_owned()));
-            }
-        }
+        let mut form = self.credential.form(&self.client_id)?;
+        form.push(("grant_type", "client_credentials".to_owned()));
         let answer = self
             .http
             .post(&self.token_url)

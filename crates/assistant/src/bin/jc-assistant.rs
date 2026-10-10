@@ -9,6 +9,7 @@
 //! `0.0.0.0:8080`), `HOSTNAME` (the worker's name in the queue), and for the chat:
 //! `JC_ASSISTANT_PROXY_URL` (`jc-agent-proxy`), `JC_ASSISTANT_GATEWAY_URL` (the connectors' MCP
 //! surfaces), `JC_ASSISTANT_TOKEN_URL`, `JC_ASSISTANT_CLIENT_ID` (default `jc-assistant`) and
+//! `JC_ASSISTANT_CLIENT_ASSERTION_FILE` (the pod's projected token, PF-47) or
 //! `JC_ASSISTANT_CLIENT_SECRET_FILE` (the service's own Keycloak client), `JC_ASSISTANT_LLM` (the
 //! model the completions name) and `JC_ASSISTANT_FUNCTIONS_URL` (`jc-functions`, for the scripts
 //! of a deployment with `sandbox: true`; none without it) and `JC_ASSISTANT_PORTAL_CLIENT` (the
@@ -29,6 +30,7 @@ use assistant::chat::{self, ChatState};
 use assistant::crawl::Crawler;
 use assistant::embed::{embed_missing, Embedder};
 use assistant::worker::{self, checkout_from_env};
+use jc_core::ClientCredential;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -102,15 +104,36 @@ async fn main() -> ExitCode {
         Ok(value.trim_end_matches('/').to_owned())
     };
     let chat_config = (|| -> Result<(String, ModelConfig), String> {
-        let secret_file = env("JC_ASSISTANT_CLIENT_SECRET_FILE")
-            .ok_or("JC_ASSISTANT_CLIENT_SECRET_FILE is required")?;
-        let client_secret = std::fs::read_to_string(&secret_file)
-            .map_err(|err| format!("JC_ASSISTANT_CLIENT_SECRET_FILE could not be read: {err}"))?
-            .trim()
-            .to_owned();
-        if client_secret.is_empty() {
-            return Err("JC_ASSISTANT_CLIENT_SECRET_FILE is empty".into());
-        }
+        let credential = match (
+            env("JC_ASSISTANT_CLIENT_ASSERTION_FILE"),
+            env("JC_ASSISTANT_CLIENT_SECRET_FILE"),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(
+                    "JC_ASSISTANT_CLIENT_ASSERTION_FILE and JC_ASSISTANT_CLIENT_SECRET_FILE \
+                            are both set; a federated client holds no secret beside it"
+                        .into(),
+                )
+            }
+            (Some(file), None) => ClientCredential::Assertion(file.into()),
+            (None, Some(secret_file)) => {
+                let client_secret = std::fs::read_to_string(&secret_file)
+                    .map_err(|err| {
+                        format!("JC_ASSISTANT_CLIENT_SECRET_FILE could not be read: {err}")
+                    })?
+                    .trim()
+                    .to_owned();
+                if client_secret.is_empty() {
+                    return Err("JC_ASSISTANT_CLIENT_SECRET_FILE is empty".into());
+                }
+                ClientCredential::Secret(jc_core::Secret::new(client_secret))
+            }
+            (None, None) => {
+                return Err("JC_ASSISTANT_CLIENT_ASSERTION_FILE or \
+                            JC_ASSISTANT_CLIENT_SECRET_FILE is required"
+                    .into())
+            }
+        };
         Ok((
             base("JC_ASSISTANT_GATEWAY_URL")?,
             ModelConfig {
@@ -118,7 +141,7 @@ async fn main() -> ExitCode {
                 token_url: env("JC_ASSISTANT_TOKEN_URL")
                     .ok_or("JC_ASSISTANT_TOKEN_URL is required")?,
                 client_id: env("JC_ASSISTANT_CLIENT_ID").unwrap_or_else(|| "jc-assistant".into()),
-                client_secret,
+                credential,
                 model: env("JC_ASSISTANT_LLM").ok_or("JC_ASSISTANT_LLM is required")?,
             },
         ))

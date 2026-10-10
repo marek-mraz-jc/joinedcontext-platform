@@ -307,29 +307,13 @@ impl Config {
     /// `client_assertion` and no `client_id` (Keycloak finds a `federated-jwt` client by the
     /// token's subject and refuses one named beside it), else the id and the secret.
     pub fn client_auth(&self) -> Result<Vec<(&'static str, String)>, String> {
-        let Some(path) = &self.oidc_client_assertion_file else {
-            return Ok(vec![
-                ("client_id", self.oidc_client_id.clone()),
-                ("client_secret", self.oidc_client_secret.clone()),
-            ]);
-        };
-        let token = std::fs::read_to_string(path).map_err(|e| {
-            format!(
-                "the projected token {} is not readable: {e}",
-                path.display()
-            )
-        })?;
-        let token = token.trim();
-        if token.is_empty() {
-            return Err(format!("the projected token {} is empty", path.display()));
+        match &self.oidc_client_assertion_file {
+            Some(path) => jc_core::ClientCredential::Assertion(path.clone()),
+            None => jc_core::ClientCredential::Secret(jc_core::Secret::new(
+                self.oidc_client_secret.clone(),
+            )),
         }
-        Ok(vec![
-            (
-                "client_assertion_type",
-                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_owned(),
-            ),
-            ("client_assertion", token.to_owned()),
-        ])
+        .form(&self.oidc_client_id)
     }
 
     /// Whether the proxy holds any credential for its client.

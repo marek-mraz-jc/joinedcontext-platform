@@ -8,16 +8,9 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-/// How the gateway proves its own Keycloak client.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Credential {
-    /// A client secret (`JC_OIDC_CLIENT_SECRET`).
-    Secret(jc_core::Secret),
-    /// The pod's projected ServiceAccount token, presented as `client_assertion` to a
-    /// `federated-jwt` client (`JC_OIDC_CLIENT_ASSERTION_FILE`, PF-47). Read at every grant,
-    /// because the kubelet rewrites the file before the token expires.
-    Assertion(PathBuf),
-}
+/// How the gateway proves its own Keycloak client (`JC_OIDC_CLIENT_SECRET` or
+/// `JC_OIDC_CLIENT_ASSERTION_FILE`, PF-47).
+pub use jc_core::ClientCredential as Credential;
 
 /// The gateway's runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]

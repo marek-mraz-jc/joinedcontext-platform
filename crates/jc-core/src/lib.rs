@@ -57,5 +57,5 @@ pub use kinds::{
     DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
-pub use secret::Secret;
+pub use secret::{ClientCredential, Secret};
 pub use urn::{apply_render_prefix, EntityRef, Prefixed, Urn};
