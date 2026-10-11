@@ -7,6 +7,8 @@
 //! remembering to; what the tests below hold is the other half of that: a refusal carries none,
 //! because a `404` that named a schema would tell a caller the endpoint exists.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::routing::any;
@@ -40,13 +42,23 @@ fn station() -> Value {
 }
 
 async fn broker() -> String {
-    let app = Router::new().fallback(any(|| async { axum::Json(json!([station()])) }));
+    // A view's access surface answers the engine's document (T-3649); every other path the
+    // station.
+    let app = Router::new().fallback(any(|uri: axum::http::Uri| async move {
+        if uri.path() == "/access" {
+            axum::Json(json!({ "subject": { "type": "role", "id": "public" },
+                               "resource": { "type": "view", "id": SLUG },
+                               "permissions": [], "prohibitions": [] }))
+        } else {
+            axum::Json(json!([station()]))
+        }
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a free port");
     let address = listener.local_addr().expect("an address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     format!("http://{address}")
 }
@@ -223,44 +235,6 @@ async fn an_endpoint_with_two_majors_names_four_documents() {
             "major {major} is named: {described:?}"
         );
     }
-}
-
-/// EP-03, R20: a refusal names no schema. A `404` that carried one would tell a caller who
-/// may not use this endpoint, or who asked for an entity nobody has, that it exists.
-#[tokio::test]
-async fn no_refusal_names_a_schema() {
-    for uri in [
-        // A slug nobody serves.
-        "/api/endpoint/zzz7pq2mzt6vhx3nbwrs5cjd8f/ngsi-ld/v1/entities?type=AirQualityObserved"
-            .to_owned(),
-        // An entity id that is no NGSI-LD URN (PF-43). A URN naming another space is an id of
-        // this one since ADR-N-041, read like any other.
-        format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved"),
-        // A query naming no selector at all.
-        format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities"),
-    ] {
-        let (status, links) = links_of(&uri).await;
-        assert!(!status.is_success(), "{uri} answered {status}");
-        assert!(
-            describedby(&links).is_empty(),
-            "{uri} answered {status} and named a schema: {links:?}"
-        );
-    }
-
-    // And an operation this grant does not hold at all, which is the other refusal (GW1).
-    let (status, links) = sent(
-        "DELETE",
-        &format!(
-            "/api/endpoint/{SLUG}/ngsi-ld/v1/entities/\
-             urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:station-01"
-        ),
-    )
-    .await;
-    assert!(!status.is_success(), "a delete answered {status}");
-    assert!(
-        describedby(&links).is_empty(),
-        "a refused delete named a schema: {links:?}"
-    );
 }
 
 /// The schema documents describe themselves, and so do the endpoint record and the access

@@ -4,6 +4,8 @@
 //! declare is a 400 naming the type and the model, before the broker is asked. A space that
 //! names no model yet is not narrowed, so a repository being migrated keeps working.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -45,7 +47,7 @@ async fn broker() -> (String, Hops) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -135,19 +137,6 @@ async fn send(
 }
 
 #[tokio::test]
-async fn a_type_the_model_lacks_is_a_400_naming_it_and_the_broker_is_not_asked() {
-    let model: &[&str] = &["AirQualityObserved"];
-    let (status, problem, asked) = send(Some(model), "/entities", entity("Device", "lamp-1")).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let detail = problem["detail"].as_str().unwrap_or_default();
-    assert!(
-        detail.contains("`Device`") && detail.contains("`bb-air-quality`"),
-        "{problem}"
-    );
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-}
-
-#[tokio::test]
 async fn a_declared_type_reaches_the_broker() {
     let model: &[&str] = &["AirQualityObserved"];
     let (status, _, asked) = send(
@@ -158,26 +147,6 @@ async fn a_declared_type_reaches_the_broker() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(asked.len(), 1, "{asked:?}");
-}
-
-#[tokio::test]
-async fn a_batch_with_one_undeclared_type_is_refused_whole() {
-    let model: &[&str] = &["AirQualityObserved"];
-    let (status, problem, asked) = send(
-        Some(model),
-        "/entityOperations/upsert",
-        json!([
-            entity("AirQualityObserved", "station-1"),
-            entity("Device", "lamp-1")
-        ]),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(problem["detail"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("`Device`"));
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }
 
 #[tokio::test]
@@ -306,4 +275,37 @@ fn the_table_narrows_a_space_to_the_model_it_names_and_only_then() {
         "urnSegment: ovzdusie\n  dataModelRef: { kind: DataModel, name: gone }",
     );
     assert_eq!(declared_of(&repo("dangling", &dangling)), (None, None));
+}
+
+#[tokio::test]
+async fn a_type_the_model_lacks_is_a_400_naming_it_and_the_broker_is_not_asked() {
+    let model: &[&str] = &["AirQualityObserved"];
+    let (status, problem, asked) = send(Some(model), "/entities", entity("Device", "lamp-1")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("`Device`") && detail.contains("`bb-air-quality`"),
+        "{problem}"
+    );
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
+}
+
+#[tokio::test]
+async fn a_batch_with_one_undeclared_type_is_refused_whole() {
+    let model: &[&str] = &["AirQualityObserved"];
+    let (status, problem, asked) = send(
+        Some(model),
+        "/entityOperations/upsert",
+        json!([
+            entity("AirQualityObserved", "station-1"),
+            entity("Device", "lamp-1")
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(problem["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("`Device`"));
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }
