@@ -30,3 +30,36 @@ egress-client | token_sidecar::run | reqwest::async_impl::client::Client::builde
 egress-client | wasm_host::bucket | reqwest::async_impl::client::Client::builder | the shard's object store at JC_WASM_S3_ENDPOINT, SigV4, no redirect
 egress-client | wasm_host::host::Host::new | reqwest::async_impl::client::Client::builder | an App's calls to the configured gateway and Portal: no redirect, 10 s
 egress-client | wasm_host::jobs::JobTokens::new | reqwest::async_impl::client::Client::builder | the token service at JC_WASM_JOB_TOKEN_URL: no redirect, 15 s
+
+process-spawn | jcctl::assemble::GitCheckouts::git | git clone/remote/rev-parse/checkout of a registry entry: the url is https without credentials or a DNS-1123 forge name (ProjectRepository::validate, called by read_registry before any checkout), so no argument starts with `-`; the slug is checked by project::registry_path; GIT_TERMINAL_PROMPT=0, GIT_CONFIG_NOSYSTEM=1; reached by the gateway and the assistant through assemble (T-3845)
+process-spawn | jcctl::commands::apply::revision_of | `git -C <dir> rev-parse HEAD` on the directory the operator's command names; no other argument
+process-spawn | jcctl::commands::git_bundle::git | the operator's export/import of an organization bundle on their machine; the arguments are the command's own literals and paths it creates
+process-spawn | jcctl::commands::migrate::git | the operator's `jcctl migrate` on their machine; literal git subcommands on the checkout it was given
+
+sql-from-text | assistant::chat::admin::sources | the text interpolates the UTC format constant only; project and source are bound or select the transaction's scope
+sql-from-text | assistant::chat::admin::pages | the text interpolates the UTC format constant only; site and parent are bound ($1, $2)
+sql-from-text | assistant::chat::admin::apply_inclusion | `reset` is one of two literals of the function; the ids are bound arrays
+sql-from-text | wasm_host::sql::PgStore::run | an App's own statement by design (AP-144): parsed by pg_query, one select/insert/update/delete/values, no refused function by name or quoted name, run as the App's role in its own schema with every value bound (T-3342, T-3364)
+
+fs-write-from-a-server | context_gateway::previews::Mirror::apply | a prefix of the ws-[a-z0-9-]- alphabet and relative paths of plain components with no leading dot (`inside`), written to a fresh staging directory then renamed
+fs-write-from-a-server | jcctl::assemble::GitCheckouts::checkout | under the configured cache: `{slug}.git` and `{slug}.tree-{commit}` with a validated slug and a commit git printed
+fs-write-from-a-server | jcctl::assemble::assemble | the configured output directory, replaced as a whole through a sibling staging directory
+fs-write-from-a-server | jcctl::assemble::copy_tree | relative paths from a walk of the checkout; a link that resolves out of the checkout is refused, any other is copied as the file it points to
+fs-write-from-a-server | jcctl::assemble::mount_project | rewrites manifests in place inside the tree copy_tree made, which holds no links
+fs-write-from-a-server | jcctl::assemble::remove | removes the output or staging directory assemble names, never a path from a manifest
+
+secret-exposed | context_gateway::config::Config::from_env | the delivery key's length is compared with the minimum; the value goes nowhere
+secret-exposed | context_gateway::main | the delivery key becomes the HMAC key of notification subjects
+secret-exposed | jc_core::secret::ClientCredential::form | the client secret goes into the token request's form body, to the configured token endpoint only
+secret-exposed | jcctl::assemble::GitCheckouts::git | the repository credential becomes git's http.extraHeader through GIT_CONFIG_* environment, never an argument (ps shows arguments)
+secret-exposed | jcctl::commands::publish_ckan::token | the CKAN token read from the operator's file is handed on as a SecretValue
+secret-exposed | jcctl::gateway::Gateway::said | the token is replaced by [redacted] in a gateway answer before the snippet reaches an error
+secret-exposed | jcctl::gateway::Gateway::entity | the bearer header of the request to the gateway
+secret-exposed | jcctl::gateway::Gateway::upsert | the bearer header of the request to the gateway
+secret-exposed | jcctl::login::write_token | written to a mode-600 staging file and renamed over the token file
+secret-exposed | jcctl::portal::Portal::send | the bearer header of the request to the Portal
+secret-exposed | jcctl::portal::Portal::refused | the token is replaced by [redacted] in the Portal's refusal before it is shown
+secret-exposed | jcctl::portal::Portal::json | the token is replaced by [redacted] in a Portal answer before the snippet reaches an error
+secret-exposed | jcctl::publish::ckan_http::HttpCkan::send | the Authorization header CKAN's API expects
+secret-exposed | jcctl::secrets::openbao::BaoStore::fetch | the OpenBao session token of the request's X-Vault-Token header
+secret-exposed | jcctl::secrets::sops::decrypt_document | the plaintext feeds the SOPS MAC, and the stored MAC is compared with the computed one; the Portal decrypts here too, and a timed comparison forges no value, since each value is its own authenticated AES-GCM ciphertext
