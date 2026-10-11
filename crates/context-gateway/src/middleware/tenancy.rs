@@ -8,9 +8,10 @@
 //! The stripping is unconditional and happens first, before routing, authentication or
 //! policy evaluation, so no later stage can accidentally read a client-supplied value.
 
+use crate::pdp::evaluator::Subject;
 use axum::extract::Request;
-use axum::http::header::InvalidHeaderValue;
-use axum::http::{HeaderName, HeaderValue};
+use axum::http::header::{InvalidHeaderValue, AUTHORIZATION, COOKIE};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 
 /// The header that pins the broker's tenant. Only the gateway ever sets it (GW20).
 pub const TENANT: HeaderName = HeaderName::from_static("ngsild-tenant");
@@ -24,7 +25,23 @@ pub const FORGEABLE: &[&str] = &[
     "x-allowed-scope-ids",
     "x-endpoint-slug",
     "x-consumer-identity",
+    "x-jc-subject",
+    "x-jc-groups",
+    "x-jc-roles",
+    "x-jc-client",
+    "x-jc-restricted",
 ];
+
+/// The user the gateway verified, as the broker's `joinedcontext` engine reads it (T-3641).
+pub const SUBJECT: HeaderName = HeaderName::from_static("x-jc-subject");
+/// The groups of the verified caller, comma separated.
+pub const GROUPS: HeaderName = HeaderName::from_static("x-jc-groups");
+/// The roles of the verified caller, comma separated; `public` for an anonymous one.
+pub const ROLES: HeaderName = HeaderName::from_static("x-jc-roles");
+/// The service account of the verified caller.
+pub const CLIENT: HeaderName = HeaderName::from_static("x-jc-client");
+/// `true` when the caller asked to be told about narrowing (O-3 (b), R22).
+pub const RESTRICTED: HeaderName = HeaderName::from_static("x-jc-restricted");
 
 /// Removes every header a client could use to forge identity or tenancy (EP-21, GW20).
 ///
@@ -47,4 +64,72 @@ pub fn pin_tenant(request: &mut Request, space: &str) -> Result<(), InvalidHeade
     let value = HeaderValue::from_str(space)?;
     request.headers_mut().insert(TENANT, value);
     Ok(())
+}
+
+/// Pins the tenant and the verified caller for the hop to the broker, and drops the caller's
+/// own credentials from it (T-3641, map G15, K36).
+///
+/// The broker is the audience of neither the caller's token nor their cookie. It decides on the
+/// `x-jc-*` headers instead, and reads a request carrying none of them as the cluster's own, so
+/// `x-jc-roles` is always set, to `public` at least for an anonymous caller. A list member
+/// holding a comma, or a value that is no legal header, is left out: the broker splits on
+/// commas, and leaving a name out only narrows what the caller holds.
+pub fn pin_caller(
+    request: &mut Request,
+    space: &str,
+    subject: &Subject,
+) -> Result<(), InvalidHeaderValue> {
+    pin_tenant(request, space)?;
+    let asked = super::response::asked_about_narrowing(request);
+    let headers = request.headers_mut();
+    for name in [
+        AUTHORIZATION,
+        COOKIE,
+        SUBJECT,
+        GROUPS,
+        ROLES,
+        CLIENT,
+        RESTRICTED,
+    ] {
+        while headers.remove(&name).is_some() {}
+    }
+    one(headers, SUBJECT, subject.user.as_deref());
+    one(headers, CLIENT, subject.service_account.as_deref());
+    list(headers, GROUPS, &subject.groups, false);
+    list(headers, ROLES, &subject.roles, true);
+    if asked {
+        headers.insert(RESTRICTED, HeaderValue::from_static("true"));
+    }
+    Ok(())
+}
+
+fn one(headers: &mut HeaderMap, name: HeaderName, value: Option<&str>) {
+    if let Some(value) = value.and_then(|v| HeaderValue::from_str(v).ok()) {
+        headers.insert(name, value);
+    }
+}
+
+fn list<'a>(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    members: impl IntoIterator<Item = &'a String>,
+    always: bool,
+) {
+    let joined = members
+        .into_iter()
+        .filter(|member| !member.is_empty() && !member.contains(','))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    match HeaderValue::from_str(&joined) {
+        Ok(value) if always || !joined.is_empty() => {
+            headers.insert(name, value);
+        }
+        // One member no header can carry drops the whole list; the roles still say the
+        // caller is a platform caller, and one holding nothing.
+        Err(_) if always => {
+            headers.insert(name, HeaderValue::from_static(""));
+        }
+        _ => {}
+    }
 }

@@ -933,7 +933,7 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
-    if let Err(problem) = tenancy::pin_tenant(&mut request, &endpoint.space) {
+    if let Err(problem) = tenancy::pin_caller(&mut request, &endpoint.space, &subject) {
         tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
         return ProblemDetails::internal().into_response();
     }
