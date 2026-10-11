@@ -443,7 +443,7 @@ fn delivery_of(stored: &Value) -> Option<(String, Vec<String>, Option<String>)> 
 }
 
 /// The target, the areas and the sealed subscriber of a routed notification endpoint.
-fn routed_parts(uri: &str) -> Option<(String, Vec<String>, Option<String>)> {
+pub(crate) fn routed_parts(uri: &str) -> Option<(String, Vec<String>, Option<String>)> {
     let (path, query) = uri.split_once('?')?;
     if !path.ends_with(EGRESS_PATH) {
         return None;
