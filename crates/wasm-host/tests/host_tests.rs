@@ -857,3 +857,77 @@ async fn an_anonymous_request_or_a_shard_without_a_portal_asks_nothing() {
         (200, "nobody".into())
     );
 }
+
+/// T-3857: every App's job records and the shard's counters answer on the admin port alone. The
+/// apps port, the one the edge reaches, answers `/jobs` and `/metrics` with a 404 whatever token
+/// the caller holds, and still serves the placed Apps; the admin port serves no App.
+#[tokio::test(flavor = "multi_thread")]
+async fn job_records_and_counters_answer_on_the_admin_port_alone() {
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+    use wasm_host::jobs::{HostRunner, Scheduler, WALL_TIME};
+    use wasm_host::metrics::Metrics;
+    use wasm_host::server::{Port, Shard};
+
+    let world = World::new("admin-port", Limits::default(), None);
+    let app = world.place("one", guest());
+    let shard = Arc::new(Shard {
+        id: "0".into(),
+        host: world.host.clone(),
+        apps: RwLock::new(HashMap::from([("one".to_owned(), app)])),
+        metrics: Metrics::new(20),
+        jobs: Arc::new(Scheduler::new(
+            HostRunner {
+                host: world.host.clone(),
+                tokens: None,
+            },
+            WALL_TIME,
+        )),
+    });
+    let bind = || tokio::net::TcpListener::bind("127.0.0.1:0");
+    let (apps, admin) = (bind().await.expect("apps"), bind().await.expect("admin"));
+    let apps_url = format!("http://{}", apps.local_addr().expect("addr"));
+    let admin_url = format!("http://{}", admin.local_addr().expect("addr"));
+    tokio::spawn(shard.clone().serve(apps, Port::Apps));
+    tokio::spawn(shard.clone().serve(admin, Port::Admin));
+    let http = reqwest::Client::new();
+    let get = |url: String, token: Option<&'static str>| {
+        let mut request = http.get(url);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        async move {
+            let answer = request.send().await.expect("answers");
+            (answer.status().as_u16(), answer.text().await.expect("body"))
+        }
+    };
+
+    for token in [None, Some("a-strangers-token"), Some("the-portals-token")] {
+        for path in ["/jobs", "/metrics", "/jobs/", "/apps/one/../../jobs"] {
+            let (status, body) = get(format!("{apps_url}{path}"), token).await;
+            assert_eq!(status, 404, "apps port {path} {token:?}");
+            assert!(!body.contains("\"jobs\""), "apps port {path}: {body}");
+        }
+    }
+    assert_eq!(
+        get(format!("{apps_url}/apps/one/api/hello"), None).await.0,
+        200
+    );
+    assert_eq!(get(format!("{apps_url}/healthz"), None).await.0, 200);
+
+    let (status, body) = get(format!("{admin_url}/jobs"), None).await;
+    assert_eq!(status, 200);
+    let records: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(records["jobs"].is_array(), "{records}");
+    let (status, body) = get(format!("{admin_url}/metrics"), None).await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("one"),
+        "the counters name the App served: {body}"
+    );
+    assert_eq!(get(format!("{admin_url}/healthz"), None).await.0, 200);
+    assert_eq!(
+        get(format!("{admin_url}/apps/one/api/hello"), None).await.0,
+        404
+    );
+}
