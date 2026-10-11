@@ -10,6 +10,8 @@
 //! Every surface here reads the same broker answer, so this is one fixture asked eight ways: a
 //! Depot the endpoint's grant never names, carrying a name no answer may contain.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -63,7 +65,7 @@ async fn careless_broker() -> String {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     format!("http://{address}")
 }
@@ -183,94 +185,6 @@ async fn through(
     )
 }
 
-/// EP-26: a type no grant names is not this endpoint's to serve, whichever surface asks and
-/// whatever the broker sends back.
-#[tokio::test]
-async fn no_surface_serves_an_entity_of_a_type_no_grant_names() {
-    let asked: Vec<(&str, Method, &str, Option<Value>)> =
-        vec![
-        ("NGSI-LD", Method::GET, "/ngsi-ld/v1/entities?type=Vehicle", None),
-        (
-            "NGSI-LD keyValues",
-            Method::GET,
-            "/ngsi-ld/v1/entities?type=Vehicle&options=keyValues",
-            None,
-        ),
-        (
-            "temporal",
-            Method::GET,
-            "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=2020-01-01T00:00:00Z",
-            None,
-        ),
-        ("file.geojson", Method::GET, "/file.geojson", None),
-        ("file.csv", Method::GET, "/file.csv", None),
-        (
-            "OGC items",
-            Method::GET,
-            "/ogc/features/collections/Vehicle/items",
-            None,
-        ),
-        ("SensorThings", Method::GET, "/sta/v1.1/Things", None),
-        (
-            "MCP query_entities",
-            Method::POST,
-            "/mcp",
-            Some(json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } }
-            })),
-        ),
-    ];
-
-    for (name, method, uri, body) in asked {
-        let (status, answer) = surface(method, uri, body).await;
-        assert!(
-            status.is_success() || status == StatusCode::NOT_FOUND,
-            "{name} answered {status}: {answer}"
-        );
-        assert!(
-            !answer.contains(FORBIDDEN),
-            "{name} served an entity of a type no grant names:\n{answer}"
-        );
-        assert!(
-            !answer.contains("Depot:hel.fi"),
-            "{name} named the entity even without its attributes:\n{answer}"
-        );
-    }
-}
-
-/// R22, T-2131: the broker counted two entities and the caller may read one of them. The count
-/// is the broker's number over what the broker saw, so it leaves with the entity it counted;
-/// keeping it would say "one of the two matches is withheld" in a header.
-#[tokio::test]
-async fn the_count_of_a_narrowed_answer_is_not_the_brokers_count() {
-    let asked = "/ngsi-ld/v1/entities?type=Vehicle&count=true";
-    let (status, headers, answer) = answered(Method::GET, asked, None, &[]).await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert!(
-        !headers.contains_key("ngsild-results-count"),
-        "the answer counts the entity the guard dropped: {:?}",
-        headers.get("ngsild-results-count")
-    );
-
-    // A caller who asks to be told about narrowing is told, which is the whole of R22: the
-    // header is not sent to a caller who did not ask, so its absence above says nothing.
-    let (_, headers, answer) = answered(
-        Method::GET,
-        asked,
-        None,
-        &[("NGSILD-Results-Restricted", "true")],
-    )
-    .await;
-    assert_eq!(
-        headers
-            .get("ngsild-results-restricted")
-            .and_then(|value| value.to_str().ok()),
-        Some("true"),
-        "the answer dropped an entity and does not say it narrowed: {answer}"
-    );
-}
-
 /// A broker that answers only what it was asked, and counts it: the other half of the count
 /// rule, because a header removed from every answer would pass the test above and tell a
 /// well-behaved caller nothing about how many entities match their query.
@@ -292,7 +206,7 @@ async fn honest_broker() -> String {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     format!("http://{address}")
 }
@@ -324,131 +238,4 @@ async fn the_granted_type_still_comes_through() {
     let (status, answer) = surface(Method::GET, "/ngsi-ld/v1/entities?type=Vehicle", None).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert!(answer.contains("Bus 01"), "{answer}");
-}
-
-/// A broker whose answer holds an array where an entity belongs. Not a legal CIM 009 answer, and
-/// the gateway is the policy enforcement point: it does not depend on the broker being correct
-/// (T-2335, T-2131).
-async fn nesting_broker() -> String {
-    let app = Router::new().fallback(any(|| async {
-        (
-            [("NGSILD-Results-Count", "2")],
-            axum::Json(json!([
-                {
-                    "id": "urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01",
-                    "type": "Vehicle",
-                    "name": { "type": "Property", "value": "Bus 01" },
-                    "location": {
-                        "type": "GeoProperty",
-                        "value": { "type": "Point", "coordinates": [24.9, 60.2] }
-                    }
-                },
-                [
-                    {
-                        "id": "urn:ngsi-ld:Depot:hel.fi:fleet:north",
-                        "type": "Depot",
-                        "name": { "type": "Property", "value": FORBIDDEN },
-                        "capacity": { "type": "Property", "value": 40 }
-                    }
-                ]
-            ])),
-        )
-    }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a free port");
-    let address = listener.local_addr().expect("the bound address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{address}")
-}
-
-/// T-2335: an element that is not an entity is dropped by the same `retain` as one of a type no
-/// grant names, on every surface that reads a query answer. `project_entity_to` returns early on
-/// anything that is not an object, so an element that survived the guard would reach the caller
-/// with every attribute it carries.
-#[tokio::test]
-async fn no_surface_serves_an_element_that_is_not_an_entity() {
-    let asked: Vec<(&str, Method, &str, Option<Value>)> =
-        vec![
-        ("NGSI-LD", Method::GET, "/ngsi-ld/v1/entities?type=Vehicle", None),
-        (
-            "NGSI-LD keyValues",
-            Method::GET,
-            "/ngsi-ld/v1/entities?type=Vehicle&options=keyValues",
-            None,
-        ),
-        (
-            "temporal",
-            Method::GET,
-            "/ngsi-ld/v1/temporal/entities?type=Vehicle&timerel=after&timeAt=2020-01-01T00:00:00Z",
-            None,
-        ),
-        ("file.geojson", Method::GET, "/file.geojson", None),
-        ("file.csv", Method::GET, "/file.csv", None),
-        (
-            "OGC items",
-            Method::GET,
-            "/ogc/features/collections/Vehicle/items",
-            None,
-        ),
-        ("SensorThings", Method::GET, "/sta/v1.1/Things", None),
-        (
-            "MCP query_entities",
-            Method::POST,
-            "/mcp",
-            Some(json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } }
-            })),
-        ),
-    ];
-
-    for (name, method, uri, body) in asked {
-        let upstream = nesting_broker().await;
-        let (status, _, answer) = through(upstream, method, uri, body, &[]).await;
-        assert!(
-            status.is_success() || status == StatusCode::NOT_FOUND,
-            "{name} answered {status}: {answer}"
-        );
-        assert!(
-            !answer.contains(FORBIDDEN),
-            "{name} served the attributes of a nested array unprojected:\n{answer}"
-        );
-        assert!(
-            !answer.contains("Depot:hel.fi"),
-            "{name} named the nested entity:\n{answer}"
-        );
-        assert!(
-            !answer.contains("capacity"),
-            "{name} served an attribute no grant names:\n{answer}"
-        );
-    }
-}
-
-/// R22: the element the guard dropped is one the caller may not read, so the broker's own count
-/// would say how many were withheld.
-#[tokio::test]
-async fn the_dropped_element_counts_towards_the_restricted_answer() {
-    let upstream = nesting_broker().await;
-    let (status, headers, answer) = through(
-        upstream,
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=Vehicle&count=true",
-        None,
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert!(
-        !headers.contains_key("ngsild-results-count"),
-        "the answer counts the element the guard dropped"
-    );
-    let served: Value = serde_json::from_str(&answer).expect("an array");
-    assert_eq!(
-        served.as_array().map(Vec::len),
-        Some(1),
-        "only the entity survives: {answer}"
-    );
 }

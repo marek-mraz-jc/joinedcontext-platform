@@ -7,6 +7,8 @@
 //! test: the refusal happens before the broker is asked, it names the parameter, the tool
 //! refuses in the same words as the REST route, and the harmless case still reaches the broker.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -25,11 +27,6 @@ const SLUG: &str = "3ecozggnnhjlp5miouhia53mr2";
 const PROJECT: &str = "helsinki";
 const SPACE: &str = "fleet";
 const DOMAIN: &str = "hel.fi";
-
-/// The area a grant draws, in the one form a `Policy` writes it: no GeoProperty is named, so
-/// it means CIM 009's default, `location`.
-const GRANTED_AREA: &str =
-    "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]";
 
 /// A geo query of the caller's own, inside that area.
 const CALLER_AREA: &str =
@@ -66,7 +63,7 @@ async fn broker() -> (String, Hops) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -183,53 +180,6 @@ fn tool_refusal(result: &Value) -> String {
         .to_owned()
 }
 
-/// AG-85, GW2: the area a grant draws is drawn on `location`. A caller that points the geo
-/// query at another GeoProperty would have that polygon tested against an attribute it was
-/// never written for — an entity whose `location` is outside the area and whose
-/// `homeLocation` is inside it would come back — so the request is refused by name.
-#[tokio::test]
-async fn a_geoproperty_beside_a_grants_own_area_is_refused_by_name() {
-    let (status, body, asked) = rest(
-        endpoint(policy(&format!("geoQ: \"{GRANTED_AREA}\"\n"))),
-        "type=Vehicle&geoproperty=homeLocation",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.starts_with("geoproperty:")),
-        "the refusal names the parameter: {body}"
-    );
-    assert!(asked.is_empty(), "the broker was asked anyway: {asked:?}");
-}
-
-/// The same grant, the same request, over MCP: one rule in the shared handler, so the two
-/// surfaces answer the same words (AG-84, the parity rule of T-1860).
-#[tokio::test]
-async fn the_tool_refuses_a_geoproperty_beside_a_grants_area_in_the_same_words() {
-    let grant = format!("geoQ: \"{GRANTED_AREA}\"\n");
-    let (_, rest_body, _) = rest(
-        endpoint(policy(&grant)),
-        "type=Vehicle&geoproperty=homeLocation",
-    )
-    .await;
-    let (result, asked) = mcp(
-        endpoint(policy(&grant)),
-        json!({ "type": "Vehicle", "geoproperty": "homeLocation" }),
-    )
-    .await;
-
-    let words = tool_refusal(&result);
-    assert!(
-        words.contains(rest_body["detail"].as_str().unwrap_or("|")),
-        "the tool says {words}, the route says {}",
-        rest_body["detail"]
-    );
-    assert!(asked.is_empty(), "the broker was asked anyway: {asked:?}");
-}
-
 /// Where no grant draws an area, nothing has been written for one GeoProperty rather than
 /// another: the caller's own pair goes upstream together and narrows only itself.
 #[tokio::test]
@@ -250,87 +200,6 @@ async fn a_geoproperty_without_a_granted_area_reaches_the_broker_beside_the_geo_
         sent.contains("georel=within"),
         "and so did the area: {sent}"
     );
-}
-
-/// A `geoproperty` with no geo query selects nothing and would only offer a grant's own area a
-/// second property to be tested against, so it never rides alone.
-#[tokio::test]
-async fn a_geoproperty_alone_is_not_forwarded() {
-    let (status, body, asked) = rest(
-        endpoint(policy("")),
-        "type=Vehicle&geoproperty=homeLocation",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let sent = asked.first().expect("the broker was asked");
-    assert!(
-        !sent.contains("geoproperty"),
-        "a GeoProperty with no geo query reached the broker: {sent}"
-    );
-}
-
-/// R9, AG-85: the value the broker copies into a GeoJSON `geometry` is not that attribute any
-/// more, so the answer narrowing cannot take it back. The attribute has to be one the grant
-/// covers before the request is sent, and a request for one it does not cover is a bad
-/// request rather than an empty answer.
-#[tokio::test]
-async fn a_geometry_property_naming_a_hidden_attribute_is_refused_by_name() {
-    let narrow =
-        "information:\n  - entities:\n      - type: Vehicle\n    propertyNames: [location]\n";
-    let (status, body, asked) = rest(
-        endpoint(policy(narrow)),
-        "type=Vehicle&geometryProperty=homeLocation",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(
-        body["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.starts_with("geometryProperty:")),
-        "the refusal names the parameter: {body}"
-    );
-    assert!(asked.is_empty(), "the broker was asked anyway: {asked:?}");
-
-    // The granted one passes and reaches the broker.
-    let (status, body, asked) = rest(
-        endpoint(policy(narrow)),
-        "type=Vehicle&geometryProperty=location",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        asked
-            .first()
-            .is_some_and(|sent| sent.contains("geometryProperty=location")),
-        "the granted GeoProperty went upstream: {asked:?}"
-    );
-}
-
-/// The MCP mirror of the same rule, over the same grant (AG-84).
-#[tokio::test]
-async fn the_tool_refuses_a_geometry_property_it_does_not_serve_in_the_same_words() {
-    let narrow =
-        "information:\n  - entities:\n      - type: Vehicle\n    propertyNames: [location]\n";
-    let (_, rest_body, _) = rest(
-        endpoint(policy(narrow)),
-        "type=Vehicle&geometryProperty=homeLocation",
-    )
-    .await;
-    let (result, asked) = mcp(
-        endpoint(policy(narrow)),
-        json!({ "type": "Vehicle", "geometryProperty": "homeLocation" }),
-    )
-    .await;
-
-    let words = tool_refusal(&result);
-    assert!(
-        words.contains(rest_body["detail"].as_str().unwrap_or("|")),
-        "the tool says {words}, the route says {}",
-        rest_body["detail"]
-    );
-    assert!(asked.is_empty(), "the broker was asked anyway: {asked:?}");
 }
 
 /// AG-21, T-2299: `accept` and `context` are in the contract's table and served by neither

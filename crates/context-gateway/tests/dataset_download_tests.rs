@@ -135,6 +135,29 @@ async fn a_bare_geojson_download_selects_the_types_the_space_holds() {
     // The question is asked of this endpoint's tenant and no other, or the type list of a
     // neighbouring space would become this endpoint's selector.
     assert_eq!(types_hop.tenant, "ovzdusie", "{types_hop:?}");
+    // The list only narrows, and no grant gives a caller 5.7.5, so the gateway asks it on its
+    // own account (T-3790): its client and no caller; the entity query is the caller's.
+    let header = |hop: &common::Hop, name: &str| {
+        hop.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        header(types_hop, "x-jc-client").as_deref(),
+        Some("context-gateway")
+    );
+    assert_eq!(
+        header(types_hop, "x-jc-roles").as_deref(),
+        Some(""),
+        "{types_hop:?}"
+    );
+    let entities_hop = hops.last().expect("an entity query");
+    assert_eq!(
+        header(entities_hop, "x-jc-roles").as_deref(),
+        Some("public")
+    );
+    assert_eq!(header(entities_hop, "x-jc-client"), None);
     let query = &hops.last().expect("an entity query").query;
     assert!(
         query.contains("type=AirQualityObserved"),
@@ -280,4 +303,62 @@ information:
         hops.iter().all(|hop| hop.path != "/ngsi-ld/v1/types"),
         "the grant already selected, so there was nothing to fall back to: {hops:?}"
     );
+}
+
+/// T-3790: the type list is asked on the gateway's account and so names every type the space
+/// holds. It is asked only when nothing selects, which is a caller who may read every type: a
+/// Policy that keeps one type from them is refused before any hop, the list never asked, and
+/// the refusal names nothing of that type. A grant that names types never asks it either
+/// (`a_grant_that_narrows_is_never_widened_by_the_fallback`).
+#[tokio::test]
+async fn a_type_the_caller_may_not_read_is_never_listed_for_them() {
+    let depot = json!({
+        "id": "urn:ngsi-ld:Depot:banskabystrica.sk:ovzdusie:north",
+        "type": "Depot",
+        "capacity": { "type": "Property", "value": 7 },
+    });
+    let mut endpoint = unrestricted_endpoint();
+    endpoint.representations.push(Representation::Json);
+    endpoint.policies.push(
+        serde_norway::from_str(
+            r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+effect: prohibition
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: Depot
+"#,
+        )
+        .expect("the policy spec parses"),
+    );
+    for file in ["file.geojson", "file.csv", "file.json"] {
+        let broker = BrokerStub::start(vec![json!([station(), depot.clone()])]).await;
+        let response = gateway(&broker.url, endpoint.clone())
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/api/endpoint/{SLUG}/{file}"))
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the gateway answers");
+        let status = response.status();
+        let headers = format!("{:?}", response.headers());
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .expect("a readable body");
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::FORBIDDEN, "{file}: {body}");
+        assert!(
+            broker.hops().is_empty(),
+            "{file} asked the broker: {:?}",
+            broker.hops()
+        );
+        for trace in ["Depot", "capacity", "north"] {
+            assert!(!body.contains(trace), "{file} names {trace}: {body}");
+            assert!(!headers.contains(trace), "{file} names {trace}: {headers}");
+        }
+    }
 }

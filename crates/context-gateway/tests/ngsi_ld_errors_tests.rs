@@ -110,8 +110,8 @@ fn assert_ngsi_ld_error(status: StatusCode, content_type: &str, body: &Value, ex
     }
 }
 
-/// T-0272: a write-guard refusal is a 400 BadRequestData, and a refused operation is a
-/// 403 — two statuses, so one hard-coded string cannot satisfy both.
+/// T-0272: a write-guard refusal is a 400 BadRequestData in the ETSI shape, carrying the
+/// platform's slug as `code`.
 #[tokio::test]
 async fn gateway_refusals_are_ngsi_ld_errors() {
     // An id that is no NGSI-LD URN (PF-43): a bad request whatever the grant (ADR-N-041).
@@ -139,51 +139,8 @@ async fn gateway_refusals_are_ngsi_ld_errors() {
         "{body}"
     );
     assert_eq!(body["field"], json!("id"), "{body}");
-
-    // PATCH is nothing the public grant covers: refused before any body is read.
-    let patch = Request::builder()
-        .method("PATCH")
-        .uri(format!(
-            "{}/urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:s1/attrs",
-            entities()
-        ))
-        .header("content-type", "application/json")
-        .body(Body::from(r#"{"pm10":{"type":"Property","value":1}}"#))
-        .expect("a request");
-    let (status, content_type, body) = call(patch).await;
-    assert_ngsi_ld_error(status, &content_type, &body, 403);
-    assert!(
-        !body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("policy"),
-        "GW1: a refusal does not name the rule that refused it: {body}"
-    );
-
-    // A refused single-entity read stays a miss, and the miss is an ETSI one: the public
-    // grant covers no temporal operation, so one entity's history is refused before the
-    // broker, as a 404 (R20).
-    let (status, content_type, body) = call(
-        Request::builder()
-            .uri(format!(
-                "/api/endpoint/{SLUG}/ngsi-ld/v1/temporal/entities/urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:s1"
-            ))
-            .body(Body::empty())
-            .expect("a request"),
-    )
-    .await;
-    assert_ngsi_ld_error(status, &content_type, &body, 404);
-    assert_eq!(
-        body["type"],
-        json!("https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound")
-    );
-    assert_eq!(body["code"], json!("resource-not-found"), "{body}");
-    assert!(
-        body["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.ends_with('.')),
-        "{body}"
-    );
+    // A refused operation and a refused single-entity read are the broker's view's answers
+    // since T-3643 (Antares `views_errors`), and come back as it gave them.
 }
 
 /// T-0273, clause 6.3.2: a payload in a media type the surface does not take is 415, and
