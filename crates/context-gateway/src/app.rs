@@ -3838,7 +3838,8 @@ async fn mcp_message(
 /// broker has no tool or resource for, `describe_access`, `describe_schema` and their
 /// `access://` and `schema://` documents, added to the broker's listings and answered from the
 /// documents the access and schema surfaces serve, and what no view serves yet (a view
-/// mapping, an agreement's caller, a federating space) stays on its own façade.
+/// mapping, a federating space) stays on its own façade. A caller under a data space
+/// agreement is the view's too: the hop names its DID alone (map K38, T-3818).
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
@@ -3879,7 +3880,6 @@ async fn mcp_answer(
     let viewed = request_message
         && !federates
         && endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
         && (1..=MAX_VIEW_ID).contains(&view.len());
     if described || !viewed {
         return facade_answer(gateway, endpoint, subject, credential, message).await;
