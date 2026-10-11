@@ -6,6 +6,10 @@
 //! same admission and the same evaluator. The rest is who may ask (the Portal's own
 //! service-account token for the simulate audience, nobody else) and what the answer names
 //! (the Policy that decided, which `access/check` keeps to itself on a refusal).
+//!
+//! The Endpoints here have a view of another model, which no broker view serves yet, so their
+//! `access/check` is the gateway's own (T-3649, `app::has_view`). Through a view the broker's
+//! engine decides, and the simulator asking it instead is T-3881.
 mod common;
 
 use axum::body::Body;
@@ -112,7 +116,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
-        view_mapping: None,
+        view_mapping: Some(common::no_view()),
         catalog: None,
         policy_names,
         policies,

@@ -435,7 +435,8 @@ async fn resources_list_what_the_caller_may_read_and_never_another_space() {
     assert!(uris.contains(&format!("access://{PUBLIC}").as_str()));
     assert!(uris.iter().any(|uri| uri.starts_with("schema://")));
 
-    // The grant document is answered from the endpoint itself, with no broker hop.
+    // The grant document is the one `GET …/access` serves: the view's access surface, under
+    // the Endpoint's own name (T-3649).
     let before = broker.hops().len();
     let (_, grants, _) = send(
         app(&broker.url, &realm),
@@ -451,11 +452,23 @@ async fn resources_list_what_the_caller_may_read_and_never_another_space() {
         ),
     )
     .await;
-    assert!(grants["result"]["contents"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("AirQualityObserved"));
-    assert_eq!(broker.hops().len(), before, "the access document is local");
+    let document: Value = serde_json::from_str(
+        grants["result"]["contents"][0]["text"]
+            .as_str()
+            .unwrap_or_default(),
+    )
+    .expect("the access document is JSON");
+    assert_eq!(document["resource"]["id"], PUBLIC, "{grants}");
+    let hops = broker.hops();
+    let asked: Vec<(&str, &str)> = hops[before..]
+        .iter()
+        .map(|hop| (hop.view.as_str(), hop.path.as_str()))
+        .collect();
+    assert_eq!(
+        asked,
+        [(PUBLIC, "/access")],
+        "one read of the view's access surface"
+    );
 
     // A URI for a space this endpoint does not serve is an unknown resource, which is
     // what a URI nobody defined is too (SP-20, R20).
