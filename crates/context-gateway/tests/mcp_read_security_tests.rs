@@ -78,7 +78,7 @@ async fn broker_answering(status: StatusCode, body: Value) -> (String, Log) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), log)
 }
@@ -507,43 +507,6 @@ async fn a_join_level_is_bounded_on_both_surfaces() {
 }
 
 // 6. `options=sysAttrs`, `format`, `lang` -------------------------------------------------
-
-/// AG-84: what the two surfaces answer for the same representation arguments is the same
-/// document, so a tool cannot ask for a member the route would not serve.
-#[tokio::test]
-async fn sys_attrs_and_format_reveal_no_member_the_route_hides() {
-    let body = json!([{
-        "id": BUS,
-        "type": "Vehicle",
-        "name": { "type": "Property", "value": "Bus 01" },
-        HIDDEN: { "type": "Property", "value": "brake pads next week" },
-        "createdAt": "2026-01-01T00:00:00Z",
-    }]);
-
-    let (result, _) = tool(
-        "query_entities",
-        json!({ "type": "Vehicle", "options": ["sysAttrs"], "format": "normalized", "lang": "fi" }),
-        body.clone(),
-    )
-    .await;
-    let (_, route, _) = rest(
-        "type=Vehicle&options=sysAttrs&format=normalized&lang=fi",
-        body,
-    )
-    .await;
-
-    assert_eq!(
-        json!(entities(&result)),
-        route,
-        "the tool and the route answered different documents"
-    );
-    assert!(
-        !serde_json::to_string(&route)
-            .expect("the answer serializes")
-            .contains(HIDDEN),
-        "the hidden attribute came back with the system members: {route}"
-    );
-}
 
 // 7. `count` ------------------------------------------------------------------------------
 

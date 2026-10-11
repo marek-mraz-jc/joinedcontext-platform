@@ -3,9 +3,10 @@
 //!
 //! The point of these tests is not that each representation works. It is that they cannot
 //! disagree: an attribute a policy withholds, and an attribute the endpoint hides, are
-//! absent from NGSI-LD, GeoJSON, CSV and the MCP tool result alike, for both demo spaces.
-//! A translator added later that reads the broker instead of the projection would fail
-//! here rather than in a leak.
+//! absent from GeoJSON, CSV, OGC Features, SensorThings and the MCP tool result alike, for
+//! both demo spaces. A translator added later that reads the broker instead of the projection
+//! would fail here rather than in a leak. NGSI-LD through the slug is the broker's view since
+//! T-3643, and its narrowing is proved there (Antares `views_read.rs`, `policy_filter_by_type.rs`).
 
 mod common;
 
@@ -219,17 +220,6 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
         let entity_type = entity["type"].as_str().expect("a type").to_owned();
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
 
-        // 1. NGSI-LD, the canonical form the other three are translated from.
-        let (status, body) = get(
-            app(&broker.url),
-            &format!("/api/endpoint/{slug}/ngsi-ld/v1/entities?type={entity_type}"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let entities: Value = serde_json::from_slice(&body).expect("JSON");
-        let ngsi_ld = attributes_of(&entities[0]);
-        assert_eq!(ngsi_ld, expected, "NGSI-LD is the reference for {slug}");
-
         // 2. GeoJSON: `location` becomes the geometry, so it is a property no more.
         let (status, body) = get(
             app(&broker.url),
@@ -252,7 +242,10 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
             "the geometry is where `location` went"
         );
         geojson.insert("location".to_owned());
-        assert_eq!(geojson, expected, "GeoJSON shows what NGSI-LD shows");
+        assert_eq!(
+            geojson, expected,
+            "GeoJSON shows what the grants and the endpoint leave"
+        );
 
         // 3. CSV: one column per leaf, and the stems are the same attributes.
         let (status, body) = get(app(&broker.url), &format!("/api/endpoint/{slug}/file.csv")).await;
@@ -281,7 +274,7 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
             .cloned()
             .collect();
         ogc.insert("location".to_owned());
-        assert_eq!(ogc, expected, "OGC Features shows what NGSI-LD shows");
+        assert_eq!(ogc, expected, "OGC Features shows what GeoJSON shows");
 
         // 5. SensorThings: the same attributes, split across the sets the profile has for
         // them. A numeric attribute is a Datastream, a label stays a property, the geometry
@@ -308,7 +301,7 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
         if !thing["Locations"].as_array().expect("a list").is_empty() {
             observed.insert("location".to_owned());
         }
-        assert_eq!(observed, expected, "SensorThings shows what NGSI-LD shows");
+        assert_eq!(observed, expected, "SensorThings shows what GeoJSON shows");
 
         // 6. MCP: the tool result is the projected entity, not a second read.
         let answer = post(
@@ -333,10 +326,6 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
             expected,
             "an agent sees exactly what a browser sees"
         );
-        assert_eq!(
-            structured, &entities[0],
-            "the MCP result is the same document, byte for byte"
-        );
     }
 }
 
@@ -351,7 +340,6 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
         let entity_type = entity["type"].as_str().expect("a type").to_owned();
 
         for uri in [
-            format!("/api/endpoint/{slug}/ngsi-ld/v1/entities?type={entity_type}"),
             format!("/api/endpoint/{slug}/file.geojson"),
             format!("/api/endpoint/{slug}/file.csv"),
             format!("/api/endpoint/{slug}/ogc/features/collections/{entity_type}/items"),
@@ -398,23 +386,6 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
 async fn a_type_no_grant_names_answers_the_same_nothing_everywhere() {
     let broker = common::BrokerStub::start(vec![json!([station()])]).await;
 
-    let (status, body) = get(
-        app(&broker.url),
-        &format!("/api/endpoint/{AIR_SLUG}/ngsi-ld/v1/entities?type=WaterQualityObserved"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).expect("JSON"),
-        json!([]),
-        "a type no grant reaches is empty, which is what a type that does not exist is too"
-    );
-    assert!(
-        broker.hops().is_empty(),
-        "T-0381: an empty intersection must not be forwarded as no filter at all, which \
-         would ask the broker for every type in the tenant"
-    );
-
     let answer = post(
         app(&broker.url),
         &format!("/api/endpoint/{AIR_SLUG}/mcp"),
@@ -436,6 +407,7 @@ async fn a_type_no_grant_names_answers_the_same_nothing_everywhere() {
     );
     assert!(
         broker.hops().is_empty(),
-        "and still nothing was asked of the broker"
+        "T-0381: an empty intersection must not be forwarded as no filter at all, which \
+         would ask the broker for every type in the tenant"
     );
 }
