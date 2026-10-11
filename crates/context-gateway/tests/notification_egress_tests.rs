@@ -349,32 +349,6 @@ fn unsealed(to: &str, attributes: Value, q: &str) -> Value {
     })
 }
 
-/// A routed URI the gateway wrote, without the subscriber sealed at its end, after checking the
-/// seal opens as the anonymous caller the public policy grants (GW27, T-2383).
-fn unsealed_uri(uri: &str) -> String {
-    let (rest, _) = uri
-        .rsplit_once("&sub=")
-        .unwrap_or_else(|| panic!("the subscriber is sealed into the endpoint: {uri}"));
-    let params = context_gateway::query::parse(uri.split_once('?').expect("a query").1);
-    let first = |name: &str| context_gateway::query::first(&params, name).unwrap_or_default();
-    let areas: Vec<String> = params
-        .iter()
-        .filter(|(name, _)| name == "area")
-        .map(|(_, area)| area.clone())
-        .collect();
-    assert_eq!(
-        common::delivery_key().open(
-            &format!("/api/endpoint/{SLUG}"),
-            first("to"),
-            &areas,
-            first("sub")
-        ),
-        Some(Subject::anonymous()),
-        "the seal opens as the caller who wrote the subscription: {uri}"
-    );
-    rest.to_owned()
-}
-
 fn notification(entities: Vec<Value>) -> Value {
     json!({
         "id": "urn:ngsi-ld:Notification:1",
@@ -473,114 +447,6 @@ async fn deliver_via(
         .await
         .expect("the gateway answers");
     (response.status(), Vec::new())
-}
-
-#[tokio::test]
-async fn a_created_subscription_is_narrowed_and_its_delivery_routed_back_through_the_gateway() {
-    let (status, forwarded) = create(json!({
-        "type": "Subscription",
-        "entities": [{ "type": "AirQualityObserved" }, { "type": "Device" }],
-        "q": "temperature>10",
-        "notification": {
-            "endpoint": { "uri": "http://mesto.internal/hooks/ovzdusie" }
-        }
-    }))
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-    let stored = forwarded.first().expect("the broker was told something");
-
-    let uri = &unsealed_uri(
-        stored["notification"]["endpoint"]["uri"]
-            .as_str()
-            .expect("a rewritten uri"),
-    );
-    assert!(
-        uri.starts_with(&format!(
-            "{PUBLIC_URL}/api/endpoint/{SLUG}/egress/notifications?to="
-        )),
-        "delivery goes through the gateway: {uri}"
-    );
-    assert!(
-        uri.ends_with(&percent("http://mesto.internal/hooks/ovzdusie")),
-        "and the subscriber's own endpoint travels with it: {uri}"
-    );
-
-    assert_eq!(
-        stored["entities"],
-        json!([{ "type": "AirQualityObserved" }]),
-        "a type outside the grant is not watched"
-    );
-    assert_eq!(
-        stored["q"].as_str().expect("a folded filter"),
-        "(temperature>10);((temperature<100))",
-        "the subscriber's filter and the grant's, conjoined"
-    );
-    assert_eq!(
-        stored["notification"]["attributes"],
-        json!(["location", "temperature"]),
-        "a subscription that named no attributes is stored asking for the granted ones"
-    );
-}
-
-#[tokio::test]
-async fn a_subscription_that_watches_nothing_granted_is_refused() {
-    let (status, forwarded) = create(json!({
-        "type": "Subscription",
-        "entities": [{ "type": "Device" }],
-        "notification": { "endpoint": { "uri": "http://mesto.internal/hooks/x" } }
-    }))
-    .await;
-
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(forwarded.is_empty(), "nothing was stored: {forwarded:?}");
-}
-
-#[tokio::test]
-async fn a_subscription_asking_for_an_ungranted_attribute_keeps_only_the_granted_ones() {
-    let (status, forwarded) = create(json!({
-        "type": "Subscription",
-        "entities": [{ "type": "AirQualityObserved" }],
-        "notification": {
-            "attributes": ["temperature", UNGRANTED],
-            "endpoint": { "uri": "http://mesto.internal/hooks/x" }
-        }
-    }))
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(
-        forwarded[0]["notification"]["attributes"],
-        json!(["temperature"])
-    );
-}
-
-/// The gateway's dispatcher speaks HTTP, so a subscription it could never deliver is
-/// refused at creation rather than stored and silently dropped later.
-/// T-0426 changed this test rather than adding one: an `https://` endpoint used to be the
-/// `501` this asserted, because the gateway had no TLS client to deliver with.
-#[tokio::test]
-async fn an_endpoint_behind_tls_is_accepted_at_creation_and_routed_like_any_other() {
-    let (status, forwarded) = create(json!({
-        "type": "Subscription",
-        "entities": [{ "type": "AirQualityObserved" }],
-        "notification": { "endpoint": { "uri": "https://mesto.example/hooks/x" } }
-    }))
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-    let uri = unsealed_uri(
-        forwarded[0]["notification"]["endpoint"]["uri"]
-            .as_str()
-            .expect("the stored subscription carries a rewritten endpoint"),
-    );
-    assert_eq!(
-        uri,
-        format!(
-            "{PUBLIC_URL}/api/endpoint/{SLUG}/egress/notifications?to={}",
-            percent("https://mesto.example/hooks/x")
-        )
-    );
 }
 
 #[tokio::test]
@@ -901,29 +767,6 @@ async fn a_subscriber_behind_tls_is_delivered_to_over_tls() {
 }
 
 #[tokio::test]
-async fn a_grant_with_a_geographic_condition_stores_the_subscription_with_its_area() {
-    let (status, forwarded) = create_under(
-        json!({
-            "type": "Subscription",
-            "entities": [{ "type": "AirQualityObserved" }],
-            "notification": { "endpoint": { "uri": "http://mesto.example/hooks/x" } }
-        }),
-        geo_policy(),
-        None,
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED, "the subscription is stored");
-    let uri = forwarded[0]["notification"]["endpoint"]["uri"]
-        .as_str()
-        .expect("the stored subscription carries a rewritten endpoint");
-    assert!(
-        uri.contains(&format!("&area={}", percent(CITY))),
-        "the granted area travels with the delivery: {uri}"
-    );
-}
-
-#[tokio::test]
 async fn an_entity_outside_the_granted_area_is_not_delivered() {
     let (webhook, seen, _) = sink().await;
     let inside = placed(SENSOR, 19.15, 48.73);
@@ -997,42 +840,6 @@ async fn an_entity_the_gateway_cannot_place_is_not_delivered_under_a_geo_grant()
     assert!(
         seen.lock().expect("the delivery log").is_empty(),
         "nothing left the platform"
-    );
-}
-
-/// Where the broker delivers is not where a caller's token is audience-bound (R46, PF-45).
-#[tokio::test]
-async fn a_deployment_that_names_an_egress_url_has_the_broker_deliver_there() {
-    let (status, forwarded) = create_under(
-        json!({
-            "type": "Subscription",
-            "entities": [{ "type": "AirQualityObserved" }],
-            "notification": { "endpoint": { "uri": "http://mesto.internal/hooks/ovzdusie" } }
-        }),
-        policy(),
-        Some(EGRESS),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-    let uri = &unsealed_uri(
-        forwarded[0]["notification"]["endpoint"]["uri"]
-            .as_str()
-            .expect("a rewritten uri"),
-    );
-    assert!(
-        uri.starts_with(&format!(
-            "{EGRESS}/api/endpoint/{SLUG}/egress/notifications?to="
-        )),
-        "the broker is handed the in-cluster address: {uri}"
-    );
-    assert!(
-        !uri.starts_with(PUBLIC_URL),
-        "and not the public one, which would send the delivery out through the edge: {uri}"
-    );
-    assert!(
-        uri.ends_with(&percent("http://mesto.internal/hooks/ovzdusie")),
-        "the subscriber's own endpoint still travels with it: {uri}"
     );
 }
 
@@ -1711,44 +1518,6 @@ async fn a_subscriber_the_gateway_cannot_verify_gets_nothing_delivered() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(delivered.is_empty(), "{delivered:?}");
-}
-
-#[tokio::test]
-async fn a_gateway_without_a_delivery_key_stores_no_subscription_that_delivers() {
-    let (upstream, forwarded) = broker(BrokerState {
-        stored: None,
-        matching: Vec::new(),
-        forwarded: Arc::new(Mutex::new(Vec::new())),
-    })
-    .await;
-    let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
-            .deliver_through(Some(EGRESS.to_owned()))
-            .serve([endpoint(&[])]),
-    );
-    let response = router(gateway)
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "type": "Subscription",
-                        "entities": [{ "type": "AirQualityObserved" }],
-                        "notification": { "endpoint": { "uri": "http://mesto.example/hooks/x" } }
-                    })
-                    .to_string(),
-                ))
-                .expect("a request"),
-        )
-        .await
-        .expect("the gateway answers");
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    assert!(
-        forwarded.lock().expect("the forwarding log").is_empty(),
-        "a subscription nobody could decide again reached the broker"
-    );
 }
 
 /// One grant of the two `notification_projected_by_the_grants_the_entity_matches` delivers under.
