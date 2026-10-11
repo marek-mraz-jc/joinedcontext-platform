@@ -36,7 +36,8 @@ use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header::{
-    ACCEPT, ALLOW, AUTHORIZATION, CONTENT_LENGTH, CONTENT_LOCATION, IF_MATCH, LINK, LOCATION,
+    ACCEPT, ALLOW, AUTHORIZATION, CONTENT_LENGTH, CONTENT_LOCATION, CONTENT_TYPE, IF_MATCH, LINK,
+    LOCATION,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
@@ -3829,33 +3830,217 @@ async fn mcp_message(
         Err(problem) => return *problem,
     };
 
-    mcp_answer(gateway, endpoint, subject, request).await
+    let view = endpoint.slug.clone();
+    mcp_answer(gateway, endpoint, subject, view, request).await
 }
 
-/// One JSON-RPC message, whichever surface it arrived on.
+/// One JSON-RPC message, whichever surface it arrived on: the broker's MCP surface of the
+/// view answers it under the verified caller (plan 5.3, T-3647). The gateway keeps what the
+/// broker has no tool or resource for, `describe_access`, `describe_schema` and their
+/// `access://` and `schema://` documents, added to the broker's listings and answered from the
+/// documents the access and schema surfaces serve, and what no view serves yet (a view
+/// mapping, an agreement's caller, a federating space) stays on its own façade.
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
     subject: Subject,
+    view: String,
     request: Request,
 ) -> Response<Body> {
-    let authorization = request.headers().get(AUTHORIZATION).cloned();
-    let (_, body) = request.into_parts();
+    let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
         return mcp::endpoint_facade::parse_error();
     };
-    let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
+    let Ok(mut message) = serde_json::from_slice::<Value>(&bytes) else {
         return mcp::endpoint_facade::parse_error();
     };
-
     let credential = Credential {
-        authorization,
+        authorization: parts.headers.get(AUTHORIZATION).cloned(),
         door: Door::Endpoint,
     };
+    let tool = message["params"]["name"].as_str().map(str::to_owned);
+    let calls = message["method"] == "tools/call";
+    let described = calls
+        && tool
+            .as_deref()
+            .is_some_and(|tool| DESCRIBE_TOOLS.contains(&tool))
+        || message["method"] == "resources/read"
+            && message["params"]["uri"]
+                .as_str()
+                .is_some_and(|uri| OWN_SCHEMES.iter().any(|scheme| uri.starts_with(scheme)));
+    // What is no single request (a batch, a scalar, a notification that changes nothing) is
+    // answered here as JSON-RPC says, before a hop.
+    let request_message = message.is_object() && message.get("id").is_some();
+    // A space that federates registrations says so in its instructions, tool descriptions and
+    // results (EP-71); the broker's view does not know the platform's members, so that space's
+    // MCP stays on the façade until the hub forwards (T-3808).
+    let federates = !gateway
+        .members_of(&endpoint.project, &endpoint.space)
+        .is_empty();
+    let viewed = request_message
+        && !federates
+        && endpoint.view_mapping.is_none()
+        && subject.agreement.is_none()
+        && (1..=MAX_VIEW_ID).contains(&view.len());
+    if described || !viewed {
+        return facade_answer(gateway, endpoint, subject, credential, message).await;
+    }
+
+    // A tool the gateway does not know as a read is a write for the domain gate (PF-41); the
+    // operation stands for the class of the call, the broker gates the tool's own clause.
+    let writes = calls
+        && !tool
+            .as_deref()
+            .is_some_and(|tool| MCP_READ_TOOLS.contains(&tool));
+    let operation = if writes {
+        Operation::UpsertBatch
+    } else {
+        Operation::QueryEntity
+    };
+    let mut request = Request::from_parts(parts, Body::empty());
+    if let Err(answer) = view_request(&gateway, &endpoint, &subject, "", operation, &mut request) {
+        return *answer;
+    }
+    let (mut parts, _) = request.into_parts();
+    if calls {
+        capped_arguments(&mut message["params"]["arguments"]);
+    }
+    // The broker's Streamable HTTP refuses a request that does not accept both (406); the
+    // façade took `application/json` alone, and the callers that send just that keep working.
+    parts.headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/json, text/event-stream"),
+    );
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        %view,
+        principal = %principal_of(&subject),
+        tool = tool.as_deref().unwrap_or_default(),
+        "MCP message forwarded to the broker's view"
+    );
+    let method = message["method"].as_str().unwrap_or_default().to_owned();
+    let answer = match gateway
+        .broker
+        .send(
+            Method::POST,
+            &format!("/x/views/{view}/mcp"),
+            parts.headers,
+            Body::from(message.to_string()),
+        )
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => return ProblemDetails::from(error).into_response(),
+    };
+    if answer.status().is_server_error() {
+        let (parts, body) = answer.into_parts();
+        return broker_failure(parts.status, body).await;
+    }
+    let json = answer
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json"));
+    let Some(key) = OWN_LISTINGS
+        .iter()
+        .find(|(listing, _)| *listing == method)
+        .map(|(_, key)| *key)
+        .filter(|_| answer.status().is_success() && json)
+    else {
+        return answer;
+    };
+    let (parts, body) = answer.into_parts();
+    let held = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .unwrap_or_default();
+    let Ok(mut listed) = serde_json::from_slice::<Value>(&held) else {
+        return proxy::with_body(parts, held.to_vec());
+    };
+    let ask = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": method });
+    let own = mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, ask).await;
+    let kept: Vec<Value> = own
+        .as_ref()
+        .and_then(|own| own["result"][key].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|item| gateway_owns(item))
+        .cloned()
+        .collect();
+    if let Some(items) = listed["result"][key].as_array_mut() {
+        items.extend(kept);
+    }
+    proxy::with_body(parts, listed.to_string().into_bytes())
+}
+
+/// The listings the gateway adds its own entries to, by method and result member.
+const OWN_LISTINGS: &[(&str, &str)] = &[("tools/list", "tools"), ("resources/list", "resources")];
+
+/// Whether a listed tool or resource is the gateway's: the two describe tools and the
+/// documents they answer from (`schema://`, `access://`).
+fn gateway_owns(item: &Value) -> bool {
+    item["name"]
+        .as_str()
+        .is_some_and(|name| DESCRIBE_TOOLS.contains(&name))
+        || item["uri"]
+            .as_str()
+            .is_some_and(|uri| OWN_SCHEMES.iter().any(|scheme| uri.starts_with(scheme)))
+}
+
+/// The resources the gateway serves itself: the schema and access documents behind the two
+/// describe tools, which the broker has no resource for (Antares `mcp-surface.md` section 9).
+const OWN_SCHEMES: &[&str] = &["schema://", "access://"];
+
+/// The gateway's own façade, for the tools it keeps and the Endpoints no view serves yet.
+async fn facade_answer(
+    gateway: Arc<Gateway>,
+    endpoint: Arc<Endpoint>,
+    subject: Subject,
+    credential: Credential,
+    message: Value,
+) -> Response<Body> {
     match mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, message).await {
         Some(answer) => mcp::endpoint_facade::json_response(StatusCode::OK, &answer),
         // A notification is acknowledged and nothing more: there is no state to change.
         None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// The tools that describe the Endpoint rather than its data: no broker tool (Antares
+/// `mcp-surface.md` section 9), so the gateway answers them.
+const DESCRIBE_TOOLS: &[&str] = &["describe_access", "describe_schema"];
+
+/// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
+const MCP_READ_TOOLS: &[&str] = &[
+    "batch_query",
+    "batch_query_temporal",
+    "get_attribute",
+    "get_attribute_value",
+    "get_entity",
+    "get_subscription",
+    "get_type",
+    "list_attribute_details",
+    "list_attributes",
+    "list_subscriptions",
+    "list_type_details",
+    "list_types",
+    "query_entities",
+    "query_temporal",
+    "retrieve_temporal",
+];
+
+/// The two costs one call may put on the shared broker, capped as [`capped_query`] caps them
+/// on the NGSI-LD surface: `joinLevel` (AG-25) and `lastN` (GW26).
+fn capped_arguments(arguments: &mut Value) {
+    for (name, cap) in [
+        ("joinLevel", query::JOIN_LEVEL_CAP),
+        ("lastN", query::LAST_N_CAP),
+    ] {
+        if let Some(value) = arguments.get_mut(name) {
+            if value.as_u64().is_some_and(|n| n > cap) {
+                *value = Value::from(cap);
+            }
+        }
     }
 }
 
@@ -3875,7 +4060,9 @@ async fn space_mcp_message(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
-    mcp_answer(gateway, Arc::clone(&space.endpoint), subject, request).await
+    // The space surface's view is the one the Portal writes per Context Space (plan 5.1).
+    let view = format!("cs-{}", space.endpoint.space);
+    mcp_answer(gateway, Arc::clone(&space.endpoint), subject, view, request).await
 }
 
 /// The protected-resource metadata of one MCP route (RFC 9728, AG-32).

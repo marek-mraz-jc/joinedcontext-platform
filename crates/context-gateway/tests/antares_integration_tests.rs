@@ -67,7 +67,7 @@ impl Antares {
                 "-e",
                 "ANTARES_STORE=memory",
                 "-e",
-                "ANTARES_API_SURFACES=admin,views",
+                "ANTARES_API_SURFACES=admin,views,mcp",
                 "-e",
                 "ANTARES_POLICY=joinedcontext",
                 "-e",
@@ -304,7 +304,11 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         project: SPACE.to_owned(),
         audience,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![
+            Representation::NgsiLd,
+            Representation::GeoJson,
+            Representation::Mcp,
+        ],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -403,6 +407,22 @@ fn get(slug: &str, path: &str) -> Request<Body> {
         .header("accept", "application/ld+json")
         .body(Body::empty())
         .expect("a request")
+}
+
+/// One JSON-RPC request to an Endpoint's MCP through the gateway, as its answer.
+async fn mcp(app: &axum::Router, slug: &str, method: &str, params: Value) -> Value {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/endpoint/{slug}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .body(Body::from(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string(),
+        ))
+        .expect("a request");
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{method}: {}", body_text(&body));
+    serde_json::from_slice(&body).expect("a JSON-RPC answer")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -789,7 +809,72 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let problem: Value = serde_json::from_slice(&body).expect("problem+json");
     assert_eq!(problem["type"], json!("urn:antares:error:AccessDenied"));
-    assert_eq!(problem["code"], json!("forbidden"), "the Portal's key for its hint");
+    assert_eq!(
+        problem["code"],
+        json!("forbidden"),
+        "the Portal's key for its hint"
+    );
+
+    // T-3647: the Endpoint's MCP is the broker's view under the verified caller. The tool
+    // list is the view's plus the two the gateway answers; a result is narrowed like the
+    // NGSI-LD read (the seeded phone stays out); a type no grant names and a type nobody has
+    // answer alike; an argument naming a tenant is refused (carried over from the façade's
+    // `mcp_read_security_tests`).
+    let listed = mcp(&app, PUBLIC_SLUG, "tools/list", json!({})).await;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for wanted in [
+        "query_entities",
+        "get_entity",
+        "describe_access",
+        "describe_schema",
+    ] {
+        assert!(names.contains(&wanted), "{wanted}: {listed}");
+    }
+    let queried = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "query_entities", "arguments": { "type": ["AirQualityObserved"], "count": true } }),
+    )
+    .await;
+    let found = &queried["result"]["structuredContent"]["entities"];
+    assert!(
+        found
+            .as_array()
+            .is_some_and(|entities| entities.iter().any(|entity| entity["id"] == json!(seeded))),
+        "{queried}"
+    );
+    assert!(!queried.to_string().contains("+421"), "{queried}");
+    let fetched = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "get_entity", "arguments": { "id": seeded } }),
+    )
+    .await;
+    assert_eq!(fetched["result"]["isError"], json!(false), "{fetched}");
+    assert!(!fetched.to_string().contains("operatorPhone"), "{fetched}");
+    let hidden = |name: &str| json!({ "name": "query_entities", "arguments": { "type": [name] } });
+    let denied = mcp(&app, PUBLIC_SLUG, "tools/call", hidden("Depot")).await;
+    let absent = mcp(&app, PUBLIC_SLUG, "tools/call", hidden("Ghost")).await;
+    assert_eq!(denied["result"]["isError"], json!(true), "{denied}");
+    assert_eq!(
+        denied["result"], absent["result"],
+        "a hidden and an absent type answer alike"
+    );
+    let aimed = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "query_entities", "arguments": { "type": ["AirQualityObserved"], "tenant": "doprava" } }),
+    )
+    .await;
+    assert_eq!(aimed["result"]["isError"], json!(true), "{aimed}");
 
     // Delete, and it is gone.
     let (status, body) = call(
