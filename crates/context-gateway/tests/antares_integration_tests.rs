@@ -789,7 +789,11 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let problem: Value = serde_json::from_slice(&body).expect("problem+json");
     assert_eq!(problem["type"], json!("urn:antares:error:AccessDenied"));
-    assert_eq!(problem["code"], json!("forbidden"), "the Portal's key for its hint");
+    assert_eq!(
+        problem["code"],
+        json!("forbidden"),
+        "the Portal's key for its hint"
+    );
 
     // Delete, and it is gone.
     let (status, body) = call(
