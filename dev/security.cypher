@@ -2,3 +2,11 @@
 GREP "grant_type" IN crates/*/src/**/*.rs;
 // egress-client: a reqwest client built anywhere in production code; each is allowlisted with what it reaches and why its redirect and resolver policy fits (SSRF, credential carry-over); a new one is red until reviewed (T-3682)
 MATCH (c:Symbol)-[:CALLS]->(x:Symbol) WHERE x.external AND x.path STARTS WITH 'reqwest::' AND x.name IN ['builder','new','default'] AND (x.path CONTAINS '::Client::' OR x.path CONTAINS '::ClientBuilder::') AND NOT c.is_test AND NOT c.file CONTAINS '/examples/' RETURN DISTINCT c.path, x.path ORDER BY c.path;
+// process-spawn: a child process started in production code; each is allowlisted with where its arguments come from, since an argument a caller controls is an option or command injection (T-3845)
+MATCH (c:Symbol)-[:CALLS]->(x:Symbol) WHERE x.external AND x.path ENDS WITH 'process::Command::new' AND NOT c.is_test AND NOT c.file CONTAINS '/examples/' RETURN DISTINCT c.path ORDER BY c.path;
+// sql-from-text: SQL that is not a literal (sqlx refuses any other unless it is wrapped in AssertSqlSafe); each is allowlisted with why no request value reaches the text (T-3845)
+GREP AssertSqlSafe IN crates/*/src/**/*.rs;
+// fs-write-from-a-server: a file written, renamed or removed by code a server reaches within five calls; each is allowlisted with how its path is kept inside the directory it belongs to (path traversal, T-3845)
+MATCH (c:Symbol)-[:CALLS]->(x:Symbol) WHERE x.external AND (x.path STARTS WITH 'std::fs::' OR x.path STARTS WITH 'tokio::fs::') AND x.name IN ['write','create_dir_all','create_dir','remove_file','remove_dir_all','rename','copy','create','set_permissions'] AND NOT c.is_test AND NOT c.file CONTAINS '/examples/' AND NOT c.file ENDS WITH '/build.rs' WITH DISTINCT c MATCH (s:Symbol)-[:CALLS|DISPATCHES*0..5]->(c) WHERE NOT s.is_test AND s.package IN ['context-gateway','wasm-host','agent-proxy','assistant','functions','token-sidecar'] RETURN DISTINCT c.path ORDER BY c.path;
+// secret-exposed: a secret taken out of jc_core::Secret, whose Debug and Display print nothing; each is allowlisted with where the value goes, never a log or an error (T-3845)
+GREP \.expose\(\) IN crates/*/src/**/*.rs;
