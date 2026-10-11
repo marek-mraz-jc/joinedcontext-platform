@@ -10,7 +10,7 @@ mod common;
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
@@ -23,7 +23,7 @@ use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use jcctl::loader::Repository;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 const SLUG: &str = "d7m2xq9vkt4zc6wrb8shj5nfp3";
@@ -207,20 +207,72 @@ async fn a_transfer_token_reads_as_the_consumer_did_and_nothing_else() {
 }
 
 /// DS-01, DS-02: the connector obtains the token, so its `azp` names an account with roles
-/// of its own. Resolving it would hand a data space consumer the connector's grants.
+/// of its own. Resolving it would hand a data space consumer the connector's grants. Since
+/// T-3800 the broker's engine decides the grant (Antares `tests/engine.rs`
+/// `a_participant_reads_what_its_agreement_grants_and_nothing_public`); the gateway holds that
+/// the hop names the participant alone: its DID, no account, no role.
 #[tokio::test]
-async fn the_connectors_own_account_grants_nothing_under_a_transfer_token() {
-    let status = read(
-        serving_now(),
-        "{ kind: serviceAccount, id: dataspace-connector }",
-        &transfer(SLUG, 300, CONSUMER, AGREEMENT),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "a grant to the connector is not a grant to the participant it fetched a token for"
+async fn the_connectors_own_account_never_reaches_the_broker_under_a_transfer_token() {
+    let hops: Arc<Mutex<Vec<(String, HeaderMap)>>> = Arc::default();
+    let recorder = Arc::clone(&hops);
+    let app = Router::new().fallback(any(move |request: Request| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            recorder
+                .lock()
+                .expect("the hop log")
+                .push((request.uri().path().to_owned(), request.headers().clone()));
+            axum::Json(json!([station()]))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let upstream = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let realm = common::Realm::new();
+    let token = realm.mint(&transfer(SLUG, 300, CONSUMER, AGREEMENT));
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None)
+            .serve([endpoint(
+                SLUG,
+                "{ kind: serviceAccount, id: dataspace-connector }",
+            )]),
     );
+    gateway.replace_agreements(serving_now());
+    let status = router(gateway)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-jc-client", "dataspace-connector")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers")
+        .status();
+    assert_eq!(status, StatusCode::OK);
+    let hops = hops.lock().expect("the hop log").clone();
+    assert_eq!(hops.len(), 1);
+    let (path, headers) = &hops[0];
+    assert_eq!(path, &format!("/x/views/{SLUG}/ngsi-ld/v1/entities"));
+    assert_eq!(headers["x-jc-did"], "did%3Aweb%3Ahelsinki.fi");
+    for name in [
+        "x-jc-client",
+        "x-jc-subject",
+        "x-jc-roles",
+        "x-jc-groups",
+        "authorization",
+    ] {
+        assert!(headers.get(name).is_none(), "{name}: {headers:?}");
+    }
 }
 
 /// DS-02: the audience is one Endpoint (RFC 8707), which the ordinary verifier enforces —
