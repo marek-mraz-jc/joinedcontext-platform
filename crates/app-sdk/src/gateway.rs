@@ -2,8 +2,8 @@
 //! App reads what the person it serves may read and nothing more. A component has no environment
 //! to learn where the gateway runs; it calls the fixed origin `http://gateway` and the host sends
 //! the call on, to the App's own Endpoint only: `/api/endpoint/<its slug>/…`, or for short
-//! `/ngsi-ld/v1/…` and `/schema/…` (AP-147). Every other origin and path is refused before a
-//! connection is made.
+//! `/ngsi-ld/v1/…`, `/ogc/features/…` and `/schema/…` (AP-147). Every other origin and path is
+//! refused before a connection is made.
 
 use serde::de::DeserializeOwned;
 
@@ -96,6 +96,56 @@ pub fn get_json<T: DeserializeOwned>(path: &str) -> Result<T, Error> {
     serde_json::from_slice(&body).map_err(|err| Error::Decode(err.to_string()))
 }
 
+/// The `/items` path of `collection` on the Endpoint's OGC API - Features surface (EP-29), with
+/// `query`'s parameters encoded in order; a `filter` without a `filter-lang` is CQL2 text.
+pub fn features_path(collection: &str, query: &[(&str, &str)]) -> Result<String, Error> {
+    let collection = collection_name(collection)?;
+    let mut pairs: Vec<String> = query
+        .iter()
+        .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
+        .collect();
+    if query.iter().any(|(name, _)| *name == "filter")
+        && !query.iter().any(|(name, _)| *name == "filter-lang")
+    {
+        pairs.push("filter-lang=cql2-text".into());
+    }
+    let path = format!("/ogc/features/collections/{collection}/items");
+    Ok(if pairs.is_empty() {
+        path
+    } else {
+        format!("{path}?{}", pairs.join("&"))
+    })
+}
+
+/// One page of `collection`'s Features (a GeoJSON `FeatureCollection`) from the App's Endpoint,
+/// e.g. `features::<serde_json::Value>("Vehicle", &[("bbox", "24.9,60.1,25.1,60.3"), ("filter",
+/// "speed > 50"), ("limit", "100")])`: the Entities the Endpoint's view and Policy admit to the
+/// caller, as GeoJSON (EP-29).
+pub fn features<T: DeserializeOwned>(collection: &str, query: &[(&str, &str)]) -> Result<T, Error> {
+    get_json(&features_path(collection, query)?)
+}
+
+/// The Feature `id` (an Entity URN) of `collection`.
+pub fn feature<T: DeserializeOwned>(collection: &str, id: &str) -> Result<T, Error> {
+    let collection = collection_name(collection)?;
+    get_json(&format!(
+        "/ogc/features/collections/{collection}/items/{}",
+        encode(id)
+    ))
+}
+
+/// A collection is an Entity type name: a letter, then letters, digits and `_`.
+fn collection_name(name: &str) -> Result<&str, Error> {
+    let mut chars = name.chars();
+    let fine = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if fine {
+        Ok(name)
+    } else {
+        Err(Error::Invalid(format!("{name:?} is not a type name")))
+    }
+}
+
 fn send(path: &str) -> Result<Vec<u8>, Error> {
     use wasip2::http::outgoing_handler;
     use wasip2::http::types::{Fields, IncomingBody, OutgoingBody, OutgoingRequest, Scheme};
@@ -169,6 +219,54 @@ mod tests {
         }
         // A query may carry `//`, as a URL value does.
         assert!(checked("/a?q=http://x").is_ok());
+    }
+
+    #[test]
+    fn a_features_read_names_its_collection_and_encodes_every_parameter() {
+        assert_eq!(
+            features_path("Vehicle", &[]).as_deref(),
+            Ok("/ogc/features/collections/Vehicle/items")
+        );
+        assert_eq!(
+            features_path(
+                "Vehicle",
+                &[("bbox", "24.9,60.1,25.1,60.3"), ("filter", "name LIKE 'A%'"), ("limit", "10")]
+            )
+            .as_deref(),
+            Ok("/ogc/features/collections/Vehicle/items?bbox=24.9%2C60.1%2C25.1%2C60.3&filter=name%20LIKE%20%27A%25%27&limit=10&filter-lang=cql2-text")
+        );
+        // a filter language the App names is kept, never doubled
+        assert_eq!(
+            features_path("Vehicle", &[("filter", "{}"), ("filter-lang", "cql2-json")]).as_deref(),
+            Ok("/ogc/features/collections/Vehicle/items?filter=%7B%7D&filter-lang=cql2-json")
+        );
+        // every path it builds is one the gateway check accepts
+        assert!(checked(
+            &features_path("V", &[("datetime", "2026-01-01T00:00:00Z/..")]).unwrap_or_default()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_collection_that_is_no_type_name_is_refused_before_any_call() {
+        for bad in [
+            "",
+            "../x",
+            "Vehicle/items",
+            "1Car",
+            "Car?x=1",
+            "Car#x",
+            "Ca r",
+        ] {
+            assert!(
+                matches!(features_path(bad, &[]), Err(Error::Invalid(_))),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            feature::<serde_json::Value>("../admin", "x"),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]
