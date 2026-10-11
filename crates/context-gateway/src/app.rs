@@ -3871,32 +3871,12 @@ async fn mcp_answer(
     // What is no single request (a batch, a scalar, a notification that changes nothing) is
     // answered here as JSON-RPC says, before a hop.
     let request_message = message.is_object() && message.get("id").is_some();
-    // A space that federates registrations says so in its instructions, tool descriptions and
-    // results (EP-71); the broker's view does not know the platform's members, so that space's
-    // MCP stays on the façade until the hub forwards (T-3808).
-    let federates = !gateway
-        .members_of(&endpoint.project, &endpoint.space)
-        .is_empty();
-    let viewed = request_message
-        && !federates
-        && endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
-        && (1..=MAX_VIEW_ID).contains(&view.len());
+    let viewed = request_message && view_serves(&gateway, &endpoint, &subject, &view);
     if described || !viewed {
         return facade_answer(gateway, endpoint, subject, credential, message).await;
     }
 
-    // A tool the gateway does not know as a read is a write for the domain gate (PF-41); the
-    // operation stands for the class of the call, the broker gates the tool's own clause.
-    let writes = calls
-        && !tool
-            .as_deref()
-            .is_some_and(|tool| MCP_READ_TOOLS.contains(&tool));
-    let operation = if writes {
-        Operation::UpsertBatch
-    } else {
-        Operation::QueryEntity
-    };
+    let operation = mcp_operation(calls.then_some(tool.as_deref().unwrap_or_default()));
     let mut request = Request::from_parts(parts, Body::empty());
     if let Err(answer) = view_request(&gateway, &endpoint, &subject, "", operation, &mut request) {
         return *answer;
@@ -3971,6 +3951,129 @@ async fn mcp_answer(
         items.extend(kept);
     }
     proxy::with_body(parts, listed.to_string().into_bytes())
+}
+
+/// Whether the broker's MCP surface of `view` answers this Endpoint's caller: not what no view
+/// serves yet, a view mapping, an agreement's caller, or a space that federates registrations,
+/// which says so in its instructions, tool descriptions and results (EP-71) while the broker's
+/// view does not know the platform's members.
+fn view_serves(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+    gateway
+        .members_of(&endpoint.project, &endpoint.space)
+        .is_empty()
+        && endpoint.view_mapping.is_none()
+        && subject.agreement.is_none()
+        && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// The operation the domain gate (PF-41) weighs a message as: a tool the gateway does not know
+/// as a read is a write. It stands for the class of the call; the broker gates the tool's own
+/// clause.
+fn mcp_operation(tool: Option<&str>) -> Operation {
+    if tool.is_some_and(|tool| !MCP_READ_TOOLS.contains(&tool)) {
+        Operation::UpsertBatch
+    } else {
+        Operation::QueryEntity
+    }
+}
+
+/// Whether a member's call to `tool` goes to the broker's view of the member (T-3808): not the
+/// describe tools the gateway answers, and not a member no view serves yet.
+pub(crate) fn member_viewed(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    tool: &str,
+) -> bool {
+    !DESCRIBE_TOOLS.contains(&tool) && view_serves(gateway, endpoint, subject, &endpoint.slug)
+}
+
+/// One `tools/call` of the hub or of a named server as the broker's view of the member answers
+/// it (T-3808): the member's slug is its view, the tenant and the verified caller are pinned, and
+/// no token travels. What fails on the way is the call's tool error, so a fan-out names the
+/// member it failed on; the broker's own explanation of a failure is not passed on.
+pub(crate) async fn member_call(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    mut message: Value,
+) -> Value {
+    let id = message["id"].clone();
+    let operation = mcp_operation(message["params"]["name"].as_str());
+    let mut request = Request::new(Body::empty());
+    if let Err(refusal) = view_request(gateway, endpoint, subject, "", operation, &mut request) {
+        let held = axum::body::to_bytes(refusal.into_body(), MAX_BODY)
+            .await
+            .unwrap_or_default();
+        return member_refusal(id, problem_text(&held));
+    }
+    let (mut parts, _) = request.into_parts();
+    capped_arguments(&mut message["params"]["arguments"]);
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    parts.headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/json, text/event-stream"),
+    );
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        principal = %principal_of(subject),
+        tool = message["params"]["name"].as_str().unwrap_or_default(),
+        "member call forwarded to the broker's view"
+    );
+    let path = format!("/x/views/{}/mcp", endpoint.slug);
+    let answer = match gateway
+        .broker
+        .send(
+            Method::POST,
+            &path,
+            parts.headers,
+            Body::from(message.to_string()),
+        )
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => {
+            tracing::warn!(slug = %endpoint.slug, %error, "the broker's view did not answer a member call");
+            return member_refusal(id, None);
+        }
+    };
+    let status = answer.status();
+    let held = axum::body::to_bytes(answer.into_body(), MAX_BODY)
+        .await
+        .unwrap_or_default();
+    match serde_json::from_slice::<Value>(&held) {
+        Ok(answer) if status.is_success() && answer.get("jsonrpc").is_some() => answer,
+        _ if status.is_client_error() => member_refusal(id, problem_text(&held)),
+        _ => {
+            tracing::warn!(
+                slug = %endpoint.slug,
+                status = status.as_u16(),
+                broker = %String::from_utf8_lossy(&held),
+                "the broker failed a member call; its own explanation is not passed on"
+            );
+            member_refusal(id, None)
+        }
+    }
+}
+
+/// The sentence of a Problem Details body: its `detail`, else its `title`.
+fn problem_text(body: &[u8]) -> Option<String> {
+    let problem = serde_json::from_slice::<Value>(body).ok()?;
+    problem["detail"]
+        .as_str()
+        .or_else(|| problem["title"].as_str())
+        .map(str::to_owned)
+}
+
+/// A member call that ended before the broker's tool answered, as the tool error MCP gives it.
+fn member_refusal(id: Value, why: Option<String>) -> Value {
+    let why = why.unwrap_or_else(|| {
+        "the context broker behind this Endpoint failed to answer this call".to_owned()
+    });
+    mcp::endpoint_facade::result(id, mcp::endpoint_facade::refused(&why, &Value::Null))
 }
 
 /// The listings the gateway adds its own entries to, by method and result member.
