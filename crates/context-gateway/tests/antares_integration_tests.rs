@@ -4,6 +4,11 @@
 //! Antares in Docker and drives the whole path — resolve, decide, guard, forward, project
 //! — because the interesting failures are the ones at the seam: a header the broker does
 //! not get, a query parameter it does not understand, a status the gateway swallows.
+//!
+//! Since T-3643 the NGSI-LD surface of an Endpoint is the broker's view of the same slug, so
+//! the broker is the platform's build (`-jc`: views and the `joinedcontext` engine) and each
+//! test loads what the Portal's view writer would: one view per Endpoint and the space's rule
+//! document (portal `reconciler/views.rs`).
 
 mod common;
 
@@ -18,7 +23,9 @@ use serde_json::{json, Value};
 use std::process::Command;
 use tower::ServiceExt;
 
-const IMAGE: &str = "ghcr.io/marek-mraz/antares-broker:dev";
+/// Antares dev dfe4502 by image-jc.yml run 38152236779: the first -jc build whose engine reads a
+/// rule document's per-view bindings (T-3702).
+const IMAGE: &str = "ghcr.io/marek-mraz-jc/antares-broker-jc:dfe4502@sha256:54e81850572cd4200a79c94f7a3f9105f06255afa8495f65c4cfa458a0afbfd1";
 const SPACE: &str = "ovzdusie";
 const ORG: &str = "banskabystrica.sk";
 const PUBLIC_SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
@@ -59,6 +66,12 @@ impl Antares {
                 "127.0.0.1:0:9090",
                 "-e",
                 "ANTARES_STORE=memory",
+                "-e",
+                "ANTARES_API_SURFACES=admin,views,mcp",
+                "-e",
+                "ANTARES_POLICY=joinedcontext",
+                "-e",
+                "ANTARES_POLICY_SUBJECT_HEADERS=x-jc-subject,x-jc-groups,x-jc-roles,x-jc-client,x-jc-restricted",
                 IMAGE,
             ])
             .output()
@@ -108,6 +121,151 @@ impl Antares {
     fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
+
+    /// Loads the views and the space's rule document, as the Portal's view writer does
+    /// (`PUT /q/views/{id}`, `PUT /q/policy/{tenant}`). The container publishes on loopback
+    /// only, so `/q` runs without the admin secret here.
+    async fn load(&self, views: &[Value], rules: Value) {
+        let client = reqwest::Client::new();
+        let mut puts: Vec<(String, Value)> = views
+            .iter()
+            .map(|view| {
+                (
+                    format!("/q/views/{}", view["id"].as_str().expect("an id")),
+                    view.clone(),
+                )
+            })
+            .collect();
+        puts.push((format!("/q/policy/{SPACE}"), with_gateway(rules)));
+        let client = &client;
+        for (path, body) in puts {
+            let response = client
+                .put(format!("{}{path}", self.url()))
+                .json(&body)
+                .send()
+                .await
+                .expect("the broker answers");
+            let status = response.status();
+            assert!(
+                status.is_success(),
+                "{path}: {status} {}",
+                response.text().await.unwrap_or_default()
+            );
+        }
+    }
+
+    /// Writes an entity at the broker's root on the `seeder` account, past every view: what a
+    /// pipeline stored that a caller of the view may not see all of.
+    async fn seed(&self, entity: &Value) {
+        let response = reqwest::Client::new()
+            .post(format!("{}/ngsi-ld/v1/entities", self.url()))
+            .header("ngsild-tenant", SPACE)
+            .header("x-jc-client", "seeder")
+            .json(entity)
+            .send()
+            .await
+            .expect("the broker answers");
+        assert_eq!(response.status(), reqwest::StatusCode::CREATED, "seed");
+    }
+}
+
+/// A view of the space's one type showing `attributes`, serving `operations` (matrix row ids).
+fn view(slug: &str, attributes: &[&str], operations: &[&str]) -> Value {
+    json!({
+        "id": slug,
+        "tenant": SPACE,
+        "selector": ["AirQualityObserved"],
+        "rules": [{"types": ["AirQualityObserved"], "attributes": attributes}],
+        "operations": operations,
+    })
+}
+
+/// The rule document's policy for a grant: its id, assignee, clauses and information.
+fn rule(id: &str, assignee: Value, clauses: &[&str], information: Option<Value>) -> Value {
+    let mut rule = json!({
+        "id": format!("{SPACE}/{id}"),
+        "effect": "permit",
+        "assignee": assignee,
+        "operations": clauses,
+    });
+    if let Some(information) = information {
+        rule["information"] = information;
+    }
+    rule
+}
+
+/// The gateway's own hops (T-3767, and the download's type list: T-3790, T-3791), which the Portal
+/// adds to every rule document.
+fn with_gateway(mut rules: Value) -> Value {
+    if let Some(policies) = rules["policies"].as_array_mut() {
+        policies.push(json!({
+            "id": "@context-gateway",
+            "effect": "permit",
+            "assignee": {"kind": "serviceAccount", "id": "context-gateway"},
+            "operations": ["5.6.4", "5.6.5", "5.6.6", "5.7.1", "5.7.2", "5.7.5", "5.8.3"],
+        }));
+    }
+    rules
+}
+
+/// What `public_grant` grants, as the writer puts it into the broker.
+fn public_rules() -> (Vec<Value>, Value) {
+    let information = json!([{
+        "entities": [{
+            "type": "AirQualityObserved",
+            "idPattern": "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:.*$"
+        }],
+        "propertyNames": ["pm10", "pm25", "location"]
+    }]);
+    let views = vec![
+        view(
+            PUBLIC_SLUG,
+            &["location", "pm10", "pm25"],
+            &[
+                "batch_upsert",
+                "create_entity",
+                "delete_entity",
+                "query_entities",
+                "retrieve_entity",
+                "temporal_retrieve",
+            ],
+        ),
+        // The space surface `/cs/{space}` (plan 5.1): every class whole, the engine narrows.
+        json!({
+            "id": format!("cs-{SPACE}"),
+            "tenant": SPACE,
+            "selector": ["*"],
+            "rules": [{"types": ["*"], "attributes": ["*"]}],
+            "operations": ["query_entities", "retrieve_entity"],
+        }),
+        // A grant naming no type shows every type whole: the `*` form (ADR-0023 rule 12).
+        json!({
+            "id": OPEN_SLUG,
+            "tenant": SPACE,
+            "selector": ["*"],
+            "rules": [{"types": ["*"], "attributes": ["*"]}],
+            "operations": ["query_entities", "retrieve_entity"],
+        }),
+    ];
+    let public = json!({"kind": "role", "id": "public"});
+    let rules = json!({
+        "policies": [
+            rule(
+                "public-air",
+                public.clone(),
+                &["5.7.2", "5.7.1", "5.6.1", "5.6.6", "5.7.3", "5.6.8"],
+                Some(information),
+            ),
+            rule("open", public, &["5.7.1", "5.7.2"], None),
+            // What the test writes past every view, as a pipeline's account would.
+            rule("seeder", json!({"kind": "serviceAccount", "id": "seeder"}), &["5.6.1"], None),
+        ],
+        "views": {
+            PUBLIC_SLUG: [format!("{SPACE}/public-air")],
+            OPEN_SLUG: [format!("{SPACE}/open")],
+        },
+    });
+    (views, rules)
 }
 
 impl Drop for Antares {
@@ -123,7 +281,7 @@ fn public_grant() -> PolicySpec {
         r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk
 assignee: { kind: role, id: public }
-operations: [queryEntity, retrieveEntity, createEntity, deleteEntity]
+operations: [queryEntity, retrieveEntity, createEntity, deleteEntity, retrieveTemporal, upsertBatch]
 information:
   - entities:
       - type: AirQualityObserved
@@ -146,7 +304,11 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         project: SPACE.to_owned(),
         audience,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![
+            Representation::NgsiLd,
+            Representation::GeoJson,
+            Representation::Mcp,
+        ],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -176,11 +338,25 @@ operations: [queryEntity, retrieveEntity]
 fn gateway(broker_url: String) -> axum::Router {
     let mut open = endpoint(OPEN_SLUG, Audience::Public);
     open.policies = vec![unrestricted_grant()];
-    let gateway = Gateway::new(Broker::new(broker_url), Box::new(PolicyPdp), ORG).serve([
-        endpoint(PUBLIC_SLUG, Audience::Public),
-        endpoint(MEMBERS_SLUG, Audience::Organization),
-        open,
-    ]);
+    let space = context_gateway::resolver::Space {
+        endpoint: std::sync::Arc::new(Endpoint {
+            slug: SPACE.to_owned(),
+            base_path: format!("/cs/{SPACE}"),
+            policies: vec![public_grant(), unrestricted_grant()],
+            ..endpoint(PUBLIC_SLUG, Audience::Public)
+        }),
+        title: Default::default(),
+        description: Default::default(),
+        is_sandbox: false,
+        default_locale: None,
+    };
+    let gateway = Gateway::new(Broker::new(broker_url), Box::new(PolicyPdp), ORG)
+        .serve([
+            endpoint(PUBLIC_SLUG, Audience::Public),
+            endpoint(MEMBERS_SLUG, Audience::Organization),
+            open,
+        ])
+        .serve_spaces([space]);
     router(std::sync::Arc::new(gateway))
 }
 
@@ -233,11 +409,29 @@ fn get(slug: &str, path: &str) -> Request<Body> {
         .expect("a request")
 }
 
+/// One JSON-RPC request to an Endpoint's MCP through the gateway, as its answer.
+async fn mcp(app: &axum::Router, slug: &str, method: &str, params: Value) -> Value {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/endpoint/{slug}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .body(Body::from(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string(),
+        ))
+        .expect("a request");
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{method}: {}", body_text(&body));
+    serde_json::from_slice(&body).expect("a JSON-RPC answer")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     let Some(antares) = Antares::start() else {
         return;
     };
+    let (views, rules) = public_rules();
+    antares.load(&views, rules).await;
     let app = gateway(antares.url());
 
     // Create, through the endpoint and its grant.
@@ -418,12 +612,10 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
             .expect("a request"),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The view serves no merge here, so the broker answers 405 with `Allow` (views.md 4).
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     let problem: Value = serde_json::from_slice(&body).expect("problem+json");
-    assert_eq!(problem["status"], json!(403));
-    assert!(problem["type"]
-        .as_str()
-        .is_some_and(|t| t.ends_with("forbidden")));
+    assert_eq!(problem["status"], json!(405));
     // CIM 009 clause 6.3.3 carries `detail`; GW1 and R20 say it names no rule: not the
     // policy, not its assignee, not the attribute that was outside the grant.
     assert!(
@@ -471,6 +663,218 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = call(&app, get(PUBLIC_SLUG, "/admin/shutdown")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Plan 5.2, M3 and M9: `pick` and `join` through the slug are the view's.
+    let (status, body) = call(
+        &app,
+        get(
+            PUBLIC_SLUG,
+            "/entities?type=AirQualityObserved&pick=id,pm10",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "pick: {}", body_text(&body));
+    let picked: Value = serde_json::from_slice(&body).expect("a list");
+    assert_eq!(picked[0]["pm10"]["value"], json!(34.2));
+    assert!(picked[0].get("pm25").is_none(), "{picked}");
+    let (status, _) = call(
+        &app,
+        get(
+            PUBLIC_SLUG,
+            "/entities?type=AirQualityObserved&join=inline&joinLevel=2",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // M8: the temporal read of the same entity, through the view.
+    let (status, body) = call(
+        &app,
+        get(PUBLIC_SLUG, &format!("/temporal/entities/{STATION}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "temporal: {}", body_text(&body));
+
+    // M4, M6: the space surface is the `cs-{space}` view, decided by every Policy of the space.
+    let (status, body) = call(
+        &app,
+        Request::builder()
+            .uri(format!("/cs/{SPACE}/ngsi-ld/v1/entities/{STATION}"))
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "space: {}", body_text(&body));
+
+    // M1: what a pipeline stored beyond the grant is cut, and a caller who asks is told so under
+    // the specification's header; one who does not ask is not (R22, O-3 (b)).
+    let seeded = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-seeded";
+    let mut stored = station(Some((
+        "operatorPhone",
+        json!({ "type": "Property", "value": "+421 900 000 000" }),
+    )));
+    stored["id"] = json!(seeded);
+    if let Some(members) = stored.as_object_mut() {
+        members.remove("@context");
+    }
+    antares.seed(&stored).await;
+    let query = || {
+        get(
+            PUBLIC_SLUG,
+            &format!("/entities?type=AirQualityObserved&id={seeded}"),
+        )
+    };
+    let mut asked = query();
+    asked.headers_mut().insert(
+        "ngsild-results-restricted",
+        "true".parse().expect("a value"),
+    );
+    let response = app
+        .clone()
+        .oneshot(asked)
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("ngsild-results-restricted")
+            .map(|v| v.as_bytes()),
+        Some(&b"true"[..])
+    );
+    assert!(response
+        .headers()
+        .get("antares-results-restricted")
+        .is_none());
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    assert!(!body_text(&bytes).contains("+421"), "{}", body_text(&bytes));
+    let response = app
+        .clone()
+        .oneshot(query())
+        .await
+        .expect("the gateway answers");
+    assert!(response
+        .headers()
+        .get("ngsild-results-restricted")
+        .is_none());
+
+    // CIM 009 6.3.15: GeoJSON on the NGSI-LD tree is the broker's rendering of the same narrowed
+    // answer, so what the view cuts is cut there too.
+    let mut geo = query();
+    geo.headers_mut()
+        .insert("accept", "application/geo+json".parse().expect("a value"));
+    let response = app.clone().oneshot(geo).await.expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").map(|v| v.as_bytes()),
+        Some(&b"application/geo+json"[..])
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    let collection: Value = serde_json::from_slice(&bytes).expect("a FeatureCollection");
+    assert_eq!(collection["type"], json!("FeatureCollection"));
+    assert_eq!(collection["features"][0]["id"], json!(seeded));
+    assert!(!body_text(&bytes).contains("+421"), "{collection}");
+
+    // M17: a batch upsert is decided member by member, and the refused one comes back in the
+    // 207 under the broker's own type (O-8).
+    let fine = station(None);
+    let mut beyond = station(Some((
+        "operatorPhone",
+        json!({ "type": "Property", "value": "x" }),
+    )));
+    beyond["id"] = json!("urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-02");
+    let (status, body) = call(
+        &app,
+        post(
+            PUBLIC_SLUG,
+            "/entityOperations/upsert",
+            &json!([fine, beyond]),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::MULTI_STATUS, "{}", body_text(&body));
+    let result: Value = serde_json::from_slice(&body).expect("a BatchOperationResult");
+    assert_eq!(result["success"], json!([STATION]));
+    assert_eq!(
+        result["errors"][0]["error"]["type"],
+        json!("urn:antares:error:AccessDenied")
+    );
+
+    // M7: a write the engine refuses is 403 under the broker's type, whatever the id names.
+    let (status, body) = call(&app, post(PUBLIC_SLUG, "/entities", &named_elsewhere)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let problem: Value = serde_json::from_slice(&body).expect("problem+json");
+    assert_eq!(problem["type"], json!("urn:antares:error:AccessDenied"));
+    assert_eq!(
+        problem["code"],
+        json!("forbidden"),
+        "the Portal's key for its hint"
+    );
+
+    // T-3647: the Endpoint's MCP is the broker's view under the verified caller. The tool
+    // list is the view's plus the two the gateway answers; a result is narrowed like the
+    // NGSI-LD read (the seeded phone stays out); a type no grant names and a type nobody has
+    // answer alike; an argument naming a tenant is refused (carried over from the façade's
+    // `mcp_read_security_tests`).
+    let listed = mcp(&app, PUBLIC_SLUG, "tools/list", json!({})).await;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for wanted in [
+        "query_entities",
+        "get_entity",
+        "describe_access",
+        "describe_schema",
+    ] {
+        assert!(names.contains(&wanted), "{wanted}: {listed}");
+    }
+    let queried = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "query_entities", "arguments": { "type": ["AirQualityObserved"], "count": true } }),
+    )
+    .await;
+    let found = &queried["result"]["structuredContent"]["entities"];
+    assert!(
+        found
+            .as_array()
+            .is_some_and(|entities| entities.iter().any(|entity| entity["id"] == json!(seeded))),
+        "{queried}"
+    );
+    assert!(!queried.to_string().contains("+421"), "{queried}");
+    let fetched = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "get_entity", "arguments": { "id": seeded } }),
+    )
+    .await;
+    assert_eq!(fetched["result"]["isError"], json!(false), "{fetched}");
+    assert!(!fetched.to_string().contains("operatorPhone"), "{fetched}");
+    let hidden = |name: &str| json!({ "name": "query_entities", "arguments": { "type": [name] } });
+    let denied = mcp(&app, PUBLIC_SLUG, "tools/call", hidden("Depot")).await;
+    let absent = mcp(&app, PUBLIC_SLUG, "tools/call", hidden("Ghost")).await;
+    assert_eq!(denied["result"]["isError"], json!(true), "{denied}");
+    assert_eq!(
+        denied["result"], absent["result"],
+        "a hidden and an absent type answer alike"
+    );
+    let aimed = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "query_entities", "arguments": { "type": ["AirQualityObserved"], "tenant": "doprava" } }),
+    )
+    .await;
+    assert_eq!(aimed["result"]["isError"], json!(true), "{aimed}");
 
     // Delete, and it is gone.
     let (status, body) = call(
@@ -525,6 +929,32 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
     let Some(antares) = Antares::start() else {
         return;
     };
+    antares
+        .load(
+            &[view(
+                WRITER_SLUG,
+                &["location", "pm10", "pm25"],
+                &[
+                    "create_entity",
+                    "delete_entity",
+                    "query_entities",
+                    "retrieve_entity",
+                ],
+            )],
+            json!({
+                "policies": [rule(
+                    "writer",
+                    json!({"kind": "serviceAccount", "id": "writer"}),
+                    &["5.6.1", "5.7.1", "5.7.2", "5.6.6"],
+                    Some(json!([{
+                        "entities": [{"type": "AirQualityObserved"}],
+                        "propertyNames": ["pm10", "pm25", "location"]
+                    }])),
+                )],
+                "views": { WRITER_SLUG: [format!("{SPACE}/writer")] },
+            }),
+        )
+        .await;
     let realm = common::Realm::new();
     let accounts = service_accounts();
 
