@@ -246,6 +246,44 @@ fn a_caller_is_never_forwarded_as_the_gateway() {
     assert!(request.headers().get("x-jc-roles").is_some());
 }
 
+#[test]
+fn a_participant_is_forwarded_as_its_did_alone() {
+    // T-3800, DS-02: a transfer token establishes the participant and nothing else. The hop
+    // carries its DID and no role, account or opt-in, so a broker that does not read `x-jc-did`
+    // takes it as the cluster's own and refuses it, never as the public caller.
+    let mut subject = context_gateway::pdp::evaluator::Subject::anonymous();
+    subject.service_account = Some("dataspace-connector".to_owned());
+    subject.roles.insert("public".to_owned());
+    subject.did = Some("did:web:helsinki.fi".to_owned());
+    subject.agreement = Some("urn:uuid:agreement-1".to_owned());
+    let mut request = with(&[
+        ("x-jc-did", "did:web:forged.example"),
+        ("x-jc-restricted", "true"),
+        ("ngsild-results-restricted", "true"),
+    ]);
+    context_gateway::middleware::tenancy::pin_caller(&mut request, "city", &subject)
+        .expect("a legal space");
+    let mut pinned: Vec<(String, String)> = request
+        .headers()
+        .iter()
+        .filter(|(n, _)| n.as_str().starts_with("x-jc-") || *n == TENANT)
+        .map(|(n, v)| {
+            (
+                n.as_str().to_owned(),
+                v.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    pinned.sort();
+    assert_eq!(
+        pinned,
+        [
+            ("ngsild-tenant".to_owned(), "city".to_owned()),
+            ("x-jc-did".to_owned(), "did%3Aweb%3Ahelsinki.fi".to_owned()),
+        ]
+    );
+}
+
 /// The `x-jc-*` names a client sends that no fixed list could know of: the next identity
 /// header the broker starts reading (`x-jc-did`, T-3800), any new one, and repeats.
 const NEW_IDENTITY: [(&str, &str); 5] = [

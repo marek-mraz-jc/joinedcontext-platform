@@ -1433,7 +1433,6 @@ fn reserve_create(
 /// GW16).
 fn served_by_view(
     endpoint: &Endpoint,
-    subject: &Subject,
     (view, operation, headers): (&str, Operation, &HeaderMap),
 ) -> bool {
     let subscription = matches!(
@@ -1445,24 +1444,19 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    has_view(endpoint, subject, view) && !conditional && !subscription
+    has_view(endpoint, view) && !conditional && !subscription
 }
 
-/// Whether the broker holds a view `view` of this Endpoint that decides for `subject` (plan 5.1,
-/// T-3643). What no view can serve yet keeps the gateway's own answer, each until its gap
-/// closes: a projection with `temporalQ` (G6), a slug no view id can hold (the writer refuses
-/// it). A caller under a data-space agreement stays too: the
-/// engine has no agreements to decide on yet, and would judge the connector's own account
-/// instead (map K38).
-pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+/// Whether the broker holds a view `view` of this Endpoint (plan 5.1, T-3643). What no view can
+/// serve yet keeps the gateway's own answer, each until its gap closes: a projection with
+/// `temporalQ` (G6), a slug no view id can hold (the writer refuses it).
+pub(crate) fn has_view(endpoint: &Endpoint, view: &str) -> bool {
     let temporal = endpoint
         .projection
         .as_ref()
         .and_then(|projection| projection.filter.as_ref())
         .is_some_and(|filter| filter.temporal_q.is_some());
-    subject.agreement.is_none()
-        && !temporal
-        && (1..=MAX_VIEW_ID).contains(&view.len())
+    !temporal && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The broker's view of an Endpoint (plan 5.1): its slug, or `cs-{space}` for a space's
@@ -1509,7 +1503,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !served_by_view(&endpoint, &subject, (&view, operation, request.headers())) {
+    if !served_by_view(&endpoint, (&view, operation, request.headers())) {
         return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
     }
     if operation == Operation::QueryEntity {
