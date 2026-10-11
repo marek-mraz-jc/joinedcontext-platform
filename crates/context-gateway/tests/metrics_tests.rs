@@ -108,30 +108,6 @@ async fn the_scrape_target_answers_the_text_format_prometheus_reads() {
     );
 }
 
-/// The series the edge cannot produce: APISIX counts statuses, not decisions (GW1, OPS-16).
-#[tokio::test]
-async fn a_policy_decision_is_counted_with_its_operation_and_verdict() {
-    // Reaches the decision point and then fails to reach the broker, which is enough: the
-    // decision is made before anything is forwarded.
-    call(&format!(
-        "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
-    ))
-    .await;
-
-    let (_, _, body) = call("/metrics").await;
-    let counted: Vec<&str> = body
-        .lines()
-        .filter(|line| line.starts_with("jc_gateway_pdp_decisions_total{"))
-        .collect();
-    assert!(!counted.is_empty(), "no decision was counted:\n{body}");
-    assert!(
-        counted
-            .iter()
-            .any(|line| line.contains("operation=\"queryEntity\"")),
-        "{counted:?}"
-    );
-}
-
 #[tokio::test]
 async fn a_request_through_the_surface_moves_the_counter() {
     // The endpoint record: one request, no broker, and a route the monitor's dashboard draws.

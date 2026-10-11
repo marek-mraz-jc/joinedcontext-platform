@@ -8,6 +8,8 @@
 //! store that answers the computed end's query (`type` + `q={slot}=="{urn}"`) and applies the
 //! writes, so each test reads the store after the request.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
@@ -219,7 +221,7 @@ async fn broker(held: Vec<Value>, failing: &[&str]) -> (String, Shared) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), store)
 }
