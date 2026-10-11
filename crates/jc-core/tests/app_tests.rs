@@ -1403,3 +1403,44 @@ fn the_jobs_service_needs_the_jobs_it_names_ap162() {
     }));
     assert!(why.contains("spec.server.jobs"), "{why}");
 }
+
+/// The names of the Organization's domain an App also answers on (AP-172).
+fn with_hostnames(list: &str) -> impl FnOnce(&mut String) + '_ {
+    move |y: &mut String| {
+        *y = y.replace(
+            "  storage:\n",
+            &format!("  hostnames: {list}\n  storage:\n"),
+        )
+    }
+}
+
+#[test]
+fn an_app_lists_its_hostnames_and_round_trips_ap172() {
+    let app = wasm_app(with_hostnames("[bikes.hel.fi, hel.fi]")).expect("hostnames validate");
+    assert_eq!(app.spec.hostnames, ["bikes.hel.fi", "hel.fi"]);
+    let again = App::from_yaml(&app.to_yaml().expect("yaml")).expect("read back");
+    assert_eq!(again.spec.hostnames, app.spec.hostnames);
+    assert!(wasm_app(|_| {}).expect("plain").spec.hostnames.is_empty());
+}
+
+#[test]
+fn a_hostname_that_is_no_dns_name_repeats_or_is_one_too_many_is_refused_ap172() {
+    for bad in [
+        "[https://bikes.hel.fi]",
+        "[Bikes.hel.fi]",
+        "[bikes]",
+        "[bikes.hel.fi:443]",
+        "[bikes.hel.fi/x]",
+        "[\"*.hel.fi\"]",
+        "[bikes.hel.fi.]",
+    ] {
+        let why = wasm_refusal(wasm_app(with_hostnames(bad)));
+        assert!(why.contains("hostnames"), "{bad}: {why}");
+    }
+    let why = wasm_refusal(wasm_app(with_hostnames("[a.hel.fi, a.hel.fi]")));
+    assert!(why.contains("once"), "{why}");
+    let why = wasm_refusal(wasm_app(with_hostnames(
+        "[a.hel.fi, b.hel.fi, c.hel.fi, d.hel.fi]",
+    )));
+    assert!(why.contains("at most 3"), "{why}");
+}
