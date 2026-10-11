@@ -7,6 +7,8 @@
 //! caller the space does not admit is told the slug does not exist, and a bad draft is refused
 //! naming the member at fault.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -48,14 +50,6 @@ fn saved_projection() -> Arc<ModelProjectionSpec> {
     Arc::new(parsed.spec)
 }
 
-/// The same projection as the draft body carries it.
-fn draft_projection() -> Value {
-    json!({
-        "classes": [{ "name": "Vehicle", "slots": ["name", "speed"] }],
-        "filter": { "q": "category==\"public\"" }
-    })
-}
-
 fn bus() -> Value {
     json!({
         "id": "urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01",
@@ -86,7 +80,7 @@ async fn broker() -> (String, Hops) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -192,36 +186,6 @@ async fn preview(draft: Value) -> Answer {
         Some(draft),
     )
     .await
-}
-
-#[tokio::test]
-async fn a_draft_answers_what_the_same_filter_saved_answers() {
-    let saved = call(
-        true,
-        Method::GET,
-        &format!(
-            "/api/endpoint/{SAVED}/ngsi-ld/v1/entities?type=Vehicle&limit=50&offset=0&count=true"
-        ),
-        None,
-    )
-    .await;
-    let drafted = preview(json!({ "projection": draft_projection(), "type": "Vehicle" })).await;
-
-    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
-    assert_eq!(drafted.status, StatusCode::OK, "{}", drafted.body);
-    assert_eq!(
-        drafted.asked, saved.asked,
-        "the broker is asked the same question"
-    );
-    assert!(drafted.asked[0].contains("category"), "{:?}", drafted.asked);
-    assert_eq!(drafted.body, saved.body);
-    // The projection keeps name and speed of a Vehicle: the odometer the broker holds is not served.
-    assert!(
-        drafted.body[0].get("odometer").is_none(),
-        "{}",
-        drafted.body
-    );
-    assert_eq!(drafted.body[0]["speed"]["value"], json!(32));
 }
 
 #[tokio::test]

@@ -83,7 +83,11 @@ async fn broker(kind: &'static str) -> (String, Arc<AtomicUsize>) {
         .await
         .expect("a port");
     let address = listener.local_addr().expect("an address");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+    tokio::spawn(async move {
+        axum::serve(listener, common::plain_tree(app))
+            .await
+            .expect("the stub serves")
+    });
     (format!("http://{address}"), hits)
 }
 

@@ -1,4 +1,4 @@
-//! The leak sweep: every read surface of one Endpoint, asked 105 ways, asserting that none of
+//! The leak sweep: every read surface of one Endpoint, asked 60 ways, asserting that none of
 //! them serves more than (projection ∩ grants − hidden) per type (T-2135; EP-26, MP-02, TS-19).
 //!
 //! One Endpoint, a projection whose classes have different slots (`User: [name, age, location]`,
@@ -7,7 +7,9 @@
 //! every type, each value a canary `CANARY-{Type}-{attr}` and each schema description
 //! `DESC-{Type}-{attr}`, so anything that should have been cut is visible in the bytes.
 //!
-//! The probes cover NGSI-LD (query, retrieve, temporal, batch query, types and attributes), the
+//! NGSI-LD is not probed here: since T-3643 the gateway forwards it to the broker's view, and
+//! Antares sweeps that surface itself (`views_read`, `views_q`, `joinedcontext-policy` engine
+//! tests). The probes cover the
 //! file downloads (`json`, `csv`, `geojson`, `xlsx`, `zip` — the two compressed ones are opened
 //! and their parts read), OGC API Features, SensorThings, the schema artifacts, the access
 //! document, the endpoint record and every read-only MCP tool. Two brokers: one that honours
@@ -21,6 +23,8 @@
 //!
 //! First measured on 2026-09-18 with 42 leaking and 24 oracle probes (T-1862 … T-2135 come from
 //! that run, and `tasks/audit/leak-probe/` holds the report); green since 2026-09-19.
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -141,7 +145,7 @@ async fn broker(honest: bool) -> (String, Hops) {
         .expect("a port");
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -237,61 +241,16 @@ fn mcp(label: &'static str, tool: &str, arguments: Value) -> Probe {
 }
 
 fn probes() -> Vec<Probe> {
-    let e = "/ngsi-ld/v1/entities";
-    let t = "/ngsi-ld/v1/temporal/entities";
     let mut all = vec![
-        get("ld two types", &format!("{e}?type=User,Vehicle")),
-        get("ld one type", &format!("{e}?type=Vehicle")),
-        get("ld q on the other type's attribute", &format!("{e}?type=User,Vehicle&q=age%3E30")),
-        get("ld q on a foreign attribute, one type", &format!("{e}?type=Vehicle&q=age%3E30")),
-        get("ld q on an attribute outside the projection", &format!("{e}?type=Vehicle&q=odometer%3E1")),
-        get("ld q on a hidden attribute", &format!("{e}?type=Vehicle&q=secretPin%3D%3D%221%22")),
-        get("ld q non-existence of a foreign attribute", &format!("{e}?type=Vehicle&q=!age")),
-        get("ld q or-branch", &format!("{e}?type=User,Vehicle&q=age%3E30%7Cweight%3E100")),
-        get("ld q dotted path", &format!("{e}?type=Vehicle&q=age.observedAt%3E2026-01-01T00:00:00Z")),
-        get("ld q expanded iri", &format!("{e}?type=Vehicle&q=https://hel.fi/schema/odometer%3E1")),
-        get("ld attrs foreign", &format!("{e}?type=User,Vehicle&attrs=age")),
-        get("ld attrs outside", &format!("{e}?type=Vehicle&attrs=odometer")),
-        get("ld pick foreign", &format!("{e}?type=User,Vehicle&pick=id,age,odometer")),
-        get("ld omit", &format!("{e}?type=User,Vehicle&omit=name")),
-        get("ld keyValues", &format!("{e}?type=User,Vehicle&options=keyValues")),
-        get("ld concise", &format!("{e}?type=User,Vehicle&options=concise")),
-        get("ld sysAttrs", &format!("{e}?type=User,Vehicle&options=sysAttrs")),
-        get("ld format simplified", &format!("{e}?type=User,Vehicle&format=simplified")),
-        get("ld no type, q", &format!("{e}?q=name~%3D%22B%22")),
-        get("ld no type, attrs", &format!("{e}?attrs=name")),
-        get("ld type outside the projection", &format!("{e}?type=Depot")),
-        get("ld three types, one outside", &format!("{e}?type=User,Vehicle,Depot")),
-        get("ld idPattern", &format!("{e}?type=Vehicle&idPattern=.*")),
-        get("ld id of another type", &format!("{e}?type=Vehicle&id={DEPOT}")),
-        get("ld geoproperty", &format!("{e}?type=User,Vehicle&georel=near;maxDistance==100&geometry=Point&coordinates=[24.9,60.2]&geoproperty=odometer")),
-        get("ld join inline", &format!("{e}?type=Vehicle&join=inline&joinLevel=2")),
-        get("ld count", &format!("{e}?type=User,Vehicle&count=true&limit=1")),
-        get("ld lang", &format!("{e}?type=User,Vehicle&lang=sk")),
-        get("ld retrieve vehicle", &format!("{e}/{VEHICLE}")),
-        get("ld retrieve vehicle attrs=age", &format!("{e}/{VEHICLE}?attrs=age")),
-        get("ld retrieve vehicle keyValues", &format!("{e}/{VEHICLE}?options=keyValues")),
-        get("ld retrieve depot", &format!("{e}/{DEPOT}")),
-        get("ld temporal two types", &format!("{t}?type=User,Vehicle&timerel=after&timeAt=2026-01-01T00:00:00Z")),
-        get("ld temporal attrs foreign", &format!("{t}?type=Vehicle&attrs=age&timerel=after&timeAt=2026-01-01T00:00:00Z")),
-        get("ld temporal values", &format!("{t}?type=User,Vehicle&options=temporalValues&timerel=after&timeAt=2026-01-01T00:00:00Z")),
-        get("ld temporal aggregated", &format!("{t}?type=Vehicle&attrs=age&aggrMethods=max&aggrPeriodDuration=P1D&options=aggregatedValues&timerel=after&timeAt=2026-01-01T00:00:00Z")),
-        get("ld temporal retrieve", &format!("{t}/{VEHICLE}")),
-        get("ld temporal retrieve depot", &format!("{t}/{DEPOT}")),
-        get("ld types", "/ngsi-ld/v1/types"),
-        get("ld types details", "/ngsi-ld/v1/types?details=true"),
-        get("ld type info", "/ngsi-ld/v1/types/Vehicle"),
-        get("ld type info outside", "/ngsi-ld/v1/types/Depot"),
-        get("ld attributes", "/ngsi-ld/v1/attributes"),
-        get("ld attributes details", "/ngsi-ld/v1/attributes?details=true"),
-        get("ld attribute info outside", "/ngsi-ld/v1/attributes/odometer"),
-        get("ld attribute info hidden", "/ngsi-ld/v1/attributes/secretPin"),
         get("file json", "/file.json"),
         get("file json two types", "/file.json?type=User,Vehicle"),
         get("file json q foreign", "/file.json?type=Vehicle&q=age%3E30"),
         get("file csv", "/file.csv?type=User,Vehicle"),
         get("file csv one type", "/file.csv?type=Vehicle"),
-        get("file csv attrs foreign", "/file.csv?type=Vehicle&attrs=age,odometer"),
+        get(
+            "file csv attrs foreign",
+            "/file.csv?type=Vehicle&attrs=age,odometer",
+        ),
         get("file geojson", "/file.geojson?type=User,Vehicle"),
         get("file xlsx", "/file.xlsx?type=User,Vehicle"),
         get("file zip", "/file.zip?type=User,Vehicle"),
@@ -300,17 +259,32 @@ fn probes() -> Vec<Probe> {
         get("ogc collection outside", "/ogc/features/collections/Depot"),
         get("ogc items", "/ogc/features/collections/Vehicle/items"),
         get("ogc items outside", "/ogc/features/collections/Depot/items"),
-        get("ogc items properties", "/ogc/features/collections/Vehicle/items?properties=age,odometer"),
-        get("ogc items filter", "/ogc/features/collections/Vehicle/items?age=CANARY-Vehicle-age"),
-        get("ogc queryables", "/ogc/features/collections/Vehicle/queryables"),
-        get("ogc item", &format!("/ogc/features/collections/Vehicle/items/{VEHICLE}")),
+        get(
+            "ogc items properties",
+            "/ogc/features/collections/Vehicle/items?properties=age,odometer",
+        ),
+        get(
+            "ogc items filter",
+            "/ogc/features/collections/Vehicle/items?age=CANARY-Vehicle-age",
+        ),
+        get(
+            "ogc queryables",
+            "/ogc/features/collections/Vehicle/queryables",
+        ),
+        get(
+            "ogc item",
+            &format!("/ogc/features/collections/Vehicle/items/{VEHICLE}"),
+        ),
         get("sta root", "/sta/v1.1"),
         get("sta things", "/sta/v1.1/Things"),
         get("sta things expand", "/sta/v1.1/Things?$expand=Datastreams"),
         get("sta datastreams", "/sta/v1.1/Datastreams"),
         get("sta observed properties", "/sta/v1.1/ObservedProperties"),
         get("sta observations", "/sta/v1.1/Observations"),
-        get("sta filter foreign", "/sta/v1.1/Things?$filter=properties/age%20eq%20%27x%27"),
+        get(
+            "sta filter foreign",
+            "/sta/v1.1/Things?$filter=properties/age%20eq%20%27x%27",
+        ),
         get("schema index", "/schema/index.json"),
         get("schema linkml", "/schema/1/model.linkml.yaml"),
         get("schema shacl", "/schema/1/model.shacl.ttl"),
@@ -321,57 +295,100 @@ fn probes() -> Vec<Probe> {
         get("schema markdown", "/schema/1/model.md"),
         get("access", "/access"),
         get("endpoint record", ""),
-        mcp("mcp query one type", "query_entities", json!({ "type": "Vehicle" })),
-        mcp("mcp query q foreign", "query_entities", json!({ "type": "Vehicle", "q": "age>30" })),
-        mcp("mcp query attrs foreign", "query_entities", json!({ "type": "Vehicle", "attrs": ["age", "odometer"] })),
-        mcp("mcp query outside", "query_entities", json!({ "type": "Depot" })),
+        mcp(
+            "mcp query one type",
+            "query_entities",
+            json!({ "type": "Vehicle" }),
+        ),
+        mcp(
+            "mcp query q foreign",
+            "query_entities",
+            json!({ "type": "Vehicle", "q": "age>30" }),
+        ),
+        mcp(
+            "mcp query attrs foreign",
+            "query_entities",
+            json!({ "type": "Vehicle", "attrs": ["age", "odometer"] }),
+        ),
+        mcp(
+            "mcp query outside",
+            "query_entities",
+            json!({ "type": "Depot" }),
+        ),
         mcp("mcp get", "get_entity", json!({ "id": VEHICLE })),
         mcp("mcp get depot", "get_entity", json!({ "id": DEPOT })),
-        mcp("mcp batch ids", "batch_query", json!({ "ids": [VEHICLE, USER, DEPOT] })),
-        mcp("mcp batch type", "batch_query", json!({ "type": "Vehicle", "q": "odometer>1" })),
-        mcp("mcp temporal", "query_temporal", json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" })),
-        mcp("mcp temporal batch", "batch_query_temporal", json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" })),
-        mcp("mcp retrieve temporal", "retrieve_temporal", json!({ "id": VEHICLE })),
+        mcp(
+            "mcp batch ids",
+            "batch_query",
+            json!({ "ids": [VEHICLE, USER, DEPOT] }),
+        ),
+        mcp(
+            "mcp batch type",
+            "batch_query",
+            json!({ "type": "Vehicle", "q": "odometer>1" }),
+        ),
+        mcp(
+            "mcp temporal",
+            "query_temporal",
+            json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" }),
+        ),
+        mcp(
+            "mcp temporal batch",
+            "batch_query_temporal",
+            json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" }),
+        ),
+        mcp(
+            "mcp retrieve temporal",
+            "retrieve_temporal",
+            json!({ "id": VEHICLE }),
+        ),
         mcp("mcp types", "list_types", json!({ "details": true })),
         // The two registry item reads: one name the grant covers and one it does not, because the
         // answer to a type nobody granted must not differ from the answer to a type nobody has.
         mcp("mcp type info", "get_type", json!({ "type": "Vehicle" })),
-        mcp("mcp type info outside", "get_type", json!({ "type": "Depot" })),
-        mcp("mcp attribute info", "get_attribute", json!({ "attrId": "odometer" })),
-        mcp("mcp attribute info outside", "get_attribute", json!({ "attrId": "secretPin" })),
-        mcp("mcp attributes", "list_attributes", json!({ "details": true })),
+        mcp(
+            "mcp type info outside",
+            "get_type",
+            json!({ "type": "Depot" }),
+        ),
+        mcp(
+            "mcp attribute info",
+            "get_attribute",
+            json!({ "attrId": "odometer" }),
+        ),
+        mcp(
+            "mcp attribute info outside",
+            "get_attribute",
+            json!({ "attrId": "secretPin" }),
+        ),
+        mcp(
+            "mcp attributes",
+            "list_attributes",
+            json!({ "details": true }),
+        ),
         mcp("mcp schema summary", "describe_schema", json!({})),
-        mcp("mcp schema linkml", "describe_schema", json!({ "format": "linkml" })),
-        mcp("mcp schema shacl", "describe_schema", json!({ "format": "shacl" })),
-        mcp("mcp schema json-schema", "describe_schema", json!({ "format": "json-schema" })),
-        mcp("mcp schema outside", "describe_schema", json!({ "format": "linkml", "entityType": "Depot" })),
+        mcp(
+            "mcp schema linkml",
+            "describe_schema",
+            json!({ "format": "linkml" }),
+        ),
+        mcp(
+            "mcp schema shacl",
+            "describe_schema",
+            json!({ "format": "shacl" }),
+        ),
+        mcp(
+            "mcp schema json-schema",
+            "describe_schema",
+            json!({ "format": "json-schema" }),
+        ),
+        mcp(
+            "mcp schema outside",
+            "describe_schema",
+            json!({ "format": "linkml", "entityType": "Depot" }),
+        ),
         mcp("mcp access", "describe_access", json!({})),
     ];
-    all.push(Probe {
-        label: "ld geo+json",
-        method: Method::GET,
-        uri: format!("{e}?type=User,Vehicle"),
-        accept: "application/geo+json",
-        body: None,
-    });
-    all.push(Probe {
-        label: "ld json-ld",
-        method: Method::GET,
-        uri: format!("{e}?type=User,Vehicle"),
-        accept: "application/ld+json",
-        body: None,
-    });
-    all.push(Probe { label: "ld post query", method: Method::POST, uri: "/ngsi-ld/v1/entityOperations/query".to_owned(),
-        accept: "application/json",
-        body: Some(json!({ "type": "Query", "entities": [{ "type": "User" }, { "type": "Vehicle" }, { "type": "Depot" }],
-                           "q": "age>30", "attrs": ["age", "odometer"] })) });
-    all.push(Probe {
-        label: "ld post query by id",
-        method: Method::POST,
-        uri: "/ngsi-ld/v1/entityOperations/query".to_owned(),
-        accept: "application/json",
-        body: Some(json!({ "type": "Query", "entities": [{ "id": DEPOT, "type": "Vehicle" }] })),
-    });
     all.push(Probe {
         label: "mcp resources list",
         method: Method::POST,
@@ -606,7 +623,7 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    assert!(probed >= 100, "the sweep stopped after {probed} probes");
+    assert!(probed >= 60, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -637,7 +654,8 @@ async fn every_representation_and_tool_has_a_probe() {
 
     for representation in endpoint().representations {
         let path = match representation {
-            Representation::NgsiLd => "/ngsi-ld/v1/entities",
+            // The broker's view serves it since T-3643 and Antares sweeps it there.
+            Representation::NgsiLd => continue,
             Representation::Mcp => "/mcp",
             Representation::GeoJson => "/file.geojson",
             Representation::Csv => "/file.csv",
@@ -716,7 +734,7 @@ async fn an_upstream_error_body_never_reaches_the_caller() {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, failing).await;
+        let _ = axum::serve(listener, common::plain_tree(failing)).await;
     });
 
     let gateway = Arc::new(
@@ -750,62 +768,20 @@ async fn an_upstream_error_body_never_reaches_the_caller() {
     }
 }
 
-/// EP-26, R24: a grant that names one type, no projection, and a read of another type's entity
-/// by id — the read that carries no type of its own, so only the answer can be judged (T-2130).
-#[tokio::test]
-async fn an_entity_of_another_type_is_not_retrieved_by_id() {
-    for uri in [
-        format!("/ngsi-ld/v1/entities/{DEPOT}"),
-        format!("/ngsi-ld/v1/temporal/entities/{DEPOT}"),
-        format!("/ngsi-ld/v1/entities?type=Vehicle&id={DEPOT}"),
-    ] {
-        let (upstream, _) = broker(true).await;
-        let mut one_type = endpoint();
-        one_type.projection = None;
-        one_type.hidden_attributes = Default::default();
-        one_type.policies = vec![serde_norway::from_str(
-            "contextSpaceRef: fleet\nassigner: did:web:hel.fi\nassignee: { kind: role, id: public }\n\
-             operations: [queryEntity, retrieveEntity, retrieveTemporal]\n\
-             information:\n  - entities: [{ type: Vehicle }]\n    propertyNames: [name]\n",
-        )
-        .expect("the policy spec parses")];
-        let gateway = Arc::new(
-            Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([one_type]),
-        );
-        let response = router(gateway)
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/endpoint/{SLUG}{uri}"))
-                    .body(Body::empty())
-                    .expect("a request"),
-            )
-            .await
-            .expect("the gateway answers");
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("a body");
-        let answer = String::from_utf8_lossy(&bytes);
-        assert!(
-            !answer.contains("CANARY-Depot") && !answer.contains("fleet:north"),
-            "{uri} answered {status} with the Depot: {answer}"
-        );
-    }
-}
-
 /// SP-01, EP-26: the same canary space, reached by its own name instead of an Endpoint slug.
 ///
-/// `/cs/{space}/ngsi-ld` and `/cs/{space}/mcp` are a second door to the same decision point, with
-/// their own resolver and their own record. A projection that is only applied behind a slug would
-/// pass every probe above and leak here, so the NGSI-LD and MCP probes are asked again through it.
+/// `/cs/{space}/mcp` is a second door to the same decision point, with its own resolver and its
+/// own record. A projection that is only applied behind a slug would pass every probe above and
+/// leak here, so the MCP probes are asked again through it (`/cs/{space}/ngsi-ld` is the broker's
+/// `cs-{space}` view since T-3643).
 #[tokio::test]
 async fn no_surface_of_the_space_leaks() {
     let asked: Vec<Probe> = probes()
         .into_iter()
-        .filter(|probe| probe.uri.starts_with("/ngsi-ld") || probe.uri.starts_with("/mcp"))
+        .filter(|probe| probe.uri.starts_with("/mcp"))
         .collect();
     assert!(
-        asked.len() > 40,
+        asked.len() >= 25,
         "the space sweep asks {} probes",
         asked.len()
     );

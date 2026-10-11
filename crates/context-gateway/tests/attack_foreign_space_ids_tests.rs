@@ -67,7 +67,7 @@ async fn broker() -> (String, Hops) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -204,36 +204,6 @@ async fn an_entity_created_under_another_spaces_urn_lands_in_this_space_only() {
 }
 
 #[tokio::test]
-async fn a_batch_lands_in_this_space_and_one_malformed_id_refuses_all_of_it() {
-    let (status, problem, asked) = send(
-        Method::POST,
-        "/entityOperations/upsert",
-        Some(json!([device(OURS), device(OTHER_SPACE)])),
-    )
-    .await;
-    assert_lands_here(status, &problem, &asked, OTHER_SPACE);
-
-    let (status, problem, asked) = send(
-        Method::POST,
-        "/entityOperations/delete",
-        Some(json!([OURS, OTHER_ORG])),
-    )
-    .await;
-    assert_lands_here(status, &problem, &asked, OTHER_ORG);
-
-    // A malformed id is no grant decision but a malformed write, and a batch half applied is
-    // the one outcome nobody asked for, so the whole call is refused before the broker sees it.
-    let (status, problem, asked) = send(
-        Method::POST,
-        "/entityOperations/upsert",
-        Some(json!([device(OURS), device("urn:ngsi-ld:Device")])),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-}
-
-#[tokio::test]
 async fn an_addressed_write_to_another_spaces_urn_lands_in_this_space_only() {
     for id in [OTHER_SPACE, OTHER_ORG, LOOKALIKE] {
         let (status, problem, asked) = send(
@@ -247,20 +217,6 @@ async fn an_addressed_write_to_another_spaces_urn_lands_in_this_space_only() {
         let (status, problem, asked) = send(Method::DELETE, &format!("/entities/{id}"), None).await;
         assert_lands_here(status, &problem, &asked, id);
     }
-}
-
-#[tokio::test]
-async fn a_body_that_names_another_space_than_the_path_is_refused() {
-    // The path is inside this space and the body is not: two identifiers, and the write is
-    // refused rather than one of them being picked (GW17, PF-44).
-    let (status, problem, asked) = send(
-        Method::PATCH,
-        &format!("/entities/{OURS}/attrs"),
-        Some(device(OTHER_SPACE)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }
 
 #[tokio::test]
@@ -336,4 +292,48 @@ async fn an_id_of_this_space_is_written_through_every_route_it_was_refused_on() 
         assert_eq!(asked.len(), 1, "{method} {uri}: {asked:?}");
         assert_eq!(asked[0].1, SPACE, "{method} {uri}: {asked:?}");
     }
+}
+
+#[tokio::test]
+async fn a_body_that_names_another_space_than_the_path_is_refused() {
+    // The path is inside this space and the body is not: two identifiers, and the write is
+    // refused rather than one of them being picked (GW17, PF-44).
+    let (status, problem, asked) = send(
+        Method::PATCH,
+        &format!("/entities/{OURS}/attrs"),
+        Some(device(OTHER_SPACE)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
+}
+
+#[tokio::test]
+async fn a_batch_lands_in_this_space_and_one_malformed_id_refuses_all_of_it() {
+    let (status, problem, asked) = send(
+        Method::POST,
+        "/entityOperations/upsert",
+        Some(json!([device(OURS), device(OTHER_SPACE)])),
+    )
+    .await;
+    assert_lands_here(status, &problem, &asked, OTHER_SPACE);
+
+    let (status, problem, asked) = send(
+        Method::POST,
+        "/entityOperations/delete",
+        Some(json!([OURS, OTHER_ORG])),
+    )
+    .await;
+    assert_lands_here(status, &problem, &asked, OTHER_ORG);
+
+    // A malformed id is no grant decision but a malformed write, and a batch half applied is
+    // the one outcome nobody asked for, so the whole call is refused before the broker sees it.
+    let (status, problem, asked) = send(
+        Method::POST,
+        "/entityOperations/upsert",
+        Some(json!([device(OURS), device("urn:ngsi-ld:Device")])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }

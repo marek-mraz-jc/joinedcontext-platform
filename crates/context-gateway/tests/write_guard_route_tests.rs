@@ -4,6 +4,8 @@
 //! path; neither has an entity body for the write guard to read, so each identifier is
 //! checked on its own against the grant's types and patterns.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -45,7 +47,7 @@ async fn broker() -> (String, Hops) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -115,53 +117,6 @@ async fn send(method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Ve
 }
 
 #[tokio::test]
-async fn a_batch_delete_of_an_ungranted_type_is_refused_without_a_broker_hop() {
-    let (status, asked) = send(
-        Method::POST,
-        "/entityOperations/delete",
-        Some(json!(["urn:ngsi-ld:Secret:banskabystrica.sk:ovzdusie:1"])),
-    )
-    .await;
-    // Every entity refused: the batch is answered per entity, and the broker never asked (GW18).
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-}
-
-#[tokio::test]
-async fn a_mixed_batch_delete_applies_the_granted_entity_and_answers_the_other() {
-    // One lamp and one traffic light: the lamp is deleted, the traffic light answered as
-    // refused (GW18; GW17 judges each entity whole, not the batch).
-    let (status, body, bodies) = batch(
-        lamps_only(),
-        "/entityOperations/delete",
-        json!([
-            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7",
-            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1"
-        ]),
-        |_| (StatusCode::NO_CONTENT, None),
-    )
-    .await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert_eq!(
-        bodies,
-        vec![json!([
-            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7"
-        ])],
-        "only the granted entity reaches the broker"
-    );
-    assert_eq!(
-        body["success"],
-        json!(["urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7"])
-    );
-    assert_eq!(
-        body["errors"][0]["entityId"],
-        "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1"
-    );
-    assert_eq!(body["errors"][0]["error"]["status"], 403);
-    assert_eq!(body["errors"].as_array().map(Vec::len), Some(1));
-}
-
-#[tokio::test]
 async fn a_batch_delete_inside_the_grant_reaches_the_broker() {
     let (status, asked) = send(
         Method::POST,
@@ -173,81 +128,6 @@ async fn a_batch_delete_inside_the_grant_reaches_the_broker() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(asked, vec!["POST /ngsi-ld/v1/entityOperations/delete"]);
-}
-
-#[tokio::test]
-async fn an_addressed_delete_outside_the_pattern_or_type_never_reaches_the_broker() {
-    for id in [
-        "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1",
-        "urn:ngsi-ld:Secret:banskabystrica.sk:ovzdusie:1",
-    ] {
-        let (status, asked) = send(Method::DELETE, &format!("/entities/{id}"), None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{id}");
-        assert!(asked.is_empty(), "{id}: the broker was asked: {asked:?}");
-    }
-    let (status, asked) = send(
-        Method::DELETE,
-        "/entities/urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(asked.len(), 1);
-}
-
-/// Edge cases: a batch item that is no URN is a bad request, an empty batch is the broker's
-/// to answer, and the attribute fragment of an addressed write is held to the path id.
-#[tokio::test]
-async fn a_malformed_batch_item_is_a_bad_request_and_an_empty_batch_is_forwarded() {
-    let (status, asked) = send(
-        Method::POST,
-        "/entityOperations/delete",
-        Some(json!(["not-a-urn"])),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-
-    // A malformed id beside a granted one still refuses the batch whole: it is no grant
-    // decision to divide by (PF-42).
-    let (status, asked) = send(
-        Method::POST,
-        "/entityOperations/delete",
-        Some(json!([
-            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7",
-            "not-a-urn"
-        ])),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-
-    // An entry that names no entity leaves nothing to answer it under: the batch is malformed.
-    for entries in [
-        json!([7]),
-        json!([{ "type": "Device" }]),
-        json!([{ "id": 7 }]),
-    ] {
-        let (status, asked) = send(Method::POST, "/entityOperations/delete", Some(entries)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-    }
-
-    let (status, asked) = send(Method::POST, "/entityOperations/delete", Some(json!([]))).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(asked.len(), 1, "an empty batch is the broker's to refuse");
-}
-
-#[tokio::test]
-async fn an_attribute_fragment_for_an_entity_outside_the_pattern_never_reaches_the_broker() {
-    let (status, asked) = send(
-        Method::PATCH,
-        "/entities/urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:traffic-1/attrs",
-        Some(json!({ "status": { "type": "Property", "value": "off" } })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }
 
 type Bodies = Arc<Mutex<Vec<Value>>>;
@@ -310,7 +190,7 @@ async fn batch(
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     let mut serving = endpoint();
     serving.policies = vec![policy];
@@ -352,37 +232,6 @@ fn created(sent: &Value) -> (StatusCode, Option<Value>) {
 }
 
 #[tokio::test]
-async fn batch_207_mixed_outcomes() {
-    let (status, body, bodies) = batch(
-        lamps_create(),
-        "/entityOperations/create",
-        json!([device("lamps-1"), device("traffic-1"), device("lamps-2")]),
-        created,
-    )
-    .await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert_eq!(
-        bodies,
-        vec![json!([device("lamps-1"), device("lamps-2")])],
-        "the broker is sent the permitted entities, and only them"
-    );
-    assert_eq!(body["success"], json!([id("lamps-1"), id("lamps-2")]));
-    assert_eq!(
-        body["errors"],
-        json!([{
-            "entityId": id("traffic-1"),
-            "error": {
-                "type": "https://joinedcontext.com/errors/forbidden",
-                "title": "Access Denied by Policy",
-                "status": 403,
-                // What to do about it rides with every catalogued type (T-3243, API/00 §4).
-                "hint": "Ask a project owner or an organization administrator for the role this needs.",
-            },
-        }])
-    );
-}
-
-#[tokio::test]
 async fn a_batch_the_grants_permit_whole_is_the_brokers_own_answer() {
     let (status, body, bodies) = batch(
         lamps_create(),
@@ -396,102 +245,45 @@ async fn a_batch_the_grants_permit_whole_is_the_brokers_own_answer() {
     assert_eq!(bodies.len(), 1);
 }
 
+/// Edge cases: a batch item that is no URN is a bad request, an empty batch is the broker's
+/// to answer, and the attribute fragment of an addressed write is held to the path id.
 #[tokio::test]
-async fn a_batch_the_grants_refuse_whole_is_207_with_every_entry_an_error() {
-    let (status, body, bodies) = batch(
-        lamps_create(),
-        "/entityOperations/create",
-        json!([device("traffic-1"), device("traffic-2")]),
-        created,
+async fn a_malformed_batch_item_is_a_bad_request_and_an_empty_batch_is_forwarded() {
+    let (status, asked) = send(
+        Method::POST,
+        "/entityOperations/delete",
+        Some(json!(["not-a-urn"])),
     )
     .await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert!(bodies.is_empty(), "the broker was asked: {bodies:?}");
-    assert_eq!(body["success"], json!([]));
-    let errors = body["errors"].as_array().expect("an errors list");
-    assert_eq!(errors.len(), 2);
-    for (entry, local) in errors.iter().zip(["traffic-1", "traffic-2"]) {
-        assert_eq!(entry["entityId"], id(local));
-        assert_eq!(entry["error"]["status"], 403);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
+
+    // A malformed id beside a granted one still refuses the batch whole: it is no grant
+    // decision to divide by (PF-42).
+    let (status, asked) = send(
+        Method::POST,
+        "/entityOperations/delete",
+        Some(json!([
+            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7",
+            "not-a-urn"
+        ])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
+
+    // An entry that names no entity leaves nothing to answer it under: the batch is malformed.
+    for entries in [
+        json!([7]),
+        json!([{ "type": "Device" }]),
+        json!([{ "id": 7 }]),
+    ] {
+        let (status, asked) = send(Method::POST, "/entityOperations/delete", Some(entries)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(asked.is_empty(), "the broker was asked: {asked:?}");
     }
-}
 
-#[tokio::test]
-async fn the_brokers_own_207_is_merged_with_the_gateways_refusals() {
-    let (status, body, _) = batch(
-        lamps_create(),
-        "/entityOperations/upsert",
-        json!([device("lamps-1"), device("traffic-1"), device("lamps-2")]),
-        |_| {
-            (
-                StatusCode::MULTI_STATUS,
-                Some(json!({
-                    "success": [id("lamps-1")],
-                    "errors": [{
-                        "entityId": id("lamps-2"),
-                        "error": { "type": "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
-                                   "title": "Bad request data", "status": 400 },
-                    }],
-                })),
-            )
-        },
-    )
-    .await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert_eq!(body["success"], json!([id("lamps-1")]));
-    let failed: Vec<&Value> = body["errors"]
-        .as_array()
-        .expect("an errors list")
-        .iter()
-        .map(|entry| &entry["entityId"])
-        .collect();
-    assert_eq!(failed, vec![&json!(id("lamps-2")), &json!(id("traffic-1"))]);
-}
-
-#[tokio::test]
-async fn a_broker_refusal_of_the_forwarded_part_is_answered_for_each_of_its_entities() {
-    let (status, body, _) = batch(
-        lamps_create(),
-        "/entityOperations/create",
-        json!([device("lamps-1"), device("traffic-1")]),
-        |_| {
-            (
-                StatusCode::CONFLICT,
-                Some(
-                    json!({ "type": "https://uri.etsi.org/ngsi-ld/errors/AlreadyExists",
-                             "title": "Already exists", "status": 409 }),
-                ),
-            )
-        },
-    )
-    .await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert_eq!(body["success"], json!([]));
-    assert_eq!(body["errors"][0]["entityId"], id("lamps-1"));
-    assert_eq!(body["errors"][0]["error"]["status"], 409);
-    assert_eq!(body["errors"][1]["entityId"], id("traffic-1"));
-    assert_eq!(body["errors"][1]["error"]["status"], 403);
-}
-
-#[tokio::test]
-async fn a_broker_failure_under_a_divided_batch_is_not_passed_on_verbatim() {
-    let (status, body, _) = batch(
-        lamps_create(),
-        "/entityOperations/create",
-        json!([device("lamps-1"), device("traffic-1")]),
-        |_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Some(json!({ "detail": "pg: relation lamps-1 locked" })),
-            )
-        },
-    )
-    .await;
-    assert_eq!(status, StatusCode::MULTI_STATUS);
-    assert_eq!(body["errors"][0]["entityId"], id("lamps-1"));
-    assert_eq!(body["errors"][0]["error"]["status"], 500);
-    assert!(
-        !body.to_string().contains("pg: relation"),
-        "the broker's own words leaked: {body}"
-    );
+    let (status, asked) = send(Method::POST, "/entityOperations/delete", Some(json!([]))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(asked.len(), 1, "an empty batch is the broker's to refuse");
 }

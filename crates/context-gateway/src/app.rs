@@ -35,7 +35,9 @@ use crate::{egress, mcp, middleware::tenancy, operations, query, telemetry};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::header::{ACCEPT, ALLOW, AUTHORIZATION, CONTENT_LENGTH, IF_MATCH};
+use axum::http::header::{
+    ACCEPT, ALLOW, AUTHORIZATION, CONTENT_LENGTH, CONTENT_LOCATION, IF_MATCH, LINK, LOCATION,
+};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{any, get, post};
@@ -550,7 +552,8 @@ async fn ngsi_ld(
         request.headers(),
     );
     let prefix = format!("/api/endpoint/{slug}/ngsi-ld/v1");
-    as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
+    let view = |endpoint: &Endpoint| endpoint.slug.clone();
+    as_ngsi_ld_error(serve_ngsi_ld_view(&gateway, admitted, &prefix, view, request).await).await
 }
 
 /// The entry document at the NGSI-LD access URL (EP-90): where the entities are, the types this
@@ -609,7 +612,9 @@ async fn space_ngsi_ld(
     )
     .map(|(space, subject)| (Arc::clone(&space.endpoint), subject));
     let prefix = format!("/cs/{space}/ngsi-ld/v1");
-    as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
+    // The space surface's view is the one the Portal writes per Context Space (plan 5.1).
+    let view = |endpoint: &Endpoint| format!("cs-{}", endpoint.space);
+    as_ngsi_ld_error(serve_ngsi_ld_view(&gateway, admitted, &prefix, view, request).await).await
 }
 
 /// Runs one NGSI-LD request through the very pipeline the HTTP surfaces run (T-0166, SP-16).
@@ -782,39 +787,16 @@ pub(crate) async fn serve_ngsi_ld(
         return refusal;
     }
 
-    let Some(operation) = operations::operation_of(&method, &path, details) else {
-        if let Some(attribute) = operations::sets_attribute_value(&method, &path) {
-            return ProblemDetails::for_status(422)
-                .with_detail(format!(
-                    "Set Attribute Value is not offered through an Endpoint; write the value \
-                     with PATCH /ngsi-ld/v1/entities/{{id}}/attrs/{attribute}"
-                ))
-                .into_response();
-        }
-        return ProblemDetails::not_found().into_response();
+    let operation = match operation_or_answer(&method, &path, details) {
+        Ok(operation) => operation,
+        Err(answer) => return *answer,
     };
 
     // GW31: a type or q the specification refuses is refused as the caller sent it, before an
     // empty intersection with the grants answers it with nothing.
     if operation == Operation::QueryEntity {
-        if let Some(why) = query::malformed(&params) {
-            return ProblemDetails::bad_request()
-                .with_detail(why)
-                .into_response();
-        }
-        // GW33: a query naming no selector is `400 BadRequestData` (CIM 009 5.7.2.4), an `id`
-        // list or an `idPattern` alone included. The grants would have supplied a type and
-        // answered it, which is the narrowing this refusal replaces: a grant decides which of
-        // the well-formed answers a caller sees, never which status code the surface returns.
-        if query::unselected(&params) {
-            return ProblemDetails::bad_request()
-                .with_detail(
-                    "a query names at least one of type, attrs, q or georel; an id list or \
-                     idPattern alone is not a selector (CIM 009 5.7.2.4). The entry at \
-                     /ngsi-ld/v1/ lists the types you may query here, or retrieve one \
-                     entity at /ngsi-ld/v1/entities/{id}",
-                )
-                .into_response();
+        if let Some(refusal) = query_shape_refusal(&params) {
+            return refusal;
         }
     }
 
@@ -939,16 +921,9 @@ pub(crate) async fn serve_ngsi_ld(
     }
 
     let (mut parts, body) = request.into_parts();
-    let limit = gateway.max_request_body();
-    let Ok(sent) = axum::body::to_bytes(body, limit).await else {
-        return ProblemDetails::bad_request()
-            .with_detail(format!(
-                "the request body is unreadable or larger than the {} MiB this organization \
-                 accepts (spec.limits.gateway.maxRequestBodyMegabytes); send less at once, or \
-                 ask an organization admin to raise it in Organization settings",
-                limit / (1024 * 1024)
-            ))
-            .into_response();
+    let sent = match read_body(gateway, body).await {
+        Ok(sent) => sent,
+        Err(answer) => return *answer,
     };
 
     // A payload the surface does not accept is refused for its media type, before anything
@@ -1269,45 +1244,11 @@ pub(crate) async fn serve_ngsi_ld(
             .insert(ACCEPT, HeaderValue::from_static("application/json"));
     }
     let target = format!("/ngsi-ld/v1{path}?{sent_query}");
-    // The day's creates are counted last, so a create refused above spends none (EP-97), and
-    // per caller as the rate limit keys them, so one sender takes a tenth at most (T-3285).
+    // The day's creates are counted last, so a create refused above spends none (EP-97).
     let caller = crate::middleware::rate_limit::caller_key(&parts.headers);
-    let reserved = match endpoint
-        .creates
-        .as_ref()
-        .and_then(|creates| creates.per_day)
-    {
-        Some(per_day) if operation == Operation::CreateEntity => {
-            let now = crate::creates::now();
-            if let Err((retry_after, spent)) =
-                gateway
-                    .creates
-                    .reserve(&endpoint.slug, &caller, per_day, now)
-            {
-                let detail = match spent {
-                    crate::creates::Spent::Form => {
-                        tracing::info!(slug = %endpoint.slug, "the endpoint's creates for today are spent");
-                        "this form has taken all the entries it accepts today; retry after the \
-                         seconds Retry-After names"
-                    }
-                    crate::creates::Spent::Caller => {
-                        tracing::info!(slug = %endpoint.slug, "one caller's share of today's creates is spent");
-                        "you have sent this form as many entries as one sender may today; retry \
-                         after the seconds Retry-After names"
-                    }
-                };
-                let mut refusal =
-                    ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
-                        .with_detail(detail)
-                        .into_response();
-                refusal
-                    .headers_mut()
-                    .insert("retry-after", HeaderValue::from(retry_after));
-                return refusal;
-            }
-            Some(now)
-        }
-        _ => None,
+    let reserved = match reserve_create(gateway, &endpoint, &caller, operation) {
+        Ok(reserved) => reserved,
+        Err(answer) => return *answer,
     };
     let answer = match gateway
         .broker
@@ -1348,6 +1289,559 @@ pub(crate) async fn serve_ngsi_ld(
         None => answer,
     };
     with_filled_units(answer, &units_filled)
+}
+
+/// GW31 and GW33: a query the specification refuses is refused as the caller sent it (a type or
+/// `q` that does not parse), and so is one that names no selector, an `id` list or `idPattern`
+/// alone included (CIM 009 5.7.2.4), with the way to the entry document. A grant decides which
+/// of the well-formed answers a caller sees, never which status code the surface returns.
+fn query_shape_refusal(params: &[(String, String)]) -> Option<Response<Body>> {
+    if let Some(why) = query::malformed(params) {
+        return Some(
+            ProblemDetails::bad_request()
+                .with_detail(why)
+                .into_response(),
+        );
+    }
+    query::unselected(params).then(|| {
+        ProblemDetails::bad_request()
+            .with_detail(
+                "a query names at least one of type, attrs, q or georel; an id list or \
+                 idPattern alone is not a selector (CIM 009 5.7.2.4). The entry at \
+                 /ngsi-ld/v1/ lists the types you may query here, or retrieve one entity at \
+                 /ngsi-ld/v1/entities/{id}",
+            )
+            .into_response()
+    })
+}
+
+/// A broker's `5xx` as the caller gets it: the gateway's own document, and the broker's text
+/// in the operator's log. What a broker says when it fails is whatever it was holding: an entity
+/// id in a message, a fragment of its own query, the name of an attribute an endpoint hides
+/// (T-2260).
+async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
+    let held = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .unwrap_or_default();
+    tracing::warn!(
+        status = status.as_u16(),
+        broker = %String::from_utf8_lossy(&held),
+        "the broker failed; its own explanation is not passed on"
+    );
+    ProblemDetails::new(
+        status.as_u16(),
+        "broker-failure",
+        "The context broker could not answer",
+    )
+    .with_detail("the context broker behind this endpoint failed to answer this request")
+    .into_response()
+}
+
+/// The NGSI-LD operation a request stands for, or the answer to one that stands for none: Set
+/// Attribute Value names the PATCH it is offered as (422), anything else is not found.
+fn operation_or_answer(
+    method: &Method,
+    path: &str,
+    details: bool,
+) -> Result<Operation, Box<Response<Body>>> {
+    operations::operation_of(method, path, details).ok_or_else(|| {
+        Box::new(match operations::sets_attribute_value(method, path) {
+            Some(attribute) => ProblemDetails::for_status(422)
+                .with_detail(format!(
+                    "Set Attribute Value is not offered through an Endpoint; write the value \
+                     with PATCH /ngsi-ld/v1/entities/{{id}}/attrs/{attribute}"
+                ))
+                .into_response(),
+            None => ProblemDetails::not_found().into_response(),
+        })
+    })
+}
+
+/// The request body, up to the organization's limit, or the answer that names the limit.
+async fn read_body(gateway: &Gateway, body: Body) -> Result<Vec<u8>, Box<Response<Body>>> {
+    let limit = gateway.max_request_body();
+    axum::body::to_bytes(body, limit)
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|_| {
+            Box::new(
+                ProblemDetails::bad_request()
+                    .with_detail(format!(
+                        "the request body is unreadable or larger than the {} MiB this \
+                         organization accepts (spec.limits.gateway.maxRequestBodyMegabytes); \
+                         send less at once, or ask an organization admin to raise it in \
+                         Organization settings",
+                        limit / (1024 * 1024)
+                    ))
+                    .into_response(),
+            )
+        })
+}
+
+/// Reserves one of the day's creates of a form Endpoint (EP-97), per caller as the rate limit
+/// keys them, so one sender takes a tenth at most (T-3285). `Some(now)` is the reservation to
+/// release when the broker does not take the create.
+fn reserve_create(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    caller: &str,
+    operation: Operation,
+) -> Result<Option<u64>, Box<Response<Body>>> {
+    let Some(per_day) = endpoint
+        .creates
+        .as_ref()
+        .and_then(|creates| creates.per_day)
+    else {
+        return Ok(None);
+    };
+    if operation != Operation::CreateEntity {
+        return Ok(None);
+    }
+    let now = crate::creates::now();
+    let Err((retry_after, spent)) = gateway
+        .creates
+        .reserve(&endpoint.slug, caller, per_day, now)
+    else {
+        return Ok(Some(now));
+    };
+    let detail = match spent {
+        crate::creates::Spent::Form => {
+            tracing::info!(slug = %endpoint.slug, "the endpoint's creates for today are spent");
+            "this form has taken all the entries it accepts today; retry after the seconds \
+             Retry-After names"
+        }
+        crate::creates::Spent::Caller => {
+            tracing::info!(slug = %endpoint.slug, "one caller's share of today's creates is spent");
+            "you have sent this form as many entries as one sender may today; retry after the \
+             seconds Retry-After names"
+        }
+    };
+    let mut refusal = ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
+        .with_detail(detail)
+        .into_response();
+    refusal
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from(retry_after));
+    Err(Box::new(refusal))
+}
+
+/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
+/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a view of
+/// another model (G18), a projection with `temporalQ` (G6), a slug no view id can hold (the
+/// writer refuses it), and a subscription, whose delivery the gateway still seals and routes
+/// back (plan 5.5, T-3653). A caller under a data-space agreement stays too: the engine has no
+/// agreements to decide on yet, and would judge the connector's own account instead (map K38).
+/// So does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
+/// compare and conditional write is the only lost-update guard there is (R45, GW16).
+fn served_by_view(
+    endpoint: &Endpoint,
+    subject: &Subject,
+    (view, operation, headers): (&str, Operation, &HeaderMap),
+) -> bool {
+    let temporal = endpoint
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.filter.as_ref())
+        .is_some_and(|filter| filter.temporal_q.is_some());
+    let subscription = matches!(
+        operation,
+        Operation::CreateSubscription
+            | Operation::UpdateSubscription
+            | Operation::RetrieveSubscription
+            | Operation::QuerySubscription
+            | Operation::DeleteSubscription
+    );
+    let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
+    endpoint.view_mapping.is_none()
+        && subject.agreement.is_none()
+        && !conditional
+        && !temporal
+        && !subscription
+        && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
+const MAX_VIEW_ID: usize = 63;
+
+/// One NGSI-LD request through the broker's view of the Endpoint (plan 5.1 and 5.2, T-3643):
+/// `{prefix}{rest}` goes to `/x/views/{view}/ngsi-ld/v1{rest}` with the caller's query as sent,
+/// and the broker's engine decides and narrows it under the `x-jc-*` subject the gateway
+/// verified. The gateway keeps what is not a decision: the identifier check, the domain gate,
+/// the media type, the core context, a form's minted ids and daily creates, the model's units
+/// and relationships. What no view serves yet goes through [`serve_ngsi_ld`].
+pub(crate) async fn serve_ngsi_ld_view(
+    gateway: &Gateway,
+    admitted: Result<(Arc<Endpoint>, Subject), Box<Response<Body>>>,
+    prefix: &str,
+    view: impl Fn(&Endpoint) -> String,
+    request: Request,
+) -> Response<Body> {
+    let (endpoint, subject) = match admitted {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let path = uri
+        .path()
+        .strip_prefix(prefix)
+        .unwrap_or_default()
+        .to_owned();
+    let params = query::parse(uri.query().unwrap_or_default());
+    let details = query::first(&params, "details") == Some("true");
+    let operation = match operation_or_answer(&method, &path, details) {
+        Ok(operation) => operation,
+        Err(answer) => return *answer,
+    };
+    let view = view(&endpoint);
+    if !served_by_view(&endpoint, &subject, (&view, operation, request.headers())) {
+        return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
+    }
+    if operation == Operation::QueryEntity {
+        if let Some(refusal) = query_shape_refusal(&params) {
+            return refusal;
+        }
+    }
+    // The audit line names the principal the gateway established (PF-46); the decision is the
+    // broker's, and its answer says what it was.
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        %view,
+        principal = %principal_of(&subject),
+        agreement = subject.agreement.as_deref().unwrap_or_default(),
+        operation = %operation.as_str(),
+        "forwarded to the broker's view"
+    );
+    let mut request = request;
+    match view_request(gateway, &endpoint, &subject, &path, operation, &mut request) {
+        Ok(()) => {}
+        Err(answer) => return *answer,
+    }
+
+    let (mut parts, body) = request.into_parts();
+    let mut sent = match read_body(gateway, body).await {
+        Ok(sent) => sent,
+        Err(answer) => return *answer,
+    };
+    let mut divided: Option<(Vec<String>, Refused)> = None;
+    let units_filled = match view_payload(
+        gateway,
+        (&endpoint, &subject),
+        (&path, &params, operation),
+        &mut parts.headers,
+        &mut sent,
+        &mut divided,
+    )
+    .await
+    {
+        Ok(filled) => filled,
+        Err(answer) => return *answer,
+    };
+
+    let caller = crate::middleware::rate_limit::caller_key(&parts.headers);
+    let reserved = match reserve_create(gateway, &endpoint, &caller, operation) {
+        Ok(reserved) => reserved,
+        Err(answer) => return *answer,
+    };
+    let target = match uri.query() {
+        Some(query) if !query.is_empty() => {
+            format!("/x/views/{view}/ngsi-ld/v1{path}?{}", capped_query(query))
+        }
+        _ => format!("/x/views/{view}/ngsi-ld/v1{path}"),
+    };
+    let answer = match gateway
+        .broker
+        .send(method, &target, parts.headers, Body::from(sent))
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => {
+            if let Some(now) = reserved {
+                gateway.creates.release(&endpoint.slug, &caller, now);
+            }
+            return ProblemDetails::from(error).into_response();
+        }
+    };
+    if let Some(now) = reserved {
+        if !answer.status().is_success() {
+            gateway.creates.release(&endpoint.slug, &caller, now);
+        }
+    }
+    if answer.status().is_server_error() {
+        let (parts, body) = answer.into_parts();
+        return broker_failure(parts.status, body).await;
+    }
+    if answer.status() == StatusCode::FORBIDDEN {
+        return with_platform_slug(answer).await;
+    }
+    // A space nobody has written to yet has no tenant at the broker, and the caller was
+    // admitted to it: a listing answers with nothing, a read of one thing with the plain miss,
+    // and the broker's wording, which names the tenant, never reaches the caller (EP-22, R20).
+    if answer.status() == StatusCode::NOT_FOUND && !operation.is_write() {
+        let (parts, body) = answer.into_parts();
+        let held = axum::body::to_bytes(body, MAX_BODY)
+            .await
+            .unwrap_or_default();
+        if !names_no_tenant(&held) {
+            return proxy::with_body(parts, held.to_vec());
+        }
+        return match empty_space(operation) {
+            Some(empty) => json_response(&empty),
+            None => ProblemDetails::not_found().into_response(),
+        };
+    }
+    let mut answer = match divided {
+        Some((forwarded, refused)) => merged_batch(answer, forwarded, refused).await,
+        None => answer,
+    };
+    caller_links(
+        answer.headers_mut(),
+        &format!("/x/views/{view}/ngsi-ld/v1"),
+        prefix,
+    );
+    // The broker marks a narrowed answer in its own header, and only when the caller opted in
+    // (`x-jc-restricted`); the caller reads it under the name the specification gives (R22).
+    let headers = answer.headers_mut();
+    if let Some(restricted) = headers.remove(ANTARES_RESTRICTED) {
+        headers.insert(RESULTS_RESTRICTED, restricted);
+    }
+    with_filled_units(answer, &units_filled)
+}
+
+/// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
+/// `code` with its hint, the members the NGSI-LD surface carries them in (API/00 §4, T-3243), so
+/// a client keyed on the slug still says who can give access.
+async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
+    let (parts, body) = answer.into_parts();
+    let held = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .unwrap_or_default();
+    let Ok(mut problem) = serde_json::from_slice::<Value>(&held) else {
+        return proxy::with_body(parts, held.to_vec());
+    };
+    let denied = problem["type"] == ANTARES_ACCESS_DENIED;
+    if let Some(members) = problem.as_object_mut().filter(|_| denied) {
+        members
+            .entry("code")
+            .or_insert_with(|| Value::from("forbidden"));
+        if let Some(forbidden) = jc_core::error::problem_type("forbidden") {
+            members
+                .entry("hint")
+                .or_insert_with(|| Value::from(forbidden.hint));
+        }
+    }
+    proxy::with_body(parts, problem.to_string().into_bytes())
+}
+
+/// The type of the broker's refusal (Antares `configuration.md`, `ANTARES_POLICY`).
+const ANTARES_ACCESS_DENIED: &str = "urn:antares:error:AccessDenied";
+
+/// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
+const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+
+/// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
+/// the caller reaches the same resource under their own prefix, and the mount is internal.
+fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
+    for name in [LOCATION, CONTENT_LOCATION, LINK] {
+        let rewritten: Vec<HeaderValue> = headers
+            .get_all(&name)
+            .iter()
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|text| HeaderValue::from_str(&text.replace(root, prefix)).ok())
+                    .unwrap_or_else(|| value.clone())
+            })
+            .collect();
+        if rewritten.is_empty() {
+            continue;
+        }
+        headers.remove(&name);
+        for value in rewritten {
+            headers.append(&name, value);
+        }
+    }
+}
+
+/// The caller's query as sent, with the two costs one request may put on the shared broker
+/// capped as the gateway's own pipeline caps them: `lastN` (GW26) and `joinLevel` (AG-25). The
+/// broker refuses a `joinLevel` past 10 and pages a temporal read (S17, T-3643); these caps are
+/// tighter and silent, as callers already rely on. Every other pair goes on byte for byte.
+fn capped_query(raw: &str) -> String {
+    raw.split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some(("lastN", n)) if n.parse::<u64>().is_ok_and(|n| n > query::LAST_N_CAP) => {
+                format!("lastN={}", query::LAST_N_CAP)
+            }
+            Some(("joinLevel", n)) if n.parse::<u64>().is_ok_and(|n| n > query::JOIN_LEVEL_CAP) => {
+                format!("joinLevel={}", query::JOIN_LEVEL_CAP)
+            }
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// The checks of a view request that need no body: the domain gate on a write (PF-41), the
+/// federation the platform cannot serve yet (PF-48), the identifier (PF-43), then the tenant
+/// and the verified caller pinned for the hop (T-3641).
+fn view_request(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    path: &str,
+    operation: Operation,
+    request: &mut Request,
+) -> Result<(), Box<Response<Body>>> {
+    if operation.is_write() {
+        if let Some(refusal) = gateway.domain_gate.refusal(&gateway.org_domain) {
+            tracing::info!(slug = %endpoint.slug, %operation, "write refused: the domain is not verified");
+            return Err(Box::new(refusal.into_response()));
+        }
+    }
+    let waiting = gateway.caller_identity_members(&endpoint.project, &endpoint.space);
+    if !waiting.is_empty() {
+        tracing::warn!(
+            slug = %endpoint.slug,
+            registrations = %waiting.join(", "),
+            "caller identity is registered but token exchange is not implemented"
+        );
+        return Err(Box::new(
+            ProblemDetails::new(501, "federation-identity-unavailable", "Not Implemented")
+                .with_detail(
+                    "a source registered on this space forwards the caller's own token, which \
+                     needs an RFC 8693 token exchange this deployment does not have yet; \
+                     spec.federation.identity: serviceAccount is served today",
+                )
+                .into_response(),
+        ));
+    }
+    if let Some(raw) = operations::addressed_entity(path) {
+        if let Err(refusal) = write_guard::check_identifier(&query::decode(raw), None) {
+            return Err(Box::new(ProblemDetails::from(refusal).into_response()));
+        }
+    }
+    tenancy::pin_caller(request, &endpoint.space, subject).map_err(|problem| {
+        tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
+        Box::new(ProblemDetails::internal().into_response())
+    })
+}
+
+/// The payload of a view request as the gateway keeps it: the media type (CIM 009 6.3.2), the
+/// core context (T-3287), a form's minted id and one entity per create (EP-97), the model's
+/// units (DM-06) and relationships (DM-70, DM-71). Returns the units it filled; a batch the
+/// relationships divide leaves its refused members in `divided`.
+async fn view_payload(
+    gateway: &Gateway,
+    (endpoint, subject): (&Endpoint, &Subject),
+    (path, params, operation): (&str, &[(String, String)], Operation),
+    headers: &mut HeaderMap,
+    sent: &mut Vec<u8>,
+    divided: &mut Option<(Vec<String>, Refused)>,
+) -> Result<Vec<String>, Box<Response<Body>>> {
+    let answer = |problem: ProblemDetails| Box::new(problem.into_response());
+    if operation.is_write() && !sent.is_empty() && !accepted_payload(headers) {
+        return Err(answer(unsupported_media_type()));
+    }
+    if let Err(why) = crate::context_guard::check_link(headers)
+        .and_then(|()| crate::context_guard::check_body(sent))
+    {
+        tracing::info!(slug = %endpoint.slug, "refused: a context other than the core one");
+        return Err(answer(ProblemDetails::bad_request().with_detail(why)));
+    }
+    let before = sent.len();
+    if let Some(creates) = &endpoint.creates {
+        match operation {
+            Operation::CreateEntity if creates.mint_ids && !sent.is_empty() => {
+                *sent = crate::creates::minted(sent).map_err(|problem| answer(*problem))?;
+            }
+            Operation::CreateBatch | Operation::UpsertBatch | Operation::UpsertTemporal => {
+                return Err(answer(ProblemDetails::bad_request().with_detail(
+                    "this endpoint takes one entity per create, at POST /entities",
+                )));
+            }
+            _ => {}
+        }
+    }
+    // What the Endpoint asks of a write whatever the grants are: an id that is an NGSI-LD URN
+    // of its type (PF-43), the entity of the path (PF-44), a type of the space's model (DM-61),
+    // no access control inside the data (GW29). With no constraint the grant checks pass; the
+    // broker's view and its engine decide the grants. A batch keeps what passes (GW18).
+    if operation.is_write() && !sent.is_empty() {
+        let unconstrained = Constraints::default();
+        match judge_write(sent, path, operation, &unconstrained, endpoint) {
+            Err(problem) => return Err(answer(*problem)),
+            Ok(Judged::Whole) => {}
+            Ok(Judged::Divided { permitted, refused }) => {
+                if permitted.is_empty() {
+                    return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
+                }
+                let ids = permitted.iter().filter_map(batch_entry_id).collect();
+                *sent = serde_json::to_vec(&permitted).map_err(|error| {
+                    tracing::error!(%error, "the permitted part of a batch does not serialize");
+                    answer(ProblemDetails::internal())
+                })?;
+                *divided = Some((ids, refused));
+            }
+        }
+    }
+    let declared = endpoint.declared_types.as_ref();
+    let mut filled = Vec::new();
+    if operation.is_write() && !sent.is_empty() {
+        if let Some(declared) = declared {
+            filled = filled_units(sent, path, &declared.units).map_err(|problem| {
+                tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
+                Box::new(problem.into_response())
+            })?;
+        }
+    }
+    if let Some(rules) = declared
+        .map(|declared| &declared.relationships)
+        .filter(|rules| !rules.is_empty())
+    {
+        if operation.is_write() {
+            let held = HeldWrite {
+                gateway,
+                subject,
+                endpoint,
+                headers,
+                path,
+                params,
+                operation,
+                rules,
+            };
+            held.check(sent, divided).await.inspect_err(|_| {
+                tracing::info!(slug = %endpoint.slug, "write refused: it breaks a relationship of the space's model");
+            })?;
+        }
+        if matches!(operation, Operation::DeleteEntity | Operation::DeleteBatch) {
+            let held = HeldDelete {
+                gateway,
+                subject,
+                endpoint,
+                headers,
+                rules,
+            };
+            let refused = if operation == Operation::DeleteEntity {
+                match operations::addressed_entity(path).map(query::decode) {
+                    Some(id) => held.entity(&id).await,
+                    None => Ok(()),
+                }
+            } else {
+                held.batch(sent, divided).await.map(|_| ())
+            };
+            refused.inspect_err(|_| {
+                tracing::info!(slug = %endpoint.slug, "delete refused: a relationship keeps it");
+            })?;
+        }
+    }
+    if sent.len() != before {
+        headers.remove(CONTENT_LENGTH);
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+    }
+    Ok(filled)
 }
 
 /// Ids the existence read of a write asks for at once; a batch naming more is read in chunks.
@@ -2891,21 +3385,7 @@ async fn project_answer(
         // message, a fragment of its own query, the name of an attribute this endpoint hides.
         // The caller gets the gateway's own document and the operator gets the text (T-2260).
         if parts.status.is_server_error() {
-            let held = axum::body::to_bytes(body, MAX_BODY)
-                .await
-                .unwrap_or_default();
-            tracing::warn!(
-                status = parts.status.as_u16(),
-                broker = %String::from_utf8_lossy(&held),
-                "the broker failed; its own explanation is not passed on"
-            );
-            return ProblemDetails::new(
-                parts.status.as_u16(),
-                "broker-failure",
-                "The context broker could not answer",
-            )
-            .with_detail("the context broker behind this endpoint failed to answer this request")
-            .into_response();
+            return broker_failure(parts.status, body).await;
         }
         // A `4xx` is the caller's own request coming back, and it explains what to send instead.
         return Response::from_parts(parts, body);
