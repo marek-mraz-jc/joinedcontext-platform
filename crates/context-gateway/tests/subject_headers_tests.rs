@@ -279,7 +279,7 @@ async fn a_group_whose_name_holds_a_comma_is_not_split_into_two_groups() {
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     // The broker splits the list on commas: forwarded as is, this one group would hand the
-    // caller `/admins` as well.
+    // caller `/admins` as well. Encoded, it stays one name.
     let edge = token(&realm, json!(["/ovzdusie", "/x,/admins"]));
 
     status(
@@ -290,7 +290,50 @@ async fn a_group_whose_name_holds_a_comma_is_not_split_into_two_groups() {
 
     let hops = broker.hops();
     assert_eq!(hops.len(), 1, "{hops:?}");
-    assert_eq!(list(&hops[0].headers, "x-jc-groups"), ["ovzdusie"]);
+    assert_eq!(
+        list(&hops[0].headers, "x-jc-groups"),
+        ["ovzdusie", "x%2C%2Fadmins"]
+    );
+}
+
+/// T-3770: a name with a diacritic or a reserved character reaches the broker percent-encoded
+/// (UTF-8, RFC 3986 unreserved kept), one member at a time; the others stay as they are.
+#[tokio::test]
+async fn names_beyond_plain_ascii_reach_the_broker_percent_encoded() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let edge = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5b",
+        "aud": "context-gateway",
+        "preferred_username": "jožo",
+        "groups": ["/ovzdusie", "/doprava/správa"],
+        "realm_access": { "roles": ["steward", "správca"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+
+    status(
+        app(&broker.url, &realm),
+        request(Method::GET, &query(), Some(&edge), &[], None),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert_eq!(
+        values(headers, "x-jc-subject"),
+        ["jo%C5%BEo"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        list(headers, "x-jc-groups"),
+        ["doprava%2Fspr%C3%A1va", "ovzdusie"]
+    );
+    let roles = list(headers, "x-jc-roles");
+    assert!(roles.contains(&"steward".to_owned()), "{roles:?}");
+    assert!(roles.contains(&"spr%C3%A1vca".to_owned()), "{roles:?}");
 }
 
 #[tokio::test]
