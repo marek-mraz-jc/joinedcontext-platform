@@ -457,6 +457,12 @@ const fn distribution(
             "OGC SensorThings API",
         ),
         Representation::Odata => ("/odata/v4/", "OData", "application/json", "OData v4"),
+        Representation::WebSocket => (
+            "/ws",
+            "WebSocket",
+            "application/json",
+            "Live updates over WebSocket",
+        ),
     }
 }
 

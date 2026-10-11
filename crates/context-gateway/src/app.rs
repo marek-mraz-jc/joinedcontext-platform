@@ -123,6 +123,8 @@ pub struct Gateway {
     pub rate_limiter: RateLimiter,
     /// The creates each form Endpoint has taken today (EP-97).
     pub creates: crate::creates::DailyCreates,
+    /// The WebSocket connections each caller holds open (EP-107).
+    pub ws_open: crate::handlers::ws::Open,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -189,6 +191,7 @@ impl Gateway {
             delivery_key: None,
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
+            ws_open: Default::default(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
@@ -468,6 +471,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
+        // Live updates: the broker view's WebSocket, relayed under the caller (EP-106, T-3885).
+        .route(
+            "/api/endpoint/{slug}/ws",
+            get(crate::handlers::ws::endpoint_ws),
+        )
         .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))

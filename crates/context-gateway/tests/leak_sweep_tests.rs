@@ -583,6 +583,7 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::OgcFeatures => "/ogc/features",
             Representation::Sta => "/sta/v1.1",
             Representation::Odata => "/odata/v4",
+            Representation::WebSocket => "/ws",
         };
         assert!(
             swept(path),
