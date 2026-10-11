@@ -9,6 +9,7 @@ pub mod placement;
 pub mod provision;
 pub mod s3;
 pub mod server;
+pub mod services;
 pub mod source;
 pub mod sql;
 pub mod storage;

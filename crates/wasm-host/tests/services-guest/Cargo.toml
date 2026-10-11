@@ -1,0 +1,20 @@
+# The test App of jc-wasm-host's service tests (T-3622): built on jc-app-sdk against jc:app@0.1.1,
+# it calls identity, email and ai and answers what they said. Built for wasm32-wasip2 by
+# tests/host_tests.rs; never part of the workspace or an image.
+[package]
+name = "wasm-host-services-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jc-app-sdk = { path = "../../../app-sdk" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+
+[workspace]

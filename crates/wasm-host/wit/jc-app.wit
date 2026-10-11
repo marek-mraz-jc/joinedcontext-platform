@@ -1,7 +1,9 @@
 /// What the shared host offers a server WASM App beside `wasi:http` (ADR-N-044, AP-144, AP-145).
 /// An App never holds a connection string, a password or an object-store key: it asks the host,
 /// and the host answers as the App's own database role and under the App's own storage prefix.
-package jc:app@0.1.0;
+/// 0.1.1 adds `identity`, `email` and `ai` (API/06 §5) and changes nothing of 0.1.0, so a
+/// component built against 0.1.0 links unchanged.
+package jc:app@0.1.1;
 
 /// The App's own Postgres schema, `app_<id>`, through bound parameters only (AP-144).
 interface sql {
@@ -65,9 +67,102 @@ interface blob {
     presign: func(key: string, method: method, expires-seconds: u32) -> result<string, error>;
 }
 
-/// What the host links into every App: its storage. The App itself exports
-/// `wasi:http/incoming-handler` (AP-143).
+/// The person a request comes from, as the Portal verified them for this App (AP-109): an id,
+/// a name, an e-mail and the App's roles, never a token.
+interface identity {
+    record person {
+        id: string,
+        name: string,
+        email: option<string>,
+        roles: list<string>,
+    }
+
+    /// The request's person; `none` for an anonymous visitor, in a job, and when the Portal
+    /// cannot say.
+    caller: func() -> option<person>;
+}
+
+/// What a platform service answers when it does not (API/06 §3, SDK-43).
+interface services {
+    /// A service a layer keeps off (`layer`: `organization`, `project` or `app`), or a quota that
+    /// is used up (`quota`, and `reset-at` when it frees by itself).
+    record refusal {
+        service: string,
+        layer: option<string>,
+        quota: option<string>,
+        reset-at: option<string>,
+    }
+
+    variant error {
+        refused(refusal),
+        /// The Portal's other no, with its detail: a message it does not take, a recipient outside
+        /// the organization, no model key, no signed-in person.
+        rejected(string),
+        /// No Portal to ask, or it did not answer.
+        unavailable(string),
+    }
+}
+
+/// A message to people of the organization, by person id or the caller (AP-168); the Portal looks
+/// the addresses up, so the App never holds one.
+interface email {
+    use services.{error};
+
+    variant recipients {
+        me,
+        people(list<string>),
+    }
+
+    record message {
+        to: recipients,
+        subject: string,
+        text: string,
+        html: option<string>,
+    }
+
+    /// The message's id once the relay took it.
+    send: func(message: message) -> result<string, error>;
+}
+
+/// A completion from the organization's model, counted against the App's day (AP-169).
+interface ai {
+    use services.{error};
+
+    enum role {
+        system,
+        user,
+        assistant,
+    }
+
+    record message {
+        role: role,
+        content: string,
+    }
+
+    /// `max-tokens` is 1 to 4096, 1024 when absent; `schema` is a JSON Schema as JSON text, and
+    /// the answer's `json` is then a value of it.
+    record completion {
+        messages: list<message>,
+        max-tokens: option<u32>,
+        schema: option<string>,
+    }
+
+    record answer {
+        text: string,
+        json: option<string>,
+        tokens-in: u32,
+        tokens-out: u32,
+    }
+
+    complete: func(request: completion) -> result<answer, error>;
+}
+
+/// What the host links into every App: its storage, its caller and the platform services. The
+/// App itself exports `wasi:http/incoming-handler` (AP-143).
 world app-host {
     import sql;
     import blob;
+    import identity;
+    import email;
+    import ai;
 }

@@ -1,6 +1,8 @@
-//! jc-wasm-host against real components (T-3339, AP-143, AP-146, AP-147): the test App of
-//! `tests/guest`, built for wasm32-wasip2 here (`rustup target add wasm32-wasip2`), served by a
-//! shard whose components sit in a directory. The gateway is a mock that records what reached it.
+//! jc-wasm-host against real components (T-3339, AP-143, AP-146, AP-147): the test Apps of
+//! `tests/guest` (a `jc:app@0.1.0` component) and `tests/services-guest` (`jc-app-sdk` over
+//! `jc:app@0.1.1`, T-3622), built for wasm32-wasip2 here (`rustup target add wasm32-wasip2`),
+//! served by a shard whose components sit in a directory. The gateway and the Portal are mocks that
+//! record what reached them.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,18 +17,29 @@ use wasm_host::limits::Limits;
 use wasm_host::placement::Placed;
 use wasm_host::source::Source;
 use wasm_host::storage::Unconfigured;
-use wiremock::matchers::any;
+use wiremock::matchers::{any, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// The test App, built once per test binary.
+/// The test App, a component of `jc:app@0.1.0` as published Apps are, built once per test binary.
 fn guest() -> &'static [u8] {
     static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
-    BYTES.get_or_init(|| {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/Cargo.toml");
+    BYTES.get_or_init(|| build("guest", "wasm_host_test_guest"))
+}
+
+/// The services test App on `jc-app-sdk` over `jc:app@0.1.1` (T-3622), built once per test binary.
+fn services_guest() -> &'static [u8] {
+    static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+    BYTES.get_or_init(|| build("services-guest", "wasm_host_services_guest"))
+}
+
+fn build(dir: &str, lib: &str) -> Vec<u8> {
+    {
+        let manifest =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/{dir}/Cargo.toml"));
         let target = std::env::var("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
-            .join("wasm-host-guest");
+            .join(format!("wasm-host-{dir}"));
         let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
             .args([
                 "build",
@@ -44,9 +57,9 @@ fn guest() -> &'static [u8] {
             status.success(),
             "the test App builds for wasm32-wasip2 (rustup target add wasm32-wasip2)"
         );
-        std::fs::read(target.join("wasm32-wasip2/release/wasm_host_test_guest.wasm"))
+        std::fs::read(target.join(format!("wasm32-wasip2/release/{lib}.wasm")))
             .expect("the test App")
-    })
+    }
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -74,6 +87,15 @@ struct World {
 
 impl World {
     fn new(case: &str, limits: Limits, gateway: Option<&str>) -> Self {
+        Self::with_portal(case, limits, gateway, None)
+    }
+
+    fn with_portal(
+        case: &str,
+        limits: Limits,
+        gateway: Option<&str>,
+        portal: Option<&str>,
+    ) -> Self {
         let dir = std::env::temp_dir().join(format!("wasm-host-{case}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let host = Host::new(
@@ -81,6 +103,7 @@ impl World {
             Source::Dir(dir.clone()),
             Arc::new(Unconfigured),
             gateway,
+            portal,
         )
         .expect("host");
         Self { dir, host }
@@ -110,7 +133,18 @@ impl World {
         path: &str,
         token: Option<&str>,
     ) -> Result<(u16, String), Failure> {
+        self.call("GET", app, path, token).await
+    }
+
+    async fn call(
+        &self,
+        method: &str,
+        app: &Placed,
+        path: &str,
+        token: Option<&str>,
+    ) -> Result<(u16, String), Failure> {
         let request = http::Request::builder()
+            .method(method)
             .uri(format!("http://apps.test/apps/{}{path}", app.name))
             .header("authorization", "Bearer from-the-caller")
             .header("cookie", "session=secret")
@@ -638,4 +672,188 @@ async fn the_cache_counts_its_hits_and_misses() {
     }
     let stats = world.host.cache_stats();
     assert_eq!((stats.cached, stats.hits, stats.misses), (2, 2, 2));
+}
+
+/// A Portal that answers `GET …/me`, `email/send` and `ai/complete` of App `desk` with the given
+/// answers, recording what reached it.
+async fn portal(
+    caller: ResponseTemplate,
+    email: ResponseTemplate,
+    ai: ResponseTemplate,
+) -> MockServer {
+    let portal = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects/helsinki/apps/desk/me"))
+        .respond_with(caller)
+        .mount(&portal)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/apps/desk/api/services/email/send"))
+        .respond_with(email)
+        .mount(&portal)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/apps/desk/api/services/ai/complete"))
+        .respond_with(ai)
+        .mount(&portal)
+        .await;
+    portal
+}
+
+fn problem(status: u16, body: serde_json::Value) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_raw(body.to_string(), "application/problem+json")
+}
+
+/// T-3622, API/06 §5: a component asks for its caller, sends a mail to them and asks the model,
+/// and the host asks the Portal each time as the request's person, on the App's own host; the
+/// component never sees the token.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_email_and_ai_ask_the_portal_as_the_requests_person() {
+    let portal = portal(
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "u-1", "name": "Eero Laine", "email": "eero@hel.fi", "roles": ["steward"]
+        })),
+        ResponseTemplate::new(202).set_body_json(serde_json::json!({ "id": "msg-7" })),
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "text": "{\"severity\":4}", "json": { "severity": 4 }, "tokens": { "in": 21, "out": 6 }
+        })),
+    )
+    .await;
+    let world = World::with_portal("services", Limits::default(), None, Some(&portal.uri()));
+    let app = world.place("desk", services_guest());
+
+    let (status, me) = world.get(&app, "/api/caller", Some("tok-1")).await.unwrap();
+    assert_eq!(status, 200, "{me}");
+    let me: serde_json::Value = serde_json::from_str(&me).expect("json");
+    assert_eq!(me["name"], "Eero Laine");
+    assert_eq!(me["roles"], serde_json::json!(["steward"]));
+    assert_eq!(
+        world
+            .call("POST", &app, "/api/email", Some("tok-1"))
+            .await
+            .unwrap(),
+        (202, "msg-7".into())
+    );
+    assert_eq!(
+        world
+            .call("POST", &app, "/api/ai", Some("tok-1"))
+            .await
+            .unwrap(),
+        (200, "{\"severity\":4} 21 6".into())
+    );
+
+    let seen = portal.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 3);
+    for request in &seen {
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer tok-1"),
+            "{}",
+            request.url
+        );
+        assert!(request.headers.get("cookie").is_none());
+    }
+    let mail: serde_json::Value = serde_json::from_slice(&seen[1].body).expect("json");
+    assert_eq!(
+        mail,
+        serde_json::json!({ "to": "me", "subject": "Today's defects", "text": "Three new." })
+    );
+    assert_eq!(
+        seen[1].headers.get("host").and_then(|v| v.to_str().ok()),
+        Some("apps.test"),
+        "the service routes answer on the App's own host"
+    );
+    let asked: serde_json::Value = serde_json::from_slice(&seen[2].body).expect("json");
+    assert_eq!(asked["maxTokens"], 20);
+    assert_eq!(
+        asked["schema"],
+        serde_json::json!({ "type": "object", "required": ["severity"] })
+    );
+    assert_eq!(asked["messages"][0]["role"], "user");
+}
+
+/// T-3622, SDK-43: a service a layer keeps off and a used-up quota reach the component with their
+/// members, which `Response::from_service` answers as the Portal's problem.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_reaches_the_component_with_its_layer_or_its_quota() {
+    for layer in ["organization", "project", "app"] {
+        let portal = portal(
+            ResponseTemplate::new(401),
+            problem(403, serde_json::json!({ "type": "https://joinedcontext.com/errors/service-off", "service": "email", "layer": layer })),
+            problem(429, serde_json::json!({ "type": "https://joinedcontext.com/errors/quota", "service": "ai", "quota": "aiTokensPerDay", "resetAt": "2026-10-12T00:00:00Z" })),
+        )
+        .await;
+        let world = World::with_portal(
+            &format!("refused-{layer}"),
+            Limits::default(),
+            None,
+            Some(&portal.uri()),
+        );
+        let app = world.place("desk", services_guest());
+        let (status, off) = world
+            .call("POST", &app, "/api/email", Some("tok-1"))
+            .await
+            .unwrap();
+        assert_eq!(status, 403, "{off}");
+        let off: serde_json::Value = serde_json::from_str(&off).expect("json");
+        assert_eq!(off["type"], "https://joinedcontext.com/errors/service-off");
+        assert_eq!(off["layer"], layer);
+        assert_eq!(off["service"], "email");
+
+        let (status, spent) = world
+            .call("POST", &app, "/api/ai", Some("tok-1"))
+            .await
+            .unwrap();
+        assert_eq!(status, 429, "{spent}");
+        let spent: serde_json::Value = serde_json::from_str(&spent).expect("json");
+        assert_eq!(spent["quota"], "aiTokensPerDay");
+        assert_eq!(spent["resetAt"], "2026-10-12T00:00:00Z");
+
+        assert_eq!(
+            world.get(&app, "/api/caller", Some("tok-1")).await.unwrap(),
+            (200, "nobody".into()),
+            "a 401 is nobody"
+        );
+    }
+}
+
+/// T-3622: without a person nothing is asked; without a Portal every call says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_anonymous_request_or_a_shard_without_a_portal_asks_nothing() {
+    let portal = portal(
+        ResponseTemplate::new(500),
+        ResponseTemplate::new(500),
+        ResponseTemplate::new(500),
+    )
+    .await;
+    let world = World::with_portal("anonymous", Limits::default(), None, Some(&portal.uri()));
+    let app = world.place("desk", services_guest());
+    assert_eq!(
+        world.get(&app, "/api/caller", None).await.unwrap(),
+        (200, "nobody".into())
+    );
+    let (status, said) = world.call("POST", &app, "/api/email", None).await.unwrap();
+    assert_eq!(status, 422, "{said}");
+    assert!(said.contains("in a person's name"), "{said}");
+    assert!(portal
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
+
+    let world = World::new("no-portal", Limits::default(), None);
+    let app = world.place("desk", services_guest());
+    let (status, said) = world
+        .call("POST", &app, "/api/ai", Some("tok-1"))
+        .await
+        .unwrap();
+    assert_eq!(status, 503, "{said}");
+    assert!(said.contains("JC_WASM_PORTAL_URL"), "{said}");
+    assert_eq!(
+        world.get(&app, "/api/caller", Some("tok-1")).await.unwrap(),
+        (200, "nobody".into())
+    );
 }
