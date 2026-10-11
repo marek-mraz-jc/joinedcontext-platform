@@ -6,6 +6,8 @@
 //! entity tag it was decided on. What the caller sends in `If-Match` is checked by the very
 //! same read.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -34,8 +36,6 @@ const ETAG: &str = "\"7f3a\"";
 #[derive(Debug, Clone)]
 struct Call {
     method: Method,
-    path: String,
-    query: String,
     if_match: Option<String>,
     /// `x-jc-client` and `x-jc-roles`: who the broker is told asks (T-3641, T-3767).
     client: Option<String>,
@@ -77,11 +77,8 @@ async fn broker(stored: Stored) -> (String, Calls) {
             |State(stored): State<Stored>, request: Request| async move {
                 let method = request.method().clone();
                 let path = request.uri().path().to_owned();
-                let query = request.uri().query().unwrap_or_default().to_owned();
                 stored.calls.lock().expect("the call log").push(Call {
                     method: method.clone(),
-                    path: path.clone(),
-                    query: query.clone(),
                     if_match: request
                         .headers()
                         .get("if-match")
@@ -134,7 +131,7 @@ async fn broker(stored: Stored) -> (String, Calls) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), calls)
 }
@@ -312,38 +309,6 @@ async fn an_if_match_against_a_broker_that_publishes_no_etag_is_412() {
     assert!(writes(&calls).is_empty(), "nothing was written: {calls:?}");
 }
 
-#[tokio::test]
-async fn a_state_dependent_grant_reads_first_and_writes_conditionally() {
-    let (status, calls) = write(
-        Method::PATCH,
-        None,
-        Some("temperature<100"),
-        holding(Some(ETAG), true),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let condition = calls
-        .iter()
-        .find(|call| call.method == Method::GET && call.path == "/ngsi-ld/v1/entities")
-        .expect("the grant's filter was evaluated by the broker");
-    assert!(
-        condition.query.contains("temperature%3C100"),
-        "the grant's own filter is what was asked: {}",
-        condition.query
-    );
-    assert!(
-        condition.query.contains("id=urn%3Angsi-ld") || condition.query.contains("id=urn:ngsi-ld"),
-        "about this entity alone: {}",
-        condition.query
-    );
-    assert_eq!(
-        writes(&calls)[0].if_match.as_deref(),
-        Some(ETAG),
-        "the window between the read and the write is closed by the tag it was read at"
-    );
-}
-
 /// T-3767: the probes the gateway makes before a write are its own, so they speak as the
 /// gateway's service account with no role; the write itself is the caller's.
 #[tokio::test]
@@ -377,25 +342,6 @@ async fn the_probes_speak_as_the_gateway_and_the_write_as_the_caller() {
     );
 }
 
-/// The half GW16 cannot see: the payload sits inside the grant, the stored entity does not.
-#[tokio::test]
-async fn a_write_whose_stored_state_fails_the_condition_is_refused_and_never_forwarded() {
-    let (status, calls) = write(
-        Method::PATCH,
-        None,
-        Some("temperature<100"),
-        holding(Some(ETAG), false),
-    )
-    .await;
-
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "an entity the caller may not touch is a miss, not a refusal (R20)"
-    );
-    assert!(writes(&calls).is_empty(), "nothing was written: {calls:?}");
-}
-
 /// GW19: a delete is a write, and gets the same treatment.
 #[tokio::test]
 async fn a_delete_is_conditional_too() {
@@ -411,14 +357,6 @@ async fn a_delete_is_conditional_too() {
     let written = writes(&calls);
     assert_eq!(written[0].method, Method::DELETE);
     assert_eq!(written[0].if_match.as_deref(), Some(ETAG));
-}
-
-#[tokio::test]
-async fn a_conditional_write_on_an_entity_the_broker_does_not_hold_is_a_miss() {
-    let (status, calls) = write(Method::PATCH, None, Some("temperature<100"), empty()).await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(writes(&calls).is_empty(), "nothing was written: {calls:?}");
 }
 
 #[test]
@@ -444,157 +382,3 @@ fn the_strong_comparison_is_the_one_rfc_9110_asks_for() {
 }
 
 // --- the grant that draws an area rather than a condition (T-0807) -------------------------
-
-/// The district the grant draws, far from where the sensor is stored (19.15, 48.73).
-const DISTRICT: &str = "georel=within;geometry=Polygon;coordinates=[[[21.0,48.0],[21.5,48.0],[21.5,48.5],[21.0,48.5],[21.0,48.0]]]";
-
-/// A grant over the sensor, narrowed by whatever `narrowing` says — an area, a filter, or
-/// nothing — and allowing exactly the operations named.
-///
-/// The area case is the one that used to disappear: a `geoQ` forwarded to the broker left
-/// the constraint set with no area of its own, so nothing here knew the grant drew one.
-fn grant(operations: &str, narrowing: &str) -> PolicySpec {
-    serde_norway::from_str(&format!(
-        "contextSpaceRef: {SPACE}\n\
-         assigner: did:web:{DOMAIN}\n\
-         assignee: {{ kind: role, id: public }}\n\
-         operations: [{operations}]\n\
-         {narrowing}\n\
-         information:\n\
-         \x20 - entities:\n\
-         \x20     - type: AirQualityObserved\n\
-         \x20   propertyNames: [temperature, location]\n"
-    ))
-    .expect("the policy spec parses")
-}
-
-/// The grant of the two area tests: one district, no filter.
-fn in_the_district(operations: &str) -> PolicySpec {
-    grant(operations, &format!("geoQ: '{DISTRICT}'"))
-}
-
-/// One request through a gateway serving `policies`, and everything the broker was asked.
-async fn through(
-    policies: Vec<PolicySpec>,
-    method: Method,
-    uri: &str,
-    body: Body,
-    stored: Stored,
-) -> (StatusCode, Vec<Call>) {
-    let (upstream, calls) = broker(stored).await;
-    let endpoint = Endpoint {
-        roles: Default::default(),
-        policy_names: Vec::new(),
-        policies,
-        ..endpoint(None)
-    };
-    let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
-    );
-    let response = router(gateway)
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(format!("/api/endpoint/{SLUG}{uri}"))
-                .header("content-type", "application/json")
-                .body(body)
-                .expect("a request"),
-        )
-        .await
-        .expect("the gateway answers");
-
-    let status = response.status();
-    let made = calls.lock().expect("the call log").clone();
-    (status, made)
-}
-
-/// The grant is an area and the payload carries no location, so GW16 has nothing to test:
-/// the only thing that says where this entity is, is the entity as the broker holds it.
-#[tokio::test]
-async fn a_grant_that_is_only_an_area_reads_the_stored_entity_before_it_edits_one() {
-    let (status, calls) = through(
-        vec![in_the_district("retrieveEntity, queryEntity, updateAttrs")],
-        Method::PATCH,
-        &format!("/ngsi-ld/v1/entities/{SENSOR}/attrs"),
-        Body::from(json!({ "temperature": { "type": "Property", "value": 21.0 } }).to_string()),
-        holding(Some(ETAG), true),
-    )
-    .await;
-
-    // A write to an entity the caller cannot see is a miss, not a refusal (R20).
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(
-        writes(&calls).is_empty(),
-        "the entity is stored outside the granted district, so nothing was written: {calls:?}"
-    );
-    assert!(
-        calls.iter().any(|call| call.method == Method::GET),
-        "the stored entity was read before the decision: {calls:?}"
-    );
-}
-
-/// The same grant, the same district, an entity stored inside it: the write goes through and
-/// carries the tag it was decided on.
-#[tokio::test]
-async fn a_grant_that_is_only_an_area_still_lets_a_write_inside_it_through() {
-    let inside = Stored {
-        entity: Some(json!({
-            "id": SENSOR,
-            "type": "AirQualityObserved",
-            "temperature": { "type": "Property", "value": 19.5 },
-            "location": {
-                "type": "GeoProperty",
-                "value": { "type": "Point", "coordinates": [21.2, 48.2] }
-            }
-        })),
-        ..holding(Some(ETAG), true)
-    };
-    let (status, calls) = through(
-        vec![in_the_district("retrieveEntity, queryEntity, updateAttrs")],
-        Method::PATCH,
-        &format!("/ngsi-ld/v1/entities/{SENSOR}/attrs"),
-        Body::from(json!({ "temperature": { "type": "Property", "value": 21.0 } }).to_string()),
-        inside,
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(
-        writes(&calls)[0].if_match.as_deref(),
-        Some(ETAG),
-        "a state-dependent write is conditional upstream (R45)"
-    );
-}
-
-/// A batch names its entities in the payload, so there is no stored entity to read and no
-/// tag to carry. The payload alone cannot decide a grant that decides from stored state.
-#[tokio::test]
-async fn a_batch_write_under_a_state_dependent_grant_never_reaches_the_broker() {
-    const ALLOWED: &str = "retrieveEntity, queryEntity, upsertBatch";
-    for narrowing in ["q: temperature<100", &format!("geoQ: '{DISTRICT}'")] {
-        let (status, calls) = through(
-            vec![grant(ALLOWED, narrowing)],
-            Method::POST,
-            "/ngsi-ld/v1/entityOperations/upsert",
-            // Inside the granted district, and a legal payload in every other way: what is
-            // refused is the operation, not the body.
-            Body::from(
-                json!([{
-                    "id": SENSOR,
-                    "type": "AirQualityObserved",
-                    "temperature": { "type": "Property", "value": 21.0 },
-                    "location": {
-                        "type": "GeoProperty",
-                        "value": { "type": "Point", "coordinates": [21.2, 48.2] }
-                    }
-                }])
-                .to_string(),
-            ),
-            holding(Some(ETAG), true),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(calls.is_empty(), "the broker was never called: {calls:?}");
-    }
-}

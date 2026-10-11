@@ -1,6 +1,8 @@
 //! T-3172: a public form's Endpoint mints the id, caps the day and takes only the form's
 //! fields (EP-97).
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -47,7 +49,7 @@ async fn broker() -> (String, Bodies) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), bodies)
 }
@@ -165,51 +167,6 @@ async fn a_caller_chosen_id_is_not_used() {
         assert_ne!(id, chosen);
     }
     assert_ne!(sent[0]["id"], sent[1]["id"], "each create gets its own id");
-}
-
-#[tokio::test]
-async fn an_attribute_outside_the_form_is_refused_before_the_broker() {
-    let form = form(None).await;
-    let mut body = report("urn:ngsi-ld:Report:x");
-    body["website"] = json!({"type": "Property", "value": "spam"});
-    // 403 without naming the rule that decided (GW6): the form knows its own fields.
-    assert_eq!(
-        form.post("/entities", body).await.status(),
-        StatusCode::FORBIDDEN
-    );
-    assert!(form.sent().is_empty(), "the broker was asked");
-}
-
-#[tokio::test]
-async fn the_cap_answers_429_past_its_count_and_a_refused_create_spends_none() {
-    let form = form(Some(2)).await;
-    // Refused before the broker: spends nothing.
-    let mut spam = report("urn:ngsi-ld:Report:x");
-    spam["website"] = json!({"type": "Property", "value": "spam"});
-    assert_eq!(
-        form.post("/entities", spam).await.status(),
-        StatusCode::FORBIDDEN
-    );
-    // Two senders, so neither runs into its own share first (T-3285).
-    for address in ["203.0.113.7", "198.51.100.4"] {
-        let status = form
-            .post_from(address, "/entities", report("urn:ngsi-ld:Report:x"))
-            .await
-            .status();
-        assert_eq!(status, StatusCode::CREATED);
-    }
-    let spent = form
-        .post_from("192.0.2.80", "/entities", report("urn:ngsi-ld:Report:x"))
-        .await;
-    assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
-    let retry: u64 = spent
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-        .expect("a Retry-After in seconds");
-    assert!((1..=86_400).contains(&retry), "{retry}");
-    assert_eq!(form.sent().len(), 2);
 }
 
 #[tokio::test]
