@@ -314,91 +314,79 @@ async fn endpoint_is_one_string_and_no_other_argument_routes() {
     );
 }
 
-/// Section 3, row 3: an elicitation asked through one Endpoint does not confirm a call on
-/// another; on its own Endpoint it does, once.
+/// Section 3, row 3, since T-3808: a write goes to the named Endpoint's view alone, in the
+/// broker's form, and the confirmation it asks for is that view's (Antares `docs/src/mcp.md`
+/// section 4), so no other Endpoint sees the call. An Endpoint that does not grant the write
+/// answers the SP-17 tool error and the broker is never asked.
 #[tokio::test]
-async fn an_elicitation_asked_on_one_endpoint_does_not_confirm_a_call_on_another() {
+async fn a_write_reaches_the_named_endpoints_view_alone_in_the_brokers_form() {
     let realm = common::Realm::new();
-    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let broker =
+        common::BrokerStub::start(vec![json!({ "created": "urn:ngsi-ld:Subscription:1" })]).await;
     let app = app(&broker.url, &realm);
-    // A second Endpoint that grants subscriptions too, so only the binding can refuse.
     let token = edge(&realm);
     let subscription = json!({
         "type": "Subscription",
         "entities": [{ "type": "AirQualityObserved" }],
         "notification": { "endpoint": { "uri": "https://example.org/hook" } }
     });
-
-    let (_, asked) = send(
-        app.clone(),
-        hub(
-            Some(&token),
-            call(
-                "create_subscription",
-                json!({ "endpoint": AIR, "subscription": subscription }),
-            ),
-        ),
-    )
-    .await;
-    let elicitation_id = asked["result"]["structuredContent"]["elicitation"]["elicitationId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no question: {asked}"))
-        .to_owned();
-
-    let answered = |endpoint: &str| {
-        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "create_subscription",
-            "arguments": { "endpoint": endpoint, "subscription": subscription },
-            "elicitation": { "elicitationId": elicitation_id, "action": "accept" },
-        }})
+    let subscribe = |endpoint: &str| {
+        call(
+            "create_subscription",
+            json!({ "endpoint": endpoint, "subscription": subscription }),
+        )
     };
 
-    // BIKES does not grant subscriptions: the answer is the SP-17 tool error, and the question
-    // stays unanswered.
-    let (_, elsewhere) = send(app.clone(), hub(Some(&token), answered(BIKES))).await;
+    let (_, elsewhere) = send(app.clone(), hub(Some(&token), subscribe(BIKES))).await;
     assert_eq!(elsewhere["result"]["isError"], json!(true), "{elsewhere}");
-    assert!(
-        broker.hops().is_empty(),
-        "an answer given on BIKES created something"
-    );
+    assert!(broker.hops().is_empty(), "BIKES does not grant the write");
 
-    let (_, created) = send(app.clone(), hub(Some(&token), answered(AIR))).await;
+    let (_, created) = send(app, hub(Some(&token), subscribe(AIR))).await;
     assert_eq!(created["result"]["isError"], json!(false), "{created}");
-    assert_eq!(broker.hops().len(), 1);
-
-    let (_, again) = send(app, hub(Some(&token), answered(AIR))).await;
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1);
     assert_eq!(
-        again["result"]["isError"],
-        json!(true),
-        "a spent answer was reused: {again}"
+        (hops[0].view.as_str(), hops[0].path.as_str()),
+        (AIR, "/mcp")
     );
-    assert_eq!(broker.hops().len(), 1);
+    assert_eq!(hops[0].tenant, "ovzdusie");
+    assert!(
+        !hops[0].headers.contains_key("authorization"),
+        "a token reached the broker"
+    );
+    assert!(
+        hops[0].headers.contains_key("x-jc-subject"),
+        "the caller is not pinned"
+    );
+    let sent: Value = serde_json::from_slice(&hops[0].body).expect("a JSON-RPC message");
+    assert_eq!(sent["params"]["name"], json!("create_subscription"));
+    assert_eq!(
+        sent["params"]["arguments"], subscription,
+        "the subscription is the arguments"
+    );
 }
 
-/// Section 3, row 3 again, where both Endpoints grant the write: the question is bound to the
-/// Endpoint it was asked on, so the other Endpoint's façade does not know it.
+/// T-3808: the hub's catalogue keeps its names and arguments, and each call reaches the broker
+/// under the name and in the form the broker's tool takes: one `type` as a list, `details` as
+/// its own tool, `ids` as `id`, the cursor as the broker gave it.
 #[tokio::test]
-async fn a_question_is_bound_to_its_endpoint_even_where_both_grant_the_write() {
+async fn a_hub_call_reaches_the_broker_under_its_own_tool_and_arguments() {
     let realm = common::Realm::new();
-    let broker = common::BrokerStub::start(vec![json!({})]).await;
-    let both = vec![
-        endpoint(
-            AIR,
-            vec![grant("steward", "queryEntity, createSubscription")],
-        ),
-        endpoint(
-            BIKES,
-            vec![grant("steward", "queryEntity, createSubscription")],
-        ),
-    ];
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let air = endpoint(
+        AIR,
+        vec![grant(
+            "steward",
+            "queryEntity, queryBatch, retrieveEntityTypes, retrieveEntityTypeDetails",
+        )],
+    );
     let app = router(Arc::new(
         Gateway::new(
             Broker::new(&broker.url),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
-        .serve(both)
-        .seal_subscribers_with(common::delivery_key())
+        .serve([air])
         .authenticate(
             Arc::new(realm.verifier()),
             ServiceAccounts::new(),
@@ -406,44 +394,89 @@ async fn a_question_is_bound_to_its_endpoint_even_where_both_grant_the_write() {
         ),
     ));
     let token = edge(&realm);
-    let subscription = json!({
-        "type": "Subscription",
-        "entities": [{ "type": "AirQualityObserved" }],
-        "notification": { "endpoint": { "uri": "https://example.org/hook" } }
-    });
-    let (_, asked) = send(
-        app.clone(),
-        hub(
-            Some(&token),
+    let id = "urn:ngsi-ld:AirQualityObserved:st-1";
+    let cases = [
+        (
             call(
-                "create_subscription",
-                json!({ "endpoint": AIR, "subscription": subscription }),
+                "query_entities",
+                json!({ "endpoint": AIR, "type": "AirQualityObserved", "cursor": "b3BhcXVl" }),
             ),
+            "query_entities",
+            json!({ "type": ["AirQualityObserved"], "cursor": "b3BhcXVl" }),
         ),
-    )
-    .await;
-    let elicitation_id = asked["result"]["structuredContent"]["elicitation"]["elicitationId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no question: {asked}"))
-        .to_owned();
+        (
+            call(
+                "query_entities",
+                json!({ "endpoint": AIR, "type": ["AirQualityObserved"] }),
+            ),
+            "query_entities",
+            json!({ "type": ["AirQualityObserved"] }),
+        ),
+        (
+            call(
+                "batch_query",
+                json!({ "endpoint": AIR, "ids": [id], "type": "AirQualityObserved" }),
+            ),
+            "batch_query",
+            json!({ "id": [id], "type": ["AirQualityObserved"] }),
+        ),
+        (
+            call("list_types", json!({ "endpoint": AIR, "details": true })),
+            "list_type_details",
+            json!({}),
+        ),
+        (
+            call("list_types", json!({ "endpoint": AIR, "details": false })),
+            "list_types",
+            json!({}),
+        ),
+    ];
+    for (asked, (message, tool, arguments)) in cases.into_iter().enumerate() {
+        let (_, answer) = send(app.clone(), hub(Some(&token), message.clone())).await;
+        let hops = broker.hops();
+        assert_eq!(hops.len(), asked + 1, "no hop for {message}: {answer}");
+        let sent: Value = serde_json::from_slice(&hops[asked].body).expect("a JSON-RPC message");
+        assert_eq!(sent["params"]["name"], json!(tool), "{message}");
+        assert_eq!(sent["params"]["arguments"], arguments, "{message}");
+    }
+}
 
-    let (_, crossed) = send(
-        app,
-        hub(
-            Some(&token),
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                "name": "create_subscription",
-                "arguments": { "endpoint": BIKES, "subscription": subscription },
-                "elicitation": { "elicitationId": elicitation_id, "action": "accept" },
-            }}),
+/// T-3808: a broker that fails a member call is the call's tool error, and nothing the broker
+/// said about it reaches the caller; a broker refusal is passed on in its own sentence.
+#[tokio::test]
+async fn a_failing_broker_is_a_tool_error_that_repeats_nothing_of_it() {
+    for (status, body, expected) in [
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "title": "pool exhausted at db-0.internal:5432" }),
+            "the context broker behind this Endpoint failed to answer this call",
         ),
-    )
-    .await;
-    assert_eq!(crossed["result"]["isError"], json!(true), "{crossed}");
-    assert!(
-        broker.hops().is_empty(),
-        "AIR's answer created a subscription on BIKES"
-    );
+        (
+            StatusCode::NOT_FOUND,
+            json!({ "title": "Not Found", "detail": "no view of this name" }),
+            "no view of this name",
+        ),
+    ] {
+        let stub = Router::new().fallback(move || {
+            let body = body.clone();
+            async move { (status, axum::Json(body)) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a free port");
+        let url = format!("http://{}", listener.local_addr().expect("an address"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, stub).await;
+        });
+        let realm = common::Realm::new();
+        let (_, answer) = send(app(&url, &realm), hub(Some(&edge(&realm)), query(AIR))).await;
+        assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+        assert_eq!(
+            answer["result"]["content"][0]["text"],
+            json!(expected),
+            "{answer}"
+        );
+    }
 }
 
 /// Section 3, row 4: a burst spread over several Endpoints spends one per-subject bucket, and
@@ -603,30 +636,27 @@ async fn a_hub_token_opens_no_endpoint_url() {
     assert!(broker.hops().is_empty());
 }
 
-/// Section 4 and 2.7: the edge audience reaches through the hub what it reaches Endpoint by
-/// Endpoint, and the per-Endpoint URL answers exactly as before.
+/// Section 4 and 2.7: the edge audience reaches an Endpoint through the hub. The per-Endpoint
+/// URL is the broker's view since T-3647; the hub forwards there too with T-3808, which brings
+/// the two answers back to one.
 #[tokio::test]
-async fn the_hub_answers_what_the_endpoint_url_answers() {
+async fn the_hub_reads_an_endpoint_for_the_edge_audience() {
     let realm = common::Realm::new();
     let entity = json!([{ "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:st-1", "type": "AirQualityObserved" }]);
     let broker = common::BrokerStub::start(vec![entity]).await;
     let app = app(&broker.url, &realm);
     let token = edge(&realm);
 
-    let (_, through_hub) = send(app.clone(), hub(Some(&token), query(AIR))).await;
-    let (_, direct) = send(
-        app,
-        post(
-            &format!("/api/endpoint/{AIR}/mcp"),
-            Some(&token),
-            call("query_entities", json!({ "type": "AirQualityObserved" })),
-        ),
-    )
-    .await;
-    assert_eq!(through_hub["result"], direct["result"]);
+    let (_, through_hub) = send(app, hub(Some(&token), query(AIR))).await;
     assert_eq!(
         through_hub["result"]["isError"],
         json!(false),
+        "{through_hub}"
+    );
+    assert!(
+        through_hub["result"]["structuredContent"]["entities"]
+            .as_array()
+            .is_some_and(|entities| entities.len() == 1),
         "{through_hub}"
     );
 }
@@ -764,4 +794,30 @@ async fn list_endpoints_pages_and_describes_each_endpoint() {
             "{arguments}: {refused}"
         );
     }
+}
+
+/// T-3648: the describe tools have no broker tool behind them, so the hub answers them itself,
+/// from the same documents the access surface serves, and nothing reaches the broker.
+#[tokio::test]
+async fn a_describe_tool_through_the_hub_is_answered_without_a_hop() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = app(&broker.url, &realm);
+    let token = edge(&realm);
+
+    let (status, answer) = send(
+        app,
+        hub(
+            Some(&token),
+            call("describe_access", json!({ "endpoint": AIR })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["result"]["isError"], json!(false), "{answer}");
+    assert!(
+        answer["result"]["structuredContent"]["access"].is_object(),
+        "{answer}"
+    );
+    assert!(broker.hops().is_empty(), "{:?}", broker.hops());
 }

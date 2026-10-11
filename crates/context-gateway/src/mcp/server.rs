@@ -9,8 +9,9 @@
 
 use crate::app::{authenticate, subject_from, Gateway, EDGE_AUDIENCE, HUB_PATH, MAX_BODY};
 use crate::auth::token::{self, Claims};
-use crate::mcp::endpoint_facade::{self, error, refused, result, HubTool};
 use crate::mcp::hub::{misrouted, Answer, Hub};
+use crate::mcp::jsonrpc::{self, error, refused, result};
+use crate::mcp::tools::{self, HubTool};
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -170,20 +171,19 @@ pub async fn message(
 
     let (_, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
-        return endpoint_facade::parse_error();
+        return jsonrpc::parse_error();
     };
     let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
-        return endpoint_facade::parse_error();
+        return jsonrpc::parse_error();
     };
     let hub = Hub {
         gateway,
         reach,
-        authorization,
         caller,
         server: Some(server),
     };
     let mut response = match hub.answer(message).await {
-        Answer::Json(answer) => endpoint_facade::json_response(StatusCode::OK, &answer),
+        Answer::Json(answer) => jsonrpc::json_response(StatusCode::OK, &answer),
         Answer::Notification => StatusCode::ACCEPTED.into_response(),
         Answer::Refused(response) => response,
     };
@@ -198,7 +198,7 @@ fn readable(
     endpoint: Arc<Endpoint>,
     subject: Subject,
 ) -> Option<(Arc<Endpoint>, Subject)> {
-    endpoint_facade::reads_anything(gateway, &endpoint, &subject).then_some((endpoint, subject))
+    tools::reads_anything(gateway, &endpoint, &subject).then_some((endpoint, subject))
 }
 
 /// The projects a verified caller acts in: a ServiceAccount's own, a person's groups.
@@ -237,7 +237,7 @@ pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
          not answer; every other tool names one Endpoint in `endpoint`.",
     );
     json!({
-        "protocolVersion": endpoint_facade::PROTOCOL_VERSION,
+        "protocolVersion": jsonrpc::PROTOCOL_VERSION,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {
             "name": name,
@@ -271,9 +271,10 @@ pub(crate) fn fan_out_schemas(tools: &mut [Value]) {
                     cursor.clone(),
                     {
                         "type": "object",
-                        "additionalProperties": { "type": "integer", "minimum": 0 },
+                        "additionalProperties": { "type": ["string", "integer"] },
                         "description": "Without `endpoint`: the previous answer's nextCursor, \
-                                        one offset per Endpoint slug; only those Endpoints are asked",
+                                        one cursor per Endpoint slug, passed back as given; only \
+                                        those Endpoints are asked",
                     },
                 ],
             });
@@ -301,7 +302,7 @@ impl Hub {
                 return Answer::Json(result(
                     id,
                     refused(
-                        "`cursor` is the previous answer's nextCursor: an object of one offset per Endpoint slug",
+                        "`cursor` is the previous answer's nextCursor: an object of one cursor per Endpoint slug",
                         &Value::Null,
                     ),
                 ))
@@ -321,7 +322,7 @@ impl Hub {
                     own.insert("cursor".to_owned(), offset.clone());
                 }
             }
-            match endpoint_facade::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
+            match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
                 HubTool::Unknown => return Answer::Json(error(id, -32602, "unknown tool")),
                 HubTool::Ungranted(refusal) => {
                     failed.push((index, failure(&endpoint.slug, &refusal)));
@@ -366,8 +367,7 @@ impl Hub {
                     index,
                     json!({ "endpoint": endpoint.slug, "reason": "no answer within ten seconds" }),
                 )),
-                Ok(None) => {}
-                Ok(Some(answer)) => match member_entry(&endpoint, &answer) {
+                Ok(answer) => match member_entry(&endpoint, &answer) {
                     Ok((entry, cursor)) => {
                         if let Some(cursor) = cursor {
                             next.insert(index, (endpoint.slug.clone(), cursor));
@@ -494,7 +494,7 @@ pub async fn protected_resource(
     ) else {
         return ProblemDetails::not_found().into_response();
     };
-    endpoint_facade::json_response(
+    jsonrpc::json_response(
         StatusCode::OK,
         &json!({
             "resource": format!("{}{}", gateway.base_url(), server.path()),

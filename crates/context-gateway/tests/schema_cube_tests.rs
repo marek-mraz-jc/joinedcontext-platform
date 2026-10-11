@@ -5,6 +5,8 @@
 //! the component typing of the OWL from the projection, so a grant that hides a dimension hides
 //! it from the cube too, and a model without a DSD has no cube at all.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use context_gateway::app::{router, Gateway};
@@ -115,7 +117,7 @@ fn endpoint(model: Model, entity_type: &str, properties: &[&str]) -> Endpoint {
 async fn fetch(endpoint: Endpoint, request: Request<Body>) -> (StatusCode, String, String) {
     let app = router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(common::mcp_broker(json!([])).await),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )

@@ -217,6 +217,18 @@ impl BrokerStub {
                     });
                     let pages = served.lock().expect("no poisoned lock");
 
+                    // A view's MCP surface (T-3647, T-3808): a tool call answered with the
+                    // next page as its structured content, the way the broker's tools answer.
+                    if path == "/mcp" {
+                        let asked = hops.iter().filter(|hop| hop.path == "/mcp").count();
+                        let index = asked.saturating_sub(1).min(pages.len().saturating_sub(1));
+                        return axum::Json(mcp_answer(
+                            &hops[hops.len() - 1].body,
+                            pages.get(index).cloned().unwrap_or_else(|| json!([])),
+                        ))
+                        .into_response();
+                    }
+
                     // `GET /types` is how a caller asks what a tenant holds; the answer is
                     // built from the entities this stub was given, so it never disagrees
                     // with them.
@@ -306,6 +318,27 @@ fn in_view(path: &str) -> (String, String) {
         Some((view, rest)) => (view.to_owned(), format!("/{rest}")),
         None => (String::new(), path.to_owned()),
     }
+}
+
+/// The broker's answer to one MCP tool call: a list is the `entities` of a page, anything else
+/// the tool's own structured content.
+fn mcp_answer(sent: &[u8], page: Value) -> Value {
+    let id =
+        serde_json::from_slice::<Value>(sent).map_or(Value::Null, |message| message["id"].clone());
+    let structured = if page.is_array() {
+        json!({ "entities": page })
+    } else {
+        page
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "isError": false,
+            "content": [{ "type": "text", "text": structured.to_string() }],
+            "structuredContent": structured,
+        },
+    })
 }
 
 /// Whether a query selects at all (CIM 009 5.7.2).
@@ -430,4 +463,25 @@ pub fn public_subscribe_policy(
         attributes.join(", ")
     ))
     .expect("the policy spec parses")
+}
+
+/// A broker whose MCP surface answers every request with `tools` as its tool list and no
+/// resource: the hop an Endpoint's or a space's MCP message takes since T-3647. Returns its URL.
+pub async fn mcp_broker(tools: Value) -> String {
+    let stub = axum::Router::new().fallback(move || {
+        let tools = tools.clone();
+        async move {
+            axum::Json(
+                json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools, "resources": [] } }),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    url
 }

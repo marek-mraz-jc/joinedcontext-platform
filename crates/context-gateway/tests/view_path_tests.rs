@@ -244,6 +244,15 @@ async fn what_no_view_serves_stays_on_the_gateway() {
     let (status, _, _) = call(app(upstream.clone(), endpoint()), conditional).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
+/// An Endpoint with a view mapping (G18) is the broker's view too: the Portal writes the
+/// Mapping IR into the view of its slug (T-3671), the broker inverts each read and rebuilds the
+/// answer in the target model (T-3669, T-3670), and refuses a write with 405 (`mapping::READS`).
+/// The gateway forwards both as sent and judges no body against the source model.
+#[tokio::test]
+async fn a_mapped_endpoint_is_served_by_its_view() {
     let mapping = ViewMapping::parse(&json!({
         "version": 2,
         "sourceClass": "Senzor",
@@ -255,20 +264,51 @@ async fn what_no_view_serves_stays_on_the_gateway() {
         view_mapping: Some(Arc::new(mapping)),
         ..endpoint()
     };
-    call(
-        app(upstream, mapped),
+    let (upstream, hops) = broker(StatusCode::OK, &[], json!([])).await;
+    let (status, _, _) = call(
+        app(upstream, mapped.clone()),
         get(&format!(
-            "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+            "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved&q=pm10%3E2"
         )),
     )
     .await;
+    assert_eq!(status, StatusCode::OK);
+    let (upstream, writes) = broker(
+        StatusCode::METHOD_NOT_ALLOWED,
+        &[("allow", "GET")],
+        json!({ "type": "https://uri.etsi.org/ngsi-ld/errors/OperationNotSupported" }),
+    )
+    .await;
+    let (status, headers, _) = call(
+        app(upstream, mapped),
+        post(
+            &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities"),
+            json!({ "id": "urn:ngsi-ld:Vehicle:x", "type": "Vehicle" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(headers["allow"], "GET");
 
-    let hops = hops.lock().expect("the hop log").clone();
-    let paths: Vec<&str> = hops.iter().map(|hop| hop.path.as_str()).collect();
+    let read = hops.lock().expect("the hop log").clone();
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].path, format!("/x/views/{SLUG}/ngsi-ld/v1/entities"));
     assert_eq!(
-        paths,
-        ["/ngsi-ld/v1/entities"],
-        "the mapped read reached the plain root"
+        read[0].query.as_deref(),
+        Some("type=AirQualityObserved&q=pm10%3E2")
+    );
+    let write = writes.lock().expect("the hop log").clone();
+    assert_eq!(
+        write.len(),
+        1,
+        "the write reached the view, judged by the broker"
+    );
+    assert_eq!(
+        (write[0].method.clone(), write[0].path.as_str()),
+        (
+            Method::POST,
+            format!("/x/views/{SLUG}/ngsi-ld/v1/entities").as_str()
+        )
     );
 }
 
