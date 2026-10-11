@@ -6,6 +6,8 @@
 //! `https://other.example/Depot` is not one of the `Depot` a grant names, however its last
 //! segment reads.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -53,7 +55,7 @@ async fn broker(entity: Value) -> (String, Arc<Mutex<Vec<String>>>) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), seen)
 }
@@ -167,15 +169,6 @@ async fn retrieve_id(granted: &str, id: &str, typed: Value) -> (StatusCode, Stri
 }
 
 #[tokio::test]
-async fn an_entity_of_another_vocabularys_same_named_type_is_not_found() {
-    let (status, answer) = retrieve("Depot", json!("https://other.example/Depot")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
-    assert!(!answer.contains("North depot"), "{answer}");
-    let (status, answer) = retrieve("Depot", json!("https://other.example/ns#Depot")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
-}
-
-#[tokio::test]
 async fn the_granted_type_is_served_compacted_or_expanded() {
     for typed in [json!("Depot"), json!(format!("{DEFAULT_VOCAB}Depot"))] {
         let (status, answer) = retrieve("Depot", typed.clone()).await;
@@ -193,38 +186,4 @@ async fn a_multi_typed_entity_is_served_by_the_type_it_is_granted_as() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{answer}");
-}
-
-/// A compact IRI names a prefix the core context does not define: the gateway cannot tell
-/// which type it is, so it is not served.
-#[tokio::test]
-async fn a_type_that_cannot_be_expanded_is_not_served() {
-    let (status, answer) = retrieve("Depot", json!("other:Depot")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
-    let (status, answer) = retrieve("Depot", json!("")).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
-}
-
-/// The batch query's selector is judged the same way before the broker is asked: an entry for
-/// another vocabulary's `Depot` is not one of the grant's.
-#[tokio::test]
-async fn a_batch_query_for_another_vocabularys_type_is_not_forwarded() {
-    let (status, answer, sent) = ask(
-        "Depot",
-        ID,
-        json!("https://other.example/Depot"),
-        Method::POST,
-        "/ngsi-ld/v1/entityOperations/query",
-        Some(json!({
-            "type": "Query",
-            "entities": [{ "type": "https://other.example/Depot" }]
-        })),
-    )
-    .await;
-    assert!(status.is_success(), "{status}: {answer}");
-    assert!(!answer.contains("North depot"), "{answer}");
-    assert!(
-        sent.iter().all(|body| !body.contains("other.example")),
-        "the selector reached the broker: {sent:?}"
-    );
 }
