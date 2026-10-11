@@ -1,16 +1,14 @@
 //! `POST /api/endpoint/{slug}/access/simulate` (EP-103, T-3311): the decision `access/check`
 //! would give someone else, for the Portal alone.
 //!
-//! The one property that matters is agreement: for every subject, action and type the
-//! simulator answers what the gateway answers that subject's own token, because it is the
-//! same admission and the same evaluator. The rest is who may ask (the Portal's own
-//! service-account token for the simulate audience, nobody else) and what the answer names
-//! (the Policy that decided, which `access/check` keeps to itself on a refusal).
-//!
-//! Most Endpoints here have a view of another model, which no broker view serves yet, so their
-//! `access/check` is the gateway's own (T-3649, `app::has_view`). Through a view the broker's
-//! engine decides, and the simulator asks the engine's `access/explain` under the headers the
-//! subject's own token pins (T-3881): the `view_` tests below hold that hop.
+//! The one property that matters is agreement: for every subject the simulator asks the broker's
+//! engine through the Endpoint's view (`access/explain`) under exactly the headers that subject's
+//! own token pins on `access/check` (T-3881), so the two are one decision. The engine's side, that
+//! explain and check share one verdict, is Antares `addons/joinedcontext-policy` (`access::tests`,
+//! `tests/access.rs::explain_names_the_policy_that_decided`). The rest is who may ask (the
+//! Portal's own service-account token for the simulate audience, nobody else), what the answer
+//! names (the Policy that decided, under its manifest name) and what is refused before the engine
+//! is asked.
 mod common;
 
 use axum::body::Body;
@@ -117,7 +115,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
-        view_mapping: Some(common::no_view()),
+        view_mapping: None,
         catalog: None,
         policy_names,
         policies,
@@ -232,161 +230,6 @@ async fn simulate(
         &body,
     )
     .await
-}
-
-/// EP-103: for every subject, action and type, the simulator answers what the gateway answers
-/// that subject's own token on `access/check`, refusals at the door included.
-#[tokio::test]
-async fn the_simulator_agrees_with_the_gateway_for_every_subject() {
-    let realm = common::Realm::new();
-    let app = app_of(&realm);
-    let people = [
-        json!({ "user": "vera", "groups": [], "roles": ["viewer"] }),
-        json!({ "user": "stefan", "groups": ["ovzdusie"], "roles": ["data-steward"] }),
-        json!({ "user": "gina", "groups": ["ovzdusie"], "roles": [] }),
-        json!({ "user": "ada", "groups": ["ovzdusie"], "roles": [] }),
-        json!({ "user": "otto", "groups": ["elsewhere"], "roles": [] }),
-    ];
-    let actions = [
-        "retrieveEntity",
-        "queryTemporal",
-        "createEntity",
-        "updateAttrs",
-        "deleteEntity",
-    ];
-    let types = [None, Some("AirQualityObserved"), Some("InternalIncident")];
-    let mut compared = 0;
-    for slug in [OPEN, CLOSED] {
-        for action in actions {
-            for entity_type in types {
-                // The public: no token at all against the subject named by nothing.
-                let (status, real) = post(
-                    &app,
-                    &format!("/api/endpoint/{slug}/access/check"),
-                    None,
-                    &question(action, entity_type),
-                )
-                .await;
-                let real_decision = status == StatusCode::OK && real["decision"] == json!(true);
-                let mut asked = question(action, entity_type);
-                asked["subject"] = json!({});
-                let (status, simulated) = simulate(&app, &realm, slug, asked).await;
-                assert_eq!(status, StatusCode::OK, "{simulated}");
-                assert_eq!(
-                    simulated["decision"],
-                    json!(real_decision),
-                    "public {slug} {action} {entity_type:?}: {simulated}"
-                );
-                compared += 1;
-
-                for who in &people {
-                    let token = person_token(&realm, slug, who);
-                    let (status, real) = post(
-                        &app,
-                        &format!("/api/endpoint/{slug}/access/check"),
-                        Some(&token),
-                        &question(action, entity_type),
-                    )
-                    .await;
-                    let real_decision = status == StatusCode::OK && real["decision"] == json!(true);
-                    let mut asked = question(action, entity_type);
-                    asked["subject"] = who.clone();
-                    let (status, simulated) = simulate(&app, &realm, slug, asked).await;
-                    assert_eq!(status, StatusCode::OK, "{simulated}");
-                    assert_eq!(
-                        simulated["decision"],
-                        json!(real_decision),
-                        "{who} {slug} {action} {entity_type:?}: real {status} {real}, simulated {simulated}"
-                    );
-                    // A door that refused the real token is `not_admitted`, never a Policy.
-                    if status != StatusCode::OK {
-                        assert_eq!(simulated["context"]["reason"], json!("not_admitted"));
-                    }
-                    compared += 1;
-                }
-            }
-        }
-    }
-    assert_eq!(compared, 2 * 5 * 3 * 6);
-}
-
-/// The answer names the Policy that decided, a refusing prohibition included.
-#[tokio::test]
-async fn the_answer_names_the_deciding_policy() {
-    let realm = common::Realm::new();
-    let app = app_of(&realm);
-    let cases = [
-        (
-            json!({}),
-            "retrieveEntity",
-            Some("AirQualityObserved"),
-            true,
-            "policy_grant_matched",
-            Some("public-air"),
-        ),
-        (
-            json!({}),
-            "queryTemporal",
-            Some("AirQualityObserved"),
-            false,
-            "prohibited",
-            Some("no-history"),
-        ),
-        (
-            json!({ "roles": ["data-steward"] }),
-            "createEntity",
-            Some("InternalIncident"),
-            true,
-            "policy_grant_matched",
-            Some("stewards"),
-        ),
-        (
-            json!({ "groups": ["ovzdusie"] }),
-            "updateAttrs",
-            Some("AirQualityObserved"),
-            true,
-            "policy_grant_matched",
-            Some("ovzdusie-writes"),
-        ),
-        (
-            json!({ "user": "ada" }),
-            "deleteEntity",
-            Some("AirQualityObserved"),
-            true,
-            "policy_grant_matched",
-            Some("ada-deletes"),
-        ),
-        // A member of a group with no person of their own: no Policy for one person applies.
-        (
-            json!({ "groups": ["ovzdusie"] }),
-            "deleteEntity",
-            Some("AirQualityObserved"),
-            false,
-            "no_grant",
-            None,
-        ),
-    ];
-    for (subject, action, entity_type, decision, reason, policy) in cases {
-        let mut asked = question(action, entity_type);
-        asked["subject"] = subject.clone();
-        let (status, answer) = simulate(&app, &realm, OPEN, asked).await;
-        assert_eq!(status, StatusCode::OK, "{answer}");
-        assert_eq!(
-            answer["decision"],
-            json!(decision),
-            "{subject} {action}: {answer}"
-        );
-        assert_eq!(
-            answer["context"]["reason"],
-            json!(reason),
-            "{subject} {action}: {answer}"
-        );
-        assert_eq!(
-            answer["context"].get("policy"),
-            policy.map(|p| json!(p)).as_ref(),
-            "{subject} {action}: {answer}"
-        );
-    }
 }
 
 /// The public on an organization-only Endpoint never reaches a Policy.
@@ -543,10 +386,6 @@ async fn recording_broker(status: StatusCode, answer: Value) -> (String, Arc<Mut
 
 /// The two Endpoints served by a broker view each (no other model, no temporal projection).
 fn view_app(realm: &common::Realm, upstream: String) -> axum::Router {
-    let through_view = |slug: &str, audience| Endpoint {
-        view_mapping: None,
-        ..endpoint(slug, audience)
-    };
     router(Arc::new(
         Gateway::new(
             Broker::new(upstream),
@@ -554,8 +393,8 @@ fn view_app(realm: &common::Realm, upstream: String) -> axum::Router {
             "banskabystrica.sk",
         )
         .serve([
-            through_view(OPEN, Audience::Public),
-            through_view(CLOSED, Audience::Organization),
+            endpoint(OPEN, Audience::Public),
+            endpoint(CLOSED, Audience::Organization),
         ])
         .authenticate(
             Arc::new(realm.verifier()),
@@ -693,4 +532,37 @@ async fn view_a_refusal_at_the_door_or_by_the_broker_is_never_a_decision() {
         assert_ne!(got, StatusCode::OK, "{status}: {answer}");
         assert!(answer.get("decision").is_none(), "{status}: {answer}");
     }
+}
+
+/// An Endpoint the broker can hold no view of has nobody to decide for it: the simulation is a
+/// `503`, never an answer of the gateway's own, and the broker is not asked (T-3650).
+#[tokio::test]
+async fn view_an_endpoint_without_a_view_is_simulated_by_nobody() {
+    let realm = common::Realm::new();
+    let (upstream, hops) = recording_broker(StatusCode::OK, json!({ "decision": true })).await;
+    let long = "k".repeat(64);
+    let unviewable = Endpoint {
+        slug: long.clone(),
+        base_path: format!("/api/endpoint/{long}"),
+        ..endpoint(OPEN, Audience::Public)
+    };
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new(upstream),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([unviewable])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some("https://bb.example.sk".to_owned()),
+        ),
+    ));
+    let mut asked = question("retrieveEntity", Some("AirQualityObserved"));
+    asked["subject"] = json!({});
+    let (status, answer) = simulate(&app, &realm, &long, asked).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert!(answer.get("decision").is_none(), "{answer}");
+    assert!(taken(&hops).is_empty());
 }

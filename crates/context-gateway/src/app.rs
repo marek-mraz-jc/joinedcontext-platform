@@ -15,7 +15,6 @@ use crate::auth::accounts::ServiceAccounts;
 use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
-use crate::handlers::access_routes::{access, access_check, access_simulate};
 use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
 use crate::handlers::ogc::ogc_features;
 use crate::handlers::schema_routes::{
@@ -23,6 +22,7 @@ use crate::handlers::schema_routes::{
 };
 use crate::handlers::space_routes::{space_catalog, space_record};
 use crate::handlers::sta::sensorthings;
+use crate::handlers::view_access::{access, access_check, access_simulate};
 use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{self, Constraints, Subject, Verdict};
@@ -1431,10 +1431,7 @@ fn reserve_create(
 /// T-3653). A write with `If-Match` stays too: the broker publishes no entity tags, and the
 /// gateway's read, compare and conditional write is the only lost-update guard there is (R45,
 /// GW16).
-fn served_by_view(
-    endpoint: &Endpoint,
-    (view, operation, headers): (&str, Operation, &HeaderMap),
-) -> bool {
+fn served_by_view(view: &str, operation: Operation, headers: &HeaderMap) -> bool {
     let subscription = matches!(
         operation,
         Operation::CreateSubscription
@@ -1497,7 +1494,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !served_by_view(&endpoint, (&view, operation, request.headers())) {
+    if !served_by_view(&view, operation, request.headers()) {
         return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
     }
     if operation == Operation::QueryEntity {

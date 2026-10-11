@@ -70,7 +70,7 @@ impl Antares {
                 "-e",
                 "ANTARES_STORE=memory",
                 "-e",
-                "ANTARES_API_SURFACES=admin,views",
+                "ANTARES_API_SURFACES=admin,views,access",
                 "-e",
                 "ANTARES_POLICY=joinedcontext",
                 "-e",

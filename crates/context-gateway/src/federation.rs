@@ -14,8 +14,6 @@
 //! what an endpoint federates. Names only: an address never leaves this platform (EP-71).
 
 /// Turning an accepted ODRL agreement into the policies that enforce it (DS-10).
-pub mod odrl_compiler;
-
 use jc_core::kinds::{ContextSourceRegistrationSpec, FederationIdentity};
 use jcctl::loader::Repository;
 use std::collections::BTreeMap;

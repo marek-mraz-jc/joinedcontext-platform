@@ -1,5 +1,9 @@
-//! The routes of the access document (EP-55…EP-60): what the caller may do, and the check of one
-//! request before it is sent.
+//! The routes of the access document (EP-55…EP-60): what the caller may do, the check of one
+//! request before it is sent, and the Portal's simulation of both for someone else (EP-103).
+//! The broker's engine answers every one through the Endpoint's view (plan 5.6, T-3649, T-3650):
+//! the gateway admits the caller, pins them on the hop and adds what belongs to the Endpoint.
+
+pub mod odrl;
 
 use crate::app::admit;
 use crate::app::json_response;
@@ -12,7 +16,7 @@ use crate::app::{broker_failure, has_view, principal_of, view_of, MAX_BODY};
 use crate::auth::token::{self, Claims};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
-use crate::{handlers, middleware::tenancy, proxy};
+use crate::{middleware::tenancy, proxy};
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
@@ -55,21 +59,16 @@ pub(crate) async fn access(
     };
     match format {
         AccessFormat::AuthZen => json_response(&document),
-        AccessFormat::Odrl => typed_json_response(&document, handlers::access_odrl::ODRL_JSON),
-        AccessFormat::Turtle => text_response(
-            handlers::access_odrl::turtle(&document),
-            handlers::access_odrl::TURTLE,
-        ),
-        AccessFormat::GrantAst => {
-            typed_json_response(&document, handlers::access_ucast::GRANT_AST_JSON)
-        }
+        AccessFormat::Odrl => typed_json_response(&document, odrl::ODRL_JSON),
+        AccessFormat::Turtle => text_response(odrl::turtle(&document), odrl::TURTLE),
+        AccessFormat::GrantAst => typed_json_response(&document, GRANT_AST_JSON),
     }
 }
 
 /// The caller's grants on `endpoint` in `format`, the document `GET …/access` serves (EP-55 to
-/// EP-58), ODRL JSON-LD standing for Turtle too: the broker view's with what the gateway adds,
-/// or the gateway's own for an Endpoint no view serves yet ([`has_view`]). The MCP façade's
-/// `describe_access` reads this same function, so the two surfaces cannot disagree (EP-60).
+/// EP-58), ODRL JSON-LD standing for Turtle too: the broker view's with what the gateway adds. The
+/// MCP façade's `describe_access` reads this same function, so the two surfaces cannot disagree
+/// (EP-60).
 pub(crate) async fn document(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -77,47 +76,25 @@ pub(crate) async fn document(
     format: AccessFormat,
 ) -> Result<Value, Box<Response<Body>>> {
     if !has_view(&view_of(endpoint)) {
-        return Ok(own_document(gateway, endpoint, subject, format));
+        return Err(Box::new(no_view(endpoint)));
     }
     // ODRL and Turtle are both read as ODRL JSON-LD: the gateway adds the licence's duties and
     // writes the Turtle from the result, so the two serializations still say one thing.
     let asked = match format {
         AccessFormat::AuthZen => "application/json",
-        AccessFormat::Odrl | AccessFormat::Turtle => handlers::access_odrl::ODRL_JSON,
-        AccessFormat::GrantAst => handlers::access_ucast::GRANT_AST_JSON,
+        AccessFormat::Odrl | AccessFormat::Turtle => odrl::ODRL_JSON,
+        AccessFormat::GrantAst => GRANT_AST_JSON,
     };
     let document = from_view(gateway, endpoint, subject, ViewCall::Document(asked)).await?;
     match format {
         AccessFormat::AuthZen => Ok(endpoint_document(document, endpoint)),
         AccessFormat::GrantAst => Ok(document),
-        AccessFormat::Odrl | AccessFormat::Turtle => handlers::access_odrl::published(
-            document,
-            endpoint,
-            gateway.base_url(),
-            sha256_hex,
-        )
-        .ok_or_else(|| {
-            tracing::error!(slug = %endpoint.slug, "the broker's ODRL document is not a Set");
-            Box::new(not_a_document())
-        }),
-    }
-}
-
-/// The gateway's own document, for an Endpoint no view serves yet ([`has_view`]); it goes with
-/// the gateway's pipeline when those gaps close (T-3646).
-fn own_document(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    format: AccessFormat,
-) -> Value {
-    let now = crate::pdp::now();
-    match format {
-        AccessFormat::AuthZen => handlers::access::permissions(subject, endpoint, now),
         AccessFormat::Odrl | AccessFormat::Turtle => {
-            handlers::access_odrl::policy(subject, endpoint, now, gateway.base_url(), sha256_hex)
+            odrl::published(document, endpoint, gateway.base_url(), sha256_hex).ok_or_else(|| {
+                tracing::error!(slug = %endpoint.slug, "the broker's ODRL document is not a Set");
+                Box::new(not_a_document())
+            })
         }
-        AccessFormat::GrantAst => handlers::access_ucast::grant_ast(subject, endpoint, now),
     }
 }
 
@@ -233,6 +210,20 @@ async fn from_view(
     }
 }
 
+/// The answer for an Endpoint the broker holds no view of: its slug is longer than a view id can
+/// be, so the Portal's writer refused the view and the Endpoint's status says so. Nobody decides
+/// for it, so nothing is answered (fail closed).
+fn no_view(endpoint: &Endpoint) -> Response<Body> {
+    tracing::error!(slug = %endpoint.slug, "no broker view serves this endpoint's access surface");
+    ProblemDetails::new(
+        503,
+        "no-view",
+        "The access surface of this endpoint is not served",
+    )
+    .with_detail("no context broker view serves this endpoint; its status in the Portal says why")
+    .into_response()
+}
+
 /// A broker answer the gateway cannot read: the caller learns that the broker failed, the
 /// operator's log says how.
 fn not_a_document() -> Response<Body> {
@@ -240,6 +231,9 @@ fn not_a_document() -> Response<Body> {
         .with_detail("the context broker behind this endpoint failed to answer this request")
         .into_response()
 }
+
+/// The media type of the condition-tree representation (EP-58).
+pub const GRANT_AST_JSON: &str = "application/vnd.joinedcontext.grant-ast+json";
 
 /// Which representation of the access surface the caller asked for (EP-56, EP-57, EP-58).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,9 +260,9 @@ fn access_format(accept: Option<&str>) -> AccessFormat {
     };
     for offer in accept.split(',') {
         match offer.split(';').next().unwrap_or_default().trim() {
-            handlers::access_odrl::ODRL_JSON => return AccessFormat::Odrl,
-            handlers::access_odrl::TURTLE => return AccessFormat::Turtle,
-            handlers::access_ucast::GRANT_AST_JSON => return AccessFormat::GrantAst,
+            odrl::ODRL_JSON => return AccessFormat::Odrl,
+            odrl::TURTLE => return AccessFormat::Turtle,
+            GRANT_AST_JSON => return AccessFormat::GrantAst,
             "application/json" | "application/ld+json" => return AccessFormat::AuthZen,
             _ => {}
         }
@@ -299,27 +293,18 @@ pub(crate) async fn access_check(
             .with_detail("request body is not JSON")
             .into_response();
     };
-    let Some(action) = query
-        .get("action")
-        .and_then(|action| action.get("name"))
+    if query
+        .pointer("/action/name")
         .and_then(Value::as_str)
-    else {
+        .is_none()
+    {
         return ProblemDetails::bad_request()
             .with_detail("action.name is required")
             .into_response();
-    };
+    }
 
     if !has_view(&view_of(&endpoint)) {
-        return json_response(&handlers::access::check(
-            &subject,
-            &endpoint,
-            action,
-            query
-                .get("resource")
-                .and_then(|resource| resource.get("type"))
-                .and_then(Value::as_str),
-            crate::pdp::now(),
-        ));
+        return no_view(&endpoint);
     }
     // The broker's engine decides, on the request as the caller wrote it (plan 5.6, T-3649).
     match from_view(&gateway, &endpoint, &subject, ViewCall::Check(bytes)).await {
@@ -371,10 +356,9 @@ struct Resource {
 /// The decision `access/check` would give someone else, for the Portal alone (EP-103, T-3311).
 ///
 /// The subject goes through the same admission as a real token ([`subject_from`]) and is asked
-/// of whoever decides that token's `access/check`: the broker's engine through the view, pinned
-/// as the subject's own token pins it (T-3881), or the gateway's evaluator
-/// ([`handlers::access::decide`]) for an Endpoint no view serves. The simulator cannot disagree
-/// with the decision that is made: it is the same decision, asked about another caller.
+/// of the broker's engine through the view, pinned as the subject's own token pins it (T-3881):
+/// the simulator cannot disagree with the decision that is made, it is the same decision, asked
+/// about another caller.
 pub(crate) async fn access_simulate(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
@@ -423,8 +407,13 @@ pub(crate) async fn access_simulate(
         .resource
         .as_ref()
         .and_then(|resource| resource.entity_type.as_deref());
+    if !has_view(&view_of(&endpoint)) {
+        return no_view(&endpoint);
+    }
     let answer = match &subject {
-        Some(subject) if has_view(&endpoint, subject, &view_of(&endpoint)) => {
+        // The audience refused them before any Policy is read (EP-14).
+        None => json!({ "decision": false, "context": { "reason": "not_admitted" } }),
+        Some(subject) => {
             let mut query = json!({ "action": { "name": action } });
             if let Some(entity_type) = entity_type {
                 query["resource"] = json!({ "type": entity_type });
@@ -435,14 +424,6 @@ pub(crate) async fn access_simulate(
                 Err(answer) => return *answer,
             }
         }
-        _ => handlers::access::simulate(
-            subject.as_ref().unwrap_or(&Subject::anonymous()),
-            subject.is_some(),
-            &endpoint,
-            action,
-            entity_type,
-            crate::pdp::now(),
-        ),
     };
     // The Portal's record names the administrator; this one names whom they asked about, beside
     // the Portal's account that asked (EP-103). Never a token.
