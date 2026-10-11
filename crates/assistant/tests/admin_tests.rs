@@ -199,34 +199,142 @@ async fn passages_left(pool: &PgPool) -> i64 {
     n
 }
 
-/// AG-113: nobody but the Portal's service account reads or steers anything.
+/// A token the Portal's own client holds for another audience (the gateway's): an
+/// administrator of the assistant only by name.
+const OTHER_AUDIENCE_TOKEN: &str = "gateway-audience-token";
+
+/// Every `/internal` route of the router with its method, from the source that declares it, so
+/// a route added without a row in the sweep below turns the sweep red.
+fn declared_internal_routes() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for source in [
+        include_str!("../src/chat/admin.rs"),
+        include_str!("../src/chat/mod.rs"),
+    ] {
+        for (at, _) in source.match_indices("\"/internal/") {
+            let rest = &source[at + 1..];
+            let route = &rest[..rest.find('"').expect("a closed literal")];
+            let method = ["get(", "post(", "put(", "patch(", "delete("]
+                .into_iter()
+                .filter_map(|m| rest.find(m).map(|i| (i, m)))
+                .min()
+                .expect("a method after the path")
+                .1;
+            found.push((
+                method.trim_end_matches('(').to_uppercase(),
+                route.to_owned(),
+            ));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// AG-113: every `/internal` route refuses all but the Portal's service account, with each
+/// method; a refused call changes nothing.
 #[tokio::test]
 async fn only_the_portals_service_account_is_answered() {
     let w = world("adminauth").await;
-    for token in [None, Some("somebody-else"), Some("")] {
-        for (method, uri) in [
-            ("GET", format!("{BASE}/sources")),
-            ("GET", format!("{BASE}/sources/web/pages")),
-            ("POST", format!("{BASE}/sources/web/recrawl")),
-        ] {
-            let (status, _) = call(&w.app, method, &uri, token, None).await;
+    Mock::given(method("POST"))
+        .and(path("/token/introspect"))
+        .and(body_string_contains(format!("token={OTHER_AUDIENCE_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": true, "azp": "portal-api", "username": "service-account-portal-api", "aud": ["context-gateway"]})))
+        .mount(&w._realm)
+        .await;
+    let k = "/internal/v1/projects/{project}/knowledge";
+    // (method, declared route, called uri, body)
+    let sweep: Vec<(&str, String, String, Option<Value>)> = vec![
+        (
+            "GET",
+            format!("{k}/sources"),
+            format!("{BASE}/sources"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/sources/{{source}}/pages"),
+            format!("{BASE}/sources/web/pages?parent={}", w.root),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/sources/{{source}}/documents"),
+            format!("{BASE}/sources/web/documents"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/sources/{{source}}/pages/{{page}}/links"),
+            format!("{BASE}/sources/web/pages/{}/links", w.root),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/sources/{{source}}/passages"),
+            format!("{BASE}/sources/web/passages?page={}", w.child),
+            None,
+        ),
+        (
+            "POST",
+            format!("{k}/sources/{{source}}/inclusion"),
+            format!("{BASE}/sources/web/inclusion"),
+            Some(json!({"pages": [w.root], "included": false})),
+        ),
+        (
+            "POST",
+            format!("{k}/sources/{{source}}/recrawl"),
+            format!("{BASE}/sources/web/recrawl"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/deployments/{{deployment}}/usage"),
+            format!("{BASE}/deployments/obcania/usage"),
+            None,
+        ),
+        (
+            "POST",
+            format!("{k}/deployments/{{deployment}}/chat"),
+            format!("{BASE}/deployments/obcania/chat"),
+            Some(json!({"message": "Kedy je zber?"})),
+        ),
+    ];
+    let mut swept: Vec<(String, String)> = sweep
+        .iter()
+        .map(|(m, route, _, _)| ((*m).to_owned(), route.clone()))
+        .collect();
+    swept.sort();
+    assert_eq!(
+        swept,
+        declared_internal_routes(),
+        "every /internal route is in the sweep"
+    );
+
+    for token in [
+        None,
+        Some("somebody-else"),
+        Some(""),
+        Some(OTHER_AUDIENCE_TOKEN),
+    ] {
+        for (method, _, uri, body) in &sweep {
+            let (status, _) = call(&w.app, method, uri, token, body.clone()).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri} {token:?}");
         }
     }
-    let (status, _) = call(
-        &w.app,
-        "POST",
-        &format!("{BASE}/sources/web/inclusion"),
-        Some("somebody-else"),
-        Some(json!({"pages": [w.root], "included": false})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         passages_left(&w.pool).await,
         4,
         "a refused call changed nothing"
     );
+
+    for (method, _, uri, body) in &sweep {
+        let (status, _) = call(&w.app, method, uri, Some(PORTAL_TOKEN), body.clone()).await;
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} answers the Portal"
+        );
+    }
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
