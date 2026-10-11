@@ -1340,7 +1340,7 @@ pub(crate) async fn serve_ngsi_ld(
     let projected = project_answer(answer, operation, &judged).await;
     let answer = match &endpoint.view_mapping {
         None => projected,
-        Some(mapping) => translated(projected, mapping).await,
+        Some(mapping) => translated(projected, mapping, &params).await,
     };
     let answer = match divided {
         Some((forwarded, refused)) => merged_batch(answer, forwarded, refused).await,
@@ -2190,8 +2190,9 @@ async fn as_geojson(
 
 /// Rewrites the parameters of a query that name attributes of the model (DM-51).
 ///
-/// `type` is not translated per value: the entity type is the mapping's own class pair, so
-/// the target class the caller asked for is replaced by the source class wholesale.
+/// `type` names the target class, which is the source class to the broker, or a class the view
+/// does not serve. `pick` and `omit` name target members and stay here: they apply to the
+/// translated answer (`translated`, T-3672).
 fn invert_query(
     mapping: &view_mapping::ViewMapping,
     query: &str,
@@ -2207,7 +2208,8 @@ fn invert_query(
             "attrs" => mapping.invert_attrs(&decoded)?,
             "q" => mapping.invert_q(&decoded)?,
             "geoproperty" => mapping.invert_geo_property(&decoded)?,
-            "type" => mapping.source_class.clone(),
+            "type" => mapping.invert_type(&decoded),
+            "pick" | "omit" => continue,
             _ => {
                 out.push(pair.to_owned());
                 continue;
@@ -2227,7 +2229,11 @@ fn invert_query(
 ///
 /// After the projection, never before: the grants and the geo and temporal filters are
 /// written in the source model's names, which is the only model the repository declares.
-async fn translated(answer: Response<Body>, mapping: &view_mapping::ViewMapping) -> Response<Body> {
+async fn translated(
+    answer: Response<Body>,
+    mapping: &view_mapping::ViewMapping,
+    params: &[(String, String)],
+) -> Response<Body> {
     let (parts, body) = answer.into_parts();
     if !parts.status.is_success() {
         return Response::from_parts(parts, body);
@@ -2240,6 +2246,13 @@ async fn translated(answer: Response<Body>, mapping: &view_mapping::ViewMapping)
         return proxy::with_body(parts, bytes.to_vec());
     };
     mapping.translate(&mut payload);
+    let param = |name: &str| {
+        params
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, v)| v.as_str())
+    };
+    view_mapping::project(&mut payload, param("pick"), param("omit"));
     match serde_json::to_vec(&payload) {
         Ok(bytes) => proxy::with_body(parts, bytes),
         Err(error) => {

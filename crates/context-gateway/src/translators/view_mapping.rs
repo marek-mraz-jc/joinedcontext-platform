@@ -19,6 +19,7 @@
 //! slot no target slot derives has no value to reconstruct, and a constant or an `expr` slot
 //! has none at all — so a write in the target model is refused rather than half-inverted.
 
+use antares_ql::{CmpOp, QNode, QPath, QValue};
 use jc_core::ProblemDetails;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -36,6 +37,20 @@ const STRUCTURAL: &[&str] = &["id", "@id", "@context", "scope"];
 /// The members the broker generates, which a view keeps for the same reason a projection does
 /// (EP-71): they say when the data was written and who answered, not what it contains.
 const SYSTEM: &[&str] = &["createdAt", "modifiedAt", "deletedAt", "expiresAt"];
+
+/// The `type` of the discovery answers (CIM 009 5.2.24 to 5.2.27), which name types and
+/// attributes rather than carry them.
+const VOCABULARY: &[&str] = &[
+    "EntityTypeList",
+    "EntityType",
+    "EntityTypeInfo",
+    "AttributeList",
+    "Attribute",
+];
+
+/// A type no broker stores: what a type selection of a class the view does not serve
+/// becomes, so it selects nothing (T-3672).
+const NOT_SERVED: &str = "urn:joinedcontext:view:type-not-served";
 
 /// Why an IR document is not one this gateway can run.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -411,7 +426,13 @@ impl ViewMapping {
         let Some(members) = entity.as_object() else {
             return;
         };
-        // Not an entity: a problem document, a type list, an attribute list.
+        if let Some(Value::String(kind)) = members.get("type") {
+            if VOCABULARY.contains(&kind.as_str()) {
+                self.translate_vocabulary(entity);
+                return;
+            }
+        }
+        // Not an entity: a problem document.
         if !members.contains_key("id") && !members.contains_key("@id") {
             return;
         }
@@ -447,6 +468,92 @@ impl ViewMapping {
             translated.insert(slot.target.clone(), forward(&slot.derivation, attribute));
         }
         *entity = Value::Object(translated);
+    }
+
+    /// A discovery answer (5.7.5 to 5.7.10) in the target model (T-3672): the source class is
+    /// the target class and any other type is not served here; an attribute list holds the
+    /// target names the listed source attributes produce, the constants, and each computed
+    /// slot whose every input is listed.
+    fn translate_vocabulary(&self, document: &mut Value) {
+        let Some(members) = document.as_object_mut() else {
+            return;
+        };
+        let class = |name: &Value| {
+            (name.as_str() == Some(self.source_class.as_str()))
+                .then(|| Value::String(self.target_class.clone()))
+        };
+        for key in ["typeList", "typeNames"] {
+            if let Some(Value::Array(names)) = members.get_mut(key) {
+                *names = names.iter().filter_map(class).collect();
+            }
+        }
+        for key in ["typeName", "id"] {
+            if let Some(name) = members.get(key).and_then(class) {
+                members.insert(key.to_owned(), name);
+            }
+        }
+        for key in ["attributeList", "attributeNames"] {
+            if let Some(Value::Array(names)) = members.get_mut(key) {
+                let listed: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
+                *names = self
+                    .targets_of(&listed)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect();
+            }
+        }
+        if let Some(Value::String(name)) = members.get("attributeName") {
+            if let Some(target) = self.targets_of(&[name.as_str()]).into_iter().next() {
+                members.insert("attributeName".to_owned(), Value::String(target));
+            }
+        }
+    }
+
+    /// The target slots that the source attributes `listed` produce, in slot order.
+    fn targets_of(&self, listed: &[&str]) -> Vec<String> {
+        self.slots
+            .iter()
+            .filter(|slot| match &slot.derivation {
+                Derivation::Constant(_) => true,
+                Derivation::Expr(expression) => {
+                    let mut reads = Vec::new();
+                    expression.reads(&mut reads);
+                    reads.iter().all(|read| listed.contains(&read.as_str()))
+                }
+                _ => slot
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| listed.contains(&source)),
+            })
+            .map(|slot| slot.target.clone())
+            .collect()
+    }
+
+    /// A type selection (4.17) in the source model (T-3672): the target class is the source
+    /// class, and every other type is one the view does not serve, so it becomes a type no
+    /// broker stores and selects nothing, in an `;` and in an `|` alike.
+    pub fn invert_type(&self, selection: &str) -> String {
+        let mut out = String::with_capacity(selection.len());
+        let mut name = String::new();
+        let flush = |name: &mut String, out: &mut String| {
+            let trimmed = name.trim();
+            if trimmed == self.target_class {
+                out.push_str(&self.source_class);
+            } else if !trimmed.is_empty() {
+                out.push_str(NOT_SERVED);
+            }
+            name.clear();
+        };
+        for character in selection.chars() {
+            if matches!(character, ',' | '|' | ';' | '(' | ')') {
+                flush(&mut name, &mut out);
+                out.push(character);
+            } else {
+                name.push(character);
+            }
+        }
+        flush(&mut name, &mut out);
+        out
     }
 
     /// The `attrs` a caller asked for, in the source model's names (DM-51).
@@ -490,94 +597,190 @@ impl ViewMapping {
     ///
     /// Attribute names become source names and a compared value goes back through the slot's
     /// own inverse, so a filter written in the target model reaches the broker as a filter
-    /// the broker's own data satisfies.
+    /// the broker's own data satisfies. The rewrite runs on the parsed query, so a separator
+    /// inside a quoted value stays in the value (T-3672).
     pub fn invert_q(&self, filter: &str) -> Result<String, Box<ProblemDetails>> {
-        let mut out = String::with_capacity(filter.len());
-        let mut term = String::new();
-        for character in filter.chars() {
-            match character {
-                ';' | '|' | '(' | ')' => {
-                    out.push_str(&self.invert_term(&term)?);
-                    term.clear();
-                    out.push(character);
-                }
-                _ => term.push(character),
-            }
-        }
-        out.push_str(&self.invert_term(&term)?);
-        Ok(out)
+        let node = antares_ql::parse_q(filter).map_err(|error| {
+            Box::new(ProblemDetails::bad_request().with_detail(error.to_string()))
+        })?;
+        Ok(self.invert_node(node)?.to_string())
     }
 
-    /// One comparison of a `q`, or one bare attribute name (an existence check).
-    fn invert_term(&self, term: &str) -> Result<String, Box<ProblemDetails>> {
-        if term.trim().is_empty() {
-            return Ok(term.to_owned());
+    fn invert_node(&self, node: QNode) -> Result<QNode, Box<ProblemDetails>> {
+        let all = |nodes: Vec<QNode>| -> Result<Vec<QNode>, Box<ProblemDetails>> {
+            nodes.into_iter().map(|n| self.invert_node(n)).collect()
+        };
+        match node {
+            QNode::And(nodes) => all(nodes).map(QNode::And),
+            QNode::Or(nodes) => all(nodes).map(QNode::Or),
+            QNode::Exists { path, negated } => Ok(QNode::Exists {
+                path: self.source_path(&path)?.0,
+                negated,
+            }),
+            QNode::Cmp { path, op, value } => {
+                let (source, slot) = self.source_path(&path)?;
+                invert_comparison(&slot.derivation, source, op, value)
+                    .ok_or_else(|| Box::new(not_comparable(&slot.target, op)))
+            }
         }
-        let (name, operator, value) = match split_comparison(term) {
-            Some(split) => split,
-            None => (term, "", ""),
-        };
-        let attribute = name.trim();
-        // A negated existence check is `!attribute`, and the `!` belongs to the term rather
-        // than to the name.
-        let (prefix, attribute) = match attribute.strip_prefix('!') {
-            Some(rest) => ("!", rest.trim()),
-            None => ("", attribute),
-        };
+    }
 
+    /// The source attribute a term's path names, and its slot. Only a plain attribute name
+    /// is mapped: a sub-attribute, a language or a linked entity behind it is not.
+    fn source_path(&self, path: &QPath) -> Result<(QPath, &Slot), Box<ProblemDetails>> {
+        let [attribute] = path.path.as_slice() else {
+            return Err(Box::new(unknown(&path.to_string())));
+        };
+        if !path.links.is_empty() || path.bracket.is_some() {
+            return Err(Box::new(unknown(&path.to_string())));
+        }
         let Some(slot) = self.by_target(attribute) else {
             return Err(Box::new(unknown(attribute)));
         };
         if !slot.filterable {
             return Err(Box::new(not_filterable(attribute)));
         }
-        let source = slot.source.as_deref().unwrap_or(&slot.target);
-        if operator.is_empty() {
-            return Ok(format!("{prefix}{source}"));
-        }
-        let inverted = value
-            .split(',')
-            .map(|one| invert_value(&slot.derivation, one))
-            .collect::<Vec<_>>()
-            .join(",");
-        Ok(format!("{prefix}{source}{operator}{inverted}"))
+        let source = slot.source.clone().unwrap_or_else(|| slot.target.clone());
+        let path = QPath {
+            links: Vec::new(),
+            path: vec![source],
+            bracket: None,
+        };
+        Ok((path, slot))
     }
 }
 
-/// The comparison operators of the NGSI-LD query language, longest first so `>=` is never
-/// read as `>` (CIM 009 clause 4.9).
-const OPERATORS: &[&str] = &["==", "!=", ">=", "<=", "~=", ">", "<"];
-
-/// Splits one term into its attribute, its operator and its value.
-fn split_comparison(term: &str) -> Option<(&str, &str, &str)> {
-    OPERATORS
-        .iter()
-        .filter_map(|operator| term.find(operator).map(|at| (at, *operator)))
-        .min_by_key(|(at, _)| *at)
-        .map(|(at, operator)| (&term[..at], operator, &term[at + operator.len()..]))
+/// One comparison in the source model, or `None` when the derivation has no inverse for it.
+fn invert_comparison(
+    derivation: &Derivation,
+    path: QPath,
+    op: CmpOp,
+    value: QValue,
+) -> Option<QNode> {
+    match derivation {
+        Derivation::ValueMappings { forward, .. } => {
+            // A table has no order: only equality inverts, to every source value that maps
+            // to an asked one.
+            if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+                return None;
+            }
+            let asked = match value {
+                QValue::List(items) => items,
+                QValue::Range(..) => return None,
+                one => vec![one],
+            };
+            let mut sources = Vec::new();
+            for target in &asked {
+                let text = scalar_text(target)?;
+                for (source, produced) in forward {
+                    if plain(produced) == text {
+                        sources.push(source_value(source));
+                    }
+                }
+            }
+            Some(match (sources.len(), op) {
+                // nothing maps to it: `==` holds for no entity, `!=` for each that has it
+                (0, CmpOp::Eq) => QNode::And(vec![
+                    QNode::Exists {
+                        path: path.clone(),
+                        negated: false,
+                    },
+                    QNode::Exists {
+                        path,
+                        negated: true,
+                    },
+                ]),
+                (0, _) => QNode::Exists {
+                    path,
+                    negated: false,
+                },
+                (1, _) => QNode::Cmp {
+                    path,
+                    op,
+                    value: sources.remove(0),
+                },
+                _ => QNode::Cmp {
+                    path,
+                    op,
+                    value: QValue::List(sources),
+                },
+            })
+        }
+        Derivation::UnitConversion { factor, offset } if *factor != 0.0 => {
+            let back = |v: QValue| match v {
+                QValue::Num(n) => QValue::Num(rounded((n - offset) / factor)),
+                other => other,
+            };
+            let value = match value {
+                QValue::List(items) => QValue::List(items.into_iter().map(back).collect()),
+                // a negative factor reverses the order, so the ends trade places
+                QValue::Range(lo, hi) if *factor < 0.0 => {
+                    QValue::Range(Box::new(back(*hi)), Box::new(back(*lo)))
+                }
+                QValue::Range(lo, hi) => QValue::Range(Box::new(back(*lo)), Box::new(back(*hi))),
+                one => back(one),
+            };
+            let op = match (op, *factor < 0.0) {
+                (CmpOp::Gt, true) => CmpOp::Lt,
+                (CmpOp::Ge, true) => CmpOp::Le,
+                (CmpOp::Lt, true) => CmpOp::Gt,
+                (CmpOp::Le, true) => CmpOp::Ge,
+                (op, _) => op,
+            };
+            Some(QNode::Cmp { path, op, value })
+        }
+        _ => Some(QNode::Cmp { path, op, value }),
+    }
 }
 
-/// The source value a target value in a filter stands for.
-fn invert_value(derivation: &Derivation, value: &str) -> String {
-    let trimmed = value.trim();
-    let (quote, bare) = match trimmed.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
-        Some(bare) => ("\"", bare),
-        None => ("", trimmed),
+/// A value table's source key as the scalar the broker stores: the table keys a number or a
+/// boolean by its text, as `plain` writes it.
+fn source_value(key: &str) -> QValue {
+    match serde_json::from_str::<Value>(key) {
+        Ok(Value::Number(number)) => number
+            .as_f64()
+            .map_or_else(|| QValue::Str(key.to_owned()), QValue::Num),
+        Ok(Value::Bool(flag)) => QValue::Bool(flag),
+        _ => QValue::Str(key.to_owned()),
+    }
+}
+
+/// A scalar of a `q` as the text a value table is keyed by.
+fn scalar_text(value: &QValue) -> Option<String> {
+    match value {
+        QValue::Str(text) => Some(text.clone()),
+        QValue::Num(_) | QValue::Bool(_) => Some(value.to_string()),
+        QValue::List(_) | QValue::Range(..) => None,
+    }
+}
+
+/// A converted number as the shortest text that round-trips would read, so an inverted
+/// filter reads like one a person would have written.
+fn rounded(value: f64) -> f64 {
+    render(value).parse().unwrap_or(value)
+}
+
+/// `pick` and `omit` (4.21) on a translated answer: they name target members, which the
+/// broker does not hold, so they are applied here, to each entity, after the translation.
+pub fn project(body: &mut Value, pick: Option<&str>, omit: Option<&str>) {
+    let names = |list: Option<&str>| -> Option<Vec<String>> {
+        list.map(|list| list.split(',').map(|name| name.trim().to_owned()).collect())
     };
-    match derivation {
-        Derivation::ValueMappings { inverse, .. } => match inverse.get(bare) {
-            Some(source) => format!("{quote}{}{quote}", plain(source)),
-            // A value the table does not name matches nothing on either side, so it is sent
-            // as it stands and the broker answers with nothing, which is the truth.
-            None => value.to_owned(),
-        },
-        Derivation::UnitConversion { factor, offset } if *factor != 0.0 => {
-            match bare.parse::<f64>() {
-                Ok(number) => render((number - offset) / factor),
-                Err(_) => value.to_owned(),
-            }
+    let (pick, omit) = (names(pick), names(omit));
+    let mut one = |entity: &mut Value| {
+        let Some(members) = entity.as_object_mut() else {
+            return;
+        };
+        if let Some(pick) = &pick {
+            members.retain(|key, _| key == "@context" || pick.contains(key));
         }
-        _ => value.to_owned(),
+        if let Some(omit) = &omit {
+            members.retain(|key, _| !omit.contains(key));
+        }
+    };
+    match body {
+        Value::Array(entities) => entities.iter_mut().for_each(&mut one),
+        entity => one(entity),
     }
 }
 
@@ -909,6 +1112,14 @@ fn not_filterable(name: &str) -> ProblemDetails {
     ProblemDetails::bad_request().with_detail(format!(
         "`{name}` is computed by the view and has no source attribute to filter on, so it \
          cannot appear in a query"
+    ))
+}
+
+/// The refusal for a comparison the slot's derivation cannot invert (T-3672).
+fn not_comparable(name: &str, op: CmpOp) -> ProblemDetails {
+    ProblemDetails::bad_request().with_detail(format!(
+        "`{name}` is translated through a value table, which has no order and no ranges, so \
+         `{op}` cannot be asked of it"
     ))
 }
 

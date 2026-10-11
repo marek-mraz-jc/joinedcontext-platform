@@ -49,11 +49,12 @@ fn translated(entity: Value) -> Value {
 
 #[test]
 fn a_document_that_is_not_an_entity_is_left_exactly_as_it_was() {
-    // A problem document, a type list and an attribute list travel the same path as an entity.
-    // Rebuilding one in the target model would replace its members with a `type` it never had.
+    // A problem document travels the same path as an entity. Rebuilding one in the target
+    // model would replace its members with a `type` it never had. A type list or an attribute
+    // list is translated as vocabulary, never as an entity (T-3672,
+    // view_mapping_tests::a_discovery_answer_is_translated).
     for untouched in [
         json!({ "type": "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound", "title": "Not Found" }),
-        json!({ "typeList": ["MestskySenzor"], "type": "EntityTypeList" }),
         json!([]),
         json!("text"),
         json!(null),
@@ -61,6 +62,12 @@ fn a_document_that_is_not_an_entity_is_left_exactly_as_it_was() {
     ] {
         assert_eq!(translated(untouched.clone()), untouched, "{untouched}");
     }
+    let types = translated(json!({ "typeList": ["MestskySenzor"], "type": "EntityTypeList" }));
+    assert_eq!(
+        types["type"],
+        json!("EntityTypeList"),
+        "not rebuilt as an entity: {types}"
+    );
 }
 
 #[test]
