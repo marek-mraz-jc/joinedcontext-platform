@@ -14,7 +14,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Method, Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View, ViewRule};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -355,8 +355,8 @@ async fn a_non_numeric_attribute_is_not_a_datastream() {
     );
 }
 
-/// EP-07, EP-61: the four sets are views of one projected page, so what the endpoint hides is
-/// missing from all of them at once.
+/// EP-07, EP-61: the four sets are renderings of one page the view answered, so what the view
+/// withholds is missing from all of them at once (T-3651).
 #[tokio::test]
 async fn a_hidden_attribute_is_absent_from_every_set() {
     for path in [
@@ -365,12 +365,8 @@ async fn a_hidden_attribute_is_absent_from_every_set() {
         "/Observations",
         "/ObservedProperties",
     ] {
-        let broker = BrokerStub::start(vec![json!([station()])]).await;
-        let (_, answer) = get(
-            gateway(&broker.url, endpoint(&["operatorPhone"])),
-            &sta(path),
-        )
-        .await;
+        let broker = BrokerStub::narrowing(vec![json!([station()])], hiding_phone()).await;
+        let (_, answer) = get(gateway(&broker.url, endpoint(&[])), &sta(path)).await;
         assert!(
             !answer.to_string().contains("operatorPhone"),
             "{path} carries a hidden attribute"
@@ -618,13 +614,13 @@ async fn a_series_carries_only_the_attribute_its_datastream_names() {
     }
 }
 
-/// EP-07, R9: the history is a second upstream path, so the projection that withholds an
-/// attribute on the instant answer withholds it here too, on every instance.
+/// EP-07, R9: the history is read through the same view as the instant answer, so the attribute
+/// the view withholds has no series either (T-3651).
 #[tokio::test]
 async fn a_hidden_attribute_has_no_series_either() {
-    let broker = BrokerStub::start(vec![history()]).await;
+    let broker = BrokerStub::narrowing(vec![history()], hiding_phone()).await;
     let (status, collection, _) = call(
-        gateway(&broker.url, endpoint(&["operatorPhone"])),
+        gateway(&broker.url, endpoint(&[])),
         Method::GET,
         &sta(&format!("/Datastreams('{URN}/operatorPhone')/Observations")),
     )
@@ -783,31 +779,35 @@ async fn orderby_phenomenon_time_desc_puts_the_newest_first() {
 /// representation softer than the NGSI-LD surface it is a view of.
 #[tokio::test]
 async fn an_endpoint_without_the_temporal_grant_serves_no_history() {
-    let broker = BrokerStub::start(vec![history()]).await;
-    let mut instant_only = endpoint(&[]);
-    instant_only.policies = vec![serde_norway::from_str(
-        r#"contextSpaceRef: ovzdusie
-assigner: did:web:banskabystrica.sk
-assignee: { kind: role, id: public }
-operations: [queryEntity, retrieveEntity]
-"#,
-    )
-    .expect("the policy spec parses")];
+    let mut instant_only = View::of(SLUG, "public", &["AirQualityObserved"], None);
+    instant_only.rules[0].history = false;
+    let broker = BrokerStub::narrowing(vec![history()], instant_only).await;
 
-    let (status, _, _) = call(
-        gateway(&broker.url, instant_only),
+    let (status, body, _) = call(
+        gateway(&broker.url, endpoint(&[])),
         Method::GET,
         &sta(&format!("/Datastreams('{URN}/pm10')/Observations")),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(
-        broker
-            .hops()
-            .iter()
-            .all(|hop| !hop.path.starts_with("/ngsi-ld/v1/temporal/")),
-        "the refusal happened before the broker was asked"
-    );
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(!body.to_string().contains("pm10"), "{body}");
+}
+
+/// The view of this endpoint as the Portal writes it for an endpoint hiding `operatorPhone`.
+fn hiding_phone() -> View {
+    View {
+        name: SLUG.to_owned(),
+        rules: vec![ViewRule {
+            role: "public".to_owned(),
+            types: vec!["AirQualityObserved".to_owned()],
+            attrs: Some(
+                ["pm10", "pm25", "location", "name", "refDevice"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ),
+            history: true,
+        }],
+    }
 }
 
 /// A key that is not `{urn}/{attribute}` names no datastream, so it has no observations rather

@@ -441,3 +441,89 @@ async fn the_engines_refusal_carries_the_platforms_slug_and_hint() {
         json!("Ask a project owner or an organization administrator for the role this needs.")
     );
 }
+
+/// T-3651: the file and SensorThings translators read the slug's view with the caller pinned
+/// and their own selector as sent, and an Endpoint no view serves (a mapped one, G18) still
+/// reads the plain root through the gateway's PDP, with the grant's type folded in.
+#[tokio::test]
+async fn the_translators_read_the_view_and_what_no_view_serves_reads_the_plain_root() {
+    let translated = || Endpoint {
+        representations: vec![
+            Representation::NgsiLd,
+            Representation::Json,
+            Representation::Sta,
+        ],
+        ..endpoint()
+    };
+    // A SensorThings Thing is an entity with a place (T-1889).
+    let located = json!([{ "id": STATION, "type": "AirQualityObserved",
+        "pm10": { "type": "Property", "value": 1.0 },
+        "location": { "type": "GeoProperty",
+                      "value": { "type": "Point", "coordinates": [19.1, 48.7] } } }]);
+    // Each names its selector: with none the type list is asked first, which this broker does
+    // not answer (that hop, `dataset_download_tests`).
+    for rest in [
+        "file.json?type=AirQualityObserved",
+        "sta/v1.1/Things?$filter=pm10%20gt%200",
+    ] {
+        let (upstream, hops) = broker(StatusCode::OK, &[], located.clone()).await;
+        let (status, _, body) = call(
+            app(upstream, translated()),
+            get(&format!("/api/endpoint/{SLUG}/{rest}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rest}: {body}");
+        assert!(body.contains("st-1"), "{rest}: {body}");
+        let hops = hops.lock().expect("the hop log").clone();
+        let entity_reads: Vec<&Hop> = hops
+            .iter()
+            .filter(|hop| hop.path.ends_with("/entities"))
+            .collect();
+        assert!(!entity_reads.is_empty(), "{rest}: no entity read");
+        for hop in entity_reads {
+            assert_eq!(
+                hop.path,
+                format!("/x/views/{SLUG}/ngsi-ld/v1/entities"),
+                "{rest}"
+            );
+            assert_eq!(
+                hop.headers.get("x-jc-roles").and_then(|v| v.to_str().ok()),
+                Some("public"),
+                "{rest}: the caller is pinned"
+            );
+            assert!(hop.headers.get("cookie").is_none(), "{rest}");
+        }
+    }
+
+    let mapping = ViewMapping::parse(&json!({
+        "version": 2,
+        "sourceClass": "AirQualityObserved",
+        "targetClass": "AirQualityObserved",
+        "slots": [{ "target": "pm10", "source": "pm10", "kind": "rename", "filterable": true }]
+    }))
+    .expect("the IR parses");
+    let mapped = Endpoint {
+        view_mapping: Some(Arc::new(mapping)),
+        ..translated()
+    };
+    let (upstream, hops) = broker(StatusCode::OK, &[], json!([station()])).await;
+    let (status, _, body) = call(
+        app(upstream, mapped),
+        get(&format!("/api/endpoint/{SLUG}/file.json")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hops = hops.lock().expect("the hop log").clone();
+    let read = hops
+        .iter()
+        .find(|hop| hop.path.ends_with("/entities"))
+        .expect("an entity read");
+    assert_eq!(read.path, "/ngsi-ld/v1/entities", "the plain root");
+    assert!(
+        read.query
+            .as_deref()
+            .is_some_and(|query| query.contains("type=AirQualityObserved")),
+        "the PDP folded the grant's type in: {:?}",
+        read.query
+    );
+}

@@ -1433,7 +1433,7 @@ fn reserve_create(
 /// agreements to decide on yet, and would judge the connector's own account instead (map K38).
 /// So does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
 /// compare and conditional write is the only lost-update guard there is (R45, GW16).
-fn served_by_view(
+pub(crate) fn served_by_view(
     endpoint: &Endpoint,
     subject: &Subject,
     (view, operation, headers): (&str, Operation, &HeaderMap),
@@ -1638,7 +1638,7 @@ async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
 const ANTARES_ACCESS_DENIED: &str = "urn:antares:error:AccessDenied";
 
 /// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
-const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
@@ -3311,7 +3311,7 @@ fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) 
 
 /// Whether the broker's `404` says the tenant does not exist (CIM 009 5.5.2 `NonexistentTenant`)
 /// rather than that the thing asked for does not.
-fn names_no_tenant(body: &[u8]) -> bool {
+pub(crate) fn names_no_tenant(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
         problem
             .get("type")

@@ -18,7 +18,11 @@
 //!
 //! An answer is judged by what it carries and a request by what it selects on: a filter is a
 //! read, so a name outside the endpoint's own vocabulary may not reach the broker inside anything
-//! that decides which entities come back. `every_representation_and_tool_has_a_probe` fails when
+//! that decides which entities come back. Since T-3651 the file downloads and SensorThings read
+//! the broker's view: both brokers answer a view hop as the engine would (projection ∩ grants −
+//! hidden, no `Depot`), and a view hop is not judged for oracles, because the engine reads a hidden
+//! name as absent there (Antares `views_props::q_over_hidden_equals_q_over_absent`). The answers
+//! of those probes are still judged byte by byte. `every_representation_and_tool_has_a_probe` fails when
 //! a surface is added without a probe, because an unswept surface is where the next leak lives.
 //!
 //! First measured on 2026-09-18 with 42 leaking and 24 oracle probes (T-1862 … T-2135 come from
@@ -28,6 +32,7 @@ mod common;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
@@ -82,17 +87,27 @@ fn entity(id: &str, kind: &str) -> Value {
 
 type Hops = Arc<Mutex<Vec<String>>>;
 
+/// The mark of a hop that went to the broker's view (T-3651).
+const VIEW_HOP: &str = "VIEW ";
+
 async fn broker(honest: bool) -> (String, Hops) {
     let hops: Hops = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&hops);
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
-            let path = request.uri().path().to_owned();
+            // A hop to the broker's view is answered as its engine answers it (T-3651): the
+            // projection ∩ grants − hidden the Portal writes into the rules, honest or not, because
+            // the view is where the narrowing happens now.
+            let raw = request.uri().path().to_owned();
+            let (view, path) = match raw.strip_prefix("/x/views/").and_then(|rest| rest.split_once('/')) {
+                Some((_, rest)) => (true, format!("/{rest}")),
+                None => (false, raw),
+            };
             let query = request.uri().query().unwrap_or_default().to_owned();
             let body = axum::body::to_bytes(request.into_body(), 1 << 20).await.unwrap_or_default();
             recorder.lock().expect("log").push(format!(
-                "{path}?{query} {}", String::from_utf8_lossy(&body)
+                "{}{path}?{query} {}", if view { VIEW_HOP } else { "" }, String::from_utf8_lossy(&body)
             ));
             let param = |name: &str| -> Option<Vec<String>> {
                 query.split('&').find_map(|pair| pair.strip_prefix(&format!("{name}="))).map(|v| {
@@ -107,7 +122,15 @@ async fn broker(honest: bool) -> (String, Hops) {
             }
             let attrs = param("attrs");
             let shape = |mut e: Value| -> Value {
-                if let (true, Some(attrs)) = (honest, &attrs) {
+                if view {
+                    let kind = e["type"].as_str().unwrap_or_default().to_owned();
+                    if let Some(members) = e.as_object_mut() {
+                        members.retain(|k, _| {
+                            matches!(k.as_str(), "id" | "type" | "location") || allowed(&kind, k)
+                        });
+                    }
+                }
+                if let (true, Some(attrs)) = (honest || view, &attrs) {
                     if let Some(members) = e.as_object_mut() {
                         members.retain(|k, _| k == "id" || k == "type" || attrs.contains(k));
                     }
@@ -115,7 +138,8 @@ async fn broker(honest: bool) -> (String, Hops) {
                 e
             };
             let listed: Vec<Value> = [(USER, "User"), (VEHICLE, "Vehicle"), (DEPOT, "Depot")].into_iter()
-                .filter(|(_, kind)| !honest || types.is_empty() || types.iter().any(|t| t == kind))
+                .filter(|(_, kind)| !view || *kind != "Depot")
+                .filter(|(_, kind)| !(honest || view) || types.is_empty() || types.iter().any(|t| t == kind))
                 .map(|(id, kind)| shape(entity(id, kind))).collect();
             let all = Value::Array(listed);
             let answer = if path.ends_with("/types") {
@@ -128,6 +152,8 @@ async fn broker(honest: bool) -> (String, Hops) {
                 json!({ "id": "urn:x", "type": "Attribute", "attributeName": "odometer",
                         "attributeCount": 3, "typeNames": ["User", "Vehicle", "Depot"],
                         "attributeDetails": [{ "id": "odometer", "type": "Attribute", "attributeName": "odometer" }] })
+            } else if path.contains("Depot") && view {
+                return (StatusCode::NOT_FOUND, axum::Json(json!({"type": "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound"}))).into_response();
             } else if path.contains("Depot") {
                 shape(entity(DEPOT, "Depot"))
             } else if path.contains("Vehicle:") || path.contains("Vehicle%3A") {
@@ -137,7 +163,7 @@ async fn broker(honest: bool) -> (String, Hops) {
             } else {
                 all
             };
-            axum::Json(answer)
+            axum::Json(answer).into_response()
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -145,7 +171,7 @@ async fn broker(honest: bool) -> (String, Hops) {
         .expect("a port");
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, common::plain_tree(app)).await;
+        let _ = axum::serve(listener, app).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -496,9 +522,14 @@ fn selectors(hop: &str) -> String {
 /// selector. `age` belongs to `User` alone, so it may appear beside `User` and never beside
 /// `Vehicle` on its own. `Depot` is outside the projection, so it may never be asked for as a
 /// type at all.
+///
+/// A hop to the broker's view carries the caller's query as sent: the engine judges what it
+/// selects on there (Antares `addons/joinedcontext-policy/tests/engine.rs`
+/// `bisecting_a_hidden_value_learns_nothing`, `views_q.rs`), so only the hops to the plain root
+/// are read here (T-3651).
 fn oracle(hops: &[String], probe: &Probe) -> Vec<String> {
     let mut found = Vec::new();
-    for hop in hops {
+    for hop in hops.iter().filter(|hop| !hop.starts_with(VIEW_HOP)) {
         let asked = selectors(hop);
         for name in ["odometer", "secretPin"] {
             if asked.contains(name) {
