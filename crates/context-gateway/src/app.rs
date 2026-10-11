@@ -17,7 +17,7 @@ use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::access_routes::{access, access_check, access_simulate};
 use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
-use crate::handlers::ogc::ogc_features;
+use crate::handlers::ogc::{odata, ogc_features};
 use crate::handlers::schema_routes::{
     schema_artifact, schema_index, space_schema_artifact, space_schema_index,
 };
@@ -476,6 +476,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
+        // The OData v4 service of the view (EP-104, T-3830), read-only until T-3939.
+        .route("/api/endpoint/{slug}/odata/v4", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))
