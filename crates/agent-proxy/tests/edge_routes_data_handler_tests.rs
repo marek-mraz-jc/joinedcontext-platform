@@ -301,7 +301,8 @@ async fn a_read_only_run_may_post_a_query_and_nothing_else() {
 }
 
 /// AG-25: the MCP body of a read-only run is read for the tool it calls, so a mutation named
-/// inside a POST that is otherwise allowed is refused too.
+/// inside a POST that is otherwise allowed is refused too. The read tools are named, not the
+/// writes: the broker's MCP surface has write tools under names no deny-list knows (T-3806).
 #[tokio::test]
 async fn a_read_only_run_may_not_call_a_mutation_tool_over_mcp() {
     let gateway = MockServer::start().await;
@@ -310,19 +311,59 @@ async fn a_read_only_run_may_not_call_a_mutation_tool_over_mcp() {
         .mount(&gateway)
         .await;
 
-    for (tool, expected) in [
-        ("upsert_entity", StatusCode::FORBIDDEN),
-        ("create_subscription", StatusCode::FORBIDDEN),
-        ("query_entities", StatusCode::OK),
-    ] {
-        let proxy = with_gateway(false, &gateway.uri());
-        let body = serde_json::json!({
+    let call = |tool: &str| {
+        serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": { "name": tool, "arguments": {} }
         })
-        .to_string();
+    };
+    let list = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+    let mut cases: Vec<(String, String, StatusCode)> = Vec::new();
+    for tool in [
+        "upsert_entity",
+        "create_subscription",
+        "create_entity",
+        "batch_delete",
+        "replace_entity",
+        "no_such_tool",
+    ] {
+        cases.push((
+            tool.to_owned(),
+            call(tool).to_string(),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    for tool in [
+        "query_entities",
+        "get_entity",
+        "batch_query",
+        "query_temporal",
+        "list_types",
+        "list_type_details",
+        "describe_schema",
+        "describe_access",
+    ] {
+        cases.push((tool.to_owned(), call(tool).to_string(), StatusCode::OK));
+    }
+    cases.push(("tools/list".to_owned(), list.to_string(), StatusCode::OK));
+    // A JSON-RPC batch is checked member by member.
+    cases.push((
+        "batch with a write".to_owned(),
+        serde_json::json!([call("query_entities"), call("upsert_entity")]).to_string(),
+        StatusCode::FORBIDDEN,
+    ));
+    cases.push((
+        "batch of reads".to_owned(),
+        serde_json::json!([list, call("get_entity")]).to_string(),
+        StatusCode::OK,
+    ));
+    // A body the proxy cannot read is not a body it may pass.
+    cases.push(("not json".to_owned(), "{".to_owned(), StatusCode::FORBIDDEN));
+
+    for (case, body, expected) in cases {
+        let proxy = with_gateway(false, &gateway.uri());
         let response = proxy
             .oneshot(
                 authed("POST", "/v1/data/mcp")
@@ -332,8 +373,21 @@ async fn a_read_only_run_may_not_call_a_mutation_tool_over_mcp() {
             )
             .await
             .expect("an answer");
-        assert_eq!(response.status(), expected, "tool {tool}");
+        assert_eq!(response.status(), expected, "{case}");
     }
+
+    // A run that may write is not narrowed by tool.
+    let proxy = with_gateway(true, &gateway.uri());
+    let response = proxy
+        .oneshot(
+            authed("POST", "/v1/data/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(call("create_entity").to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK, "a write run");
 }
 
 /// AG-64: the query string is the read, so it travels with the path and nothing of it is dropped.

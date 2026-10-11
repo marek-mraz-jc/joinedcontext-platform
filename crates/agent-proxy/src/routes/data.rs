@@ -21,6 +21,47 @@ const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
     "x-consumer-identity",
 ];
 
+/// The MCP tools that only read: the gateway's and the broker's (Antares `docs/src/mcp.md`).
+/// Named rather than the writes, so a write tool under a name nobody listed is refused, not
+/// passed (T-3806).
+const READ_TOOLS: &[&str] = &[
+    "batch_query",
+    "batch_query_temporal",
+    "describe_access",
+    "describe_schema",
+    "get_attribute",
+    "get_attribute_value",
+    "get_entity",
+    "get_subscription",
+    "get_type",
+    "list_attribute_details",
+    "list_attributes",
+    "list_subscriptions",
+    "list_type_details",
+    "list_types",
+    "query_entities",
+    "query_temporal",
+    "retrieve_temporal",
+];
+
+/// Whether an MCP body, one message or a JSON-RPC batch, calls no tool but a read one. A body
+/// that does not parse reads nothing the proxy can vouch for.
+fn reads_only(body: &[u8]) -> bool {
+    let reads = |message: &serde_json::Value| {
+        message.get("method").and_then(|m| m.as_str()) != Some("tools/call")
+            || message
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .is_some_and(|tool| READ_TOOLS.contains(&tool))
+    };
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Array(messages)) => messages.iter().all(reads),
+        Ok(message @ serde_json::Value::Object(_)) => reads(&message),
+        _ => false,
+    }
+}
+
 /// `/v1/data/{*rest}`: the run's primary endpoint.
 pub async fn handler(
     State(state): State<ProxyState>,
@@ -168,23 +209,11 @@ async fn forward(
         Err(refusal) => return *refusal,
     };
 
-    // If MCP tools/call on read-only run, inspect for mutation tools
-    if rest == "mcp" && !run.allows_write {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            if v.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
-                if let Some(tool) = v
-                    .get("params")
-                    .and_then(|p| p.get("name"))
-                    .and_then(|n| n.as_str())
-                {
-                    if matches!(tool, "upsert_entity" | "create_subscription") {
-                        return jc_core::ProblemDetails::forbidden()
-                            .with_detail("mutation tools not permitted on read-only run")
-                            .into_response();
-                    }
-                }
-            }
-        }
+    // AG-25: a read-only run's MCP body passes only when every message in it reads.
+    if rest == "mcp" && !run.allows_write && !reads_only(&body_bytes) {
+        return jc_core::ProblemDetails::forbidden()
+            .with_detail("mutation tools not permitted on read-only run")
+            .into_response();
     }
 
     let mut client_req = state.http.request(method.clone(), &target_url);
