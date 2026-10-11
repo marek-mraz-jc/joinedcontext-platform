@@ -1,8 +1,9 @@
 //! The guest side of a server WASM App (ADR-N-044, AP-143..AP-145): what an App's component is
 //! written against. A request comes in as a [`http::Request`], a handler answers a
-//! [`http::Response`], and the App's own database and files are [`sql`] and [`blob`]. The App
-//! never holds a connection string, a password or a storage key: the host answers every call as
-//! the App and no other.
+//! [`http::Response`], and the App's own database and files are [`sql`] and [`blob`]. The request's
+//! person is [`identity::caller`], and the platform's [`email`] and [`ai`] are asked in their name
+//! (`jc:app@0.1.1`, API/06 §5). The App never holds a connection string, a password, a storage key
+//! or a token: the host answers every call as the App and no other.
 //!
 //! ```no_run
 //! use jc_app_sdk::http::{Request, Response, Router};
@@ -143,6 +144,48 @@ pub mod blob {
     /// key, valid for at most five minutes.
     pub fn presign(key: &str, method: Method, expires_seconds: u32) -> Result<String, Error> {
         crate::jc::app::blob::presign(key, method, expires_seconds)
+    }
+}
+
+/// The person a request comes from, as the Portal verified them for this App (AP-109).
+pub mod identity {
+    /// `id`, `name`, `email` and the App's `roles` this person holds; never a token.
+    pub use crate::jc::app::identity::Person as Caller;
+
+    /// The request's person; `None` for an anonymous visitor, in a job, and when the host cannot
+    /// say.
+    pub fn caller() -> Option<Caller> {
+        crate::jc::app::identity::caller()
+    }
+}
+
+/// What `email` and `ai` answer when they do not (API/06 §3, SDK-43): `Refused` when a layer keeps
+/// the service off or a quota is used up, `Rejected` with the Portal's detail for any other no,
+/// `Unavailable` when the host reaches no Portal.
+pub mod services {
+    pub use crate::jc::app::services::{Error, Refusal};
+}
+
+/// A message to people of the organization, by person id or the caller (AP-168): the Portal looks
+/// the addresses up, so the App never holds one.
+pub mod email {
+    pub use crate::jc::app::email::{Message as Email, Recipients};
+    pub use crate::services::{Error, Refusal};
+
+    /// The message's id once the relay took it.
+    pub fn send(message: &Email) -> Result<String, Error> {
+        crate::jc::app::email::send(message)
+    }
+}
+
+/// A completion from the organization's model, counted against the App's day (AP-169).
+pub mod ai {
+    pub use crate::jc::app::ai::{Answer, Completion, Message, Role};
+    pub use crate::services::{Error, Refusal};
+
+    /// `request.schema`, a JSON Schema as JSON text, makes `Answer::json` a value of it.
+    pub fn complete(request: &Completion) -> Result<Answer, Error> {
+        crate::jc::app::ai::complete(request)
     }
 }
 

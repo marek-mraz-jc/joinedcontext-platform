@@ -39,6 +39,8 @@ pub struct State {
     /// The App this instance runs for: the storage interfaces answer as it and no other.
     pub app: Placed,
     pub storage: Arc<dyn Storage>,
+    /// The caller and the platform services, asked of the Portal as the request's person.
+    pub services: crate::services::Services,
 }
 
 impl WasiView for State {
@@ -292,6 +294,8 @@ pub struct Host {
     storage: Arc<dyn Storage>,
     /// The gateway's origin, `scheme://host[:port]`, without a trailing slash.
     gateway: Option<String>,
+    /// The Portal's origin inside the cluster, which `identity`, `email` and `ai` ask.
+    portal: Option<String>,
     /// The client an App's calls to the gateway go through: no redirects, so a gateway answer
     /// can never send one elsewhere.
     client: reqwest::Client,
@@ -302,12 +306,14 @@ pub struct Host {
 
 impl Host {
     /// The engine with its limits, and a linker offering WASI (without its sockets' reach),
-    /// `wasi:http` and `jc:app`. `gateway` is the one origin an App may call, `https://host[:port]`.
+    /// `wasi:http` and `jc:app`. `gateway` is the one origin an App may call, `https://host[:port]`;
+    /// `portal` the Portal the host asks for an App's caller and services.
     pub fn new(
         limits: Limits,
         source: Source,
         storage: Arc<dyn Storage>,
         gateway: Option<&str>,
+        portal: Option<&str>,
     ) -> wasmtime::Result<Arc<Self>> {
         let mut pooling = PoolingAllocationConfig::new();
         pooling.total_component_instances(limits.pooled_instances);
@@ -326,21 +332,23 @@ impl Host {
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
         crate::storage::add_to_linker(&mut linker)?;
 
-        let gateway = match gateway {
-            None => None,
-            Some(origin) => {
-                let url = url::Url::parse(origin)
-                    .map_err(|err| wasmtime::format_err!("JC_GATEWAY_URL: {err}"))?;
-                let host = url
-                    .host_str()
-                    .ok_or_else(|| wasmtime::format_err!("JC_GATEWAY_URL has no host"))?;
-                let authority = match url.port() {
-                    Some(port) => format!("{host}:{port}"),
-                    None => host.to_owned(),
-                };
-                Some(format!("{}://{authority}", url.scheme()))
-            }
+        let origin = |var: &str, value: Option<&str>| -> wasmtime::Result<Option<String>> {
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            let url =
+                url::Url::parse(value).map_err(|err| wasmtime::format_err!("{var}: {err}"))?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| wasmtime::format_err!("{var} has no host"))?;
+            let authority = match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            };
+            Ok(Some(format!("{}://{authority}", url.scheme())))
         };
+        let gateway = origin("JC_GATEWAY_URL", gateway)?;
+        let portal = origin("JC_WASM_PORTAL_URL", portal)?;
         let host = Arc::new(Self {
             cache: Mutex::new(Cache {
                 capacity: limits.cached_components,
@@ -355,6 +363,7 @@ impl Host {
             source,
             storage,
             gateway,
+            portal,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(10))
@@ -459,13 +468,16 @@ impl Host {
     }
 
     /// A fresh store for one instance of `app` under the request's limits, its calls to the
-    /// gateway carrying `token`, stopped after `deadline_ticks` epochs.
+    /// gateway carrying `token`, stopped after `deadline_ticks` epochs. `person` is the request's
+    /// person's token and the `Host` it came on, which the services are asked with; a job has none.
     fn store(
         &self,
         app: &Placed,
         token: Option<String>,
+        person: Option<(String, Option<String>)>,
         deadline_ticks: u64,
     ) -> Result<Store<State>, Failure> {
+        let (person, origin) = person.map_or((None, None), |(token, origin)| (Some(token), origin));
         let wasi = WasiCtx::builder()
             .allow_tcp(false)
             .allow_udp(false)
@@ -493,6 +505,14 @@ impl Host {
                 },
                 app: app.clone(),
                 storage: self.storage.clone(),
+                services: crate::services::Services::new(
+                    self.portal
+                        .clone()
+                        .map(|portal| (portal, self.client.clone())),
+                    person,
+                    origin,
+                    self.limits.response_bytes,
+                ),
             },
         );
         store.limiter(|state| &mut state.limits);
@@ -528,7 +548,7 @@ impl Host {
             })?;
         let ticks = (wall.as_millis() / EPOCH_TICK.as_millis()).max(1) as u64;
         let mut store = self
-            .store(app, Some(token), ticks)
+            .store(app, Some(token), None, ticks)
             .map_err(|f| f.detail().to_owned())?;
         let export = export.to_owned();
         let id = app.id.clone();
@@ -596,9 +616,21 @@ impl Host {
             return Err(Failure::TooLarge);
         }
         let pre = self.component(&app.digest).await?;
-        let mut store = self.store(app, token, self.limits.deadline_ticks())?;
-
         let (mut parts, body) = request.into_parts();
+        // The services are asked on the host the request came on, the App's own (AP-133).
+        let came_on = parts
+            .uri
+            .authority()
+            .map(|a| a.as_str().to_owned())
+            .or_else(|| {
+                parts
+                    .headers
+                    .get(http::header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .map(str::to_owned)
+            });
+        let person = token.clone().map(|token| (token, came_on));
+        let mut store = self.store(app, token, person, self.limits.deadline_ticks())?;
         parts.headers.remove(http::header::AUTHORIZATION);
         parts.headers.remove(http::header::COOKIE);
         // The App sees the path below `/apps/{name}`, under the authority the caller asked.

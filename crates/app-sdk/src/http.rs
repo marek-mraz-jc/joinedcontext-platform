@@ -108,6 +108,44 @@ impl Response {
         }
     }
 
+    /// An `email` or `ai` error as the caller reads it: a refusal keeps the problem the Portal
+    /// answered (`/service-off` with its `layer`, `/quota` with its `quota` and `resetAt`), so the
+    /// App's page reads it as the SDK's `ServiceRefusedError` (API/06 §3).
+    pub fn from_service(err: crate::services::Error) -> Self {
+        use crate::services::Error;
+        let problem = |status: u16, kind: &str, title: &str, extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "type": format!("https://joinedcontext.com/errors/{kind}"),
+                "status": status,
+                "title": title,
+            });
+            if let (Some(body), serde_json::Value::Object(extra)) = (body.as_object_mut(), extra) {
+                body.extend(extra);
+            }
+            Self::new(
+                status,
+                "application/problem+json",
+                body.to_string().into_bytes(),
+            )
+        };
+        match err {
+            Error::Refused(refusal) if refusal.quota.is_some() => problem(
+                429,
+                "quota",
+                "Quota Used Up",
+                serde_json::json!({ "service": refusal.service, "quota": refusal.quota, "resetAt": refusal.reset_at }),
+            ),
+            Error::Refused(refusal) => problem(
+                403,
+                "service-off",
+                "Service Off",
+                serde_json::json!({ "service": refusal.service, "layer": refusal.layer }),
+            ),
+            Error::Rejected(why) => Self::problem(422, "Unprocessable Content", &why),
+            Error::Unavailable(why) => Self::problem(503, "Unavailable", &why),
+        }
+    }
+
     /// A `jc:app/blob` error as the caller reads it.
     pub fn from_blob(err: crate::blob::Error) -> Self {
         use crate::blob::Error;
@@ -334,6 +372,42 @@ mod tests {
 
     fn all(_: &Request, _: &Params) -> Response {
         Response::text(200, "all")
+    }
+
+    #[test]
+    fn a_service_refusal_keeps_the_portals_problem() {
+        use crate::services::{Error, Refusal};
+        let off = Response::from_service(Error::Refused(Refusal {
+            service: "ai".into(),
+            layer: Some("organization".into()),
+            quota: None,
+            reset_at: None,
+        }));
+        assert_eq!(off.status, 403);
+        let body: serde_json::Value = serde_json::from_slice(&off.body).expect("json");
+        assert_eq!(body["type"], "https://joinedcontext.com/errors/service-off");
+        assert_eq!(body["layer"], "organization");
+        assert_eq!(body["service"], "ai");
+
+        let spent = Response::from_service(Error::Refused(Refusal {
+            service: "email".into(),
+            layer: None,
+            quota: Some("emailsPerDay".into()),
+            reset_at: Some("2026-10-12T00:00:00Z".into()),
+        }));
+        assert_eq!(spent.status, 429);
+        let body: serde_json::Value = serde_json::from_slice(&spent.body).expect("json");
+        assert_eq!(body["type"], "https://joinedcontext.com/errors/quota");
+        assert_eq!(body["resetAt"], "2026-10-12T00:00:00Z");
+
+        assert_eq!(
+            Response::from_service(Error::Rejected("no".into())).status,
+            422
+        );
+        assert_eq!(
+            Response::from_service(Error::Unavailable("down".into())).status,
+            503
+        );
     }
 
     #[test]

@@ -129,8 +129,14 @@ async fn the_example_keeps_notes_and_files_of_its_own() {
         // The bucket's shard prefix is the database's shard, as one shard's pods hold both.
         blob: Some(S3Blob::new(store.bucket("s1"), &store.shard("s1"), 1 << 20)),
     };
-    let host =
-        Host::new(Limits::default(), Source::Dir(dir), Arc::new(stores), None).expect("host");
+    let host = Host::new(
+        Limits::default(),
+        Source::Dir(dir),
+        Arc::new(stores),
+        None,
+        None,
+    )
+    .expect("host");
     let example = Example { host };
     let first = Placed {
         digest: digest.clone(),

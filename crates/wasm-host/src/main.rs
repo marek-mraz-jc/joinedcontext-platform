@@ -6,6 +6,7 @@
 //! | `JC_WASM_PLACEMENTS` | the placement file the reconciler renders for this shard |
 //! | `JC_WASM_LISTEN` | the address to serve on, default `0.0.0.0:8080` |
 //! | `JC_GATEWAY_URL` | the one origin an App may call, `https://host[:port]` |
+//! | `JC_WASM_PORTAL_URL` | the Portal inside the cluster, which the host asks for a request's caller and an App's `email` and `ai` (T-3622); unset, `identity` answers nobody and both services `unavailable` |
 //! | `JC_WASM_S3_ENDPOINT`, `JC_WASM_S3_BUCKET` | the bucket of `components/sha256-<64 hex>.wasm` and `apps/<shard>/<id>/` |
 //! | `JC_WASM_S3_KEY_FILE`, `JC_WASM_S3_SECRET_FILE` | the shard's key, as mounted files, never variables |
 //! | `JC_WASM_S3_PUBLIC_ENDPOINT` | the store's address for a browser, which presigned URLs name |
@@ -143,8 +144,14 @@ async fn run() -> Result<(), String> {
     } else {
         Arc::new(Stores { sql, blob })
     };
-    let host = Host::new(limits, source, storage, var("JC_GATEWAY_URL").as_deref())
-        .map_err(|err| format!("{err:#}"))?;
+    let host = Host::new(
+        limits,
+        source,
+        storage,
+        var("JC_GATEWAY_URL").as_deref(),
+        var("JC_WASM_PORTAL_URL").as_deref(),
+    )
+    .map_err(|err| format!("{err:#}"))?;
     let tokens = var("JC_WASM_JOB_TOKEN_URL")
         .map(JobTokens::new)
         .transpose()?;

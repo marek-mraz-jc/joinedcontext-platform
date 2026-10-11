@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The guest side of a server WASM App on jc-wasm-host: wasi:http in and out, jc:app sql and blob (ADR-N-044)"
+description = "The guest side of a server WASM App on jc-wasm-host: wasi:http in and out, jc:app sql, blob, identity, email and ai (ADR-N-044)"
 
 [dependencies]
 wasip2 = "=2.0.1"
