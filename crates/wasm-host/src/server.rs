@@ -1,6 +1,9 @@
-//! The shard's HTTP side (ADR-N-044 §2.1): `/apps/{name}/api/*` to the App placed under that name,
-//! `/healthz`, `/metrics`, `/jobs` (the last run of each job, AP-154). The edge has checked the login already; the host passes the caller's
-//! token to the gateway on the App's behalf and never to the App.
+//! The shard's HTTP side (ADR-N-044 §2.1), two listeners. The apps port answers
+//! `/apps/{name}/api/*` to the App placed under that name and `/healthz`; the edge reaches it, has
+//! checked the login already, and the host passes the caller's token to the gateway on the App's
+//! behalf and never to the App. The admin port answers `/healthz`, `/metrics` and `/jobs` (the
+//! last run of each job, AP-154), every App's records, so only the Portal and the scraper reach it
+//! (T-3857): no edge route, and no listener the edge reaches, ever serves them.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -12,6 +15,9 @@ use bytes::Bytes;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpListener;
 
 use crate::host::{capped, Failure, Host};
 use crate::jobs::{records_json, HostRunner, Scheduler};
@@ -64,6 +70,15 @@ fn bearer(headers: &http::HeaderMap) -> Option<String> {
     (!token.is_empty()).then(|| token.to_owned())
 }
 
+/// Which of the shard's listeners a request came in on (T-3857).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Port {
+    /// The Apps' APIs, which the edge routes here.
+    Apps,
+    /// `/metrics` and `/jobs`, for the Portal and the scraper alone.
+    Admin,
+}
+
 impl Shard {
     /// The App a path names: `/apps/{name}/api` or below.
     fn route(&self, path: &str) -> Option<Placed> {
@@ -75,24 +90,64 @@ impl Shard {
         self.apps.read().ok()?.get(name).cloned()
     }
 
+    /// Serves `port` on `listener` until the process ends.
+    pub async fn serve(self: Arc<Self>, listener: TcpListener, port: Port) {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    tracing::warn!(%err, ?port, "accept failed");
+                    continue;
+                }
+            };
+            let shard = self.clone();
+            tokio::spawn(async move {
+                let service = hyper::service::service_fn(move |request| {
+                    let shard = shard.clone();
+                    async move {
+                        Ok::<_, Infallible>(match port {
+                            Port::Apps => shard.handle(request).await,
+                            Port::Admin => shard.handle_admin(request.uri().path()),
+                        })
+                    }
+                });
+                if let Err(err) = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                {
+                    tracing::debug!(%err, "connection ended");
+                }
+            });
+        }
+    }
+
+    /// The admin port: the probe, the counters and the job records, nothing of an App's API.
+    pub fn handle_admin(&self, path: &str) -> http::Response<Body> {
+        match path {
+            "/healthz" => text(200, "text/plain", "ok".into()),
+            "/metrics" => text(
+                200,
+                "text/plain; version=0.0.4",
+                self.metrics.render(&self.id, self.host.cache_stats()),
+            ),
+            "/jobs" => text(
+                200,
+                "application/json",
+                records_json(&self.jobs.records()).to_string(),
+            ),
+            _ => problem(
+                404,
+                "Not Found",
+                "The admin port serves /metrics and /jobs.",
+            ),
+        }
+    }
+
+    /// The apps port: `/healthz` and the placed Apps' APIs.
     pub async fn handle(&self, request: http::Request<Incoming>) -> http::Response<Body> {
         let path = request.uri().path().to_owned();
         if path == "/healthz" {
             return text(200, "text/plain", "ok".into());
-        }
-        if path == "/metrics" {
-            return text(
-                200,
-                "text/plain; version=0.0.4",
-                self.metrics.render(&self.id, self.host.cache_stats()),
-            );
-        }
-        if path == "/jobs" {
-            return text(
-                200,
-                "application/json",
-                records_json(&self.jobs.records()).to_string(),
-            );
         }
         let Some(app) = self.route(&path) else {
             return problem(
