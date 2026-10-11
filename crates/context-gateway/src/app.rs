@@ -1450,8 +1450,8 @@ fn served_by_view(
 
 /// Whether the broker holds a view `view` of this Endpoint that decides for `subject` (plan 5.1,
 /// T-3643). What no view can serve yet keeps the gateway's own answer, each until its gap
-/// closes: a view of another model (G18), a projection with `temporalQ` (G6), a slug no view id
-/// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
+/// closes: a projection with `temporalQ` (G6), a slug no view id can hold (the writer refuses
+/// it). A caller under a data-space agreement stays too: the
 /// engine has no agreements to decide on yet, and would judge the connector's own account
 /// instead (map K38).
 pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
@@ -1460,8 +1460,7 @@ pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bo
         .as_ref()
         .and_then(|projection| projection.filter.as_ref())
         .is_some_and(|filter| filter.temporal_q.is_some());
-    endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
+    subject.agreement.is_none()
         && !temporal
         && (1..=MAX_VIEW_ID).contains(&view.len())
 }
@@ -1541,16 +1540,23 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let mut divided: Option<(Vec<String>, Refused)> = None;
-    let units_filled = match view_payload(
-        gateway,
-        (&endpoint, &subject),
-        (&path, &params, operation),
-        &mut parts.headers,
-        &mut sent,
-        &mut divided,
-    )
-    .await
-    {
+    // A view of another model takes no write (the broker's 405, `mapping::READS`), so no body is
+    // judged against the source model first (T-3799).
+    let mapped_write = endpoint.view_mapping.is_some() && operation.is_write();
+    let payload = if mapped_write {
+        Ok(Vec::new())
+    } else {
+        view_payload(
+            gateway,
+            (&endpoint, &subject),
+            (&path, &params, operation),
+            &mut parts.headers,
+            &mut sent,
+            &mut divided,
+        )
+        .await
+    };
+    let units_filled = match payload {
         Ok(filled) => filled,
         Err(answer) => return *answer,
     };
