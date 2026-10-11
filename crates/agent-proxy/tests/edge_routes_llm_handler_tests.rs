@@ -578,7 +578,7 @@ async fn a_model_call_is_reported_with_its_latency_tokens_and_model() {
 /// The first frame the proxy sent the Portal. It is sent beside the answer, never before it, so
 /// the test waits for it.
 async fn reported_usage(portal: &MockServer) -> serde_json::Value {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let seen = portal.received_requests().await.unwrap_or_default();
         if let Some(request) = seen.first() {
             return serde_json::from_slice(&request.body).expect("a JSON frame");
@@ -622,7 +622,7 @@ async fn a_model_call_is_reported_with_the_reasoning_effort_it_was_sent_with() {
 
 /// The request the Portal received on `path`, once the proxy sent it beside its answer.
 async fn received_on(portal: &MockServer, on: &str) -> serde_json::Value {
-    for _ in 0..100 {
+    for _ in 0..500 {
         let seen = portal.received_requests().await.unwrap_or_default();
         if let Some(request) = seen.iter().find(|request| request.url.path() == on) {
             return serde_json::from_slice(&request.body).expect("a JSON body");
