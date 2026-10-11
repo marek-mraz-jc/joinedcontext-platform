@@ -281,6 +281,44 @@ async fn what_no_view_serves_stays_on_the_gateway() {
     );
 }
 
+/// T-3801 (G6, T-3632): an Endpoint whose projection has a `temporalQ` is served by its view,
+/// whose permits carry the window (T-3812), a temporal read as sent and nothing clamped here.
+#[tokio::test]
+async fn a_projection_with_a_temporal_q_is_served_by_its_view() {
+    let (upstream, hops) = broker(StatusCode::OK, &[], json!([])).await;
+    let projection = serde_json::from_value(json!({
+        "contextSpaceRef": SPACE, "dataModelRef": {"name": "air", "version": "1.0.0"},
+        "classes": [{"name": "AirQualityObserved"}],
+        "filter": {"temporalQ": "timerel=after;timeAt=P-1D"}
+    }))
+    .expect("a projection");
+    let windowed = Endpoint {
+        projection: Some(Arc::new(projection)),
+        ..endpoint()
+    };
+    let raw = "type=AirQualityObserved&timerel=after&timeAt=2020-01-01T00:00:00Z";
+    let (status, _, _) = call(
+        app(upstream, windowed),
+        get(&format!(
+            "/api/endpoint/{SLUG}/ngsi-ld/v1/temporal/entities?{raw}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let hops = hops.lock().expect("the hop log").clone();
+    let sent: Vec<(&str, Option<&str>)> = hops
+        .iter()
+        .map(|hop| (hop.path.as_str(), hop.query.as_deref()))
+        .collect();
+    assert_eq!(
+        sent,
+        [(
+            format!("/x/views/{SLUG}/ngsi-ld/v1/temporal/entities").as_str(),
+            Some(raw)
+        )]
+    );
+}
+
 /// R20, T-2260: what the broker prints when it fails stays with the gateway.
 #[tokio::test]
 async fn a_broker_failure_behind_the_view_is_the_gateways_own_answer() {

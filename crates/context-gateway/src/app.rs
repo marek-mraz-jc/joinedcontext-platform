@@ -1427,8 +1427,7 @@ fn reserve_create(
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
 /// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a view of
-/// another model (G18), a projection with `temporalQ` (G6), a slug no view id can hold (the
-/// writer refuses it), and a subscription, whose delivery the gateway still seals and routes
+/// another model (G18), a slug no view id can hold (the writer refuses it), and a subscription, whose delivery the gateway still seals and routes
 /// back (plan 5.5, T-3653). A caller under a data-space agreement stays too: the engine has no
 /// agreements to decide on yet, and would judge the connector's own account instead (map K38).
 /// So does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
@@ -1438,11 +1437,6 @@ fn served_by_view(
     subject: &Subject,
     (view, operation, headers): (&str, Operation, &HeaderMap),
 ) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
     let subscription = matches!(
         operation,
         Operation::CreateSubscription
@@ -1455,7 +1449,6 @@ fn served_by_view(
     endpoint.view_mapping.is_none()
         && subject.agreement.is_none()
         && !conditional
-        && !temporal
         && !subscription
         && (1..=MAX_VIEW_ID).contains(&view.len())
 }
