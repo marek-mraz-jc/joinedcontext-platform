@@ -399,6 +399,11 @@ fn the_two_directions_agree_on_every_derivation() {
         let inverted = mapping
             .invert_q(&format!("{target}=={produced}"))
             .expect("the filter inverts");
+        // the rewritten query is rendered from its parse, which quotes every string
+        let stored_value = match stored_value.parse::<f64>() {
+            Ok(_) => stored_value.to_owned(),
+            Err(_) => format!("\"{stored_value}\""),
+        };
         assert_eq!(inverted, format!("{source}=={stored_value}"));
     }
 }
@@ -668,4 +673,183 @@ fn a_computed_slot_is_still_refused_in_a_filter() {
     )]));
     assert!(mapping.invert_q("label==\"x!\"").is_err());
     assert!(mapping.invert_geo_property("label").is_err());
+}
+
+// --- the q rewrite on the parsed query (T-3672) -------------------------------------------
+
+fn slots(slots: Value) -> ViewMapping {
+    ViewMapping::parse(&json!({
+        "version": 2, "sourceClass": "S", "targetClass": "T", "slots": slots
+    }))
+    .expect("the IR parses")
+}
+
+/// A `;`, `|` or parenthesis inside a quoted value is part of the value, not of the query.
+#[test]
+fn a_separator_inside_a_quoted_value_stays_in_the_value() {
+    let mapping = slots(json!([
+        { "target": "name", "source": "nazov", "kind": "rename", "filterable": true }
+    ]));
+    assert_eq!(
+        mapping.invert_q(r#"name=="a;b|(c)""#).expect("inverts"),
+        r#"nazov=="a;b|(c)""#
+    );
+}
+
+/// `target = source * factor + offset` with a negative factor reverses the order, so `>` on
+/// the target is `<` on the source, and a range's ends trade places.
+#[test]
+fn a_negative_factor_turns_the_comparison_around() {
+    let mapping = slots(json!([{
+        "target": "depth", "source": "height", "kind": "unitConversion",
+        "factor": -1.0, "offset": 0.0, "filterable": true
+    }]));
+    for (asked, sent) in [
+        ("depth>5", "height<-5"),
+        ("depth<=5", "height>=-5"),
+        ("depth==1..3", "height==-3..-1"),
+        ("depth==2", "height==-2"),
+    ] {
+        assert_eq!(mapping.invert_q(asked).expect("inverts"), sent, "{asked}");
+    }
+}
+
+/// A table that maps several source values to one target value is inverted to all of them,
+/// and a target value no source value maps to matches nothing rather than a source value
+/// that happens to be spelled the same.
+#[test]
+fn a_many_to_one_table_inverts_to_every_source_value() {
+    let mapping = slots(json!([{
+        "target": "level", "source": "uroven", "kind": "valueMappings",
+        "forward": { "a": "high", "b": "high", "c": "low", "high": "low", "7": "seven" },
+        "inverse": { "high": "a", "low": "c" },
+        "filterable": true
+    }]));
+    for (asked, sent) in [
+        ("level==high", r#"uroven=="a","b""#),
+        ("level!=high", r#"uroven!="a","b""#),
+        ("level==low", r#"uroven=="c","high""#),
+        ("level==high,low", r#"uroven=="a","b","c","high""#),
+        ("level==none", "uroven;!uroven"),
+        ("level!=none", "uroven"),
+        // a numeric source value goes back as the number the broker stores
+        ("level==seven", "uroven==7"),
+    ] {
+        assert_eq!(mapping.invert_q(asked).expect("inverts"), sent, "{asked}");
+    }
+    // a table has no order, so an ordering comparison has no inverse
+    assert!(mapping.invert_q("level>high").is_err());
+}
+
+/// A `q` that is not one is refused here, with the reason, instead of reaching the broker in
+/// pieces.
+#[test]
+fn an_unparsable_q_is_a_bad_request() {
+    let mapping = slots(json!([
+        { "target": "name", "source": "nazov", "kind": "rename", "filterable": true }
+    ]));
+    assert!(mapping.invert_q("name==").is_err());
+    assert!(
+        mapping.invert_q("name.sub==1").is_err(),
+        "a path below the attribute is not mapped"
+    );
+}
+
+/// The value of one parameter of a forwarded query, decoded.
+fn sent(hops: &[Hop], name: &str) -> Option<String> {
+    let hop = hops.last()?;
+    hop.query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| context_gateway::query::decode(value))
+    })
+}
+
+/// `type` is translated per type, not replaced: the view serves its target class only, so a
+/// selection of another type selects nothing the broker stores, never the source class.
+#[tokio::test]
+async fn a_type_the_view_does_not_serve_is_not_asked_as_the_source_class() {
+    let (_, _, hops, _) =
+        through(Method::GET, "/ngsi-ld/v1/entities?type=AirQualityObserved").await;
+    assert_eq!(sent(&hops, "type").as_deref(), Some("MestskySenzor"));
+    let (_, _, hops, _) = through(Method::GET, "/ngsi-ld/v1/entities?type=Device").await;
+    let asked = sent(&hops, "type").unwrap_or_default();
+    assert!(
+        !asked.is_empty() && !asked.contains("MestskySenzor"),
+        "{asked}"
+    );
+    let (_, _, hops, _) = through(
+        Method::GET,
+        "/ngsi-ld/v1/entities?type=Device,AirQualityObserved",
+    )
+    .await;
+    let asked = sent(&hops, "type").unwrap_or_default();
+    assert!(
+        asked.contains("MestskySenzor") && !asked.contains("Device,"),
+        "{asked}"
+    );
+}
+
+/// `pick` and `omit` name target members, which the broker does not hold: they are applied
+/// to the translated answer, and never reach the broker.
+#[tokio::test]
+async fn pick_and_omit_apply_to_the_target_model() {
+    let (status, body, hops, _) = through(
+        Method::GET,
+        "/ngsi-ld/v1/entities?type=AirQualityObserved&pick=id,pm25,dataProvider",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut members: Vec<&String> = body[0].as_object().expect("an entity").keys().collect();
+    members.sort();
+    assert_eq!(members, ["dataProvider", "id", "pm25"], "{body}");
+    assert_eq!(sent(&hops, "pick"), None);
+
+    let (_, body, hops, _) = through(
+        Method::GET,
+        "/ngsi-ld/v1/entities?type=AirQualityObserved&omit=temperature,label",
+    )
+    .await;
+    let entity = body[0].as_object().expect("an entity");
+    assert!(
+        !entity.contains_key("temperature") && !entity.contains_key("label"),
+        "{body}"
+    );
+    assert!(entity.contains_key("pm25"), "{body}");
+    assert_eq!(sent(&hops, "omit"), None);
+}
+
+/// The vocabulary answers (5.7.5 to 5.7.10) come back in the target model too: the source
+/// class is the target class, an attribute the mapping derives carries its target name, and
+/// one it does not serve is left out.
+#[test]
+fn a_discovery_answer_is_translated() {
+    let mapping = mapping();
+    let mut types = json!({
+        "id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList",
+        "typeList": ["MestskySenzor", "Other"]
+    });
+    mapping.translate(&mut types);
+    assert_eq!(types["typeList"], json!(["AirQualityObserved"]));
+
+    let mut attributes = json!({
+        "id": "urn:ngsi-ld:AttributeList:1", "type": "AttributeList",
+        "attributeList": ["pm2p5", "teplota", "kalibracia"]
+    });
+    mapping.translate(&mut attributes);
+    assert_eq!(
+        attributes["attributeList"],
+        json!(["pm25", "temperature", "dataProvider"])
+    );
+
+    let mut detailed = json!([{
+        "id": "MestskySenzor", "type": "EntityType", "typeName": "MestskySenzor",
+        "attributeNames": ["pm2p5", "spolahlivost", "nazov"]
+    }]);
+    mapping.translate(&mut detailed);
+    assert_eq!(detailed[0]["typeName"], json!("AirQualityObserved"));
+    assert_eq!(detailed[0]["type"], json!("EntityType"));
+    assert_eq!(
+        detailed[0]["attributeNames"],
+        json!(["pm25", "reliability", "dataProvider", "label"])
+    );
 }
