@@ -1427,16 +1427,13 @@ fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a view of
-/// another model (G18), a projection with `temporalQ` (G6), a slug no view id can hold (the
-/// writer refuses it), and a subscription, whose delivery the gateway still seals and routes
-/// back (plan 5.5, T-3653). A caller under a data-space agreement stays too: the engine has no
-/// agreements to decide on yet, and would judge the connector's own account instead (map K38).
-/// So does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
+/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a projection
+/// with `temporalQ` (G6), a slug no view id can hold (the writer refuses it), and a
+/// subscription, whose delivery the gateway still seals and routes back (plan 5.5, T-3653). So
+/// does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
 /// compare and conditional write is the only lost-update guard there is (R45, GW16).
 fn served_by_view(
     endpoint: &Endpoint,
-    subject: &Subject,
     (view, operation, headers): (&str, Operation, &HeaderMap),
 ) -> bool {
     let temporal = endpoint
@@ -1453,12 +1450,7 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
-        && !conditional
-        && !temporal
-        && !subscription
-        && (1..=MAX_VIEW_ID).contains(&view.len())
+    !conditional && !temporal && !subscription && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
@@ -1495,7 +1487,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !served_by_view(&endpoint, &subject, (&view, operation, request.headers())) {
+    if !served_by_view(&endpoint, (&view, operation, request.headers())) {
         return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
     }
     if operation == Operation::QueryEntity {
@@ -1526,16 +1518,23 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let mut divided: Option<(Vec<String>, Refused)> = None;
-    let units_filled = match view_payload(
-        gateway,
-        (&endpoint, &subject),
-        (&path, &params, operation),
-        &mut parts.headers,
-        &mut sent,
-        &mut divided,
-    )
-    .await
-    {
+    // A view of another model takes no write (the broker's 405, `mapping::READS`), so no body is
+    // judged against the source model first (T-3799).
+    let mapped_write = endpoint.view_mapping.is_some() && operation.is_write();
+    let payload = if mapped_write {
+        Ok(Vec::new())
+    } else {
+        view_payload(
+            gateway,
+            (&endpoint, &subject),
+            (&path, &params, operation),
+            &mut parts.headers,
+            &mut sent,
+            &mut divided,
+        )
+        .await
+    };
+    let units_filled = match payload {
         Ok(filled) => filled,
         Err(answer) => return *answer,
     };
@@ -3839,7 +3838,8 @@ async fn mcp_message(
 /// broker has no tool or resource for, `describe_access`, `describe_schema` and their
 /// `access://` and `schema://` documents, added to the broker's listings and answered from the
 /// documents the access and schema surfaces serve, and what no view serves yet (a view
-/// mapping, an agreement's caller, a federating space) stays on its own façade.
+/// mapping, a federating space) stays on its own façade. A caller under a data space
+/// agreement is the view's too: the hop names its DID alone (map K38, T-3818).
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
@@ -3954,7 +3954,7 @@ async fn mcp_answer(
 }
 
 /// Whether the broker's MCP surface of `view` answers this Endpoint's caller: not what no view
-/// serves yet, a view mapping, an agreement's caller, or a space that federates registrations,
+/// serves yet, a view mapping, or a space that federates registrations,
 /// which says so in its instructions, tool descriptions and results (EP-71) while the broker's
 /// view does not know the platform's members.
 fn view_serves(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
@@ -3962,7 +3962,6 @@ fn view_serves(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject, view: 
         .members_of(&endpoint.project, &endpoint.space)
         .is_empty()
         && endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
         && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
