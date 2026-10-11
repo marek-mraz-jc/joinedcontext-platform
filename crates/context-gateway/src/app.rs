@@ -3121,6 +3121,9 @@ fn audiences_of(slug: &str, base_path: &str, public_url: Option<&str>) -> Vec<St
     audiences
 }
 
+/// What every App job's client id carries, `{project}-appjob-{app}` (AP-159).
+const JOB_CLIENT_MARK: &str = "-appjob-";
+
 /// Turns verified claims into the subject the PDP evaluates.
 fn subject_of(
     claims: &Claims,
@@ -3161,6 +3164,16 @@ fn subject_of(
             .preferred_username
             .as_deref()
             .is_some_and(|user| !user.eq_ignore_ascii_case(&format!("service-account-{azp}")));
+        // An App job's client (AP-159) is its derived account or nobody: a token of one the
+        // table does not hold (its App gone, or a colliding client id) is never decided as the
+        // person or the `service-account-…` user it names (T-3693).
+        if account.is_none() && azp.contains(JOB_CLIENT_MARK) {
+            tracing::warn!(
+                azp,
+                "a token from an App job's client no App of the repository runs"
+            );
+            return Err(Box::new(ProblemDetails::forbidden()));
+        }
         match account {
             Some(account) if for_a_person && account.delegates => {
                 via = Some(account.name.clone());

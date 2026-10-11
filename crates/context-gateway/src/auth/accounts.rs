@@ -65,7 +65,8 @@ impl Account {
 #[derive(Debug, Clone, Default)]
 pub struct ServiceAccounts {
     by_client_id: HashMap<String, Account>,
-    /// The slugs each App's client `app-{name}` is admitted on (AP-113).
+    /// The slugs each App's client `app-{name}` is admitted on (AP-113), and each App job's
+    /// client `{project}-appjob-{name}` (AP-159).
     apps: HashMap<String, BTreeSet<String>>,
 }
 
@@ -205,16 +206,42 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
             },
         );
     }
-    ServiceAccounts {
-        by_client_id,
-        apps: apps_of(repo),
+    let (apps, jobs) = apps_of(repo);
+    // Every wasm App's job principal (AP-159, T-3693): derived, never a file, and the azp of its
+    // federated client `{project}-appjob-{app}`. It holds no role of its own: the App's Endpoint,
+    // the only one it is admitted on, gives it the caller role, so the App's own Policies. A
+    // collision with another client id resolves to nobody, as a Pipeline's does.
+    for (project, app) in jobs {
+        let name = jc_core::kinds::app_identity::account_name(&app);
+        let client = client_id(&project, &name);
+        if ambiguous.contains(&client) || by_client_id.remove(&client).is_some() {
+            tracing::warn!(client = %client, "an App's job principal and another derive one client id; it resolves to nobody");
+            ambiguous.insert(client);
+            continue;
+        }
+        by_client_id.insert(
+            client,
+            Account {
+                name,
+                project,
+                roles: Vec::new(),
+                delegates: false,
+            },
+        );
     }
+    ServiceAccounts { by_client_id, apps }
 }
 
 /// The slugs each App's client is admitted on, by the one rule the Portal gives its client's
 /// audiences with (jc-core `served_endpoints`, AP-113). Slugs are the Endpoints' own, not a
 /// preview's, so a token of an App reaches the Endpoints of `main` alone.
-fn apps_of(repo: &Repository) -> HashMap<String, BTreeSet<String>> {
+///
+/// A wasm App with jobs also gets its job client `{project}-appjob-{app}` admitted on the App's
+/// own generated Endpoint alone (AP-159), or on none while that Endpoint does not exist; the
+/// second value names those Apps, `(project, app)`.
+type AppTables = (HashMap<String, BTreeSet<String>>, Vec<(String, String)>);
+
+fn apps_of(repo: &Repository) -> AppTables {
     enum Target {
         Named(String, String),
         Slug(String),
@@ -292,13 +319,36 @@ fn apps_of(repo: &Repository) -> HashMap<String, BTreeSet<String>> {
             })
         })
         .collect();
-    apps.into_iter()
-        .map(|(project, name, spec)| {
-            let slugs = served_endpoints(&project, &name, &spec, &endpoints, &references)
-                .into_iter()
+    let mut admitted = HashMap::new();
+    let mut jobs = Vec::new();
+    for (project, name, spec) in apps {
+        let slugs = served_endpoints(&project, &name, &spec, &endpoints, &references)
+            .into_iter()
+            .map(|endpoint| endpoint.slug.clone())
+            .collect();
+        admitted.insert(format!("{APP_CLIENT_PREFIX}{name}"), slugs);
+        let runs_jobs = spec.class == jc_core::kinds::app::AppClass::Wasm
+            && spec
+                .server
+                .as_ref()
+                .is_some_and(|server| !server.jobs.is_empty());
+        if runs_jobs {
+            let own_name = format!("{APP_CLIENT_PREFIX}{name}");
+            let own: BTreeSet<String> = endpoints
+                .iter()
+                .filter(|endpoint| {
+                    endpoint.project == project
+                        && endpoint.name == own_name
+                        && endpoint.generated_by.as_deref()
+                            == Some(jc_core::kinds::app::APP_ENDPOINT_GENERATOR)
+                        && !endpoint.slug.is_empty()
+                })
                 .map(|endpoint| endpoint.slug.clone())
                 .collect();
-            (format!("{APP_CLIENT_PREFIX}{name}"), slugs)
-        })
-        .collect()
+            let account = jc_core::kinds::app_identity::account_name(&name);
+            admitted.insert(client_id(&project, &account), own);
+            jobs.push((project, name));
+        }
+    }
+    (admitted, jobs)
 }
