@@ -98,6 +98,11 @@ fn served(representation: Representation) -> Served {
     }
 }
 
+/// The path of a representation under the Endpoint's root, as the record lists it.
+pub(crate) fn path_of(representation: Representation) -> &'static str {
+    served(representation).path
+}
+
 /// The formalism a schema artifact is written in, for `dcterms:conformsTo` (EP-46, EP-68).
 ///
 /// A file name rather than the `Artifact` enum: the descriptors arrive as the JSON the

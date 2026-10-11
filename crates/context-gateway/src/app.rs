@@ -429,6 +429,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
         // One connector over every Endpoint the token reaches (EP-87, ADR-N-025).
         .route(HUB_PATH, post(mcp::hub::message))
+        .route("/api/endpoints", get(mcp::hub::endpoints))
         .route(
             "/api/mcp/.well-known/oauth-protected-resource",
             get(mcp::hub::protected_resource),
