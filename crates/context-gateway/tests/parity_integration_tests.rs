@@ -3,10 +3,11 @@
 //!
 //! The point of these tests is not that each representation works. It is that they cannot
 //! disagree: an attribute a policy withholds, and an attribute the endpoint hides, are
-//! absent from GeoJSON, CSV, OGC Features, SensorThings and the MCP tool result alike, for
-//! both demo spaces. A translator added later that reads the broker instead of the projection
-//! would fail here rather than in a leak. NGSI-LD through the slug is the broker's view since
-//! T-3643, and its narrowing is proved there (Antares `views_read.rs`, `policy_filter_by_type.rs`).
+//! absent from GeoJSON, CSV, OGC Features and SensorThings alike, for both demo spaces. A
+//! translator added later that reads the broker instead of the projection would fail here
+//! rather than in a leak. NGSI-LD and MCP through the slug are the broker's view since T-3643
+//! and T-3647, and their narrowing is proved there (Antares `views_read.rs`,
+//! `policy_filter_by_type.rs`, `mcp_discovery.rs`) and end to end in `antares_integration_tests`.
 
 mod common;
 
@@ -163,38 +164,6 @@ async fn get(app: Router, uri: &str) -> (StatusCode, Vec<u8>) {
     (status, bytes.to_vec())
 }
 
-async fn post(app: Router, uri: &str, body: Value) -> Value {
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .expect("a request"),
-        )
-        .await
-        .expect("the gateway answers");
-    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-        .await
-        .expect("a body");
-    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-}
-
-/// The attribute names of one NGSI-LD entity, without the structure every entity carries.
-fn attributes_of(entity: &Value) -> BTreeSet<String> {
-    entity
-        .as_object()
-        .map(|members| {
-            members
-                .keys()
-                .filter(|name| !matches!(name.as_str(), "id" | "type" | "@context" | "scope"))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// The attribute names a CSV header describes: one column per leaf, so the stems are the
 /// attributes and the rest is the flattening (EP-08).
 fn attributes_of_csv(csv: &str) -> BTreeSet<String> {
@@ -302,30 +271,6 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
             observed.insert("location".to_owned());
         }
         assert_eq!(observed, expected, "SensorThings shows what GeoJSON shows");
-
-        // 6. MCP: the tool result is the projected entity, not a second read.
-        let answer = post(
-            app(&broker.url),
-            &format!("/api/endpoint/{slug}/mcp"),
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "query_entities",
-                    "arguments": { "type": entity_type },
-                },
-            }),
-        )
-        .await;
-        // The structured half of a result is an object naming what it holds (AG-08, T-0848),
-        // so the entities are under the key the tool's output schema declares.
-        let structured = &answer["result"]["structuredContent"]["entities"][0];
-        assert_eq!(
-            attributes_of(structured),
-            expected,
-            "an agent sees exactly what a browser sees"
-        );
     }
 }
 
@@ -355,22 +300,6 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
             );
         }
 
-        let answer = post(
-            app(&broker.url),
-            &format!("/api/endpoint/{slug}/mcp"),
-            json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": { "name": "query_entities", "arguments": { "type": entity_type } },
-            }),
-        )
-        .await;
-        assert!(
-            !answer.to_string().contains(hidden),
-            "{hidden} must not reach an agent either"
-        );
-
         // The broker was asked for the whole entity: the narrowing is the gateway's, and
         // that is exactly why it has to hold in every encoding.
         assert!(
@@ -378,36 +307,4 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
             "the entity came from the broker, not from a fixture the gateway kept"
         );
     }
-}
-
-/// R20, EP-06: a type no grant names is empty everywhere, and never an error that says
-/// the type exists.
-#[tokio::test]
-async fn a_type_no_grant_names_answers_the_same_nothing_everywhere() {
-    let broker = common::BrokerStub::start(vec![json!([station()])]).await;
-
-    let answer = post(
-        app(&broker.url),
-        &format!("/api/endpoint/{AIR_SLUG}/mcp"),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "query_entities",
-                "arguments": { "type": "WaterQualityObserved" },
-            },
-        }),
-    )
-    .await;
-    assert_eq!(
-        answer["result"]["structuredContent"]["entities"],
-        json!([]),
-        "an agent sees the same nothing, from the same decision"
-    );
-    assert!(
-        broker.hops().is_empty(),
-        "T-0381: an empty intersection must not be forwarded as no filter at all, which \
-         would ask the broker for every type in the tenant"
-    );
 }

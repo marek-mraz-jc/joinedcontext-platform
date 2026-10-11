@@ -108,11 +108,11 @@ fn space(
     }
 }
 
-fn app() -> axum::Router {
+async fn app() -> axum::Router {
     let realm = common::Realm::new();
     router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(common::mcp_broker(json!([])).await),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
@@ -151,7 +151,11 @@ fn app() -> axum::Router {
 }
 
 async fn call(request: Request<Body>) -> (StatusCode, String, String) {
-    let response = app().oneshot(request).await.expect("the gateway answers");
+    let response = app()
+        .await
+        .oneshot(request)
+        .await
+        .expect("the gateway answers");
     let status = response.status();
     let challenge = response
         .headers()
@@ -407,6 +411,7 @@ async fn the_refusal_names_nothing_of_the_deployment() {
 async fn nothing_but_post_reaches_the_space_instance() {
     for method in ["GET", "PUT", "PATCH", "DELETE"] {
         let response = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method(method)
