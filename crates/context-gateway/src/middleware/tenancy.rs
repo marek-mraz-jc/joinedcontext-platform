@@ -34,9 +34,9 @@ pub const FORGEABLE: &[&str] = &[
 
 /// The user the gateway verified, as the broker's `joinedcontext` engine reads it (T-3641).
 pub const SUBJECT: HeaderName = HeaderName::from_static("x-jc-subject");
-/// The groups of the verified caller, comma separated.
+/// The groups of the verified caller, each percent-encoded, comma separated.
 pub const GROUPS: HeaderName = HeaderName::from_static("x-jc-groups");
-/// The roles of the verified caller, comma separated; `public` for an anonymous one.
+/// The roles of the verified caller, each percent-encoded, comma separated; `public` for an anonymous one.
 pub const ROLES: HeaderName = HeaderName::from_static("x-jc-roles");
 /// The service account of the verified caller.
 pub const CLIENT: HeaderName = HeaderName::from_static("x-jc-client");
@@ -71,9 +71,9 @@ pub fn pin_tenant(request: &mut Request, space: &str) -> Result<(), InvalidHeade
 ///
 /// The broker is the audience of neither the caller's token nor their cookie. It decides on the
 /// `x-jc-*` headers instead, and reads a request carrying none of them as the cluster's own, so
-/// `x-jc-roles` is always set, to `public` at least for an anonymous caller. A list member
-/// holding a comma, or a value that is no legal header, is left out: the broker splits on
-/// commas, and leaving a name out only narrows what the caller holds.
+/// `x-jc-roles` is always set, to `public` at least for an anonymous caller. Every value and
+/// list member is percent-encoded (T-3770), so a name with a diacritic or a comma reaches the
+/// broker whole.
 pub fn pin_caller(
     request: &mut Request,
     space: &str,
@@ -104,9 +104,24 @@ pub fn pin_caller(
 }
 
 fn one(headers: &mut HeaderMap, name: HeaderName, value: Option<&str>) {
-    if let Some(value) = value.and_then(|v| HeaderValue::from_str(v).ok()) {
+    if let Some(value) = value.and_then(|v| HeaderValue::from_str(&encode(v)).ok()) {
         headers.insert(name, value);
     }
+}
+
+/// One name as the broker reads it (Antares `addons/joinedcontext-policy/README.md` section 1):
+/// percent-encoded UTF-8, the RFC 3986 unreserved characters kept, so a diacritic travels and a
+/// comma never splits a list member.
+fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 fn list<'a>(
@@ -117,19 +132,14 @@ fn list<'a>(
 ) {
     let joined = members
         .into_iter()
-        .filter(|member| !member.is_empty() && !member.contains(','))
-        .map(String::as_str)
+        .filter(|member| !member.is_empty())
+        .map(|member| encode(member))
         .collect::<Vec<_>>()
         .join(",");
-    match HeaderValue::from_str(&joined) {
-        Ok(value) if always || !joined.is_empty() => {
+    // Encoded, every member is visible ASCII, which a header always carries.
+    if let Ok(value) = HeaderValue::from_str(&joined) {
+        if always || !joined.is_empty() {
             headers.insert(name, value);
         }
-        // One member no header can carry drops the whole list; the roles still say the
-        // caller is a platform caller, and one holding nothing.
-        Err(_) if always => {
-            headers.insert(name, HeaderValue::from_static(""));
-        }
-        _ => {}
     }
 }
