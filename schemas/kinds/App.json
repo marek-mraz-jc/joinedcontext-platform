@@ -1322,9 +1322,16 @@
           "type": "string"
         },
         {
-          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`).",
+          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104).",
           "enum": [
             "sta"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "OData v4 service of the Endpoint's view (`/odata/v4/`, EP-104).",
+          "enum": [
+            "odata"
           ],
           "type": "string"
         }

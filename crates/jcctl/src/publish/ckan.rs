@@ -456,6 +456,7 @@ const fn distribution(
             "application/json",
             "OGC SensorThings API",
         ),
+        Representation::Odata => ("/odata/v4/", "OData", "application/json", "OData v4"),
     }
 }
 
