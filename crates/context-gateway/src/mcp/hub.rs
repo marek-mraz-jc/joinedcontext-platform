@@ -354,7 +354,7 @@ impl Hub {
         );
 
         let mut forwarded = params.as_object().cloned().unwrap_or_default();
-        if app::member_viewed(&self.gateway, endpoint, subject, name) {
+        if app::member_viewed(endpoint, subject, name) {
             let (tool, arguments) = broker_call(name, arguments);
             forwarded.insert("name".to_owned(), json!(tool));
             forwarded.insert("arguments".to_owned(), Value::Object(arguments));
