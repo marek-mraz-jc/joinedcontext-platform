@@ -152,6 +152,9 @@ struct Seen {
     uri: String,
     tenant: Option<String>,
     authorization: Option<String>,
+    /// The verified caller the gateway forwards (T-3641).
+    subject: Option<String>,
+    roles: Option<String>,
 }
 
 type Log = Arc<Mutex<Vec<Seen>>>;
@@ -188,6 +191,8 @@ async fn record(
         uri: request.uri().to_string(),
         tenant: header(request.headers(), "ngsild-tenant"),
         authorization: header(request.headers(), "authorization"),
+        subject: header(request.headers(), "x-jc-subject"),
+        roles: header(request.headers(), "x-jc-roles"),
     });
     ([("content-type", "application/json")], "[]".to_owned())
 }
@@ -359,9 +364,10 @@ async fn an_argument_that_would_aim_the_tool_at_another_space_is_refused() {
 }
 
 /// EP-26, SP-16: the tool call becomes the NGSI-LD request it stands for, with the tenant
-/// pinned by the gateway and the caller's own token carried to the broker.
+/// pinned by the gateway. The caller's own token is admitted again through the gateway PEP and
+/// ends there: the broker hears the subject it verified, never the token (T-3641).
 #[tokio::test]
-async fn a_tool_call_reaches_the_broker_pinned_to_the_space_and_carrying_the_callers_token() {
+async fn a_tool_call_reaches_the_broker_pinned_to_the_space_as_the_verified_caller() {
     let realm = common::Realm::new();
     let token = steward(&realm);
     let (broker, log) = stub_broker().await;
@@ -398,10 +404,19 @@ async fn a_tool_call_reaches_the_broker_pinned_to_the_space_and_carrying_the_cal
         "the space is pinned by the endpoint, never by the agent (EP-22)"
     );
     assert_eq!(
-        seen[0].authorization.as_deref(),
-        Some(format!("Bearer {token}").as_str()),
-        "the caller's own token, not an identity the façade holds (EP-26)"
+        seen[0].subject.as_deref(),
+        Some("jana"),
+        "the caller the token names, not an identity the façade holds (EP-26)"
     );
+    assert!(
+        seen[0]
+            .roles
+            .as_deref()
+            .is_some_and(|roles| roles.split(',').any(|role| role == "steward")),
+        "{:?}",
+        seen[0].roles
+    );
+    assert_eq!(seen[0].authorization, None, "the token ends at the gateway");
 }
 
 /// An anonymous tool call is served, and nothing invents a token for it.
@@ -427,6 +442,12 @@ async fn an_anonymous_tool_call_carries_no_token_at_all() {
     let seen = log.lock().expect("the log").clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].authorization, None);
+    assert_eq!(seen[0].subject, None);
+    assert_eq!(
+        seen[0].roles.as_deref(),
+        Some("public"),
+        "anonymous, never the cluster's own"
+    );
     assert!(
         seen[0].uri.contains("urn%3Angsi-ld%3AAirQualityObserved"),
         "the URN survives the trip encoded, got {}",
