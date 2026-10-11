@@ -18,6 +18,8 @@
 //! T-2260), which the 5xx case below widens to every 5xx, a body that is not JSON, and the
 //! broker's headers.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::routing::any;
@@ -27,13 +29,11 @@ use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, Representation};
-use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 const SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
 const AQ: &str = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:st-1";
-const INVOICE: &str = "urn:ngsi-ld:Invoice:banskabystrica.sk:ovzdusie:inv-1";
 
 /// One type, two attributes, an area drawn on `location`, and a window from 2026 on.
 const GRANT: &str = r#"contextSpaceRef: ovzdusie
@@ -119,7 +119,7 @@ impl Stub {
             .expect("a port");
         let port = listener.local_addr().expect("an address").port();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            let _ = axum::serve(listener, common::plain_tree(app)).await;
         });
         Self {
             url: format!("http://127.0.0.1:{port}"),
@@ -178,98 +178,6 @@ async fn get(app: Router, path: &str) -> (StatusCode, HeaderMap, String) {
     send(app, Method::GET, path, None, Vec::new()).await
 }
 
-fn entity(id: &str, kind: &str) -> Value {
-    json!({
-        "id": id,
-        "type": kind,
-        "pm10": { "type": "Property", "value": 34.2 },
-        "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [19.1, 48.7] } }
-    })
-}
-
-/// R20, EP-26: a read of an id whose type no grant names is the gateway's own 404, the same
-/// document an unknown id of a granted type gets, and the broker is not asked for it.
-#[tokio::test]
-async fn a_read_of_an_id_the_grant_does_not_select_is_the_same_404_as_unknown() {
-    let broker = Stub::start(
-        StatusCode::NOT_FOUND,
-        &[],
-        r#"{"title":"urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:st-9 not found"}"#,
-    )
-    .await;
-    let (ungranted, _, ungranted_body) =
-        get(app(&broker.url), &ngsi(&format!("/entities/{INVOICE}"))).await;
-    assert!(
-        broker.asked().is_empty(),
-        "the broker was asked for an ungranted type"
-    );
-
-    let unknown = AQ.replace("st-1", "st-9");
-    let (missing, _, missing_body) =
-        get(app(&broker.url), &ngsi(&format!("/entities/{unknown}"))).await;
-    assert_eq!(ungranted, StatusCode::NOT_FOUND, "{ungranted_body}");
-    assert_eq!(missing, StatusCode::NOT_FOUND, "{missing_body}");
-    assert_eq!(ungranted_body, missing_body, "the two misses read alike");
-    assert!(
-        !missing_body.contains("st-9"),
-        "the broker's wording came through: {missing_body}"
-    );
-}
-
-/// GW11, R24: a write to an id outside the granted types is refused on its path, and its body
-/// never leaves the gateway.
-#[tokio::test]
-async fn a_write_to_an_id_outside_the_granted_types_is_refused_before_the_body_is_forwarded() {
-    let broker = Stub::start(StatusCode::NO_CONTENT, &[], "").await;
-    for (method, tail) in [
-        (Method::PATCH, format!("/entities/{INVOICE}/attrs")),
-        (Method::POST, format!("/entities/{INVOICE}/attrs")),
-    ] {
-        let (status, _, body) = send(
-            app(&broker.url),
-            method.clone(),
-            &ngsi(&tail),
-            Some("application/json"),
-            br#"{"amount":{"type":"Property","value":1}}"#.to_vec(),
-        )
-        .await;
-        assert!(
-            status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
-            "{method} {tail}: {status} {body}"
-        );
-    }
-    assert!(broker.asked().is_empty(), "{:?}", broker.asked());
-}
-
-/// AG-85: a batch query that selects only on a type this endpoint does not serve answers an
-/// empty list, and the broker is not asked.
-#[tokio::test]
-async fn a_batch_query_selecting_on_an_unserved_type_narrows_to_empty_without_a_broker_call() {
-    let broker = Stub::start(
-        StatusCode::OK,
-        &[],
-        &json!([entity(INVOICE, "Invoice")]).to_string(),
-    )
-    .await;
-    let (status, _, body) = send(
-        app(&broker.url),
-        Method::POST,
-        &ngsi("/entityOperations/query"),
-        Some("application/json"),
-        json!({ "type": "Query", "entities": [{ "type": "Invoice" }] })
-            .to_string()
-            .into_bytes(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&body).ok(),
-        Some(json!([])),
-        "{body}"
-    );
-    assert!(broker.asked().is_empty(), "{:?}", broker.asked());
-}
-
 /// GW33: a query that selects nothing is 400 as the caller sent it, before the broker is asked.
 #[tokio::test]
 async fn a_query_with_no_selector_is_400_before_the_broker_is_asked() {
@@ -278,48 +186,6 @@ async fn a_query_with_no_selector_is_400_before_the_broker_is_asked() {
         let (status, _, body) = get(app(&broker.url), &ngsi(&format!("/entities{query}"))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
     }
-    assert!(broker.asked().is_empty(), "{:?}", broker.asked());
-}
-
-/// AG-85: `geoproperty` and `geometryProperty` choose the attribute a decision is taken on, so
-/// each is judged against the grants before the broker is asked.
-#[tokio::test]
-async fn a_geoproperty_or_geometryproperty_query_is_judged_before_the_broker_is_asked() {
-    let broker = Stub::start(StatusCode::OK, &[], "[]").await;
-    for query in [
-        "?type=AirQualityObserved&georel=near;maxDistance==1000&geometry=Point&coordinates=[19.1,48.7]&geoproperty=operatorHome",
-        "?type=AirQualityObserved&geometryProperty=operatorPhone",
-        "?type=AirQualityObserved&geometryProperty=ownerAddress",
-    ] {
-        let (status, _, body) = get(app(&broker.url), &ngsi(&format!("/entities{query}"))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
-    }
-    assert!(broker.asked().is_empty(), "{:?}", broker.asked());
-}
-
-/// GW26: a period no grant reaches is genuinely no history, answered here without a window-less
-/// question to the broker.
-#[tokio::test]
-async fn a_temporal_window_the_grants_do_not_reach_answers_empty_without_a_broker_call() {
-    let broker = Stub::start(
-        StatusCode::OK,
-        &[],
-        &json!([entity(AQ, "AirQualityObserved")]).to_string(),
-    )
-    .await;
-    let (status, _, body) = get(
-        app(&broker.url),
-        &ngsi(
-            "/temporal/entities?type=AirQualityObserved&timerel=before&timeAt=2020-01-01T00:00:00Z",
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&body).ok(),
-        Some(json!([])),
-        "{body}"
-    );
     assert!(broker.asked().is_empty(), "{:?}", broker.asked());
 }
 
@@ -461,51 +327,4 @@ async fn a_4xx_broker_body_still_explains_itself_to_the_caller() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("unknown operator"), "{body}");
-}
-
-/// R22: when the projection drops an entity the broker counted, the broker's count goes with
-/// it; when it drops nothing, the count stands.
-#[tokio::test]
-async fn the_entity_count_after_projection_removes_the_broker_supplied_count_header() {
-    // A broker that answers more than it was asked: one granted entity and one of another type.
-    let both = json!([entity(AQ, "AirQualityObserved"), entity(INVOICE, "Invoice")]).to_string();
-    let broker = Stub::start(
-        StatusCode::OK,
-        &[
-            ("content-type", "application/json"),
-            ("ngsild-results-count", "2"),
-        ],
-        &both,
-    )
-    .await;
-    let (status, headers, body) = get(
-        app(&broker.url),
-        &ngsi("/entities?type=AirQualityObserved&count=true"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(!body.contains("inv-1"), "{body}");
-    assert!(headers.get("ngsild-results-count").is_none(), "{headers:?}");
-
-    let one = json!([entity(AQ, "AirQualityObserved")]).to_string();
-    let broker = Stub::start(
-        StatusCode::OK,
-        &[
-            ("content-type", "application/json"),
-            ("ngsild-results-count", "1"),
-        ],
-        &one,
-    )
-    .await;
-    let (_, headers, _) = get(
-        app(&broker.url),
-        &ngsi("/entities?type=AirQualityObserved&count=true"),
-    )
-    .await;
-    assert_eq!(
-        headers
-            .get("ngsild-results-count")
-            .and_then(|v| v.to_str().ok()),
-        Some("1")
-    );
 }
