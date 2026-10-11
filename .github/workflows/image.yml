@@ -135,7 +135,7 @@ jobs:
           for _ in $(seq 30); do curl -sf localhost:8080/healthz >/dev/null && break || sleep 1; done
           jq -Rs '{source: .}' tools/model-tools/tests/fixtures/senzor.linkml.yaml > body.json
           curl -sf -H 'content-type: application/json' -d @body.json localhost:8080/generate > out.json
-          jq -e '.errors == [] and (.jsonSchema | type == "object") and (.context["@context"].Entity | length > 0)' out.json
+          jq -e '.errors == [] and (.jsonSchema | type == "object") and (.context["@context"].Entity | length > 0) and (.brokerSchema.classes.AirQualityObserved.is_a == "Entity")' out.json
           pinned=$(grep -o 'linkml==[0-9.]*' tools/model-tools/pyproject.toml | head -1 | cut -d= -f3)
           jq -e --arg v "$pinned" '.generatorVersion == "linkml-" + $v' out.json
           docker rm -f model-tools
