@@ -1,0 +1,32 @@
+# Rows dev/security.cypher may return, checked by dev/cg-invariants.py (T-3682, after Antares T-3587).
+# name | key | reason. An entry without a reason, or one that matches no row, fails the job.
+# Reviewed like code: a new row says why the invariant does not apply there.
+
+token-request-outside-owners | agent_proxy::delegation::Grants::bind | owner: the token exchange that binds a run to its delegating user (AG-52)
+token-request-outside-owners | agent_proxy::delegation::Grants::token | owner: refresh of the delegated grant (AG-52)
+token-request-outside-owners | token_sidecar::exchange | owner: the federated client-credentials exchange of a workload's ServiceAccount assertion (Architecture/12 section 3)
+token-request-outside-owners | agent_proxy::inject::CredentialManager::get_endpoint_token | the agent proxy's own client credential, audience-bound to one endpoint and injected into the run's call, so the workspace never holds it (AG-52)
+token-request-outside-owners | assistant::chat::model::Model::token | the assistant's own client credential (secretRef), audience the agent proxy and jc-functions; no user token is exchanged
+token-request-outside-owners | context_gateway::previews::WorkloadToken::fetch | the gateway's own workload identity for the Portal's internal listener (PF-46)
+token-request-outside-owners | jcctl::login::login | the operator's own device-authorization login on their machine; a public client, no secret
+token-request-outside-owners | wasm_host::jobs::JobTokens::token | asks the token service (JC_WASM_JOB_TOKEN_URL, token-sidecar's /token) for a job principal's token and carries no secret: the sidecar holds the credential
+
+egress-client | agent_proxy::egress_client | reqwest::async_impl::client::Client::builder | the fetch and packages egress: no redirect, 30 s, a resolver that returns public addresses only (AG-65, T-1304)
+egress-client | agent_proxy::no_redirect_client | reqwest::async_impl::client::Client::builder | credentialed calls to configured upstreams (model, forge, token endpoint): no redirect, so no credential is carried to a host nobody named (AG-52, T-1695)
+egress-client | assistant::crawl::fetch::client_with_tls | reqwest::async_impl::client::Client::builder | the docs crawler: the caller's public-only resolver, no redirect, native roots
+egress-client | assistant::main | reqwest::async_impl::client::Client::builder | the chat's calls to the configured gateway and model: no redirect, 10 s connect, 120 s total
+egress-client | context_gateway::domain_gate::DomainGate::follow | reqwest::async_impl::client::Client::builder | the Portal's internal listener at a deployment-configured URL, every 10 s with the gateway's token; default redirect policy (chyby.md 2026-10-11)
+egress-client | context_gateway::previews::Mirror::follow | reqwest::async_impl::client::Client::builder | the Portal's internal listener at a deployment-configured URL with the gateway's token; default redirect policy (chyby.md 2026-10-11)
+egress-client | context_gateway::previews::WorkloadToken::with_credential | reqwest::async_impl::client::Client::builder | the deployment-configured OIDC token endpoint, 5 s; default redirect policy (chyby.md 2026-10-11)
+egress-client | functions::main | reqwest::async_impl::client::Client::builder | jc-functions' calls to the configured gateway and agent proxy: no redirect
+egress-client | jcctl::commands::publish_ckan::fetch | reqwest::blocking::client::Client::builder | the operator's CLI on their machine, fetching a gateway URL the operator names
+egress-client | jcctl::gateway::Gateway::new | reqwest::blocking::client::Client::builder | the operator's CLI: an http(s) gateway URL checked before use, the reconciler's token
+egress-client | jcctl::login::login | reqwest::blocking::client::Client::builder | the operator's CLI: the issuer the operator names, device-authorization login
+egress-client | jcctl::portal::Portal::new | reqwest::blocking::client::Client::builder | the operator's CLI: an http(s) Portal URL checked before use
+egress-client | jcctl::publish::ckan_http::HttpCkan::new | reqwest::blocking::client::Client::builder | the operator's CLI: the CKAN instance the operator names, its API token from a file
+egress-client | jcctl::secrets::bao_http::HttpBao::new | reqwest::blocking::client::Client::builder | the in-cluster OpenBao address, checked at start; a URL with credentials is refused
+egress-client | jcctl::secrets::bao_http::HttpBao::with_ca_file | reqwest::blocking::client::Client::builder | the same, trusting the cluster's own root (selfsigned-ca)
+egress-client | token_sidecar::run | reqwest::async_impl::client::Client::builder | the Kubernetes TokenRequest API and the configured token endpoint, trusting the cluster CA, 15 s; default redirect policy (chyby.md 2026-10-11)
+egress-client | wasm_host::bucket | reqwest::async_impl::client::Client::builder | the shard's object store at JC_WASM_S3_ENDPOINT, SigV4, no redirect
+egress-client | wasm_host::host::Host::new | reqwest::async_impl::client::Client::builder | an App's calls to the configured gateway and Portal: no redirect, 10 s
+egress-client | wasm_host::jobs::JobTokens::new | reqwest::async_impl::client::Client::builder | the token service at JC_WASM_JOB_TOKEN_URL: no redirect, 15 s

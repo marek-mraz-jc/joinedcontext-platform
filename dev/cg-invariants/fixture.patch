@@ -1,0 +1,33 @@
+diff --git a/crates/context-gateway/src/cg_fixture.rs b/crates/context-gateway/src/cg_fixture.rs
+new file mode 100644
+index 0000000..7afa28d
+--- /dev/null
++++ b/crates/context-gateway/src/cg_fixture.rs
+@@ -0,0 +1,15 @@
++//! dev/cg-invariants/fixture.patch: one violation per statement of dev/security.cypher.
++
++/// A token request outside the owners.
++pub async fn cg_fixture_token(url: &str) -> reqwest::Result<reqwest::Response> {
++    cg_fixture_client()
++        .post(url)
++        .form(&[("grant_type", "client_credentials")])
++        .send()
++        .await
++}
++
++/// A client nobody reviewed.
++pub fn cg_fixture_client() -> reqwest::Client {
++    reqwest::Client::new()
++}
+diff --git a/crates/context-gateway/src/lib.rs b/crates/context-gateway/src/lib.rs
+index 3ad41b0..df9246c 100644
+--- a/crates/context-gateway/src/lib.rs
++++ b/crates/context-gateway/src/lib.rs
+@@ -10,6 +10,7 @@
+ #![forbid(unsafe_code)]
+ #![warn(missing_docs)]
+ 
++pub mod cg_fixture;
+ pub mod app;
+ pub mod auth;
+ pub mod config;

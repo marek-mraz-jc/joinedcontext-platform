@@ -1,0 +1,4 @@
+// token-request-outside-owners: a request to the OIDC token endpoint (every grant names grant_type) outside token-sidecar and agent_proxy::delegation, the two crates that own credential exchange (T-3682); each other caller is allowlisted with why it holds its own credential
+GREP "grant_type" IN crates/*/src/**/*.rs;
+// egress-client: a reqwest client built anywhere in production code; each is allowlisted with what it reaches and why its redirect and resolver policy fits (SSRF, credential carry-over); a new one is red until reviewed (T-3682)
+MATCH (c:Symbol)-[:CALLS]->(x:Symbol) WHERE x.external AND x.path STARTS WITH 'reqwest::' AND x.name IN ['builder','new','default'] AND (x.path CONTAINS '::Client::' OR x.path CONTAINS '::ClientBuilder::') AND NOT c.is_test AND NOT c.file CONTAINS '/examples/' RETURN DISTINCT c.path, x.path ORDER BY c.path;
