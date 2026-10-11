@@ -7,9 +7,10 @@
 //! service-account token for the simulate audience, nobody else) and what the answer names
 //! (the Policy that decided, which `access/check` keeps to itself on a refusal).
 //!
-//! The Endpoints here have a view of another model, which no broker view serves yet, so their
+//! Most Endpoints here have a view of another model, which no broker view serves yet, so their
 //! `access/check` is the gateway's own (T-3649, `app::has_view`). Through a view the broker's
-//! engine decides, and the simulator asking it instead is T-3881.
+//! engine decides, and the simulator asks the engine's `access/explain` under the headers the
+//! subject's own token pins (T-3881): the `view_` tests below hold that hop.
 mod common;
 
 use axum::body::Body;
@@ -21,7 +22,7 @@ use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 /// A public endpoint.
@@ -491,4 +492,205 @@ async fn a_malformed_simulation_is_a_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// One hop as the broker received it: its path, the `x-jc-*` and tenant headers, its body.
+type Hop = (String, Vec<(String, String)>, Value);
+
+/// A broker that records every hop and answers each with `status` and `answer`.
+async fn recording_broker(status: StatusCode, answer: Value) -> (String, Arc<Mutex<Vec<Hop>>>) {
+    use axum::response::IntoResponse;
+    let hops: Arc<Mutex<Vec<Hop>>> = Arc::default();
+    let recorder = Arc::clone(&hops);
+    let app = axum::Router::new().fallback(move |request: Request<Body>| {
+        let (recorder, answer) = (Arc::clone(&recorder), answer.clone());
+        async move {
+            let (parts, body) = request.into_parts();
+            let body = axum::body::to_bytes(body, 64 * 1024)
+                .await
+                .expect("the hop's body");
+            let mut pinned: Vec<(String, String)> = parts
+                .headers
+                .iter()
+                .filter(|(name, _)| {
+                    name.as_str().starts_with("x-jc-") || name.as_str() == "ngsild-tenant"
+                })
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_owned(),
+                        value.to_str().expect("a visible header").to_owned(),
+                    )
+                })
+                .collect();
+            pinned.sort();
+            recorder.lock().expect("the hop log").push((
+                parts.uri.path().to_owned(),
+                pinned,
+                serde_json::from_slice(&body).unwrap_or(Value::Null),
+            ));
+            (status, axum::Json(answer)).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, hops)
+}
+
+/// The two Endpoints served by a broker view each (no other model, no temporal projection).
+fn view_app(realm: &common::Realm, upstream: String) -> axum::Router {
+    let through_view = |slug: &str, audience| Endpoint {
+        view_mapping: None,
+        ..endpoint(slug, audience)
+    };
+    router(Arc::new(
+        Gateway::new(
+            Broker::new(upstream),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([
+            through_view(OPEN, Audience::Public),
+            through_view(CLOSED, Audience::Organization),
+        ])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some("https://bb.example.sk".to_owned()),
+        ),
+    ))
+}
+
+fn taken(hops: &Mutex<Vec<Hop>>) -> Vec<Hop> {
+    std::mem::take(&mut *hops.lock().expect("the hop log"))
+}
+
+/// T-3881: through a view the simulator asks the broker's engine, under exactly the headers the
+/// subject's own token pins on `access/check`, and answers the engine's decision.
+#[tokio::test]
+async fn view_the_simulator_asks_the_engine_as_the_subjects_own_token_would() {
+    let realm = common::Realm::new();
+    let decided = json!({ "decision": true, "context": {
+        "reason": "policy_grant_matched", "policy": "ovzdusie/stewards@k4y7pq2mzt6vhx3nbwrs5cjd8f",
+        "assigner": "did:web:banskabystrica.sk" } });
+    let (upstream, hops) = recording_broker(StatusCode::OK, decided).await;
+    let app = view_app(&realm, upstream);
+    let asked = question("createEntity", Some("InternalIncident"));
+    let subjects = [
+        // the public, a role, a group, a person with both, one with a diacritic and a comma
+        json!({}),
+        json!({ "user": "", "groups": [], "roles": ["data-steward"] }),
+        json!({ "user": "", "groups": ["ovzdusie"], "roles": [] }),
+        json!({ "user": "stefan", "groups": ["ovzdusie"], "roles": ["data-steward"] }),
+        json!({ "user": "Šťastný, Ján", "groups": ["ovzdusie"], "roles": [] }),
+    ];
+    for who in &subjects {
+        let bearer = (who != &json!({})).then(|| person_token(&realm, OPEN, who));
+        let (status, _) = post(
+            &app,
+            &format!("/api/endpoint/{OPEN}/access/check"),
+            bearer.as_deref(),
+            &asked,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{who}");
+        let real = taken(&hops);
+
+        let mut simulation = asked.clone();
+        // the Portal names a person's empty user by leaving it out
+        simulation["subject"] = match who.as_object() {
+            Some(members) => Value::Object(
+                members
+                    .iter()
+                    .filter(|(name, value)| !(*name == "user" && *value == &json!("")))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            ),
+            None => json!({}),
+        };
+        let (status, answer) = simulate(&app, &realm, OPEN, simulation).await;
+        assert_eq!(status, StatusCode::OK, "{who}: {answer}");
+        let simulated = taken(&hops);
+
+        assert_eq!(real.len(), 1, "{who}");
+        assert_eq!(simulated.len(), 1, "{who}");
+        assert_eq!(real[0].0, format!("/x/views/{OPEN}/access/check"));
+        assert_eq!(simulated[0].0, format!("/x/views/{OPEN}/access/explain"));
+        assert_eq!(simulated[0].1, real[0].1, "{who}: the pinned caller");
+        assert_eq!(simulated[0].2, asked, "{who}: the question");
+        assert_eq!(
+            answer,
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched",
+                    "policy": "stewards", "assigner": "did:web:banskabystrica.sk" } }),
+            "{who}: the Policy under its manifest name"
+        );
+    }
+}
+
+/// The engine's refusals come back with the Policy that ended them, under its manifest name; an
+/// id the Portal did not write is left out rather than shown.
+#[tokio::test]
+async fn view_the_engines_reasons_name_the_policy_as_the_portal_lists_it() {
+    let realm = common::Realm::new();
+    for (engine, shown) in [
+        (
+            json!({ "decision": false, "context": { "reason": "prohibited",
+                    "policy": "ovzdusie/no-history", "assigner": "did:web:banskabystrica.sk" } }),
+            json!({ "decision": false, "context": { "reason": "prohibited",
+                    "policy": "no-history", "assigner": "did:web:banskabystrica.sk" } }),
+        ),
+        (
+            json!({ "decision": false, "context": { "reason": "no_grant" } }),
+            json!({ "decision": false, "context": { "reason": "no_grant" } }),
+        ),
+        (
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched", "policy": "loose" } }),
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched" } }),
+        ),
+        (
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched", "policy": "a/b/c" } }),
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched" } }),
+        ),
+        (
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched", "policy": "ovzdusie/@x" } }),
+            json!({ "decision": true, "context": { "reason": "policy_grant_matched" } }),
+        ),
+    ] {
+        let (upstream, _) = recording_broker(StatusCode::OK, engine.clone()).await;
+        let app = view_app(&realm, upstream);
+        let mut asked = question("queryTemporal", Some("AirQualityObserved"));
+        asked["subject"] = json!({});
+        let (status, answer) = simulate(&app, &realm, OPEN, asked).await;
+        assert_eq!(status, StatusCode::OK, "{engine}");
+        assert_eq!(answer, shown, "{engine}");
+    }
+}
+
+/// The audience refuses before the engine is asked; a broker that does not know the view, or
+/// fails, is the answer the caller gets, never a made-up decision.
+#[tokio::test]
+async fn view_a_refusal_at_the_door_or_by_the_broker_is_never_a_decision() {
+    let realm = common::Realm::new();
+    let (upstream, hops) = recording_broker(StatusCode::OK, json!({ "decision": true })).await;
+    let app = view_app(&realm, upstream);
+    let mut asked = question("retrieveEntity", Some("AirQualityObserved"));
+    asked["subject"] = json!({});
+    let (_, answer) = simulate(&app, &realm, CLOSED, asked.clone()).await;
+    assert_eq!(
+        answer,
+        json!({ "decision": false, "context": { "reason": "not_admitted" } })
+    );
+    assert!(taken(&hops).is_empty(), "the engine is not asked");
+
+    for status in [StatusCode::NOT_FOUND, StatusCode::INTERNAL_SERVER_ERROR] {
+        let (upstream, _) = recording_broker(status, json!({ "title": "no such view" })).await;
+        let app = view_app(&realm, upstream);
+        let (got, answer) = simulate(&app, &realm, OPEN, asked.clone()).await;
+        assert_ne!(got, StatusCode::OK, "{status}: {answer}");
+        assert!(answer.get("decision").is_none(), "{status}: {answer}");
+    }
 }
