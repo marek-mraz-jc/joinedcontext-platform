@@ -35,6 +35,7 @@ ARTIFACT_FIELDS = {
     "owl",
     "typescript",
     "qb",
+    "brokerSchema",
     "generatorVersion",
     "errors",
 }

@@ -14,6 +14,7 @@ the Smart Data Models organisation and nothing else (DM-10, DM-18).
 | `src/gen_rdf_artifacts.py` | closed SHACL shapes and the OWL ontology, both Turtle | DM-28, DM-43, DM-46 |
 | `src/gen_qb.py` | `model.qb.ttl`, the RDF Data Cube structure of a model that declares a Data Structure Definition (`qb_dsd`, `qb_component`) | DM-60 |
 | `src/gen_typescript.py` | `jc-types.ts` for a generated application: one type per entity class, each attribute as the App SDK's row cell | SDK-03, SDK-10 |
+| `src/gen_broker_schema.py` | the model in the broker's LinkML subset, which the Portal writes to a Context Space's broker tenant (`PUT /q/schemas/{tenant}`) | T-3703 |
 | `src/import_sdm.py` | a LinkML model from a Smart Data Models catalogue identifier, with provenance | DM-07…DM-11 |
 | `src/infer_schema.py` | a draft LinkML model and the editor operations that build it, from a sample file parsed in memory | DM-54, DM-55 |
 
@@ -28,6 +29,7 @@ python3 src/gen_context.py model.linkml.yaml -o context/model.v1.jsonld
 python3 src/gen_rdf_artifacts.py model.linkml.yaml --artifact shacl -o shapes/model.v1.ttl
 python3 src/gen_typescript.py model.linkml.yaml -o src/jc-types.ts
 python3 src/gen_qb.py model.linkml.yaml -o model.qb.ttl
+python3 src/gen_broker_schema.py model.linkml.yaml -o model.broker.json
 python3 src/import_sdm.py dataModel.Environment/AirQualityObserved -o model.linkml.yaml
 pytest
 ```

@@ -38,6 +38,7 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 import yaml
 
 from common import MODEL_IMPORT, RelationshipError, as_path, generator_version, imported, model_imports
+from gen_broker_schema import compile_broker_schema
 from gen_context import compile_context
 from gen_docs import compile_docs
 from gen_example import compile_example
@@ -86,6 +87,8 @@ CATALOGUE_TTL_SECONDS = 24 * 60 * 60
 #: `typescript` is the `jc-types.ts` a generated application compiles against (SDK-10).
 #: `qb` is the RDF Data Cube structure, and only a model declaring a Data Structure Definition
 #: has one: its renderer answers None for any other, and the field is then absent (DM-60).
+#: `brokerSchema` is the model in the broker's LinkML subset, which the Portal's reconciler writes to
+#: a Context Space's tenant at `PUT /q/schemas/{tenant}` (T-3703).
 RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("jsonSchema", compile_schema),
     ("context", compile_context),
@@ -95,6 +98,7 @@ RENDERERS: tuple[tuple[str, Callable[[str], Any]], ...] = (
     ("owl", compile_owl),
     ("typescript", compile_typescript),
     ("qb", compile_qb),
+    ("brokerSchema", compile_broker_schema),
 )
 
 
