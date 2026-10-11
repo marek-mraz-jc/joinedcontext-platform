@@ -110,18 +110,6 @@ impl Broker {
         }
     }
 
-    /// The same client aimed at another origin (the egress dispatcher's target, R46).
-    ///
-    /// The connection pool and the trust anchors are shared: a delivery reuses the
-    /// connection to a subscriber it already spoke to, and cannot trust more than the
-    /// gateway was configured to.
-    pub fn aimed_at(&self, origin: impl Into<String>) -> Self {
-        Self {
-            client: self.client.clone(),
-            base: origin.into(),
-        }
-    }
-
     fn with(base: impl Into<String>, roots: RootCertStore) -> Self {
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(roots)

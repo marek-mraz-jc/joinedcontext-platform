@@ -586,40 +586,6 @@ async fn an_unusable_upstream_uri_is_also_a_502_that_says_nothing_about_the_upst
 }
 
 #[tokio::test]
-async fn a_second_origin_is_a_second_target_and_the_broker_keeps_its_own() {
-    // R46: the egress dispatcher aims the same client at a subscriber's webhook. The broker hop
-    // must keep pointing at the broker, or one delivery would redirect every later request.
-    let (broker_base, broker_log) = upstream(200, "[]", Vec::new()).await;
-    let (sink_base, sink_log) = upstream(204, "", Vec::new()).await;
-    let broker = Broker::new(broker_base.clone());
-    let aimed = broker.aimed_at(sink_base.clone());
-
-    assert_eq!(broker.base(), broker_base);
-    assert_eq!(aimed.base(), sink_base);
-
-    aimed
-        .send(Method::POST, "/hook", HeaderMap::new(), Body::from("{}"))
-        .await
-        .expect("the sink answered");
-    broker
-        .send(
-            Method::GET,
-            "/ngsi-ld/v1/entities",
-            HeaderMap::new(),
-            Body::empty(),
-        )
-        .await
-        .expect("the broker answered");
-
-    assert_eq!(sink_log.lock().expect("the log").len(), 1);
-    assert_eq!(broker_log.lock().expect("the log").len(), 1);
-    assert_eq!(
-        broker_log.lock().expect("the log")[0].uri,
-        "/ngsi-ld/v1/entities"
-    );
-}
-
-#[tokio::test]
 async fn an_authorization_header_is_relayed_because_the_hop_is_the_brokers_own() {
     // Struck as an attack, recorded as behaviour: `send` is not where the caller's token is
     // removed. The handlers build the header map they hand in (GW20 strips the tenancy headers

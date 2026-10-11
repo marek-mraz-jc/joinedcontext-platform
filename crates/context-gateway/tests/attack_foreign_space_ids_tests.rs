@@ -132,13 +132,7 @@ async fn send_with(
 ) -> (StatusCode, Value, Vec<(String, String)>) {
     let (upstream, hops) = broker().await;
     let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
-            // A subscription is only stored when the gateway knows an address to route its
-            // delivery back through (R46); without one the surface answers 501 and the tenancy
-            // of a subscription would never be reached.
-            .deliver_through(Some("https://platform.example.sk".to_owned()))
-            .seal_subscribers_with(common::delivery_key())
-            .serve([endpoint()]),
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
     );
     let mut request = Request::builder()
         .method(method)

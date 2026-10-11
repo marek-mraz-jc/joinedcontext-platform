@@ -4,15 +4,13 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::auth::jwks;
 use context_gateway::auth::token::Verifier;
 use context_gateway::config::Config;
-use context_gateway::egress::migrate::{self, Args, Found, Surface};
-use context_gateway::egress::subject::DeliveryKey;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::store;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-/// The one outbound client: the broker hop and every notification delivery (R46).
+/// The one outbound client: the broker hop (R46).
 fn broker_of(config: &Config) -> Result<Broker, String> {
     let Some(path) = config.egress_ca_bundle.as_ref() else {
         return Broker::verified(config.broker_url.clone()).map_err(|error| error.to_string());
@@ -42,7 +40,7 @@ async fn main() -> ExitCode {
         Ok(broker) => broker,
         Err(error) => {
             // An unusable trust bundle is a deployment fault, and starting without it would
-            // deliver notifications to a peer nobody verified (R46).
+            // talk to a broker nobody verified (R46).
             tracing::error!(%error, "cannot build the outbound client");
             return ExitCode::FAILURE;
         }
@@ -85,13 +83,6 @@ async fn main() -> ExitCode {
             }
         },
     };
-    // T-3883: a one-time run, inside the gateway's own pod, of what only its key can read.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("migrate-r12-subscriptions") {
-        let mut surfaces: Vec<Surface> = endpoints.iter().map(Surface::of).collect();
-        surfaces.extend(spaces.iter().map(|space| Surface::of(&space.endpoint)));
-        return migrate_r12(&broker, &config, &surfaces, &args[1..]).await;
-    }
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone());
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.replace_federation(federations);
@@ -118,8 +109,6 @@ async fn main() -> ExitCode {
         }
     };
 
-    // Where the broker delivers a notification, which is not where a caller's token is
-    // audience-bound: the public URL when the deployment names no egress URL (R46).
     // The Portal's internal listener answers a workload it can name (PF-46, AG-52): the
     // gateway's own client, audience-bound to that listener. Without a client configured the
     // pollers send no token and the Portal refuses them, which says so in the log rather
@@ -145,23 +134,8 @@ async fn main() -> ExitCode {
     ) {
         tokio::spawn(Arc::clone(&domain_gate).follow(url, token.clone()));
     }
-    // Each subscription's subscriber is sealed with this key and every delivery decided again
-    // for them (GW27, T-2383); without it a subscription that routes a delivery is refused.
-    let gateway =
-        match config.delivery_key.as_ref().and_then(|key| {
-            context_gateway::egress::subject::DeliveryKey::new(key.expose().as_bytes())
-        }) {
-            Some(key) => gateway.seal_subscribers_with(key),
-            None => {
-                tracing::warn!(
-                    "JC_GATEWAY_DELIVERY_KEY is not set: subscriptions that deliver are refused"
-                );
-                gateway
-            }
-        };
     let gateway = Arc::new(
         gateway
-            .deliver_through(config.egress_url.clone())
             .deliver_privately_to(config.egress_private_hosts.clone())
             .gate_writes_on(domain_gate),
     );
@@ -212,103 +186,6 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
-}
-
-/// Moves the subscriptions stored with an R12 endpoint to their view (T-3883, O-7 (a)): counts
-/// per space on `--dry-run`, otherwise the stored form into `--backup` (a new file, mode 600: it
-/// holds what the broker holds, `receiverInfo` included) and then the move. Prints ids, spaces
-/// and reasons, never a target, a seal or the key.
-async fn migrate_r12(
-    broker: &Broker,
-    config: &Config,
-    surfaces: &[Surface],
-    args: &[String],
-) -> ExitCode {
-    let args = match Args::parse(args) {
-        Ok(args) => args,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let Some(key) = config
-        .delivery_key
-        .as_ref()
-        .and_then(|key| DeliveryKey::new(key.expose().as_bytes()))
-    else {
-        eprintln!("JC_GATEWAY_DELIVERY_KEY is not set: no seal can be opened");
-        return ExitCode::FAILURE;
-    };
-    let survey = match migrate::survey(
-        broker,
-        surfaces,
-        &key,
-        &args.portal_client,
-        &config.egress_private_hosts,
-    )
-    .await
-    {
-        Ok(survey) => survey,
-        Err(error) => {
-            eprintln!("nothing changed: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    for (space, counts) in survey.counts() {
-        println!(
-            "space={space} routed={} reconciler={} rewritable={} unreadable={} refused={}",
-            counts.routed, counts.reconciler, counts.rewritable, counts.unreadable, counts.refused
-        );
-    }
-    for (space, found) in &survey.spaces {
-        for (stored, found) in found {
-            let why = match found {
-                Found::Rewritable { .. } => continue,
-                Found::Reconciler => "written by the Portal, which writes it again",
-                Found::Unreadable(why) => why,
-                Found::Refused(why) => why.as_str(),
-            };
-            let id = stored
-                .get("id")
-                .and_then(|id| id.as_str())
-                .unwrap_or_default();
-            println!("left alone: {id} in {space}: {why}");
-        }
-    }
-    let Some(backup) = args.backup else {
-        return ExitCode::SUCCESS;
-    };
-    if let Err(error) = keep(&backup, &survey) {
-        eprintln!("nothing changed: {}: {error}", backup.display());
-        return ExitCode::FAILURE;
-    }
-    let mut failed = false;
-    for (id, outcome) in migrate::apply(broker, &survey).await {
-        match outcome {
-            migrate::Outcome::Rewritten => println!("moved: {id}"),
-            migrate::Outcome::Failed(why) => {
-                failed = true;
-                println!("not moved: {id}: {why}");
-            }
-        }
-    }
-    match failed {
-        true => ExitCode::FAILURE,
-        false => ExitCode::SUCCESS,
-    }
-}
-
-/// Writes the stored form of every R12 subscription into a file that did not exist, readable
-/// by its owner only.
-fn keep(path: &std::path::Path, survey: &migrate::Survey) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    file.write_all(&serde_json::to_vec_pretty(&survey.stored())?)?;
-    file.sync_all()
 }
 
 /// Stops on SIGTERM, which is how Kubernetes asks (OPS-12).

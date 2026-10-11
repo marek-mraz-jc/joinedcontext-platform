@@ -226,8 +226,8 @@ async fn last_n_and_join_level_are_capped_and_nothing_else_is_touched() {
     );
 }
 
-/// What no view serves yet stays on the gateway's own pipeline and reaches the broker's plain
-/// root: a conditional write (R45, T-3789) and an Endpoint with a view mapping (G18).
+/// What no view serves yet stays on the gateway's own pipeline: a conditional write (R45,
+/// T-3789).
 #[tokio::test]
 async fn what_no_view_serves_stays_on_the_gateway() {
     let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
@@ -309,6 +309,46 @@ async fn a_mapped_endpoint_is_served_by_its_view() {
             Method::POST,
             format!("/x/views/{SLUG}/ngsi-ld/v1/entities").as_str()
         )
+    );
+}
+
+/// T-3654: a subscription no view can take is refused, never stored on the plain surface where
+/// the broker would deliver it with nothing deciding what leaves: a slug no view id can hold and
+/// a conditional write are two of the cases `served_by_view` keeps on the gateway.
+#[tokio::test]
+async fn a_subscription_no_view_can_take_is_refused_and_never_stored_around_it() {
+    let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
+    let long = "s".repeat(64);
+    let unviewable = Endpoint {
+        slug: long.clone(),
+        base_path: format!("/api/endpoint/{long}"),
+        ..endpoint()
+    };
+    let (status, _, body) = call(
+        app(upstream.clone(), unviewable),
+        get(&format!("/api/endpoint/{long}/ngsi-ld/v1/subscriptions")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(
+        body.to_string().contains("subscription-without-view"),
+        "{body}"
+    );
+
+    let mut conditional = post(
+        &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:air-1"),
+        json!({ "notification": { "endpoint": { "uri": "https://hooks.example/air" } } }),
+    );
+    *conditional.method_mut() = Method::PATCH;
+    conditional
+        .headers_mut()
+        .insert("if-match", "\"1\"".parse().expect("a header value"));
+    let (status, _, body) = call(app(upstream, endpoint()), conditional).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+
+    assert!(
+        hops.lock().expect("the hop log").is_empty(),
+        "a subscription reached the broker around its view"
     );
 }
 

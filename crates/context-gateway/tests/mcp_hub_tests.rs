@@ -111,7 +111,6 @@ fn app_limited(broker: &str, realm: &common::Realm, hub: Option<RateLimits>) -> 
         "banskabystrica.sk",
     )
     .serve(endpoints())
-    .seal_subscribers_with(common::delivery_key())
     .authenticate(
         Arc::new(realm.verifier()),
         ServiceAccounts::new(),

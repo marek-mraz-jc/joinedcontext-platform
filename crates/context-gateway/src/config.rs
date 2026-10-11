@@ -61,22 +61,12 @@ pub struct Config {
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
-    /// The base a rewritten `notification.endpoint.uri` carries
-    /// (`JC_GATEWAY_EGRESS_URL`), which is the address the broker dials to deliver; the
-    /// public URL when the deployment names none. An in-cluster Service URL keeps the
-    /// delivery hop inside the cluster, where a NetworkPolicy governs it (R46).
-    pub egress_url: Option<String>,
-    /// A PEM file of extra trust anchors the notification egress trusts on top of the
-    /// public roots (`JC_GATEWAY_EGRESS_CA_BUNDLE`), for subscribers behind the
-    /// installation's own CA (R46).
+    /// A PEM file of extra trust anchors the outbound client trusts on top of the public roots
+    /// (`JC_GATEWAY_EGRESS_CA_BUNDLE`), for a broker behind the installation's own CA (R46).
     pub egress_ca_bundle: Option<PathBuf>,
-    /// Hosts inside the platform's own networks a notification may still be delivered to
+    /// Hosts inside the platform's own networks a subscription may still name as its target
     /// (`JC_GATEWAY_EGRESS_PRIVATE_HOSTS`, comma-separated); empty refuses them all (T-1302).
     pub egress_private_hosts: Vec<String>,
-    /// The key a subscription's subscriber is sealed with (`JC_GATEWAY_DELIVERY_KEY`, a secret
-    /// of at least 32 bytes), so each delivery is decided again against the policies in force
-    /// (GW27, T-2383); unset refuses every subscription that routes a delivery with `501`.
-    pub delivery_key: Option<jc_core::Secret>,
     /// `report` or `enforce` (`JC_GATEWAY_DOMAIN_VERIFICATION`, default `report`): whether a
     /// write waits for the Organization's verified domain (PF-41, Architecture/03 §3).
     pub domain_verification: crate::domain_gate::Mode,
@@ -158,24 +148,6 @@ impl Config {
             (None, None) => None,
         };
 
-        let delivery_key = std::env::var("JC_GATEWAY_DELIVERY_KEY")
-            .ok()
-            .filter(|key| !key.trim().is_empty())
-            .map(jc_core::Secret::new);
-        if delivery_key
-            .as_ref()
-            .is_some_and(|key| key.expose().len() < crate::egress::subject::MIN_KEY_BYTES)
-        {
-            // The length only, never the value (CC-06).
-            return Err(ConfigError::Invalid {
-                name: "JC_GATEWAY_DELIVERY_KEY",
-                reason: format!(
-                    "shorter than {} bytes, too weak to sign a subscription's subscriber with",
-                    crate::egress::subject::MIN_KEY_BYTES
-                ),
-            });
-        }
-
         let domain_verification = crate::domain_gate::Mode::parse(
             std::env::var("JC_GATEWAY_DOMAIN_VERIFICATION")
                 .ok()
@@ -227,9 +199,6 @@ impl Config {
             public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
                 .ok()
                 .map(|url| url.trim_end_matches('/').to_owned()),
-            egress_url: std::env::var("JC_GATEWAY_EGRESS_URL")
-                .ok()
-                .map(|url| url.trim_end_matches('/').to_owned()),
             egress_ca_bundle: std::env::var("JC_GATEWAY_EGRESS_CA_BUNDLE")
                 .ok()
                 .filter(|path| !path.trim().is_empty())
@@ -243,7 +212,6 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
-            delivery_key,
         })
     }
 }
@@ -313,10 +281,8 @@ mod tests {
                 Credential::Secret(jc_core::Secret::new("Kx7-the-realms-client-secret-9fQ")),
             )),
             public_url: None,
-            egress_url: None,
             egress_ca_bundle: None,
             egress_private_hosts: Vec::new(),
-            delivery_key: None,
             domain_verification: crate::domain_gate::Mode::Report,
             domain_verifications_url: None,
         }
