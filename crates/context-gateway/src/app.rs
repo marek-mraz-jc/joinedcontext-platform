@@ -2048,6 +2048,7 @@ impl HeldDelete<'_> {
             if let Some(tenant) = self.headers.get(tenancy::TENANT) {
                 headers.insert(tenancy::TENANT, tenant.clone());
             }
+            tenancy::as_gateway(&mut headers);
             if body.is_some() {
                 headers.insert(
                     axum::http::header::CONTENT_TYPE,

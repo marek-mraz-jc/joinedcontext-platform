@@ -41,6 +41,10 @@ const UNGRANTED: &str = "operatorPhone";
 
 /// What one side of the egress path recorded.
 type Seen = Arc<Mutex<Vec<Value>>>;
+
+/// Every read the broker stub answered, with the `x-jc-client` it carried (T-3767). One log
+/// for the binary: only the egress path reads, and every read of it is the gateway's own.
+static READS: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
 /// The headers one delivery arrived with.
 type Headers = Arc<Mutex<Vec<(String, String)>>>;
 
@@ -176,6 +180,17 @@ async fn broker(state: BrokerState) -> (String, Seen) {
                 let method = request.method().clone();
                 let path = request.uri().path().to_owned();
                 let query = request.uri().query().unwrap_or_default().to_owned();
+                if method == Method::GET {
+                    let client = request
+                        .headers()
+                        .get("x-jc-client")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    READS
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push((path.clone(), client));
+                }
 
                 if method == Method::GET && path == "/ngsi-ld/v1/entities" {
                     let matched: Vec<Value> = state
@@ -616,6 +631,43 @@ async fn a_delivered_notification_carries_only_the_attributes_the_subscription_w
             .any(|(name, value)| name == "x-auth-token" && value.contains("receiverInfo")),
         "the authorization material the broker attached reaches the receiver: {arrived:?}"
     );
+}
+
+/// T-3767: reading the stored Subscription and re-checking its condition are the gateway's own
+/// reads; they speak as its service account, never as nobody.
+#[tokio::test]
+async fn a_delivery_reads_the_broker_as_the_gateway() {
+    let (webhook, _, _) = sink().await;
+    let (status, _) = deliver(
+        Some(stored(
+            &webhook,
+            json!(["temperature"]),
+            "((temperature<100))",
+        )),
+        vec![SENSOR.to_owned()],
+        vec![sensor(SENSOR)],
+        &[],
+        &webhook,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let reads = READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for kind in ["/ngsi-ld/v1/subscriptions/", "/ngsi-ld/v1/entities"] {
+        let of_kind: Vec<&(String, Option<String>)> = reads
+            .iter()
+            .filter(|(path, _)| path.starts_with(kind))
+            .collect();
+        assert!(!of_kind.is_empty(), "{kind}: {reads:?}");
+        assert!(
+            of_kind
+                .iter()
+                .all(|(_, client)| client.as_deref() == Some("context-gateway")),
+            "{kind}: {of_kind:?}"
+        );
+    }
 }
 
 #[tokio::test]

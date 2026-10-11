@@ -765,6 +765,7 @@ async fn read(
         headers.insert(TENANT, tenant);
     }
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    crate::middleware::tenancy::as_gateway(&mut headers);
 
     let answer = broker
         .send(Method::GET, target, headers, Body::empty())

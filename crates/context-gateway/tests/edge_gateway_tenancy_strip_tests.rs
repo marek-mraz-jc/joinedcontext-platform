@@ -11,7 +11,9 @@
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::HeaderValue;
-use context_gateway::middleware::tenancy::{pin_tenant, strip_client_headers, FORGEABLE, TENANT};
+use context_gateway::middleware::tenancy::{
+    as_gateway, pin_tenant, strip_client_headers, FORGEABLE, GATEWAY_CLIENT, TENANT,
+};
 
 fn with(headers: &[(&str, &str)]) -> Request {
     let mut builder = Request::builder().uri("/api/endpoint/s/ngsi-ld/v1/entities");
@@ -188,4 +190,58 @@ fn a_space_name_with_no_characters_in_it_still_pins_nothing_useful() {
         .expect("a request");
     pin_tenant(&mut request, "").expect("the empty string is a legal header value");
     assert_eq!(request.headers()[&TENANT], "");
+}
+
+#[test]
+fn a_hop_on_the_gateways_own_account_says_so_and_nothing_else() {
+    // T-3767: whatever the headers held, the hop names the gateway's service account, no role,
+    // and no credential or subject of anybody else.
+    let mut headers = with(&[
+        ("authorization", "Bearer someone"),
+        ("cookie", "session=1"),
+        ("x-jc-subject", "ana"),
+        ("x-jc-groups", "admins"),
+        ("x-jc-roles", "admin"),
+        ("x-jc-client", "app"),
+        ("x-jc-restricted", "true"),
+        ("ngsild-tenant", "city"),
+    ])
+    .headers()
+    .clone();
+    as_gateway(&mut headers);
+    let mut left: Vec<(String, String)> = headers
+        .iter()
+        .map(|(n, v)| {
+            (
+                n.as_str().to_owned(),
+                v.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        [
+            ("ngsild-tenant".to_owned(), "city".to_owned()),
+            ("x-jc-client".to_owned(), GATEWAY_CLIENT.to_owned()),
+            ("x-jc-roles".to_owned(), String::new()),
+        ]
+    );
+}
+
+#[test]
+fn a_caller_is_never_forwarded_as_the_gateway() {
+    // T-3767: a token of the gateway's own client, admitted on a data path, does not make the
+    // caller the principal the gateway's own hops are granted as.
+    let mut subject = context_gateway::pdp::evaluator::Subject::anonymous();
+    subject.service_account = Some(GATEWAY_CLIENT.to_owned());
+    let mut request = with(&[]);
+    context_gateway::middleware::tenancy::pin_caller(&mut request, "city", &subject)
+        .expect("a legal space");
+    assert!(
+        request.headers().get("x-jc-client").is_none(),
+        "{:?}",
+        request.headers()
+    );
+    assert!(request.headers().get("x-jc-roles").is_some());
 }

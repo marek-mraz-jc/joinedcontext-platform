@@ -37,6 +37,9 @@ struct Call {
     path: String,
     query: String,
     if_match: Option<String>,
+    /// `x-jc-client` and `x-jc-roles`: who the broker is told asks (T-3641, T-3767).
+    client: Option<String>,
+    roles: Option<String>,
 }
 
 type Calls = Arc<Mutex<Vec<Call>>>;
@@ -82,6 +85,16 @@ async fn broker(stored: Stored) -> (String, Calls) {
                     if_match: request
                         .headers()
                         .get("if-match")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned),
+                    client: request
+                        .headers()
+                        .get("x-jc-client")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned),
+                    roles: request
+                        .headers()
+                        .get("x-jc-roles")
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_owned),
                 });
@@ -328,6 +341,39 @@ async fn a_state_dependent_grant_reads_first_and_writes_conditionally() {
         writes(&calls)[0].if_match.as_deref(),
         Some(ETAG),
         "the window between the read and the write is closed by the tag it was read at"
+    );
+}
+
+/// T-3767: the probes the gateway makes before a write are its own, so they speak as the
+/// gateway's service account with no role; the write itself is the caller's.
+#[tokio::test]
+async fn the_probes_speak_as_the_gateway_and_the_write_as_the_caller() {
+    let (status, calls) = write(
+        Method::PATCH,
+        Some(ETAG),
+        Some("temperature<100"),
+        holding(Some(ETAG), true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let probes: Vec<&Call> = calls.iter().filter(|c| c.method == Method::GET).collect();
+    assert!(probes.len() >= 2, "{calls:?}");
+    for probe in probes {
+        assert_eq!(
+            probe.client.as_deref(),
+            Some("context-gateway"),
+            "{probe:?}"
+        );
+        assert_eq!(probe.roles.as_deref(), Some(""), "{probe:?}");
+    }
+    let written = writes(&calls);
+    assert_eq!(written.len(), 1, "{calls:?}");
+    assert_eq!(written[0].client, None, "{:?}", written[0]);
+    assert_eq!(
+        written[0].roles.as_deref(),
+        Some("public"),
+        "{:?}",
+        written[0]
     );
 }
 

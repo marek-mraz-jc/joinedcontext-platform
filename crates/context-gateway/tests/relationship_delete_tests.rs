@@ -40,6 +40,8 @@ fn urn(kind: &str, local: &str) -> String {
 struct Store {
     entities: BTreeMap<String, Value>,
     calls: Vec<String>,
+    /// Per call, in order, the `x-jc-client` it carried (T-3767).
+    clients: Vec<Option<String>>,
     /// Writes to these paths are refused with 500, to stop a delete part way.
     failing: BTreeSet<String>,
 }
@@ -67,11 +69,17 @@ async fn serve(State(store): State<Shared>, request: Request) -> axum::response:
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let query = request.uri().query().unwrap_or_default().to_owned();
+    let client = request
+        .headers()
+        .get("x-jc-client")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
         .await
         .unwrap_or_default();
     let mut store = store.lock().expect("the store");
     store.calls.push(format!("{method} {path}?{query}"));
+    store.clients.push(client);
     let pairs: Vec<(String, String)> = query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
@@ -200,6 +208,7 @@ async fn broker(held: Vec<Value>, failing: &[&str]) -> (String, Shared) {
             .map(|entity| (entity["id"].as_str().unwrap_or_default().to_owned(), entity))
             .collect(),
         calls: Vec::new(),
+        clients: Vec::new(),
         failing: failing.iter().map(|path| (*path).to_owned()).collect(),
     }));
     let app = Router::new()
@@ -602,6 +611,31 @@ async fn a_many_to_many_cascade_removes_only_the_one_link() {
         .collect();
     assert_eq!(courses, vec![urn("Course", "c2")]);
     assert!(answer.held(&urn("Course", "c2")).is_some());
+}
+
+/// T-3767: the reads and the unlinking a held delete makes are the gateway's own and speak as
+/// its service account; the caller's delete is the caller's.
+#[tokio::test]
+async fn a_held_delete_unlinks_as_the_gateway() {
+    let answer = delete(CLASSES, &urn("Desk", "d1")).await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.body);
+    let store = answer.store.lock().expect("the store");
+    let by_call: Vec<(&String, Option<&str>)> = store
+        .calls
+        .iter()
+        .zip(store.clients.iter().map(Option::as_deref))
+        .collect();
+    let unlinked: Vec<&(&String, Option<&str>)> = by_call
+        .iter()
+        .filter(|(call, _)| call.contains("Teacher") && !call.starts_with("GET "))
+        .collect();
+    assert!(
+        !unlinked.is_empty(),
+        "the desk's teacher was unlinked: {by_call:?}"
+    );
+    for (call, client) in unlinked {
+        assert_eq!(*client, Some("context-gateway"), "{call}");
+    }
 }
 
 #[tokio::test]
