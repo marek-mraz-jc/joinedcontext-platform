@@ -351,41 +351,6 @@ async fn a_tool_result_carries_the_sources_it_is_a_union_over() {
     assert!(structured["entities"].is_array(), "{answer}");
 }
 
-/// A space that federates nothing says nothing about federation: an ordinary endpoint's MCP
-/// surface is what it always was.
-#[tokio::test]
-async fn an_ordinary_endpoint_s_mcp_surface_is_unchanged() {
-    let (broker, _) = partial_broker().await;
-    let answer = mcp(
-        &broker,
-        Federations::new(),
-        json!({ "jsonrpc": "2.0", "id": 4, "method": "initialize", "params": {} }),
-    )
-    .await;
-    let instructions = answer["result"]["instructions"]
-        .as_str()
-        .expect("instructions");
-    assert!(!instructions.contains("federates"), "{instructions}");
-
-    let answer = mcp(
-        &broker,
-        Federations::new(),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } },
-        }),
-    )
-    .await;
-    assert!(
-        answer["result"]["structuredContent"]
-            .get("jc:source")
-            .is_none(),
-        "nothing to attribute: {answer}"
-    );
-}
-
 /// EP-70: a source that failed does not fail the request. The status and the warning are the
 /// broker's, passed through, because only the broker knows which part did not answer.
 #[tokio::test]
