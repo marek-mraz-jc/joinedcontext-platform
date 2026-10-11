@@ -87,7 +87,7 @@ pub(crate) async fn query_entities(
     if constraints.empty {
         return Ok((Value::Array(Vec::new()), true));
     }
-    tenancy::pin_tenant(request, &endpoint.space)
+    tenancy::pin_caller(request, &endpoint.space, subject)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
     // Nothing the caller sent and nothing the grants added selects anything, and a query that
@@ -177,7 +177,7 @@ pub(crate) async fn query_temporal(
     if constraints.empty {
         return Ok((Value::Null, true));
     }
-    tenancy::pin_tenant(request, &endpoint.space)
+    tenancy::pin_caller(request, &endpoint.space, subject)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
     // By id, so without the grants' `type` (CIM 009 6.19.3.1): `projection::permitted` below
@@ -299,7 +299,7 @@ pub(crate) async fn paged_entities(
     if constraints.empty {
         return Ok((Value::Array(Vec::new()), true));
     }
-    tenancy::pin_tenant(request, &endpoint.space)
+    tenancy::pin_caller(request, &endpoint.space, subject)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
     // The caller's own window is a ceiling on the download, not the page size: paging is

@@ -135,6 +135,8 @@ pub struct Hop {
     pub body: Vec<u8>,
     /// The W3C Trace Context the gateway relayed: `traceparent` and `tracestate` (OPS-17).
     pub trace: (String, String),
+    /// Every header the hop carried, for the tests of what the gateway lets through (T-3641).
+    pub headers: axum::http::HeaderMap,
 }
 
 /// A broker on a real socket, because the gateway forwards over HTTP and what these tests
@@ -169,6 +171,7 @@ impl BrokerStub {
                 );
                 async move {
                     let headers = request.headers().clone();
+                    let method = request.method().clone();
                     let path = request.uri().path().to_owned();
                     let query = request.uri().query().unwrap_or_default().to_owned();
                     let body = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024)
@@ -206,6 +209,7 @@ impl BrokerStub {
                                 .unwrap_or_default()
                                 .to_owned(),
                         ),
+                        headers,
                     });
                     let pages = served.lock().expect("no poisoned lock");
 
@@ -216,8 +220,12 @@ impl BrokerStub {
                         return entity_type_list(&pages).into_response();
                     }
 
-                    // CIM 009 5.7.2: a query over the collection must select something.
-                    if path == "/ngsi-ld/v1/entities" && !selects(&query) {
+                    // CIM 009 5.7.2: a query over the collection must select something; a
+                    // create at the same path is not a query.
+                    if method == axum::http::Method::GET
+                        && path == "/ngsi-ld/v1/entities"
+                        && !selects(&query)
+                    {
                         return unselected_query().into_response();
                     }
 
