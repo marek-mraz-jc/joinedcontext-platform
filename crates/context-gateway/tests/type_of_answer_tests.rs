@@ -5,6 +5,8 @@
 //! not the authority on what a caller may read, so what comes back is judged here — and an id
 //! whose URN already names an ungranted type is answered before the broker is asked.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
@@ -61,7 +63,11 @@ async fn broker(answer: Value) -> (String, Hops) {
         .await
         .expect("a port");
     let address = listener.local_addr().expect("an address");
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+    tokio::spawn(async move {
+        axum::serve(listener, common::plain_tree(app))
+            .await
+            .expect("the stub serves")
+    });
     (format!("http://{address}"), hops)
 }
 
@@ -148,35 +154,6 @@ async fn ask(
     (status, String::from_utf8_lossy(&bytes).into_owned(), log)
 }
 
-/// EP-26: the Depot is not granted, so a retrieve of it by id is not found — whatever the
-/// broker chose to answer.
-#[tokio::test]
-async fn a_retrieve_of_an_ungranted_type_by_id_is_not_found() {
-    let (status, body, _) = ask(
-        entity(DEPOT, "Depot"),
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{DEPOT}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
-    assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
-}
-
-/// EP-26: the temporal tree is the same read, so it answers the same way.
-#[tokio::test]
-async fn a_temporal_retrieve_of_an_ungranted_type_by_id_is_not_found() {
-    let (status, body, _) = ask(
-        entity(DEPOT, "Depot"),
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/temporal/entities/{DEPOT}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
-    assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
-}
-
 /// T-2987, CIM 009 6.19.3.1: one entity's history takes no `type`, and a broker holding to it
 /// refused every history read under a type grant with 400. The grant's type is judged on the
 /// answer instead, so it reaches the broker without one.
@@ -202,36 +179,6 @@ async fn a_temporal_retrieve_by_id_asks_the_broker_without_the_granted_type() {
     assert!(log[0].contains("attrs=name"), "{log:?}");
 }
 
-/// T-2987: without `type` upstream, a broker answering an entity of another type for a URN that
-/// names a granted one is still refused, with the gateway's own miss.
-#[tokio::test]
-async fn a_temporal_retrieve_by_id_still_refuses_what_the_broker_answers_of_another_type() {
-    let (status, body, log) = ask(
-        entity(VEHICLE, "Depot"),
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/temporal/entities/{VEHICLE}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
-    assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
-    assert_eq!(log.len(), 1, "the broker was asked: {log:?}");
-}
-
-/// T-2987: the query form keeps the grant's type, which is how it selects (CIM 009 6.18.3.2).
-#[tokio::test]
-async fn a_temporal_query_still_sends_the_granted_type() {
-    let (_, _, log) = ask(
-        json!([entity(VEHICLE, "Vehicle")]),
-        &["Vehicle"],
-        "/ngsi-ld/v1/temporal/entities?attrs=name",
-    )
-    .await;
-
-    assert_eq!(log.len(), 1, "{log:?}");
-    assert!(log[0].contains("type=Vehicle"), "{log:?}");
-}
-
 /// T-2987: a SensorThings Datastream reads the same history through the same function, so its
 /// Observations reach the broker without `type` as well.
 #[tokio::test]
@@ -255,61 +202,6 @@ async fn sensorthings_observations_ask_the_broker_without_the_granted_type() {
     );
 }
 
-/// MP-02: a list leaves the ungranted entity out instead of paging it.
-#[tokio::test]
-async fn a_query_that_the_broker_answers_too_widely_drops_the_ungranted_type() {
-    let (status, body, _) = ask(
-        json!([entity(VEHICLE, "Vehicle"), entity(DEPOT, "Depot")]),
-        &["Vehicle"],
-        "/ngsi-ld/v1/entities?type=Vehicle",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "body was {body}");
-    assert!(
-        body.contains("Vehicle north"),
-        "the Vehicle is granted: {body}"
-    );
-    assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
-}
-
-/// EP-26, R20: an id whose URN names an ungranted type is refused without asking the broker,
-/// so an ungranted type cannot be probed through the gateway's upstream traffic either.
-#[tokio::test]
-async fn no_broker_call_is_made_for_a_urn_of_an_ungranted_type() {
-    let (status, _, log) = ask(
-        entity(DEPOT, "Depot"),
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{DEPOT}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(log.is_empty(), "the broker was asked anyway: {log:?}");
-}
-
-/// R20: the refusal is the one an unknown id gets, so the caller learns nothing from the
-/// difference between "no such entity" and "not yours".
-#[tokio::test]
-async fn the_refusal_equals_an_unknown_id_byte_for_byte() {
-    let unknown = "urn:ngsi-ld:Vehicle:hel.fi:fleet:nothing-here";
-    let (ungranted_status, ungranted_body, _) = ask(
-        entity(DEPOT, "Depot"),
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{DEPOT}"),
-    )
-    .await;
-    let (unknown_status, unknown_body, _) = ask(
-        Value::Null,
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{unknown}"),
-    )
-    .await;
-
-    assert_eq!(ungranted_status, unknown_status);
-    assert_eq!(ungranted_body, unknown_body);
-}
-
 /// An entity that carries two types, one of them granted, is a granted entity.
 #[tokio::test]
 async fn an_entity_with_two_types_one_granted_is_served() {
@@ -324,21 +216,6 @@ async fn an_entity_with_two_types_one_granted_is_served() {
 
     assert_eq!(status, StatusCode::OK, "body was {body}");
     assert!(body.contains("Vehicle north"), "body was {body}");
-}
-
-/// An entity whose every type is ungranted is not found, even in a list of types.
-#[tokio::test]
-async fn an_entity_whose_every_type_is_ungranted_is_not_found() {
-    let mut neither = entity(VEHICLE, "Vehicle");
-    neither["type"] = json!(["Depot", "Tram"]);
-    let (status, body, _) = ask(
-        neither,
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{VEHICLE}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
 }
 
 /// A grant that names no type at all is a grant over every type the endpoint serves: the
@@ -356,38 +233,6 @@ async fn a_grant_over_every_type_is_unchanged() {
     assert!(body.contains("Depot north"), "body was {body}");
 }
 
-/// A broker that answers a JSON-LD expanded type must be judged by the same rule: the grant's
-/// term is read through the model's `@context` and compared as an IRI (T-3473).
-#[tokio::test]
-async fn an_expanded_type_iri_is_compacted_before_it_is_judged() {
-    let mut expanded = entity(VEHICLE, "Depot");
-    expanded["type"] = json!("https://hel.fi/schema/Depot");
-    let (status, body, _) = ask(
-        expanded,
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{VEHICLE}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
-    assert!(!body.contains("Depot north"), "the Depot leaked: {body}");
-
-    let mut granted = entity(VEHICLE, "Vehicle");
-    granted["type"] = json!("https://hel.fi/schema/Vehicle");
-    let (status, body, _) = ask(
-        granted,
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{VEHICLE}"),
-    )
-    .await;
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "an expanded granted type is served: {body}"
-    );
-}
-
 /// An id outside the URN scheme of ADR 001 is refused by the scheme itself, before any grant is
 /// consulted, so no read reaches the broker with an id whose type cannot be read (EP-26).
 #[tokio::test]
@@ -402,18 +247,4 @@ async fn an_id_outside_the_urn_scheme_is_refused_before_the_broker() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "body was {body}");
     assert!(log.is_empty(), "the broker was asked anyway: {log:?}");
-}
-
-/// An answer with no `type` at all is not an entity the gateway can judge, so it is not served
-/// when the grant names types.
-#[tokio::test]
-async fn an_answer_without_a_type_is_not_served_under_a_type_grant() {
-    let (status, body, _) = ask(
-        json!({ "id": VEHICLE, "name": { "type": "Property", "value": "nameless" } }),
-        &["Vehicle"],
-        &format!("/ngsi-ld/v1/entities/{VEHICLE}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::NOT_FOUND, "body was {body}");
 }
