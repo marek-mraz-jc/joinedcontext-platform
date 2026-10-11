@@ -59,7 +59,10 @@ const FORMALISMS: [&str; 7] = [
 ];
 
 async fn broker() -> String {
-    let app = Router::new().fallback(any(|| async { axum::Json(json!([])) }));
+    // The MCP surface of the view lists no tool and no resource of its own (T-3647).
+    let app = Router::new().fallback(any(|| async {
+        axum::Json(json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [], "resources": [] } }))
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a port");

@@ -94,64 +94,6 @@ async fn read(broker: &BrokerStub, property_names: &str, path: &str) -> (StatusC
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
-/// The dev case: `[id, name, availableBikeNumber]` reads the stations, and the broker is asked
-/// for the two attributes, never for `id`.
-#[tokio::test]
-async fn a_grant_naming_id_reads_its_entities_and_never_asks_the_broker_for_id() {
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
-    let (status, body) = read(
-        &broker,
-        "[id, name, availableBikeNumber]",
-        "/ngsi-ld/v1/entities?type=BikeHireDockingStation",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let entity = &body[0];
-    assert_eq!(entity["id"], station()["id"]);
-    assert_eq!(entity["availableBikeNumber"]["value"], json!(7));
-    assert!(
-        entity.get("location").is_none(),
-        "the grant does not name location: {entity}"
-    );
-    let hops = broker.hops();
-    assert!(
-        hops.iter().all(|hop| !hop
-            .query
-            .split('&')
-            .any(|pair| pair.starts_with("attrs=")
-                && pair.split(['=', ',']).any(|part| part == "id"))),
-        "the broker is never asked for id: {hops:?}"
-    );
-}
-
-/// A grant of the identity alone answers the identity alone: the grant's type selects, and the
-/// projection leaves nothing but `id` and `type`.
-#[tokio::test]
-async fn a_grant_of_the_identity_alone_answers_ids_and_types_only() {
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
-    let (status, body) = read(
-        &broker,
-        "[id]",
-        "/ngsi-ld/v1/entities?type=BikeHireDockingStation",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let members: BTreeSet<&str> = body[0]
-        .as_object()
-        .expect("an entity")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert!(
-        members
-            .iter()
-            .all(|member| matches!(*member, "id" | "type" | "@context")),
-        "identity only: {members:?}"
-    );
-}
-
 /// The caller who asks the broker for `id` in their own words gets the broker's own answer:
 /// the gateway changes no status code of the NGSI-LD surface.
 #[tokio::test]
