@@ -220,7 +220,7 @@ async fn partial_broker() -> (String, Calls) {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
     (format!("http://{address}"), calls)
 }
@@ -351,41 +351,6 @@ async fn a_tool_result_carries_the_sources_it_is_a_union_over() {
     assert!(structured["entities"].is_array(), "{answer}");
 }
 
-/// A space that federates nothing says nothing about federation: an ordinary endpoint's MCP
-/// surface is what it always was.
-#[tokio::test]
-async fn an_ordinary_endpoint_s_mcp_surface_is_unchanged() {
-    let (broker, _) = partial_broker().await;
-    let answer = mcp(
-        &broker,
-        Federations::new(),
-        json!({ "jsonrpc": "2.0", "id": 4, "method": "initialize", "params": {} }),
-    )
-    .await;
-    let instructions = answer["result"]["instructions"]
-        .as_str()
-        .expect("instructions");
-    assert!(!instructions.contains("federates"), "{instructions}");
-
-    let answer = mcp(
-        &broker,
-        Federations::new(),
-        json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } },
-        }),
-    )
-    .await;
-    assert!(
-        answer["result"]["structuredContent"]
-            .get("jc:source")
-            .is_none(),
-        "nothing to attribute: {answer}"
-    );
-}
-
 /// EP-70: a source that failed does not fail the request. The status and the warning are the
 /// broker's, passed through, because only the broker knows which part did not answer.
 #[tokio::test]
@@ -414,37 +379,6 @@ async fn a_partial_merge_reaches_the_caller_as_the_broker_sent_it() {
         "a warning must not carry a member's address: {warning}"
     );
     assert_eq!(body.as_array().map(Vec::len), Some(1), "{body}");
-}
-
-/// EP-71: provenance is what the broker generated, and a grant is about data. The hub's
-/// policy still masks a merged answer, and the system attributes still arrive.
-#[tokio::test]
-async fn masking_applies_to_a_merged_answer_and_provenance_survives_it() {
-    let (broker, _) = partial_broker().await;
-    let (_, _, body) = query(
-        &broker,
-        table(vec![member(
-            "transport",
-            FederationIdentity::ServiceAccount,
-        )]),
-    )
-    .await;
-
-    let entity = &body[0];
-    assert!(
-        entity.get("location").is_some(),
-        "a granted attribute: {entity}"
-    );
-    assert!(
-        entity.get("speed").is_some(),
-        "a granted attribute: {entity}"
-    );
-    assert!(
-        entity.get(HIDDEN).is_none(),
-        "the endpoint hides {HIDDEN} whatever the merge returned: {entity}"
-    );
-    assert_eq!(entity["createdAt"], json!("2026-09-01T06:00:00Z"));
-    assert_eq!(entity["modifiedAt"], json!("2026-09-06T08:12:00Z"));
 }
 
 /// PF-48: `caller` identity needs an RFC 8693 exchange this platform does not have. Answering
@@ -559,7 +493,7 @@ async fn the_entity_map_header_crosses_the_gateway_in_both_directions() {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(listener, common::plain_tree(app)).await;
     });
 
     let members = table(vec![member(

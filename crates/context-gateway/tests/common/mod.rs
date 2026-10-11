@@ -120,8 +120,11 @@ pub fn b64(raw: &str) -> String {
 /// What the broker was asked for on one hop.
 #[derive(Debug, Clone, Default)]
 pub struct Hop {
-    /// The path, which must be the plain CIM 009 tree with no surface prefix left on it.
+    /// The path, which must be the plain CIM 009 tree with no surface prefix left on it; a hop
+    /// to a view root (`/x/views/{view}/ngsi-ld/v1/...`) is recorded under the plain tree.
     pub path: String,
+    /// The view a hop went through, empty for the broker's plain root (T-3643).
+    pub view: String,
     /// The query string as the gateway rewrote it.
     pub query: String,
     /// The tenant the gateway pinned (GW25).
@@ -172,7 +175,7 @@ impl BrokerStub {
                 async move {
                     let headers = request.headers().clone();
                     let method = request.method().clone();
-                    let path = request.uri().path().to_owned();
+                    let (view, path) = in_view(request.uri().path());
                     let query = request.uri().query().unwrap_or_default().to_owned();
                     let body = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024)
                         .await
@@ -180,6 +183,7 @@ impl BrokerStub {
                         .unwrap_or_default();
                     let mut hops = recorder.lock().expect("no poisoned lock");
                     hops.push(Hop {
+                        view,
                         path: path.clone(),
                         query: query.clone(),
                         tenant: headers
@@ -266,6 +270,41 @@ impl BrokerStub {
     /// The hops the gateway made, cloned out of the recorder.
     pub fn hops(&self) -> Vec<Hop> {
         self.hops.lock().expect("no poisoned lock").clone()
+    }
+}
+
+/// A fake broker that answers the broker's view roots as its plain tree (T-3643): the gateway
+/// sends `/x/views/{view}/ngsi-ld/v1/...`, and a fake written for `/ngsi-ld/v1/...` keeps
+/// answering it, its view dropped.
+pub fn plain_tree(app: axum::Router) -> axum::Router {
+    axum::Router::new()
+        .fallback_service(app)
+        .layer(axum::middleware::map_request(
+            |mut request: axum::extract::Request| async move {
+                let (view, path) = in_view(request.uri().path());
+                if !view.is_empty() {
+                    let rebuilt = match request.uri().query() {
+                        Some(query) => format!("{path}?{query}"),
+                        None => path,
+                    };
+                    if let Ok(uri) = rebuilt.parse() {
+                        *request.uri_mut() = uri;
+                    }
+                }
+                request
+            },
+        ))
+}
+
+/// The view a path goes through and the plain CIM 009 path it stands for: the broker's view
+/// root serves the same tree as its plain root (ADR-0023), so the stub answers both alike.
+fn in_view(path: &str) -> (String, String) {
+    match path
+        .strip_prefix("/x/views/")
+        .and_then(|rest| rest.split_once('/'))
+    {
+        Some((view, rest)) => (view.to_owned(), format!("/{rest}")),
+        None => (String::new(), path.to_owned()),
     }
 }
 
@@ -391,4 +430,25 @@ pub fn public_subscribe_policy(
         attributes.join(", ")
     ))
     .expect("the policy spec parses")
+}
+
+/// A broker whose MCP surface answers every request with `tools` as its tool list and no
+/// resource: the hop an Endpoint's or a space's MCP message takes since T-3647. Returns its URL.
+pub async fn mcp_broker(tools: Value) -> String {
+    let stub = axum::Router::new().fallback(move || {
+        let tools = tools.clone();
+        async move {
+            axum::Json(
+                json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools, "resources": [] } }),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    url
 }
