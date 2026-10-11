@@ -1,0 +1,49 @@
+name: vulnerabilities
+# T-3834: the images this repository publishes and the libraries it locks, scanned every day and
+# on demand, so a CVE disclosed after a build is named without waiting for a push. image.yml and
+# ci-full gate each build the same way; this lane catches what was disclosed since.
+# Every HIGH and CRITICAL goes to code scanning (SARIF, one category per target); the job fails on
+# a fixable one, and tasks/ci files the red run. An exception is a .trivyignore line with its
+# reason, task and expiry, never a lowered severity.
+on:
+  schedule: [{ cron: "17 5 * * *" }]
+  workflow_dispatch:
+permissions: { contents: read }
+concurrency: { group: vulnerabilities, cancel-in-progress: true }
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: read, security-events: write }
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # what image.yml publishes as `:main`, and the lock files of the tree
+        target: [image, checkouts, libraries]
+    env:
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE: ${{ matrix.target == 'image' && format('ghcr.io/{0}:main', github.repository) || format('ghcr.io/{0}/checkouts:main', github.repository) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: findings to code scanning
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: ${{ matrix.target == 'libraries' && 'fs' || 'image' }}
+          image-ref: ${{ matrix.target != 'libraries' && env.IMAGE || '' }}
+          scan-ref: "."
+          severity: "HIGH,CRITICAL"
+          format: sarif
+          output: trivy.sarif
+          exit-code: "0"
+      - uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with: { sarif_file: trivy.sarif, category: "trivy-${{ matrix.target }}" }
+      - name: a fixable HIGH or CRITICAL fails the day
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: ${{ matrix.target == 'libraries' && 'fs' || 'image' }}
+          image-ref: ${{ matrix.target != 'libraries' && env.IMAGE || '' }}
+          scan-ref: "."
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          exit-code: "1"
