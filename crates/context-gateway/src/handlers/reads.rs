@@ -24,17 +24,22 @@ use serde_json::Value;
 /// has already decided what this caller may see, and every constraint it produced is applied
 /// either upstream or on the way back. An empty list means an empty space, which is an empty
 /// file rather than an error.
+///
+/// Asked on the gateway's own account (T-3790): no grant gives a caller the type list (5.7.5),
+/// and the broker's engine refuses it to them; the entity query that follows is the caller's.
 async fn dataset_types(
     gateway: &Gateway,
     slug: &str,
     headers: &HeaderMap,
 ) -> Result<Vec<String>, Box<Response<Body>>> {
+    let mut headers = headers.clone();
+    tenancy::as_gateway(&mut headers);
     let answer = gateway
         .broker
         .send(
             axum::http::Method::GET,
             "/ngsi-ld/v1/types",
-            headers.clone(),
+            headers,
             Body::empty(),
         )
         .await

@@ -135,6 +135,29 @@ async fn a_bare_geojson_download_selects_the_types_the_space_holds() {
     // The question is asked of this endpoint's tenant and no other, or the type list of a
     // neighbouring space would become this endpoint's selector.
     assert_eq!(types_hop.tenant, "ovzdusie", "{types_hop:?}");
+    // The list only narrows, and no grant gives a caller 5.7.5, so the gateway asks it on its
+    // own account (T-3790): its client and no caller; the entity query is the caller's.
+    let header = |hop: &common::Hop, name: &str| {
+        hop.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        header(types_hop, "x-jc-client").as_deref(),
+        Some("context-gateway")
+    );
+    assert_eq!(
+        header(types_hop, "x-jc-roles").as_deref(),
+        Some(""),
+        "{types_hop:?}"
+    );
+    let entities_hop = hops.last().expect("an entity query");
+    assert_eq!(
+        header(entities_hop, "x-jc-roles").as_deref(),
+        Some("public")
+    );
+    assert_eq!(header(entities_hop, "x-jc-client"), None);
     let query = &hops.last().expect("an entity query").query;
     assert!(
         query.contains("type=AirQualityObserved"),
