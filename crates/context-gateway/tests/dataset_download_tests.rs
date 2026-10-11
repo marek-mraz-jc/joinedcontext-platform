@@ -304,3 +304,61 @@ information:
         "the grant already selected, so there was nothing to fall back to: {hops:?}"
     );
 }
+
+/// T-3790: the type list is asked on the gateway's account and so names every type the space
+/// holds. It is asked only when nothing selects, which is a caller who may read every type: a
+/// Policy that keeps one type from them is refused before any hop, the list never asked, and
+/// the refusal names nothing of that type. A grant that names types never asks it either
+/// (`a_grant_that_narrows_is_never_widened_by_the_fallback`).
+#[tokio::test]
+async fn a_type_the_caller_may_not_read_is_never_listed_for_them() {
+    let depot = json!({
+        "id": "urn:ngsi-ld:Depot:banskabystrica.sk:ovzdusie:north",
+        "type": "Depot",
+        "capacity": { "type": "Property", "value": 7 },
+    });
+    let mut endpoint = unrestricted_endpoint();
+    endpoint.representations.push(Representation::Json);
+    endpoint.policies.push(
+        serde_norway::from_str(
+            r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+effect: prohibition
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: Depot
+"#,
+        )
+        .expect("the policy spec parses"),
+    );
+    for file in ["file.geojson", "file.csv", "file.json"] {
+        let broker = BrokerStub::start(vec![json!([station(), depot.clone()])]).await;
+        let response = gateway(&broker.url, endpoint.clone())
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(format!("/api/endpoint/{SLUG}/{file}"))
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the gateway answers");
+        let status = response.status();
+        let headers = format!("{:?}", response.headers());
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .expect("a readable body");
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::FORBIDDEN, "{file}: {body}");
+        assert!(
+            broker.hops().is_empty(),
+            "{file} asked the broker: {:?}",
+            broker.hops()
+        );
+        for trace in ["Depot", "capacity", "north"] {
+            assert!(!body.contains(trace), "{file} names {trace}: {body}");
+            assert!(!headers.contains(trace), "{file} names {trace}: {headers}");
+        }
+    }
+}
