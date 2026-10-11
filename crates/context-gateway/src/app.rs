@@ -123,8 +123,6 @@ pub struct Gateway {
     pub rate_limiter: RateLimiter,
     /// The creates each form Endpoint has taken today (EP-97).
     pub creates: crate::creates::DailyCreates,
-    /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
-    pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
@@ -143,32 +141,6 @@ pub const HUB_RATE_LIMIT: RateLimits = RateLimits {
     requests_per_minute: 600,
     burst: Some(60),
 };
-
-/// What a tool call re-enters the NGSI-LD path with: the caller's own `Authorization` header,
-/// and the door the call came in by (EP-26, ADR-N-025 section 4).
-#[derive(Debug, Clone)]
-pub struct Credential {
-    /// The header as the caller sent it; `None` for an anonymous caller.
-    pub authorization: Option<HeaderValue>,
-    /// Where the call entered.
-    pub door: Door,
-}
-
-/// The door a request came in by (ADR-N-025 section 4).
-///
-/// A token whose audience is the hub is accepted only on a call that entered at `/api/mcp`,
-/// and only for the Endpoints its `endpoint:{slug}` scopes name: the same token sent to an
-/// Endpoint's own URL is refused, so a hub connector is never a key to the REST surfaces.
-/// The door is a function argument and never a header, so no client can claim it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Door {
-    /// `/api/endpoint/{slug}/…` or `/cs/{space}/…`, as every surface before the hub.
-    Endpoint,
-    /// `/api/mcp`, naming the Endpoint in the `endpoint` argument (EP-87).
-    Hub,
-    /// `/api/mcp/{project}/{name}`, a named server over chosen Endpoints (EP-92, ADR-N-043).
-    Server,
-}
 
 impl Gateway {
     /// A gateway with an empty endpoint table.
@@ -189,7 +161,6 @@ impl Gateway {
             delivery_key: None,
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
-            elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
@@ -265,24 +236,6 @@ impl Gateway {
         let mut audiences = vec![HUB_AUDIENCE.to_owned()];
         if let Some(base) = self.public_url.as_deref() {
             audiences.push(format!("{base}{HUB_PATH}"));
-        }
-        audiences
-    }
-
-    /// What a token may be bound to on a call to `endpoint` through `door`.
-    fn audiences_by(&self, endpoint: &Endpoint, door: Door) -> Vec<String> {
-        let mut audiences = self.audiences_for(endpoint);
-        match door {
-            Door::Endpoint => {}
-            Door::Hub => audiences.extend(self.hub_audiences()),
-            // A server's token reaches the members of that server and nothing else (EP-94).
-            Door::Server => audiences.extend(
-                self.servers
-                    .load()
-                    .iter()
-                    .filter(|server| server.members.contains(&endpoint.slug))
-                    .flat_map(|server| self.server_audiences(server)),
-            ),
         }
         audiences
     }
@@ -616,69 +569,6 @@ async fn space_ngsi_ld(
     // The space surface's view is the one the Portal writes per Context Space (plan 5.1).
     let view = |endpoint: &Endpoint| format!("cs-{}", endpoint.space);
     as_ngsi_ld_error(serve_ngsi_ld_view(&gateway, admitted, &prefix, view, request).await).await
-}
-
-/// Runs one NGSI-LD request through the very pipeline the HTTP surfaces run (T-0166, SP-16).
-///
-/// The MCP façade turns a tool call into the NGSI-LD request it stands for and hands it
-/// here, so the PDP, the query narrowing, the write guard and the response projection are
-/// literally the same code for an agent as for any other client, and discovery can never
-/// drift from enforcement.
-///
-/// `path` is the part under `/ngsi-ld/v1`, already percent-encoded; only the caller's own
-/// token crosses over, because a header of the MCP request describes that request and not
-/// this one.
-pub async fn ngsi_ld_request(
-    gateway: Arc<Gateway>,
-    endpoint: &Endpoint,
-    method: Method,
-    path: &str,
-    query: &str,
-    body: Option<Vec<u8>>,
-    credential: Credential,
-) -> Response<Body> {
-    let Credential {
-        authorization,
-        door,
-    } = credential;
-    let prefix = format!("{}/ngsi-ld/v1", endpoint.base_path);
-    let uri = match query.is_empty() {
-        true => format!("{prefix}{path}"),
-        false => format!("{prefix}{path}?{query}"),
-    };
-    let mut builder = axum::http::Request::builder().method(method).uri(uri);
-    if let Some(token) = authorization {
-        builder = builder.header(AUTHORIZATION, token);
-    }
-    if body.is_some() {
-        builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
-    }
-    let Ok(request) = builder.body(body.map_or_else(Body::empty, Body::from)) else {
-        return ProblemDetails::bad_request()
-            .with_detail("the arguments do not form a request this endpoint can serve")
-            .into_response();
-    };
-
-    // Admitted again from the token alone, so a tool call carries no privilege the same
-    // call over HTTP would not have (EP-26). The record says which of the two surfaces it
-    // belongs to, so a space instance re-resolves through the space table (SP-14).
-    let admitted = match endpoint.base_path.strip_prefix("/cs/") {
-        Some(space) => admit_space(
-            &gateway,
-            space,
-            Some(Representation::Mcp),
-            request.headers(),
-        )
-        .map(|(space, subject)| (Arc::clone(&space.endpoint), subject)),
-        None => admit_by(
-            &gateway,
-            &endpoint.slug,
-            Some(Representation::Mcp),
-            request.headers(),
-            door,
-        ),
-    };
-    as_ngsi_ld_error(serve_ngsi_ld(&gateway, admitted, &prefix, request).await).await
 }
 
 /// The error types of CIM 009 clause 5.5.2 the gateway's own refusals map to, by status.
@@ -3478,16 +3368,6 @@ pub(crate) fn authenticate(
     endpoint: &Endpoint,
     headers: &HeaderMap,
 ) -> Result<Subject, Box<ProblemDetails>> {
-    authenticate_by(gateway, endpoint, headers, Door::Endpoint)
-}
-
-/// [`authenticate`], for a request that came in by `door` (ADR-N-025 section 4).
-pub(crate) fn authenticate_by(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    headers: &HeaderMap,
-    door: Door,
-) -> Result<Subject, Box<ProblemDetails>> {
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -3509,13 +3389,8 @@ pub(crate) fn authenticate_by(
         return Err(Box::new(ProblemDetails::unauthorized()));
     };
     let claims = verifier
-        .verify(raw, &gateway.audiences_by(endpoint, door))
+        .verify(raw, &gateway.audiences_for(endpoint))
         .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
-    // A hub token whose scopes do not pick this Endpoint does not reach it, and learns no more
-    // than it would about a slug that does not exist (EP-88, SP-20).
-    if door == Door::Hub && !gateway.reaches(&claims, endpoint) {
-        return Err(Box::new(ProblemDetails::not_found()));
-    }
     subject_from(gateway, endpoint, &claims)
 }
 
@@ -3772,17 +3647,6 @@ pub(crate) fn admit(
     representation: Option<Representation>,
     headers: &HeaderMap,
 ) -> Result<(Arc<Endpoint>, Subject), Box<Response<Body>>> {
-    admit_by(gateway, slug, representation, headers, Door::Endpoint)
-}
-
-/// [`admit`], for a request that came in by `door` (ADR-N-025 section 4).
-pub(crate) fn admit_by(
-    gateway: &Gateway,
-    slug: &str,
-    representation: Option<Representation>,
-    headers: &HeaderMap,
-    door: Door,
-) -> Result<(Arc<Endpoint>, Subject), Box<Response<Body>>> {
     let endpoint = gateway
         .resolver
         .resolve(slug)
@@ -3793,7 +3657,7 @@ pub(crate) fn admit_by(
     if representation.is_some_and(|wanted| !endpoint.serves(wanted)) {
         return Err(Box::new(ProblemDetails::not_found().into_response()));
     }
-    let subject = authenticate_by(gateway, &endpoint, headers, door)
+    let subject = authenticate(gateway, &endpoint, headers)
         .map_err(|problem| Box::new(problem.into_response()))?;
     Ok((endpoint, subject))
 }
@@ -3850,31 +3714,47 @@ async fn mcp_answer(
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
-        return mcp::endpoint_facade::parse_error();
+        return mcp::jsonrpc::parse_error();
     };
     let Ok(mut message) = serde_json::from_slice::<Value>(&bytes) else {
-        return mcp::endpoint_facade::parse_error();
+        return mcp::jsonrpc::parse_error();
     };
-    let credential = Credential {
-        authorization: parts.headers.get(AUTHORIZATION).cloned(),
-        door: Door::Endpoint,
-    };
+    // What is no single request (a notification, a batch, a scalar) changes nothing and is
+    // answered with nothing, before a hop: nothing is kept between messages (SP-19).
+    if !(message.is_object() && message.get("id").is_some()) {
+        return StatusCode::ACCEPTED.into_response();
+    }
     let tool = message["params"]["name"].as_str().map(str::to_owned);
     let calls = message["method"] == "tools/call";
-    let described = calls
+    let id = message["id"].clone();
+    if calls
         && tool
             .as_deref()
-            .is_some_and(|tool| DESCRIBE_TOOLS.contains(&tool))
-        || message["method"] == "resources/read"
-            && message["params"]["uri"]
-                .as_str()
-                .is_some_and(|uri| OWN_SCHEMES.iter().any(|scheme| uri.starts_with(scheme)));
-    // What is no single request (a batch, a scalar, a notification that changes nothing) is
-    // answered here as JSON-RPC says, before a hop.
-    let request_message = message.is_object() && message.get("id").is_some();
-    let viewed = request_message && view_serves(&endpoint, &view);
-    if described || !viewed {
-        return facade_answer(gateway, endpoint, subject, credential, message).await;
+            .is_some_and(|tool| mcp::describe::DESCRIBE_TOOLS.contains(&tool))
+    {
+        let answer = mcp::describe::call(&gateway, &endpoint, &subject, id, &message["params"]);
+        return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
+    }
+    if message["method"] == "resources/read"
+        && message["params"]["uri"].as_str().is_some_and(|uri| {
+            mcp::describe::OWN_SCHEMES
+                .iter()
+                .any(|scheme| uri.starts_with(scheme))
+        })
+    {
+        let answer = mcp::describe::read(&gateway, &endpoint, &subject, id, &message["params"]);
+        return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
+    }
+    if !(1..=MAX_VIEW_ID).contains(&view.len()) {
+        // The Portal writes no view whose id the broker refuses (`[a-z0-9-]{1,63}`), so a space
+        // whose name leaves no room for `cs-` has no MCP surface to forward to.
+        tracing::info!(%view, "MCP refused: no broker view can carry this id");
+        return ProblemDetails::new(501, "no-view", "Not Implemented")
+            .with_detail(
+                "this space's name is too long for a broker view, so its MCP surface is not \
+                 served; a space name of at most 60 characters is",
+            )
+            .into_response();
     }
 
     let operation = mcp_operation(calls.then_some(tool.as_deref().unwrap_or_default()));
@@ -3885,7 +3765,7 @@ async fn mcp_answer(
     let federates = member_names(&gateway, &endpoint);
     let (mut parts, _) = request.into_parts();
     if calls {
-        capped_arguments(&mut message["params"]["arguments"]);
+        capped_arguments(&mut message);
     }
     // The broker's Streamable HTTP refuses a request that does not accept both (406); the
     // façade took `application/json` alone, and the callers that send just that keep working.
@@ -3943,16 +3823,10 @@ async fn mcp_answer(
         federated(&mut listed, &method, &federates);
     }
     if let Some(key) = key {
-        let ask = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": method });
-        let own = mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, ask).await;
-        let kept: Vec<Value> = own
-            .as_ref()
-            .and_then(|own| own["result"][key].as_array())
-            .into_iter()
-            .flatten()
-            .filter(|item| gateway_owns(item))
-            .cloned()
-            .collect();
+        let kept = match key {
+            "tools" => mcp::describe::tools(&gateway, &endpoint, &subject),
+            _ => mcp::describe::resources(&endpoint, &subject),
+        };
         let items = listed
             .get_mut("result")
             .and_then(|result| result.get_mut(key))
@@ -4040,14 +3914,6 @@ fn federated(answer: &mut Value, method: &str, members: &[String]) {
     }
 }
 
-/// Whether the broker's MCP surface of `view` answers this Endpoint's caller: not what no view
-/// serves yet, a view mapping. An agreement's caller is the view's (map K38, T-3818), and a space
-/// that federates registrations is served by its own view, which merges them as its NGSI-LD
-/// surface does; the gateway names them in the answer (EP-71, T-3819).
-fn view_serves(endpoint: &Endpoint, view: &str) -> bool {
-    endpoint.view_mapping.is_none() && (1..=MAX_VIEW_ID).contains(&view.len())
-}
-
 /// The operation the domain gate (PF-41) weighs a message as: a tool the gateway does not know
 /// as a read is a write. It stands for the class of the call; the broker gates the tool's own
 /// clause.
@@ -4057,12 +3923,6 @@ fn mcp_operation(tool: Option<&str>) -> Operation {
     } else {
         Operation::QueryEntity
     }
-}
-
-/// Whether a member's call to `tool` goes to the broker's view of the member (T-3808): not the
-/// describe tools the gateway answers, and not a member no view serves yet.
-pub(crate) fn member_viewed(endpoint: &Endpoint, tool: &str) -> bool {
-    !DESCRIBE_TOOLS.contains(&tool) && view_serves(endpoint, &endpoint.slug)
 }
 
 /// One `tools/call` of the hub or of a named server as the broker's view of the member answers
@@ -4085,7 +3945,7 @@ pub(crate) async fn member_call(
         return member_refusal(id, problem_text(&held));
     }
     let (mut parts, _) = request.into_parts();
-    capped_arguments(&mut message["params"]["arguments"]);
+    capped_arguments(&mut message);
     parts
         .headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -4156,45 +4016,11 @@ fn member_refusal(id: Value, why: Option<String>) -> Value {
     let why = why.unwrap_or_else(|| {
         "the context broker behind this Endpoint failed to answer this call".to_owned()
     });
-    mcp::endpoint_facade::result(id, mcp::endpoint_facade::refused(&why, &Value::Null))
+    mcp::jsonrpc::result(id, mcp::jsonrpc::refused(&why, &Value::Null))
 }
 
 /// The listings the gateway adds its own entries to, by method and result member.
 const OWN_LISTINGS: &[(&str, &str)] = &[("tools/list", "tools"), ("resources/list", "resources")];
-
-/// Whether a listed tool or resource is the gateway's: the two describe tools and the
-/// documents they answer from (`schema://`, `access://`).
-fn gateway_owns(item: &Value) -> bool {
-    item["name"]
-        .as_str()
-        .is_some_and(|name| DESCRIBE_TOOLS.contains(&name))
-        || item["uri"]
-            .as_str()
-            .is_some_and(|uri| OWN_SCHEMES.iter().any(|scheme| uri.starts_with(scheme)))
-}
-
-/// The resources the gateway serves itself: the schema and access documents behind the two
-/// describe tools, which the broker has no resource for (Antares `mcp-surface.md` section 9).
-const OWN_SCHEMES: &[&str] = &["schema://", "access://"];
-
-/// The gateway's own façade, for the tools it keeps and the Endpoints no view serves yet.
-async fn facade_answer(
-    gateway: Arc<Gateway>,
-    endpoint: Arc<Endpoint>,
-    subject: Subject,
-    credential: Credential,
-    message: Value,
-) -> Response<Body> {
-    match mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, message).await {
-        Some(answer) => mcp::endpoint_facade::json_response(StatusCode::OK, &answer),
-        // A notification is acknowledged and nothing more: there is no state to change.
-        None => StatusCode::ACCEPTED.into_response(),
-    }
-}
-
-/// The tools that describe the Endpoint rather than its data: no broker tool (Antares
-/// `mcp-surface.md` section 9), so the gateway answers them.
-const DESCRIBE_TOOLS: &[&str] = &["describe_access", "describe_schema"];
 
 /// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
 const MCP_READ_TOOLS: &[&str] = &[
@@ -4216,8 +4042,16 @@ const MCP_READ_TOOLS: &[&str] = &[
 ];
 
 /// The two costs one call may put on the shared broker, capped as [`capped_query`] caps them
-/// on the NGSI-LD surface: `joinLevel` (AG-25) and `lastN` (GW26).
-fn capped_arguments(arguments: &mut Value) {
+/// on the NGSI-LD surface: `joinLevel` (AG-25) and `lastN` (GW26). A message whose `params` or
+/// `arguments` is no object is left for the broker to refuse.
+fn capped_arguments(message: &mut Value) {
+    let Some(arguments) = message
+        .get_mut("params")
+        .and_then(|params| params.get_mut("arguments"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
     for (name, cap) in [
         ("joinLevel", query::JOIN_LEVEL_CAP),
         ("lastN", query::LAST_N_CAP),

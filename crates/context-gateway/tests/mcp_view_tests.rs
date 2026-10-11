@@ -325,10 +325,15 @@ async fn a_write_tool_meets_the_domain_gate_before_the_broker() {
     assert_eq!(hops.lock().expect("the hop log").len(), 1);
 }
 
-/// An Endpoint with a view mapping has no view at the broker yet: its MCP stays the gateway's.
+/// An Endpoint with a view mapping is its view's too: the broker serves the mapped view's MCP
+/// (Antares T-3817), and the gateway no longer has a façade to keep it on (T-3648).
 #[tokio::test]
-async fn a_mapped_endpoint_stays_on_the_gateways_mcp() {
-    let (upstream, hops) = broker(StatusCode::OK, json!({})).await;
+async fn a_mapped_endpoint_is_its_views_mcp() {
+    let (upstream, hops) = broker(
+        StatusCode::OK,
+        json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [] } }),
+    )
+    .await;
     let mapping = ViewMapping::parse(&json!({
         "version": 2,
         "sourceClass": "Senzor",
@@ -344,10 +349,12 @@ async fn a_mapped_endpoint_stays_on_the_gateways_mcp() {
     let (status, answer) = post(gateway(upstream, mapped), &endpoint_mcp(), &list).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert!(
-        tool_names(&answer).contains(&"query_entities".to_owned()),
-        "{answer}"
+        !tool_names(&answer).contains(&"query_entities".to_owned()),
+        "the data tools are the broker's, and this broker listed none: {answer}"
     );
-    assert!(hops.lock().expect("the hop log").is_empty());
+    let hops = hops.lock().expect("the hop log");
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0].path, format!("/x/views/{SLUG}/mcp"));
 }
 
 /// AG-25: a tool call spends the Endpoint's quota like any other request; the limiter stands
@@ -602,4 +609,67 @@ async fn an_event_stream_listing_is_passed_on_untouched() {
         .await
         .expect("a body");
     assert_eq!(String::from_utf8_lossy(&bytes), stream);
+}
+
+/// T-3648: a space whose name leaves no room for `cs-` in a view id has no broker view; its MCP
+/// is refused with what to change, and nothing reaches the broker.
+#[tokio::test]
+async fn a_space_too_long_for_a_view_id_is_refused_without_a_hop() {
+    let (upstream, hops) = broker(StatusCode::OK, json!({})).await;
+    let long = "s".repeat(61);
+    let space = Space {
+        endpoint: Arc::new(Endpoint {
+            slug: long.clone(),
+            space: long.clone(),
+            base_path: format!("/cs/{long}"),
+            ..endpoint()
+        }),
+        title: Default::default(),
+        description: Default::default(),
+        is_sandbox: false,
+        default_locale: None,
+    };
+    let gateway = Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+        .serve([endpoint()])
+        .serve_spaces([space]);
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (status, answer) = post(gateway, &format!("/cs/{long}/mcp"), &list).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{answer}");
+    assert!(
+        answer["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("60 characters")),
+        "{answer}"
+    );
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
+/// T-3648: `params` or `arguments` that is no object is the broker's to refuse; the gateway
+/// caps what it can read and never fails on what it cannot.
+#[tokio::test]
+async fn params_that_are_no_object_reach_the_broker_unchanged() {
+    let (upstream, hops) = broker(
+        StatusCode::OK,
+        json!({ "jsonrpc": "2.0", "id": 7, "error": { "code": -32602, "message": "invalid params" } }),
+    )
+    .await;
+    for params in [
+        json!("x"),
+        json!([1]),
+        json!({ "name": "query_entities", "arguments": 3 }),
+    ] {
+        let message =
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": params });
+        let (status, answer) = post(
+            gateway(upstream.clone(), endpoint()),
+            &endpoint_mcp(),
+            &message,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{params}: {answer}");
+        assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+    }
+    let hops = hops.lock().expect("the hop log");
+    assert_eq!(hops.len(), 3);
+    assert_eq!(hops[0].body["params"], json!("x"));
 }
