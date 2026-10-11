@@ -79,8 +79,9 @@ struct GatewayOnly {
 }
 
 /// Where a call of a component goes (AP-147): `http://gateway/api/endpoint/<slug>/…` with the
-/// App's own slug, or for short `http://gateway/ngsi-ld/v1/…` and the Endpoint's schema
-/// `http://gateway/schema/…`, all to `<gateway>/api/endpoint/<slug>/…`. Any other origin, path or
+/// App's own slug, or for short `http://gateway/ngsi-ld/v1/…`, the Endpoint's OGC API - Features
+/// surface `http://gateway/ogc/features/…` (EP-29) and its schema `http://gateway/schema/…`, all
+/// to `<gateway>/api/endpoint/<slug>/…`. Any other origin, path or
 /// Endpoint, and any path with a dot segment, an encoded dot or slash, or a backslash (which a URL
 /// parser could fold into a step out of the Endpoint), is refused.
 pub fn endpoint_target(gateway: &str, slug: &str, uri: &http::Uri) -> Option<String> {
@@ -98,8 +99,11 @@ pub fn endpoint_target(gateway: &str, slug: &str, uri: &http::Uri) -> Option<Str
         .filter(|rest| rest.starts_with('/'))
         .unwrap_or(target);
     let path = below.split('?').next().unwrap_or_default();
-    if !(path == "/ngsi-ld/v1" || path.starts_with("/ngsi-ld/v1/") || path.starts_with("/schema/"))
-    {
+    let served = ["/ngsi-ld/v1", "/ogc/features"].iter().any(|root| {
+        path.strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }) || path.starts_with("/schema/");
+    if !served {
         return None;
     }
     let lower = path.to_ascii_lowercase();
@@ -757,6 +761,14 @@ mod tests {
                 "http://gateway/schema/v1/json-schema",
                 "http://gw:8080/api/endpoint/ep1/schema/v1/json-schema",
             ),
+            (
+                "http://gateway/ogc/features/collections/Alert/items?bbox=24.9,60.1,25.1,60.3&limit=10",
+                "http://gw:8080/api/endpoint/ep1/ogc/features/collections/Alert/items?bbox=24.9,60.1,25.1,60.3&limit=10",
+            ),
+            (
+                "http://gateway/api/endpoint/ep1/ogc/features",
+                "http://gw:8080/api/endpoint/ep1/ogc/features",
+            ),
             // The long form T-3346's Apps write, with the App's own slug.
             (
                 "http://gateway/api/endpoint/ep1/ngsi-ld/v1/entities?type=A",
@@ -778,6 +790,10 @@ mod tests {
             "http://gateway/api/endpoint/ep1/mcp",
             "http://gateway/api/endpoint/ep1",
             "http://gateway/ngsi-ld/v1x",
+            "http://gateway/ogc/featuresx",
+            "http://gateway/ogc",
+            "http://gateway/ogc/features/../../other/ogc/features",
+            "http://gateway/api/endpoint/other/ogc/features/collections",
             "http://gateway/schema",
             "http://gateway/schemas/x",
             "http://gateway/schema/../../other/schema/index.json",
