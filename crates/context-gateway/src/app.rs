@@ -1444,19 +1444,13 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    has_view(endpoint, view) && !conditional && !subscription
+    has_view(view) && !conditional && !subscription
 }
 
-/// Whether the broker holds a view `view` of this Endpoint (plan 5.1, T-3643). What no view can
-/// serve yet keeps the gateway's own answer, each until its gap closes: a projection with
-/// `temporalQ` (G6), a slug no view id can hold (the writer refuses it).
-pub(crate) fn has_view(endpoint: &Endpoint, view: &str) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
-    !temporal && (1..=MAX_VIEW_ID).contains(&view.len())
+/// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
+/// one, unless its slug is longer than a view id can be (the writer refuses it).
+pub(crate) fn has_view(view: &str) -> bool {
+    (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The broker's view of an Endpoint (plan 5.1): its slug, or `cs-{space}` for a space's

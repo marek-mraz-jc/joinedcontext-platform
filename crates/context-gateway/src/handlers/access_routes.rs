@@ -76,7 +76,7 @@ pub(crate) async fn document(
     subject: &Subject,
     format: AccessFormat,
 ) -> Result<Value, Box<Response<Body>>> {
-    if !has_view(endpoint, &view_of(endpoint)) {
+    if !has_view(&view_of(endpoint)) {
         return Ok(own_document(gateway, endpoint, subject, format));
     }
     // ODRL and Turtle are both read as ODRL JSON-LD: the gateway adds the licence's duties and
@@ -300,7 +300,7 @@ pub(crate) async fn access_check(
             .into_response();
     };
 
-    if !has_view(&endpoint, &view_of(&endpoint)) {
+    if !has_view(&view_of(&endpoint)) {
         return json_response(&handlers::access::check(
             &subject,
             &endpoint,

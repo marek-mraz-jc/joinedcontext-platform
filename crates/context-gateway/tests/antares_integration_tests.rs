@@ -1154,3 +1154,96 @@ fn authorized(request: Request<Body>, token: &str) -> Request<Body> {
 fn body_text(body: &[u8]) -> String {
     String::from_utf8_lossy(body).into_owned()
 }
+
+/// T-3801 (G6, T-3632, T-3812): a projection's `temporalQ` reaches the broker as the window of the
+/// view's permit, as the Portal's writer puts it, and a temporal read through the Endpoint
+/// returns only the instances inside it; the gateway clamps nothing itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_window_narrows_a_temporal_read_through_the_view() {
+    let Some(antares) = Antares::start() else {
+        return;
+    };
+    let public = json!({"kind": "role", "id": "public"});
+    let information = json!([{
+        "entities": [{"type": "AirQualityObserved"}],
+        "propertyNames": ["pm10"]
+    }]);
+    let window = "timerel=after;timeAt=2026-01-01T00:00:00Z";
+    let mut recent = rule(
+        &format!("public-air@{WRITER_SLUG}"),
+        public,
+        &["5.7.3"],
+        Some(information),
+    );
+    recent["temporalQ"] = json!(window);
+    let rules = json!({
+        "policies": [
+            recent,
+            rule("seeder", json!({"kind": "serviceAccount", "id": "seeder"}), &["5.6.1", "5.6.2"], None),
+        ],
+        "views": { WRITER_SLUG: [format!("{SPACE}/public-air@{WRITER_SLUG}")] },
+    });
+    antares
+        .load(
+            &[view(WRITER_SLUG, &["pm10"], &["temporal_retrieve"])],
+            rules,
+        )
+        .await;
+    // Two instances of pm10, one each side of the window: a create, then an update.
+    let instance =
+        |value: f64, at: &str| json!({"type": "Property", "value": value, "observedAt": at});
+    antares
+        .seed(&json!({
+            "id": STATION,
+            "type": "AirQualityObserved",
+            "pm10": instance(1.0, "2025-06-01T00:00:00Z"),
+        }))
+        .await;
+    let updated = reqwest::Client::new()
+        .patch(format!(
+            "{}/ngsi-ld/v1/entities/{STATION}/attrs",
+            antares.url()
+        ))
+        .header("ngsild-tenant", SPACE)
+        .header("x-jc-client", "seeder")
+        .json(&json!({"pm10": instance(2.0, "2026-06-01T00:00:00Z")}))
+        .send()
+        .await
+        .expect("the broker answers");
+    let code = updated.status();
+    assert!(
+        code.is_success(),
+        "update: {code} {}",
+        updated.text().await.unwrap_or_default()
+    );
+
+    let projection = serde_json::from_value(json!({
+        "contextSpaceRef": SPACE, "dataModelRef": {"name": "air", "version": "1.0.0"},
+        "classes": [{"name": "AirQualityObserved"}],
+        "filter": {"temporalQ": window}
+    }))
+    .expect("a projection");
+    let windowed = Endpoint {
+        projection: Some(std::sync::Arc::new(projection)),
+        ..endpoint(WRITER_SLUG, Audience::Public)
+    };
+    let app = router(std::sync::Arc::new(
+        Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG).serve([windowed]),
+    ));
+    let (status, body) = call(
+        &app,
+        get(WRITER_SLUG, &format!("/temporal/entities/{STATION}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "temporal: {}", body_text(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("a JSON answer");
+    let values: Vec<&Value> = answer["pm10"]
+        .as_array()
+        .map(|instances| instances.iter().map(|i| &i["value"]).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        values,
+        [&json!(2.0)],
+        "only the instance inside the window: {answer}"
+    );
+}
