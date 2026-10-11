@@ -245,3 +245,61 @@ fn a_caller_is_never_forwarded_as_the_gateway() {
     );
     assert!(request.headers().get("x-jc-roles").is_some());
 }
+
+/// The `x-jc-*` names a client sends that no fixed list could know of: the next identity
+/// header the broker starts reading (`x-jc-did`, T-3800), any new one, and repeats.
+const NEW_IDENTITY: [(&str, &str); 5] = [
+    ("x-jc-did", "did:web:forged"),
+    ("X-JC-Anything-New", "forged"),
+    ("x-jc-roles", "admin"),
+    ("x-jc-roles", "steward"),
+    ("x-jc-subject", "ana"),
+];
+
+#[test]
+fn every_x_jc_header_a_client_sends_is_removed_by_its_prefix() {
+    // T-3816: the broker's engine believes every `x-jc-*` the gateway pins, so a client may
+    // send none of them, including one no list names yet.
+    let mut request = with(&NEW_IDENTITY);
+    let kept = [
+        ("x-jcx", "1"),
+        ("xx-jc-did", "2"),
+        ("x-j-c-did", "3"),
+        ("accept", "a"),
+    ];
+    for (name, value) in kept {
+        request
+            .headers_mut()
+            .append(name, HeaderValue::from_static(value));
+    }
+    strip_client_headers(&mut request);
+    let left: Vec<&str> = request.headers().keys().map(|n| n.as_str()).collect();
+    assert_eq!(left.len(), kept.len(), "{left:?}");
+    assert!(left.iter().all(|n| !n.starts_with("x-jc-")), "{left:?}");
+}
+
+#[test]
+fn a_hop_carries_only_the_x_jc_headers_the_gateway_set() {
+    // T-3816: `as_gateway` and `pin_caller` drop every client `x-jc-*`, not only the ones they set.
+    let mut headers = with(&NEW_IDENTITY).headers().clone();
+    as_gateway(&mut headers);
+    let mut jc: Vec<&str> = headers
+        .keys()
+        .map(|n| n.as_str())
+        .filter(|n| n.starts_with("x-jc-"))
+        .collect();
+    jc.sort_unstable();
+    assert_eq!(jc, ["x-jc-client", "x-jc-roles"]);
+
+    let mut request = with(&NEW_IDENTITY);
+    let subject = context_gateway::pdp::evaluator::Subject::anonymous();
+    context_gateway::middleware::tenancy::pin_caller(&mut request, "city", &subject)
+        .expect("a legal space");
+    let jc: Vec<(&str, &str)> = request
+        .headers()
+        .iter()
+        .filter(|(n, _)| n.as_str().starts_with("x-jc-"))
+        .map(|(n, v)| (n.as_str(), v.to_str().unwrap_or_default()))
+        .collect();
+    assert_eq!(jc, [("x-jc-roles", "public")]);
+}
