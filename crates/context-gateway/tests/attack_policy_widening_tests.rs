@@ -4,9 +4,11 @@
 //! `filter_oracle_tests.rs` plays this attack on the NGSI-LD surface: `q`, `attrs`, `orderBy`,
 //! `geoproperty` and the selectors of a batch query body are all held to what the endpoint may
 //! serve, so filtering on a hidden or foreign attribute considers no entity at all instead of
-//! answering with the rows that matched. The OGC and SensorThings surfaces take their filter in
-//! another language — CQL2-text in `filter`, an OData-ish expression in `$filter` — and both are
-//! compiled into an NGSI-LD `q`. This file is the same attack written in those two languages.
+//! answering with the rows that matched. The SensorThings surface takes its filter in another
+//! language, an OData-ish expression in `$filter`, compiled into an NGSI-LD `q`; this file is the
+//! same attack written in it. The OGC surface is the broker's (T-3752): its CQL2 `filter` is held
+//! to the view there (Antares `crates/antares-ogc/tests/ogc/filter.rs`,
+//! `hidden_and_unknown_property_are_the_same_400` and `a_filter_never_widens_the_policy`).
 //!
 //! The property each case asserts is equality, not emptiness: the same request with two different
 //! values for the hidden attribute has to give the same answer and ask the broker the same
@@ -216,75 +218,6 @@ async fn indistinguishable(one: &str, other: &str) {
     }
 }
 
-/// EP-61, T-1862: CQL2 is compiled into `q` before the enforcement point decides, so a hidden
-/// name in a `filter` is the hidden name in a `q` — and bisecting it learns nothing.
-#[tokio::test]
-async fn a_cql2_filter_on_a_hidden_attribute_is_not_an_oracle() {
-    indistinguishable(
-        "/ogc/features/collections/Vehicle/items?filter=secretPin%3D%274321%27",
-        "/ogc/features/collections/Vehicle/items?filter=secretPin%3D%279999%27",
-    )
-    .await;
-    let (status, _, asked) =
-        ask("/ogc/features/collections/Vehicle/items?filter=secretPin%3D%274321%27").await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "an oracle is closed by emptiness, not by an error"
-    );
-    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
-}
-
-/// The same for an `OR`: a branch still decides whether a row comes back, so the whole filter is
-/// judged by every name it mentions.
-#[tokio::test]
-async fn a_hidden_name_in_an_or_branch_of_a_cql2_filter_is_not_an_oracle() {
-    indistinguishable(
-        "/ogc/features/collections/Vehicle/items?filter=weight%3E1%20OR%20secretPin%3D%274321%27",
-        "/ogc/features/collections/Vehicle/items?filter=weight%3E1%20OR%20secretPin%3D%279999%27",
-    )
-    .await;
-}
-
-/// MP-02: `age` is a `User`'s slot in this projection, so a `Vehicle` may not be selected on it.
-#[tokio::test]
-async fn a_cql2_filter_on_an_attribute_of_another_type_selects_no_vehicle() {
-    let (status, body, _) = ask("/ogc/features/collections/Vehicle/items?filter=age%3E5").await;
-    assert_eq!(status, StatusCode::OK);
-    let features = body["features"].as_array().cloned().unwrap_or_default();
-    assert!(
-        features.iter().all(
-            |feature| feature["id"].as_str() != Some("urn:ngsi-ld:Vehicle:hel.fi:fleet:bus-01")
-        ),
-        "a vehicle was selected on an attribute this endpoint does not serve for it: {body}"
-    );
-    assert!(
-        !body.to_string().contains("\"4321\""),
-        "the vehicle's hidden value is in the answer: {body}"
-    );
-}
-
-/// The control: a filter the endpoint does serve is compiled and does reach the broker. Without
-/// it this file would pass just as well with the whole surface refusing everything.
-#[tokio::test]
-async fn a_cql2_filter_the_endpoint_serves_is_compiled_and_forwarded() {
-    let (status, body, asked) =
-        ask("/ogc/features/collections/Vehicle/items?filter=weight%3E100").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(asked.len(), 1, "the broker was asked {asked:?}");
-    assert!(
-        asked[0].contains("q=%28weight%3E100%29"),
-        "the compiled filter did not reach the broker: {}",
-        asked[0]
-    );
-    assert!(
-        body["features"]
-            .as_array()
-            .is_some_and(|features| !features.is_empty()),
-        "the control returned nothing, so the other cases prove nothing: {body}"
-    );
-}
-
 /// EP-12, EP-61: SensorThings takes its filter in `$filter`, and it is compiled into the same `q`.
 #[tokio::test]
 async fn a_sensorthings_filter_on_a_hidden_attribute_is_not_an_oracle() {
@@ -312,15 +245,4 @@ async fn a_sensorthings_filter_the_endpoint_serves_is_compiled_and_forwarded() {
             .is_some_and(|value| !value.is_empty()),
         "the control returned nothing, so the other cases prove nothing: {body}"
     );
-}
-
-/// A parameter this surface does not implement is not a selector the broker gets to see: an OGC
-/// queryable named after a hidden attribute changes neither the answer nor the question.
-#[tokio::test]
-async fn a_queryable_this_surface_does_not_implement_never_reaches_the_broker() {
-    indistinguishable(
-        "/ogc/features/collections/Vehicle/items?secretPin=4321",
-        "/ogc/features/collections/Vehicle/items?secretPin=9999",
-    )
-    .await;
 }

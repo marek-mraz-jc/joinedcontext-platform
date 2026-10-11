@@ -1,39 +1,38 @@
-//! The OGC API Features surface of an endpoint, one handler over its own resource tree (EP-29).
+//! The OGC API Features surface of an endpoint (EP-29): the broker's `antares-ogc` surface of the
+//! Endpoint's view (T-3752, ADR-0029 decision 3).
+//!
+//! `/api/endpoint/{slug}/ogc/features{rest}` goes to `/x/views/{view}/ogc/features{rest}` with
+//! the caller's query as sent and the tenant and the verified caller pinned, like the NGSI-LD
+//! surface (T-3643). The broker answers every document, filter (CQL2) and decision; the gateway
+//! admits the caller, keeps the representation read-only (EP-39) and moves the broker's links
+//! under the caller's URL.
 
-use crate::app::accept_language;
-use crate::app::admit;
-use crate::app::read_only;
-use crate::app::typed_json_response;
-use crate::app::Gateway;
-use crate::app::PAGE;
-use crate::handlers::reads::query_entities;
-use crate::handlers::schema;
+use crate::app::{
+    admit, broker_failure, caller_links, has_view, principal_of, read_only, view_of,
+    with_platform_slug, Gateway, MAX_BODY,
+};
 use crate::middleware::response::RESULTS_RESTRICTED;
-use crate::pdp::evaluator::Subject;
-use crate::resolver::{Endpoint, Space};
-use crate::translators::{cql2, ogc};
-use crate::{middleware::tenancy, query};
+use crate::middleware::tenancy;
+use crate::proxy;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
+use axum::http::{Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use jc_core::kinds::Representation;
 use jc_core::ProblemDetails;
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Every OGC API - Features request of one endpoint (T-0159, EP-29, EP-30, EP-31, EP-32, EP-39).
-///
-/// One handler over the whole Core resource tree, for the same reason the NGSI-LD surface has
-/// one: the four steps before the branch — strip, resolve, refuse a write, translate the
-/// parameters — are the steps that make the representation safe, and a second entry point is
-/// a second place to forget one of them.
+/// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
+const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+
+/// Every OGC API - Features request of one endpoint (EP-29, EP-39, EP-40).
 pub(crate) async fn ogc_features(
     State(gateway): State<Arc<Gateway>>,
     Path(params): Path<HashMap<String, String>>,
     mut request: Request,
 ) -> Response<Body> {
+    // Before routing, before authentication, before anything reads a header (EP-21).
     tenancy::strip_client_headers(&mut request);
     let slug = params.get("slug").cloned().unwrap_or_default();
     let (endpoint, subject) = match admit(
@@ -45,9 +44,8 @@ pub(crate) async fn ogc_features(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
-
-    // EP-39: this representation has no write half at all. `OPTIONS` is answered rather than
-    // refused, because that is how a client is supposed to discover the fact.
+    // EP-39: this representation has no write half. `OPTIONS` is answered rather than refused,
+    // because that is how a client discovers the fact.
     let method = request.method().clone();
     if method == Method::OPTIONS {
         return read_only(StatusCode::NO_CONTENT);
@@ -55,327 +53,96 @@ pub(crate) async fn ogc_features(
     if ![Method::GET, Method::HEAD].contains(&method) {
         return read_only(StatusCode::METHOD_NOT_ALLOWED);
     }
-
-    let base = format!("{}{}", gateway.base_url(), endpoint.base_path);
-    let raw_query = request.uri().query().unwrap_or_default().to_owned();
-    let caller = query::parse(&raw_query);
-    if let Some(wanted) = query::first(&caller, "crs") {
-        if let Err(problem) = ogc::crs(wanted) {
-            return bad_parameter(&problem);
-        }
+    let view = view_of(&endpoint);
+    if !has_view(&endpoint, &subject, &view) {
+        return no_view();
     }
-
-    let segments: Vec<&str> = params
-        .get("rest")
-        .map(|rest| rest.split('/').filter(|part| !part.is_empty()).collect())
+    // The raw path, still percent-encoded: a decoded `/` or `?` in an item id would be a
+    // different resource at the broker.
+    let prefix = format!("{}/ogc/features", endpoint.base_path);
+    let rest = request
+        .uri()
+        .path()
+        .strip_prefix(&prefix)
+        .filter(|rest| *rest != "/")
         .unwrap_or_default();
-
-    match segments.as_slice() {
-        [] => {
-            let space = gateway.resolver.resolve_space(&endpoint.space);
-            let (title, description) = ogc_titles(space.as_deref(), &endpoint, request.headers());
-            typed_json_response(&ogc::landing(&base, &title, &description), ogc::JSON)
-        }
-        ["conformance"] => typed_json_response(&ogc::conformance(), ogc::JSON),
-        // EP-40: the description is generated from what this caller may actually see, so the
-        // collections it lists are the collections the rest of the document leads to.
-        ["api"] => {
-            let space = gateway.resolver.resolve_space(&endpoint.space);
-            let (title, description) = ogc_titles(space.as_deref(), &endpoint, request.headers());
-            match ogc_sample(&gateway, &endpoint, &subject, &mut request, &[]).await {
-                Ok(sampled) => {
-                    let types: Vec<String> = sampled.keys().cloned().collect();
-                    typed_json_response(
-                        &ogc::api_document(&base, &title, &description, &types),
-                        ogc::OPENAPI,
-                    )
-                }
-                Err(problem) => *problem,
-            }
-        }
-        ["collections"] => {
-            let space = gateway.resolver.resolve_space(&endpoint.space);
-            let (_, description) = ogc_titles(space.as_deref(), &endpoint, request.headers());
-            match ogc_sample(&gateway, &endpoint, &subject, &mut request, &[]).await {
-                Ok(sampled) => {
-                    let types: Vec<String> = sampled.keys().cloned().collect();
-                    typed_json_response(&ogc::collections(&base, &types, &description), ogc::JSON)
-                }
-                Err(problem) => *problem,
-            }
-        }
-        ["collections", name] => {
-            let space = gateway.resolver.resolve_space(&endpoint.space);
-            let (_, description) = ogc_titles(space.as_deref(), &endpoint, request.headers());
-            let name = (*name).to_owned();
-            match ogc_sample(
-                &gateway,
-                &endpoint,
-                &subject,
-                &mut request,
-                std::slice::from_ref(&name),
-            )
-            .await
-            {
-                // EP-31: a type with no geometry is not a Feature Collection, and an ungranted
-                // one is indistinguishable from it (R20).
-                Ok(sampled) => match sampled.get(&name) {
-                    Some(extent) => typed_json_response(
-                        &ogc::collection(&base, &name, &description, Some(extent)),
-                        ogc::JSON,
-                    ),
-                    None => ProblemDetails::not_found().into_response(),
-                },
-                Err(problem) => *problem,
-            }
-        }
-        ["collections", name, "items"] => {
-            ogc_items(
-                &gateway,
-                &endpoint,
-                &subject,
-                &mut request,
-                name,
-                &base,
-                &raw_query,
-            )
-            .await
-        }
-        ["collections", name, "items", id] => {
-            ogc_item(&gateway, &endpoint, &subject, &mut request, name, id, &base).await
-        }
-        _ => ProblemDetails::not_found().into_response(),
+    let root = format!("/x/views/{view}/ogc/features");
+    let target = match request.uri().query() {
+        Some(query) if !query.is_empty() => format!("{root}{rest}?{query}"),
+        _ => format!("{root}{rest}"),
+    };
+    if let Err(problem) = tenancy::pin_caller(&mut request, &endpoint.space, &subject) {
+        tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
+        return ProblemDetails::internal().into_response();
     }
-}
-
-/// One page of one collection (EP-33, EP-34, EP-36, EP-37, EP-38).
-async fn ogc_items(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    request: &mut Request,
-    name: &str,
-    base: &str,
-    raw_query: &str,
-) -> Response<Body> {
-    let caller = query::parse(raw_query);
-    let limit = query::first(&caller, "limit")
-        .and_then(|limit| limit.parse::<usize>().ok())
-        .unwrap_or(ogc::DEFAULT_LIMIT)
-        .clamp(1, PAGE);
-    let offset = query::first(&caller, "next")
-        .and_then(ogc::offset_of)
-        .unwrap_or_default();
-
-    let mut upstream = vec![
-        ("type".to_owned(), name.to_owned()),
-        ("limit".to_owned(), limit.to_string()),
-        ("offset".to_owned(), offset.to_string()),
-    ];
-    for (parameter, translate) in [
-        (
-            "bbox",
-            ogc::bbox as fn(&str) -> Result<Vec<(String, String)>, ogc::ParamError>,
-        ),
-        ("datetime", ogc::datetime),
-    ] {
-        if let Some(raw) = query::first(&caller, parameter) {
-            match translate(raw) {
-                Ok(translated) => upstream.extend(translated),
-                Err(problem) => return bad_parameter(&problem),
-            }
-        }
-    }
-
-    // EP-35: the CQL2 filter, compiled into the same three NGSI-LD parameters. A predicate the
-    // subset does not cover is a `400` naming the operator, never a filter half applied.
-    if let Some(raw) = query::first(&caller, "filter") {
-        if let Some(lang) = query::first(&caller, "filter-lang") {
-            if lang != cql2::LANG {
-                return bad_parameter(&ogc::ParamError {
-                    parameter: "filter-lang",
-                    detail: format!("this endpoint reads {} only", cql2::LANG),
-                });
-            }
-        }
-        let compiled = match cql2::compile(raw) {
-            Ok(compiled) => compiled,
-            Err(problem) => return bad_parameter(&problem),
-        };
-        // NGSI-LD carries one `geoQ` and one `temporalQ`, so a filter that brings its own
-        // cannot be combined with the parameter that means the same thing. Applying both
-        // would drop one of them, and dropping one returns more than the caller asked for.
-        for (from_filter, parameter) in [
-            (!compiled.geo.is_empty(), "bbox"),
-            (!compiled.temporal.is_empty(), "datetime"),
-        ] {
-            if from_filter && query::first(&caller, parameter).is_some() {
-                return bad_parameter(&ogc::ParamError {
-                    parameter: "filter",
-                    detail: format!(
-                        "{parameter} and a filter predicate of the same kind cannot both be \
-                         applied; write the whole condition in one of them"
-                    ),
-                });
-            }
-        }
-        upstream.extend(compiled.geo);
-        upstream.extend(compiled.temporal);
-        if let Some(q) = compiled.q {
-            upstream.push(("q".to_owned(), q));
-        }
-    }
-
-    let (entities, restricted) =
-        match query_entities(gateway, endpoint, subject, &upstream, request).await {
-            Ok(answer) => answer,
-            Err(problem) => return *problem,
-        };
-
-    let timestamp = crate::pdp::now().to_rfc3339();
-    let page = ogc::items(
-        base,
-        name,
-        &entities,
-        limit,
-        offset,
-        raw_query,
-        &timestamp,
-        accept_language(request.headers()),
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        %view,
+        principal = %principal_of(&subject),
+        "OGC request forwarded to the broker's view"
     );
-    let mut response = typed_json_response(&page, ogc::GEOJSON);
-    response
-        .headers_mut()
-        .insert("content-crs", HeaderValue::from_static(ogc::CRS84));
-    if restricted {
-        response
-            .headers_mut()
-            .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
-    }
-    response
-}
-
-/// One feature by its entity URN (EP-33).
-async fn ogc_item(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    request: &mut Request,
-    name: &str,
-    id: &str,
-    base: &str,
-) -> Response<Body> {
-    let upstream = vec![
-        ("type".to_owned(), name.to_owned()),
-        ("id".to_owned(), id.to_owned()),
-        ("limit".to_owned(), "1".to_owned()),
-    ];
-    let (entities, restricted) =
-        match query_entities(gateway, endpoint, subject, &upstream, request).await {
-            Ok(answer) => answer,
-            Err(problem) => return *problem,
-        };
-
-    // An entity that does not exist, one the grants withhold and one with no geometry all
-    // answer the same 404, so a probe over the URN space learns nothing (R20, EP-33).
-    let Some(feature) = entities
-        .as_array()
-        .and_then(|list| list.first())
-        .and_then(|entity| ogc::feature(base, name, entity, accept_language(request.headers())))
-    else {
-        return ProblemDetails::not_found().into_response();
+    let (parts, _) = request.into_parts();
+    let answer = match gateway
+        .broker
+        .send(method, &target, parts.headers, Body::empty())
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => return ProblemDetails::from(error).into_response(),
     };
-    let mut response = typed_json_response(&feature, ogc::GEOJSON);
-    response
-        .headers_mut()
-        .insert("content-crs", HeaderValue::from_static(ogc::CRS84));
-    if restricted {
-        response
-            .headers_mut()
-            .insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
+    if answer.status().is_server_error() {
+        let (parts, body) = answer.into_parts();
+        return broker_failure(parts.status, body).await;
     }
-    response
-}
-
-/// The collections of an endpoint and what each of them spans, from one bounded page (EP-31,
-/// EP-32).
-///
-/// The manifest cannot answer either question: whether a type carries a geometry and what its
-/// data spans are properties of the data. Both come from one projected page, so a GIS client's
-/// discovery costs one broker call and not one per type.
-// ponytail: a page, not a scan. A type whose geometries all sit past `PAGE` entities is not
-// listed; the upgrade path is the cached extent query EP-32 names with its `maxAgeSeconds`.
-async fn ogc_sample(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    request: &mut Request,
-    wanted: &[String],
-) -> Result<BTreeMap<String, ogc::Extent>, Box<Response<Body>>> {
-    let visible = schema::visible(subject, endpoint, crate::pdp::now());
-    let mut types = schema::visible_types(endpoint, &visible);
-    if !wanted.is_empty() {
-        types.retain(|name| wanted.contains(name));
-        // A type the models do not declare is still a type the space may hold, and the PDP
-        // decides either way; the models only ever narrow the discovery list.
-        if types.is_empty() {
-            types = wanted.to_vec();
-        }
+    if answer.status() == StatusCode::FORBIDDEN {
+        return with_platform_slug(answer).await;
     }
-
-    let mut upstream = vec![("limit".to_owned(), PAGE.to_string())];
-    if !types.is_empty() {
-        upstream.push(("type".to_owned(), types.join(",")));
-    }
-    let (entities, _) = query_entities(gateway, endpoint, subject, &upstream, request).await?;
-
-    let mut grouped: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for entity in entities.as_array().into_iter().flatten() {
-        if let Some(name) = entity.get("type").and_then(Value::as_str) {
-            grouped
-                .entry(name.to_owned())
-                .or_default()
-                .push(entity.clone());
-        }
-    }
-    Ok(grouped
-        .into_iter()
-        .filter_map(|(name, group)| {
-            let extent = ogc::extent_of(&Value::Array(group));
-            // EP-31: only a type that actually carries a geometry is a Feature Collection.
-            extent.bbox.is_some().then_some((name, extent))
-        })
-        .collect())
-}
-
-/// The endpoint's title and description in the caller's language (EP-32).
-fn ogc_titles(space: Option<&Space>, endpoint: &Endpoint, headers: &HeaderMap) -> (String, String) {
-    let accept = headers
-        .get(axum::http::header::ACCEPT_LANGUAGE)
-        .and_then(|value| value.to_str().ok());
-    let Some(space) = space else {
-        return (endpoint.space.clone(), String::new());
+    // The broker names its resources by its own address (`http://{Host}`, Antares
+    // `public_base`); the caller reaches them under the Endpoint's URL.
+    let from = format!("http://{}{root}", authority(gateway.broker.base()));
+    let to = format!("{}{prefix}", gateway.base_url());
+    let (mut parts, body) = answer.into_parts();
+    // ponytail: the page is held whole to move its links, so one past MAX_BODY (8 MiB) is a
+    // broker failure; stream the rewrite if a `limit` ever reaches that.
+    let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
+        tracing::error!(slug = %endpoint.slug, "the broker's OGC answer is larger than the gateway holds");
+        return broker_failure(StatusCode::BAD_GATEWAY, Body::empty()).await;
     };
-    let locale = space.default_locale.as_deref();
-    let title = ogc::localized(&space.title, accept, locale);
-    let description = ogc::localized(&space.description, accept, locale);
-    (
-        if title.is_empty() {
-            endpoint.space.clone()
-        } else {
-            title.to_owned()
-        },
-        description.to_owned(),
-    )
+    caller_links(&mut parts.headers, &from, &to);
+    if let Some(restricted) = parts.headers.remove(ANTARES_RESTRICTED) {
+        parts.headers.insert(RESULTS_RESTRICTED, restricted);
+    }
+    let text = String::from_utf8_lossy(&held).replace(&from, &to);
+    proxy::with_body(parts, text.into_bytes())
 }
 
-/// A parameter the representation cannot honour, naming it so the client can fix it (EP-34).
-pub(crate) fn bad_parameter(problem: &ogc::ParamError) -> Response<Body> {
-    let mut body = ProblemDetails::bad_request()
-        .with_detail(problem.detail.clone())
-        .into_response();
-    *body.status_mut() = StatusCode::BAD_REQUEST;
-    let _ = HeaderValue::from_str(problem.parameter)
-        .map(|value| body.headers_mut().insert("x-parameter", value));
-    body
+/// The `host[:port]` of an upstream URL.
+fn authority(base: &str) -> &str {
+    let rest = base.split_once("://").map_or(base, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or(rest)
+}
+
+/// An Endpoint no broker view can serve yet (a view of another model, a projection with
+/// `temporalQ`, a caller under a data-space agreement, a slug no view id holds): the OGC
+/// surface is the broker's alone, so there is no other answer (ADR-0029 decision 3).
+fn no_view() -> Response<Body> {
+    ProblemDetails::new(501, "ogc-view-unavailable", "Not Implemented")
+        .with_detail(
+            "the OGC API Features surface is served from the broker's view of this endpoint, \
+             and this endpoint or caller has none yet; read it through the NGSI-LD surface",
+        )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authority_is_host_and_port() {
+        assert_eq!(authority("http://antares:1026"), "antares:1026");
+        assert_eq!(authority("https://b.example/base"), "b.example");
+        assert_eq!(authority("antares:1026"), "antares:1026");
+    }
 }

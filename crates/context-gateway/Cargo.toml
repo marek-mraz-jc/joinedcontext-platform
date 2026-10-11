@@ -9,7 +9,7 @@ repository.workspace = true
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum", "logs"] }
 jcctl = { path = "../jcctl", version = "0.1.0" }
 arc-swap = "1"
-# base64url for the opaque OGC page cursor (EP-36); already in the tree via jsonwebtoken
+# base64url for the egress subject; already in the tree via jsonwebtoken
 base64 = "0.22"
 argon2 = "0.5"
 axum = "0.8"

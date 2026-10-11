@@ -461,8 +461,9 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
         .route("/api/endpoint/{slug}/file.zip", get(file_zip))
-        // The OGC surface is one handler over its own resource tree: three spellings of the
-        // landing page, because a GIS client stores whichever one it was given (EP-29).
+        // The OGC surface is the broker's view (T-3752), one forward over its resource tree:
+        // three spellings of the landing page, because a GIS client stores whichever one it was
+        // given (EP-29).
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
@@ -1628,7 +1629,7 @@ pub(crate) async fn serve_ngsi_ld_view(
 /// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
 /// `code` with its hint, the members the NGSI-LD surface carries them in (API/00 §4, T-3243), so
 /// a client keyed on the slug still says who can give access.
-async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
+pub(crate) async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
     let (parts, body) = answer.into_parts();
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -1658,7 +1659,7 @@ const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
-fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
+pub(crate) fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
     for name in [LOCATION, CONTENT_LOCATION, LINK] {
         let rewritten: Vec<HeaderValue> = headers
             .get_all(&name)
