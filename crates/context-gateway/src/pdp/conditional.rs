@@ -262,6 +262,7 @@ pub(crate) async fn retrieve(
         probe.insert(TENANT, tenant.clone());
     }
     probe.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    crate::middleware::tenancy::as_gateway(&mut probe);
 
     let answer = broker
         .send(Method::GET, target, probe, Body::empty())

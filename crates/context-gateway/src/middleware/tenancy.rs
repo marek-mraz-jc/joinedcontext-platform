@@ -43,6 +43,11 @@ pub const CLIENT: HeaderName = HeaderName::from_static("x-jc-client");
 /// `true` when the caller asked to be told about narrowing (O-3 (b), R22).
 pub const RESTRICTED: HeaderName = HeaderName::from_static("x-jc-restricted");
 
+/// The service account the gateway's own hops to the broker run as (T-3767): its Keycloak
+/// client. The rule document the Portal writes grants it the reads and the unlinking those hops
+/// make; a caller never carries it (see [`pin_caller`]).
+pub const GATEWAY_CLIENT: &str = "context-gateway";
+
 /// Removes every header a client could use to forge identity or tenancy (EP-21, GW20).
 ///
 /// Removes each name entirely, not just its first value: a repeated header would otherwise
@@ -94,7 +99,9 @@ pub fn pin_caller(
         while headers.remove(&name).is_some() {}
     }
     one(headers, SUBJECT, subject.user.as_deref());
-    one(headers, CLIENT, subject.service_account.as_deref());
+    // Only the gateway's own hops speak as the gateway, never a token of its client.
+    let client = subject.service_account.as_deref();
+    one(headers, CLIENT, client.filter(|c| *c != GATEWAY_CLIENT));
     list(headers, GROUPS, &subject.groups, false);
     list(headers, ROLES, &subject.roles, true);
     if asked {
@@ -142,4 +149,24 @@ fn list<'a>(
             headers.insert(name, value);
         }
     }
+}
+
+/// Marks a hop the gateway makes on its own account (T-3767): the condition probe of a write,
+/// the unlinking of a held delete, the read of a stored Subscription. It speaks as
+/// [`GATEWAY_CLIENT`] with no role, so the engine decides it by the gateway's own grant and a
+/// hop that forgot this is refused, never served as the cluster's own.
+pub fn as_gateway(headers: &mut HeaderMap) {
+    for name in [
+        AUTHORIZATION,
+        COOKIE,
+        SUBJECT,
+        GROUPS,
+        ROLES,
+        CLIENT,
+        RESTRICTED,
+    ] {
+        while headers.remove(&name).is_some() {}
+    }
+    headers.insert(CLIENT, HeaderValue::from_static(GATEWAY_CLIENT));
+    headers.insert(ROLES, HeaderValue::from_static(""));
 }
