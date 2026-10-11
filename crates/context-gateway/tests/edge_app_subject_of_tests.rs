@@ -8,8 +8,9 @@
 //! **Inputs.** The claims (`azp`, `groups`, `preferred_username`, `realm_access.roles`,
 //! `agreementId`) and the endpoint (project, allowed projects, audience).
 //!
-//! The subject is read back from `GET …/access`, which names it and lists the grants that apply
-//! to it, so a role or a group that reaches the PDP shows up as a grant.
+//! The subject is read back from `GET …/access`: the caller the gateway pins on its hop to the
+//! broker's view, and the grants of this file's Policies that name it (T-3649), so a role or a
+//! group that reaches the engine shows up as a grant.
 //! Struck: "two allowed groups resolve to the first match" cannot be observed, because the
 //! project found is used for `admits` only and both matches admit.
 
@@ -116,17 +117,19 @@ impl Drop for Repo {
 struct Fixture {
     realm: common::Realm,
     app: axum::Router,
+    broker: common::BrokerStub,
     _repo: Repo,
 }
 
-fn fixture(name: &str, audience: Audience, account_project: &str) -> Fixture {
+async fn fixture(name: &str, audience: Audience, account_project: &str) -> Fixture {
     let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
     let repo = Repo::new(name, account_project);
     let accounts =
         accounts_of(&jcctl::loader::Repository::load(&repo.0).expect("the repository loads"));
     let app = router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(broker.url.clone()),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
@@ -136,6 +139,7 @@ fn fixture(name: &str, audience: Audience, account_project: &str) -> Fixture {
     Fixture {
         realm,
         app,
+        broker,
         _repo: repo,
     }
 }
@@ -155,8 +159,10 @@ fn token(realm: &common::Realm, extra: Value) -> String {
     realm.mint(&claims)
 }
 
-/// `GET …/access` with the token: the status and the document.
+/// `GET …/access` with the token: the status and the document. Where the broker's view answers
+/// it (T-3649), the document is the one its engine writes for the caller the gateway pinned.
 async fn access(fixture: &Fixture, extra: Value) -> (StatusCode, Value) {
+    let before = fixture.broker.hops().len();
     let response = fixture
         .app
         .clone()
@@ -176,7 +182,12 @@ async fn access(fixture: &Fixture, extra: Value) -> (StatusCode, Value) {
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("a readable body");
-    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    let hops = fixture.broker.hops();
+    let document = match hops.get(before..) {
+        Some([hop]) => common::engine_document(&hop.headers, &endpoint(Audience::Public).policies),
+        _ => serde_json::from_slice(&body).unwrap_or(Value::Null),
+    };
+    (status, document)
 }
 
 /// The markers of the grants that reached the subject, sorted.
@@ -200,7 +211,7 @@ fn workload() -> String {
 #[tokio::test]
 async fn an_azp_naming_no_service_account_and_no_username_is_unauthorized_not_public() {
     for audience in [Audience::Public, Audience::Organization] {
-        let fixture = fixture("unknown-azp", audience, PROJECT);
+        let fixture = fixture("unknown-azp", audience, PROJECT).await;
         let (status, document) = access(&fixture, json!({ "azp": "some-other-client" })).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{audience:?}: {document}");
         assert!(granted(&document).is_empty(), "{document}");
@@ -210,7 +221,7 @@ async fn an_azp_naming_no_service_account_and_no_username_is_unauthorized_not_pu
 /// PF-35: a workload of a project the endpoint does not serve gets nothing here.
 #[tokio::test]
 async fn a_service_account_whose_project_the_endpoint_does_not_admit_is_forbidden() {
-    let fixture = fixture("foreign-account", Audience::ProjectList, "zdravie");
+    let fixture = fixture("foreign-account", Audience::ProjectList, "zdravie").await;
     let (status, document) =
         access(&fixture, json!({ "azp": client_id("zdravie", "senzory") })).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{document}");
@@ -221,7 +232,7 @@ async fn a_service_account_whose_project_the_endpoint_does_not_admit_is_forbidde
 /// nothing to them.
 #[tokio::test]
 async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_same_token() {
-    let fixture = fixture("account-with-human-claims", Audience::Organization, PROJECT);
+    let fixture = fixture("account-with-human-claims", Audience::Organization, PROJECT).await;
     let (status, document) = access(
         &fixture,
         json!({
@@ -251,7 +262,7 @@ async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_sa
 /// that group, because that membership is not a reviewed change.
 #[tokio::test]
 async fn a_service_accounts_token_groups_reach_no_group_policy() {
-    let fixture = fixture("account-in-a-group", Audience::Organization, PROJECT);
+    let fixture = fixture("account-in-a-group", Audience::Organization, PROJECT).await;
     let (status, document) = access(
         &fixture,
         json!({ "azp": workload(), "groups": ["/stewards"] }),
@@ -268,7 +279,7 @@ async fn a_service_accounts_token_groups_reach_no_group_policy() {
 /// PF-46: when both are present, a known `azp` decides; the person's name is not the subject.
 #[tokio::test]
 async fn a_token_with_azp_and_preferred_username_prefers_the_service_account_path() {
-    let fixture = fixture("both-names", Audience::Organization, PROJECT);
+    let fixture = fixture("both-names", Audience::Organization, PROJECT).await;
     let (_, document) = access(
         &fixture,
         json!({ "azp": workload(), "preferred_username": format!("service-account-{}", workload()) }),
@@ -303,7 +314,7 @@ async fn a_token_with_azp_and_preferred_username_prefers_the_service_account_pat
 /// agreement it is refused, never read as the workload or the person it also names.
 #[tokio::test]
 async fn a_dataspace_token_never_falls_through_to_the_workload_or_human_branch() {
-    let fixture = fixture("dataspace", Audience::Public, PROJECT);
+    let fixture = fixture("dataspace", Audience::Public, PROJECT).await;
     let (status, document) = access(
         &fixture,
         json!({
@@ -326,11 +337,11 @@ async fn a_dataspace_token_never_falls_through_to_the_workload_or_human_branch()
 async fn a_human_in_none_of_the_endpoints_allowed_groups_gets_the_empty_project_and_is_admitted_only_if_public(
 ) {
     let outsider = json!({ "preferred_username": "eva", "groups": ["/zdravie"] });
-    let list = fixture("outsider-list", Audience::ProjectList, PROJECT);
+    let list = fixture("outsider-list", Audience::ProjectList, PROJECT).await;
     let (status, _) = access(&list, outsider.clone()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    let public = fixture("outsider-public", Audience::Public, PROJECT);
+    let public = fixture("outsider-public", Audience::Public, PROJECT).await;
     let (status, document) = access(&public, outsider).await;
     assert_eq!(status, StatusCode::OK, "{document}");
     assert_eq!(granted(&document), ["PublicView"], "{document}");
@@ -339,7 +350,7 @@ async fn a_human_in_none_of_the_endpoints_allowed_groups_gets_the_empty_project_
 /// EP-15: Keycloak writes a group as its path; `/doprava` is the allowed project `doprava`.
 #[tokio::test]
 async fn a_group_with_a_leading_slash_is_trimmed_before_matching() {
-    let fixture = fixture("slash", Audience::ProjectList, PROJECT);
+    let fixture = fixture("slash", Audience::ProjectList, PROJECT).await;
     for group in ["/doprava", "doprava", "/ovzdusie"] {
         let (status, document) = access(
             &fixture,
@@ -361,12 +372,12 @@ async fn a_group_with_a_leading_slash_is_trimmed_before_matching() {
 /// the public role and nothing more.
 #[tokio::test]
 async fn no_roles_claim_yields_an_empty_role_set_rather_than_a_default_grant() {
-    let organization = fixture("no-roles", Audience::Organization, PROJECT);
+    let organization = fixture("no-roles", Audience::Organization, PROJECT).await;
     let (status, document) = access(&organization, json!({ "preferred_username": "jana" })).await;
     assert_eq!(status, StatusCode::OK, "{document}");
     assert!(granted(&document).is_empty(), "{document}");
 
-    let public = fixture("no-roles-public", Audience::Public, PROJECT);
+    let public = fixture("no-roles-public", Audience::Public, PROJECT).await;
     let (_, document) = access(&public, json!({ "preferred_username": "jana" })).await;
     assert_eq!(granted(&document), ["PublicView"], "{document}");
 }
@@ -374,7 +385,7 @@ async fn no_roles_claim_yields_an_empty_role_set_rather_than_a_default_grant() {
 /// EP-15: `groups: []` and no `groups` claim are the same person with no project.
 #[tokio::test]
 async fn an_empty_groups_list_is_the_same_as_no_groups_claim() {
-    let fixture = fixture("empty-groups", Audience::ProjectList, PROJECT);
+    let fixture = fixture("empty-groups", Audience::ProjectList, PROJECT).await;
     let (without, _) = access(&fixture, json!({ "preferred_username": "jana" })).await;
     let (empty, _) = access(
         &fixture,
@@ -389,7 +400,7 @@ async fn an_empty_groups_list_is_the_same_as_no_groups_claim() {
 /// token of another realm never reaches the lookup.
 #[tokio::test]
 async fn a_service_account_resolved_for_the_wrong_realm_is_never_looked_up_by_name_alone() {
-    let fixture = fixture("bare-name", Audience::Organization, PROJECT);
+    let fixture = fixture("bare-name", Audience::Organization, PROJECT).await;
     let (status, document) = access(&fixture, json!({ "azp": "senzory" })).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{document}");
 
@@ -422,7 +433,7 @@ async fn a_service_account_resolved_for_the_wrong_realm_is_never_looked_up_by_na
 /// account's own bindings and grants do not.
 #[tokio::test]
 async fn a_delegated_token_is_decided_as_the_person_and_never_with_the_accounts_grants() {
-    let fixture = fixture("delegated", Audience::Organization, PROJECT);
+    let fixture = fixture("delegated", Audience::Organization, PROJECT).await;
     let delegate = client_id(PROJECT, "asistent");
     let (status, document) = access(
         &fixture,
@@ -468,7 +479,7 @@ async fn a_delegated_token_is_decided_as_the_person_and_never_with_the_accounts_
 /// project is.
 #[tokio::test]
 async fn a_delegated_person_outside_the_endpoints_projects_is_refused() {
-    let fixture = fixture("delegated-stranger", Audience::ProjectList, PROJECT);
+    let fixture = fixture("delegated-stranger", Audience::ProjectList, PROJECT).await;
     let (status, document) = access(
         &fixture,
         json!({

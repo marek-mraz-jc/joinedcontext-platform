@@ -92,6 +92,40 @@ pub fn policy(
     Value::Object(document)
 }
 
+/// The broker's ODRL `Set` for one caller (plan 5.6, T-3649) as this Endpoint publishes it: the
+/// licence's duties on every permission (EP-79), which the broker does not hold, and the `uid`
+/// of the gateway's own access URL over the rules with those duties, so a changed licence is a
+/// new identifier too (EP-59). `None` when the broker's answer is not a `Set` object.
+pub fn published(
+    document: Value,
+    endpoint: &Endpoint,
+    base: &str,
+    digest: impl Fn(&[u8]) -> String,
+) -> Option<Value> {
+    let Value::Object(mut document) = document else {
+        return None;
+    };
+    let duties = licence_duties(endpoint);
+    if !duties.is_empty() {
+        let rules = document.get_mut("permission").and_then(Value::as_array_mut);
+        for rule in rules.into_iter().flatten().filter_map(Value::as_object_mut) {
+            rule.insert("duty".to_owned(), Value::Array(duties.clone()));
+        }
+    }
+    let rules = |name: &str| document.get(name).cloned().unwrap_or_else(|| json!([]));
+    let body =
+        serde_json::to_vec(&json!([rules("permission"), rules("prohibition")])).unwrap_or_default();
+    document.insert(
+        "uid".to_owned(),
+        json!(format!(
+            "{base}/api/endpoint/{}/access#sha256:{}",
+            endpoint.slug,
+            digest(&body)
+        )),
+    );
+    Some(Value::Object(document))
+}
+
 /// The same document as Turtle (EP-57).
 ///
 /// Written from the JSON-LD rather than from the policies, so the two serializations cannot
