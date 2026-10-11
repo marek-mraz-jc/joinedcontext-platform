@@ -1426,8 +1426,8 @@ fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a view of
-/// another model (G18), a projection with `temporalQ` (G6), a slug no view id can hold (the
+/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a projection
+/// with `temporalQ` (G6), a slug no view id can hold (the
 /// writer refuses it), and a subscription, whose delivery the gateway still seals and routes
 /// back (plan 5.5, T-3653). A caller under a data-space agreement stays too: the engine has no
 /// agreements to decide on yet, and would judge the connector's own account instead (map K38).
@@ -1452,8 +1452,7 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
+    subject.agreement.is_none()
         && !conditional
         && !temporal
         && !subscription
@@ -1525,16 +1524,23 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let mut divided: Option<(Vec<String>, Refused)> = None;
-    let units_filled = match view_payload(
-        gateway,
-        (&endpoint, &subject),
-        (&path, &params, operation),
-        &mut parts.headers,
-        &mut sent,
-        &mut divided,
-    )
-    .await
-    {
+    // A view of another model takes no write (the broker's 405, `mapping::READS`), so no body is
+    // judged against the source model first (T-3799).
+    let mapped_write = endpoint.view_mapping.is_some() && operation.is_write();
+    let payload = if mapped_write {
+        Ok(Vec::new())
+    } else {
+        view_payload(
+            gateway,
+            (&endpoint, &subject),
+            (&path, &params, operation),
+            &mut parts.headers,
+            &mut sent,
+            &mut divided,
+        )
+        .await
+    };
+    let units_filled = match payload {
         Ok(filled) => filled,
         Err(answer) => return *answer,
     };
