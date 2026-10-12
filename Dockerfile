@@ -26,7 +26,8 @@ COPY crates/assistant/Cargo.toml crates/assistant/Cargo.toml
 COPY crates/token-sidecar/Cargo.toml crates/token-sidecar/Cargo.toml
 COPY crates/wasm-host/Cargo.toml crates/wasm-host/Cargo.toml
 COPY crates/app-sdk/Cargo.toml crates/app-sdk/Cargo.toml
-RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src \
+COPY crates/camera-sim/Cargo.toml crates/camera-sim/Cargo.toml
+RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src crates/camera-sim/src \
  && echo 'pub fn _dep_cache() {}' > crates/jc-core/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/context-gateway/src/lib.rs \
  && echo 'fn main() {}' > crates/context-gateway/src/main.rs \
@@ -41,6 +42,7 @@ RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crat
  && echo 'pub fn _dep_cache() {}' > crates/wasm-host/src/lib.rs \
  && echo 'fn main() {}' > crates/wasm-host/src/main.rs \
  && echo 'pub fn _dep_cache() {}' > crates/app-sdk/src/lib.rs \
+ && echo 'fn main() {}' > crates/camera-sim/src/main.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
  && cargo build --release --locked --workspace --exclude assistant \
  && cargo build --release --locked -p assistant && rm -rf crates/*/src
@@ -49,7 +51,7 @@ COPY . .
 # reorders what the gateway and jcctl write (T-3206).
 RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace --exclude assistant \
  && cargo build --release --locked -p assistant \
- && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant target/release/jc-token-sidecar
+ && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant target/release/jc-token-sidecar target/release/jc-camera-sim
 
 # `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
 # for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
@@ -67,6 +69,8 @@ COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
 COPY --from=build /src/target/release/jc-functions /usr/local/bin/jc-functions
 COPY --from=build /src/target/release/jc-token-sidecar /usr/local/bin/jc-token-sidecar
+# The camera simulator of the camera-over-mqtt Blueprint (T-3838): `docker run … jc-camera-sim publish`.
+COPY --from=build /src/target/release/jc-camera-sim /usr/local/bin/jc-camera-sim
 # The shared host of server WASM Apps (ADR-N-044): a shard runs this binary with `command`.
 COPY --from=build /src/target/release/jc-wasm-host /usr/local/bin/jc-wasm-host
 # The knowledge assistant's crawl worker (Architecture/22, T-3052); its Deployment names it as the
