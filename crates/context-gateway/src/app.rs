@@ -15,7 +15,6 @@ use crate::auth::accounts::ServiceAccounts;
 use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
-use crate::handlers::access_routes::{access, access_check, access_simulate};
 use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
 use crate::handlers::ogc::ogc_features;
 use crate::handlers::schema_routes::{
@@ -23,6 +22,7 @@ use crate::handlers::schema_routes::{
 };
 use crate::handlers::space_routes::{space_catalog, space_record};
 use crate::handlers::sta::sensorthings;
+use crate::handlers::view_access::{access, access_check, access_simulate};
 use crate::handlers::{endpoint_surface, schema, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{self, Constraints, Subject, Verdict};
@@ -1623,25 +1623,13 @@ pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &Head
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    !conditional && !subscription && (1..=MAX_VIEW_ID).contains(&view.len())
+    has_view(view) && !conditional && !subscription
 }
 
-/// Whether the access documents of this Endpoint are the view's engine's for `subject` (plan
-/// 5.1, T-3643, T-3649); reads follow [`served_by_view`]. What no view can serve yet keeps the gateway's own answer, each until its gap
-/// closes: a view of another model (G18), a projection with `temporalQ` (G6), a slug no view id
-/// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
-/// engine has no agreements to decide on yet, and would judge the connector's own account
-/// instead (map K38).
-pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
-    endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
-        && !temporal
-        && (1..=MAX_VIEW_ID).contains(&view.len())
+/// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
+/// one, unless its slug is longer than a view id can be (the writer refuses it).
+pub(crate) fn has_view(view: &str) -> bool {
+    (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The broker's view of an Endpoint (plan 5.1): its slug, or `cs-{space}` for a space's
