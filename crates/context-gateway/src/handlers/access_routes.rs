@@ -153,6 +153,9 @@ enum ViewCall {
     Document(&'static str),
     /// `POST access/check` with this AuthZEN request.
     Check(Bytes),
+    /// `POST access/explain` with this AuthZEN request: the decision with the policy that made
+    /// it, for the simulator alone (EP-103, T-3881).
+    Explain(Bytes),
 }
 
 /// The view's answer as JSON, or the answer the caller gets instead: the broker's own refusal
@@ -177,6 +180,12 @@ async fn from_view(
         ViewCall::Check(bytes) => (
             Method::POST,
             format!("/x/views/{}/access/check", view_of(endpoint)),
+            "application/json",
+            Body::from(bytes),
+        ),
+        ViewCall::Explain(bytes) => (
+            Method::POST,
+            format!("/x/views/{}/access/explain", view_of(endpoint)),
             "application/json",
             Body::from(bytes),
         ),
@@ -362,9 +371,11 @@ struct Resource {
 
 /// The decision `access/check` would give someone else, for the Portal alone (EP-103, T-3311).
 ///
-/// The subject goes through the same admission as a real token ([`subject_from`]) and the
-/// same evaluator ([`handlers::access::decide`]), so the simulator cannot disagree with the
-/// gateway: it is the gateway, asked about another caller.
+/// The subject goes through the same admission as a real token ([`subject_from`]) and is asked
+/// of whoever decides that token's `access/check`: the broker's engine through the view, pinned
+/// as the subject's own token pins it (T-3881), or the gateway's evaluator
+/// ([`handlers::access::decide`]) for an Endpoint no view serves. The simulator cannot disagree
+/// with the decision that is made: it is the same decision, asked about another caller.
 pub(crate) async fn access_simulate(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
@@ -440,14 +451,27 @@ pub(crate) async fn access_simulate(
         .resource
         .as_ref()
         .and_then(|resource| resource.entity_type.as_deref());
-    let answer = handlers::access::simulate(
-        subject.as_ref().unwrap_or(&Subject::anonymous()),
-        subject.is_some(),
-        &endpoint,
-        action,
-        entity_type,
-        crate::pdp::now(),
-    );
+    let answer = match &subject {
+        Some(subject) if has_view(&endpoint, subject, &view_of(&endpoint)) => {
+            let mut query = json!({ "action": { "name": action } });
+            if let Some(entity_type) = entity_type {
+                query["resource"] = json!({ "type": entity_type });
+            }
+            let call = ViewCall::Explain(Bytes::from(query.to_string()));
+            match from_view(&gateway, &endpoint, subject, call).await {
+                Ok(answer) => policy_named(answer),
+                Err(answer) => return *answer,
+            }
+        }
+        _ => handlers::access::simulate(
+            subject.as_ref().unwrap_or(&Subject::anonymous()),
+            subject.is_some(),
+            &endpoint,
+            action,
+            entity_type,
+            crate::pdp::now(),
+        ),
+    };
     // The Portal's record names the administrator; this one names whom they asked about, beside
     // the Portal's account that asked (EP-103). Never a token.
     tracing::info!(
@@ -464,6 +488,28 @@ pub(crate) async fn access_simulate(
         "access simulated"
     );
     json_response(&answer)
+}
+
+/// The engine's explanation with the deciding policy under the name the Portal knows it by: the
+/// engine holds a Policy as `{project}/{name}`, or `{project}/{name}@{endpoint}` where it is bound
+/// to one view (the Portal's reconciler, `reconciler/views.rs`), and the Portal lists `{name}`.
+/// An id of any other shape is left out rather than shown as a name nobody wrote.
+fn policy_named(mut answer: Value) -> Value {
+    let Some(context) = answer.get_mut("context").and_then(Value::as_object_mut) else {
+        return answer;
+    };
+    let name = context
+        .get("policy")
+        .and_then(Value::as_str)
+        .and_then(|id| id.split('@').next())
+        .and_then(|id| id.split_once('/'))
+        .map(|(_, name)| name.to_owned())
+        .filter(|name| !name.is_empty() && !name.contains('/'));
+    match name {
+        Some(name) => context.insert("policy".to_owned(), json!(name)),
+        None => context.remove("policy"),
+    };
+    answer
 }
 
 /// Whether the request carries the Portal's own service-account token for
