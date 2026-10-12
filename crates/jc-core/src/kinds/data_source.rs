@@ -169,6 +169,106 @@ pub struct HttpConnection {
     /// Request timeout as a Bento duration, `10s`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
+    /// The members of a zip archive to read, by HTTP `Range`, instead of the whole body (PL-72).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<HttpArchive>,
+}
+
+/// The named members of the archive an `http` connection serves (PL-72, Architecture/08 §6).
+///
+/// The runner reads the directory from the archive's last 64 KiB and then each member by its
+/// own range, so a member nobody named is never fetched or inflated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HttpArchive {
+    /// The archive format; `zip` is the only one.
+    pub format: ArchiveFormat,
+    /// The member names to read, at most 20, each letters, digits, `.`, `_`, `-` and `/`.
+    pub members: Vec<String>,
+    /// The largest member accepted, packed and unpacked, in bytes; 32 MiB when absent, at most
+    /// 256 MiB. A deflated member is read only when 1032 times its packed size, the most
+    /// deflate expands, is within it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+impl HttpArchive {
+    /// The member size bound when the manifest names none.
+    pub const DEFAULT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+    /// The largest bound a manifest may set.
+    pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
+    /// The most members one connection reads.
+    pub const MAX_MEMBERS: usize = 20;
+
+    /// The bound in force.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes.unwrap_or(Self::DEFAULT_MAX_BYTES)
+    }
+
+    fn validate(&self, http: &HttpConnection) -> Result<()> {
+        let refuse = |field, value: String, reason| {
+            Err(Error::Name {
+                field,
+                value,
+                reason,
+            })
+        };
+        if self.members.is_empty() || self.members.len() > Self::MAX_MEMBERS {
+            return refuse(
+                "spec.http.archive.members",
+                self.members.len().to_string(),
+                "an archive names 1 to 20 members",
+            );
+        }
+        for member in &self.members {
+            let plain = !member.is_empty()
+                && member.len() <= 255
+                && member
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c));
+            if !plain {
+                return refuse(
+                    "spec.http.archive.members",
+                    member.clone(),
+                    "a member name is 1 to 255 letters, digits, '.', '_', '-' and '/'",
+                );
+            }
+        }
+        if !(1..=Self::MAX_BYTES).contains(&self.max_bytes()) {
+            return refuse(
+                "spec.http.archive.maxBytes",
+                self.max_bytes().to_string(),
+                "maxBytes is 1 to 268435456 (256 MiB)",
+            );
+        }
+        if http.verb.as_deref().is_some_and(|verb| verb != "GET") {
+            return refuse(
+                "spec.http.verb",
+                http.verb.clone().unwrap_or_default(),
+                "an archive is read with GET",
+            );
+        }
+        if let Some(range) = http
+            .headers
+            .keys()
+            .find(|h| h.eq_ignore_ascii_case("range"))
+        {
+            return refuse(
+                "spec.http.headers",
+                range.clone(),
+                "an archive read sets its own Range header",
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The archive formats an `http` connection reads (PL-72).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveFormat {
+    /// A zip archive: stored or deflated members, no Zip64.
+    Zip,
 }
 
 /// A WebSocket the runner keeps open (Architecture/08 §6).
@@ -434,6 +534,9 @@ impl DataSourceSpec {
                 url(&http.url, HTTP_SCHEMES, "spec.http.url")?;
                 if let Some(authorization) = &http.authorization {
                     header_name(authorization.header_name())?;
+                }
+                if let Some(archive) = &http.archive {
+                    archive.validate(http)?;
                 }
                 verb(http.verb.as_deref())
             }
