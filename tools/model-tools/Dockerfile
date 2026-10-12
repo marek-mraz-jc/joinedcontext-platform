@@ -3,7 +3,7 @@
 # and pinned by digest in the deployment; DM-19 pins the same version for CI and the preview.
 #
 # Build context is this folder: `docker build tools/model-tools`.
-FROM python:3.11-slim-bookworm AS build
+FROM python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS build
 WORKDIR /src
 # Every dependency is pinned exactly in pyproject.toml, so the image and `pip install .[test]`
 # in CI resolve to the same generator (DM-19). No index other than the default is configured.
@@ -25,7 +25,7 @@ RUN python -m venv /opt/venv \
            /opt/venv/lib/python3.11/site-packages/wheel-*.dist-info \
            /opt/venv/bin/pip /opt/venv/bin/pip3 /opt/venv/bin/pip3.11
 
-FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-trixie@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
 # The interpreter image lags Debian's security updates by days (pcre2, T-0574): the runtime
 # stage takes them itself, so the scan judges what is shipped rather than what was published.
 RUN apt-get update \
