@@ -69,7 +69,7 @@ fn endpoint() -> Endpoint {
         "contextSpaceRef: {SPACE}\n\
          assigner: did:web:{DOMAIN}\n\
          assignee: {{ kind: role, id: public }}\n\
-         operations: [upsertBatch, queryEntity]\n\
+         operations: [upsertBatch, queryEntity, deleteEntity]\n\
          information:\n\
          \x20 - entities:\n\
          \x20     - type: AirQualityObserved\n"
@@ -202,6 +202,43 @@ async fn a_write_past_the_budget_is_answered_503_and_never_reaches_the_broker() 
         .expect("answered")
         .status()
         .is_success());
+}
+
+/// A DELETE carries no body and no Content-Length.
+fn delete(n: usize) -> Request<Body> {
+    Request::builder()
+        .method(Method::DELETE)
+        .uri(format!(
+            "/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved:{DOMAIN}:{SPACE}:st-{n}"
+        ))
+        .body(Body::empty())
+        .expect("a request")
+}
+
+#[tokio::test]
+async fn a_delete_without_content_length_takes_the_smallest_share() {
+    let mut broker = stalled_broker().await;
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(broker.url.clone()), Box::new(PolicyPdp), DOMAIN)
+            .budget_writes(1)
+            .serve([endpoint()]),
+    );
+    let app = router(gateway);
+
+    // A write holds 700 of the 1024 KiB; a DELETE still fits beside it.
+    let held = tokio::spawn(app.clone().oneshot(upsert(700, 1)));
+    broker.arrived.recv().await.expect("the write arrives");
+    let deleting = tokio::spawn(app.clone().oneshot(delete(1)));
+    broker.arrived.recv().await.expect("the delete arrives");
+    broker.release.add_permits(2);
+    assert!(held
+        .await
+        .expect("joined")
+        .expect("answered")
+        .status()
+        .is_success());
+    let deleted = deleting.await.expect("joined").expect("answered");
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

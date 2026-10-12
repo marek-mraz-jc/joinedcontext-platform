@@ -13,7 +13,8 @@ use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::http::header::ACCEPT;
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::stream::{self, StreamExt};
 use jc_core::kinds::Operation;
@@ -36,6 +37,7 @@ async fn dataset_types(
 ) -> Result<Vec<String>, Box<Response<Body>>> {
     let mut headers = headers.clone();
     tenancy::as_gateway(&mut headers);
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
         .send(
@@ -120,14 +122,14 @@ pub(crate) async fn query_entities(
         "/ngsi-ld/v1/entities?{}",
         query::upstream(params, &constraints, &fallback)
     );
+    // The entity array is read here and rendered by the caller's handler: asked with the
+    // caller's `application/geo+json`, the broker answers a FeatureCollection, which reads as
+    // no entity (T-4106).
+    let mut headers = request.headers().clone();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
-        .send(
-            axum::http::Method::GET,
-            &target,
-            request.headers().clone(),
-            Body::empty(),
-        )
+        .send(axum::http::Method::GET, &target, headers, Body::empty())
         .await
         .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
 
@@ -658,6 +660,52 @@ async fn paged_view(
     Ok((Value::Array(chunks.concat()), restricted))
 }
 
+/// The type list of an Endpoint as its reads show the caller (CIM 009 5.7.1, T-4080): every
+/// type the space holds that the Endpoint's view answers at least one entity of to this caller.
+/// A read grant is enough to be shown it, as it is for the schema (EP-47), and each type is the
+/// view's decision, so no type name outside what the caller may read is listed. `None` when the
+/// caller holds no read through the Endpoint: the view then answers the operation itself.
+pub(crate) async fn listed_types(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    request: &mut Request,
+) -> Result<Option<Value>, Box<Response<Body>>> {
+    let slug = endpoint.slug.as_str();
+    let reads = gateway.pdp.decide(
+        subject,
+        Operation::QueryEntity,
+        &query::requested(&[]),
+        endpoint,
+    );
+    if !matches!(reads, Verdict::Rewrite(_)) {
+        return Ok(None);
+    }
+    view_hop(endpoint, subject, request)?;
+    let held = view_fallback(gateway, (endpoint, subject, slug), &[], request.headers())
+        .await?
+        .unwrap_or_default();
+    let mut shown = Vec::new();
+    for name in held {
+        let target = format!(
+            "entities?{}&limit=1",
+            query::view_read(&[], std::slice::from_ref(&name))
+        );
+        match view_page(gateway, slug, slug, &target, request.headers()).await {
+            Ok((page, _, _, _)) if !page.is_empty() => shown.push(name),
+            Ok(_) => {}
+            // A type the view refuses this caller is a type they are not shown.
+            Err(refused) if refused.status() == StatusCode::FORBIDDEN => {}
+            Err(failed) => return Err(failed),
+        }
+    }
+    Ok(Some(serde_json::json!({
+        "id": format!("urn:ngsi-ld:EntityTypeList:{slug}"),
+        "type": "EntityTypeList",
+        "typeList": shown,
+    })))
+}
+
 /// Pins the tenant and the verified caller for a hop to the view; a caller who asked about
 /// narrowing has the broker asked too (R22).
 fn view_hop(
@@ -719,12 +767,16 @@ async fn view_page(
     target: &str,
     headers: &HeaderMap,
 ) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
+    // An entity array is read here, whatever the caller accepts: asked with its geo+json, the
+    // view answers a FeatureCollection that reads as no entity (T-4111, as T-4106 for the PDP path).
+    let mut headers = headers.clone();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
         .send(
             axum::http::Method::GET,
             &format!("/x/views/{view}/ngsi-ld/v1/{target}"),
-            headers.clone(),
+            headers,
             Body::empty(),
         )
         .await
