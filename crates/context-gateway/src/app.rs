@@ -1646,7 +1646,7 @@ pub(crate) fn has_view(view: &str) -> bool {
 /// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
 /// engine has no agreements to decide on yet, and would judge the connector's own account
 /// instead (map K38).
-pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+pub(crate) fn access_by_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
     let temporal = endpoint
         .projection
         .as_ref()

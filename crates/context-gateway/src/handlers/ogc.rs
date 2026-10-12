@@ -230,7 +230,7 @@ async fn odata_write(
         return offered;
     }
     let view = endpoint.slug.clone();
-    if endpoint.view_mapping.is_some() || !has_view(&endpoint, &view) {
+    if endpoint.view_mapping.is_some() || !has_view(&view) {
         return no_view(&ODATA);
     }
     let prefix = format!("{}/{}", endpoint.base_path, ODATA.path);
@@ -238,7 +238,7 @@ async fn odata_write(
         Ok(write) => write,
         Err(problem) => return problem.into_response(),
     };
-    // The domain gate, the federation the platform cannot serve, the caller pinned: what the
+    // The domain gate, a federated read's token refused on a write, the caller pinned: what the
     // NGSI-LD view forward checks before it reads a body.
     if let Err(answer) = view_request(
         gateway,
