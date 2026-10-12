@@ -551,10 +551,10 @@ async fn admission_comes_before_the_hop() {
     assert!(hops.lock().expect("the hop log").is_empty());
 }
 
-/// An Endpoint no view serves yet (a view of another model, G18) keeps the gateway's own
-/// document and check until its gap closes; the broker is not asked.
+/// An Endpoint with a view of another model (G18) is served by its broker view like any other
+/// (T-3799): the gateway keeps no document or decision of its own (T-3650).
 #[tokio::test]
-async fn an_endpoint_without_a_view_keeps_the_gateways_own_answer() {
+async fn an_endpoint_with_a_view_mapping_is_answered_by_its_view() {
     let mut mapped = endpoint();
     mapped.view_mapping = Some(Arc::new(
         ViewMapping::parse(&json!({
@@ -565,20 +565,7 @@ async fn an_endpoint_without_a_view_keeps_the_gateways_own_answer() {
         }))
         .expect("the IR parses"),
     ));
-    let (upstream, hops) = json_broker(StatusCode::OK, json!({})).await;
-    let (status, _, body) = call(
-        app(upstream.clone(), mapped.clone()),
-        get("application/json"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let document: Value = serde_json::from_str(&body).expect("JSON");
-    assert_eq!(document["resource"]["id"], SLUG);
-    assert_eq!(
-        document["permissions"][0]["resource"]["type"],
-        "AirQualityObserved"
-    );
-
+    let (upstream, hops) = json_broker(StatusCode::OK, json!({ "decision": false })).await;
     let (status, _, body) = call(
         app(upstream, mapped),
         check(r#"{"action":{"name":"queryEntity"},"resource":{"type":"AirQualityObserved"}}"#),
@@ -586,8 +573,45 @@ async fn an_endpoint_without_a_view_keeps_the_gateways_own_answer() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
-        serde_json::from_str::<Value>(&body).expect("JSON")["decision"],
-        true
+        serde_json::from_str::<Value>(&body).expect("JSON"),
+        json!({ "decision": false }),
+        "the engine's answer, though the gateway's own Policy grants it"
     );
+    let hops = hops.lock().expect("the hop log");
+    assert_eq!(hops.len(), 1);
+    assert_eq!(hops[0].path, format!("/x/views/{SLUG}/access/check"));
+}
+
+/// An Endpoint the broker can hold no view of (a slug longer than a view id, which the Portal's
+/// writer refuses) has nobody to decide for it: its document and check are a `503` naming why,
+/// never the gateway's own answer, and the broker is not asked (T-3650, fail closed).
+#[tokio::test]
+async fn an_endpoint_without_a_view_is_answered_by_nobody() {
+    let long = "k".repeat(64);
+    let mut unviewable = endpoint();
+    unviewable.slug = long.clone();
+    unviewable.base_path = format!("/api/endpoint/{long}");
+    let (upstream, hops) = json_broker(StatusCode::OK, json!({ "decision": true })).await;
+    for request in [
+        Request::builder()
+            .uri(format!("/api/endpoint/{long}/access"))
+            .body(Body::empty())
+            .expect("a request"),
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/endpoint/{long}/access/check"))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"action":{"name":"queryEntity"}}"#))
+            .expect("a request"),
+    ] {
+        let (status, headers, body) =
+            call(app(upstream.clone(), unviewable.clone()), request).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(headers["content-type"], "application/problem+json");
+        assert!(
+            !body.contains("decision") && !body.contains("permissions"),
+            "{body}"
+        );
+    }
     assert!(hops.lock().expect("the hop log").is_empty());
 }

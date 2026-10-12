@@ -13,9 +13,10 @@
 //! decision itself, which must be the same one the data path would make — an operation the
 //! caller may not perform is `false` here and refused there.
 //!
-//! The Endpoints here have a view of another model, which no broker view serves yet, so the
-//! gateway decides (T-3649, `app::has_view`); through a view the broker's engine does
-//! (`tests/access_view_tests.rs`).
+//! The broker's engine decides through the Endpoint's view (T-3649, T-3650): what a caller holds
+//! is tested there (Antares `addons/joinedcontext-policy/tests/access.rs`). What stays here is
+//! the gateway's half: admission, the body ceiling and shape, and that the engine is asked about
+//! the verified caller and nobody a header names.
 
 mod common;
 
@@ -27,7 +28,7 @@ use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -85,7 +86,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
-        view_mapping: Some(common::no_view()),
+        view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
         policies: grants(),
@@ -145,53 +146,6 @@ fn asking(action: &str, entity_type: Option<&str>) -> Body {
         query["resource"] = json!({ "type": entity_type });
     }
     Body::from(serde_json::to_vec(&query).expect("a query"))
-}
-
-/// R51, GW6: the first case, and the one most likely to be red. The check has to agree with
-/// the enforcement — a grant the caller does not hold is `false`, and the refusal names
-/// nothing of the grant that would have allowed it to somebody else.
-#[tokio::test]
-async fn an_operation_the_caller_does_not_hold_is_a_bare_no() {
-    for (action, entity_type) in [
-        ("createEntity", Some("InternalIncident")),
-        ("deleteEntity", Some("InternalIncident")),
-        ("createEntity", None),
-        ("queryEntity", Some("InternalIncident")),
-        ("retrieveEntity", Some("InternalIncident")),
-    ] {
-        let (status, body) = call(check(OPEN, asking(action, entity_type))).await;
-        assert_eq!(status, StatusCode::OK, "{action} {entity_type:?}: {body}");
-
-        let answer: Value = serde_json::from_str(&body).expect("a decision");
-        assert_eq!(answer["decision"], json!(false), "{action} {entity_type:?}");
-        assert_eq!(
-            answer.as_object().expect("an object").len(),
-            1,
-            "a refusal is the decision and nothing else: {body}",
-        );
-        for secret in ["tajny-uradnik.sk", "data-steward", "InternalIncident"] {
-            assert!(!body.contains(secret), "{secret:?} leaked into {body}");
-        }
-    }
-}
-
-/// R51: what the caller does hold is a yes, and it may name the assigner — the caller holds
-/// that grant, so the provenance of their own permission is theirs to read.
-#[tokio::test]
-async fn an_operation_the_caller_holds_is_a_yes_with_its_assigner() {
-    let (status, body) = call(check(
-        OPEN,
-        asking("queryEntity", Some("AirQualityObserved")),
-    ))
-    .await;
-
-    assert_eq!(status, StatusCode::OK);
-    let answer: Value = serde_json::from_str(&body).expect("a decision");
-    assert_eq!(answer["decision"], json!(true));
-    assert_eq!(
-        answer["context"]["assigner"],
-        json!("did:web:banskabystrica.sk")
-    );
 }
 
 /// T-0163: `action.name` is required, and every way of leaving it out is the same bad
@@ -267,124 +221,6 @@ async fn a_body_past_the_ceiling_is_refused_rather_than_read() {
     assert!(!body.contains("decision"), "{body}");
 }
 
-/// An action name that is not an operation is a no, not a 500 and not a yes. The list is the
-/// ways a client gets the name wrong: a near miss, the wrong case, a prefixed spelling, an
-/// empty string, and one with a newline that would otherwise reach a log line.
-#[tokio::test]
-async fn an_action_name_that_is_not_an_operation_is_a_no() {
-    for action in [
-        "",
-        " ",
-        "queryentity",
-        "QUERYENTITY",
-        "query_entity",
-        "queryEntity ",
-        " queryEntity",
-        "queryEntity\r\nX-Injected: 1",
-        "*",
-        "../queryEntity",
-        "\u{0}queryEntity",
-        &"a".repeat(4096),
-    ] {
-        let (status, body) = call(check(OPEN, asking(action, None))).await;
-        assert_eq!(status, StatusCode::OK, "{action:?} answered {body}");
-        let answer: Value = serde_json::from_str(&body).expect("a decision");
-        assert_eq!(answer["decision"], json!(false), "{action:?}");
-    }
-}
-
-/// `resource.type` narrows the question, and a type that is not a string is the same as not
-/// asking about a type at all: the check is over the operation, and a malformed narrowing
-/// never widens the answer.
-#[tokio::test]
-async fn a_malformed_resource_type_never_widens_the_answer() {
-    let unnarrowed: Value =
-        serde_json::from_str(&call(check(OPEN, asking("queryEntity", None))).await.1)
-            .expect("a decision");
-
-    for resource in [
-        json!({ "type": 42 }),
-        json!({ "type": null }),
-        json!({ "type": ["AirQualityObserved"] }),
-        json!({ "Type": "AirQualityObserved" }),
-        json!("AirQualityObserved"),
-        json!(null),
-    ] {
-        let body = json!({ "action": { "name": "queryEntity" }, "resource": resource });
-        let (status, answer) = call(check(OPEN, serde_json::to_vec(&body).expect("a query"))).await;
-        assert_eq!(status, StatusCode::OK, "{body} answered {answer}");
-        let decided: Value = serde_json::from_str(&answer).expect("a decision");
-        assert_eq!(
-            decided["decision"], unnarrowed["decision"],
-            "{body} decided differently from the unnarrowed question",
-        );
-    }
-
-    // And a type the caller may not touch is a no, whatever the operation says.
-    let (_, refused) = call(check(OPEN, asking("queryEntity", Some("InternalIncident")))).await;
-    let refused: Value = serde_json::from_str(&refused).expect("a decision");
-    assert_eq!(refused["decision"], json!(false));
-}
-
-/// EP-55: the check is this caller's. A token that carries the steward's role decides
-/// differently from the anonymous caller on the very same question, because it is the same
-/// PDP answering about a different subject.
-#[tokio::test]
-async fn the_decision_is_the_callers_own() {
-    let realm = common::Realm::new();
-    let steward = realm.mint(&json!({
-        "iss": common::ISSUER,
-        "sub": "a-steward",
-        "aud": CLOSED,
-        "preferred_username": "jana",
-        "groups": ["/ovzdusie"],
-        "realm_access": { "roles": ["data-steward"] },
-        "exp": common::in_seconds(300),
-        "iat": common::in_seconds(-10),
-    }));
-
-    let (status, body) = call_on(
-        app_of(&realm),
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/endpoint/{CLOSED}/access/check"))
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .header(
-                axum::http::header::AUTHORIZATION,
-                format!("Bearer {steward}"),
-            )
-            .body(asking("createEntity", Some("InternalIncident")))
-            .expect("a request"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let answer: Value = serde_json::from_str(&body).expect("a decision");
-    assert_eq!(answer["decision"], json!(true), "{body}");
-}
-
-/// GW20: the tenancy headers are stripped before the endpoint is resolved, so a forged one
-/// cannot move the question to another space's rules.
-#[tokio::test]
-async fn a_forged_tenant_header_does_not_change_the_decision() {
-    let honest = call(check(OPEN, asking("createEntity", None))).await;
-    let forged = call(
-        Request::builder()
-            .method("POST")
-            .uri(format!("/api/endpoint/{OPEN}/access/check"))
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .header("NGSILD-Tenant", "somebody-elses-space")
-            .header("X-Forwarded-Groups", "data-steward")
-            .header("X-Forwarded-User", "spravca")
-            .body(asking("createEntity", None))
-            .expect("a request"),
-    )
-    .await;
-
-    assert_eq!(honest.0, StatusCode::OK);
-    assert_eq!(forged, honest);
-}
-
 /// The check is a `POST` surface, and nothing else reaches it — a `GET` in particular, which
 /// would otherwise be a way of asking the question with the answer cached by a proxy.
 #[tokio::test]
@@ -406,4 +242,125 @@ async fn nothing_but_post_reaches_the_check() {
             "{method} reached the check",
         );
     }
+}
+
+/// The deployment over a stub broker that records each hop.
+async fn stubbed(realm: &common::Realm) -> (axum::Router, common::BrokerStub) {
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new(broker.url.clone()),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([
+            endpoint(OPEN, Audience::Public),
+            endpoint(CLOSED, Audience::Organization),
+        ])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some("https://bb.example.sk".to_owned()),
+        ),
+    ));
+    (app, broker)
+}
+
+/// One pinned header of the last hop, as the broker read it.
+fn pinned(broker: &common::BrokerStub, name: &str) -> Option<String> {
+    let hops = broker.hops();
+    let hop = hops.last().expect("the engine was asked");
+    hop.headers
+        .get(name)
+        .map(|value| value.to_str().expect("visible").to_owned())
+}
+
+/// EP-55: the check is this caller's. The engine is asked about the verified token's person,
+/// groups and roles, so a steward's question is the steward's.
+#[tokio::test]
+async fn the_engine_is_asked_about_the_callers_own_token() {
+    let realm = common::Realm::new();
+    let steward = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "a-steward",
+        "aud": CLOSED,
+        "preferred_username": "jana",
+        "groups": ["/ovzdusie"],
+        "realm_access": { "roles": ["data-steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    let (app, broker) = stubbed(&realm).await;
+    let (status, body) = call_on(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/endpoint/{CLOSED}/access/check"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {steward}"),
+            )
+            .body(asking("createEntity", Some("InternalIncident")))
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(pinned(&broker, "x-jc-subject").as_deref(), Some("jana"));
+    assert!(
+        pinned(&broker, "x-jc-roles")
+            .is_some_and(|roles| roles.split(',').any(|r| r == "data-steward")),
+        "{:?}",
+        pinned(&broker, "x-jc-roles")
+    );
+    assert_eq!(
+        pinned(&broker, "authorization"),
+        None,
+        "the token stays here"
+    );
+}
+
+/// GW20: the tenancy and identity headers a client sends are stripped, so a forged one cannot
+/// move the question to another space or another subject: the hop is the honest one.
+#[tokio::test]
+async fn a_forged_tenant_header_does_not_change_the_question() {
+    let realm = common::Realm::new();
+    let (app, broker) = stubbed(&realm).await;
+    let honest = call_on(app.clone(), check(OPEN, asking("createEntity", None))).await;
+    let forged = call_on(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/endpoint/{OPEN}/access/check"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("NGSILD-Tenant", "somebody-elses-space")
+            .header("X-Forwarded-Groups", "data-steward")
+            .header("X-Forwarded-User", "spravca")
+            .header("x-jc-roles", "data-steward")
+            .header("x-jc-subject", "spravca")
+            .body(asking("createEntity", None))
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(honest.0, StatusCode::OK);
+    assert_eq!(forged, honest);
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 2);
+    for name in [
+        "ngsild-tenant",
+        "x-jc-roles",
+        "x-jc-subject",
+        "x-jc-groups",
+        "x-forwarded-user",
+    ] {
+        assert_eq!(
+            hops[1].headers.get(name),
+            hops[0].headers.get(name),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        hops[1].headers.get("ngsild-tenant").map(|v| v.as_bytes()),
+        Some(&b"ovzdusie"[..])
+    );
 }
