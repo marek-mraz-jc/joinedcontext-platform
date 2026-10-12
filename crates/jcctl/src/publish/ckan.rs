@@ -148,7 +148,11 @@ pub fn package(
     };
     let organization = organization(publication, instance)?;
     let name = publication.dataset_name(&endpoint.metadata.name);
-    let url = settings.endpoint_url(spec.slug.as_str());
+    // The address a reader clicks is the one the Endpoint's own record names, not the host the
+    // publisher read the record through: the Portal reads it on its own host, and the catalogue
+    // showed that one beside a DCAT record naming the public one (T-4066).
+    let url = public_base(record, spec.slug.as_str())
+        .unwrap_or_else(|| settings.endpoint_url(spec.slug.as_str()));
     let language = settings.language.as_deref();
     let served = spec.served_representations();
 
@@ -208,6 +212,20 @@ pub fn package(
         },
     );
     Ok(Some(payload))
+}
+
+/// The record's own `@id` when it is `https://{host}/api/endpoint/{slug}` for this slug and a
+/// plain host; `None` keeps the publisher's host for a record that names anything else.
+fn public_base(record: &Value, slug: &str) -> Option<String> {
+    let id = record.get("@id")?.as_str()?.trim_end_matches('/');
+    let host = id
+        .strip_prefix("https://")?
+        .strip_suffix(&format!("/api/endpoint/{slug}"))?;
+    let plain = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+    plain.then(|| id.to_owned())
 }
 
 /// What a usage text says about the dataset it sits in (EP-108, API/02 §10).
