@@ -95,6 +95,7 @@ impl Fixture {
             Some(&verifier),
             &self.accounts,
             caller,
+            &RUNNER_PODS.map(|ip| ip.parse().expect("an address")),
             connect,
         );
         serde_json::to_value(answer).expect("serializes")
@@ -115,6 +116,9 @@ fn device(azp: &str, token: String) -> Connect {
         ipaddr: "203.0.113.7".to_owned(),
     }
 }
+
+/// The addresses the runner's headless Service resolves to in these tests.
+const RUNNER_PODS: [&str; 2] = ["10.42.0.17", "fd00::17"];
 
 fn runner(ipaddr: &str) -> Connect {
     Connect {
@@ -231,12 +235,12 @@ fn every_way_a_camera_is_refused() {
     }
 }
 
-/// PL-76: the runner connects without a token from inside the cluster and may only subscribe
-/// to what the DataSources naming this broker read.
+/// PL-76, T-4004: the runner connects without a token from one of its own pods only, and may
+/// only subscribe to what the DataSources naming this broker read.
 #[test]
-fn the_runner_subscribes_to_its_data_sources_topics_from_inside_only() {
+fn the_runner_subscribes_to_its_data_sources_topics_from_its_own_pods_only() {
     let f = Fixture::new("runner");
-    for inside in ["10.42.0.17", "127.0.0.1", "::1"] {
+    for inside in ["10.42.0.17", "fd00::17", "::ffff:10.42.0.17"] {
         let answer = f.decide(Some(CAMERAS), &runner(inside));
         assert_eq!(answer["result"], "allow", "{inside}: {answer}");
         assert!(answer.get("expire_at").is_none(), "{answer}");
@@ -249,8 +253,15 @@ fn the_runner_subscribes_to_its_data_sources_topics_from_inside_only() {
         );
     }
     let deny = json!({"result": "deny", "superuser": false});
-    // Through Traefik the PROXY protocol carries the public address.
-    assert_eq!(f.decide(Some(CAMERAS), &runner("203.0.113.7")), deny);
+    // Through Traefik the PROXY protocol carries the public address, or a cluster pod's own:
+    // a private address that is no runner pod's is refused like a public one.
+    for elsewhere in ["203.0.113.7", "10.42.0.99", "127.0.0.1", "::1", "fd00::99"] {
+        assert_eq!(
+            f.decide(Some(CAMERAS), &runner(elsewhere)),
+            deny,
+            "{elsewhere}"
+        );
+    }
     assert_eq!(f.decide(Some(CAMERAS), &runner("not an address")), deny);
     // Without a token only the runner's name passes, and only on a broker a DataSource reads.
     let someone = Connect {
@@ -291,7 +302,7 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
     };
 
     for (with_identity, result) in [(true, "allow"), (false, "deny")] {
-        let response = internal_router(Arc::clone(&gateway))
+        let response = internal_router(Arc::clone(&gateway), None)
             .oneshot(request(with_identity))
             .await
             .expect("answers");
@@ -311,5 +322,47 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
         public.status(),
         StatusCode::OK,
         "the public surface serves no CONNECT check"
+    );
+}
+
+/// T-4004: on the internal router, the tokenless runner is admitted from what the configured
+/// runner host resolves to, and from nowhere when no host is configured.
+#[tokio::test]
+async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
+    let f = Fixture::new("runner-router");
+    let gateway = Gateway::new(
+        Broker::new("http://broker.invalid:1026"),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .authenticate(Arc::new(f.realm.verifier()), f.accounts.clone(), None);
+    gateway.replace_brokers(f.brokers.clone());
+    let gateway = Arc::new(gateway);
+    let ask = |host: Option<&str>, ipaddr: &str| {
+        let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned));
+        let body = json!({
+            "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner",
+            "password": "", "ipaddr": ipaddr
+        })
+        .to_string();
+        async move {
+            let request = Request::post("/internal/mqtt/auth")
+                .header("content-type", "application/json")
+                .header("l5d-client-id", CAMERAS)
+                .body(Body::from(body))
+                .expect("a request");
+            let response = app.oneshot(request).await.expect("answers");
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("a body");
+            serde_json::from_slice::<Value>(&bytes).expect("json")["result"].clone()
+        }
+    };
+    assert_eq!(ask(Some("localhost"), "127.0.0.1").await, "allow");
+    assert_eq!(ask(Some("localhost"), "10.42.0.17").await, "deny");
+    assert_eq!(ask(None, "127.0.0.1").await, "deny");
+    assert_eq!(
+        ask(Some("no-such-runner.invalid"), "127.0.0.1").await,
+        "deny"
     );
 }

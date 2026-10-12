@@ -215,7 +215,10 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let app = context_gateway::mqtt::internal_router(Arc::clone(&gateway));
+        let app = context_gateway::mqtt::internal_router(
+            Arc::clone(&gateway),
+            config.mqtt_runner_host.clone(),
+        );
         tracing::info!(bind = %internal, "internal listener for the MQTT brokers");
         tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
