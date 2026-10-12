@@ -271,9 +271,10 @@ pub(crate) fn fan_out_schemas(tools: &mut [Value]) {
                     cursor.clone(),
                     {
                         "type": "object",
-                        "additionalProperties": { "type": "integer", "minimum": 0 },
+                        "additionalProperties": { "type": ["string", "integer"] },
                         "description": "Without `endpoint`: the previous answer's nextCursor, \
-                                        one offset per Endpoint slug; only those Endpoints are asked",
+                                        one cursor per Endpoint slug, passed back as given; only \
+                                        those Endpoints are asked",
                     },
                 ],
             });
@@ -301,7 +302,7 @@ impl Hub {
                 return Answer::Json(result(
                     id,
                     refused(
-                        "`cursor` is the previous answer's nextCursor: an object of one offset per Endpoint slug",
+                        "`cursor` is the previous answer's nextCursor: an object of one cursor per Endpoint slug",
                         &Value::Null,
                     ),
                 ))

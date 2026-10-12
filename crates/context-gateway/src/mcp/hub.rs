@@ -2,12 +2,13 @@
 //! EP-87, EP-88).
 //!
 //! The hub holds no data path of its own. It answers who the caller may reach, and every tool
-//! call it takes is handed to the named Endpoint's own façade, which re-enters the NGSI-LD path
-//! with the caller's token exactly as a call to `/api/endpoint/{slug}/mcp` does: the Endpoint's
-//! PDP, projection and elicitation decide (SP-16). Nothing is remembered between calls (SP-19):
+//! call it takes goes to the named Endpoint's view on the broker, `/x/views/{slug}/mcp`, in the
+//! broker's form and under the verified caller, as a call to `/api/endpoint/{slug}/mcp` does
+//! (T-3808); `describe_schema`, `describe_access` and an Endpoint no view serves yet stay on the
+//! Endpoint's own façade (SP-16). Nothing is remembered between calls (SP-19):
 //! the agent names the Endpoint on every call, and the list is rebuilt from the token each time.
 
-use crate::app::{principal_of, subject_from, Credential, Door, Gateway, HUB_PATH, MAX_BODY};
+use crate::app::{self, principal_of, subject_from, Credential, Door, Gateway, HUB_PATH, MAX_BODY};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
 use crate::mcp::endpoint_facade::{self, answered, error, refused, result, HubTool};
@@ -34,6 +35,38 @@ const PAGE: usize = 50;
 
 /// The key the per-subject bucket is kept under. It holds a `/`, so no Endpoint slug is it.
 const HUB_BUCKET: &str = HUB_PATH;
+
+/// A hub tool call in the form the broker's MCP surface takes it (Antares `docs/src/mcp.md`
+/// section 2): the hub keeps its catalogue's names and arguments, and the broker names a few
+/// of them otherwise. A `type` is a list of names, `details` is a tool of its own, and the one
+/// entity or subscription a write carries is the broker's argument list. A cursor is the
+/// broker's, passed back as it gave it.
+fn broker_call(name: &str, mut arguments: Map<String, Value>) -> (&str, Map<String, Value>) {
+    let details = arguments.remove("details") == Some(Value::Bool(true));
+    match name {
+        "list_types" if details => ("list_type_details", arguments),
+        "list_attributes" if details => ("list_attribute_details", arguments),
+        "upsert_entity" => {
+            let entity = arguments.remove("entity").unwrap_or(Value::Null);
+            arguments.insert("entities".to_owned(), json!([entity]));
+            ("batch_upsert", arguments)
+        }
+        "create_subscription" => match arguments.remove("subscription") {
+            Some(Value::Object(subscription)) => (name, subscription),
+            _ => (name, arguments),
+        },
+        "get_type" => (name, arguments),
+        _ => {
+            if let Some(one) = arguments.get_mut("type").filter(|one| one.is_string()) {
+                *one = json!([one.take()]);
+            }
+            if let Some(ids) = arguments.remove("ids") {
+                arguments.entry("id").or_insert(ids);
+            }
+            (name, arguments)
+        }
+    }
+}
 
 /// One JSON-RPC message to the hub (EP-87).
 pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) -> Response<Body> {
@@ -301,6 +334,19 @@ impl Hub {
             "tools/list" => {
                 let mut tools = vec![list_endpoints_tool()];
                 tools.extend(endpoint_facade::hub_tools(&self.gateway, &self.reach));
+                // A member's view answers its own cursor, opaque; a member no view serves yet
+                // still answers an offset (T-3808).
+                for cursor in tools
+                    .iter_mut()
+                    .filter_map(|tool| tool.pointer_mut("/inputSchema/properties/cursor"))
+                {
+                    *cursor = json!({
+                        "type": ["string", "integer"],
+                        "maxLength": 1024,
+                        "minimum": 0,
+                        "description": "The previous page's nextCursor, passed back as given",
+                    });
+                }
                 if self.server.is_some() {
                     server::fan_out_schemas(&mut tools);
                 }
@@ -419,6 +465,18 @@ impl Hub {
         );
 
         let mut forwarded = params.as_object().cloned().unwrap_or_default();
+        if app::member_viewed(&self.gateway, endpoint, name) {
+            let (tool, arguments) = broker_call(name, arguments);
+            forwarded.insert("name".to_owned(), json!(tool));
+            forwarded.insert("arguments".to_owned(), Value::Object(arguments));
+            let message = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": forwarded,
+            });
+            return Some(app::member_call(&self.gateway, endpoint, subject, message).await);
+        }
         forwarded.insert("arguments".to_owned(), Value::Object(arguments));
         let message = json!({
             "jsonrpc": "2.0",
@@ -581,4 +639,52 @@ pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response
             "scopes_supported": ["endpoint:{slug}"],
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::broker_call;
+    use serde_json::{json, Map, Value};
+
+    fn called(name: &str, arguments: Value) -> (String, Value) {
+        let arguments: Map<String, Value> =
+            serde_json::from_value(arguments).unwrap_or_else(|e| unreachable!("{e}"));
+        let (tool, arguments) = broker_call(name, arguments);
+        (tool.to_owned(), Value::Object(arguments))
+    }
+
+    #[test]
+    fn each_hub_tool_reaches_the_broker_in_its_form() {
+        let entity = json!({ "id": "urn:ngsi-ld:Car:1", "type": "Car" });
+        assert_eq!(
+            called("upsert_entity", json!({ "entity": entity })),
+            ("batch_upsert".to_owned(), json!({ "entities": [entity] }))
+        );
+        assert_eq!(
+            called("get_type", json!({ "type": "Car" })),
+            ("get_type".to_owned(), json!({ "type": "Car" }))
+        );
+        assert_eq!(
+            called("list_attributes", json!({ "details": true })),
+            ("list_attribute_details".to_owned(), json!({}))
+        );
+        assert_eq!(
+            called("list_attributes", json!({})),
+            ("list_attributes".to_owned(), json!({}))
+        );
+        // A subscription that is not an object is left for the broker to refuse by name.
+        assert_eq!(
+            called("create_subscription", json!({ "subscription": "x" })),
+            ("create_subscription".to_owned(), json!({}))
+        );
+        // `id` beside `ids` keeps the caller's `id`.
+        assert_eq!(
+            called("batch_query", json!({ "ids": ["a"], "id": ["b"] })),
+            ("batch_query".to_owned(), json!({ "id": ["b"] }))
+        );
+        assert_eq!(
+            called("query_temporal", json!({ "type": 7 })),
+            ("query_temporal".to_owned(), json!({ "type": 7 }))
+        );
+    }
 }
