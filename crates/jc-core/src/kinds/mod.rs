@@ -102,7 +102,10 @@ pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
-pub use space::{urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectApps, ProjectSpec, Quotas};
+pub use space::{
+    retention_seconds, urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectApps, ProjectSpec,
+    Quotas, RetentionRule,
+};
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
 };

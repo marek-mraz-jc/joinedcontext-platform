@@ -1,4 +1,6 @@
-use jc_core::kinds::{ContextSpace, ContextSpaceSpec, MissingUnitCode, Project, Quotas};
+use jc_core::kinds::{
+    retention_seconds, ContextSpace, ContextSpaceSpec, MissingUnitCode, Project, Quotas,
+};
 use jc_core::Urn;
 
 const GOLDEN_PROJECT: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -176,6 +178,7 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         ttl_days: Some(7),
         urn_segment: None,
         missing_unit_code: MissingUnitCode::Fill,
+        retention: Vec::new(),
     };
     assert!(spec.validate().is_ok());
 
@@ -280,4 +283,98 @@ fn a_space_fills_a_missing_unit_code_unless_it_refuses_dm_06() {
         serde_json::json!({ "missingUnitCode": "guess" })
     )
     .is_err());
+}
+
+/// DM-81: a space's retention round-trips, holds one rule per type, and refuses a duration
+/// the broker cannot run (zero, negative, under a minute, over ten years, an unknown unit).
+#[test]
+fn retention_rules_round_trip_and_refuse_what_the_broker_cannot_run_dm_81() {
+    let yaml = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle, current: PT5M, history: PT8H }\n    - { entityType: Stop }",
+    );
+    let space = ContextSpace::from_yaml(&yaml).expect("parses");
+    assert!(space.spec.validate_with_meta(&space.metadata).is_ok());
+    assert_eq!(space.spec.retention.len(), 2);
+    let back: ContextSpaceSpec =
+        serde_json::from_value(serde_json::to_value(&space.spec).expect("serialize"))
+            .expect("round trip");
+    assert_eq!(back, space.spec);
+    let empty = serde_json::to_value(ContextSpaceSpec::default()).expect("serialize");
+    assert!(empty.get("retention").is_none(), "no rule, no field");
+
+    for (rule, field) in [
+        (
+            "{ entityType: Vehicle, current: PT0M }",
+            "spec.retention.current",
+        ),
+        (
+            "{ entityType: Vehicle, current: -PT5M }",
+            "spec.retention.current",
+        ),
+        (
+            "{ entityType: Vehicle, history: PT30S }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, history: P3651D }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, history: P1Y }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, history: 5m }",
+            "spec.retention.history",
+        ),
+        ("{ entityType: vehicle }", "entityType"),
+    ] {
+        let yaml = GOLDEN_SPACE.replace(
+            "isSandbox: false",
+            &format!("isSandbox: false\n  retention:\n    - {rule}"),
+        );
+        let space = ContextSpace::from_yaml(&yaml).expect("parses");
+        let err = space
+            .spec
+            .validate_with_meta(&space.metadata)
+            .expect_err(rule);
+        assert!(
+            matches!(&err, jc_core::Error::Name { field: f, .. } if *f == field),
+            "{rule}: {err}"
+        );
+    }
+    let twice = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle }\n    - { entityType: Vehicle, history: PT5M }",
+    );
+    let space = ContextSpace::from_yaml(&twice).expect("parses");
+    assert!(space.spec.validate_with_meta(&space.metadata).is_err());
+    let unknown = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle, keep: PT5M }",
+    );
+    assert!(
+        ContextSpace::from_yaml(&unknown).is_err(),
+        "deny_unknown_fields"
+    );
+}
+
+#[test]
+fn retention_durations_are_the_brokers_form() {
+    for (raw, secs) in [
+        ("PT1M", 60),
+        ("PT5M", 300),
+        ("PT8H", 28_800),
+        ("P1DT12H", 129_600),
+        ("PT1H30M15S", 5_415),
+        ("P3650D", 315_360_000),
+    ] {
+        assert_eq!(retention_seconds(raw), Some(secs), "{raw}");
+    }
+    for raw in [
+        "", "P", "PT", "P1DT", "PT59S", "P0D", "P1H", "PT5X", "PT5M3", "P1W", "5m",
+    ] {
+        assert_eq!(retention_seconds(raw), None, "{raw}");
+    }
 }

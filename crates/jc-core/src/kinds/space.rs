@@ -251,6 +251,54 @@ pub struct ContextSpaceSpec {
     /// A `unitCode` other than the model's is refused either way.
     #[serde(default, skip_serializing_if = "MissingUnitCode::is_fill")]
     pub missing_unit_code: MissingUnitCode,
+    /// How long the broker keeps each type's data; a type without a rule is kept forever
+    /// (DM-81, ADR-N-046).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retention: Vec<RetentionRule>,
+}
+
+/// One type's retention in a space (DM-81, ADR-N-046): both durations absent keeps it forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RetentionRule {
+    /// A class of the space's Data Model.
+    pub entity_type: String,
+    /// How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-82).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// How long a temporal instance is kept, in the same form (DM-83).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
+}
+
+/// Seconds of a retention duration `P[nD][T[nH][nM][nS]]` from one minute to 3650 days, the
+/// form the broker's `/q/retention` reads; `None` for anything else (DM-81).
+pub fn retention_seconds(raw: &str) -> Option<u64> {
+    let rest = raw.strip_prefix('P')?;
+    let (days, time) = match rest.split_once('T') {
+        Some((_, "")) => return None,
+        Some((d, t)) => (d, t),
+        None => (rest, ""),
+    };
+    if days.is_empty() && time.is_empty() {
+        return None;
+    }
+    let mut total: u64 = match days {
+        "" => 0,
+        d => d
+            .strip_suffix('D')?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(86_400)?,
+    };
+    let mut time = time;
+    for (unit, scale) in [('H', 3600), ('M', 60), ('S', 1)] {
+        if let Some((n, tail)) = time.split_once(unit) {
+            total = total.checked_add(n.parse::<u64>().ok()?.checked_mul(scale)?)?;
+            time = tail;
+        }
+    }
+    (time.is_empty() && (60..=3650 * 86_400).contains(&total)).then_some(total)
 }
 
 /// What a space does with a quantity written without its `unitCode` (DM-06).
@@ -307,6 +355,31 @@ impl ContextSpaceSpec {
                     return Err(Error::Kind {
                         expected: "DataModel",
                         got: kind.to_string(),
+                    });
+                }
+            }
+        }
+
+        let mut ruled = std::collections::BTreeSet::new();
+        for rule in &self.retention {
+            names::validate_entity_type(&rule.entity_type)?;
+            if !ruled.insert(rule.entity_type.as_str()) {
+                return Err(Error::Name {
+                    field: "spec.retention",
+                    value: rule.entity_type.clone(),
+                    reason: "a type has at most one retention rule (DM-81)",
+                });
+            }
+            for (field, value) in [
+                ("spec.retention.current", &rule.current),
+                ("spec.retention.history", &rule.history),
+            ] {
+                if let Some(v) = value.as_deref().filter(|v| retention_seconds(v).is_none()) {
+                    return Err(Error::Name {
+                        field,
+                        value: v.to_owned(),
+                        reason: "a retention duration is PT1M to P3650D, as PT5M, PT8H, \
+                                 P30D or P1DT12H (DM-81)",
                     });
                 }
             }
