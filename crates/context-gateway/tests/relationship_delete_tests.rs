@@ -287,6 +287,7 @@ fn endpoint(writable: &[&str]) -> Endpoint {
             units: Default::default(),
             relationships: rules(),
             quality: Vec::new(),
+            schema: None,
         }),
         catalog: None,
         roles: Default::default(),

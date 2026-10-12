@@ -194,7 +194,7 @@ impl BrokerStub {
                         .unwrap_or_default();
                     let mut hops = recorder.lock().expect("no poisoned lock");
                     hops.push(Hop {
-                        view,
+                        view: view.clone(),
                         path: path.clone(),
                         query: query.clone(),
                         tenant: headers
@@ -228,6 +228,20 @@ impl BrokerStub {
                     });
                     let pages = served.lock().expect("no poisoned lock");
 
+                    // A view's access surface is the engine's (T-3649): this stub's engine
+                    // holds no rule, so its document grants nothing and its check says no.
+                    if path == "/access" {
+                        return axum::Json(json!({
+                            "subject": { "type": "role", "id": "public" },
+                            "resource": { "type": "view", "id": view },
+                            "permissions": [],
+                            "prohibitions": []
+                        }))
+                        .into_response();
+                    }
+                    if path == "/access/check" {
+                        return axum::Json(json!({ "decision": false })).into_response();
+                    }
                     // A view's MCP surface (T-3647, T-3808): a tool call answered with the
                     // next page as its structured content, the way the broker's tools answer.
                     if path == "/mcp" {
@@ -640,6 +654,120 @@ pub fn public_subscribe_policy(
         attributes.join(", ")
     ))
     .expect("the policy spec parses")
+}
+
+/// The entity types of the `policies` whose assignee is the caller the gateway pinned on a hop
+/// (T-3649). The broker's engine decides on these headers (Antares
+/// `addons/joinedcontext-policy/README.md` section 1), so a test of who the gateway says the
+/// caller is reads which of its own Policies name them: the user in `x-jc-subject`, the service
+/// account in `x-jc-client`, each group and role in its percent-encoded list. A caller with
+/// neither a subject nor a client is anonymous and holds the role `public` alone.
+pub fn named_types(
+    headers: &axum::http::HeaderMap,
+    policies: &[jc_core::kinds::PolicySpec],
+) -> Vec<String> {
+    use jc_core::kinds::PrincipalKind;
+    let one = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(decode);
+    let list = |name: &str| -> Vec<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|joined| {
+                joined
+                    .split(',')
+                    .filter(|m| !m.is_empty())
+                    .map(decode)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (user, client) = (one("x-jc-subject"), one("x-jc-client"));
+    let anonymous = user.is_none() && client.is_none();
+    let (groups, roles) = (list("x-jc-groups"), list("x-jc-roles"));
+    let mut types: Vec<String> = policies
+        .iter()
+        .filter(|policy| {
+            let id = &policy.assignee.id;
+            match policy.assignee.kind {
+                PrincipalKind::Role if anonymous => id == "public",
+                PrincipalKind::Role => roles.contains(id),
+                PrincipalKind::User => user.as_ref() == Some(id),
+                PrincipalKind::ServiceAccount => client.as_ref() == Some(id),
+                PrincipalKind::Group => !anonymous && groups.contains(id),
+                PrincipalKind::Did => false,
+            }
+        })
+        .flat_map(|policy| {
+            policy
+                .information
+                .iter()
+                .flat_map(|info| info.entities.iter())
+        })
+        .map(|selector| selector.entity_type.clone())
+        .collect();
+    types.sort();
+    types.dedup();
+    types
+}
+
+/// One percent-encoded name as the broker decodes it.
+fn decode(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .and_then(|pair| std::str::from_utf8(pair).ok())
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+        match (bytes[at], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                at += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The AuthZEN document the broker's engine writes for the caller pinned on a hop (Antares
+/// `addons/joinedcontext-policy/src/access.rs`, T-3638), reduced to what a test of the subject
+/// reads: who it names (the user, else the service account, else the role `public`) and one
+/// permission per type of the `policies` that name them ([`named_types`]).
+pub fn engine_document(
+    headers: &axum::http::HeaderMap,
+    policies: &[jc_core::kinds::PolicySpec],
+) -> Value {
+    let one = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(decode);
+    let subject = match (one("x-jc-subject"), one("x-jc-client")) {
+        (Some(user), _) => json!({ "type": "user", "id": user }),
+        (None, Some(client)) => json!({ "type": "serviceAccount", "id": client }),
+        (None, None) => json!({ "type": "role", "id": "public" }),
+    };
+    let permissions: Vec<Value> = named_types(headers, policies)
+        .into_iter()
+        .map(|entity_type| json!({ "resource": { "type": entity_type } }))
+        .collect();
+    json!({ "subject": subject, "permissions": permissions, "prohibitions": [] })
+}
+
+/// A view of another model (G18) for an Endpoint fixture: no broker view serves such an
+/// Endpoint yet, so its access document and check stay the gateway's own (`app::has_view`,
+/// T-3649). The tests of that document use it to reach the gateway's code through the router.
+pub fn no_view() -> std::sync::Arc<context_gateway::translators::view_mapping::ViewMapping> {
+    std::sync::Arc::new(
+        context_gateway::translators::view_mapping::ViewMapping::parse(&json!({
+            "version": 2,
+            "sourceClass": "Senzor",
+            "targetClass": "AirQualityObserved",
+            "slots": [{ "target": "pm10", "source": "pm10", "kind": "rename", "filterable": true }]
+        }))
+        .expect("the IR parses"),
+    )
 }
 
 /// A broker whose MCP surface answers every request with `tools` as its tool list and no

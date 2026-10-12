@@ -1,4 +1,9 @@
-//! A space's quality rules on every write through an Endpoint (DM-87..DM-93, ADR-N-046 2.5).
+//! A space's quality rules on every write through an Endpoint (DM-87..DM-93, ADR-N-046 2.5),
+//! and its model's slot constraints (DM-86).
+//!
+//! The constraints are `jcctl::model_schema`'s, the compilation the Portal's pipeline stage
+//! checks a record against: a write breaking one is refused as `quality-rule` naming the SHACL
+//! component and the attribute, never the value.
 //!
 //! The verdict is `jc_core::quality`'s, the one the Portal's sweep and rejected route reach on
 //! the same entity: a rejecting rule refuses the write naming the rule and the attribute, never
@@ -10,7 +15,8 @@ use chrono::{DateTime, Utc};
 use jc_core::error::ProblemDetails;
 use jc_core::kinds::{QualityOutcome, QualityRule};
 use jc_core::quality::{mark, on_write, rejection, QUARANTINED_AT, QUARANTINE_RULES};
-use serde_json::{json, Value};
+use jcctl::model_schema::{ModelSchema, Problem};
+use serde_json::{json, Map, Value};
 
 /// Every quality check, by space, type, rule and outcome (DM-93).
 pub const CHECKS: &str = "jc_quality_checks_total";
@@ -170,6 +176,204 @@ fn judge(
     }
     mark(entity, &verdicts, now);
     Ok(())
+}
+
+/// The SHACL components of the slot constraints a write is refused for (DM-86): `required`,
+/// `minimum_value` and `maximum_value`, `pattern`, an enum and `range`. The model's other words
+/// are other checks' (a unit DM-06, a relationship DM-70, the type DM-61), or not the gateway's
+/// to refuse (an attribute the model does not declare).
+const SLOT_CONSTRAINTS: [&str; 6] = [
+    "sh:minCount",
+    "sh:minInclusive",
+    "sh:maxInclusive",
+    "sh:pattern",
+    "sh:in",
+    "sh:datatype",
+];
+
+/// The member that carries a value, and the kind of an attribute written with it but no `type`.
+const MEMBERS: [(&str, &str); 4] = [
+    ("value", "Property"),
+    ("object", "Relationship"),
+    ("languageMap", "LanguageProperty"),
+    ("vocab", "VocabProperty"),
+];
+
+/// An entity's own members, which are no attribute.
+const OWN: [&str; 8] = [
+    "id",
+    "@id",
+    "type",
+    "@type",
+    "@context",
+    "scope",
+    "createdAt",
+    "modifiedAt",
+];
+
+/// The refusal of a write that breaks a slot constraint of the space's model (DM-86).
+pub fn model_refusal(model: &str, problem: &Problem) -> ProblemDetails {
+    let mut refused =
+        ProblemDetails::new(400, "quality-rule", "Quality Rule Broken").with_detail(format!(
+            "{} ({} of the space's model `{model}`, DM-86)",
+            problem.message, problem.rule
+        ));
+    refused
+        .extensions
+        .insert("rule".into(), json!(problem.rule));
+    refused
+        .extensions
+        .insert("field".into(), json!(problem.path));
+    refused
+}
+
+/// Checks every entity of a write payload against the slot constraints of the space's model.
+/// A `whole` write (a create, a replace) carries the entity, so a required attribute must be
+/// there; any other write is checked only for the attributes it carries. A batch is refused
+/// whole by its first broken entity.
+pub fn check_model(
+    payload: &Value,
+    shape: Shape<'_>,
+    whole: bool,
+    schema: &ModelSchema,
+    space: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    if let Some(attribute) = shape.targeted {
+        let fragment = json!({ attribute: payload });
+        return checked(&fragment, shape, false, schema, space);
+    }
+    match payload {
+        Value::Array(entities) => entities
+            .iter()
+            .try_for_each(|entity| checked(entity, shape, whole, schema, space)),
+        entity => checked(entity, shape, whole, schema, space),
+    }
+}
+
+fn checked(
+    entity: &Value,
+    shape: Shape<'_>,
+    whole: bool,
+    schema: &ModelSchema,
+    space: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    let Some(object) = entity.as_object() else {
+        return Ok(());
+    };
+    // A type written as an IRI or a CURIE is the class its local name names; a type the model
+    // does not declare is DM-61's to refuse.
+    let Some(class) = types_of(object, shape.addressed)
+        .into_iter()
+        .map(|t| t.rsplit(['/', '#', ':']).next().unwrap_or(t))
+        .find(|t| schema.classes.contains_key(*t))
+    else {
+        return Ok(());
+    };
+    let id = object
+        .get("id")
+        .or_else(|| object.get("@id"))
+        .and_then(Value::as_str)
+        .or(shape.addressed)
+        .unwrap_or_default();
+    // The first instance of each attribute is checked with the entity, the others alone.
+    let mut first = Map::new();
+    let mut others: Vec<(&str, Value)> = Vec::new();
+    for (name, value) in object
+        .iter()
+        .filter(|(name, _)| !OWN.contains(&name.as_str()))
+    {
+        let mut instances = match value {
+            Value::Array(many) if !many.is_empty() && many.iter().all(is_instance) => {
+                many.iter().map(prepared).collect()
+            }
+            one => vec![prepared(one)],
+        }
+        .into_iter();
+        first.extend(instances.next().map(|one| (name.clone(), one)));
+        others.extend(instances.map(|one| (name.as_str(), one)));
+    }
+    let carried: Vec<String> = first.keys().cloned().collect();
+    let mut problems = broken(schema, class, id, first, |path| {
+        whole || carried.iter().any(|c| c == path)
+    });
+    for (name, instance) in others {
+        let alone = Map::from_iter([(name.to_owned(), instance)]);
+        problems.extend(broken(schema, class, id, alone, |path| path == name));
+    }
+    let refused = problems.first();
+    metrics::counter!(
+        CHECKS,
+        "space" => space.to_owned(),
+        "type" => class.to_owned(),
+        "rule" => refused.map_or_else(|| "model".to_owned(), |p| p.rule.clone()),
+        "outcome" => if refused.is_some() { "reject" } else { "pass" },
+    )
+    .increment(1);
+    match refused {
+        Some(problem) => {
+            tracing::info!(%space, rule = %problem.rule, field = %problem.path, "write refused: it breaks a slot constraint of the space's model");
+            Err(Box::new(model_refusal(&schema.model, problem)))
+        }
+        None => Ok(()),
+    }
+}
+
+/// The slot constraints `attributes` of an entity of `class` break, at the paths `kept` keeps.
+fn broken(
+    schema: &ModelSchema,
+    class: &str,
+    id: &str,
+    attributes: Map<String, Value>,
+    kept: impl Fn(&str) -> bool,
+) -> Vec<Problem> {
+    let mut record = attributes;
+    record.insert("id".into(), json!(id));
+    record.insert("type".into(), json!(class));
+    let normalized = schema.normalize(class, &Value::Object(record));
+    schema
+        .check(&normalized)
+        .into_iter()
+        .filter(|p| SLOT_CONSTRAINTS.contains(&p.rule.as_str()))
+        .filter(|p| !OWN.contains(&p.path.as_str()) && kept(&p.path))
+        .collect()
+}
+
+/// Whether an array member is an instance of a normalized attribute (one per `datasetId`)
+/// rather than an element of a list value.
+fn is_instance(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("type")
+            || MEMBERS
+                .iter()
+                .any(|(member, _)| object.contains_key(*member))
+    })
+}
+
+/// An attribute as the check reads it: one written with its value member but no `type` gets the
+/// kind that member says, and a typed literal (`{"@type": …, "@value": …}`), bare or as the
+/// `value`, is its value.
+fn prepared(value: &Value) -> Value {
+    // A concise attribute written as a typed literal is that literal's value.
+    let mut value = match value.get("@value") {
+        Some(inner) if value.get("type").is_none() => inner.clone(),
+        _ => value.clone(),
+    };
+    if let Some(object) = value.as_object_mut() {
+        if !object.contains_key("type") {
+            if let Some((_, kind)) = MEMBERS
+                .iter()
+                .find(|(member, _)| object.contains_key(*member))
+            {
+                object.insert("type".into(), json!(kind));
+            }
+        }
+        if let Some(literal) = object.get_mut("value") {
+            if let Some(inner) = literal.get("@value").cloned() {
+                *literal = inner;
+            }
+        }
+    }
+    value
 }
 
 #[cfg(test)]

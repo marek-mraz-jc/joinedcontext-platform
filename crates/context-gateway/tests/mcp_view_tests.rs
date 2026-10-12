@@ -247,11 +247,17 @@ async fn the_listing_is_the_brokers_plus_the_two_describe_tools_the_gateway_answ
         assert_eq!(status, StatusCode::OK, "{tool}: {answer}");
         assert!(answer["result"].is_object(), "{tool}: {answer}");
     }
-    assert_eq!(
-        hops.lock().expect("the hop log").len(),
-        1,
-        "the describe tools never reach the broker"
-    );
+    // `describe_access` reads the view's access surface, the document `GET …/access` serves
+    // (EP-60, T-3649); `describe_schema` asks the broker nothing.
+    let paths: Vec<String> = hops
+        .lock()
+        .expect("the hop log")
+        .iter()
+        .skip(1)
+        .map(|hop| hop.path.clone())
+        .collect();
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert!(paths[0].ends_with("/access"), "{paths:?}");
 }
 
 /// The two costs one call may put on the shared broker are capped as on the NGSI-LD surface:
@@ -461,7 +467,7 @@ async fn a_token_the_gateway_cannot_accept_never_reaches_the_broker_as_its_holde
 /// documents behind the two describe tools and reads them itself, so every URI it advertises
 /// answers (EP-52) and none of them is asked of the broker.
 #[tokio::test]
-async fn the_resource_listing_carries_the_gateways_documents_and_reads_them_without_a_hop() {
+async fn the_resource_listing_carries_the_gateways_documents_and_reads_access_from_the_view() {
     let listed = json!({ "jsonrpc": "2.0", "id": 1, "result": { "resources": [
         { "uri": format!("ngsi-ld://{SLUG}/types/AirQualityObserved"), "name": "AirQualityObserved" }
     ] } });
@@ -495,11 +501,16 @@ async fn the_resource_listing_carries_the_gateways_documents_and_reads_them_with
     let (status, answer) = post(gateway(upstream, endpoint()), &endpoint_mcp(), &read).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert!(answer["result"]["contents"].is_array(), "{answer}");
-    assert_eq!(
-        hops.lock().expect("the hop log").len(),
-        1,
-        "read without a hop"
-    );
+    // The access document is the view's (T-3649): one read of its access surface, no data query.
+    let paths: Vec<String> = hops
+        .lock()
+        .expect("the hop log")
+        .iter()
+        .skip(1)
+        .map(|hop| hop.path.clone())
+        .collect();
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert!(paths[0].ends_with("/access"), "{paths:?}");
 }
 
 /// The broker's MCP answers 406 unless the request accepts both JSON and an event stream

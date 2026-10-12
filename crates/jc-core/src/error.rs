@@ -149,6 +149,7 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "precondition-failed", status: 412, title: "Precondition Failed", hint: "Read the entity again and send its current version in If-Match." },
     ProblemType { slug: "payload-too-large", status: 413, title: "Payload Too Large", hint: "Send less at once: split the request or the file." },
     ProblemType { slug: "unsupported-media-type", status: 415, title: "Unsupported Media Type", hint: "Send the body as application/json or application/ld+json." },
+    ProblemType { slug: "upgrade-required", status: 426, title: "Upgrade Required", hint: "This address is a WebSocket: open it with the subprotocol ngsi-ld-ws and send an x-subscribe message; the answer names an example and the guide." },
     ProblemType { slug: "too-many-requests", status: 429, title: "Too Many Requests", hint: "Wait the seconds Retry-After names, then try again." },
     ProblemType { slug: "daily-budget", status: 429, title: "Daily Budget Spent", hint: "Today's allowance is used up; try again tomorrow or ask an administrator to raise it." },
     ProblemType { slug: "egress-budget-spent", status: 429, title: "Egress Budget Spent", hint: "This run's outbound allowance is used up; start a new run or ask an administrator to raise it." },
