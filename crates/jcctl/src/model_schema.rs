@@ -26,6 +26,7 @@ fn validator(model: &str, class: &str, schema: &Value) -> Option<Arc<jsonschema:
     let patterns = jsonschema::PatternOptions::regex().size_limit(PATTERN_SIZE_LIMIT);
     match jsonschema::draft7::options()
         .with_pattern_options(patterns)
+        .with_format("uri", absolute_iri)
         .build(schema)
     {
         Ok(validator) => Some(Arc::new(validator)),
@@ -34,6 +35,20 @@ fn validator(model: &str, class: &str, schema: &Value) -> Option<Arc<jsonschema:
             None
         }
     }
+}
+
+/// `format: uri` as SHACL's `xsd:anyURI` and the runner's stage read it: a scheme, then no
+/// whitespace or control character. Draft 7's RFC 3986 reading refuses an IRI such as
+/// `https://skörd.fi`, which Helsinki's Service Map publishes and Bento's stage lets through.
+fn absolute_iri(text: &str) -> bool {
+    let Some((scheme, rest)) = text.split_once(':') else {
+        return false;
+    };
+    let mut letters = scheme.chars();
+    letters.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && letters.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+        && !rest.is_empty()
+        && !rest.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// One model, compiled for checking normalized entities (PL-59).
@@ -964,6 +979,36 @@ mod tests {
             false,
             missing,
         )
+    }
+
+    /// T-4011: a `format: uri` slot takes an IRI the way `xsd:anyURI` and the runner's stage do,
+    /// and still refuses a value with no scheme or with whitespace.
+    #[test]
+    fn a_uri_slot_takes_an_iri_and_refuses_what_is_no_uri() {
+        let model = ModelSchema::compile(
+            "m",
+            "1",
+            &json!({ "definitions": { "Place": { "properties": {
+                "url": { "type": "string", "format": "uri", "x-ngsi-ld-kind": "Property" }
+            } } } }),
+            &["Place".into()],
+            false,
+        );
+        let place = |url: &str| {
+            json!({ "id": "urn:ngsi-ld:Place:1", "type": "Place",
+                    "url": { "type": "Property", "value": url } })
+        };
+        for kept in ["https://skörd.fi", "https://a.fi/x|y?q=ä", "mailto:a@b.fi"] {
+            assert!(model.check(&place(kept)).is_empty(), "{kept}");
+        }
+        for refused in ["skörd.fi", "https://a.fi/a b", "1http://a.fi", "https:"] {
+            let named: Vec<(String, String)> = model
+                .check(&place(refused))
+                .into_iter()
+                .map(|p| (p.rule, p.path))
+                .collect();
+            assert_eq!(named, [("sh:datatype".into(), "url".into())], "{refused}");
+        }
     }
 
     /// DM-06, T-2811: a quantity carries its model's unit code; where the space fills a missing
