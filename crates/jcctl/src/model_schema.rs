@@ -67,6 +67,10 @@ pub struct ModelSchema {
     definitions: Map<String, Value>,
     /// Each class's schema compiled once, `None` for one that does not compile.
     validators: BTreeMap<String, Option<Arc<jsonschema::Validator>>>,
+    /// The space's own quality rules (DM-87) the Portal's stage holds a record to: a rejecting
+    /// one is a problem named by the rule (DM-88). Empty from `compile`; the gateway enforces
+    /// the space's rules itself and leaves it so.
+    pub quality: Vec<jc_core::kinds::QualityRule>,
 }
 
 /// Two compilations are equal when they compile the same model to the same class schemas; the
@@ -79,12 +83,14 @@ impl PartialEq for ModelSchema {
             &self.classes,
             &self.ends,
             &self.definitions,
+            &self.quality,
         ) == (
             &other.model,
             &other.version,
             &other.classes,
             &other.ends,
             &other.definitions,
+            &other.quality,
         )
     }
 }
@@ -277,6 +283,7 @@ impl ModelSchema {
             ends,
             definitions,
             validators,
+            quality: Vec::new(),
         }
     }
 
@@ -517,7 +524,25 @@ impl ModelSchema {
             problems.retain(|one| !broken.iter().any(|rule| rule.path == one.path));
             problems.extend(broken);
         }
+        problems.extend(self.quality_problems(record));
         problems
+    }
+
+    /// The space's rules that reject `record` (DM-88), each named by the rule and the attribute,
+    /// never the value. A flag or a quarantine is no problem: the gateway marks the write.
+    pub fn quality_problems(&self, record: &Value) -> Vec<Problem> {
+        jc_core::quality::on_write(record, &self.quality, chrono::Utc::now())
+            .iter()
+            .filter(|v| v.broken == Some(jc_core::kinds::QualityOutcome::Reject))
+            .map(|v| Problem {
+                rule: v.rule.name.clone(),
+                path: v.rule.attribute.clone(),
+                message: format!(
+                    "{} breaks the space's quality rule {} (DM-88)",
+                    v.rule.attribute, v.rule.name
+                ),
+            })
+            .collect()
     }
 }
 
@@ -979,6 +1004,41 @@ mod tests {
             false,
             missing,
         )
+    }
+
+    /// DM-88: a record a rejecting rule refuses names the rule and the attribute, never the
+    /// value; a flagging rule is no problem, the gateway marks the write.
+    #[test]
+    fn a_rejecting_quality_rule_names_itself_and_a_flag_is_no_problem() {
+        let mut ruled = model(false);
+        ruled.quality = serde_json::from_value(json!([
+            {"name": "pm10-plausible", "entityType": "AirQualityObserved", "kind": "range", "attribute": "pm10", "max": 500},
+            {"name": "pm10-positive", "entityType": "AirQualityObserved", "kind": "range", "attribute": "pm10", "min": 0, "outcome": "reject"}
+        ]))
+        .expect("rules");
+        let mut record = valid();
+        record["pm10"]["value"] = json!(-2.5);
+        let named: Vec<(String, String)> = ruled
+            .check(&record)
+            .into_iter()
+            .map(|p| (p.rule, p.path))
+            .collect();
+        assert!(
+            named.contains(&("pm10-positive".into(), "pm10".into())),
+            "{named:?}"
+        );
+        let problems = ruled.quality_problems(&record);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(!problems[0].message.contains("2.5"));
+        record["pm10"]["value"] = json!(900.0);
+        assert!(
+            ruled.quality_problems(&record).is_empty(),
+            "flagged, not refused"
+        );
+        assert!(
+            model(false).quality_problems(&record).is_empty(),
+            "no rule, no problem"
+        );
     }
 
     /// T-4011: a `format: uri` slot takes an IRI the way `xsd:anyURI` and the runner's stage do,
