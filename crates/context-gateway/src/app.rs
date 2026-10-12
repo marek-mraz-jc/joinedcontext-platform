@@ -3839,8 +3839,9 @@ async fn mcp_message(
 /// broker has no tool or resource for, `describe_access`, `describe_schema` and their
 /// `access://` and `schema://` documents, added to the broker's listings and answered from the
 /// documents the access and schema surfaces serve, and what no view serves yet (a view
-/// mapping, a federating space) stays on its own façade. A caller under a data space
-/// agreement is the view's too: the hop names its DID alone (map K38, T-3818).
+/// mapping) stays on its own façade. A caller under a data space agreement is the view's too:
+/// the hop names its DID alone (map K38, T-3818). A federating space's registrations are named
+/// in the answer, see [`federated`].
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
@@ -3872,7 +3873,7 @@ async fn mcp_answer(
     // What is no single request (a batch, a scalar, a notification that changes nothing) is
     // answered here as JSON-RPC says, before a hop.
     let request_message = message.is_object() && message.get("id").is_some();
-    let viewed = request_message && view_serves(&gateway, &endpoint, &view);
+    let viewed = request_message && view_serves(&endpoint, &view);
     if described || !viewed {
         return facade_answer(gateway, endpoint, subject, credential, message).await;
     }
@@ -3882,6 +3883,7 @@ async fn mcp_answer(
     if let Err(answer) = view_request(&gateway, &endpoint, &subject, "", operation, &mut request) {
         return *answer;
     }
+    let federates = member_names(&gateway, &endpoint);
     let (mut parts, _) = request.into_parts();
     if calls {
         capped_arguments(&mut message["params"]["arguments"]);
@@ -3923,14 +3925,14 @@ async fn mcp_answer(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json"));
-    let Some(key) = OWN_LISTINGS
+    let key = OWN_LISTINGS
         .iter()
         .find(|(listing, _)| *listing == method)
-        .map(|(_, key)| *key)
-        .filter(|_| answer.status().is_success() && json)
-    else {
+        .map(|(_, key)| *key);
+    let decorated = !federates.is_empty() && FEDERATED_METHODS.contains(&method.as_str());
+    if key.is_none() && !decorated || !answer.status().is_success() || !json {
         return answer;
-    };
+    }
     let (parts, body) = answer.into_parts();
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -3938,32 +3940,113 @@ async fn mcp_answer(
     let Ok(mut listed) = serde_json::from_slice::<Value>(&held) else {
         return proxy::with_body(parts, held.to_vec());
     };
-    let ask = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": method });
-    let own = mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, ask).await;
-    let kept: Vec<Value> = own
-        .as_ref()
-        .and_then(|own| own["result"][key].as_array())
-        .into_iter()
-        .flatten()
-        .filter(|item| gateway_owns(item))
-        .cloned()
-        .collect();
-    if let Some(items) = listed["result"][key].as_array_mut() {
-        items.extend(kept);
+    if decorated {
+        federated(&mut listed, &method, &federates);
+    }
+    if let Some(key) = key {
+        let ask = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": method });
+        let own = mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, ask).await;
+        let kept: Vec<Value> = own
+            .as_ref()
+            .and_then(|own| own["result"][key].as_array())
+            .into_iter()
+            .flatten()
+            .filter(|item| gateway_owns(item))
+            .cloned()
+            .collect();
+        let items = listed
+            .get_mut("result")
+            .and_then(|result| result.get_mut(key))
+            .and_then(Value::as_array_mut);
+        if let Some(items) = items {
+            items.extend(kept);
+        }
     }
     proxy::with_body(parts, listed.to_string().into_bytes())
 }
 
-/// Whether the broker's MCP surface of `view` answers this Endpoint: not what no view serves
-/// yet, a view mapping, or a space that federates registrations, which says so in its
-/// instructions, tool descriptions and results (EP-71) while the broker's view does not know the
-/// platform's members. An agreement's caller is the view's too (T-3818).
-fn view_serves(gateway: &Gateway, endpoint: &Endpoint, view: &str) -> bool {
+/// The registrations of the endpoint's space, by name and never by address (EP-71).
+fn member_names(gateway: &Gateway, endpoint: &Endpoint) -> Vec<String> {
     gateway
         .members_of(&endpoint.project, &endpoint.space)
-        .is_empty()
-        && endpoint.view_mapping.is_none()
-        && (1..=MAX_VIEW_ID).contains(&view.len())
+        .into_iter()
+        .map(|member| member.name)
+        .collect()
+}
+
+/// The messages whose answer says what a federating space federates (EP-71, AG-30).
+const FEDERATED_METHODS: &[&str] = &["initialize", "tools/list", "tools/call"];
+
+/// What a federating space adds to the broker's answer of its view (EP-70, EP-71, AG-30): the
+/// broker merges the space's registrations and its view says nothing of them, so the gateway
+/// names them, by name only, where a model reads them: the server's instructions, each read
+/// tool's description and output schema, and the result of a read that succeeded, as
+/// `jc:source`. A write goes to this space alone and is described as it is.
+fn federated(answer: &mut Value, method: &str, members: &[String]) {
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let names = members.join(", ");
+    match method {
+        "initialize" => {
+            if let Some(Value::String(instructions)) = result.get_mut("instructions") {
+                instructions.push_str(&format!(
+                    " This space federates {names}: every read answers over their union, a \
+                     result carries the names it came from as `jc:source`, and an answer can be \
+                     partial when one of them does not respond."
+                ));
+            }
+        }
+        "tools/list" => {
+            let tools = result.get_mut("tools").and_then(Value::as_array_mut);
+            for tool in tools.into_iter().flatten().filter_map(Value::as_object_mut) {
+                let read = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| MCP_READ_TOOLS.contains(&name));
+                if !read {
+                    continue;
+                }
+                if let Some(Value::String(description)) = tool.get_mut("description") {
+                    description.push_str(&format!(
+                        " This space federates {names}: the answer is the union of their data \
+                         and can be partial."
+                    ));
+                }
+                let properties = tool
+                    .get_mut("outputSchema")
+                    .and_then(|schema| schema.get_mut("properties"))
+                    .and_then(Value::as_object_mut);
+                if let Some(properties) = properties {
+                    properties.insert(
+                        "jc:source".to_owned(),
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "The registrations this answer is a union over, by name (EP-71)",
+                        }),
+                    );
+                }
+            }
+        }
+        "tools/call" if result.get("isError") != Some(&Value::Bool(true)) => {
+            let structured = result
+                .get_mut("structuredContent")
+                .and_then(Value::as_object_mut);
+            if let Some(structured) = structured {
+                structured.insert("jc:source".to_owned(), Value::from(members.to_vec()));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether the broker's MCP surface of `view` answers this Endpoint: not what no view serves
+/// yet, a view mapping. An agreement's caller is the view's too (T-3818), and a space that
+/// federates registrations is served by its own view, which merges them as its NGSI-LD surface
+/// does; the gateway names them in the answer (EP-71, T-3819).
+fn view_serves(endpoint: &Endpoint, view: &str) -> bool {
+    endpoint.view_mapping.is_none() && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The operation the domain gate (PF-41) weighs a message as: a tool the gateway does not know
@@ -3979,8 +4062,8 @@ fn mcp_operation(tool: Option<&str>) -> Operation {
 
 /// Whether a member's call to `tool` goes to the broker's view of the member (T-3808): not the
 /// describe tools the gateway answers, and not a member no view serves yet.
-pub(crate) fn member_viewed(gateway: &Gateway, endpoint: &Endpoint, tool: &str) -> bool {
-    !DESCRIBE_TOOLS.contains(&tool) && view_serves(gateway, endpoint, &endpoint.slug)
+pub(crate) fn member_viewed(endpoint: &Endpoint, tool: &str) -> bool {
+    !DESCRIBE_TOOLS.contains(&tool) && view_serves(endpoint, &endpoint.slug)
 }
 
 /// One `tools/call` of the hub or of a named server as the broker's view of the member answers
@@ -4040,7 +4123,13 @@ pub(crate) async fn member_call(
         .await
         .unwrap_or_default();
     match serde_json::from_slice::<Value>(&held) {
-        Ok(answer) if status.is_success() && answer.get("jsonrpc").is_some() => answer,
+        Ok(mut answer) if status.is_success() && answer.get("jsonrpc").is_some() => {
+            let federates = member_names(gateway, endpoint);
+            if !federates.is_empty() {
+                federated(&mut answer, "tools/call", &federates);
+            }
+            answer
+        }
         _ if status.is_client_error() => member_refusal(id, problem_text(&held)),
         _ => {
             tracing::warn!(
@@ -4449,6 +4538,35 @@ pub(crate) fn json_response(payload: &Value) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-3819: what the broker answers is not trusted to be the shape MCP says; an answer that
+    /// is no object, or whose parts are not, is left as it came and never panics the request.
+    #[test]
+    fn a_federated_answer_of_any_shape_is_decorated_or_left_alone() {
+        let members = ["transport".to_owned()];
+        for method in FEDERATED_METHODS {
+            for shape in [
+                serde_json::json!([1, 2]),
+                serde_json::json!("text"),
+                serde_json::json!({ "result": [1] }),
+                serde_json::json!({ "result": { "tools": [1, "x"], "structuredContent": [] } }),
+                serde_json::json!({ "result": { "tools": { "a": 1 }, "instructions": 3 } }),
+            ] {
+                let mut answer = shape.clone();
+                federated(&mut answer, method, &members);
+                assert_eq!(answer, shape, "{method}");
+            }
+        }
+        let mut answer = serde_json::json!({ "result": {
+            "isError": false,
+            "structuredContent": { "entities": [] },
+        }});
+        federated(&mut answer, "tools/call", &members);
+        assert_eq!(
+            answer["result"]["structuredContent"]["jc:source"],
+            serde_json::json!(["transport"])
+        );
+    }
 
     /// AG-95: the audit line of a delegated call names the person and the account it came
     /// through; an ordinary person or workload is named alone.

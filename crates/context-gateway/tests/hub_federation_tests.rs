@@ -12,13 +12,14 @@ mod common;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
 use context_gateway::federation::{federations_of, Federations, Member};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
-use context_gateway::resolver::Endpoint;
+use context_gateway::resolver::{Endpoint, Space};
 use jc_core::kinds::{Audience, FederationIdentity, PolicySpec, Representation};
 use jcctl::loader::Repository;
 use serde_json::{json, Value};
@@ -185,13 +186,14 @@ type Calls = Arc<Mutex<Vec<String>>>;
 async fn partial_broker() -> (String, Calls) {
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let state = Arc::clone(&calls);
-    let app = Router::new()
-        .fallback(any(
-            |State(calls): State<Calls>, request: Request<Body>| async move {
-                calls
-                    .lock()
-                    .expect("the call log")
-                    .push(request.uri().to_string());
+    let app = Router::new().fallback(any(|request: Request<Body>| async move {
+                if request.uri().path().ends_with("/mcp") {
+                    let sent = axum::body::to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("a body");
+                    let message: Value = serde_json::from_slice(&sent).expect("a JSON-RPC message");
+                    return (StatusCode::OK, axum::Json(view_answer(&message))).into_response();
+                }
                 let body = json!([
                     {
                         "id": "urn:ngsi-ld:Vehicle:helsinki.fi:transport:bus-17",
@@ -211,23 +213,89 @@ async fn partial_broker() -> (String, Calls) {
                         .parse()
                         .expect("a value"),
                 );
-                (StatusCode::MULTI_STATUS, headers, body.to_string())
+                (StatusCode::MULTI_STATUS, headers, body.to_string()).into_response()
+    }));
+    // The log holds the path the gateway sent, its view included, before the plain tree drops it.
+    let app = Router::new()
+        .fallback_service(common::plain_tree(app))
+        .layer(axum::middleware::map_request(
+            move |request: Request<Body>| {
+                let state = Arc::clone(&state);
+                async move {
+                    state
+                        .lock()
+                        .expect("the call log")
+                        .push(request.uri().to_string());
+                    request
+                }
             },
-        ))
-        .with_state(state);
+        ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, common::plain_tree(app)).await;
+        let _ = axum::serve(listener, app).await;
     });
     (format!("http://{address}"), calls)
 }
 
+/// What the broker's MCP surface of the hub's view answers: it merged the registrations and
+/// names none of them (Antares `docs/src/mcp.md`). `get_entity` stands for a refused read.
+fn view_answer(message: &Value) -> Value {
+    let result = match (
+        message["method"].as_str(),
+        message["params"]["name"].as_str(),
+    ) {
+        (Some("initialize"), _) => json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "antares", "version": "1" },
+            "instructions": "Every tool reads and writes the one view behind this URL.",
+        }),
+        (Some("tools/list"), _) => json!({ "tools": [
+            {
+                "name": "query_entities",
+                "description": "Query entities.",
+                "inputSchema": { "type": "object" },
+                "outputSchema": { "type": "object", "properties": { "entities": {} } },
+            },
+            {
+                "name": "create_entity",
+                "description": "Create one entity.",
+                "inputSchema": { "type": "object" },
+                "outputSchema": { "type": "object", "properties": { "created": {} } },
+            },
+        ]}),
+        (Some("tools/call"), Some("query_entities")) => json!({
+            "isError": false,
+            "content": [{ "type": "text", "text": "[]" }],
+            "structuredContent": { "entities": [
+                { "id": "urn:ngsi-ld:Vehicle:helsinki.fi:transport:bus-17", "type": "Vehicle" }
+            ]},
+        }),
+        _ => json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": "the policy does not grant this read" }],
+            "structuredContent": { "detail": "the policy does not grant this read" },
+        }),
+    };
+    json!({ "jsonrpc": "2.0", "id": message["id"], "result": result })
+}
+
 fn gateway(broker: &str, federations: Federations) -> Arc<Gateway> {
     let gateway = Gateway::new(Broker::new(broker), Box::new(PolicyPdp), "helsinki.fi");
-    let gateway = gateway.serve([hub_endpoint()]);
+    let gateway = gateway.serve([hub_endpoint()]).serve_spaces([Space {
+        endpoint: Arc::new(Endpoint {
+            slug: HUB.to_owned(),
+            base_path: format!("/cs/{HUB}"),
+            ..hub_endpoint()
+        }),
+        title: Default::default(),
+        description: Default::default(),
+        is_sandbox: false,
+        default_locale: None,
+    }]);
     gateway.replace_federation(federations);
     Arc::new(gateway)
 }
@@ -259,11 +327,22 @@ async fn query(broker: &str, federations: Federations) -> (StatusCode, HeaderMap
 
 /// One JSON-RPC message to the hub endpoint's MCP instance.
 async fn mcp(broker: &str, federations: Federations, body: Value) -> Value {
+    mcp_at(
+        &format!("/api/endpoint/{HUB_SLUG}/mcp"),
+        broker,
+        federations,
+        body,
+    )
+    .await
+}
+
+/// One JSON-RPC message to the MCP instance at `path`.
+async fn mcp_at(path: &str, broker: &str, federations: Federations, body: Value) -> Value {
     let response = router(gateway(broker, federations))
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri(format!("/api/endpoint/{HUB_SLUG}/mcp"))
+                .uri(path)
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .expect("a request"),
@@ -281,7 +360,7 @@ async fn mcp(broker: &str, federations: Federations, body: Value) -> Value {
 /// and that it can be partial.
 #[tokio::test]
 async fn the_hub_s_mcp_server_says_what_it_federates() {
-    let (broker, _) = partial_broker().await;
+    let (broker, calls) = partial_broker().await;
     let members = table(vec![
         member("transport", FederationIdentity::ServiceAccount),
         member("air-quality", FederationIdentity::ServiceAccount),
@@ -324,19 +403,35 @@ async fn the_hub_s_mcp_server_says_what_it_federates() {
             .is_some(),
         "a client can validate the half it parses: {query}"
     );
+    let create = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("create_entity"))
+        .expect("the broker's write tool");
+    assert_eq!(
+        create["description"],
+        json!("Create one entity."),
+        "a write goes to this space alone and is described as it is"
+    );
+    // T-3819: both messages were the broker's view of the space, not the gateway's façade.
+    let calls = calls.lock().expect("the call log");
+    assert_eq!(
+        *calls,
+        vec![format!("/x/views/{HUB_SLUG}/mcp"); 2],
+        "{calls:?}"
+    );
 }
 
 /// EP-71: the answer names the registrations it is a union over, so a model attributing it
 /// has something to attribute it to. Names only, as everywhere else.
 #[tokio::test]
 async fn a_tool_result_carries_the_sources_it_is_a_union_over() {
-    let (broker, _) = partial_broker().await;
+    let (broker, calls) = partial_broker().await;
     let answer = mcp(
         &broker,
-        table(vec![member(
-            "transport",
-            FederationIdentity::ServiceAccount,
-        )]),
+        table(vec![
+            member("transport", FederationIdentity::ServiceAccount),
+            member("air-quality", FederationIdentity::ServiceAccount),
+        ]),
         json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -347,12 +442,102 @@ async fn a_tool_result_carries_the_sources_it_is_a_union_over() {
     .await;
 
     let structured = &answer["result"]["structuredContent"];
-    assert_eq!(structured["jc:source"], json!(["transport"]), "{answer}");
+    assert_eq!(
+        structured["jc:source"],
+        json!(["air-quality", "transport"]),
+        "{answer}"
+    );
     assert!(structured["entities"].is_array(), "{answer}");
+    let calls = calls.lock().expect("the call log");
+    assert_eq!(
+        *calls,
+        vec![format!("/x/views/{HUB_SLUG}/mcp")],
+        "{calls:?}"
+    );
 }
 
-/// EP-70: a source that failed does not fail the request. The status and the warning are the
-/// broker's, passed through, because only the broker knows which part did not answer.
+/// T-3819, SP-17: a read the view refused stays the tool error it is; it names no source, so a
+/// model cannot read a refusal as a union that happened to be empty.
+#[tokio::test]
+async fn a_refused_read_names_no_source() {
+    let (broker, _) = partial_broker().await;
+    let answer = mcp(
+        &broker,
+        table(vec![member(
+            "transport",
+            FederationIdentity::ServiceAccount,
+        )]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": { "name": "get_entity", "arguments": { "id": "urn:ngsi-ld:Vehicle:x" } },
+        }),
+    )
+    .await;
+
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    assert!(
+        answer["result"]["structuredContent"]
+            .get("jc:source")
+            .is_none(),
+        "{answer}"
+    );
+}
+
+/// T-3819: the space surface of a federating space is its own view too, and says the same.
+#[tokio::test]
+async fn the_space_surface_of_a_federating_space_is_its_view_and_names_its_members() {
+    let (broker, calls) = partial_broker().await;
+    let answer = mcp_at(
+        &format!("/cs/{HUB}/mcp"),
+        &broker,
+        table(vec![member(
+            "transport",
+            FederationIdentity::ServiceAccount,
+        )]),
+        json!({ "jsonrpc": "2.0", "id": 5, "method": "initialize", "params": {} }),
+    )
+    .await;
+
+    let instructions = answer["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
+    assert!(
+        instructions.starts_with("Every tool reads and writes the one view"),
+        "the broker's own text comes first: {instructions}"
+    );
+    assert!(
+        instructions.contains("This space federates transport"),
+        "{instructions}"
+    );
+    let calls = calls.lock().expect("the call log");
+    assert_eq!(*calls, vec![format!("/x/views/cs-{HUB}/mcp")], "{calls:?}");
+}
+
+/// PF-48 on the MCP surface: a registration that would need the caller's own token stops the
+/// message with the same refusal the NGSI-LD surface gives, and nothing reaches the broker.
+#[tokio::test]
+async fn a_call_under_a_caller_identity_registration_is_refused_without_a_hop() {
+    let (broker, calls) = partial_broker().await;
+    let answer = mcp(
+        &broker,
+        table(vec![member("air-quality", FederationIdentity::Caller)]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": { "name": "query_entities", "arguments": { "type": "Vehicle" } },
+        }),
+    )
+    .await;
+
+    assert_eq!(answer["status"], json!(501), "{answer}");
+    let detail = answer["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("serviceAccount"), "{detail}");
+    assert!(calls.lock().expect("the call log").is_empty());
+}
+
 #[tokio::test]
 async fn a_partial_merge_reaches_the_caller_as_the_broker_sent_it() {
     let (broker, _) = partial_broker().await;
@@ -493,7 +678,7 @@ async fn the_entity_map_header_crosses_the_gateway_in_both_directions() {
         .expect("a free port");
     let address = listener.local_addr().expect("the bound address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, common::plain_tree(app)).await;
+        let _ = axum::serve(listener, app).await;
     });
 
     let members = table(vec![member(
