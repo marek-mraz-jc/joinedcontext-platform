@@ -39,9 +39,9 @@
 //! Endpoint's view lists, and the access document; `describe_schema` reads the broker's LinkML
 //! surface of the view (T-3645, T-3646).
 
-use crate::app::{ngsi_ld_request, sha256_hex, Credential, Gateway};
+use crate::app::{ngsi_ld_request, Credential, Gateway};
 use crate::handlers::access_routes::{self, AccessFormat};
-use crate::handlers::{schema, schema_routes};
+use crate::handlers::schema_routes;
 use crate::mcp::elicitation;
 use crate::middleware::response::{self, Artifact};
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};

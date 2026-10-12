@@ -519,12 +519,13 @@ async fn the_resource_listing_carries_the_gateways_documents_and_reads_access_fr
     let (status, answer) = post(gateway(upstream, endpoint()), &endpoint_mcp(), &read).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert!(answer["result"]["contents"].is_array(), "{answer}");
-    // The access document is the view's (T-3649): one read of its access surface, no data query.
+    // The access document is the view's (T-3649): one read of its access surface past the two
+    // hops of the list, no data query.
     let paths: Vec<String> = hops
         .lock()
         .expect("the hop log")
         .iter()
-        .skip(1)
+        .skip(2)
         .map(|hop| hop.path.clone())
         .collect();
     assert_eq!(paths.len(), 1, "{paths:?}");
