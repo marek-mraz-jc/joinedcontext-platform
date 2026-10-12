@@ -972,7 +972,7 @@ pub(crate) async fn serve_ngsi_ld(
 
     // The quarantine mark is the gateway's (DM-90): a path addressing it is refused, a body's
     // copy dropped, so only the space's rules set it below.
-    if operation.is_write() && !subscribing {
+    if operation.is_write() {
         match owned_guarded(&mut sent, &path) {
             Err(problem) => return problem.into_response(),
             Ok(true) => {
