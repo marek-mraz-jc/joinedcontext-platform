@@ -16,6 +16,7 @@
 //! download mean anything.
 
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::io::{Cursor, Write};
 
 /// The media type of the CSV answer, with the parameters RFC 7111 wants.
@@ -118,30 +119,35 @@ pub fn table(entities: &Value, limits: &Limits) -> Result<Table, TooLarge> {
         return Err(TooLarge);
     }
 
+    // Each column's position by name, so placing a cell is a lookup rather than a scan of
+    // the header, and each value moves into its row instead of being cloned there (T-4107).
     let mut columns: Vec<String> = Vec::new();
-    let mut flattened: Vec<Vec<(String, Value)>> = Vec::with_capacity(entities.len());
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut flattened: Vec<Vec<(usize, Value)>> = Vec::with_capacity(entities.len());
     for entity in entities {
-        let cells = flatten(entity);
-        for (name, _) in &cells {
-            if !columns.iter().any(|known| known == name) {
-                columns.push(name.clone());
-            }
-        }
+        let cells = flatten(entity)
+            .into_iter()
+            .map(|(name, value)| {
+                let next = columns.len();
+                let index = *positions.entry(name).or_insert_with_key(|name| {
+                    columns.push(name.clone());
+                    next
+                });
+                (index, value)
+            })
+            .collect();
         flattened.push(cells);
     }
 
     let rows = flattened
         .into_iter()
         .map(|cells| {
-            columns
-                .iter()
-                .map(|column| {
-                    cells
-                        .iter()
-                        .find(|(name, _)| name == column)
-                        .map_or(Value::Null, |(_, value)| value.clone())
-                })
-                .collect()
+            let mut row = vec![Value::Null; columns.len()];
+            // Reversed, so of two leaves on one path the first one written is the one kept.
+            for (index, value) in cells.into_iter().rev() {
+                row[index] = value;
+            }
+            row
         })
         .collect();
     Ok(Table { columns, rows })
@@ -327,16 +333,20 @@ pub fn xlsx(
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
 
     for (name, body) in [
-        ("[Content_Types].xml", CONTENT_TYPES.to_owned()),
-        ("_rels/.rels", ROOT_RELS.to_owned()),
-        ("xl/workbook.xml", WORKBOOK.to_owned()),
-        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS.to_owned()),
-        ("xl/worksheets/sheet1.xml", data_sheet(table, limits)?),
-        ("xl/worksheets/sheet2.xml", metadata_sheet(metadata)),
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
     ] {
         archive.start_file(name, options)?;
         archive.write_all(body.as_bytes())?;
     }
+    // The data sheet goes into the archive row by row, compressed as it is written: the
+    // whole sheet as one string, and a copy of it, is what took the gateway down (T-4107).
+    archive.start_file("xl/worksheets/sheet1.xml", options)?;
+    data_sheet(&mut archive, table, limits)?;
+    archive.start_file("xl/worksheets/sheet2.xml", options)?;
+    archive.write_all(metadata_sheet(metadata).as_bytes())?;
     let workbook = archive.finish()?.into_inner();
     // The sheet is checked while it is written and the file itself when it is finished: the
     // one bounds what the gateway holds, the other what it would send (EP-44).
@@ -364,27 +374,33 @@ pub enum XlsxError {
 /// The `data` sheet: the header row, then one row per entity.
 ///
 /// Checked per row like the CSV writer's, so a sheet past the ceiling is refused rather than
-/// built whole and measured afterwards — the XML is the largest thing a workbook holds.
-fn data_sheet(table: &Table, limits: &Limits) -> Result<String, XlsxError> {
-    let mut rows = String::new();
+/// built whole and measured afterwards — the XML is the largest thing a workbook holds. Only
+/// one row is ever held as text.
+fn data_sheet(out: &mut impl Write, table: &Table, limits: &Limits) -> Result<(), XlsxError> {
     let header: Vec<Value> = table
         .columns
         .iter()
         .map(|column| Value::String(column.clone()))
         .collect();
-    sheet_row(&mut rows, 1, &header);
-    for (index, row) in table.rows.iter().enumerate() {
-        sheet_row(&mut rows, index as u32 + 2, row);
-        if rows.len() as u64 > limits.max_bytes {
+    out.write_all(SHEET_HEAD.as_bytes())?;
+    let mut row = String::new();
+    let mut written = 0u64;
+    for (index, cells) in std::iter::once(&header).chain(&table.rows).enumerate() {
+        row.clear();
+        sheet_row(&mut row, index as u32 + 1, cells);
+        written += row.len() as u64;
+        if written > limits.max_bytes {
             return Err(XlsxError::TooLarge);
         }
+        out.write_all(row.as_bytes())?;
     }
-    Ok(sheet(&rows))
+    out.write_all(SHEET_TAIL.as_bytes())?;
+    Ok(())
 }
 
 /// The `metadata` sheet: one `key,value` pair per row, so the file says what produced it.
 fn metadata_sheet(metadata: &[(String, String)]) -> String {
-    let mut rows = String::new();
+    let mut rows = String::from(SHEET_HEAD);
     for (index, (key, value)) in metadata.iter().enumerate() {
         sheet_row(
             &mut rows,
@@ -392,16 +408,14 @@ fn metadata_sheet(metadata: &[(String, String)]) -> String {
             &[Value::String(key.clone()), Value::String(value.clone())],
         );
     }
-    sheet(&rows)
+    rows.push_str(SHEET_TAIL);
+    rows
 }
 
-/// A worksheet part around its rows.
-fn sheet(rows: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
-    )
-}
+/// What a worksheet part holds before and after its rows.
+const SHEET_HEAD: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#;
+const SHEET_TAIL: &str = "</sheetData></worksheet>";
 
 /// One worksheet row of cells, numbers as numbers and everything else as an inline string.
 fn sheet_row(out: &mut String, number: u32, cells: &[Value]) {
