@@ -21,6 +21,7 @@ use jc_core::kinds::{
 };
 use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
+use jcctl::model_schema::ModelSchema;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -822,6 +823,18 @@ fn declared_types(
                             .map(RelationshipRules::from_schema)
                             .unwrap_or_default(),
                         quality: space.quality.clone(),
+                        // Open: an attribute the model does not declare is not the gateway's
+                        // to refuse (DM-86 names the slot constraints).
+                        schema: model.json_schema.as_ref().map(|schema| {
+                            Arc::new(ModelSchema::compile_for_space(
+                                &model.name,
+                                &model.version,
+                                schema,
+                                &model.classes,
+                                true,
+                                space.missing_unit_code,
+                            ))
+                        }),
                     },
                 );
             }

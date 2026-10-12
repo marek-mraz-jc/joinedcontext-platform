@@ -75,6 +75,7 @@ fn endpoint(declared: Option<&[&str]>) -> Endpoint {
             units: Default::default(),
             relationships: Default::default(),
             quality: Vec::new(),
+            schema: None,
         }),
         catalog: None,
         roles: Default::default(),
@@ -165,6 +166,7 @@ fn an_expanded_or_compacted_type_names_the_same_class() {
         units: Default::default(),
         relationships: Default::default(),
         quality: Vec::new(),
+        schema: None,
     };
     for written in [
         "AirQualityObserved",
@@ -263,6 +265,7 @@ fn the_table_narrows_a_space_to_the_model_it_names_and_only_then() {
         units: Default::default(),
         relationships: Default::default(),
         quality: Vec::new(),
+        schema: None,
     };
     assert_eq!(endpoint.as_ref(), Some(&expected));
     assert_eq!(
