@@ -4,7 +4,9 @@
 //! here, on the gateway's internal listener, and gets back `allow` with the client's ACL or
 //! `deny`. The broker asking is named by its mesh identity, never by the request: no broker can
 //! ask with another broker's roles. The password is a Keycloak access token for a device, and
-//! empty for the pipeline runner, which only the internal listener of a broker reaches.
+//! empty for the pipeline runner, which is admitted only from the address of one of its own
+//! pods (T-4004): a private address alone proves nothing, because a cluster pod that dials the
+//! public listener through Traefik arrives with its pod address in the PROXY header.
 
 use crate::app::Gateway;
 use crate::auth::accounts::ServiceAccounts;
@@ -101,8 +103,8 @@ pub struct Connect {
     /// The MQTT password: an access token, or empty for the runner.
     #[serde(default)]
     pub password: String,
-    /// The client's address as the broker sees it: the public one through Traefik's PROXY
-    /// protocol, a private or loopback one inside the cluster.
+    /// The client's address as the broker sees it: the one Traefik's PROXY protocol carries
+    /// on the public listener, the caller's pod address on the internal one.
     #[serde(default)]
     pub ipaddr: String,
 }
@@ -174,12 +176,15 @@ pub fn broker_of(identity: &str) -> &str {
     identity.split('.').next().unwrap_or_default()
 }
 
-/// Decides one CONNECT (PL-75, PL-76). `caller` is the mesh identity of the broker asking.
+/// Decides one CONNECT (PL-75, PL-76). `caller` is the mesh identity of the broker asking;
+/// `runner` the addresses of the pipeline runner's pods, the only ones a tokenless CONNECT is
+/// admitted from.
 pub fn decide(
     brokers: &Brokers,
     verifier: Option<&Verifier>,
     accounts: &ServiceAccounts,
     caller: Option<&str>,
+    runner: &[IpAddr],
     connect: &Connect,
 ) -> (Answer, &'static str) {
     let Some(release) = caller.map(broker_of) else {
@@ -192,11 +197,11 @@ pub fn decide(
         );
     };
     if connect.password.is_empty() {
-        let inside = connect
+        let from_runner = connect
             .ipaddr
             .parse::<IpAddr>()
-            .is_ok_and(|ip| is_inside(ip.to_canonical()));
-        if connect.username != RUNNER_USERNAME || !inside {
+            .is_ok_and(|ip| runner.contains(&ip.to_canonical()));
+        if connect.username != RUNNER_USERNAME || !from_runner {
             return (Answer::deny(), "no token");
         }
         if broker.runner_topics.is_empty() {
@@ -245,18 +250,32 @@ pub fn decide(
     (Answer::allow(acl, Some(claims.exp)), "a device")
 }
 
-/// A private or loopback address: inside the cluster, never a client Traefik forwarded.
-fn is_inside(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
-        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+/// The addresses `host` resolves to: the runner's headless Service lists one per pod. A name
+/// that does not resolve admits nobody.
+pub async fn runner_addresses(host: &str) -> Vec<IpAddr> {
+    match tokio::net::lookup_host((host, 0)).await {
+        Ok(found) => found.map(|address| address.ip().to_canonical()).collect(),
+        Err(error) => {
+            tracing::warn!(%error, host, "the pipeline runner's pods do not resolve");
+            Vec::new()
+        }
     }
+}
+
+/// What the internal listener's routes share.
+#[derive(Clone)]
+struct Internal {
+    gateway: Arc<Gateway>,
+    runner_host: Option<Arc<str>>,
 }
 
 /// `POST /internal/mqtt/auth`, on the internal listener only. Always 200 with `allow` or `deny`:
 /// a non-2xx would read as `ignore` to the broker (`deny_if_error` covers transport faults only).
-pub async fn auth(
-    State(gateway): State<Arc<Gateway>>,
+async fn auth(
+    State(Internal {
+        gateway,
+        runner_host,
+    }): State<Internal>,
     headers: HeaderMap,
     Json(connect): Json<Connect>,
 ) -> Json<Answer> {
@@ -265,11 +284,19 @@ pub async fn auth(
         .and_then(|value| value.to_str().ok());
     let brokers = gateway.brokers();
     let accounts = gateway.service_accounts();
+    // Resolved per tokenless CONNECT only: a runner reconnects rarely, a pod moves its address.
+    let runner = match &runner_host {
+        Some(host) if connect.password.is_empty() && connect.username == RUNNER_USERNAME => {
+            runner_addresses(host).await
+        }
+        _ => Vec::new(),
+    };
     let (answer, why) = decide(
         &brokers,
         gateway.verifier.as_deref(),
         &accounts,
         caller,
+        &runner,
         &connect,
     );
     // The client id and the outcome, never the password.
@@ -283,11 +310,15 @@ pub async fn auth(
     Json(answer)
 }
 
-/// The internal listener's router: the CONNECT check and nothing else.
-pub fn internal_router(gateway: Arc<Gateway>) -> axum::Router {
+/// The internal listener's router: the CONNECT check and nothing else. `runner_host` names
+/// the pipeline runner's headless Service; without one no tokenless CONNECT is admitted.
+pub fn internal_router(gateway: Arc<Gateway>, runner_host: Option<String>) -> axum::Router {
     axum::Router::new()
         .route("/internal/mqtt/auth", axum::routing::post(auth))
-        .with_state(gateway)
+        .with_state(Internal {
+            gateway,
+            runner_host: runner_host.map(Arc::from),
+        })
 }
 
 #[cfg(test)]
@@ -305,23 +336,12 @@ mod tests {
         assert_eq!(broker_of(""), "");
     }
 
-    #[test]
-    fn inside_is_private_or_loopback_in_either_family() {
-        for inside in [
-            "10.42.0.7",
-            "127.0.0.1",
-            "192.168.1.2",
-            "::1",
-            "fd00::1",
-            "::ffff:10.0.0.1",
-        ] {
-            let ip: IpAddr = inside.parse().expect("an address");
-            assert!(is_inside(ip.to_canonical()), "{inside}");
-        }
-        for outside in ["8.8.8.8", "2001:db8::1", "::ffff:8.8.8.8"] {
-            let ip: IpAddr = outside.parse().expect("an address");
-            assert!(!is_inside(ip.to_canonical()), "{outside}");
-        }
+    #[tokio::test]
+    async fn the_runner_is_the_addresses_its_name_resolves_to_and_nothing_else() {
+        assert!(runner_addresses("localhost")
+            .await
+            .contains(&"127.0.0.1".parse::<IpAddr>().expect("an address")));
+        assert!(runner_addresses("no-such-runner.invalid").await.is_empty());
     }
 
     #[test]
