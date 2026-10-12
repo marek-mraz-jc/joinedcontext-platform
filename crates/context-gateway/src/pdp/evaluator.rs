@@ -524,23 +524,8 @@ pub fn effective<'a>(
 
 /// Whether `policy` is assigned to `subject` and in force at `now`: the one test
 /// [`effective`] filters by.
-pub fn assigned_and_in_force(subject: &Subject, policy: &PolicySpec, now: DateTime<Utc>) -> bool {
+fn assigned_and_in_force(subject: &Subject, policy: &PolicySpec, now: DateTime<Utc>) -> bool {
     subject.is(&policy.assignee) && in_force(policy, now)
-}
-
-/// Every operation a policy grants, by its CIM 009 name, with the Table 4.20-2 groups
-/// expanded (R8).
-pub fn granted_operations(policy: &PolicySpec) -> BTreeSet<&'static str> {
-    policy
-        .operations
-        .iter()
-        .flat_map(|granted| match granted {
-            OperationRef::Single(single) => vec![single.as_str()],
-            OperationRef::Group(group) => {
-                group.operations().iter().map(Operation::as_str).collect()
-            }
-        })
-        .collect()
 }
 
 /// The entity types a policy's registration information names.
