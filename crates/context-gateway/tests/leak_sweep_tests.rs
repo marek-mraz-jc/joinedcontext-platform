@@ -560,6 +560,7 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::Json => "/file.json",
             Representation::Zip => "/file.zip",
             Representation::Sta => "/sta/v1.1",
+            Representation::Odata => "/odata/v4",
         };
         assert!(
             swept(path),
