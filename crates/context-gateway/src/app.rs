@@ -989,7 +989,7 @@ pub(crate) async fn serve_ngsi_ld(
     if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
         return refusal;
     }
-    let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -1708,7 +1708,7 @@ pub(crate) async fn serve_ngsi_ld_view(
             Err(answer) => return *answer,
         }
     }
-    let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -3173,15 +3173,23 @@ fn write_share(
     gateway: &Gateway,
     endpoint: &Endpoint,
     operation: Operation,
-    headers: &HeaderMap,
+    request: &Request<Body>,
 ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response<Body>>> {
     if !operation.is_write() {
         return Ok(None);
     }
-    let length = headers
+    // A body without Content-Length still knows its bound when it has one: a DELETE's is 0, so
+    // it takes the smallest share, not the largest (T-4077 re-open).
+    let length = request
+        .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            axum::body::HttpBody::size_hint(request.body())
+                .upper()
+                .and_then(|upper| usize::try_from(upper).ok())
+        });
     match gateway.write_share(length) {
         Some(share) => Ok(Some(share)),
         None => {
