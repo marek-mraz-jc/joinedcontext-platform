@@ -172,6 +172,9 @@ pub struct DeclaredTypes {
     /// The space's own quality rules, `spec.quality` (DM-87): judged on every write beside the
     /// model's constraints.
     pub quality: Vec<jc_core::kinds::QualityRule>,
+    /// The model's slot constraints, compiled from the same generated JSON Schema, which every
+    /// write is checked against (DM-86); `None` while the model has no generated schema.
+    pub schema: Option<std::sync::Arc<jcctl::model_schema::ModelSchema>>,
 }
 
 impl DeclaredTypes {

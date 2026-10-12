@@ -333,7 +333,7 @@ impl QualityRule {
         })
     }
 
-    /// The outcome of the sweep's `maxAge` check: quarantine unless the rule says otherwise.
+    /// The outcome of the sweep's `maxAge` check: quarantine, the only one validation admits.
     pub fn sweep_outcome(&self) -> QualityOutcome {
         self.outcome.unwrap_or(QualityOutcome::Quarantine)
     }
@@ -384,6 +384,18 @@ impl QualityRule {
                 self.name.clone(),
                 "a range rule sets min or max, an area rule bbox, a freshness rule maxAhead \
                  or maxAge, and nothing else (DM-87)",
+            );
+        }
+        // The sweep finds a stale entity after its write: nothing is left to refuse or flag.
+        if self.max_age.is_some()
+            && self
+                .outcome
+                .is_some_and(|outcome| outcome != QualityOutcome::Quarantine)
+        {
+            return refuse(
+                "spec.quality.outcome",
+                self.name.clone(),
+                "a rule with a maxAge quarantines; its outcome is quarantine or none (DM-87)",
             );
         }
         if let (Some(min), Some(max)) = (self.min.as_ref(), self.max.as_ref()) {

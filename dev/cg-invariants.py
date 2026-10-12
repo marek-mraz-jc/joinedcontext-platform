@@ -43,7 +43,8 @@ def sections(output: str) -> dict[str, list[str]]:
             continue
         if rows is None:
             continue
-        if line.startswith("hint:") or "output stops at" in line or "truncated" in line:
+        # cg's own words, never a substring a row may hold (`Extracted::truncated`, T-4021)
+        if line.startswith(("hint:", "... truncated at ")) or "output stops at" in line:
             found.setdefault("!", []).append(f"{name}: {line}")
         elif not line.strip() or re.match(r"\d+ (rows|hits)", line):
             continue
@@ -117,6 +118,11 @@ c.rs:3 |  | False | False | format!("SELECT")
         "stale allowlist entry: sql-from-text | gone::f"
     ]
     assert check(output + "hint: 'x' matches no Symbol\n", ok) == ["sql-from-text: hint: 'x' matches no Symbol"]
+    # a row naming `truncated` is a row; cg's own line is a problem (T-4021)
+    row = "d.rs:4 | m::Extracted::truncated | False | False | truncated = true\n"
+    assert check(output + row, ok + "sql-from-text | m::Extracted::truncated | flag\n") == []
+    cut = "... truncated at 60 rows; add LIMIT / aggregate, or --max-rows\n"
+    assert check(output + cut, ok) == [f"sql-from-text: {cut.strip()}"]
     print("cg-invariants selftest: ok")
 
 
