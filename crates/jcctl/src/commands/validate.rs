@@ -389,6 +389,15 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
         });
     }
 
+    for (location, message) in mqtt_brokers(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in federation_topology(&repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -1034,6 +1043,77 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                             )));
                         }
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// The MQTT edge brokers checked against the repository (MF-54, PL-76): every role names
+/// ServiceAccounts its project declares, no two brokers hold one dedicated port (the finding
+/// names the holder), and a DataSource's `brokerRef` names a broker of its own project.
+fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
+    use jc_core::kinds::MqttBrokerSpec;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let accounts: BTreeSet<(Option<String>, String)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "ServiceAccount")
+        .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+        .collect();
+    let brokers: BTreeSet<(Option<String>, String)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "MqttBroker")
+        .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+        .collect();
+    let mut ports: BTreeMap<u16, String> = BTreeMap::new();
+    let mut found = Vec::new();
+    for (id, resource) in repo.iter() {
+        let at = (resource.path.clone(), resource.document, resource.line);
+        match id.kind.as_str() {
+            "MqttBroker" => {
+                // A spec the kind refuses is reported by the schema check.
+                let Ok(broker) =
+                    serde_json::from_value::<MqttBrokerSpec>(resource.manifest.spec.clone())
+                else {
+                    continue;
+                };
+                for role in &broker.roles {
+                    for account in &role.service_accounts {
+                        if !accounts.contains(&(id.namespace.clone(), account.clone())) {
+                            found.push((at.clone(), format!(
+                                "{id}: role `{}` names ServiceAccount `{account}`, which no manifest of this project declares (MF-54)",
+                                role.name
+                            )));
+                        }
+                    }
+                }
+                if let Some(port) = broker.port {
+                    match ports.get(&port) {
+                        Some(holder) => found.push((at.clone(), format!(
+                            "{id}: spec.port {port} is already held by {holder}; pick another port from the reserved range (MF-54)"
+                        ))),
+                        None => {
+                            ports.insert(port, id.to_string());
+                        }
+                    }
+                }
+            }
+            "DataSource" => {
+                let Some(name) = resource
+                    .manifest
+                    .spec
+                    .pointer("/mqtt/brokerRef/name")
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                if !brokers.contains(&(id.namespace.clone(), name.to_owned())) {
+                    found.push((at, format!(
+                        "{id}: spec.mqtt.brokerRef names MqttBroker `{name}`, which no manifest of this project declares (PL-76)"
+                    )));
                 }
             }
             _ => {}
