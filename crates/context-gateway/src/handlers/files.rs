@@ -189,6 +189,9 @@ async fn tabular_download(
         Ok(table) => table,
         Err(_) => return too_large(),
     };
+    // The table owns its cells now; the broker's answer would only double what is held
+    // while the file is written (T-4107).
+    drop(entities);
     if query::first(&params, "humanHeaders") == Some("true") {
         tabular::humanize(&mut table);
     }

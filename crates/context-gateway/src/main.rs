@@ -48,7 +48,8 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone());
+    let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone())
+        .budget_writes(config.write_budget_mib);
     let checkouts = config
         .projects_dir
         .clone()

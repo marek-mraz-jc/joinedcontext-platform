@@ -140,7 +140,22 @@ pub struct Gateway {
     /// The largest request body read, from the Organization's `spec.limits.gateway`
     /// (ADR-N-035); swapped with the tables when the repository changes.
     max_request_body: AtomicUsize,
+    /// The KiB of write bodies the gateway holds at once (T-4077); see [`WRITE_BUDGET_MIB`].
+    writes: Arc<tokio::sync::Semaphore>,
+    /// The budget `writes` was made with, in KiB: what one write may take at most.
+    write_budget_kib: u32,
 }
+
+/// The MiB of write bodies in the gateway at once unless the deployment names another
+/// (`JC_GATEWAY_WRITE_BUDGET_MIB`, T-4077). A write is parsed and judged several times on its way
+/// (grants, units, the model, the relationships), so its peak is a multiple of its body: dev's
+/// gateway, 365 MiB at rest under a 512 MiB limit, was OOMKilled by a burst of about 160 MiB
+/// while a slow broker held pages of 1000 entities. A write past the budget is answered 503 with
+/// `Retry-After`, which a pipeline retries, before its body is read.
+pub const WRITE_BUDGET_MIB: usize = 16;
+
+/// The seconds a write over the budget is told to wait.
+const WRITE_RETRY_SECONDS: u32 = 1;
 
 /// The hub's per-subject quota unless the deployment names another: ten Endpoint calls a
 /// second, sustained, is more than one person's agent makes and less than a scraper wants.
@@ -208,7 +223,31 @@ impl Gateway {
             )),
             hub_rate_limit: HUB_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
+            writes: Arc::new(tokio::sync::Semaphore::new(WRITE_BUDGET_MIB * 1024)),
+            write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
         }
+    }
+
+    /// Holds at most `mib` MiB of write bodies at once (T-4077).
+    pub fn budget_writes(mut self, mib: usize) -> Self {
+        let kib = u32::try_from(mib.saturating_mul(1024))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        self.writes = Arc::new(tokio::sync::Semaphore::new(kib as usize));
+        self.write_budget_kib = kib;
+        self
+    }
+
+    /// A share of the write budget for a body of `length` bytes, or `None` when the gateway
+    /// already holds all it may (T-4077). A body of unknown length counts as the largest one the
+    /// organization accepts; one larger than the whole budget takes the whole budget, so it
+    /// waits for an idle gateway instead of never fitting.
+    fn write_share(&self, length: Option<usize>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let bytes = length.unwrap_or_else(|| self.max_request_body());
+        let kib = u32::try_from(bytes.div_ceil(1024))
+            .unwrap_or(u32::MAX)
+            .clamp(1, self.write_budget_kib);
+        self.writes.clone().try_acquire_many_owned(kib).ok()
     }
 
     /// Exchanges a caller's token with `exchanger` for a read over a space whose
@@ -950,6 +989,10 @@ pub(crate) async fn serve_ngsi_ld(
     if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
         return refusal;
     }
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
+        Ok(share) => share,
+        Err(answer) => return *answer,
+    };
 
     // PF-48, T-3999: a registration asking for `caller` identity forwards a token of the
     // caller exchanged for its broker's audience, never the hub's account or the caller's own
@@ -1458,7 +1501,7 @@ fn query_shape_refusal(params: &[(String, String)]) -> Option<Response<Body>> {
 /// in the operator's log. What a broker says when it fails is whatever it was holding: an entity
 /// id in a message, a fragment of its own query, the name of an attribute an endpoint hides
 /// (T-2260).
-async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
+pub(crate) async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
@@ -1583,6 +1626,34 @@ pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &Head
     !conditional && !subscription && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
+/// Whether the access documents of this Endpoint are the view's engine's for `subject` (plan
+/// 5.1, T-3643, T-3649); reads follow [`served_by_view`]. What no view can serve yet keeps the gateway's own answer, each until its gap
+/// closes: a view of another model (G18), a projection with `temporalQ` (G6), a slug no view id
+/// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
+/// engine has no agreements to decide on yet, and would judge the connector's own account
+/// instead (map K38).
+pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+    let temporal = endpoint
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.filter.as_ref())
+        .is_some_and(|filter| filter.temporal_q.is_some());
+    endpoint.view_mapping.is_none()
+        && subject.agreement.is_none()
+        && !temporal
+        && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// The broker's view of an Endpoint (plan 5.1): its slug, or `cs-{space}` for a space's
+/// canonical surface, the one whose root is `/cs/{segment}` (T-3643).
+pub(crate) fn view_of(endpoint: &Endpoint) -> String {
+    if endpoint.base_path.starts_with("/cs/") {
+        format!("cs-{}", endpoint.space)
+    } else {
+        endpoint.slug.clone()
+    }
+}
+
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
 const MAX_VIEW_ID: usize = 63;
 
@@ -1625,6 +1696,22 @@ pub(crate) async fn serve_ngsi_ld_view(
             return refusal;
         }
     }
+    let mut request = request;
+    // The Endpoint's type list as its reads show the caller (T-4080); a caller without a read
+    // grant, and the details form, are the view's to answer.
+    if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
+    {
+        match crate::handlers::reads::listed_types(gateway, &endpoint, &subject, &mut request).await
+        {
+            Ok(Some(list)) => return typed_json_response(&list, "application/json"),
+            Ok(None) => {}
+            Err(answer) => return *answer,
+        }
+    }
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
+        Ok(share) => share,
+        Err(answer) => return *answer,
+    };
     // The audit line names the principal the gateway established (PF-46); the decision is the
     // broker's, and its answer says what it was.
     tracing::info!(
@@ -1636,7 +1723,6 @@ pub(crate) async fn serve_ngsi_ld_view(
         operation = %operation.as_str(),
         "forwarded to the broker's view"
     );
-    let mut request = request;
     match view_request(gateway, &endpoint, &subject, &path, operation, &mut request).await {
         Ok(()) => {}
         Err(answer) => return *answer,
@@ -2871,7 +2957,10 @@ fn quality_judged(
         )
     };
     let refuse = |problem: Box<ProblemDetails>| Box::new(problem.into_response());
-    let before = payload.clone();
+    // Only a rule writes into the payload (a flag, a quarantine); the model check reads it. A
+    // space without rules keeps no second copy of a page of 1000 entities (T-4077).
+    let before = (!declared.quality.is_empty()).then(|| payload.clone());
+    let mut changed = false;
     let batch = matches!(
         operation,
         Operation::CreateBatch
@@ -2890,6 +2979,7 @@ fn quality_judged(
                 }
             });
             if !refused.is_empty() {
+                changed = true;
                 let ids: Vec<String> = entries.iter().filter_map(batch_entry_id).collect();
                 let refused = match divided.take() {
                     Some((_, mut earlier)) => {
@@ -2906,7 +2996,7 @@ fn quality_judged(
         }
         payload => judge(payload).map_err(refuse)?,
     }
-    if payload != before {
+    if changed || before.is_some_and(|before| before != payload) {
         *sent = serde_json::to_vec(&payload).map_err(|error| {
             tracing::error!(%error, "a judged write does not serialize");
             refuse(Box::new(ProblemDetails::internal()))
@@ -3074,6 +3164,54 @@ fn unsupported_media_type() -> ProblemDetails {
     ProblemDetails::new(415, "unsupported-media-type", "Unsupported Media Type").with_detail(
         "the request payload must be application/json, application/ld+json or application/merge-patch+json",
     )
+}
+
+/// A write's share of the gateway's write budget (T-4077), held from before its body is read
+/// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
+/// takes none. Over the budget, the 503 to answer instead.
+fn write_share(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    operation: Operation,
+    request: &Request<Body>,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response<Body>>> {
+    if !operation.is_write() {
+        return Ok(None);
+    }
+    // A body without Content-Length still knows its bound when it has one: a DELETE's is 0, so
+    // it takes the smallest share, not the largest (T-4077 re-open).
+    let length = request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            axum::body::HttpBody::size_hint(request.body())
+                .upper()
+                .and_then(|upper| usize::try_from(upper).ok())
+        });
+    match gateway.write_share(length) {
+        Some(share) => Ok(Some(share)),
+        None => {
+            tracing::info!(slug = %endpoint.slug, %operation, "write answered 503: the gateway holds its whole write budget");
+            Err(Box::new(busy()))
+        }
+    }
+}
+
+/// The 503 of a write over the gateway's write budget (T-4077): nothing of it was read, so
+/// sending it again after `Retry-After` is safe.
+fn busy() -> Response<Body> {
+    let mut answer = ProblemDetails::new(503, "service-unavailable", "Service Unavailable")
+        .with_detail(
+            "the gateway holds as many writes as it may at once; send this one again after the \
+             seconds Retry-After names",
+        )
+        .into_response();
+    answer
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from(WRITE_RETRY_SECONDS));
+    answer
 }
 
 /// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
