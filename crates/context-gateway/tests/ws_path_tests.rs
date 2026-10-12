@@ -407,3 +407,96 @@ async fn a_broker_refusal_is_answered_before_the_upgrade() {
         Some(StatusCode::SERVICE_UNAVAILABLE)
     );
 }
+
+/// T-4064: a plain GET (a browser tab, curl) is no upgrade. It is told how to use the address,
+/// `426` with the subprotocol, the token rule, one `x-subscribe` message and the guide, never
+/// axum's bare `400`; and the broker is not asked.
+#[tokio::test]
+async fn a_plain_get_is_told_how_to_use_the_websocket() {
+    let realm = common::Realm::new();
+    let (upstream, upgrades) = broker().await;
+    let at = gateway("guide", &upstream, &realm).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{at}/api/endpoint/{PUBLIC}/ws");
+    let guide = format!("{HOST}/docs/API/07-websocket");
+
+    let answer = client.get(&url).send().await.expect("answered");
+    assert_eq!(answer.status(), StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(answer.headers()["upgrade"], "websocket");
+    assert_eq!(answer.headers()["link"], format!("<{guide}>; rel=\"help\""));
+    assert!(answer.headers()["content-type"]
+        .to_str()
+        .expect("ascii")
+        .starts_with("application/problem+json"));
+    let body: serde_json::Value = answer.json().await.expect("a problem");
+    assert!(body["type"]
+        .as_str()
+        .is_some_and(|t| t.ends_with("upgrade-required")));
+    assert_eq!(body["protocol"], "ngsi-ld-ws");
+    assert_eq!(
+        body["address"],
+        format!("wss://hel.example.fi/api/endpoint/{PUBLIC}/ws")
+    );
+    assert!(body["token"]
+        .as_str()
+        .is_some_and(|t| t.starts_with("none")));
+    assert_eq!(body["example"]["metadata"]["x-op"], "x-subscribe");
+    assert_eq!(
+        body["example"]["body"]["entities"][0]["type"],
+        "BikeHireDockingStation"
+    );
+    let websocat = body["websocat"].as_str().expect("a websocat line");
+    assert!(websocat.contains("--protocol ngsi-ld-ws") && !websocat.contains("Authorization"));
+    assert_eq!(body["guide"], guide);
+
+    let page = client
+        .get(&url)
+        .header("accept", "text/html,application/xhtml+xml")
+        .send()
+        .await
+        .expect("answered");
+    assert_eq!(page.status(), StatusCode::UPGRADE_REQUIRED);
+    assert!(page.headers()["content-type"]
+        .to_str()
+        .expect("ascii")
+        .starts_with("text/html"));
+    let html = page.text().await.expect("a page");
+    assert!(html.contains("<code>ngsi-ld-ws</code>"), "{html}");
+    assert!(html.contains("x-subscribe") && html.contains(&format!("href=\"{guide}\"")));
+
+    assert!(
+        upgrades.lock().expect("log").is_empty(),
+        "no upgrade reached the broker"
+    );
+}
+
+/// T-4064: on an Endpoint that is not public, the plain GET is still admitted first (no token
+/// is `401`), and the guide names the token the upgrade needs.
+#[tokio::test]
+async fn a_plain_get_of_a_restricted_websocket_names_the_token() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = gateway("guide-restricted", &upstream, &realm).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{at}/api/endpoint/{INTERNAL}/ws");
+    assert_eq!(
+        client.get(&url).send().await.expect("answered").status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let token = person(&realm, "hel-mobility", INTERNAL);
+    let answer = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("answered");
+    assert_eq!(answer.status(), StatusCode::UPGRADE_REQUIRED);
+    let body: serde_json::Value = answer.json().await.expect("a problem");
+    assert!(body["websocat"]
+        .as_str()
+        .is_some_and(|line| line.contains("Authorization: Bearer $TOKEN")));
+    assert!(
+        !body.to_string().contains(&token),
+        "the token is never echoed"
+    );
+}
