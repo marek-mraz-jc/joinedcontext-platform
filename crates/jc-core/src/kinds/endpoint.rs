@@ -174,6 +174,9 @@ pub enum Representation {
     Sta,
     /// OData v4 service of the Endpoint's view (`/odata/v4/`, EP-104).
     Odata,
+    /// Notifications over one WebSocket (`/ws`, EP-106).
+    #[serde(rename = "websocket")]
+    WebSocket,
 }
 
 impl Representation {
@@ -190,11 +193,12 @@ impl Representation {
             Self::OgcFeatures => "ogc-features",
             Self::Sta => "sta",
             Self::Odata => "odata",
+            Self::WebSocket => "websocket",
         }
     }
 
     /// Every representation, in the order a record lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::NgsiLd,
         Self::Mcp,
         Self::GeoJson,
@@ -205,6 +209,7 @@ impl Representation {
         Self::OgcFeatures,
         Self::Sta,
         Self::Odata,
+        Self::WebSocket,
     ];
 }
 

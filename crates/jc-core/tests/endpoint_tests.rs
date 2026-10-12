@@ -65,6 +65,7 @@ fn representation_variants_serialize_to_expected_wire_names() {
         (Representation::OgcFeatures, "ogc-features"),
         (Representation::Sta, "sta"),
         (Representation::Odata, "odata"),
+        (Representation::WebSocket, "websocket"),
     ];
 
     let expected_names: Vec<&str> = representations.iter().map(|(_, name)| *name).collect();
@@ -80,7 +81,8 @@ fn representation_variants_serialize_to_expected_wire_names() {
             "zip",
             "ogc-features",
             "sta",
-            "odata"
+            "odata",
+            "websocket"
         ]
     );
 
@@ -638,11 +640,13 @@ fn an_endpoint_that_lists_nothing_serves_every_standard_but_sta() {
             R::Json,
             R::Zip,
             R::OgcFeatures,
-            R::Odata
+            R::Odata,
+            R::WebSocket
         ],
         "EP-104: SensorThings is opt-in"
     );
-    let narrowed = defaulted("  disabledRepresentations: [odata, xlsx]\n").expect("parses");
+    let narrowed =
+        defaulted("  disabledRepresentations: [odata, xlsx, websocket]\n").expect("parses");
     narrowed.validate().expect("validates");
     assert_eq!(
         narrowed.spec.served_representations(),
