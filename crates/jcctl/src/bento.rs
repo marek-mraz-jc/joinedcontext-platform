@@ -35,6 +35,10 @@ const ZIP_INT: &str = r#"map int {
 /// The directory of the archive's tail to the named entries, one JSON array (PL-72): every
 /// count, size, method and offset is checked before any member is fetched. `MEMBERS` and
 /// `MAX_BYTES` are replaced by values `HttpArchive::validate` admitted.
+///
+/// The directory's sizes may lie, and Bloblang's `decompress` has no output limit, so a deflate
+/// member is read only when its packed size times 1032, the most deflate expands, is within
+/// `maxBytes`: no member inflates past the bound, whatever its directory says.
 const ZIP_DIRECTORY: &str = r#"let wanted = MEMBERS
 let max_bytes = MAX_BYTES
 let tail = if content().length() > 65557 { throw("the archive server ignored Range and sent %v bytes".format(content().length())) } else { content() }
@@ -57,7 +61,7 @@ let all = $cd.split("504b0102").slice(1).map_each(e -> {
 let found = if $all.length() != $entries { throw("the archive's directory lists %v entries, its end record %v".format($all.length(), $entries)) } else { $all.filter(e -> $wanted.contains(e.name)) }
 let missing = $wanted.filter(w -> !$found.map_each(e -> e.name).contains(w))
 root = if $missing.length() > 0 { throw("the archive has no member %v".format($missing)) } else { $found }
-root = root.map_each(e -> if e.size > $max_bytes || e.csize > $max_bytes { throw("%v: %v bytes, %v packed, over maxBytes %v".format(e.name, e.size, e.csize, $max_bytes)) } else if ![0, 8].contains(e.method) { throw("%v: compression method %v, only stored and deflate are read".format(e.name, e.method)) } else if e.offset == 4294967295 { throw("%v: a Zip64 archive is not read".format(e.name)) } else { e })
+root = root.map_each(e -> if e.size > $max_bytes || e.csize > $max_bytes { throw("%v: %v bytes, %v packed, over maxBytes %v".format(e.name, e.size, e.csize, $max_bytes)) } else if ![0, 8].contains(e.method) { throw("%v: compression method %v, only stored and deflate are read".format(e.name, e.method)) } else if e.method == 8 && e.csize * 1032 > $max_bytes { throw("%v: %v packed may inflate to %v bytes, over maxBytes %v".format(e.name, e.csize, e.csize * 1032, $max_bytes)) } else if e.offset == 4294967295 { throw("%v: a Zip64 archive is not read".format(e.name)) } else { e })
 "#;
 
 /// One directory entry to the metadata the member's ranged read needs (PL-72). The range

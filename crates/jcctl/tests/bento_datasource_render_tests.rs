@@ -407,6 +407,9 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let directory = steps[0]["mapping"].as_str().unwrap();
     assert!(directory.contains(r#"let wanted = ["agency.txt","stops.txt"]"#));
     assert!(directory.contains("let max_bytes = 1048576"));
+    // The directory may lie about sizes, so a deflated member is read only when the most it
+    // can inflate to (1032 times its packed size) is within maxBytes.
+    assert!(directory.contains("e.method == 8 && e.csize * 1032 > $max_bytes"));
     assert!(!directory.contains("MEMBERS") && !directory.contains("MAX_BYTES"));
     let member = &steps[3]["http"];
     assert_eq!(member["url"], input["url"]);
