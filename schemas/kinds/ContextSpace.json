@@ -85,7 +85,7 @@
       "description": "Desired specification of a [`ContextSpace`][crate::kinds::ContextSpace] resource (PF-06, PF-09, PF-19).",
       "properties": {
         "brokerRef": {
-          "description": "The `ContextBroker` this space lives on; the organization's default when absent (PF-111, ADR-N-046). Changing it on a space that holds entities is a move job (PF-115).",
+          "description": "The `ContextBroker` this space lives on; the organization's default when absent (PF-111, ADR-N-047). Changing it on a space that holds entities is a move job (PF-115).",
           "type": [
             "string",
             "null"
