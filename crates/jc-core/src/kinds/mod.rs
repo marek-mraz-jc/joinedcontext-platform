@@ -60,8 +60,9 @@ pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
 pub use data_source::{
-    check_class, Authorization, DataSourceSpec, DataSourceType, GtfsFeed, GtfsRtConnection,
-    HttpConnection, MqttConnection, TlsSettings, WebSocketConnection,
+    check_class, ArchiveFormat, Authorization, DataSourceSpec, DataSourceType, GtfsFeed,
+    GtfsRtConnection, HttpArchive, HttpConnection, MqttConnection, TlsSettings,
+    WebSocketConnection,
 };
 pub use dataspace::{
     AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,
