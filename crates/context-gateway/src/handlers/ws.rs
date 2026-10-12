@@ -42,6 +42,12 @@ pub const PER_CALLER: usize = 10;
 /// crosses the hop.
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_FRAME: usize = 16 * 1024;
+/// What the broker writes: a notification of up to 1 MiB, in one frame (Antares
+/// `MAX_NOTIFICATION_BYTES`). Its 64 KiB bound is on what it reads; held against what it writes,
+/// the first notification over 16 KiB ended the relay without a close frame (T-4131).
+const FROM_BROKER: usize = 1024 * 1024;
+/// RFC 6455 7.4.1: the server met a condition that prevented it from fulfilling the request.
+const BROKER_FAILED: u16 = 1011;
 /// RFC 6455 7.4.1: the message was too big to process.
 const TOO_BIG: u16 = 1009;
 
@@ -168,8 +174,8 @@ pub(crate) async fn endpoint_ws(
         Err(refused) => return *refused,
     };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE))
-        .max_frame_size(Some(MAX_FRAME));
+        .max_message_size(Some(FROM_BROKER))
+        .max_frame_size(Some(FROM_BROKER));
     let broker = match tokio_tungstenite::connect_async_with_config(upstream, Some(config), false)
         .await
     {
@@ -424,14 +430,21 @@ fn refused_by_broker(status: StatusCode) -> Response<Body> {
 type Upstream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// How the client side ended.
+/// How the relay ended.
 #[derive(Debug, PartialEq, Eq)]
 enum Ended {
+    /// The client closed, went away, or broke no bound.
     Closed,
+    /// The client sent a message over the bound.
     TooBig,
+    /// The broker sent its close frame, which the client already has.
+    BrokerClosed,
+    /// The broker's side failed or ended without a close frame.
+    BrokerFailed,
 }
 
-/// Frames both ways until either side ends; the connection is counted until then.
+/// Frames both ways until either side ends; the connection is counted until then. However it
+/// ends, a client that is still there gets a close frame, never a bare end of the stream.
 async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
     let (mut to_client, mut from_client) = client.split();
     let (mut to_broker, mut from_broker) = broker.split();
@@ -447,32 +460,53 @@ async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
                 let Some(message) = upstream_message(message) else {
                     continue;
                 };
-                if to_broker.send(message).await.is_err() || closing {
-                    break;
+                if closing {
+                    let _ = to_broker.send(message).await;
+                    return Ended::Closed;
+                }
+                if let Err(error) = to_broker.send(message).await {
+                    tracing::warn!(%slug, %error, "the broker's side of a WebSocket failed");
+                    return Ended::BrokerFailed;
                 }
             }
             Ended::Closed
         };
         let down = async {
-            while let Some(Ok(message)) = from_broker.next().await {
+            loop {
+                let message = match from_broker.next().await {
+                    Some(Ok(message)) => message,
+                    Some(Err(error)) => {
+                        tracing::warn!(%slug, %error, "the broker's side of a WebSocket failed");
+                        return Ended::BrokerFailed;
+                    }
+                    None => return Ended::BrokerFailed,
+                };
                 let closing = matches!(message, Message::Close(_));
                 let Some(message) = client_message(message) else {
                     continue;
                 };
-                if to_client.send(message).await.is_err() || closing {
-                    break;
+                if to_client.send(message).await.is_err() {
+                    return Ended::Closed;
+                }
+                if closing {
+                    return Ended::BrokerClosed;
                 }
             }
         };
         tokio::select! {
             ended = up => ended,
-            () = down => Ended::Closed,
+            ended = down => ended,
         }
     };
-    if ended == Ended::TooBig {
+    let close = match ended {
+        Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
+        Ended::BrokerFailed => Some((BROKER_FAILED, "the broker ended the connection")),
+        Ended::Closed | Ended::BrokerClosed => None,
+    };
+    if let Some((code, reason)) = close {
         let frame = ws::CloseFrame {
-            code: TOO_BIG,
-            reason: "a message over 64 KiB".into(),
+            code,
+            reason: reason.into(),
         };
         let _ = to_client.send(ws::Message::Close(Some(frame))).await;
     }
