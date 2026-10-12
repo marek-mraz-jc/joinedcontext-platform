@@ -7,8 +7,8 @@ use crate::app::sha256_hex;
 use crate::app::text_response;
 use crate::app::typed_json_response;
 use crate::app::Gateway;
+use crate::app::{access_by_view, broker_failure, principal_of, view_of, MAX_BODY};
 use crate::app::{anonymous_on, subject_from, PORTAL_CLIENT, SIMULATE_AUDIENCE};
-use crate::app::{broker_failure, has_view, principal_of, view_of, MAX_BODY};
 use crate::auth::token::{self, Claims};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -68,7 +68,7 @@ pub(crate) async fn access(
 
 /// The caller's grants on `endpoint` in `format`, the document `GET …/access` serves (EP-55 to
 /// EP-58), ODRL JSON-LD standing for Turtle too: the broker view's with what the gateway adds,
-/// or the gateway's own for an Endpoint no view serves yet ([`has_view`]). The MCP façade's
+/// or the gateway's own for an Endpoint no view serves yet ([`access_by_view`]). The MCP façade's
 /// `describe_access` reads this same function, so the two surfaces cannot disagree (EP-60).
 pub(crate) async fn document(
     gateway: &Gateway,
@@ -76,7 +76,7 @@ pub(crate) async fn document(
     subject: &Subject,
     format: AccessFormat,
 ) -> Result<Value, Box<Response<Body>>> {
-    if !has_view(endpoint, subject, &view_of(endpoint)) {
+    if !access_by_view(endpoint, subject, &view_of(endpoint)) {
         return Ok(own_document(gateway, endpoint, subject, format));
     }
     // ODRL and Turtle are both read as ODRL JSON-LD: the gateway adds the licence's duties and
@@ -103,7 +103,7 @@ pub(crate) async fn document(
     }
 }
 
-/// The gateway's own document, for an Endpoint no view serves yet ([`has_view`]); it goes with
+/// The gateway's own document, for an Endpoint no view serves yet ([`access_by_view`]); it goes with
 /// the gateway's pipeline when those gaps close (T-3646).
 fn own_document(
     gateway: &Gateway,
@@ -300,7 +300,7 @@ pub(crate) async fn access_check(
             .into_response();
     };
 
-    if !has_view(&endpoint, &subject, &view_of(&endpoint)) {
+    if !access_by_view(&endpoint, &subject, &view_of(&endpoint)) {
         return json_response(&handlers::access::check(
             &subject,
             &endpoint,

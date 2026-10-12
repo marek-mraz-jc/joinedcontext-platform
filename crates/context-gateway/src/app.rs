@@ -1639,7 +1639,7 @@ pub(crate) fn has_view(view: &str) -> bool {
 /// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
 /// engine has no agreements to decide on yet, and would judge the connector's own account
 /// instead (map K38).
-pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+pub(crate) fn access_by_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
     let temporal = endpoint
         .projection
         .as_ref()
@@ -1703,6 +1703,18 @@ pub(crate) async fn serve_ngsi_ld_view(
             return refusal;
         }
     }
+    let mut request = request;
+    // The Endpoint's type list as its reads show the caller (T-4080); a caller without a read
+    // grant, and the details form, are the view's to answer.
+    if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
+    {
+        match crate::handlers::reads::listed_types(gateway, &endpoint, &subject, &mut request).await
+        {
+            Ok(Some(list)) => return typed_json_response(&list, "application/json"),
+            Ok(None) => {}
+            Err(answer) => return *answer,
+        }
+    }
     let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
         Ok(share) => share,
         Err(answer) => return *answer,
@@ -1718,7 +1730,6 @@ pub(crate) async fn serve_ngsi_ld_view(
         operation = %operation.as_str(),
         "forwarded to the broker's view"
     );
-    let mut request = request;
     match view_request(gateway, &endpoint, &subject, &path, operation, &mut request).await {
         Ok(()) => {}
         Err(answer) => return *answer,
@@ -3162,8 +3173,6 @@ fn unsupported_media_type() -> ProblemDetails {
     )
 }
 
-/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
-/// else is refused openly, without naming the rule that refused it.
 /// A write's share of the gateway's write budget (T-4077), held from before its body is read
 /// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
 /// takes none. Over the budget, the 503 to answer instead.
@@ -3204,6 +3213,8 @@ fn busy() -> Response<Body> {
     answer
 }
 
+/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
+/// else is refused openly, without naming the rule that refused it.
 fn refused(operation: Operation, path: &str) -> Response<Body> {
     if !operation.is_write() && operations::addressed_entity(path).is_some() {
         ProblemDetails::not_found().into_response()
