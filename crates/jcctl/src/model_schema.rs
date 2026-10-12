@@ -10,16 +10,18 @@
 //!
 //! The Portal's pipeline stage and the gateway's write path both check against this one
 //! compilation, so a person, the runner and the gateway reach the same verdict on one record.
-//! Every pattern is compiled by the linear-time `regex` engine under a 64 KiB size limit
-//! (DM-92): a class whose schema does not compile under it is held to its id and type only.
+//! Every pattern is compiled by the linear-time `regex` engine under a 10 MiB size limit, the
+//! engine's own default: a bounded-length slot such as `^[^<>]{0,500}$` compiles to about 530 KiB,
+//! so DM-92's 64 KiB for a quality rule would refuse it. A class whose schema does not compile
+//! under the limit is held to its id and type only.
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// The size limit of one compiled pattern (DM-92).
-pub const PATTERN_SIZE_LIMIT: usize = 64 * 1024;
+/// The size limit of one compiled model pattern: linear time either way, this bounds memory.
+pub const PATTERN_SIZE_LIMIT: usize = 10 * 1024 * 1024;
 
 /// One class schema compiled for checking, or `None` (logged) when it does not compile.
 fn validator(model: &str, class: &str, schema: &Value) -> Option<Arc<jsonschema::Validator>> {
@@ -1068,6 +1070,34 @@ mod tests {
                 .map(|p| (p.rule, p.path))
                 .collect();
             assert_eq!(named, [("sh:datatype".into(), "url".into())], "{refused}");
+        }
+    }
+
+    /// T-4072: a bounded-length slot compiles (about 530 KiB as a Unicode class) and holds its
+    /// pattern; under DM-92's 64 KiB the class did not compile and was held to id and type only.
+    #[test]
+    fn a_bounded_length_pattern_compiles_and_is_held() {
+        let model = ModelSchema::compile(
+            "m",
+            "1",
+            &json!({ "definitions": { "Note": { "properties": {
+                "text": { "type": "string", "pattern": "^[^<>]{0,500}$", "x-ngsi-ld-kind": "Property" }
+            } } } }),
+            &["Note".into()],
+            false,
+        );
+        let note = |text: &str| {
+            json!({ "id": "urn:ngsi-ld:Note:1", "type": "Note",
+                    "text": { "type": "Property", "value": text } })
+        };
+        assert!(model.check(&note("plain text, ä")).is_empty());
+        for refused in ["<script>".to_owned(), "x".repeat(501)] {
+            let paths: Vec<String> = model
+                .check(&note(&refused))
+                .into_iter()
+                .map(|p| p.path)
+                .collect();
+            assert_eq!(paths, ["text"], "{refused}");
         }
     }
 

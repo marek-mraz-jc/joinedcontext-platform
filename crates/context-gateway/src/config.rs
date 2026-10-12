@@ -85,6 +85,10 @@ pub struct Config {
     /// The Portal's list of domain states (`JC_GATEWAY_DOMAIN_VERIFICATIONS_URL`, its internal
     /// listener's `/internal/domain-verifications`); required under `enforce`.
     pub domain_verifications_url: Option<String>,
+    /// How many MiB of write bodies may be in the gateway at once
+    /// (`JC_GATEWAY_WRITE_BUDGET_MIB`, default [`crate::app::WRITE_BUDGET_MIB`]); a write past
+    /// it is answered 503 with `Retry-After` (T-4077).
+    pub write_budget_mib: usize,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -194,7 +198,21 @@ impl Config {
             return Err(ConfigError::Missing("JC_GATEWAY_DOMAIN_VERIFICATIONS_URL"));
         }
 
+        let write_budget_mib = match std::env::var("JC_GATEWAY_WRITE_BUDGET_MIB") {
+            Ok(value) if !value.trim().is_empty() => match value.trim().parse::<usize>() {
+                Ok(mib) if mib > 0 => mib,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "JC_GATEWAY_WRITE_BUDGET_MIB",
+                        reason: format!("{value:?} is not a positive number of MiB"),
+                    })
+                }
+            },
+            _ => crate::app::WRITE_BUDGET_MIB,
+        };
+
         Ok(Self {
+            write_budget_mib,
             domain_verification,
             domain_verifications_url,
             bind,
@@ -335,6 +353,7 @@ mod tests {
             egress_private_hosts: Vec::new(),
             domain_verification: crate::domain_gate::Mode::Report,
             domain_verifications_url: None,
+            write_budget_mib: crate::app::WRITE_BUDGET_MIB,
         }
     }
 
