@@ -1140,6 +1140,21 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
+    // The quarantine mark is the gateway's (DM-90): a path addressing it is refused, a body's
+    // copy dropped, so only the space's rules set it below.
+    if operation.is_write() && !subscribing {
+        match owned_guarded(&mut sent, &path) {
+            Err(problem) => return problem.into_response(),
+            Ok(true) => {
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+            }
+            Ok(false) => {}
+        }
+    }
+
     // A quantity is written in its model's unit or not at all (DM-06, T-2810): a wrong
     // `unitCode` is refused, a missing one filled with the model's code unless the space
     // refuses that. A view endpoint writes in its target model, which the space's rules do not
@@ -1158,7 +1173,11 @@ pub(crate) async fn serve_ngsi_ld(
                     return problem.into_response();
                 }
             }
-            if !units_filled.is_empty() {
+            let before = sent.len();
+            if let Err(problem) = quality_judged(&mut sent, &path, &endpoint) {
+                return problem.into_response();
+            }
+            if !units_filled.is_empty() || sent.len() != before {
                 parts.headers.remove(CONTENT_LENGTH);
                 parts
                     .headers
@@ -1923,6 +1942,9 @@ async fn view_payload(
             }
         }
     }
+    if operation.is_write() {
+        owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
+    }
     let declared = endpoint.declared_types.as_ref();
     let mut filled = Vec::new();
     if operation.is_write() && !sent.is_empty() {
@@ -1930,6 +1952,19 @@ async fn view_payload(
             filled = filled_units(sent, path, &declared.units).map_err(|problem| {
                 tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
                 Box::new(problem.into_response())
+            })?;
+            quality_judged(sent, path, endpoint).map_err(|problem| {
+                // The broker decides a view's grants after this; a caller the Endpoint's
+                // Policy refuses learns that, never a rule's name or bound (DM-88).
+                let verdict =
+                    gateway
+                        .pdp
+                        .decide(subject, operation, &query::requested(params), endpoint);
+                if verdict.is_deny() {
+                    Box::new(refused(operation, path))
+                } else {
+                    Box::new(problem.into_response())
+                }
             })?;
         }
     }
@@ -2757,6 +2792,72 @@ fn filled_units(
         })?;
     }
     Ok(filled)
+}
+
+/// The quarantine mark is written by the space's rules alone (DM-90): a write whose path
+/// addresses it is refused, a `DELETE` included, and a body's own copy is dropped. `true` when
+/// the body changed.
+fn owned_guarded(sent: &mut Vec<u8>, path: &str) -> Result<bool, Box<ProblemDetails>> {
+    let targeted = operations::targeted_attribute(path);
+    if let Some(problem) = crate::quality::owned_path(targeted) {
+        tracing::info!("write refused: it addresses the quarantine mark");
+        return Err(Box::new(problem));
+    }
+    if sent.is_empty() || targeted.is_some() {
+        return Ok(false);
+    }
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        return Ok(false);
+    };
+    if !crate::quality::strip_owned(&mut payload) {
+        return Ok(false);
+    }
+    *sent = serde_json::to_vec(&payload).map_err(|error| {
+        tracing::error!(%error, "a write without the quarantine mark does not serialize");
+        Box::new(ProblemDetails::internal())
+    })?;
+    Ok(true)
+}
+
+/// Judges a write against the space's quality rules (DM-87..DM-93): a rejecting rule refuses
+/// it, a flag or a quarantine is written into `sent` before it is forwarded.
+fn quality_judged(
+    sent: &mut Vec<u8>,
+    path: &str,
+    endpoint: &Endpoint,
+) -> Result<(), Box<ProblemDetails>> {
+    let Some(rules) = endpoint
+        .declared_types
+        .as_ref()
+        .map(|declared| &declared.quality)
+        .filter(|rules| !rules.is_empty())
+    else {
+        return Ok(());
+    };
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        // `judge_write` already refused a body that is not JSON; nothing is left to check.
+        return Ok(());
+    };
+    let addressed = operations::addressed_entity(path).map(query::decode);
+    let shape = crate::units::Shape {
+        addressed: addressed.as_deref(),
+        targeted: operations::targeted_attribute(path),
+    };
+    let before = payload.clone();
+    crate::quality::enforce(
+        &mut payload,
+        shape,
+        rules,
+        &endpoint.space,
+        chrono::Utc::now(),
+    )?;
+    if payload != before {
+        *sent = serde_json::to_vec(&payload).map_err(|error| {
+            tracing::error!(%error, "a write with its quality marks does not serialize");
+            Box::new(ProblemDetails::internal())
+        })?;
+    }
+    Ok(())
 }
 
 /// The answer to a write whose units the gateway filled, saying which (DM-06). A refused

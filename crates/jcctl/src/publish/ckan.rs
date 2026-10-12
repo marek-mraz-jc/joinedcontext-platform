@@ -433,6 +433,76 @@ pub fn missing_linkml(record: &Value) -> bool {
             .any(|artifact| artifact["format"] == "LinkML")
 }
 
+/// The W3C Data Quality Vocabulary, which DCAT-AP's own quality terms build on (DM-95).
+pub const DQV: &str = "http://www.w3.org/ns/dqv#";
+/// The metric of the share of checks a dataset's writes passed over seven days.
+pub const PASS_RATE: &str = "https://joinedcontext.com/ns/quality#passRate";
+/// The metric of the age, in seconds, of the newest data when the space was last read.
+pub const FRESHNESS: &str = "https://joinedcontext.com/ns/quality#freshness";
+
+/// What the platform measured of one dataset's data (DM-95, ADR-N-046 2.7). `None` is "not
+/// measured", which adds nothing, never a zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Measurements {
+    /// Checks passed over all checks of the space's quality rules in seven days, 0..=1.
+    pub pass_rate: Option<f64>,
+    /// Seconds between the newest data and the daily quality run that read it.
+    pub freshness_seconds: Option<i64>,
+}
+
+/// `record` with a `dqv:hasQualityMeasurement` for each measurement taken (DM-95).
+pub fn measured(record: &Value, measurements: &Measurements) -> Value {
+    let node = |metric: &str, value: Value| {
+        json!({
+            "@type": "dqv:QualityMeasurement",
+            "dqv:isMeasurementOf": { "@id": metric },
+            "dqv:value": value,
+        })
+    };
+    let nodes: Vec<Value> = [
+        measurements
+            .pass_rate
+            .map(|rate| node(PASS_RATE, json!(rate))),
+        measurements
+            .freshness_seconds
+            .map(|seconds| node(FRESHNESS, json!(seconds))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut record = record.clone();
+    if nodes.is_empty() {
+        return record;
+    }
+    if let Some(context) = record.get_mut("@context").and_then(Value::as_object_mut) {
+        context.entry("dqv").or_insert_with(|| json!(DQV));
+    }
+    record["dqv:hasQualityMeasurement"] = Value::Array(nodes);
+    record
+}
+
+/// The record's quality measurements as the extras a CKAN dataset page shows: ckanext-dcat maps
+/// only `dqv:hasQualityAnnotation`, so they are plain keys (DM-95).
+fn quality_extras(record: &Value) -> Vec<Value> {
+    let measurements = record
+        .get("dqv:hasQualityMeasurement")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    measurements
+        .iter()
+        .filter_map(|node| {
+            let key = match node.pointer("/dqv:isMeasurementOf/@id")?.as_str()? {
+                PASS_RATE => "quality_pass_rate",
+                FRESHNESS => "quality_freshness_seconds",
+                _ => return None,
+            };
+            let value = node.get("dqv:value")?;
+            Some(json!({ "key": key, "value": value.to_string() }))
+        })
+        .collect()
+}
+
 /// Whether CKAN holds the dataset as deleted: `package_delete` marks rather than purges.
 fn deleted(live: &Value) -> bool {
     live.get("state").and_then(Value::as_str) == Some("deleted")
@@ -617,6 +687,7 @@ fn extras(record: &Value, url: &str, language: Option<&str>) -> Value {
         })
         .collect();
     extras.extend(catalog_extras(record, language));
+    extras.extend(quality_extras(record));
     // Who wrote this dataset and where it came from, so a manual edit in CKAN is visible
     // as drift rather than being silently overwritten without a trace (MF-08).
     extras.push(json!({ "key": "endpoint", "value": format!("{url}/") }));

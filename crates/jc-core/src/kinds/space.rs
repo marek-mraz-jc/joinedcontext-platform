@@ -251,10 +251,229 @@ pub struct ContextSpaceSpec {
     /// A `unitCode` other than the model's is refused either way.
     #[serde(default, skip_serializing_if = "MissingUnitCode::is_fill")]
     pub missing_unit_code: MissingUnitCode,
+    /// How long the broker keeps each type's data; a type without a rule is kept forever
+    /// (DM-82, ADR-N-046).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retention: Vec<RetentionRule>,
+    /// The space's own quality rules beside its model's constraints, at most 64 (DM-87,
+    /// ADR-N-046).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quality: Vec<QualityRule>,
     /// The `ContextBroker` this space lives on; the organization's default when absent
     /// (PF-111, ADR-N-047). Changing it on a space that holds entities is a move job (PF-115).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_ref: Option<String>,
+}
+
+/// The most quality rules a space declares (DM-92).
+pub const MAX_QUALITY_RULES: usize = 64;
+
+/// What a quality rule checks (DM-87).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum QualityKind {
+    /// A number Property's value against `min` and/or `max`.
+    Range,
+    /// Every point of a GeoProperty inside `bbox`.
+    Area,
+    /// The attribute's `observedAt` against `maxAhead` (on write) and `maxAge` (by the sweep).
+    Freshness,
+}
+
+/// What a broken quality rule does (DM-88, DM-89, DM-90).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum QualityOutcome {
+    /// The write is refused.
+    Reject,
+    /// The entity is stored and the attribute carries `qualityFlags`.
+    Flag,
+    /// The entity is stored with `quarantinedAt` and hidden from all but the owner and steward.
+    Quarantine,
+}
+
+/// One named quality rule of a space (DM-87, ADR-N-046 2.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct QualityRule {
+    /// A DNS-1123 label, unique in the space: it names the rule in a refusal and the metric.
+    pub name: String,
+    /// A class of the space's Data Model.
+    pub entity_type: String,
+    /// What the rule checks.
+    pub kind: QualityKind,
+    /// The slot of `entity_type` the rule reads.
+    pub attribute: String,
+    /// `range`: the smallest value allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<serde_json::Number>,
+    /// `range`: the largest value allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<serde_json::Number>,
+    /// `area`: `[minLon, minLat, maxLon, maxLat]` in WGS 84.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<[serde_json::Number; 4]>,
+    /// `freshness`: how far `observedAt` may lie in the future, checked on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ahead: Option<String>,
+    /// `freshness`: how old `observedAt` may be, checked by the sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<String>,
+    /// Overrides the kind's default outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<QualityOutcome>,
+}
+
+impl QualityRule {
+    /// The outcome of a check on write: `range` and `area` flag, `maxAhead` rejects (DM-87).
+    pub fn write_outcome(&self) -> QualityOutcome {
+        self.outcome.unwrap_or(match self.kind {
+            QualityKind::Freshness => QualityOutcome::Reject,
+            QualityKind::Range | QualityKind::Area => QualityOutcome::Flag,
+        })
+    }
+
+    /// The outcome of the sweep's `maxAge` check: quarantine unless the rule says otherwise.
+    pub fn sweep_outcome(&self) -> QualityOutcome {
+        self.outcome.unwrap_or(QualityOutcome::Quarantine)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let refuse = |field: &'static str, value: String, reason: &'static str| {
+            Err(Error::Name {
+                field,
+                value,
+                reason,
+            })
+        };
+        if names::validate_dns1123_label(&self.name).is_err() {
+            return refuse(
+                "spec.quality.name",
+                self.name.clone(),
+                "a quality rule's name is a DNS-1123 label (DM-87)",
+            );
+        }
+        names::validate_entity_type(&self.entity_type)?;
+        if self.attribute.is_empty()
+            || self.attribute.len() > 256
+            || self
+                .attribute
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace())
+        {
+            return refuse(
+                "spec.quality.attribute",
+                self.attribute.clone(),
+                "an attribute is a slot name of the type (DM-87)",
+            );
+        }
+        let number = |n: &serde_json::Number| n.as_f64().filter(|v| v.is_finite());
+        let (range, area, fresh) = (
+            self.min.is_some() || self.max.is_some(),
+            self.bbox.is_some(),
+            self.max_ahead.is_some() || self.max_age.is_some(),
+        );
+        let fits = match self.kind {
+            QualityKind::Range => range && !area && !fresh,
+            QualityKind::Area => area && !range && !fresh,
+            QualityKind::Freshness => fresh && !range && !area,
+        };
+        if !fits {
+            return refuse(
+                "spec.quality",
+                self.name.clone(),
+                "a range rule sets min or max, an area rule bbox, a freshness rule maxAhead \
+                 or maxAge, and nothing else (DM-87)",
+            );
+        }
+        if let (Some(min), Some(max)) = (self.min.as_ref(), self.max.as_ref()) {
+            if number(min).zip(number(max)).is_none_or(|(a, b)| a > b) {
+                return refuse(
+                    "spec.quality.min",
+                    self.name.clone(),
+                    "min is at most max (DM-87)",
+                );
+            }
+        }
+        if let Some(bbox) = &self.bbox {
+            let v: Vec<f64> = bbox.iter().filter_map(number).collect();
+            let ok = v.len() == 4
+                && v[0] <= v[2]
+                && v[1] <= v[3]
+                && [v[0], v[2]].iter().all(|x| (-180.0..=180.0).contains(x))
+                && [v[1], v[3]].iter().all(|y| (-90.0..=90.0).contains(y));
+            if !ok {
+                return refuse(
+                    "spec.quality.bbox",
+                    self.name.clone(),
+                    "bbox is [minLon, minLat, maxLon, maxLat] in WGS 84, min <= max (DM-87)",
+                );
+            }
+        }
+        for (field, value) in [
+            ("spec.quality.maxAhead", &self.max_ahead),
+            ("spec.quality.maxAge", &self.max_age),
+        ] {
+            if let Some(v) = value.as_deref().filter(|v| duration_seconds(v).is_none()) {
+                return refuse(
+                    field,
+                    v.to_owned(),
+                    "a freshness duration is PT1S to P3650D, as PT30S, PT5M or P1D (DM-87)",
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One type's retention in a space (DM-82, ADR-N-046): both durations absent keeps it forever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RetentionRule {
+    /// A class of the space's Data Model.
+    pub entity_type: String,
+    /// How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// How long a temporal instance is kept, in the same form (DM-84).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
+}
+
+/// Seconds of a retention duration `P[nD][T[nH][nM][nS]]` from one minute to 3650 days, the
+/// form the broker's `/q/retention` reads; `None` for anything else (DM-82).
+pub fn retention_seconds(raw: &str) -> Option<u64> {
+    duration_seconds(raw).filter(|total| *total >= 60)
+}
+
+/// Seconds of a duration `P[nD][T[nH][nM][nS]]` from one second to 3650 days; `None` for
+/// anything else (DM-82, DM-87).
+pub fn duration_seconds(raw: &str) -> Option<u64> {
+    let rest = raw.strip_prefix('P')?;
+    let (days, time) = match rest.split_once('T') {
+        Some((_, "")) => return None,
+        Some((d, t)) => (d, t),
+        None => (rest, ""),
+    };
+    if days.is_empty() && time.is_empty() {
+        return None;
+    }
+    let mut total: u64 = match days {
+        "" => 0,
+        d => d
+            .strip_suffix('D')?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(86_400)?,
+    };
+    let mut time = time;
+    for (unit, scale) in [('H', 3600), ('M', 60), ('S', 1)] {
+        if let Some((n, tail)) = time.split_once(unit) {
+            total = total.checked_add(n.parse::<u64>().ok()?.checked_mul(scale)?)?;
+            time = tail;
+        }
+    }
+    (time.is_empty() && (1..=3650 * 86_400).contains(&total)).then_some(total)
 }
 
 /// What a space does with a quantity written without its `unitCode` (DM-06).
@@ -313,6 +532,50 @@ impl ContextSpaceSpec {
                         got: kind.to_string(),
                     });
                 }
+            }
+        }
+
+        let mut ruled = std::collections::BTreeSet::new();
+        for rule in &self.retention {
+            names::validate_entity_type(&rule.entity_type)?;
+            if !ruled.insert(rule.entity_type.as_str()) {
+                return Err(Error::Name {
+                    field: "spec.retention",
+                    value: rule.entity_type.clone(),
+                    reason: "a type has at most one retention rule (DM-82)",
+                });
+            }
+            for (field, value) in [
+                ("spec.retention.current", &rule.current),
+                ("spec.retention.history", &rule.history),
+            ] {
+                if let Some(v) = value.as_deref().filter(|v| retention_seconds(v).is_none()) {
+                    return Err(Error::Name {
+                        field,
+                        value: v.to_owned(),
+                        reason: "a retention duration is PT1M to P3650D, as PT5M, PT8H, \
+                                 P30D or P1DT12H (DM-82)",
+                    });
+                }
+            }
+        }
+
+        if self.quality.len() > MAX_QUALITY_RULES {
+            return Err(Error::Name {
+                field: "spec.quality",
+                value: self.quality.len().to_string(),
+                reason: "a space declares at most 64 quality rules (DM-92)",
+            });
+        }
+        let mut named = std::collections::BTreeSet::new();
+        for rule in &self.quality {
+            rule.validate()?;
+            if !named.insert(rule.name.as_str()) {
+                return Err(Error::Name {
+                    field: "spec.quality.name",
+                    value: rule.name.clone(),
+                    reason: "a quality rule's name is unique in the space (DM-87)",
+                });
             }
         }
 
