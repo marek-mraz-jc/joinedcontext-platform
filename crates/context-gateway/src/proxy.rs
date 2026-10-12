@@ -56,13 +56,15 @@ pub struct Broker {
 pub struct Routes {
     by_tenant: std::collections::HashMap<String, Option<String>>,
     by_view: std::collections::HashMap<String, Option<String>>,
-    /// The broker each view lives on, by name, for the hub's label (ADR-N-046 §2.3).
+    /// The broker each view lives on, by name, for the hub's label (ADR-N-047 §2.3).
     named: std::collections::HashMap<String, String>,
     /// Tenants and views a move job holds read-only (PF-115).
     moving: std::collections::HashSet<String>,
+    /// The tenants alone of `moving`: the series the move job reads, never a view's slug.
+    held: std::collections::HashSet<String>,
 }
 
-/// How long a writer is told to wait while its space moves (ADR-N-046 §2.6).
+/// How long a writer is told to wait while its space moves (ADR-N-047 §2.6).
 const MOVING_RETRY_SECONDS: u32 = 30;
 
 /// Why a forwarded request produced no answer.
@@ -171,12 +173,20 @@ impl Broker {
                 .map(|(key, broker)| (key.clone(), address(broker)))
                 .collect()
         };
-        self.routes.store(std::sync::Arc::new(Routes {
+        let routes = Routes {
             by_tenant: off_main(&brokers.by_space),
             by_view: off_main(&brokers.by_view),
             named: brokers.by_view.clone().into_iter().collect(),
             moving: brokers.moving.iter().cloned().collect(),
-        }));
+            held: brokers
+                .moving
+                .iter()
+                .filter(|key| brokers.by_space.contains_key(*key))
+                .cloned()
+                .collect(),
+        };
+        crate::telemetry::held(&self.routes.load().held, &routes.held);
+        self.routes.store(std::sync::Arc::new(routes));
     }
 
     /// The name of the broker a view (an Endpoint's slug or `cs-{space}`) lives on.
@@ -330,7 +340,7 @@ impl Broker {
 }
 
 /// Where a Debian-derived image keeps its trust anchors. The gateway's own image is
-/// `gcr.io/distroless/cc-debian12`, which ships `ca-certificates`.
+/// `gcr.io/distroless/cc-debian13`, which ships `ca-certificates`.
 const SYSTEM_ROOTS: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// The public trust anchors the image carries, read at start-up rather than compiled in (R46).

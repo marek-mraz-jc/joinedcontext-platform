@@ -275,7 +275,7 @@ async fn the_list_needs_a_token_and_pages() {
     }
 }
 
-/// ADR-N-046 §2.3: across brokers, the list names each Endpoint's broker, in the REST list and
+/// ADR-N-047 §2.3: across brokers, the list names each Endpoint's broker, in the REST list and
 /// the hub's alike; an Endpoint of no broker of its own is `main`'s.
 #[tokio::test]
 async fn each_listed_endpoint_names_the_broker_its_space_lives_on() {
