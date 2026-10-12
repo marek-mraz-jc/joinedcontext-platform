@@ -40,7 +40,7 @@
 //! compiles and names the rest as served beside the model.
 
 use crate::app::{ngsi_ld_request, sha256_hex, Credential, Gateway};
-use crate::handlers::access_routes::{self, AccessFormat};
+use crate::handlers::view_access::{self, AccessFormat};
 use crate::handlers::{schema, schema_routes};
 use crate::mcp::elicitation;
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
@@ -1887,7 +1887,7 @@ async fn access_document(
         "grant-ast" => AccessFormat::GrantAst,
         _ => AccessFormat::AuthZen,
     };
-    access_routes::document(gateway, endpoint, subject, format)
+    view_access::document(gateway, endpoint, subject, format)
         .await
         .map_err(|answer| {
             format!(

@@ -11,9 +11,8 @@
 //! SEMIC DCAT-AP 3.0 shapes and checks that both serialisations are one graph. The fast CI
 //! lane runs the two together; the assertions here run everywhere.
 
-use context_gateway::handlers::access_odrl;
 use context_gateway::handlers::endpoint_surface::{dataset, dataset_turtle, feed, feed_turtle};
-use context_gateway::pdp::evaluator::Subject;
+use context_gateway::handlers::view_access::odrl;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, Catalog, Licence, PolicySpec, Representation};
 use serde_json::{json, Value};
@@ -399,13 +398,17 @@ fn the_access_policy_carries_the_licence_duties_on_every_permission() {
             Audience::Public,
             Some(catalog(&format!("license: {licence}\n"))),
         );
-        let document = access_odrl::policy(
-            &Subject::anonymous(),
-            &endpoint,
-            chrono::Utc::now(),
-            BASE,
-            |_| "digest".to_owned(),
-        );
+        // The broker's engine writes the grants (T-3649); the Endpoint adds its licence.
+        let engine = json!({
+            "@context": ["http://www.w3.org/ns/odrl.jsonld"], "@type": "Set",
+            "permission": [
+                { "action": ["ngsi-ld:queryEntity"], "target": { "@type": "AirQualityObserved" } },
+                { "action": ["ngsi-ld:retrieveEntity"], "target": { "@type": "AirQualityObserved" } }
+            ],
+            "prohibition": []
+        });
+        let document =
+            odrl::published(engine, &endpoint, BASE, |_| "digest".to_owned()).expect("a Set");
         let permissions = document["permission"].as_array().expect("permissions");
         assert!(!permissions.is_empty());
         for permission in permissions {
@@ -417,7 +420,7 @@ fn the_access_policy_carries_the_licence_duties_on_every_permission() {
                 .collect();
             assert_eq!(actions, expected, "{licence}: {permission:#}");
         }
-        let turtle = access_odrl::turtle(&document);
+        let turtle = odrl::turtle(&document);
         if expected.contains(&SHARE_ALIKE) {
             assert!(
                 turtle.contains(&format!("odrl:duty [ odrl:action <{SHARE_ALIKE}> ]")),
