@@ -570,11 +570,6 @@ impl DataModelSpec {
         Ok(())
     }
 
-    /// Whether this is an organization model rather than a project one (DM-75).
-    pub fn is_organization_model(meta: &ObjectMeta) -> bool {
-        meta.namespace.as_deref() == Some(ORG_NAMESPACE)
-    }
-
     /// Returns `true` if this data model version can be referenced by Endpoints and Pipelines (DM-26).
     pub fn can_be_referenced(&self) -> bool {
         self.lifecycle == DataModelLifecycle::Published

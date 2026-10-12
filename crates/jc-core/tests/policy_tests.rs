@@ -236,15 +236,6 @@ fn policy_selector_and_spec_constraints() {
     });
     assert!(bad_val.validate().is_err());
 
-    // residual_is_empty on golden is false; when cleared is true
-    assert!(!p.spec.residual_is_empty());
-    let mut empty_residual = p.spec.clone();
-    empty_residual.q = None;
-    empty_residual.scope_q = None;
-    empty_residual.geo_q = None;
-    empty_residual.temporal_q = None;
-    assert!(empty_residual.residual_is_empty());
-
     // has_write on golden is false; when updateEntity added is true
     assert!(!p.spec.has_write());
     let mut with_write = p.spec.clone();

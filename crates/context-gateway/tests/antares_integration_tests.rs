@@ -18,6 +18,7 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
+use context_gateway::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::process::Command;
@@ -33,6 +34,8 @@ const MEMBERS_SLUG: &str = "t9x2wqvn7mzc4hd6bkp3rjs5ga";
 const WRITER_SLUG: &str = "p3mq8vzt5xkc2nhw7brj4gd6sy";
 /// The dev seed's shape: a public grant that narrows nothing (T-0379).
 const OPEN_SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
+/// An Endpoint serving the space in another model through a view mapping (G18, T-3799).
+const MAPPED_SLUG: &str = "w8ck3nzq6vtm2xh5brj7pgd4sf";
 const STATION: &str =
     "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-integration-01";
 
@@ -900,6 +903,73 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
 }
 
 /// The probes the deployment uses answer before any endpoint exists (OPS-12).
+/// T-3799: an Endpoint with a view mapping is its broker view. The Portal writes the Mapping IR
+/// into the view of the slug (T-3671); the broker inverts the target-model query into the source
+/// model and rebuilds the answer (T-3669), and a write is its 405, never the source model's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mapped_endpoint_reads_in_the_target_model_through_its_view() {
+    let Some(antares) = Antares::start() else {
+        return;
+    };
+    let ir = json!({
+        "version": 2,
+        "sourceClass": "AirQualityObserved",
+        "targetClass": "AirQuality",
+        "slots": [{ "target": "particulates", "source": "pm10", "kind": "rename", "filterable": true }]
+    });
+    let (mut views, mut rules) = public_rules();
+    let mut mapped = view(
+        MAPPED_SLUG,
+        &["pm10"],
+        &["query_entities", "retrieve_entity"],
+    );
+    mapped["mapping"] = ir.clone();
+    views.push(mapped);
+    rules["views"][MAPPED_SLUG] = json!([format!("{SPACE}/public-air")]);
+    antares.load(&views, rules).await;
+    let mut stored = station(None);
+    if let Some(members) = stored.as_object_mut() {
+        members.remove("@context");
+    }
+    antares.seed(&stored).await;
+    let endpoint = Endpoint {
+        view_mapping: Some(std::sync::Arc::new(
+            ViewMapping::parse(&ir).expect("the IR parses"),
+        )),
+        ..endpoint(MAPPED_SLUG, Audience::Public)
+    };
+    let app = router(std::sync::Arc::new(
+        Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG).serve([endpoint]),
+    ));
+
+    let (status, body) = call(&app, get(MAPPED_SLUG, "/entities?type=AirQuality")).await;
+    let text = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(status, StatusCode::OK, "read: {text}");
+    let entities: Value = serde_json::from_slice(&body).expect("a list");
+    assert_eq!(entities[0]["id"], json!(STATION), "{text}");
+    assert_eq!(entities[0]["type"], json!("AirQuality"), "{text}");
+    assert_eq!(entities[0]["particulates"]["value"], json!(34.2), "{text}");
+    assert!(!text.contains("pm10") && !text.contains("pm25"), "{text}");
+
+    for (q, found) in [("particulates%3E30", 1), ("particulates%3E40", 0)] {
+        let (status, body) = call(
+            &app,
+            get(MAPPED_SLUG, &format!("/entities?type=AirQuality&q={q}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{q}");
+        let entities: Value = serde_json::from_slice(&body).expect("a list");
+        assert_eq!(entities.as_array().map(Vec::len), Some(found), "{q}");
+    }
+
+    let (status, _) = call(&app, post(MAPPED_SLUG, "/entities", &station(None))).await;
+    assert_eq!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "a mapped view takes no write"
+    );
+}
+
 #[tokio::test]
 async fn the_health_probes_need_no_endpoints_and_no_broker() {
     let app = router(std::sync::Arc::new(Gateway::new(

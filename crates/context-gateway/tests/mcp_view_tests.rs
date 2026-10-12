@@ -541,3 +541,65 @@ async fn the_hop_accepts_what_the_brokers_transport_asks_for() {
         );
     }
 }
+
+/// What is no single request never reaches the broker: a notification is acknowledged, and a
+/// JSON-RPC batch is answered as the façade always answered one (the broker refuses batches
+/// whole too, Antares `mcp_transport`).
+#[tokio::test]
+async fn a_notification_and_a_batch_make_no_hop() {
+    let (upstream, hops) = broker(StatusCode::OK, json!({})).await;
+    let notification = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let request = Request::post(endpoint_mcp())
+        .header("content-type", "application/json")
+        .body(Body::from(notification.to_string()))
+        .expect("a request");
+    let status = router(Arc::new(gateway(upstream.clone(), endpoint())))
+        .oneshot(request)
+        .await
+        .expect("the gateway answers")
+        .status();
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let batch = json!([call(
+        "query_entities",
+        json!({ "type": ["AirQualityObserved"] })
+    )]);
+    let (status, answer) = post(gateway(upstream, endpoint()), &endpoint_mcp(), &batch).await;
+    assert!(
+        status == StatusCode::ACCEPTED || status == StatusCode::OK && answer.get("error").is_some(),
+        "{status}: {answer}"
+    );
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
+/// A listing the broker answers as an event stream is passed on as it came: the gateway adds
+/// its own entries only to a JSON answer it can read whole.
+#[tokio::test]
+async fn an_event_stream_listing_is_passed_on_untouched() {
+    let stream =
+        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+    let app = Router::new().fallback(move || async move {
+        ([("content-type", "text/event-stream")], stream).into_response()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let upstream = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let request = Request::post(endpoint_mcp())
+        .header("content-type", "application/json")
+        .body(Body::from(list.to_string()))
+        .expect("a request");
+    let response = router(Arc::new(gateway(upstream, endpoint())))
+        .oneshot(request)
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    assert_eq!(String::from_utf8_lossy(&bytes), stream);
+}

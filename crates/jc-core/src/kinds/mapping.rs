@@ -370,9 +370,4 @@ impl MappingSpec {
     pub fn requires_elevated_lane(&self) -> bool {
         !self.native.is_empty()
     }
-
-    /// Returns the repository path for the compiled Bloblang mapping processor (DM-35).
-    pub fn compiled_bloblang_path(&self, name: &str) -> String {
-        format!("generated/{name}.blobl")
-    }
 }
