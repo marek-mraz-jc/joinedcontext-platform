@@ -1,6 +1,7 @@
 //! T-4077: the gateway holds at most its write budget of request bodies at once. A write past it
-//! is answered 503 with `Retry-After` before its body is read, and never reaches the broker; a
-//! read is not counted; the budget comes back when a write is answered.
+//! waits for its share in arrival order (T-4123) and, when the wait runs out, is answered 503 with
+//! `Retry-After` before its body is read, and never reaches the broker; a read is not counted; the
+//! budget comes back when a write is answered.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -15,6 +16,7 @@ use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
 use tower::ServiceExt;
 
@@ -23,10 +25,10 @@ const SPACE: &str = "ovzdusie";
 const DOMAIN: &str = "banskabystrica.sk";
 
 /// A broker that answers a read at once and holds every write until `release` hands it a
-/// permit, telling `arrived` when one comes in.
+/// permit, telling `arrived` the body's size in KiB when one comes in.
 struct Stalled {
     url: String,
-    arrived: mpsc::UnboundedReceiver<()>,
+    arrived: mpsc::UnboundedReceiver<usize>,
     release: Arc<Semaphore>,
     writes: Arc<AtomicUsize>,
 }
@@ -42,9 +44,11 @@ async fn stalled_broker() -> Stalled {
             if request.method() == Method::GET {
                 return (StatusCode::OK, "[]");
             }
-            let _ = axum::body::to_bytes(request.into_body(), 8 << 20).await;
+            let body = axum::body::to_bytes(request.into_body(), 8 << 20)
+                .await
+                .unwrap_or_default();
             count.fetch_add(1, Ordering::SeqCst);
-            let _ = tx.send(());
+            let _ = tx.send(body.len() / 1024);
             gate.acquire().await.expect("the gate").forget();
             (StatusCode::NO_CONTENT, "")
         }
@@ -129,11 +133,12 @@ fn read() -> Request<Body> {
 }
 
 #[tokio::test]
-async fn a_write_past_the_budget_is_answered_503_and_never_reaches_the_broker() {
+async fn a_write_past_the_budget_waits_then_is_answered_503_and_never_reaches_the_broker() {
     let mut broker = stalled_broker().await;
     let gateway = Arc::new(
         Gateway::new(Broker::new(broker.url.clone()), Box::new(PolicyPdp), DOMAIN)
             .budget_writes(1)
+            .wait_for_writes(Duration::from_millis(100))
             .serve([endpoint()]),
     );
     let app = router(gateway);
@@ -259,4 +264,63 @@ async fn a_write_larger_than_the_budget_still_goes_through_an_idle_gateway() {
         .expect("answered")
         .status()
         .is_success());
+}
+
+/// T-4123: on dev a stream of small writes kept part of the budget held at every instant, so a
+/// page of most of the budget never found its share free and was answered 503 every second. A
+/// page that waits now holds back the small writes that come after it, and goes first.
+#[tokio::test]
+async fn a_page_waiting_for_most_of_the_budget_goes_before_the_small_writes_behind_it() {
+    let mut broker = stalled_broker().await;
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(broker.url.clone()), Box::new(PolicyPdp), DOMAIN)
+            .budget_writes(1)
+            .wait_for_writes(Duration::from_secs(5))
+            .serve([endpoint()]),
+    );
+    let app = router(gateway);
+
+    // A small write holds 100 of the 1024 KiB at the broker.
+    let small = tokio::spawn(app.clone().oneshot(upsert(100, 1)));
+    broker
+        .arrived
+        .recv()
+        .await
+        .expect("the small write arrives");
+    // A page of 1000 KiB does not fit beside it and waits; a 50 KiB write after it would fit
+    // beside the small one, and still waits behind the page.
+    let page = tokio::spawn(app.clone().oneshot(upsert(1000, 2)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let later = tokio::spawn(app.clone().oneshot(upsert(50, 3)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        broker.writes.load(Ordering::SeqCst),
+        1,
+        "the later small write overtook the waiting page"
+    );
+
+    // The small write answered, the page takes its share; the later write does not fit beside
+    // the page and follows when the page is answered.
+    broker.release.add_permits(1);
+    let first = broker.arrived.recv().await.expect("the page arrives");
+    assert!(
+        first >= 1000,
+        "the page goes first, not a {first} KiB write"
+    );
+    broker.release.add_permits(1);
+    let second = broker
+        .arrived
+        .recv()
+        .await
+        .expect("the later write arrives");
+    assert!(second < 100, "{second} KiB");
+    broker.release.add_permits(1);
+    for answer in [small, page, later] {
+        assert!(answer
+            .await
+            .expect("joined")
+            .expect("answered")
+            .status()
+            .is_success());
+    }
 }
