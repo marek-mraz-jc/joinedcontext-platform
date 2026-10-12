@@ -4,6 +4,13 @@ ignore = [
   # (crates/assistant: tokenizers 0.23.2 -> paste; tokenizers 1.0 still pulls it through
   # tk-encode). No maintained upgrade path; owner decision (a) on T-3209 (T-3191, T-3202).
   "RUSTSEC-2024-0436",
+  # unsafe-libyaml 0.2.11 is unmaintained (not a vulnerability): crates/assistant: kreuzberg
+  # 4.10.4 -> serde_yaml_ng 0.10 -> unsafe-libyaml, a required dependency of every kreuzberg
+  # release up to 5.0.0-rc.35, so no upgrade removes it. No crate here parses YAML with it: the
+  # assistant hands kreuzberg HTML pages and the document types of crawl::links::is_document_type
+  # only (extract::document_type, test a_document_is_read_only_as_a_document_type), never YAML.
+  # Decided on T-4070 like RUSTSEC-2024-0436 on T-3209; drop it when kreuzberg drops the crate.
+  "RUSTSEC-2024-0449",
 ]
 [licenses]
 allow = [

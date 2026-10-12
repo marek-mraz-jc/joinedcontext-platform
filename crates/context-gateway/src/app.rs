@@ -1174,8 +1174,10 @@ pub(crate) async fn serve_ngsi_ld(
                 }
             }
             let before = sent.len();
-            if let Err(problem) = quality_judged(&mut sent, &path, operation, &endpoint) {
-                return problem.into_response();
+            if let Err(answer) =
+                quality_judged(&mut sent, &path, operation, &endpoint, &mut divided)
+            {
+                return *answer;
             }
             if !units_filled.is_empty() || sent.len() != before {
                 parts.headers.remove(CONTENT_LENGTH);
@@ -1953,19 +1955,22 @@ async fn view_payload(
                 tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
                 Box::new(problem.into_response())
             })?;
-            quality_judged(sent, path, operation, endpoint).map_err(|problem| {
-                // The broker decides a view's grants after this; a caller the Endpoint's
-                // Policy refuses learns that, never a rule's name or bound (DM-88).
-                let verdict =
-                    gateway
-                        .pdp
-                        .decide(subject, operation, &query::requested(params), endpoint);
-                if verdict.is_deny() {
-                    Box::new(refused(operation, path))
-                } else {
-                    Box::new(problem.into_response())
-                }
-            })?;
+            // The broker decides a view's grants after this; a caller the Endpoint's Policy
+            // refuses learns that, never a rule's name or bound (DM-88), which a refusal or a
+            // 207's member names.
+            let earlier = divided.as_ref().map_or(0, |(_, refused)| refused.len());
+            let judged = quality_judged(sent, path, operation, endpoint, divided);
+            let refused_here = judged.is_err()
+                || divided.as_ref().map_or(0, |(_, refused)| refused.len()) > earlier;
+            if refused_here
+                && gateway
+                    .pdp
+                    .decide(subject, operation, &query::requested(params), endpoint)
+                    .is_deny()
+            {
+                return Err(Box::new(refused(operation, path)));
+            }
+            judged?;
         }
     }
     if let Some(rules) = declared
@@ -2822,12 +2827,17 @@ fn owned_guarded(sent: &mut Vec<u8>, path: &str) -> Result<bool, Box<ProblemDeta
 /// Judges a write against the slot constraints of the space's model (DM-86) and the space's
 /// quality rules (DM-87..DM-93): a broken constraint or a rejecting rule refuses it, a flag or
 /// a quarantine is written into `sent` before it is forwarded.
+///
+/// A batch is judged per entity, as GW18 and the relationships do: the members
+/// refused leave `sent` and join `divided`, so one bad record of a pipeline's page of 1000 no
+/// longer costs the other 999 (T-4011); a batch refused whole is a 207 naming every member.
 fn quality_judged(
     sent: &mut Vec<u8>,
     path: &str,
     operation: Operation,
     endpoint: &Endpoint,
-) -> Result<(), Box<ProblemDetails>> {
+    divided: &mut Option<(Vec<String>, Refused)>,
+) -> Result<(), Box<Response<Body>>> {
     let Some(declared) = endpoint.declared_types.as_ref() else {
         return Ok(());
     };
@@ -2843,30 +2853,63 @@ fn quality_judged(
         addressed: addressed.as_deref(),
         targeted: operations::targeted_attribute(path),
     };
-    if let Some(schema) = &declared.schema {
-        // A create or a replace carries the whole entity; every other write a part of it.
-        let whole = matches!(
-            operation,
-            Operation::CreateEntity | Operation::CreateBatch | Operation::ReplaceEntity
-        );
-        crate::quality::check_model(&payload, shape, whole, schema, &endpoint.space)?;
-    }
-    let rules = &declared.quality;
-    if rules.is_empty() {
-        return Ok(());
-    }
+    // A create or a replace carries the whole entity; every other write a part of it.
+    let whole = matches!(
+        operation,
+        Operation::CreateEntity | Operation::CreateBatch | Operation::ReplaceEntity
+    );
+    let judge = |payload: &mut Value| -> Result<(), Box<ProblemDetails>> {
+        if let Some(schema) = &declared.schema {
+            crate::quality::check_model(payload, shape, whole, schema, &endpoint.space)?;
+        }
+        crate::quality::enforce(
+            payload,
+            shape,
+            &declared.quality,
+            &endpoint.space,
+            chrono::Utc::now(),
+        )
+    };
+    let refuse = |problem: Box<ProblemDetails>| Box::new(problem.into_response());
     let before = payload.clone();
-    crate::quality::enforce(
-        &mut payload,
-        shape,
-        rules,
-        &endpoint.space,
-        chrono::Utc::now(),
-    )?;
+    let batch = matches!(
+        operation,
+        Operation::CreateBatch
+            | Operation::UpsertBatch
+            | Operation::UpdateBatch
+            | Operation::MergeBatch
+    );
+    match &mut payload {
+        Value::Array(entries) if batch => {
+            let mut refused: Refused = Vec::new();
+            entries.retain_mut(|entry| match judge(entry) {
+                Ok(()) => true,
+                Err(problem) => {
+                    refused.push((batch_entry_id(entry).unwrap_or_default(), *problem));
+                    false
+                }
+            });
+            if !refused.is_empty() {
+                let ids: Vec<String> = entries.iter().filter_map(batch_entry_id).collect();
+                let refused = match divided.take() {
+                    Some((_, mut earlier)) => {
+                        earlier.extend(refused);
+                        earlier
+                    }
+                    None => refused,
+                };
+                if entries.is_empty() {
+                    return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
+                }
+                *divided = Some((ids, refused));
+            }
+        }
+        payload => judge(payload).map_err(refuse)?,
+    }
     if payload != before {
         *sent = serde_json::to_vec(&payload).map_err(|error| {
-            tracing::error!(%error, "a write with its quality marks does not serialize");
-            Box::new(ProblemDetails::internal())
+            tracing::error!(%error, "a judged write does not serialize");
+            refuse(Box::new(ProblemDetails::internal()))
         })?;
     }
     Ok(())
