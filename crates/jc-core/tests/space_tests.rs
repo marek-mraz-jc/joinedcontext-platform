@@ -181,6 +181,7 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         missing_unit_code: MissingUnitCode::Fill,
         retention: Vec::new(),
         quality: Vec::new(),
+        broker_ref: None,
     };
     assert!(spec.validate().is_ok());
 

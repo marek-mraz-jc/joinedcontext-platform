@@ -259,6 +259,10 @@ pub struct ContextSpaceSpec {
     /// ADR-N-046).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quality: Vec<QualityRule>,
+    /// The `ContextBroker` this space lives on; the organization's default when absent
+    /// (PF-111, ADR-N-047). Changing it on a space that holds entities is a move job (PF-115).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_ref: Option<String>,
 }
 
 /// The most quality rules a space declares (DM-92).
@@ -573,6 +577,10 @@ impl ContextSpaceSpec {
                     reason: "a quality rule's name is unique in the space (DM-87)",
                 });
             }
+        }
+
+        if let Some(broker) = &self.broker_ref {
+            names::validate_dns1123_label(broker)?;
         }
 
         if let Some(ttl) = self.ttl_days {

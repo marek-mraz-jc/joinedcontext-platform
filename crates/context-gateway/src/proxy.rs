@@ -1,8 +1,9 @@
 //! Forwarding a request to the broker behind an endpoint (T-0005, EP-01, GW20).
 //!
-//! The upstream is fixed at start-up and the forwarded path is built from the route the
-//! router matched, so nothing a client sends can point the gateway at a different host or
-//! a different resource tree.
+//! The upstream is chosen by the gateway, never by the client: the broker of the space the
+//! gateway pinned as tenant, or of the view it named, else the one fixed at start-up
+//! (ADR-N-047). The forwarded path is built from the route the router matched, so nothing a
+//! client sends can point the gateway at a different host or a different resource tree.
 //!
 //! Hop-by-hop headers are dropped in both directions: they describe one TCP connection,
 //! and this is two.
@@ -14,6 +15,7 @@
 use axum::body::Body;
 use axum::http::header::{HeaderName, CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
+use axum::response::IntoResponse;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -41,7 +43,27 @@ const HOP_BY_HOP: &[&str] = &[
 pub struct Broker {
     client: Client<HttpsConnector<HttpConnector>, Body>,
     base: String,
+    /// The address of every broker but `main`: `{broker}` replaced by its name
+    /// (`JC_GATEWAY_BROKER_URL_TEMPLATE`, ADR-N-047).
+    template: Option<String>,
+    /// Which broker each space and view lives on, swapped whole on a reload.
+    routes: std::sync::Arc<arc_swap::ArcSwap<Routes>>,
 }
+
+/// The broker address of each space (by tenant) and each view (by name) whose broker is not
+/// `main`; `None` is a broker with no address, refused rather than sent to `main`.
+#[derive(Debug, Default)]
+pub struct Routes {
+    by_tenant: std::collections::HashMap<String, Option<String>>,
+    by_view: std::collections::HashMap<String, Option<String>>,
+    /// The broker each view lives on, by name, for the hub's label (ADR-N-046 §2.3).
+    named: std::collections::HashMap<String, String>,
+    /// Tenants and views a move job holds read-only (PF-115).
+    moving: std::collections::HashSet<String>,
+}
+
+/// How long a writer is told to wait while its space moves (ADR-N-046 §2.6).
+const MOVING_RETRY_SECONDS: u32 = 30;
 
 /// Why a forwarded request produced no answer.
 #[derive(Debug, thiserror::Error)]
@@ -116,9 +138,100 @@ impl Broker {
     /// connection to a subscriber it already spoke to, and cannot trust more than the
     /// gateway was configured to.
     pub fn aimed_at(&self, origin: impl Into<String>) -> Self {
+        // A subscriber's webhook is no broker: nothing a header says re-routes a delivery.
         Self {
             client: self.client.clone(),
             base: origin.into(),
+            template: None,
+            routes: Default::default(),
+        }
+    }
+
+    /// Addresses every broker but `main` by `template`, `{broker}` replaced by its name.
+    pub fn with_template(mut self, template: Option<String>) -> Self {
+        self.template = template;
+        self
+    }
+
+    /// Routes each space and view to the broker it lives on (ADR-N-047), from the next request
+    /// on. A broker without an address (no template, or a space naming no broker) is kept as
+    /// `None`, so its requests are refused instead of reaching `main`.
+    pub fn route(&self, brokers: &crate::store::SpaceBrokers) {
+        let address = |broker: &String| -> Option<String> {
+            match broker.as_str() {
+                jc_core::kinds::IMPLICIT_BROKER => Some(self.base.clone()),
+                "" => None,
+                name => self.template.as_ref().map(|t| t.replace("{broker}", name)),
+            }
+        };
+        let off_main = |table: &std::collections::BTreeMap<String, String>| {
+            table
+                .iter()
+                .filter(|(_, broker)| broker.as_str() != jc_core::kinds::IMPLICIT_BROKER)
+                .map(|(key, broker)| (key.clone(), address(broker)))
+                .collect()
+        };
+        self.routes.store(std::sync::Arc::new(Routes {
+            by_tenant: off_main(&brokers.by_space),
+            by_view: off_main(&brokers.by_view),
+            named: brokers.by_view.clone().into_iter().collect(),
+            moving: brokers.moving.iter().cloned().collect(),
+        }));
+    }
+
+    /// The name of the broker a view (an Endpoint's slug or `cs-{space}`) lives on.
+    pub fn broker_of_view(&self, view: &str) -> String {
+        self.routes
+            .load()
+            .named
+            .get(view)
+            .cloned()
+            .unwrap_or_else(|| jc_core::kinds::IMPLICIT_BROKER.to_owned())
+    }
+
+    /// Whether this request reaches a space a move holds read-only and could write it: every
+    /// method but `GET` and `HEAD`, except a query by `POST` (PF-115). An MCP call may write,
+    /// so it waits too.
+    fn held(&self, method: &Method, path: &str, headers: &HeaderMap) -> bool {
+        if matches!(*method, Method::GET | Method::HEAD) {
+            return false;
+        }
+        let route = path.split('?').next().unwrap_or_default();
+        if *method == Method::POST && route.ends_with("/entityOperations/query") {
+            return false;
+        }
+        let routes = self.routes.load();
+        if routes.moving.is_empty() {
+            return false;
+        }
+        let tenant = headers
+            .get(crate::middleware::tenancy::TENANT)
+            .and_then(|tenant| tenant.to_str().ok());
+        let view = route
+            .strip_prefix("/x/views/")
+            .and_then(|rest| rest.split('/').next());
+        tenant.is_some_and(|t| routes.moving.contains(t))
+            || view.is_some_and(|v| routes.moving.contains(v))
+    }
+
+    /// The broker a request goes to: the pinned tenant's, else the named view's, else `main`.
+    /// Only the gateway sets the tenant header; a client's is stripped before routing (GW20).
+    pub fn base_for(&self, path: &str, headers: &HeaderMap) -> Result<String, ProxyError> {
+        let routes = self.routes.load();
+        let routed = headers
+            .get(crate::middleware::tenancy::TENANT)
+            .and_then(|tenant| tenant.to_str().ok())
+            .and_then(|tenant| routes.by_tenant.get(tenant))
+            .or_else(|| {
+                let view = path.strip_prefix("/x/views/")?.split(['/', '?']).next()?;
+                routes.by_view.get(view)
+            });
+        match routed {
+            None => Ok(self.base.clone()),
+            Some(Some(base)) => Ok(base.clone()),
+            Some(None) => Err(ProxyError::Unreachable(
+                "the space's broker has no address".to_owned(),
+            )),
         }
     }
 
@@ -135,6 +248,8 @@ impl Broker {
         Self {
             client: Client::builder(TokioExecutor::new()).build(connector),
             base: base.into(),
+            template: None,
+            routes: Default::default(),
         }
     }
 
@@ -168,7 +283,20 @@ impl Broker {
                 "the forwarded path is not absolute".to_owned(),
             ));
         }
-        let uri: Uri = format!("{}{path_and_query}", self.base)
+        if self.held(&method, path_and_query, &headers) {
+            let mut answer = ProblemDetails::new(503, "space-moving", "Space Moving")
+                .with_detail(
+                    "the space is moving to another broker and takes no writes until the move ends",
+                )
+                .into_response();
+            answer.headers_mut().insert(
+                "retry-after",
+                axum::http::HeaderValue::from(MOVING_RETRY_SECONDS),
+            );
+            return Ok(answer);
+        }
+        let base = self.base_for(path_and_query, &headers)?;
+        let uri: Uri = format!("{base}{path_and_query}")
             .parse()
             .map_err(|e: axum::http::uri::InvalidUri| ProxyError::Uri(e.to_string()))?;
 

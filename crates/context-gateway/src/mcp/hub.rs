@@ -218,7 +218,7 @@ pub async fn endpoints(
                 (name, value)
             })
             .collect();
-    let mut response = match page(gateway.base_url(), &reach, &arguments) {
+    let mut response = match page(&gateway, &reach, &arguments) {
         Ok(page) => {
             tracing::info!(principal = %principal, total = reach.len(), "endpoint list");
             endpoint_facade::json_response(StatusCode::OK, &page)
@@ -233,7 +233,7 @@ pub async fn endpoints(
 
 /// One page of `reach`: `{endpoints, total, nextCursor?}`, or why the arguments are refused.
 fn page(
-    base: &str,
+    gateway: &Gateway,
     reach: &[(Arc<Endpoint>, Subject)],
     arguments: &Map<String, Value>,
 ) -> Result<Value, String> {
@@ -261,7 +261,12 @@ fn page(
         .iter()
         .skip(offset)
         .take(limit)
-        .map(|(endpoint, subject)| described(base, endpoint, subject))
+        .map(|(endpoint, subject)| {
+            let mut entry = described(gateway.base_url(), endpoint, subject);
+            // Each Endpoint names the broker its space lives on (ADR-N-046 §2.3).
+            entry["broker"] = json!(gateway.broker.broker_of_view(&endpoint.slug));
+            entry
+        })
         .collect();
     let mut page = json!({ "endpoints": endpoints, "total": reach.len() });
     let next = offset.saturating_add(limit);
@@ -504,7 +509,7 @@ impl Hub {
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).
     fn list_endpoints(&self, id: Value, arguments: &Map<String, Value>) -> Value {
-        let page = match page(self.gateway.base_url(), &self.reach, arguments) {
+        let page = match page(&self.gateway, &self.reach, arguments) {
             Ok(page) => page,
             Err(why) => return result(id, refused(&why, &Value::Null)),
         };
