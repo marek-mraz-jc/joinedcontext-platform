@@ -215,7 +215,8 @@ async fn the_space_surface_is_the_spaces_view() {
 }
 
 /// The broker lists its tools; the gateway adds the two that describe the Endpoint, as the
-/// caller's grant shows them, and answers those itself without a hop.
+/// caller's grant shows them, and answers those itself: the access without a hop, the schema
+/// from the view's LinkML surface (T-3645), never the view's MCP surface.
 #[tokio::test]
 async fn the_listing_is_the_brokers_plus_the_two_describe_tools_the_gateway_answers() {
     let listed = json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [
@@ -247,10 +248,19 @@ async fn the_listing_is_the_brokers_plus_the_two_describe_tools_the_gateway_answ
         assert_eq!(status, StatusCode::OK, "{tool}: {answer}");
         assert!(answer["result"].is_object(), "{tool}: {answer}");
     }
+    let paths: Vec<String> = hops
+        .lock()
+        .expect("the hop log")
+        .iter()
+        .map(|hop| hop.path.clone())
+        .collect();
     assert_eq!(
-        hops.lock().expect("the hop log").len(),
-        1,
-        "the describe tools never reach the broker"
+        paths,
+        [
+            format!("/x/views/{SLUG}/mcp"),
+            format!("/x/views/{SLUG}/linkml/schema/index.json")
+        ],
+        "the describe tools never reach the view's MCP surface"
     );
 }
 

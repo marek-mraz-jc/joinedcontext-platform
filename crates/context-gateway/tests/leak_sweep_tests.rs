@@ -9,9 +9,9 @@
 //!
 //! NGSI-LD is not probed here: since T-3643 the gateway forwards it to the broker's view, and
 //! Antares sweeps that surface itself (`views_read`, `views_q`, `joinedcontext-policy` engine
-//! tests). The probes cover the
+//! tests), and since T-3645 so are the schema artifacts (`linkml` surface). The probes cover the
 //! file downloads (`json`, `csv`, `geojson`, `xlsx`, `zip` — the two compressed ones are opened
-//! and their parts read), OGC API Features, SensorThings, the schema artifacts, the access
+//! and their parts read), OGC API Features, SensorThings, the access
 //! document, the endpoint record and every read-only MCP tool. Two brokers: one that honours
 //! `type` and `attrs`, and one that answers more than it was asked, which is what a federated
 //! source, a registration answering for a neighbour or a defect looks like.
@@ -266,34 +266,12 @@ fn probes() -> Vec<Probe> {
             "sta filter foreign",
             "/sta/v1.1/Things?$filter=properties/age%20eq%20%27x%27",
         ),
-        get("schema index", "/schema/index.json"),
-        get("schema linkml", "/schema/1/model.linkml.yaml"),
-        get("schema shacl", "/schema/1/model.shacl.ttl"),
-        get("schema owl", "/schema/1/model.owl.ttl"),
-        get("schema rdf", "/schema/1/model.rdf.ttl"),
-        get("schema json-schema", "/schema/1/model.schema.json"),
-        get("schema context", "/schema/1/context.jsonld"),
-        get("schema markdown", "/schema/1/model.md"),
         get("access", "/access"),
         get("endpoint record", ""),
         // The two registry item reads: one name the grant covers and one it does not, because the
         // answer to a type nobody granted must not differ from the answer to a type nobody has.
-        mcp("mcp schema summary", "describe_schema", json!({})),
-        mcp(
-            "mcp schema linkml",
-            "describe_schema",
-            json!({ "format": "linkml" }),
-        ),
-        mcp(
-            "mcp schema shacl",
-            "describe_schema",
-            json!({ "format": "shacl" }),
-        ),
-        mcp(
-            "mcp schema json-schema",
-            "describe_schema",
-            json!({ "format": "json-schema" }),
-        ),
+        // Without `entityType` the schema tool reads the broker's LinkML surface (T-3645),
+        // which Antares sweeps; narrowed to a type it is still answered here.
         mcp(
             "mcp schema outside",
             "describe_schema",
@@ -520,7 +498,7 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    assert!(probed >= 31, "the sweep stopped after {probed} probes");
+    assert!(probed >= 20, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -646,7 +624,7 @@ async fn no_surface_of_the_space_leaks() {
         .filter(|probe| probe.uri.starts_with("/mcp"))
         .collect();
     assert!(
-        asked.len() >= 6,
+        asked.len() >= 2,
         "the space sweep asks {} probes",
         asked.len()
     );

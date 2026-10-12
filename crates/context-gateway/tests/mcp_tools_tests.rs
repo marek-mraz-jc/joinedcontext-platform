@@ -234,7 +234,8 @@ async fn the_protected_resource_metadata_names_the_realm_for_every_slug() {
 }
 
 /// EP-46, EP-52, AG-29: the agent reads every formalism the REST schema surface renders, and
-/// `entityType` narrows the answer (T-0845).
+/// `entityType` narrows the answer (T-0845). Narrowed, the gateway still renders it; the whole
+/// model is the broker's LinkML surface since T-3645 (`mcp_schema_tests`).
 #[tokio::test]
 async fn describe_schema_renders_every_formalism_the_rest_surface_serves() {
     let realm = common::Realm::new();
@@ -250,7 +251,10 @@ async fn describe_schema_renders_every_formalism_the_rest_surface_serves() {
             message(
                 &format!("/api/endpoint/{PUBLIC}/mcp"),
                 None,
-                call("describe_schema", json!({ "format": format })),
+                call(
+                    "describe_schema",
+                    json!({ "format": format, "entityType": "AirQualityObserved" }),
+                ),
             ),
         )
         .await;
@@ -270,7 +274,7 @@ async fn describe_schema_renders_every_formalism_the_rest_surface_serves() {
     }
 }
 
-/// The two JSON formalisms and the summary keep answering as they did.
+/// The two JSON formalisms and the summary keep answering as they did, narrowed to a type.
 #[tokio::test]
 async fn describe_schema_still_answers_the_summary_and_the_json_formalisms() {
     let realm = common::Realm::new();
@@ -280,7 +284,10 @@ async fn describe_schema_still_answers_the_summary_and_the_json_formalisms() {
             message(
                 &format!("/api/endpoint/{PUBLIC}/mcp"),
                 None,
-                call("describe_schema", json!({ "format": format })),
+                call(
+                    "describe_schema",
+                    json!({ "format": format, "entityType": "AirQualityObserved" }),
+                ),
             ),
         )
         .await;

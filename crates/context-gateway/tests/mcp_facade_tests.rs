@@ -200,7 +200,9 @@ async fn a_body_that_is_not_json_is_the_parse_error() {
 }
 
 /// EP-47, EP-55: the two describing tools are the access and schema projections, answered
-/// from the endpoint itself, so an agent can orient without a single broker round trip.
+/// from the endpoint itself, so an agent can orient without a single broker round trip. The
+/// schema of the whole model is the broker's LinkML surface since T-3645; narrowed to a type it
+/// is still the endpoint's own.
 #[tokio::test]
 async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker() {
     let realm = common::Realm::new();
@@ -231,7 +233,15 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
 
     let (_, summary) = send(
         app(&broker, &realm),
-        message(SLUG, None, call(12, "describe_schema", json!({}))),
+        message(
+            SLUG,
+            None,
+            call(
+                12,
+                "describe_schema",
+                json!({ "entityType": "AirQualityObserved" }),
+            ),
+        ),
     )
     .await;
     assert_eq!(
@@ -244,7 +254,11 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
         message(
             SLUG,
             None,
-            call(13, "describe_schema", json!({ "format": "shacl" })),
+            call(
+                13,
+                "describe_schema",
+                json!({ "format": "shacl", "entityType": "AirQualityObserved" }),
+            ),
         ),
     )
     .await;

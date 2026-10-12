@@ -40,7 +40,7 @@
 //! compiles and names the rest as served beside the model.
 
 use crate::app::{ngsi_ld_request, sha256_hex, Credential, Gateway};
-use crate::handlers::{access, schema};
+use crate::handlers::{access, schema, schema_routes};
 use crate::mcp::elicitation;
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
 use crate::resolver::{Endpoint, Model};
@@ -1537,7 +1537,7 @@ async fn call_tool(
             return result(id, answered(&document, tool.result_key, false, &[]));
         }
         "describe_schema" => {
-            return match describe_schema(&endpoint, &subject, &arguments) {
+            return match describe_schema_for(&gateway, &endpoint, &subject, &arguments).await {
                 Ok(document) => result(id, answered(&document, tool.result_key, false, &[])),
                 Err(message) => result(id, refused(&message, &Value::Null)),
             };
@@ -1751,7 +1751,7 @@ async fn read_resource(
             let mut asked = arguments;
             asked.insert("format".to_owned(), Value::String(format));
             asked.insert("version".to_owned(), Value::from(major));
-            return match describe_schema(&endpoint, &subject, &asked) {
+            return match describe_schema_for(&gateway, &endpoint, &subject, &asked).await {
                 Ok(document) => result(id, contents(uri, &document)),
                 Err(message) => result(id, refused(&message, &Value::Null)),
             };
@@ -2088,7 +2088,7 @@ fn schema_summary(endpoint: &Endpoint, visible: &schema::Visible) -> Value {
     // The very digest function the REST index is built with: the two doors publish one
     // catalogue of one set of documents, so a client may cache on either (EP-46, SP-16).
     let digest = |body: &[u8]| sha256_hex(body);
-    let mut document = schema::index(endpoint, visible, digest);
+    let document = schema::index(endpoint, visible, digest);
 
     let mut majors: Vec<u32> = endpoint.models.iter().map(|model| model.major).collect();
     majors.sort_unstable();
@@ -2113,6 +2113,12 @@ fn schema_summary(endpoint: &Endpoint, visible: &schema::Visible) -> Value {
         }
     }
 
+    recommended(document, listed)
+}
+
+/// The catalogue with its per-model copies of the digests taken out and the reading order and
+/// the flat artifact list put in.
+fn recommended(mut document: Value, listed: Vec<Value>) -> Value {
     // The per-model copy of the same digests, under a second name and in file-name spelling,
     // would only be a second thing to keep true.
     if let Some(models) = document["models"].as_array_mut() {
@@ -2130,6 +2136,124 @@ fn schema_summary(endpoint: &Endpoint, visible: &schema::Visible) -> Value {
     document["artifacts"] = Value::Array(listed);
     document
 }
+
+/// `describe_schema` and the `schema://` resources (EP-46, EP-47): from the broker's LinkML
+/// surface of the Endpoint's view when one serves it (T-3645), so an agent reads the very bytes
+/// and digests the REST `schema/` routes serve. A call narrowed with `entityType` has no REST
+/// counterpart and is still rendered here, and so is an Endpoint no view serves.
+async fn describe_schema_for(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    arguments: &Map<String, Value>,
+) -> Result<Value, String> {
+    if !arguments.contains_key("entityType") {
+        if let Some(answer) = schema_from_view(gateway, endpoint, subject, arguments).await {
+            return answer;
+        }
+    }
+    describe_schema(endpoint, subject, arguments)
+}
+
+/// [`describe_schema`] answered from the broker's documents; `None` hands the call back (no
+/// view, or a format name only the local answer explains).
+async fn schema_from_view(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    arguments: &Map<String, Value>,
+) -> Option<Result<Value, String>> {
+    let unavailable = |status: StatusCode| {
+        tracing::warn!(slug = %endpoint.slug, %status, "the broker's schema surface did not answer");
+        "the data model cannot be read right now; try again later".to_owned()
+    };
+    let format = arguments
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("summary");
+    let artifact = schema::Artifact::from_format(format);
+    if format != "summary" && artifact.is_none() {
+        return None;
+    }
+    let index = match schema_routes::view_document(gateway, endpoint, subject, "index.json").await?
+    {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+        Err(status) => return Some(Err(unavailable(status))),
+    };
+    let majors: Vec<u64> = index["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(schema_routes::major_of)
+        .collect();
+    let Some(artifact) = artifact else {
+        return Some(Ok(view_summary(&endpoint.slug, index)));
+    };
+    let wanted = arguments.get("version").and_then(Value::as_u64);
+    let Some(major) = wanted
+        .or_else(|| majors.first().copied())
+        .filter(|m| majors.contains(m))
+    else {
+        return Some(Err(
+            "this endpoint publishes no model of that version".to_owned()
+        ));
+    };
+    let path = format!("v{major}/{}", artifact.file_name());
+    let bytes = match schema_routes::view_document(gateway, endpoint, subject, &path).await? {
+        Ok(bytes) => bytes,
+        Err(StatusCode::NOT_FOUND) if artifact == schema::Artifact::Qb => {
+            return Some(Err(NO_CUBE.to_owned()));
+        }
+        Err(status) => return Some(Err(unavailable(status))),
+    };
+    let rendered = if artifact.is_json() {
+        match serde_json::from_slice(&bytes) {
+            Ok(document) => document,
+            Err(_) => return Some(Err(unavailable(StatusCode::BAD_GATEWAY))),
+        }
+    } else {
+        json!({
+            "format": format,
+            "mediaType": artifact.media_type(),
+            "document": String::from_utf8_lossy(&bytes),
+        })
+    };
+    Some(within_bound(format, &rendered).map(|()| rendered))
+}
+
+/// The summary of the broker's catalogue: its models, and every artifact with the `format`
+/// that asks for it, its size, digest and `schema://` URI, as [`schema_summary`] lists them.
+fn view_summary(slug: &str, index: Value) -> Value {
+    let mut listed = Vec::new();
+    for model in index["models"].as_array().into_iter().flatten() {
+        let Some(major) = schema_routes::major_of(model).and_then(|m| u32::try_from(m).ok()) else {
+            continue;
+        };
+        // LinkML first, in the order the local summary lists them.
+        for artifact in schema::Artifact::ALL
+            .into_iter()
+            .chain([schema::Artifact::Qb])
+        {
+            let described = &model["artifacts"][artifact.file_name()];
+            if described.is_null() {
+                continue;
+            }
+            listed.push(json!({
+                "format": artifact.format_name(),
+                "mediaType": artifact.media_type(),
+                "version": major,
+                "bytes": described["bytes"],
+                "sha256": described["sha256"],
+                "uri": schema_uri(slug, major, artifact),
+            }));
+        }
+    }
+    recommended(index, listed)
+}
+
+/// Why there is no `qb` document (DM-60).
+const NO_CUBE: &str = "this endpoint's model declares no Data Structure Definition you may \
+                       read, so it has no RDF Data Cube; ask for shacl, owl or rdf instead";
 
 /// The `resources/read` URI of one artifact of one major.
 fn schema_uri(slug: &str, major: u32, artifact: schema::Artifact) -> String {
@@ -2174,11 +2298,7 @@ fn describe_schema(
         ));
     };
     if artifact == schema::Artifact::Qb && !schema::declares_dsd(&models, &visible) {
-        return Err(
-            "this endpoint's model declares no Data Structure Definition you may read, so it \
-             has no RDF Data Cube; ask for shacl, owl or rdf instead"
-                .to_owned(),
-        );
+        return Err(NO_CUBE.to_owned());
     }
 
     let mut redacted = Vec::new();
