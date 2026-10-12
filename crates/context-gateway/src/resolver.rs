@@ -169,6 +169,9 @@ pub struct DeclaredTypes {
     /// The stored end of each relationship of its classes, held at every write (DM-70): read
     /// from the same generated JSON Schema.
     pub relationships: crate::relationships::RelationshipRules,
+    /// The space's own quality rules, `spec.quality` (DM-87): judged on every write beside the
+    /// model's constraints.
+    pub quality: Vec<jc_core::kinds::QualityRule>,
 }
 
 impl DeclaredTypes {

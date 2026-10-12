@@ -1,4 +1,7 @@
-use jc_core::kinds::{ContextSpace, ContextSpaceSpec, MissingUnitCode, Project, Quotas};
+use jc_core::kinds::{
+    duration_seconds, retention_seconds, ContextSpace, ContextSpaceSpec, MissingUnitCode, Project,
+    QualityKind, QualityOutcome, Quotas,
+};
 use jc_core::Urn;
 
 const GOLDEN_PROJECT: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -176,6 +179,9 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         ttl_days: Some(7),
         urn_segment: None,
         missing_unit_code: MissingUnitCode::Fill,
+        retention: Vec::new(),
+        quality: Vec::new(),
+        broker_ref: None,
     };
     assert!(spec.validate().is_ok());
 
@@ -280,4 +286,207 @@ fn a_space_fills_a_missing_unit_code_unless_it_refuses_dm_06() {
         serde_json::json!({ "missingUnitCode": "guess" })
     )
     .is_err());
+}
+
+/// DM-82: a space's retention round-trips, holds one rule per type, and refuses a duration
+/// the broker cannot run (zero, negative, under a minute, over ten years, an unknown unit).
+#[test]
+fn retention_rules_round_trip_and_refuse_what_the_broker_cannot_run_dm_81() {
+    let yaml = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle, current: PT5M, history: PT8H }\n    - { entityType: Stop }",
+    );
+    let space = ContextSpace::from_yaml(&yaml).expect("parses");
+    assert!(space.spec.validate_with_meta(&space.metadata).is_ok());
+    assert_eq!(space.spec.retention.len(), 2);
+    let back: ContextSpaceSpec =
+        serde_json::from_value(serde_json::to_value(&space.spec).expect("serialize"))
+            .expect("round trip");
+    assert_eq!(back, space.spec);
+    let empty = serde_json::to_value(ContextSpaceSpec::default()).expect("serialize");
+    assert!(empty.get("retention").is_none(), "no rule, no field");
+
+    for (rule, field) in [
+        (
+            "{ entityType: Vehicle, current: PT0M }",
+            "spec.retention.current",
+        ),
+        (
+            "{ entityType: Vehicle, current: -PT5M }",
+            "spec.retention.current",
+        ),
+        (
+            "{ entityType: Vehicle, history: PT30S }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, history: P3651D }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, history: P1Y }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, history: 5m }",
+            "spec.retention.history",
+        ),
+        ("{ entityType: vehicle }", "entityType"),
+    ] {
+        let yaml = GOLDEN_SPACE.replace(
+            "isSandbox: false",
+            &format!("isSandbox: false\n  retention:\n    - {rule}"),
+        );
+        let space = ContextSpace::from_yaml(&yaml).expect("parses");
+        let err = space
+            .spec
+            .validate_with_meta(&space.metadata)
+            .expect_err(rule);
+        assert!(
+            matches!(&err, jc_core::Error::Name { field: f, .. } if *f == field),
+            "{rule}: {err}"
+        );
+    }
+    let twice = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle }\n    - { entityType: Vehicle, history: PT5M }",
+    );
+    let space = ContextSpace::from_yaml(&twice).expect("parses");
+    assert!(space.spec.validate_with_meta(&space.metadata).is_err());
+    let unknown = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle, keep: PT5M }",
+    );
+    assert!(
+        ContextSpace::from_yaml(&unknown).is_err(),
+        "deny_unknown_fields"
+    );
+}
+
+#[test]
+fn retention_durations_are_the_brokers_form() {
+    for (raw, secs) in [
+        ("PT1M", 60),
+        ("PT5M", 300),
+        ("PT8H", 28_800),
+        ("P1DT12H", 129_600),
+        ("PT1H30M15S", 5_415),
+        ("P3650D", 315_360_000),
+    ] {
+        assert_eq!(retention_seconds(raw), Some(secs), "{raw}");
+    }
+    for raw in [
+        "", "P", "PT", "P1DT", "PT59S", "P0D", "P1H", "PT5X", "PT5M3", "P1W", "5m",
+    ] {
+        assert_eq!(retention_seconds(raw), None, "{raw}");
+    }
+}
+
+fn with_quality(rules: &str) -> String {
+    GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        &format!("isSandbox: false\n  quality:\n{rules}"),
+    )
+}
+
+/// DM-87: the ADR's three rules round-trip, each kind takes its default outcome, and an
+/// explicit outcome overrides it.
+#[test]
+fn quality_rules_round_trip_with_their_default_outcomes_dm_86() {
+    let yaml = with_quality(
+        "    - { name: speed-plausible, entityType: Vehicle, kind: range, attribute: speed, max: 33.4 }\n    - { name: inside-hsl-area, entityType: Vehicle, kind: area, attribute: location, bbox: [24.5, 60.0, 25.3, 60.45] }\n    - { name: position-current, entityType: Vehicle, kind: freshness, attribute: location, maxAhead: PT30S, maxAge: PT5M }\n    - { name: speed-sure, entityType: Vehicle, kind: range, attribute: speed, min: 0, outcome: reject }",
+    );
+    let space = ContextSpace::from_yaml(&yaml).expect("parses");
+    space
+        .spec
+        .validate_with_meta(&space.metadata)
+        .expect("valid");
+    let rules = &space.spec.quality;
+    assert_eq!(rules[0].kind, QualityKind::Range);
+    assert_eq!(rules[0].write_outcome(), QualityOutcome::Flag);
+    assert_eq!(rules[1].write_outcome(), QualityOutcome::Flag);
+    assert_eq!(rules[2].write_outcome(), QualityOutcome::Reject);
+    assert_eq!(rules[2].sweep_outcome(), QualityOutcome::Quarantine);
+    assert_eq!(rules[3].write_outcome(), QualityOutcome::Reject);
+    let value = serde_json::to_value(&space.spec).expect("serialize");
+    assert_eq!(value["quality"][0]["max"], serde_json::json!(33.4));
+    assert_eq!(value["quality"][2]["maxAhead"], "PT30S");
+    let back: ContextSpaceSpec = serde_json::from_value(value).expect("round trip");
+    assert_eq!(back, space.spec);
+    let empty = serde_json::to_value(ContextSpaceSpec::default()).expect("serialize");
+    assert!(empty.get("quality").is_none(), "no rule, no field");
+}
+
+/// DM-87, DM-92: a rule that mixes kinds, a bad bound, an unknown field or outcome, a duplicate
+/// name and a 65th rule are refused.
+#[test]
+fn quality_rules_refuse_what_cannot_be_checked_dm_86_dm_91() {
+    for (rule, field) in [
+        ("{ name: Speed, entityType: Vehicle, kind: range, attribute: speed, max: 1 }", "spec.quality.name"),
+        ("{ name: s, entityType: vehicle, kind: range, attribute: speed, max: 1 }", "entityType"),
+        ("{ name: s, entityType: Vehicle, kind: range, attribute: '', max: 1 }", "spec.quality.attribute"),
+        ("{ name: s, entityType: Vehicle, kind: range, attribute: speed }", "spec.quality"),
+        ("{ name: s, entityType: Vehicle, kind: range, attribute: speed, max: 1, maxAge: PT5M }", "spec.quality"),
+        ("{ name: s, entityType: Vehicle, kind: area, attribute: location, max: 1 }", "spec.quality"),
+        ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location }", "spec.quality"),
+        ("{ name: s, entityType: Vehicle, kind: range, attribute: speed, min: 5, max: 1 }", "spec.quality.min"),
+        ("{ name: s, entityType: Vehicle, kind: area, attribute: location, bbox: [25.3, 60.0, 24.5, 60.45] }", "spec.quality.bbox"),
+        ("{ name: s, entityType: Vehicle, kind: area, attribute: location, bbox: [24.5, 60.0, 25.3, 91] }", "spec.quality.bbox"),
+        ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location, maxAge: PT0S }", "spec.quality.maxAge"),
+        ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location, maxAhead: P1Y }", "spec.quality.maxAhead"),
+    ] {
+        let space = ContextSpace::from_yaml(&with_quality(&format!("    - {rule}"))).expect(rule);
+        let err = space
+            .spec
+            .validate_with_meta(&space.metadata)
+            .expect_err(rule);
+        assert!(
+            matches!(&err, jc_core::Error::Name { field: f, .. } if *f == field),
+            "{rule}: {err}"
+        );
+    }
+    for rule in [
+        "{ name: s, entityType: Vehicle, kind: range, attribute: speed, max: 1, unit: kmh }",
+        "{ name: s, entityType: Vehicle, kind: range, attribute: speed, max: 1, outcome: drop }",
+        "{ name: s, entityType: Vehicle, kind: plausible, attribute: speed, max: 1 }",
+        "{ name: s, entityType: Vehicle, kind: area, attribute: location, bbox: [1, 2, 3] }",
+    ] {
+        assert!(
+            ContextSpace::from_yaml(&with_quality(&format!("    - {rule}"))).is_err(),
+            "{rule}"
+        );
+    }
+    let twice = with_quality(
+        "    - { name: s, entityType: Vehicle, kind: range, attribute: speed, max: 1 }\n    - { name: s, entityType: Stop, kind: range, attribute: speed, max: 1 }",
+    );
+    let space = ContextSpace::from_yaml(&twice).expect("parses");
+    assert!(space.spec.validate_with_meta(&space.metadata).is_err());
+
+    let rules = |n: usize| {
+        (0..n)
+            .map(|i| format!("    - {{ name: r{i}, entityType: Vehicle, kind: range, attribute: speed, max: 1 }}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let space = ContextSpace::from_yaml(&with_quality(&rules(64))).expect("parses");
+    assert!(space.spec.validate_with_meta(&space.metadata).is_ok());
+    let space = ContextSpace::from_yaml(&with_quality(&rules(65))).expect("parses");
+    let err = space
+        .spec
+        .validate_with_meta(&space.metadata)
+        .expect_err("65");
+    assert!(err.to_string().contains("64"), "{err}");
+}
+
+#[test]
+fn freshness_durations_start_at_one_second() {
+    assert_eq!(duration_seconds("PT1S"), Some(1));
+    assert_eq!(duration_seconds("PT30S"), Some(30));
+    assert_eq!(
+        retention_seconds("PT30S"),
+        None,
+        "retention starts at a minute"
+    );
+    assert_eq!(duration_seconds("PT0S"), None);
+    assert_eq!(duration_seconds("P3651D"), None);
 }

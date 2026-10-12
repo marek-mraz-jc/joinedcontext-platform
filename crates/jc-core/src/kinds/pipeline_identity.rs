@@ -167,6 +167,7 @@ pub fn derive(
                 name: "federated".to_owned(),
                 expires_at: None,
                 ip_allow_list: Vec::new(),
+                jwks: None,
             }],
             limits: None,
             workload: Some(Workload {
