@@ -126,7 +126,7 @@ async fn through_view(
     view: &str,
     mut request: Request,
 ) -> Result<Response<Body>, Box<Request>> {
-    if !has_view(endpoint, view) {
+    if !has_view(view) {
         return Err(Box::new(request));
     }
     let path = request.uri().path();
@@ -179,7 +179,7 @@ pub(crate) async fn view_document(
     rest: &str,
 ) -> Option<Result<Vec<u8>, StatusCode>> {
     let view = endpoint.slug.as_str();
-    if !has_view(endpoint, view) {
+    if !has_view(view) {
         return None;
     }
     let mut request = Request::new(Body::empty());

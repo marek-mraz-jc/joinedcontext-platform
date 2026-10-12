@@ -137,6 +137,31 @@ def test_the_cli_writes_the_file_it_is_given(senzor, tmp_path):
     Draft7Validator.check_schema(json.loads(out.read_text()))
 
 
+def test_a_json_property_takes_any_json_value(tmp_path):
+    """A JsonProperty's range is a string, but ETSI 4.5.24 lets it carry any JSON value: a list
+    of departures is what the model says it holds, never a string the schema would insist on."""
+    source = tmp_path / "stops.yaml"
+    source.write_text(
+        "id: https://hel.fi/ns/stops\n"
+        "name: stops\n"
+        "prefixes: {linkml: 'https://w3id.org/linkml/', hel: 'https://hel.fi/ns/'}\n"
+        "default_prefix: hel\n"
+        "default_range: string\n"
+        "imports: [linkml:types]\n"
+        "classes: {Stop: {class_uri: 'hel:Stop', slots: [id, departures]}}\n"
+        "slots:\n"
+        "  id: {identifier: true}\n"
+        "  departures: {slot_uri: 'hel:departures', description: The next departures.,\n"
+        "               annotations: {ngsi_ld_kind: JsonProperty}}\n"
+    )
+    schema = compile_schema(str(source))
+    departures = schema["definitions"]["Stop"]["properties"]["departures"]
+    assert departures == {"description": "The next departures.", "x-ngsi-ld-kind": "JsonProperty"}
+    validator = Draft7Validator({**schema, "$ref": "#/definitions/Stop"})
+    for value in ([{"route": "550", "delay": 60}], [], {"a": 1}, "text", None):
+        assert list(validator.iter_errors({"id": "urn:ngsi-ld:Stop:1", "departures": value})) == []
+
+
 def test_a_slot_with_an_unknown_kind_is_refused(tmp_path):
     source = tmp_path / "bad.yaml"
     source.write_text(

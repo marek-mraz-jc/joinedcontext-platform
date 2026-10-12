@@ -1,0 +1,24 @@
+# The bounded inflate of an archive member (T-3953, PL-72): a module for Bento's `wasm`
+# processor, which the pipeline runner loads from its ConfigMap. Built for
+# wasm32-unknown-unknown; never part of the workspace or an image.
+[package]
+name = "bento-inflate"
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+miniz_oxide = { version = "=0.8.9", default-features = false, features = ["with-alloc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]
