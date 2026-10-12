@@ -618,6 +618,14 @@ impl Kind for PipelineSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
+        if meta.name == crate::kinds::pipeline_identity::HARNESS {
+            return Err(Error::Name {
+                field: "metadata.name",
+                value: meta.name.clone(),
+                reason: "`pipeline-test` is the principal the Portal tests pipelines as (PL-43); \
+                         a Pipeline of that name would share it, so choose another name",
+            });
+        }
         self.validate()
     }
 
