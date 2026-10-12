@@ -21,6 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Error, Message};
 
@@ -147,8 +148,13 @@ async fn serve(app: Router) -> String {
 
 /// The gateway on a socket of its own, in front of `upstream`.
 async fn gateway(test: &str, upstream: &str, realm: &common::Realm) -> String {
+    lived(test, upstream, realm, Duration::from_secs(300)).await
+}
+
+/// [`gateway`] with a token caller's socket ending after `lifetime`.
+async fn lived(test: &str, upstream: &str, realm: &common::Realm, lifetime: Duration) -> String {
     let (endpoints, ..) = store::load(&repo(test)).expect("the repository loads");
-    let gateway = Gateway::new(
+    let mut gateway = Gateway::new(
         Broker::new(format!("http://{upstream}")),
         Box::new(PolicyPdp),
         "hel.fi",
@@ -159,6 +165,7 @@ async fn gateway(test: &str, upstream: &str, realm: &common::Realm) -> String {
         ServiceAccounts::new(),
         Some(HOST.to_owned()),
     );
+    gateway.ws_token_lifetime = lifetime;
     serve(router(Arc::new(gateway))).await
 }
 
@@ -549,4 +556,41 @@ async fn a_broker_gone_mid_stream_closes_the_client_with_1011() {
         }
     }
     assert_eq!(code, Some(1011));
+}
+
+/// T-4132: a token caller's socket ends at its lifetime with the broker's `x-closing: lifetime`
+/// and a normal close; an anonymous socket on a public Endpoint outlives it.
+#[tokio::test]
+async fn a_token_socket_ends_at_its_lifetime_and_an_anonymous_one_does_not() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = lived("lifetime", &upstream, &realm, Duration::from_millis(300)).await;
+    let token = person(&realm, "hel-mobility", INTERNAL);
+    let (mut held, _) = open(
+        &at,
+        INTERNAL,
+        "",
+        &[("authorization", format!("Bearer {token}"))],
+    )
+    .await
+    .expect("upgraded");
+    let (mut anonymous, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+
+    let closing = held.next().await.expect("a frame").expect("readable");
+    assert_eq!(
+        closing,
+        Message::text(r#"{"metadata":{"x-op":"x-closing","x-reason":"lifetime"}}"#)
+    );
+    match held.next().await.expect("a frame").expect("readable") {
+        Message::Close(Some(frame)) => assert_eq!(u16::from(frame.code), 1000),
+        other => panic!("a close frame, not {other:?}"),
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    anonymous
+        .send(Message::text("still here"))
+        .await
+        .expect("sent");
+    let echoed = anonymous.next().await.expect("a frame").expect("readable");
+    assert_eq!(echoed, Message::text("echo:still here"));
 }

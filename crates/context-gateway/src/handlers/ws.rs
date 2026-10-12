@@ -27,6 +27,7 @@ use jc_core::ProblemDetails;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
@@ -50,6 +51,13 @@ const FROM_BROKER: usize = 1024 * 1024;
 const BROKER_FAILED: u16 = 1011;
 /// RFC 6455 7.4.1: the message was too big to process.
 const TOO_BIG: u16 = 1009;
+/// RFC 6455 7.4.1: the connection fulfilled its purpose.
+const NORMAL: u16 = 1000;
+/// A token caller's socket ends when its access token would (Keycloak's default 300 s), since
+/// nothing re-checks the token on an open socket (Antares ADR-0026 §8, API/07 §3).
+pub const TOKEN_LIFETIME: Duration = Duration::from_secs(300);
+/// What the client reads before that end: the broker's own `x-closing` (ADR-0026 §2).
+const LIFETIME_CLOSING: &str = r#"{"metadata":{"x-op":"x-closing","x-reason":"lifetime"}}"#;
 
 /// The WebSocket connections each caller holds open (EP-107).
 #[derive(Debug, Default)]
@@ -133,7 +141,10 @@ pub(crate) async fn endpoint_ws(
     }
     // A person or an account is one caller however many tokens it holds; an anonymous caller
     // is its address.
-    let caller = match principal_of(&subject) {
+    let principal = principal_of(&subject);
+    // An anonymous socket has no token to expire (T-4132): the broker's lifetime bounds it.
+    let lifetime = (principal != "anonymous").then_some(gateway.ws_token_lifetime);
+    let caller = match principal {
         anonymous if anonymous == "anonymous" => caller_key(request.headers()),
         principal => principal,
     };
@@ -199,7 +210,7 @@ pub(crate) async fn endpoint_ws(
         .protocols([PROTOCOL])
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |client| relay(client, broker, held, endpoint.slug.clone()))
+        .on_upgrade(move |client| relay(client, broker, held, endpoint.slug.clone(), lifetime))
 }
 
 /// Whether the request asks for a WebSocket at all (RFC 6455 §4.1: `Upgrade: websocket`).
@@ -441,11 +452,19 @@ enum Ended {
     BrokerClosed,
     /// The broker's side failed or ended without a close frame.
     BrokerFailed,
+    /// A token caller's socket reached [`TOKEN_LIFETIME`].
+    Lifetime,
 }
 
 /// Frames both ways until either side ends; the connection is counted until then. However it
 /// ends, a client that is still there gets a close frame, never a bare end of the stream.
-async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
+async fn relay(
+    client: WebSocket,
+    broker: Upstream,
+    held: Held,
+    slug: String,
+    lifetime: Option<Duration>,
+) {
     let (mut to_client, mut from_client) = client.split();
     let (mut to_broker, mut from_broker) = broker.split();
     let ended = {
@@ -493,14 +512,25 @@ async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
                 }
             }
         };
+        let expired = async {
+            match lifetime {
+                Some(lifetime) => tokio::time::sleep(lifetime).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             ended = up => ended,
             ended = down => ended,
+            () = expired => Ended::Lifetime,
         }
     };
+    if ended == Ended::Lifetime {
+        let _ = to_client.send(ws::Message::text(LIFETIME_CLOSING)).await;
+    }
     let close = match ended {
         Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
         Ended::BrokerFailed => Some((BROKER_FAILED, "the broker ended the connection")),
+        Ended::Lifetime => Some((NORMAL, "lifetime")),
         Ended::Closed | Ended::BrokerClosed => None,
     };
     if let Some((code, reason)) = close {
