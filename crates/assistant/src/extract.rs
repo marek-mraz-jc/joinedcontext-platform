@@ -10,6 +10,7 @@ use kreuzberg::{
 };
 use sqlx::PgPool;
 
+use crate::crawl::links::is_document_type;
 use crate::crawl::Sink;
 use crate::Error;
 
@@ -359,33 +360,40 @@ impl Sink for Indexer {
     }
 
     async fn document(&mut self, document_id: i64, url: &str, mime: Option<&str>, bytes: &[u8]) {
-        // The server's type without parameters; a document with none is read as a PDF only when
-        // its address says so, and refused otherwise rather than guessed.
-        let mime = mime
-            .and_then(|value| value.split(';').next())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .or_else(|| {
-                url.to_ascii_lowercase()
-                    .ends_with(".pdf")
-                    .then(|| "application/pdf".to_owned())
-            });
-        match mime {
-            Some(mime) => {
+        match document_type(url, mime) {
+            Ok(mime) => {
                 self.index(Owner::Document(document_id), url, &mime, None, bytes)
                     .await
             }
-            None => self
-                .failures
-                .push(format!("{url}: the server named no content type")),
+            Err(reason) => self.failures.push(format!("{url}: {reason}")),
         }
+    }
+}
+
+/// The type a fetched document is read as: the server's, without parameters, when it is one of
+/// the document types the crawl follows ([`is_document_type`]); a PDF when the server names none
+/// and the address ends in `.pdf`; refused otherwise rather than guessed. The crawl picks a
+/// document by its address, so the type is the remote server's word: anything else would let a
+/// site steer kreuzberg into a parser the assistant never reads with, YAML through the
+/// unmaintained `unsafe-libyaml` among them (RUSTSEC-2024-0449, T-4070).
+fn document_type(url: &str, mime: Option<&str>) -> Result<String, String> {
+    let named = mime
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match named {
+        Some(mime) if is_document_type(mime) => Ok(mime.to_ascii_lowercase()),
+        Some(mime) => Err(format!(
+            "the server named {mime:?}, which is not a document type the assistant reads"
+        )),
+        None if url.to_ascii_lowercase().ends_with(".pdf") => Ok("application/pdf".to_owned()),
+        None => Err("the server named no content type".to_owned()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{first_pages, only_headings};
+    use super::{document_type, first_pages, only_headings};
 
     /// A PDF of `pages` pages, page n showing "Strana n", with a correct cross-reference table.
     fn pdf(pages: usize) -> Vec<u8> {
@@ -443,6 +451,42 @@ mod tests {
         assert!(
             first_pages(b"not a pdf", 2).is_none(),
             "read whole, as before"
+        );
+    }
+
+    /// T-4070: a document is read only as a type the crawl follows, whatever its server says.
+    #[test]
+    fn a_document_is_read_only_as_a_document_type() {
+        let pdf = "https://bb.example/plan.pdf";
+        assert_eq!(
+            document_type(pdf, Some("Application/PDF; charset=binary")),
+            Ok("application/pdf".to_owned())
+        );
+        assert_eq!(document_type(pdf, None), Ok("application/pdf".to_owned()));
+        assert_eq!(
+            document_type(pdf, Some(" ;x")),
+            Ok("application/pdf".to_owned())
+        );
+        let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        assert_eq!(
+            document_type("https://bb.example/a.docx", Some(docx)),
+            Ok(docx.to_owned())
+        );
+        for steered in [
+            "application/yaml",
+            "application/x-yaml",
+            "text/yaml",
+            "application/zip",
+            "application/x-7z-compressed",
+            "application/octet-stream",
+            "text/html",
+        ] {
+            let refused = document_type(pdf, Some(steered)).expect_err(steered);
+            assert!(refused.contains(steered), "{refused}");
+        }
+        assert_eq!(
+            document_type("https://bb.example/download?id=7", None),
+            Err("the server named no content type".to_owned())
         );
     }
 
