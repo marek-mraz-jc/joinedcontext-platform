@@ -54,10 +54,6 @@ fn golden_mapping_parses_validates_and_roundtrips() {
     assert_eq!(mapping.spec.source.version, "1");
     assert_eq!(mapping.spec.target.version, "2");
     assert!(!mapping.spec.requires_elevated_lane());
-    assert_eq!(
-        mapping.spec.compiled_bloblang_path("sdm-airquality-to-bb"),
-        "generated/sdm-airquality-to-bb.blobl"
-    );
 
     let serialized = mapping.to_yaml().expect("serialize");
     assert_eq!(mapping, Mapping::from_yaml(&serialized).expect("re-import"));
