@@ -93,7 +93,16 @@ impl Reaper {
             self.checkouts.as_ref(),
             self.previews.as_deref(),
         ) {
-            Ok((endpoints, spaces, accounts, federations, agreements, limits, servers)) => {
+            Ok((
+                endpoints,
+                spaces,
+                accounts,
+                federations,
+                agreements,
+                limits,
+                servers,
+                brokers,
+            )) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
                 // grant the PDP would have honoured; the space table carries the same
@@ -116,6 +125,8 @@ impl Reaper {
                 self.gateway.replace_limits(limits);
                 // ADR-N-043: a named server's members follow the manifest at once.
                 self.gateway.replace_servers(servers);
+                // ADR-N-046: a space follows its broker from the next request on.
+                self.gateway.broker.route(&brokers);
                 self.seen = current;
                 tracing::info!(
                     endpoints = counts.0,

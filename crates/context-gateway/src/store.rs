@@ -34,7 +34,55 @@ pub type Tables = (
     Agreements,
     Limits,
     McpServers,
+    SpaceBrokers,
 );
+
+/// The broker each space lives on, by its tenant segment, and each view, by its name: an
+/// Endpoint's slug or `cs-{space}` (PF-111, ADR-N-046). A space whose `brokerRef` names no
+/// broker maps to `""`, which the proxy refuses rather than sending to `main`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SpaceBrokers {
+    /// The broker of each space, by the tenant segment the gateway pins.
+    pub by_space: BTreeMap<String, String>,
+    /// The broker of each view, by the name in `/x/views/{view}`.
+    pub by_view: BTreeMap<String, String>,
+}
+
+/// [`SpaceBrokers`] of a repository, through the one lookup every component shares
+/// ([`jc_core::kinds::broker_of`]).
+pub fn brokers_of(repo: &Repository, endpoints: &[Endpoint]) -> SpaceBrokers {
+    let brokers: Vec<(String, jc_core::kinds::ContextBrokerSpec)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "ContextBroker")
+        .filter_map(|(id, resource)| Some((id.name.clone(), spec_of(&resource.manifest)?)))
+        .collect();
+    let mut table = SpaceBrokers::default();
+    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "ContextSpace") {
+        let Some(spec) = spec_of::<ContextSpaceSpec>(&resource.manifest) else {
+            continue;
+        };
+        let project = id.namespace.clone().unwrap_or_default();
+        let segment = repo.space_segment(&project, &id.name);
+        let named = brokers.iter().map(|(name, spec)| (name.as_str(), spec));
+        let broker = match jc_core::kinds::broker_of(spec.broker_ref.as_deref(), named) {
+            Ok(broker) => broker.to_owned(),
+            Err(error) => {
+                tracing::error!(space = %segment, %error, "the space's broker is not declared; its requests are refused");
+                String::new()
+            }
+        };
+        table
+            .by_view
+            .insert(format!("cs-{segment}"), broker.clone());
+        table.by_space.insert(segment, broker);
+    }
+    for endpoint in endpoints {
+        if let Some(broker) = table.by_space.get(&endpoint.space) {
+            table.by_view.insert(endpoint.slug.clone(), broker.clone());
+        }
+    }
+    table
+}
 
 const GATEWAY_BODY: &str = "spec.limits.gateway.maxRequestBodyMegabytes";
 
@@ -168,14 +216,17 @@ pub fn load_from(
 }
 
 fn tables(repo: &Repository, root: &Path) -> Tables {
+    let endpoints = endpoints_with_models(repo, Some(root));
+    let brokers = brokers_of(repo, &endpoints);
     (
-        endpoints_with_models(repo, Some(root)),
+        endpoints,
         spaces_of(repo, Some(root)),
         accounts_of(repo),
         federations_of(repo),
         agreements_of(repo),
         limits_of(repo),
         servers_of(repo),
+        brokers,
     )
 }
 
@@ -247,7 +298,7 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers) =
+    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers, brokers) =
         load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -290,6 +341,7 @@ pub fn load_with_previews(
         agreements,
         limits,
         servers,
+        brokers,
     ))
 }
 

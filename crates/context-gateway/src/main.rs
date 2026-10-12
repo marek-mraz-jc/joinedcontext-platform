@@ -13,10 +13,13 @@ use std::sync::Arc;
 /// The one outbound client: the broker hop and every notification delivery (R46).
 fn broker_of(config: &Config) -> Result<Broker, String> {
     let Some(path) = config.egress_ca_bundle.as_ref() else {
-        return Broker::verified(config.broker_url.clone()).map_err(|error| error.to_string());
+        return Broker::verified(config.broker_url.clone())
+            .map(|broker| broker.with_template(config.broker_url_template.clone()))
+            .map_err(|error| error.to_string());
     };
     let bundle = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     Broker::trusting(config.broker_url.clone(), &bundle)
+        .map(|broker| broker.with_template(config.broker_url_template.clone()))
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -53,42 +56,43 @@ async fn main() -> ExitCode {
             projects,
             assembly: config.assembly_dir.clone(),
         });
-    let (endpoints, spaces, accounts, federations, agreements, limits, servers) = match &config
-        .repo_dir
-    {
-        None => (
-            Vec::new(),
-            Vec::new(),
-            context_gateway::auth::accounts::ServiceAccounts::new(),
-            context_gateway::federation::Federations::new(),
-            context_gateway::auth::dataspace_token::Agreements::new(),
-            store::Limits::default(),
-            Vec::new(),
-        ),
-        Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
-            Ok(loaded) => {
-                tracing::info!(
-                    endpoints = loaded.0.len(),
-                    spaces = loaded.1.len(),
-                    accounts = loaded.2.len(),
-                    dir = %dir.display(),
-                    "repository loaded"
-                );
-                loaded
-            }
-            Err(error) => {
-                // An unreadable repository is a deployment fault, not a request fault:
-                // serving an empty table would answer 404 for endpoints that exist.
-                tracing::error!(%error, dir = %dir.display(), "cannot read the manifest repository");
-                return ExitCode::FAILURE;
-            }
-        },
-    };
+    let (endpoints, spaces, accounts, federations, agreements, limits, servers, brokers) =
+        match &config.repo_dir {
+            None => (
+                Vec::new(),
+                Vec::new(),
+                context_gateway::auth::accounts::ServiceAccounts::new(),
+                context_gateway::federation::Federations::new(),
+                context_gateway::auth::dataspace_token::Agreements::new(),
+                store::Limits::default(),
+                Vec::new(),
+                store::SpaceBrokers::default(),
+            ),
+            Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
+                Ok(loaded) => {
+                    tracing::info!(
+                        endpoints = loaded.0.len(),
+                        spaces = loaded.1.len(),
+                        accounts = loaded.2.len(),
+                        dir = %dir.display(),
+                        "repository loaded"
+                    );
+                    loaded
+                }
+                Err(error) => {
+                    // An unreadable repository is a deployment fault, not a request fault:
+                    // serving an empty table would answer 404 for endpoints that exist.
+                    tracing::error!(%error, dir = %dir.display(), "cannot read the manifest repository");
+                    return ExitCode::FAILURE;
+                }
+            },
+        };
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
     gateway.replace_servers(servers);
+    gateway.broker.route(&brokers);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
     let gateway = match (&config.oidc_issuer, &config.oidc_jwks_url) {
