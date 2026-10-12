@@ -1272,3 +1272,47 @@ fn a_changed_usage_text_updates_the_dataset_once() {
         publish(&mut api, &endpoint, &instance(), &record(), &documented()).expect("again");
     assert_eq!(outcome, Outcome::Unchanged);
 }
+
+/// T-4066: the Portal reads the record through its own host, and the catalogue's links and usage
+/// texts named `portal.` beside a DCAT record naming the Endpoint's public address. The record's
+/// `@id` is the address a reader gets; a record naming anything else keeps the publisher's host.
+#[test]
+fn links_and_usage_name_the_address_the_record_gives_the_endpoint() {
+    let through_portal = Settings::new("portal.example.org");
+    let public = |id: &str| {
+        let mut record = record();
+        record["@id"] = json!(id);
+        package(
+            &endpoint("[ngsi-ld, mcp]", PUBLISH),
+            &instance(),
+            &record,
+            &through_portal,
+        )
+        .expect("the endpoint publishes")
+        .expect("a dataset")
+    };
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    for id in [base.to_owned(), format!("{base}/")] {
+        let dataset = public(&id);
+        assert_eq!(dataset["url"], json!(format!("{base}/")));
+        assert_eq!(
+            extra(&dataset, "endpoint"),
+            Some(format!("{base}/").as_str())
+        );
+        assert!(resource_urls(&dataset)[..2]
+            .iter()
+            .all(|url| url.starts_with(base)));
+        let text = serde_json::to_string(&dataset["resources"]).expect("json");
+        assert!(text.contains(base) && !text.contains("portal.example.org"));
+    }
+    let fallback = "https://portal.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/";
+    for id in [
+        "http://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y",
+        "https://data.example.org/api/endpoint/another00000000000000000000",
+        "https://evil.example/x?https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y",
+        "https://user@data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y",
+        "https:///api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y",
+    ] {
+        assert_eq!(public(id)["url"], json!(fallback), "{id}");
+    }
+}
