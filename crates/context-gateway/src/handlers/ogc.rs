@@ -17,11 +17,15 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
+use futures_util::stream::{self, StreamExt};
 use jc_core::kinds::Representation;
 use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+/// The entities read per type to list it as a collection and give its extent (T-4104).
+const SAMPLE: usize = 100;
 
 /// Every OGC API - Features request of one endpoint (T-0159, EP-29, EP-30, EP-31, EP-32, EP-39).
 ///
@@ -297,14 +301,16 @@ async fn ogc_item(
     response
 }
 
-/// The collections of an endpoint and what each of them spans, from one bounded page (EP-31,
-/// EP-32).
+/// The collections of an endpoint and what each of them spans, from one bounded page per type
+/// (EP-31, EP-32).
 ///
 /// The manifest cannot answer either question: whether a type carries a geometry and what its
-/// data spans are properties of the data. Both come from one projected page, so a GIS client's
-/// discovery costs one broker call and not one per type.
-// ponytail: a page, not a scan. A type whose geometries all sit past `PAGE` entities is not
-// listed; the upgrade path is the cached extent query EP-32 names with its `maxAgeSeconds`.
+/// data spans are properties of the data. One page across every type spanned only the types the
+/// broker returned first: praha-mesto's first thousand entities named two of its six located
+/// types (T-4104). So each visible type is asked for its own page, a few at a time.
+// ponytail: a page per type, not a scan. The extent of a listed type is its first `SAMPLE`
+// entities' (one type asked alone: `PAGE`); the upgrade path is the cached extent query EP-32
+// names with its `maxAgeSeconds`.
 async fn ogc_sample(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -323,14 +329,40 @@ async fn ogc_sample(
         }
     }
 
-    let mut upstream = vec![("limit".to_owned(), PAGE.to_string())];
-    if !types.is_empty() {
-        upstream.push(("type".to_owned(), types.join(",")));
-    }
-    let (entities, _) = query_entities(gateway, endpoint, subject, &upstream, request).await?;
-
     let mut grouped: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for entity in entities.as_array().into_iter().flatten() {
+    let mut entities = Vec::new();
+    if types.is_empty() {
+        // No model names a type: the one read over every type the space holds, as before.
+        let upstream = vec![("limit".to_owned(), PAGE.to_string())];
+        let (page, _) = query_entities(gateway, endpoint, subject, &upstream, request).await?;
+        entities.extend(page.as_array().into_iter().flatten().cloned());
+    } else {
+        let limit = if types.len() == 1 { PAGE } else { SAMPLE };
+        let (uri, headers) = (request.uri().clone(), request.headers().clone());
+        let read = |name: String| {
+            let (uri, headers) = (uri.clone(), headers.clone());
+            async move {
+                let mut one = Request::new(Body::empty());
+                *one.uri_mut() = uri;
+                *one.headers_mut() = headers;
+                let upstream = vec![
+                    ("type".to_owned(), name),
+                    ("limit".to_owned(), limit.to_string()),
+                ];
+                query_entities(gateway, endpoint, subject, &upstream, &mut one).await
+            }
+        };
+        let pages: Vec<_> = stream::iter(types).map(read).buffered(4).collect().await;
+        for page in pages {
+            match page {
+                Ok((page, _)) => entities.extend(page.as_array().into_iter().flatten().cloned()),
+                // A type the PDP refuses is not listed, as an ungranted type never was (R20).
+                Err(refused) if refused.status() == StatusCode::FORBIDDEN => {}
+                Err(problem) => return Err(problem),
+            }
+        }
+    }
+    for entity in &entities {
         if let Some(name) = entity.get("type").and_then(Value::as_str) {
             grouped
                 .entry(name.to_owned())
