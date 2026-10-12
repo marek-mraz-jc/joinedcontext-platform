@@ -45,6 +45,17 @@ fn policy(space: &str) -> PolicySpec {
     .expect("the policy parses")
 }
 
+/// The person may write and subscribe with their own token, so a refusal of the exchanged one is
+/// the federation's limit and not a missing grant.
+fn writer(space: &str) -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: {space}\nassigner: did:web:hel.fi\nassignee: {{ kind: group, id: helsinki }}\n\
+         operations: [createEntity, updateAttrs, createSubscription, querySubscription]\n\
+         information:\n  - entities:\n      - type: Vehicle\n"
+    ))
+    .expect("the policy parses")
+}
+
 fn endpoint(slug: &str, space: &str, audience: Audience) -> Endpoint {
     Endpoint {
         declared_types: None,
@@ -67,7 +78,7 @@ fn endpoint(slug: &str, space: &str, audience: Audience) -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
-        policies: vec![policy(space)],
+        policies: vec![policy(space), writer(space)],
     }
 }
 
@@ -402,4 +413,68 @@ async fn a_broker_audience_token_of_another_client_or_another_broker_is_refused(
     let (status, _) = send(member(), Method::GET, HUB_SLUG, Some(&for_archive)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(broker.hops.lock().expect("hops").is_empty());
+}
+
+/// T-3999 review: a conditional write and a subscription take another way through the gateway
+/// than a plain write, and the exchanged token is refused on both before the broker is asked.
+#[tokio::test]
+async fn the_exchanged_token_neither_writes_with_if_match_nor_touches_a_subscription() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let exchanged = person(
+        &realm,
+        json!(format!("context-broker-{}", broker_of(&broker.url))),
+        "context-gateway",
+    );
+    let base = format!("/api/endpoint/{MEMBER_SLUG}/ngsi-ld/v1");
+    let attempts = [
+        (
+            Method::PATCH,
+            format!("{base}/entities/urn:ngsi-ld:Vehicle:bus-1/attrs?type=Vehicle"),
+            Some(json!({ "speed": { "type": "Property", "value": 1 } })),
+        ),
+        (
+            Method::POST,
+            format!("{base}/subscriptions?type=Vehicle"),
+            Some(json!({
+                "type": "Subscription",
+                "entities": [{ "type": "Vehicle" }],
+                "notification": { "endpoint": { "uri": "https://example.org/n" } }
+            })),
+        ),
+        (
+            Method::GET,
+            format!("{base}/subscriptions?type=Vehicle"),
+            None,
+        ),
+    ];
+    for (method, uri, body) in attempts {
+        let mut request = Request::builder()
+            .method(method.clone())
+            .uri(&uri)
+            .header(header::AUTHORIZATION, format!("Bearer {exchanged}"))
+            .header(header::IF_MATCH, "*");
+        let body = match body {
+            Some(body) => {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = router(gateway(&realm, &broker.url, Federations::new(), None))
+            .oneshot(request.body(body).expect("a request"))
+            .await
+            .expect("the gateway answers");
+        let status = response.status();
+        let said = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .expect("a body");
+        let said = String::from_utf8_lossy(&said);
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {said}");
+        assert!(said.contains("federated read"), "{method} {uri}: {said}");
+    }
+    assert!(
+        broker.hops.lock().expect("hops").is_empty(),
+        "nothing reached the broker"
+    );
 }

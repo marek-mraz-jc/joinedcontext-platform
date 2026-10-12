@@ -461,7 +461,10 @@ impl Gateway {
         };
         match exchanger.exchange(subject, &brokers).await {
             Ok(exchanged) => HeaderValue::from_str(&format!("Bearer {exchanged}"))
-                .map(Some)
+                .map(|mut value| {
+                    value.set_sensitive(true);
+                    Some(value)
+                })
                 .map_err(|_| Box::new(ProblemDetails::internal().into_response())),
             Err(error) => {
                 tracing::warn!(slug = %endpoint.slug, %error, "token exchange for a federated read failed");
@@ -942,6 +945,11 @@ pub(crate) async fn serve_ngsi_ld(
             return refusal.into_response();
         }
     }
+    // Every NGSI-LD door ends here, the conditional writes and subscriptions a view hands on
+    // included, so the federated token's limit is enforced here too (T-3999).
+    if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
+        return refusal;
+    }
 
     // PF-48, T-3999: a registration asking for `caller` identity forwards a token of the
     // caller exchanged for its broker's audience, never the hub's account or the caller's own
@@ -949,12 +957,17 @@ pub(crate) async fn serve_ngsi_ld(
     //
     // After the decision, not before it: a caller who may not use this endpoint at all learns
     // that it is refused, never that it federates (EP-03, EP-23).
-    let federated = match gateway
-        .federation_token(&endpoint, request.headers().get(AUTHORIZATION))
-        .await
-    {
-        Ok(federated) => federated,
-        Err(answer) => return *answer,
+    // A write's hop carries no exchanged token: the exchange serves federated reads only.
+    let federated = if operation.is_write() {
+        None
+    } else {
+        match gateway
+            .federation_token(&endpoint, request.headers().get(AUTHORIZATION))
+            .await
+        {
+            Ok(federated) => federated,
+            Err(answer) => return *answer,
+        }
     };
 
     // AG-85, T-2299: `geoproperty` and `geometryProperty` each choose the attribute a
@@ -1784,6 +1797,35 @@ fn capped_query(raw: &str) -> String {
 /// federated read's write refused (T-3999), the identifier (PF-43), then the tenant and the
 /// verified caller pinned for the hop (T-3641), with the token a `caller` registration of the
 /// space receives (PF-48, PF-113).
+/// A token the gateway exchanged for a federated read reads entities; it never writes and never
+/// touches a subscription, which would outlive it (T-3999, PF-114).
+fn federated_refusal(
+    endpoint: &Endpoint,
+    subject: &Subject,
+    operation: Operation,
+) -> Option<Response<Body>> {
+    if subject.via.as_deref() != Some(tenancy::GATEWAY_CLIENT) {
+        return None;
+    }
+    let subscription = matches!(
+        operation,
+        Operation::CreateSubscription
+            | Operation::UpdateSubscription
+            | Operation::RetrieveSubscription
+            | Operation::QuerySubscription
+            | Operation::DeleteSubscription
+    );
+    if !operation.is_write() && !subscription {
+        return None;
+    }
+    tracing::info!(slug = %endpoint.slug, %operation, "refused: a federated read's token");
+    Some(
+        ProblemDetails::forbidden()
+            .with_detail("a token exchanged for a federated read only reads entities")
+            .into_response(),
+    )
+}
+
 async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -1797,19 +1839,17 @@ async fn view_request(
             tracing::info!(slug = %endpoint.slug, %operation, "write refused: the domain is not verified");
             return Err(Box::new(refusal.into_response()));
         }
-        // A token the gateway exchanged for a federated read reads; it never writes (T-3999).
-        if subject.via.as_deref() == Some(tenancy::GATEWAY_CLIENT) {
-            tracing::info!(slug = %endpoint.slug, %operation, "write refused: a federated read's token");
-            return Err(Box::new(
-                ProblemDetails::forbidden()
-                    .with_detail("a token exchanged for a federated read cannot write")
-                    .into_response(),
-            ));
-        }
     }
-    let federated = gateway
-        .federation_token(endpoint, request.headers().get(AUTHORIZATION))
-        .await?;
+    if let Some(refusal) = federated_refusal(endpoint, subject, operation) {
+        return Err(Box::new(refusal));
+    }
+    let federated = if operation.is_write() {
+        None
+    } else {
+        gateway
+            .federation_token(endpoint, request.headers().get(AUTHORIZATION))
+            .await?
+    };
     if let Some(raw) = operations::addressed_entity(path) {
         if let Err(refusal) = write_guard::check_identifier(&query::decode(raw), None) {
             return Err(Box::new(ProblemDetails::from(refusal).into_response()));
