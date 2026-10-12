@@ -48,6 +48,35 @@ pub fn permissions(subject: &Subject, endpoint: &Endpoint, now: DateTime<Utc>) -
     Value::Object(document)
 }
 
+/// Everything `subject` is granted here, for the Portal's Access explorer (EP-103, T-3792): the
+/// [`permissions`] document a token of theirs would read on `access`, beside `admitted` and the
+/// manifest names of the Policies in force for them, or `{"admitted": false}` when the
+/// Endpoint's audience refuses them before any Policy is read (EP-14).
+pub fn granted(
+    subject: &Subject,
+    admitted: bool,
+    endpoint: &Endpoint,
+    now: DateTime<Utc>,
+) -> Value {
+    if !admitted {
+        return json!({ "admitted": false });
+    }
+    let names: Vec<&str> = effective(subject, &endpoint.policies, now)
+        .into_iter()
+        .filter_map(|policy| {
+            let index = endpoint
+                .policies
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, policy))?;
+            endpoint.policy_names.get(index).map(String::as_str)
+        })
+        .collect();
+    let mut document = permissions(subject, endpoint, now);
+    document["admitted"] = json!(true);
+    document["policies"] = json!(names);
+    document
+}
+
 /// What decided one prospective request: the index into [`Endpoint::policies`] of the
 /// Policy that did, so [`check`] and [`simulate`] read one decision and cannot disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

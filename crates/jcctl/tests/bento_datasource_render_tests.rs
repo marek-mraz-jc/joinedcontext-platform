@@ -344,3 +344,93 @@ targetEndpoint: urn:ngsi-ld:Endpoint:example.org:helsinki:ep-writer
         "expected RenderError::Class, got: {err:?}"
     );
 }
+
+const ZIP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: hsl-gtfs, namespace: helsinki }
+spec:
+  type: http
+  http:
+    url: https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
+    authorization: { header: x-key, headerRef: { name: hsl, key: key } }
+    archive:
+      format: zip
+      members: [agency.txt, stops.txt]
+      maxBytes: 1048576
+"#;
+
+/// PL-72: an archive is read by range: the input asks for the tail, the directory names the
+/// members, and each member's own request carries the connection's credential and its range.
+/// A refused read is logged and dropped before the author's processors see archive bytes.
+#[test]
+fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
+    let spec = source(ZIP);
+    let out = render(
+        "pipeline:\n  processors:\n    - unarchive: { format: csv }\n",
+        &spec,
+        &context("hsl-gtfs"),
+    )
+    .expect("renders");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let input = &doc["input"]["http_client"];
+    assert_eq!(input["headers"]["Range"].as_str(), Some("bytes=-65557"));
+    assert_eq!(
+        input["headers"]["x-key"].as_str(),
+        Some("${DS_HSL_GTFS_KEY}")
+    );
+
+    let names = |steps: &[serde_norway::Value]| -> Vec<String> {
+        steps
+            .iter()
+            .map(|step| {
+                step.as_mapping()
+                    .unwrap()
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    };
+    let outer = doc["pipeline"]["processors"]
+        .as_sequence()
+        .expect("processors");
+    assert_eq!(names(outer), ["try", "catch", "unarchive"]);
+    // The first refusal skips the rest, so an unchecked directory never reaches a request.
+    let steps = outer[0]["try"].as_sequence().expect("the read");
+    assert_eq!(
+        names(steps),
+        ["mapping", "unarchive", "mapping", "http", "mapping"]
+    );
+    let directory = steps[0]["mapping"].as_str().unwrap();
+    assert!(directory.contains(r#"let wanted = ["agency.txt","stops.txt"]"#));
+    assert!(directory.contains("let max_bytes = 1048576"));
+    // The directory may lie about sizes, so a deflated member is read only when the most it
+    // can inflate to (1032 times its packed size) is within maxBytes.
+    assert!(directory.contains("e.method == 8 && e.csize * 1032 > $max_bytes"));
+    assert!(!directory.contains("MEMBERS") && !directory.contains("MAX_BYTES"));
+    let member = &steps[3]["http"];
+    assert_eq!(member["url"], input["url"]);
+    assert_eq!(member["headers"]["Range"].as_str(), Some("${! @range }"));
+    assert_eq!(
+        member["headers"]["x-key"].as_str(),
+        Some("${DS_HSL_GTFS_KEY}")
+    );
+    assert_eq!(
+        outer[1]["catch"][1]["mapping"].as_str(),
+        Some("root = deleted()")
+    );
+    assert_eq!(outer[2]["unarchive"]["format"].as_str(), Some("csv"));
+
+    // Without `archive` the same connection renders as it did: no range, nothing prepended.
+    let plain = source(
+        &ZIP.split("    archive:")
+            .next()
+            .unwrap()
+            .replace("hsl.zip", "x.json"),
+    );
+    let out = render("", &plain, &context("hsl-gtfs")).expect("renders");
+    assert!(!out.contains("Range") && !out.contains("pipeline"), "{out}");
+}

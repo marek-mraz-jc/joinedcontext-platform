@@ -468,7 +468,7 @@ async fn a_malformed_simulation_is_a_bad_request() {
         json!({ "subject": { "user": "ada", "nickname": "a" }, "action": { "name": "retrieveEntity" } }),
         json!({ "subject": { "user": "ada", "serviceAccount": "ovzdusie-bot" }, "action": { "name": "retrieveEntity" } }),
         json!({ "subject": {}, "action": { "name": "readEverything" } }),
-        json!({ "subject": {} }),
+        json!({ "subject": {}, "resource": { "type": "AirQualityObserved" } }),
         json!({ "action": { "name": "retrieveEntity" } }),
     ];
     for body in bad {
@@ -487,4 +487,41 @@ async fn a_malformed_simulation_is_a_bad_request() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// T-3792: with no action the answer is everything the subject is granted, the `access`
+/// document a token of theirs would read, beside the Policies in force for them; a subject the
+/// audience refuses is not admitted, and the document names nothing of what they cannot reach.
+#[tokio::test]
+async fn with_no_action_the_answer_is_the_subjects_whole_grant() {
+    let realm = common::Realm::new();
+    let app = app_of(&realm);
+
+    let ada = json!({ "subject": { "user": "ada", "groups": ["ovzdusie"] } });
+    let (status, answer) = simulate(&app, &realm, CLOSED, ada).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["admitted"], json!(true));
+    assert_eq!(answer["resource"]["id"], json!(CLOSED));
+    assert_eq!(
+        answer["policies"],
+        json!(["ovzdusie-writes", "ada-deletes"])
+    );
+    let actions: Vec<&str> = answer["permissions"]
+        .as_array()
+        .expect("permissions")
+        .iter()
+        .flat_map(|entry| entry["actions"].as_array().expect("actions"))
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(actions, ["updateAttrs", "deleteEntity"], "{answer}");
+    assert!(
+        !answer.to_string().contains("InternalIncident"),
+        "EP-59: {answer}"
+    );
+
+    let (_, public) = simulate(&app, &realm, OPEN, json!({ "subject": {} })).await;
+    assert_eq!(public["policies"], json!(["public-air", "no-history"]));
+
+    let (_, refused) = simulate(&app, &realm, CLOSED, json!({ "subject": {} })).await;
+    assert_eq!(refused, json!({ "admitted": false }));
 }

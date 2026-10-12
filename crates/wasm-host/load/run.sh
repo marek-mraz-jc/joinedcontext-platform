@@ -6,16 +6,16 @@
 #
 # <dir> holds what the platform branch under test built: `jc-wasm-host`, `fleet` (the
 # provisioner, crates/wasm-host/examples/fleet.rs), the SDK example's component
-# `rust_wasm_server.wasm` and its `0001_notes.sql`. APPS (10000), RATE (5/s), DURATION (30m) and
+# `rust_wasm_server.wasm` and its `migrations.sql`. APPS (10000), RATE (5/s), DURATION (30m) and
 # CACHED (700, the compiled components a shard keeps) override the run. Everything measured lands in <dir>: samples.csv every 15 s, k6-summary.json,
 # results.txt. The rig and its volumes are removed at the end, also when the run fails.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-: "${RIG_DIR:?set RIG_DIR to the directory with jc-wasm-host, fleet, rust_wasm_server.wasm, 0001_notes.sql}"
+: "${RIG_DIR:?set RIG_DIR to the directory with jc-wasm-host, fleet, rust_wasm_server.wasm, migrations.sql}"
 RIG_DIR=$(cd "$RIG_DIR" && pwd)
 export RIG_DIR APPS=${APPS:-10000} RATE=${RATE:-5} DURATION=${DURATION:-30m} CACHED=${CACHED:-700}
 export RIG_UID=$(id -u) RIG_GID=$(id -g)
-for f in jc-wasm-host fleet rust_wasm_server.wasm 0001_notes.sql; do
+for f in jc-wasm-host fleet rust_wasm_server.wasm migrations.sql; do
   [ -s "$RIG_DIR/$f" ] || { echo "missing $RIG_DIR/$f" >&2; exit 1; }
 done
 compose() { docker compose -f "$here/compose.yaml" "$@"; }
@@ -47,7 +47,7 @@ before=$(psqlc "$catalog_sql")
 
 FLEET_DB_URL="postgres://postgres:$dbpass@127.0.0.1:15432/apps" FLEET_S3_ENDPOINT=http://127.0.0.1:19000 \
 FLEET_S3_KEY=rig-root FLEET_S3_SECRET="$STORE_SECRET" \
-  "$RIG_DIR/fleet" "$RIG_DIR/rust_wasm_server.wasm" "$RIG_DIR/0001_notes.sql" "$APPS" 2 "$RIG_DIR" 2>&1 | tee "$RIG_DIR/fleet.log"
+  "$RIG_DIR/fleet" "$RIG_DIR/rust_wasm_server.wasm" "$RIG_DIR/migrations.sql" "$APPS" 2 "$RIG_DIR" 2>&1 | tee "$RIG_DIR/fleet.log"
 psqlc "vacuum analyze" >/dev/null
 after=$(psqlc "$catalog_sql")
 

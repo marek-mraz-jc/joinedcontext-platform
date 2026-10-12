@@ -14,7 +14,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -161,7 +161,17 @@ fn members(archive: &[u8]) -> Vec<(String, String)> {
 
 #[tokio::test]
 async fn the_dump_holds_what_the_callers_grants_read_and_nothing_else() {
-    let broker = BrokerStub::start(vec![json!([station("station-01"), invoice()])]).await;
+    // The dump reads through the space's own view, as `/cs/{space}/ngsi-ld/v1` does (T-3651).
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01"), invoice()])],
+        View::of(
+            &format!("cs-{SPACE}"),
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
+    )
+    .await;
     let app = gateway(&broker.url, space(dumping(), vec![public_grant()], None));
     let (status, headers, body) = get(app, &format!("/cs/{SPACE}/dump/")).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
@@ -195,6 +205,12 @@ async fn the_dump_holds_what_the_callers_grants_read_and_nothing_else() {
         );
         assert!(!text.contains("4200.25"), "{name} carries its value");
     }
+    let hops = broker.hops();
+    assert!(
+        hops.iter()
+            .any(|hop| hop.view == format!("cs-{SPACE}") && hop.path == "/ngsi-ld/v1/entities"),
+        "{hops:?}"
+    );
 }
 
 #[tokio::test]

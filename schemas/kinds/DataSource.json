@@ -2,6 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ArchiveFormat": {
+      "description": "The archive formats an `http` connection reads (PL-72).",
+      "oneOf": [
+        {
+          "description": "A zip archive: stored or deflated members, no Zip64.",
+          "enum": [
+            "zip"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Authorization": {
       "additionalProperties": false,
       "description": "An `Authorization` header whose value is assembled from a secret (CC-06).",
@@ -257,10 +269,56 @@
       ],
       "type": "object"
     },
+    "HttpArchive": {
+      "additionalProperties": false,
+      "description": "The named members of the archive an `http` connection serves (PL-72, Architecture/08 §6).\n\nThe runner reads the directory from the archive's last 64 KiB and then each member by its own range, so a member nobody named is never fetched or inflated.",
+      "properties": {
+        "format": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ArchiveFormat"
+            }
+          ],
+          "description": "The archive format; `zip` is the only one."
+        },
+        "maxBytes": {
+          "description": "The largest member accepted, packed and unpacked, in bytes; 32 MiB when absent, at most 256 MiB. A deflated member is read only when 1032 times its packed size, the most deflate expands, is within it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "members": {
+          "description": "The member names to read, at most 20, each letters, digits, `.`, `_`, `-` and `/`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "format",
+        "members"
+      ],
+      "type": "object"
+    },
     "HttpConnection": {
       "additionalProperties": false,
       "description": "An HTTP resource the runner polls (Architecture/08 §6).",
       "properties": {
+        "archive": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HttpArchive"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The members of a zip archive to read, by HTTP `Range`, instead of the whole body (PL-72)."
+        },
         "authorization": {
           "anyOf": [
             {

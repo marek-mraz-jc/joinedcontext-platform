@@ -9,20 +9,28 @@ connection string, a password or a storage key.
 | Path | What it is |
 |---|---|
 | `server/` | the component: `wasm32-wasip2`, built on [`jc-app-sdk`](../../../crates/app-sdk) |
-| `migrations/0001_notes.sql` | the App's tables; the reconciler runs migrations at publish, the App never runs DDL |
+| `migrations/` | the App's tables, `0002_roles.sql` adds owners, the notice and `app_audit`; the reconciler runs migrations at publish, the App never runs DDL |
 
 ## What the server answers
 
 The App sees the path below `/apps/{name}`:
 
-| Route | What it does |
-|---|---|
-| `GET /api/notes` | the notes, newest first |
-| `POST /api/notes` `{"body"}` | a new note |
-| `PUT /api/notes/{id}` `{"body"}` | the note's text changed |
-| `DELETE /api/notes/{id}` | the note and its file gone |
-| `POST /api/notes/{id}/file` `{"name", "contentType"}` | a URL the browser uploads the file to, valid two minutes |
-| `GET /api/notes/{id}/file` | a URL the browser downloads it from |
+| Route | Who | What it does |
+|---|---|---|
+| `GET /api/notes` | signed in | the caller's notes (a steward: all), newest first |
+| `POST /api/notes` `{"body"}` | signed in | a new note of the caller's |
+| `PUT /api/notes/{id}` `{"body"}` | owner, steward | the note's text changed |
+| `DELETE /api/notes/{id}` | owner, steward | the note and its file gone |
+| `POST /api/notes/{id}/file` `{"name", "contentType"}` | owner, steward | a URL the browser uploads the file to, valid two minutes |
+| `GET /api/notes/{id}/file` | owner, steward | a URL the browser downloads it from |
+| `GET /api/notice` | anyone | the shared notice |
+| `PUT /api/notice` `{"body"}` | steward | the notice changed |
+| `GET /api/history` | steward | the newest changes: who, what, when |
+| `PATCH /api/entities/{id}` `{attrs}` | the Endpoint's Policy | Attributes of one Entity changed, as the caller |
+
+Roles come from `identity::caller()` alone (API/07): a role in the body or a header is ignored. A
+note another person wrote answers `404`, as if it did not exist. Every change writes a row into
+`app_audit` in the same statement, so a failed change leaves no history.
 
 Files never pass through the App: it hands out a presigned URL for one key and one method, and
 the browser talks to the store directly.
@@ -39,7 +47,7 @@ cargo build --release --target wasm32-wasip2       # target/wasm32-wasip2/releas
 `crates/wasm-host/tests/example_tests.rs` runs this component on the host against a real Postgres
 and RustFS. It covers the migration as the reconciler runs it, every route, a file up and down
 through presigned URLs, and a second App on the same component that sees none of the first App's
-notes.
+notes. A second test runs an anonymous caller, a viewer and a steward through every route above.
 
 ## What the SDK gives a handler
 
@@ -51,6 +59,9 @@ notes.
 - `jc_app_sdk::gateway::get("/ngsi-ld/v1/entities?type=…")`: the App's own Endpoint, read with
   the caller's token. The host sends `http://gateway/ngsi-ld/v1/…` there and refuses every other
   origin and path, so the App names neither the gateway nor another Endpoint (AP-147).
+- `jc_app_sdk::access`: `Caller::require` (401), `require_role` (403 naming the role needed),
+  `Owned` for rows a person writes (owner or editor role changes them, history in the same
+  statement), `record` and `history` for the App's `app_audit` table.
 - `jc_app_sdk::blob`: `get`, `put`, `list`, `delete` and `presign`, with keys relative to the
   App's own prefix. A key with `..` or a leading `/` is refused.
 - `jc_app_sdk::gateway`: `get` and `get_json` of a gateway path such as

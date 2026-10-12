@@ -55,6 +55,8 @@ pub const ROLES: HeaderName = HeaderName::from_static("x-jc-roles");
 pub const CLIENT: HeaderName = HeaderName::from_static("x-jc-client");
 /// `true` when the caller asked to be told about narrowing (O-3 (b), R22).
 pub const RESTRICTED: HeaderName = HeaderName::from_static("x-jc-restricted");
+/// The data-space participant a transfer token names (DS-02, map K38, T-3800).
+pub const DID: HeaderName = HeaderName::from_static("x-jc-did");
 
 /// The service account the gateway's own hops to the broker run as (T-3767): its Keycloak
 /// client. The rule document the Portal writes grants it the reads and the unlinking those hops
@@ -92,7 +94,9 @@ pub fn pin_tenant(request: &mut Request, space: &str) -> Result<(), InvalidHeade
 /// `x-jc-*` headers instead, and reads a request carrying none of them as the cluster's own, so
 /// `x-jc-roles` is always set, to `public` at least for an anonymous caller. Every value and
 /// list member is percent-encoded (T-3770), so a name with a diacritic or a comma reaches the
-/// broker whole.
+/// broker whole. A caller under a data-space agreement is its participant's DID alone
+/// (`x-jc-did`, DS-02): no role, no account, no opt-in, so a broker that does not read the
+/// header yet takes the hop as the cluster's own and refuses it, never as the public's.
 pub fn pin_caller(
     request: &mut Request,
     space: &str,
@@ -105,6 +109,10 @@ pub fn pin_caller(
         while headers.remove(&name).is_some() {}
     }
     drop_identity(headers);
+    if subject.agreement.is_some() {
+        one(headers, DID, subject.did.as_deref());
+        return Ok(());
+    }
     one(headers, SUBJECT, subject.user.as_deref());
     // Only the gateway's own hops speak as the gateway, never a token of its client.
     let client = subject.service_account.as_deref();

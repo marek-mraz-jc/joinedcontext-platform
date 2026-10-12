@@ -25,7 +25,8 @@ By hand, on a machine of its own:
 ```sh
 cargo build --release -p wasm-host --bin jc-wasm-host --example fleet
 (cd examples/apps/rust-wasm-server/server && cargo build --release --target wasm32-wasip2)
-# copy jc-wasm-host, examples/fleet, rust_wasm_server.wasm and migrations/0001_notes.sql into one directory
+# copy jc-wasm-host, examples/fleet and rust_wasm_server.wasm into one directory,
+# and cat examples/apps/rust-wasm-server/migrations/*.sql into migrations.sql beside them
 RIG_DIR=<that directory> crates/wasm-host/load/run.sh
 ```
 

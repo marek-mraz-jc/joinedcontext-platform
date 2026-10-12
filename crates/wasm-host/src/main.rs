@@ -4,7 +4,8 @@
 //! |---|---|
 //! | `JC_WASM_SHARD` | this shard's id; the placement file must name it |
 //! | `JC_WASM_PLACEMENTS` | the placement file the reconciler renders for this shard |
-//! | `JC_WASM_LISTEN` | the address to serve on, default `0.0.0.0:8080` |
+//! | `JC_WASM_LISTEN` | the address of the Apps' APIs, which the edge reaches, default `0.0.0.0:8080` |
+//! | `JC_WASM_ADMIN_LISTEN` | the address of `/metrics` and `/jobs`, for the Portal and the scraper alone, default `0.0.0.0:9090` (T-3857) |
 //! | `JC_GATEWAY_URL` | the one origin an App may call, `https://host[:port]` |
 //! | `JC_WASM_PORTAL_URL` | the Portal inside the cluster, which the host asks for a request's caller and an App's `email` and `ai` (T-3622); unset, `identity` answers nobody and both services `unavailable` |
 //! | `JC_WASM_S3_ENDPOINT`, `JC_WASM_S3_BUCKET` | the bucket of `components/sha256-<64 hex>.wasm` and `apps/<shard>/<id>/` |
@@ -24,8 +25,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use hyper::server::conn::http1;
-use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use wasm_host::blob::S3Blob;
 use wasm_host::host::Host;
@@ -33,7 +32,7 @@ use wasm_host::jobs::{HostRunner, JobTokens, Scheduler, WALL_TIME};
 use wasm_host::limits::Limits;
 use wasm_host::metrics::Metrics;
 use wasm_host::s3::Bucket;
-use wasm_host::server::Shard;
+use wasm_host::server::{Port, Shard};
 use wasm_host::source::Source;
 use wasm_host::sql::{connect_options, PgStore, SqlLimits};
 use wasm_host::storage::{Storage, Stores, Unconfigured};
@@ -187,30 +186,15 @@ async fn run() -> Result<(), String> {
             .unwrap_or_default()
     }));
     let listen = var("JC_WASM_LISTEN").unwrap_or_else(|| "0.0.0.0:8080".into());
-    let listener = TcpListener::bind(&listen)
+    let admin = var("JC_WASM_ADMIN_LISTEN").unwrap_or_else(|| "0.0.0.0:9090".into());
+    let apps_listener = TcpListener::bind(&listen)
         .await
         .map_err(|err| format!("{listen}: {err}"))?;
-    tracing::info!(%listen, shard = %shard.id, "serving");
-    loop {
-        let (stream, _) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            Err(err) => {
-                tracing::warn!(%err, "accept failed");
-                continue;
-            }
-        };
-        let shard = shard.clone();
-        tokio::spawn(async move {
-            let service = hyper::service::service_fn(move |request| {
-                let shard = shard.clone();
-                async move { Ok::<_, std::convert::Infallible>(shard.handle(request).await) }
-            });
-            if let Err(err) = http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .await
-            {
-                tracing::debug!(%err, "connection ended");
-            }
-        });
-    }
+    let admin_listener = TcpListener::bind(&admin)
+        .await
+        .map_err(|err| format!("{admin}: {err}"))?;
+    tracing::info!(%listen, %admin, shard = %shard.id, "serving");
+    tokio::spawn(shard.clone().serve(admin_listener, Port::Admin));
+    shard.serve(apps_listener, Port::Apps).await;
+    Ok(())
 }

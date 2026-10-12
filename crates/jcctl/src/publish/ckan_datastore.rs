@@ -22,6 +22,7 @@ use super::ckan::{CkanApi, CkanError};
 use jc_core::kinds::ckan::CkanPublication;
 use jc_core::kinds::Representation;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The primary key of every mirrored table: the entity's own URN.
@@ -489,6 +490,9 @@ pub fn sync(
             }),
         )?;
     }
+    if !upserted.is_empty() || !deleted.is_empty() {
+        touch(api, resource_id, None)?;
+    }
     Ok(Synced { upserted, deleted })
 }
 
@@ -566,6 +570,46 @@ pub fn upsert(
     let mut payload = json!({ "resource_id": resource_id, "method": "upsert", "force": true });
     payload["records"] = Value::Array(batch);
     api.action("datastore_upsert", &payload)?;
+    Ok(())
+}
+
+/// The resource field that holds [`digest`] of the rows the mirror last wrote.
+pub const ROWS_DIGEST: &str = "rows_sha256";
+
+/// The hash of one record, which [`digest`] folds: 32 bytes a row, so a large table is not
+/// held a second time to be compared (T-2968).
+pub fn row_hash(record: &Value) -> [u8; 32] {
+    Sha256::digest(record.to_string()).into()
+}
+
+/// One digest of a table's rows from their [`row_hash`]es, whatever order the Endpoint
+/// answered them in, so a reload of unchanged rows is recognised as unchanged (EP-109).
+pub fn digest(mut each: Vec<[u8; 32]>) -> String {
+    each.sort_unstable();
+    let mut whole = Sha256::new();
+    for record in &each {
+        whole.update(record);
+    }
+    format!("{:x}", whole.finalize())
+}
+
+/// Marks the table's resource as changed now, which moves its dataset's `metadata_modified` in
+/// CKAN: `datastore_upsert` and `datastore_delete` change rows and leave the dataset's dates
+/// alone, so a harvester polling `metadata_modified` would never see new rows (EP-109, T-3886).
+/// `rows` is the [`digest`] of the rows now held, when the caller knows all of them.
+pub fn touch(
+    api: &mut impl CkanApi,
+    resource_id: &str,
+    rows: Option<&str>,
+) -> Result<(), MirrorError> {
+    let mut payload = json!({
+        "id": resource_id,
+        "last_modified": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+    });
+    if let Some(rows) = rows {
+        payload[ROWS_DIGEST] = json!(rows);
+    }
+    api.action("resource_patch", &payload)?;
     Ok(())
 }
 

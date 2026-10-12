@@ -123,6 +123,8 @@ pub struct Gateway {
     pub rate_limiter: RateLimiter,
     /// The creates each form Endpoint has taken today (EP-97).
     pub creates: crate::creates::DailyCreates,
+    /// The WebSocket connections each caller holds open (EP-107).
+    pub ws_open: crate::handlers::ws::Open,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -189,6 +191,7 @@ impl Gateway {
             delivery_key: None,
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
+            ws_open: Default::default(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
@@ -432,6 +435,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
         // One connector over every Endpoint the token reaches (EP-87, ADR-N-025).
         .route(HUB_PATH, post(mcp::hub::message))
+        .route("/api/endpoints", get(mcp::hub::endpoints))
         .route(
             "/api/mcp/.well-known/oauth-protected-resource",
             get(mcp::hub::protected_resource),
@@ -467,6 +471,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
+        // Live updates: the broker view's WebSocket, relayed under the caller (EP-106, T-3885).
+        .route(
+            "/api/endpoint/{slug}/ws",
+            get(crate::handlers::ws::endpoint_ws),
+        )
         .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))
@@ -1427,23 +1436,12 @@ fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a view of
-/// another model (G18), a projection with `temporalQ` (G6), a slug no view id can hold (the
-/// writer refuses it), and a subscription, whose delivery the gateway still seals and routes
-/// back (plan 5.5, T-3653). A caller under a data-space agreement stays too: the engine has no
-/// agreements to decide on yet, and would judge the connector's own account instead (map K38).
-/// So does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
+/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a slug no view
+/// id can hold (the writer refuses it), and a subscription, whose delivery the gateway still seals
+/// and routes back (plan 5.5, T-3653). So does a write with `If-Match`: the broker publishes no
+/// entity tags, and the gateway's read,
 /// compare and conditional write is the only lost-update guard there is (R45, GW16).
-fn served_by_view(
-    endpoint: &Endpoint,
-    subject: &Subject,
-    (view, operation, headers): (&str, Operation, &HeaderMap),
-) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
+pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let subscription = matches!(
         operation,
         Operation::CreateSubscription
@@ -1453,12 +1451,7 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
-        && !conditional
-        && !temporal
-        && !subscription
-        && (1..=MAX_VIEW_ID).contains(&view.len())
+    !conditional && !subscription && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
@@ -1495,7 +1488,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !served_by_view(&endpoint, &subject, (&view, operation, request.headers())) {
+    if !served_by_view((&view, operation, request.headers())) {
         return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
     }
     if operation == Operation::QueryEntity {
@@ -1526,16 +1519,23 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let mut divided: Option<(Vec<String>, Refused)> = None;
-    let units_filled = match view_payload(
-        gateway,
-        (&endpoint, &subject),
-        (&path, &params, operation),
-        &mut parts.headers,
-        &mut sent,
-        &mut divided,
-    )
-    .await
-    {
+    // A view of another model takes no write (the broker's 405, `mapping::READS`), so no body is
+    // judged against the source model first (T-3799).
+    let mapped_write = endpoint.view_mapping.is_some() && operation.is_write();
+    let payload = if mapped_write {
+        Ok(Vec::new())
+    } else {
+        view_payload(
+            gateway,
+            (&endpoint, &subject),
+            (&path, &params, operation),
+            &mut parts.headers,
+            &mut sent,
+            &mut divided,
+        )
+        .await
+    };
+    let units_filled = match payload {
         Ok(filled) => filled,
         Err(answer) => return *answer,
     };
@@ -1639,7 +1639,7 @@ async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
 const ANTARES_ACCESS_DENIED: &str = "urn:antares:error:AccessDenied";
 
 /// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
-const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
@@ -3312,7 +3312,7 @@ fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) 
 
 /// Whether the broker's `404` says the tenant does not exist (CIM 009 5.5.2 `NonexistentTenant`)
 /// rather than that the thing asked for does not.
-fn names_no_tenant(body: &[u8]) -> bool {
+pub(crate) fn names_no_tenant(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
         problem
             .get("type")
@@ -3839,8 +3839,9 @@ async fn mcp_message(
 /// broker has no tool or resource for, `describe_access`, `describe_schema` and their
 /// `access://` and `schema://` documents, added to the broker's listings and answered from the
 /// documents the access and schema surfaces serve, and what no view serves yet (a view
-/// mapping, an agreement's caller) stays on its own façade. A federating space's registrations
-/// are named in the answer, see [`federated`].
+/// mapping) stays on its own façade. A caller under a data space agreement is the view's too:
+/// the hop names its DID alone (map K38, T-3818). A federating space's registrations are named
+/// in the answer, see [`federated`].
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
@@ -3872,7 +3873,7 @@ async fn mcp_answer(
     // What is no single request (a batch, a scalar, a notification that changes nothing) is
     // answered here as JSON-RPC says, before a hop.
     let request_message = message.is_object() && message.get("id").is_some();
-    let viewed = request_message && view_serves(&endpoint, &subject, &view);
+    let viewed = request_message && view_serves(&endpoint, &view);
     if described || !viewed {
         return facade_answer(gateway, endpoint, subject, credential, message).await;
     }
@@ -4040,14 +4041,12 @@ fn federated(answer: &mut Value, method: &str, members: &[String]) {
     }
 }
 
-/// Whether the broker's MCP surface of `view` answers this Endpoint's caller: not what no view
-/// serves yet, a view mapping or an agreement's caller. A space that federates registrations is
-/// served by its own view, which merges them as its NGSI-LD surface does; the gateway names them
-/// in the answer (EP-71, T-3819).
-fn view_serves(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
-    endpoint.view_mapping.is_none()
-        && subject.agreement.is_none()
-        && (1..=MAX_VIEW_ID).contains(&view.len())
+/// Whether the broker's MCP surface of `view` answers this Endpoint: not what no view serves
+/// yet, a view mapping. An agreement's caller is the view's too (T-3818), and a space that
+/// federates registrations is served by its own view, which merges them as its NGSI-LD surface
+/// does; the gateway names them in the answer (EP-71, T-3819).
+fn view_serves(endpoint: &Endpoint, view: &str) -> bool {
+    endpoint.view_mapping.is_none() && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The operation the domain gate (PF-41) weighs a message as: a tool the gateway does not know
@@ -4063,8 +4062,8 @@ fn mcp_operation(tool: Option<&str>) -> Operation {
 
 /// Whether a member's call to `tool` goes to the broker's view of the member (T-3808): not the
 /// describe tools the gateway answers, and not a member no view serves yet.
-pub(crate) fn member_viewed(endpoint: &Endpoint, subject: &Subject, tool: &str) -> bool {
-    !DESCRIBE_TOOLS.contains(&tool) && view_serves(endpoint, subject, &endpoint.slug)
+pub(crate) fn member_viewed(endpoint: &Endpoint, tool: &str) -> bool {
+    !DESCRIBE_TOOLS.contains(&tool) && view_serves(endpoint, &endpoint.slug)
 }
 
 /// One `tools/call` of the hub or of a named server as the broker's view of the member answers

@@ -2,7 +2,7 @@
 //! written against. A request comes in as a [`http::Request`], a handler answers a
 //! [`http::Response`], and the App's own database and files are [`sql`] and [`blob`]. The request's
 //! person is [`identity::caller`], and the platform's [`email`] and [`ai`] are asked in their name
-//! (`jc:app@0.1.1`, API/06 §5). The App never holds a connection string, a password, a storage key
+//! (`jc:app@0.1.1`, API/06 §5). Who may change what is [`access`] (API/07). The App never holds a connection string, a password, a storage key
 //! or a token: the host answers every call as the App and no other.
 //!
 //! ```no_run
@@ -31,6 +31,7 @@ wit_bindgen::generate!({
 #[doc(hidden)]
 pub use wasip2 as __wasip2;
 
+pub mod access;
 pub mod gateway;
 pub mod http;
 

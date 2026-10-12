@@ -43,7 +43,7 @@ impl From<Error> for Response {
             Error::Status(403, _) => Response::problem(
                 403,
                 "Forbidden",
-                "your account may not read the data this needs",
+                "your account may not read or change this data",
             ),
             Error::Invalid(_) => Response::problem(500, "Internal Server Error", &err.to_string()),
             _ => Response::problem(502, "Bad Gateway", &err.to_string()),
@@ -87,7 +87,27 @@ pub fn encode(value: &str) -> String {
 /// 2xx is [`Error::Status`].
 pub fn get(path: &str) -> Result<Vec<u8>, Error> {
     let path = checked(path)?;
-    send(path)
+    send("GET", path, None)
+}
+
+/// The path of [`patch_entity`]: `/ngsi-ld/v1/entities/{id}/attrs`, the id encoded.
+pub fn entity_attrs_path(id: &str) -> Result<String, Error> {
+    if id.is_empty() || id.chars().any(char::is_control) {
+        return Err(Error::Invalid(format!("{id:?} is not an Entity id")));
+    }
+    Ok(format!("/ngsi-ld/v1/entities/{}/attrs", encode(id)))
+}
+
+/// Changes Attributes of the Entity `id` through the App's own Endpoint, as the caller (API/07
+/// §4): `PATCH /ngsi-ld/v1/entities/{id}/attrs` with `attrs`, a JSON object of NGSI-LD
+/// Attributes. The Endpoint's Policy decides; a refusal is [`Error::Status`] with the gateway's
+/// `401` or `403`, which [`Response::from`] passes on as such.
+pub fn patch_entity(id: &str, attrs: &serde_json::Value) -> Result<(), Error> {
+    if !attrs.is_object() {
+        return Err(Error::Invalid("the Attributes are a JSON object".into()));
+    }
+    let path = entity_attrs_path(id)?;
+    send("PATCH", checked(&path)?, Some(attrs.to_string().as_bytes())).map(|_| ())
 }
 
 /// A `GET` of `path` read as `T`.
@@ -146,23 +166,47 @@ fn collection_name(name: &str) -> Result<&str, Error> {
     }
 }
 
-fn send(path: &str) -> Result<Vec<u8>, Error> {
+fn send(method: &str, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, Error> {
     use wasip2::http::outgoing_handler;
-    use wasip2::http::types::{Fields, IncomingBody, OutgoingBody, OutgoingRequest, Scheme};
+    use wasip2::http::types::{
+        Fields, IncomingBody, Method, OutgoingBody, OutgoingRequest, Scheme,
+    };
 
     let headers = Fields::new();
     let _ = headers.append("accept", b"application/json");
+    if body.is_some() {
+        let _ = headers.append("content-type", b"application/json");
+    }
     let request = OutgoingRequest::new(headers);
+    let _ = request.set_method(&match method {
+        "GET" => Method::Get,
+        "PATCH" => Method::Patch,
+        other => Method::Other(other.into()),
+    });
     let _ = request.set_scheme(Some(&Scheme::Http));
     let _ = request.set_authority(Some("gateway"));
     request
         .set_path_with_query(Some(path))
         .map_err(|()| Error::Invalid("the host refused the path".into()))?;
-    if let Ok(body) = request.body() {
-        let _ = OutgoingBody::finish(body, None);
-    }
+    let outgoing = request
+        .body()
+        .map_err(|()| Error::Unavailable("the host gave no request body".into()))?;
+    // handed over first: the host drains the body while it sends, so a write never waits on a
+    // full pipe that nothing reads
     let future = outgoing_handler::handle(request, None)
         .map_err(|code| Error::Unavailable(format!("{code:?}")))?;
+    if let Some(bytes) = body {
+        let stream = outgoing
+            .write()
+            .map_err(|()| Error::Unavailable("the host gave no body stream".into()))?;
+        for chunk in bytes.chunks(4096) {
+            stream
+                .blocking_write_and_flush(chunk)
+                .map_err(|err| Error::Unavailable(format!("{err:?}")))?;
+        }
+        drop(stream);
+    }
+    OutgoingBody::finish(outgoing, None).map_err(|err| Error::Unavailable(format!("{err:?}")))?;
     future.subscribe().block();
     let response = match future.get() {
         Some(Ok(Ok(response))) => response,
@@ -196,6 +240,23 @@ fn send(path: &str) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entity_edit_names_one_entity_of_the_endpoint() {
+        assert_eq!(
+            entity_attrs_path("urn:ngsi-ld:Station:7").as_deref(),
+            Ok("/ngsi-ld/v1/entities/urn%3Angsi-ld%3AStation%3A7/attrs")
+        );
+        let escaped = entity_attrs_path("../../x/y?z#").expect("encoded");
+        assert!(checked(&escaped).is_ok(), "{escaped}");
+        assert_eq!(escaped, "/ngsi-ld/v1/entities/..%2F..%2Fx%2Fy%3Fz%23/attrs");
+        assert!(entity_attrs_path("").is_err());
+        assert!(entity_attrs_path("a\nb").is_err());
+        assert!(matches!(
+            patch_entity("urn:x", &serde_json::json!([1])),
+            Err(Error::Invalid(_))
+        ));
+    }
 
     #[test]
     fn a_path_names_a_resource_of_the_gateway_alone() {
