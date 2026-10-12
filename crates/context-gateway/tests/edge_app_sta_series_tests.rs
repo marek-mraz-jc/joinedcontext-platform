@@ -13,7 +13,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -302,27 +302,40 @@ async fn top_of_zero_is_one_and_a_negative_top_is_the_default_never_an_empty_bro
     }
 }
 
-/// EP-61: a series narrowed by the endpoint's publication says it is.
+/// EP-61: a series the view narrowed says it is, to a caller who asked (T-3651): the history is
+/// read through the Endpoint's view, and its mark is passed on.
 #[tokio::test]
 async fn a_restricted_series_sets_the_results_restricted_header() {
-    let broker = BrokerStub::start(vec![series(3)]).await;
+    let mut held = series(3);
+    held["operatorPhone"] =
+        json!([{ "type": "Property", "value": "+421", "observedAt": "2026-09-01T00:00:00Z" }]);
     // CIM 009: the signal goes to a caller who asked for it.
     let asked = [("NGSILD-Results-Restricted", "true")];
-    let (status, _, headers) = get_with(
-        app(&broker.url, &["operatorPhone"]),
-        &observations(""),
-        &asked,
+    let broker = BrokerStub::narrowing(
+        vec![held.clone()],
+        View::of(SLUG, "public", &["AirQualityObserved"], Some(&["pm10"])),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    let (status, body, headers) = get_with(app(&broker.url, &[]), &observations(""), &asked).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(
         headers
             .get("ngsild-results-restricted")
             .and_then(|v| v.to_str().ok()),
         Some("true")
     );
+    let hops = broker.hops();
+    assert!(
+        hops.iter()
+            .any(|hop| hop.view == SLUG && hop.path.starts_with("/ngsi-ld/v1/temporal/entities/")),
+        "{hops:?}"
+    );
 
-    let broker = BrokerStub::start(vec![series(3)]).await;
+    let broker = BrokerStub::narrowing(
+        vec![held],
+        View::of(SLUG, "public", &["AirQualityObserved"], None),
+    )
+    .await;
     let (_, _, headers) = get_with(app(&broker.url, &[]), &observations(""), &asked).await;
     assert!(
         headers.get("ngsild-results-restricted").is_none(),
