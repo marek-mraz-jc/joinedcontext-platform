@@ -43,7 +43,7 @@ caller and it proxies the browser.
 | Route | Body | Answers |
 |---|---|---|
 | `GET /healthz` | — | `{"status", "generatorVersion"}`, what a readiness probe reads |
-| `GET /catalog?refresh=true` | — | the Smart Data Models index, cached daily (DM-12) |
+| `GET /catalog?refresh=true` | — | the Smart Data Models index, cached daily (DM-12); a refresh reaches upstream at most once a minute (T-4012) |
 | `POST /generate` | `{"source"}` | `jsonSchema`, `context`, `shacl`, `owl`, `generatorVersion`, `errors` |
 | `POST /import-sdm` | `{"model"}` | the same, plus the `linkml` the import produced and its `example` |
 | `POST /infer-schema` | `{"name", "content" (base64), "format"?}` | a draft model from a CSV, XLSX, JSON or PDF sample: `linkml`, `operations`, `detectedTypes`, `matches`, `untyped`, `rows` (DM-54) |

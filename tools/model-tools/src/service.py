@@ -79,6 +79,10 @@ CATALOGUE_DETAILS_URL = f"{RAW_BASE}data-models/master/specs/AllSubjects/metadat
 
 #: DM-12: a daily refresh, and an explicit refresh-now for the person who cannot wait for it.
 CATALOGUE_TTL_SECONDS = 24 * 60 * 60
+#: The fewest seconds between two fills: `?refresh=true` is a value any signed-in person
+#: sends, and a loop of them must not become a loop of fetches upstream (T-4012). Inside it a
+#: refresh, or a read while the upstream is down, answers the cache as it is.
+CATALOGUE_REFRESH_FLOOR_SECONDS = 60
 
 #: The artifact renderers, keyed by the field the Portal deserialises them into (API/01 §11).
 #: Renaming a key here is a silent empty preview in the editor, which `test_service.py` guards.
@@ -269,6 +273,7 @@ class Catalogue:
         self._subjects: list[dict[str, Any]] | None = None
         self._attributes: dict[str, dict[str, list[str]]] = {}
         self._filled_at: float = 0.0
+        self._tried_at: float = float("-inf")
         self._refreshed_at: str | None = None
         self._stale = False
 
@@ -278,7 +283,9 @@ class Catalogue:
                 self._subjects is not None
                 and time.time() - self._filled_at < CATALOGUE_TTL_SECONDS
             )
-            if refresh or not fresh:
+            now = time.time()
+            if (refresh or not fresh) and now - self._tried_at >= CATALOGUE_REFRESH_FLOOR_SECONDS:
+                self._tried_at = now
                 self._fill()
             if subject:
                 self._fill_attributes(subject)
