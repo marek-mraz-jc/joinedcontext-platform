@@ -7,8 +7,8 @@
 //! to a caller whose token of the App's own client `app-{name}` carries that role in
 //! `resource_access.app-{name}.roles` (ADR-N-030). An Endpoint no App generated gives a named
 //! role to the subjects its manifest names. Two endpoints over one space carry the same
-//! Policies here, as they do on a cluster; what each caller's access document lists says which
-//! roles reached them.
+//! Policies here, as they do on a cluster; the roles the gateway pins on each caller's hop to the
+//! broker say which reached them (T-3649).
 
 mod common;
 
@@ -114,13 +114,15 @@ fn endpoint(slug: &str, audience: Audience, roles: EndpointRoles) -> Endpoint {
 struct Fixture {
     realm: common::Realm,
     app: axum::Router,
+    broker: common::BrokerStub,
 }
 
-fn fixture(audience: Audience) -> Fixture {
+async fn fixture(audience: Audience) -> Fixture {
     let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
     let app = router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(broker.url.clone()),
             Box::new(PolicyPdp),
             "hel.fi",
         )
@@ -138,10 +140,11 @@ fn fixture(audience: Audience) -> Fixture {
             None,
         ),
     ));
-    Fixture { realm, app }
+    Fixture { realm, app, broker }
 }
 
-/// `GET …/access` on `slug`, with a token of `claims` or none: the status and what was granted.
+/// `GET …/access` on `slug`, with a token of `claims` or none: the status and the types of the
+/// Policies that name the caller the gateway pinned for the broker's engine (T-3649).
 async fn granted(
     fixture: &Fixture,
     slug: &str,
@@ -164,33 +167,26 @@ async fn granted(
             format!("Bearer {}", fixture.realm.mint(&all)),
         );
     }
+    let before = fixture.broker.hops().len();
     let response = fixture
         .app
         .clone()
         .oneshot(request.body(Body::empty()).expect("a request"))
         .await
         .expect("the gateway answers");
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("a readable body");
-    let document: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let mut markers: Vec<String> = document["permissions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| Some(entry["resource"]["type"].as_str()?.to_owned()))
-        .collect();
-    markers.sort();
-    markers.dedup();
-    (status, markers)
+    let hops = fixture.broker.hops();
+    let markers = match hops.get(before..) {
+        Some([hop]) => common::named_types(&hop.headers, &policies()),
+        _ => Vec::new(),
+    };
+    (response.status(), markers)
 }
 
 /// AP-96, AP-97: every person the app's endpoint admits holds its caller role there, and the
 /// same person on another endpoint of the space holds nothing of the app's.
 #[tokio::test]
 async fn the_caller_role_is_held_on_the_apps_endpoint_and_not_on_another_of_the_space() {
-    let fixture = fixture(Audience::Organization);
+    let fixture = fixture(Audience::Organization).await;
     let person = json!({ "preferred_username": "peter.novak@hel.fi" });
 
     let (status, on_app) = granted(&fixture, APP_SLUG, Some(person.clone())).await;
@@ -218,7 +214,7 @@ fn with_client_roles(azp: &str, client: &str, roles: &[&str]) -> Value {
 /// read (AP-113).
 #[tokio::test]
 async fn a_named_role_comes_from_the_apps_own_client_alone() {
-    let fixture = fixture(Audience::Organization);
+    let fixture = fixture(Audience::Organization).await;
     let editor = with_client_roles("app-alerts", "app-alerts", &["editor"]);
     let (_, on_app) = granted(&fixture, APP_SLUG, Some(editor.clone())).await;
     assert_eq!(on_app, ["AppRead", "EditorWrite"]);
@@ -251,7 +247,7 @@ async fn a_named_role_comes_from_the_apps_own_client_alone() {
 /// the leading slash, and nobody else holds it.
 #[tokio::test]
 async fn a_hand_written_endpoints_role_goes_to_its_user_and_its_group_and_to_nobody_else() {
-    let fixture = fixture(Audience::Organization);
+    let fixture = fixture(Audience::Organization).await;
     for editor in [
         json!({ "preferred_username": "jana.kovacova@hel.fi" }),
         json!({ "preferred_username": "Jana.Kovacova@HEL.fi" }),
@@ -275,7 +271,7 @@ async fn a_hand_written_endpoints_role_goes_to_its_user_and_its_group_and_to_nob
 /// realm role named like an application's grant is worth nothing; the realm's other roles stay.
 #[tokio::test]
 async fn a_token_asserting_an_endpoint_role_gains_nothing_by_it() {
-    let fixture = fixture(Audience::Organization);
+    let fixture = fixture(Audience::Organization).await;
     let forged = json!({
         "preferred_username": "someone@hel.fi",
         "realm_access": { "roles": [
@@ -296,12 +292,22 @@ async fn a_token_asserting_an_endpoint_role_gains_nothing_by_it() {
 /// endpoint that refuses the caller hands out no role at all.
 #[tokio::test]
 async fn the_caller_role_follows_admission_for_anonymous_and_refused_callers() {
-    let public = fixture(Audience::Public);
-    let (status, on_app) = granted(&public, APP_SLUG, None).await;
+    // The gateway pins the caller role for the anonymous caller too; the broker's engine keeps
+    // only `public` for one today, which T-3880 fixes, so this reads the hop itself.
+    let public = fixture(Audience::Public).await;
+    let (status, _) = granted(&public, APP_SLUG, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(on_app, ["AppRead"]);
+    let hops = public.broker.hops();
+    let roles = hops.last().expect("one hop").headers["x-jc-roles"]
+        .to_str()
+        .expect("ASCII");
+    let caller_role = endpoint_role(PROJECT, "app-alerts", None)
+        .replace(':', "%3A")
+        .replace('/', "%2F");
+    assert!(roles.split(',').any(|role| role == caller_role), "{roles}");
+    assert!(roles.split(',').any(|role| role == "public"), "{roles}");
 
-    let organization = fixture(Audience::Organization);
+    let organization = fixture(Audience::Organization).await;
     let (status, on_app) = granted(&organization, APP_SLUG, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(on_app.is_empty(), "{on_app:?}");
@@ -313,7 +319,7 @@ async fn the_caller_role_follows_admission_for_anonymous_and_refused_callers() {
 /// edge token is not narrowed.
 #[tokio::test]
 async fn an_apps_client_reaches_the_endpoints_its_app_reads_and_no_other() {
-    let fixture = fixture(Audience::Organization);
+    let fixture = fixture(Audience::Organization).await;
     let token = |azp: &str| {
         json!({
             "preferred_username": "jana.kovacova@hel.fi",

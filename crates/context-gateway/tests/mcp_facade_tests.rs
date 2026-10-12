@@ -143,8 +143,23 @@ async fn record(
     State(log): State<Log>,
     request: Request<Body>,
 ) -> ([(&'static str, &'static str); 1], String) {
+    // The access surface of a view is the engine's (T-3649): one public grant, as the engine
+    // writes it for the anonymous caller.
+    let access = request.uri().path().ends_with("/access");
     log.lock().expect("the log").push(request.uri().to_string());
-    ([("content-type", "application/json")], "[]".to_owned())
+    let body = if access {
+        json!({
+            "subject": { "type": "role", "id": "public" },
+            "resource": { "type": "view", "id": SLUG },
+            "permissions": [{ "resource": { "type": "AirQualityObserved" },
+                              "actions": ["queryEntity"], "attributes": "*", "constraints": {} }],
+            "prohibitions": []
+        })
+        .to_string()
+    } else {
+        "[]".to_owned()
+    };
+    ([("content-type", "application/json")], body)
 }
 
 #[tokio::test]
@@ -199,12 +214,12 @@ async fn a_body_that_is_not_json_is_the_parse_error() {
     // (T-3647, Antares `mcp_transport`).
 }
 
-/// EP-47, EP-55: the two describing tools are the access and schema projections, answered
-/// from the endpoint itself, so an agent can orient without a single broker round trip. The
-/// schema of the whole model is the broker's LinkML surface since T-3645; narrowed to a type it
-/// is still the endpoint's own.
+/// EP-47, EP-55: the two describing tools are the access and schema projections: the access
+/// document from the view's access surface the HTTP document reads too (T-3649), the schema of
+/// the whole model from the broker's LinkML surface (T-3645), narrowed to a type the endpoint's
+/// own, so an agent orients with small reads and no data query.
 #[tokio::test]
-async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker() {
+async fn the_describing_tools_answer_from_the_endpoint_and_its_view() {
     let realm = common::Realm::new();
     let (broker, log) = stub_broker().await;
     let call = |id: u32, name: &str, arguments: Value| {
@@ -267,9 +282,11 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
         "a formalism the gateway cannot compile is named, never approximated"
     );
 
-    assert!(
-        log.lock().expect("the log").is_empty(),
-        "neither tool asks the broker anything"
+    // `describe_access` reads the view's access surface, the document `GET …/access` serves
+    // (EP-60, T-3649); `describe_schema` asks the broker nothing.
+    assert_eq!(
+        *log.lock().expect("the log"),
+        [format!("/x/views/{SLUG}/access")]
     );
 }
 

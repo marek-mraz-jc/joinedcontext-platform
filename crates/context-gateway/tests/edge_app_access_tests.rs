@@ -11,6 +11,11 @@
 //! difference between the four: all four are computed from one PDP answer, so what one of
 //! them shows the others must show too, and none of them may show more than the caller holds.
 //!
+//! Since T-3649 the document is the broker's view's (plan 5.6): what the caller holds, and that
+//! no representation shows another subject's rule, is the engine's to hold and tested there
+//! (Antares `addons/joinedcontext-policy/tests/access.rs`, T-3638). What stays here is the
+//! gateway's half: admission, the negotiation, and what it adds to or keeps out of the answer.
+//!
 //! `access_format` reads the offers in the order they are written and never a `q` value.
 //! That is deliberate — the access surface always has an answer and a 406 would tell a caller
 //! nothing — and it is pinned below, because a client that writes its preferences as weights
@@ -100,10 +105,22 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
 
 /// The deployment, trusting one realm: the caller's token has to be minted by the same
 /// `Realm` the router was built with, so the fixture takes it rather than making its own.
-fn app_of(realm: &common::Realm) -> axum::Router {
+///
+/// The broker's view answers every `access` hop with an empty document of the engine's shape
+/// (T-3649): what the caller holds is the engine's to say (Antares
+/// `addons/joinedcontext-policy/tests/access.rs`); these tests hold the gateway's half, the
+/// negotiation and what it adds or keeps out.
+async fn app_of(realm: &common::Realm) -> axum::Router {
+    let broker = common::BrokerStub::start(vec![json!({
+        "subject": { "type": "role", "id": "public" },
+        "resource": { "type": "view", "id": OPEN },
+        "permissions": [],
+        "prohibitions": []
+    })])
+    .await;
     router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(broker.url),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
@@ -119,12 +136,12 @@ fn app_of(realm: &common::Realm) -> axum::Router {
     ))
 }
 
-fn app() -> axum::Router {
-    app_of(&common::Realm::new())
+async fn app() -> axum::Router {
+    app_of(&common::Realm::new()).await
 }
 
 async fn call(request: Request<Body>) -> (StatusCode, String, String) {
-    call_on(app(), request).await
+    call_on(app().await, request).await
 }
 
 async fn call_on(app: axum::Router, request: Request<Body>) -> (StatusCode, String, String) {
@@ -148,35 +165,6 @@ fn accepting(slug: &str, accept: Option<&str>) -> Request<Body> {
         builder = builder.header(axum::http::header::ACCEPT, accept);
     }
     builder.body(Body::empty()).expect("a request")
-}
-
-/// EP-59, GW6: the first case, and the one that carries the surface. Whichever of the four
-/// representations is asked for, a grant the caller does not hold is in none of them — not its
-/// operations, not its attributes, not the assigner who wrote it.
-#[tokio::test]
-async fn no_representation_shows_a_grant_the_caller_does_not_hold() {
-    for accept in [None, Some(ODRL_JSON), Some(TURTLE), Some(GRANT_AST)] {
-        let (status, media, body) = call(accepting(OPEN, accept)).await;
-        assert_eq!(status, StatusCode::OK, "{accept:?} answered {body}");
-        assert!(!media.is_empty(), "{accept:?} named no media type");
-
-        for secret in [
-            "InternalIncident",
-            "internalNote",
-            "severity",
-            "data-steward",
-            "tajny-uradnik.sk",
-            "createEntity",
-            "deleteEntity",
-        ] {
-            assert!(
-                !body.contains(secret),
-                "{accept:?} leaked {secret:?}: {body}",
-            );
-        }
-        // And the grant it does hold is there, so the case is not passing on an empty answer.
-        assert!(body.contains("pm10"), "{accept:?} showed nothing: {body}");
-    }
 }
 
 /// EP-56: with no `Accept` at all the caller gets the AuthZEN document, because a surface
@@ -284,45 +272,6 @@ async fn an_endpoint_the_caller_may_not_have_produces_no_document() {
     }
 }
 
-/// EP-55: the document is this caller's, so a token that names a role changes it. The
-/// anonymous document and the steward's are two different answers from one PDP, which is what
-/// makes "the same rules that enforce" true rather than a second implementation (EP-60).
-#[tokio::test]
-async fn the_document_is_the_callers_own() {
-    let realm = common::Realm::new();
-    let steward = realm.mint(&json!({
-        "iss": common::ISSUER,
-        "sub": "a-steward",
-        "aud": CLOSED,
-        "preferred_username": "jana",
-        "groups": ["/ovzdusie"],
-        "realm_access": { "roles": ["data-steward"] },
-        "exp": common::in_seconds(300),
-        "iat": common::in_seconds(-10),
-    }));
-
-    let (status, _, body) = call_on(
-        app_of(&realm),
-        Request::builder()
-            .uri(format!("/api/endpoint/{CLOSED}/access"))
-            .header(
-                axum::http::header::AUTHORIZATION,
-                format!("Bearer {steward}"),
-            )
-            .body(Body::empty())
-            .expect("a request"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let document: Value = serde_json::from_str(&body).expect("a JSON document");
-    assert_eq!(document["subject"], json!({ "type": "user", "id": "jana" }));
-    assert!(
-        body.contains("InternalIncident"),
-        "the steward's own grant is theirs to read: {body}",
-    );
-}
-
 /// R20: the document names the endpoint the caller already typed and the space behind it, and
 /// nothing of the deployment — no broker address, no realm URL, no file path.
 #[tokio::test]
@@ -383,6 +332,7 @@ async fn a_pathological_accept_header_is_answered_like_any_other() {
 async fn nothing_but_get_reaches_the_access_surface() {
     for method in ["POST", "PUT", "PATCH", "DELETE"] {
         let response = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method(method)
