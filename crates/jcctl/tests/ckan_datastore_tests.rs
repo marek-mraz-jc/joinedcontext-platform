@@ -340,7 +340,11 @@ fn the_first_publication_creates_the_table_and_loads_the_page() {
     assert_eq!(synced.upserted.len(), 2);
     assert!(synced.deleted.is_empty());
     assert_eq!(ckan.rows(&resource).expect("the table").len(), 2);
-    assert_eq!(ckan.actions(), vec!["datastore_create", "datastore_upsert"]);
+    // The patch that moves the dataset's metadata_modified (T-3886, EP-109).
+    assert_eq!(
+        ckan.actions(),
+        vec!["datastore_create", "datastore_upsert", "resource_patch"]
+    );
 }
 
 /// T-2931: a large table goes up in bounded batches, every row of it, so no single call
@@ -372,7 +376,8 @@ fn a_large_table_is_upserted_in_batches_and_keeps_every_row() {
             "datastore_create",
             "datastore_upsert",
             "datastore_upsert",
-            "datastore_upsert"
+            "datastore_upsert",
+            "resource_patch"
         ]
     );
     assert!(ensure_view(&mut ckan, &resource).expect("the view"));
@@ -938,4 +943,45 @@ fn the_same_urn_in_two_spaces_is_a_row_in_each_dataset_and_a_delete_touches_one(
         ckan.rows(&air).expect("table").contains_key(&shared),
         "the other space's row stays"
     );
+}
+
+/// T-3886, EP-109: a notification's rows reach the table and move the dataset's
+/// `metadata_modified`, the date a harvester polls; a notification that changes nothing moves
+/// nothing.
+#[test]
+fn a_notification_updates_rows_and_metadata_modified() {
+    let mut ckan = InMemoryCkan::new().with_organization("bb");
+    ckan.action(
+        "package_create",
+        &json!({ "name": "kvalita-ovzdusia", "owner_org": "bb", "resources": [] }),
+    )
+    .expect("the dataset");
+    let modified = |ckan: &InMemoryCkan| {
+        ckan.package("kvalita-ovzdusia").expect("the dataset")["metadata_modified"]
+            .as_str()
+            .expect("a date")
+            .to_owned()
+    };
+    let (columns, rows) = page();
+    let fields = fields(&columns, &rows, &[schema()]);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &fields).expect("created");
+    let before = modified(&ckan);
+
+    let answered = records(&columns, &rows[..1]).expect("the row");
+    let id = answered[0][PRIMARY_KEY].as_str().expect("an id").to_owned();
+    let body = notification(json!([{ "id": id, "type": "AirQualityObserved" }]));
+    sync(&mut ckan, &resource, &touched(&body), &answered).expect("refreshed");
+
+    assert!(ckan.rows(&resource).expect("the table").contains_key(&id));
+    let after = modified(&ckan);
+    assert!(after > before, "{before} -> {after}");
+
+    sync(
+        &mut ckan,
+        &resource,
+        &touched(&notification(json!([]))),
+        &[],
+    )
+    .expect("empty");
+    assert_eq!(modified(&ckan), after);
 }

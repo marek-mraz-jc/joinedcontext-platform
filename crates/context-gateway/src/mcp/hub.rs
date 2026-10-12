@@ -10,7 +10,7 @@
 
 use crate::app::{self, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
 use crate::auth::token;
-use crate::handlers::schema;
+use crate::handlers::{endpoint_surface, schema};
 use crate::mcp::describe;
 use crate::mcp::jsonrpc::{self, answered, error, refused, result};
 use crate::mcp::server::{self, McpServer};
@@ -21,7 +21,7 @@ use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderValue, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use jc_core::kinds::Representation;
 use jc_core::ProblemDetails;
@@ -74,67 +74,12 @@ fn broker_call(name: &str, mut arguments: Map<String, Value>) -> (&str, Map<Stri
 pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
 
-    // The hub is its own protected resource: a client without a token is told where to get one
-    // for it (AG-32, RFC 9728). It lists nothing anonymously; a public Endpoint's own URL still
-    // answers without a token.
-    let authorization = request.headers().get(AUTHORIZATION).cloned();
-    let presented = authorization.as_ref().and_then(|value| value.to_str().ok());
-    let raw = match token::bearer(presented) {
-        Ok(raw) => raw.to_owned(),
-        Err(token::Rejected::NoToken) => return unauthorized(&gateway),
-        Err(rejected) => return ProblemDetails::from(rejected).into_response(),
+    let Reached {
+        reach, decision, ..
+    } = match reached(&gateway, request.headers(), Some(Representation::Mcp)) {
+        Ok(reached) => reached,
+        Err(refusal) => return *refusal,
     };
-    let Some(verifier) = gateway.verifier.as_ref() else {
-        tracing::warn!("a token was presented to the hub but no realm is configured");
-        return ProblemDetails::unauthorized().into_response();
-    };
-
-    // Every audience the hub could honour: its own, and each MCP Endpoint's (its slug, its URL,
-    // the edge). Which Endpoints the token then reaches is decided per Endpoint by `reaches`.
-    let served: Vec<Arc<Endpoint>> = gateway
-        .resolver
-        .endpoints()
-        .into_iter()
-        .filter(|endpoint| endpoint.serves(Representation::Mcp))
-        .collect();
-    let mut audiences = gateway.hub_audiences();
-    for endpoint in &served {
-        audiences.extend(gateway.audiences_for(endpoint));
-    }
-    audiences.sort_unstable();
-    audiences.dedup();
-    let claims = match verifier.verify(&raw, &audiences) {
-        Ok(claims) => claims,
-        Err(rejected) => return ProblemDetails::from(rejected).into_response(),
-    };
-
-    // One bucket per subject across every Endpoint, spent on every hub request, so fifty
-    // Endpoints are not fifty bursts (ADR-N-025 section 3).
-    let subject_key = format!("subject:{}", claims.sub);
-    let decision = gateway.rate_limiter.check(
-        HUB_BUCKET,
-        &subject_key,
-        &gateway.hub_rate_limit,
-        Instant::now(),
-    );
-    if !decision.allowed {
-        tracing::info!(principal = %claims.sub, "hub rate limit reached");
-        return rate_limit::too_many(
-            &decision,
-            "the hub's per-subject rate limit is spent; retry after the seconds the RateLimit-Reset header names",
-        );
-    }
-
-    // The caller's list: every MCP Endpoint the token reaches, admits and grants a read on.
-    let mut reach: Vec<(Arc<Endpoint>, Subject)> = served
-        .into_iter()
-        .filter(|endpoint| gateway.reaches(&claims, endpoint))
-        .filter_map(|endpoint| {
-            let subject = subject_from(&gateway, &endpoint, &claims).ok()?;
-            tools::reads_anything(&gateway, &endpoint, &subject).then_some((endpoint, subject))
-        })
-        .collect();
-    reach.sort_by(|(a, _), (b, _)| a.slug.cmp(&b.slug));
 
     let caller = rate_limit::caller_key(request.headers());
     let (_, body) = request.into_parts();
@@ -158,6 +103,171 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
     };
     rate_limit::set_headers(response.headers_mut(), &decision);
     response
+}
+
+/// Who a token is and what it reaches: the one list the hub's `list_endpoints` and
+/// `GET /api/endpoints` answer (EP-87, EP-88, EP-105).
+pub(crate) struct Reached {
+    pub(crate) principal: String,
+    /// Every Endpoint the token reaches, admits and grants a read on, in slug order.
+    pub(crate) reach: Vec<(Arc<Endpoint>, Subject)>,
+    /// The per-subject bucket after this request spent from it (ADR-N-025 section 3).
+    pub(crate) decision: rate_limit::Decision,
+}
+
+/// Verifies the bearer token against every audience the hub could honour (its own and each
+/// Endpoint's, ADR-N-025 section 4: a ServiceAccount's audiences name its Endpoints, PF-47),
+/// spends the per-subject bucket, and lists what the token reaches, of the Endpoints that serve
+/// `serving` (`None`: any). The refusal is the HTTP answer.
+pub(crate) fn reached(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    serving: Option<Representation>,
+) -> Result<Reached, Box<Response<Body>>> {
+    // The hub is its own protected resource: a client without a token is told where to get one
+    // for it (AG-32, RFC 9728). It lists nothing anonymously; a public Endpoint's own URL still
+    // answers without a token.
+    let presented = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let raw = match token::bearer(presented) {
+        Ok(raw) => raw,
+        Err(token::Rejected::NoToken) => return Err(Box::new(unauthorized(gateway))),
+        Err(rejected) => return Err(Box::new(ProblemDetails::from(rejected).into_response())),
+    };
+    let Some(verifier) = gateway.verifier.as_ref() else {
+        tracing::warn!("a token was presented to the hub but no realm is configured");
+        return Err(Box::new(ProblemDetails::unauthorized().into_response()));
+    };
+
+    // Which Endpoints the token then reaches is decided per Endpoint by `reaches`.
+    let served: Vec<Arc<Endpoint>> = gateway
+        .resolver
+        .endpoints()
+        .into_iter()
+        .filter(|endpoint| serving.is_none_or(|wanted| endpoint.serves(wanted)))
+        .collect();
+    let mut audiences = gateway.hub_audiences();
+    for endpoint in &served {
+        audiences.extend(gateway.audiences_for(endpoint));
+    }
+    audiences.sort_unstable();
+    audiences.dedup();
+    let claims = verifier
+        .verify(raw, &audiences)
+        .map_err(|rejected| Box::new(ProblemDetails::from(rejected).into_response()))?;
+
+    // One bucket per subject across every Endpoint, spent on every hub request, so fifty
+    // Endpoints are not fifty bursts (ADR-N-025 section 3).
+    let subject_key = format!("subject:{}", claims.sub);
+    let decision = gateway.rate_limiter.check(
+        HUB_BUCKET,
+        &subject_key,
+        &gateway.hub_rate_limit,
+        Instant::now(),
+    );
+    if !decision.allowed {
+        tracing::info!(principal = %claims.sub, "hub rate limit reached");
+        return Err(Box::new(rate_limit::too_many(
+            &decision,
+            "the hub's per-subject rate limit is spent; retry after the seconds the RateLimit-Reset header names",
+        )));
+    }
+
+    let mut reach: Vec<(Arc<Endpoint>, Subject)> = served
+        .into_iter()
+        .filter(|endpoint| gateway.reaches(&claims, endpoint))
+        .filter_map(|endpoint| {
+            let subject = subject_from(gateway, &endpoint, &claims).ok()?;
+            tools::reads_anything(gateway, &endpoint, &subject).then_some((endpoint, subject))
+        })
+        .collect();
+    reach.sort_by(|(a, _), (b, _)| a.slug.cmp(&b.slug));
+    Ok(Reached {
+        principal: claims.sub,
+        reach,
+        decision,
+    })
+}
+
+/// `GET /api/endpoints`: the Endpoints this token reaches over every representation, the REST
+/// twin of `list_endpoints` for a client that does not speak MCP (EP-105, ADR-N-025 §4a).
+pub async fn endpoints(
+    State(gateway): State<Arc<Gateway>>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let Reached {
+        principal,
+        reach,
+        decision,
+    } = match reached(&gateway, request.headers(), None) {
+        Ok(reached) => reached,
+        Err(refusal) => return *refusal,
+    };
+    // The query as `list_endpoints` takes its arguments: a number is a number, anything else
+    // stays a string and is refused by the same words.
+    let arguments: Map<String, Value> =
+        crate::query::parse(request.uri().query().unwrap_or_default())
+            .into_iter()
+            .map(|(name, value)| {
+                let value = value
+                    .parse::<u64>()
+                    .map_or_else(|_| json!(value), |number| json!(number));
+                (name, value)
+            })
+            .collect();
+    let mut response = match page(gateway.base_url(), &reach, &arguments) {
+        Ok(page) => {
+            tracing::info!(principal = %principal, total = reach.len(), "endpoint list");
+            jsonrpc::json_response(StatusCode::OK, &page)
+        }
+        Err(why) => ProblemDetails::bad_request()
+            .with_detail(why)
+            .into_response(),
+    };
+    rate_limit::set_headers(response.headers_mut(), &decision);
+    response
+}
+
+/// One page of `reach`: `{endpoints, total, nextCursor?}`, or why the arguments are refused.
+fn page(
+    base: &str,
+    reach: &[(Arc<Endpoint>, Subject)],
+    arguments: &Map<String, Value>,
+) -> Result<Value, String> {
+    if let Some(unknown) = arguments
+        .keys()
+        .find(|key| !matches!(key.as_str(), "limit" | "cursor"))
+    {
+        return Err(format!("`{unknown}` is not an argument of list_endpoints"));
+    }
+    let limit = match arguments.get("limit") {
+        None => PAGE,
+        Some(value) => value
+            .as_u64()
+            .filter(|limit| (1..=100).contains(limit))
+            .ok_or("`limit` is a whole number from 1 to 100")? as usize,
+    };
+    let offset = match arguments.get("cursor") {
+        None => 0,
+        Some(value) => value
+            .as_u64()
+            .ok_or("`cursor` is the previous page's nextCursor, a whole number")?
+            as usize,
+    };
+    let endpoints: Vec<Value> = reach
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(endpoint, subject)| described(base, endpoint, subject))
+        .collect();
+    let mut page = json!({ "endpoints": endpoints, "total": reach.len() });
+    let next = offset.saturating_add(limit);
+    if next < reach.len() {
+        page["nextCursor"] = json!(next);
+    }
+    Ok(page)
 }
 
 /// One request's view of the hub, or of a named server: who may be reached, with what.
@@ -367,63 +477,18 @@ impl Hub {
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).
     fn list_endpoints(&self, id: Value, arguments: &Map<String, Value>) -> Value {
-        if let Some(unknown) = arguments
-            .keys()
-            .find(|key| !matches!(key.as_str(), "limit" | "cursor"))
-        {
-            return result(
-                id,
-                refused(
-                    &format!("`{unknown}` is not an argument of list_endpoints"),
-                    &Value::Null,
-                ),
-            );
-        }
-        let limit = match arguments.get("limit") {
-            None => PAGE,
-            Some(value) => match value.as_u64().filter(|limit| (1..=100).contains(limit)) {
-                Some(limit) => limit as usize,
-                None => {
-                    return result(
-                        id,
-                        refused("`limit` is a whole number from 1 to 100", &Value::Null),
-                    )
-                }
-            },
+        let page = match page(self.gateway.base_url(), &self.reach, arguments) {
+            Ok(page) => page,
+            Err(why) => return result(id, refused(&why, &Value::Null)),
         };
-        let offset = match arguments.get("cursor") {
-            None => 0,
-            Some(value) => match value.as_u64() {
-                Some(offset) => offset as usize,
-                None => {
-                    return result(
-                        id,
-                        refused(
-                            "`cursor` is the previous page's nextCursor, a whole number",
-                            &Value::Null,
-                        ),
-                    )
-                }
-            },
-        };
-
-        let base = self.gateway.base_url();
-        let page: Vec<Value> = self
-            .reach
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .map(|(endpoint, subject)| described(base, endpoint, subject))
-            .collect();
-        let mut answer = answered(&json!(page), "endpoints");
-        let next = offset.saturating_add(limit);
+        let mut answer = answered(&page["endpoints"], "endpoints");
         if let Some(structured) = answer
             .get_mut("structuredContent")
             .and_then(Value::as_object_mut)
         {
-            structured.insert("total".to_owned(), json!(self.reach.len()));
-            if next < self.reach.len() {
-                structured.insert("nextCursor".to_owned(), json!(next));
+            structured.insert("total".to_owned(), page["total"].clone());
+            if let Some(next) = page.get("nextCursor") {
+                structured.insert("nextCursor".to_owned(), next.clone());
             }
         }
         result(id, answer)
@@ -454,12 +519,25 @@ fn described(base: &str, endpoint: &Endpoint, subject: &Subject) -> Value {
         .iter()
         .map(Representation::as_str)
         .collect();
+    // Each representation's own URL (EP-05, EP-105), the paths the DCAT record lists.
+    let surfaces: Map<String, Value> = endpoint
+        .representations
+        .iter()
+        .map(|representation| {
+            let path = endpoint_surface::path_of(*representation);
+            (
+                representation.as_str().to_owned(),
+                json!(format!("{base}{}/{path}", endpoint.base_path)),
+            )
+        })
+        .collect();
     let mut entry = json!({
         "slug": endpoint.slug,
         "title": endpoint.title,
         "space": endpoint.space,
         "types": types,
         "representations": representations,
+        "surfaces": surfaces,
         "mcp": format!("{base}{}/mcp", endpoint.base_path),
     });
     // The recommended formalism of the newest major, the one describe_schema recommends.

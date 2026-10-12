@@ -1,0 +1,8 @@
+# crate | rows no production entry point reaches (dev/cg-dead-code.py); only ever lowered.
+# Each row's reason: docs/analysis/platform-dead-code.md.
+agent-proxy | 3
+assistant | 1
+context-gateway | 46
+jc-core | 47
+jcctl | 32
+wasm-host | 6

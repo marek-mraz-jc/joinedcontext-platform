@@ -21,6 +21,7 @@ pub mod group;
 pub mod mapping;
 pub mod mcp_server;
 pub mod model_projection;
+pub mod mqtt_broker;
 pub mod org_settings;
 pub mod organization;
 pub mod pipeline;
@@ -60,8 +61,9 @@ pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
 pub use data_source::{
-    check_class, Authorization, DataSourceSpec, DataSourceType, GtfsFeed, GtfsRtConnection,
-    HttpConnection, MqttConnection, TlsSettings, WebSocketConnection,
+    check_class, ArchiveFormat, Authorization, DataSourceSpec, DataSourceType, GtfsFeed,
+    GtfsRtConnection, HttpArchive, HttpConnection, MqttConnection, TlsSettings,
+    WebSocketConnection,
 };
 pub use dataspace::{
     AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,
@@ -80,6 +82,7 @@ pub use mapping::{
 };
 pub use mcp_server::McpServerSpec;
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
+pub use mqtt_broker::{MqttBrokerSpec, MqttLimits, MqttRole};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
     Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
@@ -143,6 +146,8 @@ pub type KnowledgeSource = crate::envelope::ResourceEnvelope<KnowledgeSourceSpec
 pub type AssistantDeployment = crate::envelope::ResourceEnvelope<AssistantDeploymentSpec>;
 /// `kind: McpServer` as a whole manifest (MF-53).
 pub type McpServer = crate::envelope::ResourceEnvelope<McpServerSpec>;
+/// `kind: MqttBroker` as a whole manifest (MF-54).
+pub type MqttBroker = crate::envelope::ResourceEnvelope<MqttBrokerSpec>;
 /// `kind: CkanInstance` as a whole manifest.
 pub type CkanInstance = crate::envelope::ResourceEnvelope<CkanInstanceSpec>;
 /// `kind: Blueprint` as a whole manifest.
