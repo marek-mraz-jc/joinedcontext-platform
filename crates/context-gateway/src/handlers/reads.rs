@@ -167,13 +167,69 @@ pub(crate) async fn read_entities(
         return query_entities(gateway, endpoint, subject, params, request).await;
     }
     view_hop(endpoint, subject, request)?;
-    let Some(fallback) = view_fallback(gateway, slug, params, request.headers()).await? else {
+    let Some(fallback) = view_fallback(
+        gateway,
+        (endpoint, subject, slug),
+        params,
+        request.headers(),
+    )
+    .await?
+    else {
         return Ok((Value::Array(Vec::new()), false));
     };
-    let target = format!("entities?{}", query::view_read(params, &fallback));
-    let (page, restricted, _) = view_page(gateway, slug, slug, &target, request.headers()).await?;
+    if fallback.len() < 2 {
+        let target = format!("entities?{}", query::view_read(params, &fallback));
+        let (page, restricted, _) =
+            view_page(gateway, slug, slug, &target, request.headers()).await?;
+        return Ok((Value::Array(page), restricted));
+    }
+    // One type at a time (T-4078): the caller's window is cut out of the types read in turn,
+    // so a page never asks the view for more than `offset + limit` rows of the space.
+    let window = |name: &str, default: usize| {
+        query::first(params, name)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(default)
+    };
+    let (offset, limit) = (window("offset", 0), window("limit", DEFAULT_LIMIT));
+    let windowless: Vec<(String, String)> = params
+        .iter()
+        .filter(|(name, _)| name != "limit" && name != "offset")
+        .cloned()
+        .collect();
+    let wanted = offset.saturating_add(limit);
+    let mut collected: Vec<Value> = Vec::new();
+    let mut restricted = false;
+    let mut held = 0u64;
+    'types: for selector in &fallback {
+        let narrowed = query::view_read(&windowless, std::slice::from_ref(selector));
+        let mut from = 0usize;
+        loop {
+            let target = format!("entities?{narrowed}&limit={PAGE}&offset={from}");
+            let (page, narrowed_page, bytes) =
+                view_page(gateway, slug, slug, &target, request.headers()).await?;
+            restricted |= narrowed_page;
+            let fetched = page.len();
+            // A deep offset reads the rows before it: the download's memory ceiling holds (T-0810).
+            held += bytes as u64;
+            if held > MAX_COLLECTED {
+                return Err(Box::new(too_large()));
+            }
+            collected.extend(page);
+            if collected.len() >= wanted {
+                break 'types;
+            }
+            if fetched < PAGE {
+                break;
+            }
+            from += PAGE;
+        }
+    }
+    let page: Vec<Value> = collected.into_iter().skip(offset).take(limit).collect();
     Ok((Value::Array(page), restricted))
 }
+
+/// The page size CIM 009 6.3.10 gives a query that names none.
+const DEFAULT_LIMIT: usize = 20;
 
 /// The history of one entity, decided and projected exactly as its current state is (T-0438).
 ///
@@ -486,31 +542,49 @@ async fn paged_view(
         .filter(|(name, _)| name != "limit" && name != "offset")
         .cloned()
         .collect();
-    let Some(fallback) = view_fallback(gateway, slug, &windowless, request.headers()).await? else {
+    let Some(fallback) = view_fallback(
+        gateway,
+        (endpoint, subject, view),
+        &windowless,
+        request.headers(),
+    )
+    .await?
+    else {
         return Ok((Value::Array(Vec::new()), false));
     };
-    let narrowed = query::view_read(&windowless, &fallback);
+    // The caller's own selector as one query; the selector of last resort one type at a time
+    // (T-4078), each paged to its end, all under the one ceiling of the download.
+    let selectors: Vec<String> = if fallback.is_empty() {
+        vec![query::view_read(&windowless, &fallback)]
+    } else {
+        fallback
+            .iter()
+            .map(|name| query::view_read(&windowless, std::slice::from_ref(name)))
+            .collect()
+    };
 
     let mut collected: Vec<Value> = Vec::new();
     let mut restricted = false;
     let mut held = 0u64;
-    let mut offset = 0usize;
-    loop {
-        let target = format!("entities?{narrowed}&limit={PAGE}&offset={offset}");
-        let (page, narrowed_page, bytes) =
-            view_page(gateway, slug, view, &target, request.headers()).await?;
-        restricted |= narrowed_page;
-        let fetched = page.len();
-        // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
-        held += bytes as u64;
-        collected.extend(page);
-        if collected.len() as u64 > wanted || held > MAX_COLLECTED {
-            return Err(Box::new(too_large()));
+    for narrowed in &selectors {
+        let mut offset = 0usize;
+        loop {
+            let target = format!("entities?{narrowed}&limit={PAGE}&offset={offset}");
+            let (page, narrowed_page, bytes) =
+                view_page(gateway, slug, view, &target, request.headers()).await?;
+            restricted |= narrowed_page;
+            let fetched = page.len();
+            // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
+            held += bytes as u64;
+            collected.extend(page);
+            if collected.len() as u64 > wanted || held > MAX_COLLECTED {
+                return Err(Box::new(too_large()));
+            }
+            if fetched < PAGE {
+                break;
+            }
+            offset += PAGE;
         }
-        if fetched < PAGE {
-            break;
-        }
-        offset += PAGE;
     }
     Ok((Value::Array(collected), restricted))
 }
@@ -529,16 +603,40 @@ fn view_hop(
 /// The selector of last resort for a view read: nothing when the caller named a selector,
 /// every type the space holds when not, and `None` for a space holding nothing, which is an
 /// empty answer rather than a `400` (EP-09).
+///
+/// Through the Endpoint's own view, the list keeps the types its Policy grants the caller: the
+/// view refuses a query whose types compose past its rule bound, and the 21 types of the
+/// Helsinki space did, as a `403` (T-4078). That only narrows what the view is asked; the view
+/// still decides each type. A grant naming none of the listed types keeps the whole list.
 async fn view_fallback(
     gateway: &Gateway,
-    slug: &str,
+    (endpoint, subject, view): (&Endpoint, &Subject, &str),
     params: &[(String, String)],
     headers: &HeaderMap,
 ) -> Result<Option<Vec<String>>, Box<Response<Body>>> {
     if !query::unselected(params) {
         return Ok(Some(Vec::new()));
     }
-    let types = dataset_types(gateway, slug, headers).await?;
+    let mut types = dataset_types(gateway, &endpoint.slug, headers).await?;
+    if view == endpoint.slug {
+        if let Verdict::Rewrite(constraints) = gateway.pdp.decide(
+            subject,
+            Operation::QueryEntity,
+            &query::requested(params),
+            endpoint,
+        ) {
+            let granted: Vec<String> = types
+                .iter()
+                .filter(|name| {
+                    constraints.types.contains(*name) || constraints.type_iris.contains(*name)
+                })
+                .cloned()
+                .collect();
+            if !granted.is_empty() {
+                types = granted;
+            }
+        }
+    }
     Ok((!types.is_empty()).then_some(types))
 }
 
