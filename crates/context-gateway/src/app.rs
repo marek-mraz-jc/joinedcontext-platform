@@ -130,6 +130,9 @@ pub struct Gateway {
     pub creates: crate::creates::DailyCreates,
     /// The WebSocket connections each caller holds open (EP-107).
     pub ws_open: crate::handlers::ws::Open,
+    /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
+    /// bounded only by the broker's own lifetime.
+    pub ws_token_lifetime: std::time::Duration,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
@@ -192,6 +195,7 @@ impl Gateway {
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
+            ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
