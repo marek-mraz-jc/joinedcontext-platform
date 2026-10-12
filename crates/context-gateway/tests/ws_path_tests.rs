@@ -94,7 +94,8 @@ fn repo(test: &str) -> PathBuf {
 
 type Upgrades = Arc<Mutex<Vec<HeaderMap>>>;
 
-/// A broker whose view WebSocket echoes every text frame, and answers `503` for [`BUSY`].
+/// A broker whose view WebSocket echoes every text frame, answers `big:{n}` with n bytes and
+/// `drop` by going away, and answers `503` for [`BUSY`].
 async fn broker() -> (String, Upgrades) {
     let upgrades: Upgrades = Arc::default();
     let seen = Arc::clone(&upgrades);
@@ -111,7 +112,15 @@ async fn broker() -> (String, Upgrades) {
                     upgrade.on_upgrade(|mut socket| async move {
                         while let Some(Ok(message)) = socket.recv().await {
                             if let AxumMessage::Text(text) = message {
-                                let echo = format!("echo:{}", text.as_str());
+                                // `drop`: the broker goes away without a close frame.
+                                if text.as_str() == "drop" {
+                                    return;
+                                }
+                                // `big:{n}`: one frame of n bytes, as a notification is.
+                                let echo = match text.as_str().strip_prefix("big:") {
+                                    Some(n) => "n".repeat(n.parse().expect("a size")),
+                                    None => format!("echo:{}", text.as_str()),
+                                };
                                 if socket.send(AxumMessage::Text(echo.into())).await.is_err() {
                                     break;
                                 }
@@ -499,4 +508,45 @@ async fn a_plain_get_of_a_restricted_websocket_names_the_token() {
         !body.to_string().contains(&token),
         "the token is never echoed"
     );
+}
+
+/// T-4131: the broker writes notifications of up to 1 MiB in one frame; one over the 16 KiB a
+/// client may send reaches the client whole, and the connection stays up.
+#[tokio::test]
+async fn a_notification_over_the_client_bound_reaches_the_client() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = gateway("big-notification", &upstream, &realm).await;
+    let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+
+    socket
+        .send(Message::text("big:200000"))
+        .await
+        .expect("sent");
+    let big = socket.next().await.expect("a frame").expect("readable");
+    assert_eq!(big.len(), 200_000);
+
+    socket.send(Message::text("after")).await.expect("sent");
+    let echoed = socket.next().await.expect("a frame").expect("readable");
+    assert_eq!(echoed, Message::text("echo:after"));
+}
+
+/// T-4131: when the broker's side ends without a close frame, the client gets 1011 rather than
+/// a bare end of the stream.
+#[tokio::test]
+async fn a_broker_gone_mid_stream_closes_the_client_with_1011() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = gateway("broker-gone", &upstream, &realm).await;
+    let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+
+    socket.send(Message::text("drop")).await.expect("sent");
+    let mut code = None;
+    while let Some(Ok(message)) = socket.next().await {
+        if let Message::Close(frame) = message {
+            code = frame.map(|frame| u16::from(frame.code));
+            break;
+        }
+    }
+    assert_eq!(code, Some(1011));
 }
