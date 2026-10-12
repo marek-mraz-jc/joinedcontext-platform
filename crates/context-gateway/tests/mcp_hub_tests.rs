@@ -798,7 +798,7 @@ async fn list_endpoints_pages_and_describes_each_endpoint() {
 /// T-3648: the describe tools have no broker tool behind them, so the hub answers them itself,
 /// from the same documents the access surface serves, and nothing reaches the broker.
 #[tokio::test]
-async fn a_describe_tool_through_the_hub_is_answered_without_a_hop() {
+async fn a_describe_tool_through_the_hub_is_answered_without_an_mcp_hop() {
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let app = app(&broker.url, &realm);
@@ -818,5 +818,8 @@ async fn a_describe_tool_through_the_hub_is_answered_without_a_hop() {
         answer["result"]["structuredContent"]["access"].is_object(),
         "{answer}"
     );
-    assert!(broker.hops().is_empty(), "{:?}", broker.hops());
+    // The gateway answers the tool itself: its one hop is the view's access surface the HTTP
+    // access document reads too (T-3649), never the broker's MCP.
+    let hops = broker.hops();
+    assert!(hops.len() == 1 && hops[0].path == "/access", "{hops:?}");
 }

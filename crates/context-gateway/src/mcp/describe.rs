@@ -5,7 +5,8 @@
 //! surfaces serve, and adds them to the broker's listings (T-3647, T-3648).
 
 use crate::app::{sha256_hex, Gateway};
-use crate::handlers::{access, schema};
+use crate::handlers::access_routes::{self, AccessFormat};
+use crate::handlers::schema;
 use crate::mcp::jsonrpc::{answered, error, refused, result};
 use crate::mcp::tools::{granted, validate, ACCESS_FORMATS, TOOLS};
 use crate::pdp::evaluator::Subject;
@@ -39,7 +40,7 @@ pub(crate) fn tools(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -
 /// One call of a describe tool, answered as the JSON-RPC response it is. Any other name is an
 /// unknown tool, and so is a describe tool this caller may not call: the two answers are
 /// byte-identical (SP-20).
-pub(crate) fn call(
+pub(crate) async fn call(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
@@ -72,8 +73,10 @@ pub(crate) fn call(
             .get("format")
             .and_then(Value::as_str)
             .unwrap_or("permissions");
-        let document = access_document(gateway, subject, endpoint, format);
-        return result(id, answered(&document, tool.result_key));
+        return match access_document(gateway, subject, endpoint, format).await {
+            Ok(document) => result(id, answered(&document, tool.result_key)),
+            Err(message) => result(id, refused(&message, &Value::Null)),
+        };
     }
     match describe_schema(endpoint, subject, &arguments) {
         Ok(document) => result(id, answered(&document, tool.result_key)),
@@ -110,7 +113,7 @@ pub(crate) fn resources(endpoint: &Endpoint, subject: &Subject) -> Vec<Value> {
 /// One `resources/read` of an `access://` or `schema://` URI. A URI this Endpoint does not serve,
 /// and one naming another Endpoint, answer the same way: the caller learns nothing about what
 /// exists elsewhere (AG-05, SP-14, SP-20).
-pub(crate) fn read(
+pub(crate) async fn read(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
@@ -120,8 +123,10 @@ pub(crate) fn read(
     let uri = params.get("uri").and_then(Value::as_str).unwrap_or("");
     match parse_resource(endpoint, uri) {
         Some(Resource::Access(format)) => {
-            let document = access_document(gateway, subject, endpoint, &format);
-            result(id, contents(uri, &document))
+            match access_document(gateway, subject, endpoint, &format).await {
+                Ok(document) => result(id, contents(uri, &document)),
+                Err(message) => result(id, refused(&message, &Value::Null)),
+            }
         }
         Some(Resource::Schema { major, format }) => {
             let mut asked = Map::new();
@@ -172,26 +177,28 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
         })
 }
 
-/// The caller's grants in one of [`ACCESS_FORMATS`], computed by the very functions the HTTP
-/// access surface uses, so MCP and HTTP answer the same document (EP-60, T-0425).
-fn access_document(
+/// The caller's grants in one of [`ACCESS_FORMATS`], read by the very function the HTTP access
+/// surface serves, so MCP and HTTP answer the same document (EP-60, T-0425, T-3649). A broker
+/// failure is the text a tool error carries, naming nothing the broker said.
+async fn access_document(
     gateway: &Gateway,
     subject: &Subject,
     endpoint: &Endpoint,
     format: &str,
-) -> Value {
-    let now = crate::pdp::now();
-    match format {
-        "odrl" => crate::handlers::access_odrl::policy(
-            subject,
-            endpoint,
-            now,
-            gateway.base_url(),
-            crate::app::sha256_hex,
-        ),
-        "grant-ast" => crate::handlers::access_ucast::grant_ast(subject, endpoint, now),
-        _ => access::permissions(subject, endpoint, now),
-    }
+) -> Result<Value, String> {
+    let format = match format {
+        "odrl" => AccessFormat::Odrl,
+        "grant-ast" => AccessFormat::GrantAst,
+        _ => AccessFormat::AuthZen,
+    };
+    access_routes::document(gateway, endpoint, subject, format)
+        .await
+        .map_err(|answer| {
+            format!(
+                "the access document could not be read (HTTP {}); try again in a moment",
+                answer.status().as_u16()
+            )
+        })
 }
 
 /// One resource, in the envelope `resources/read` answers with.

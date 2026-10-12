@@ -15,7 +15,8 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::store;
-use serde_json::{json, Value};
+use jc_core::kinds::PolicySpec;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -159,18 +160,36 @@ fn write(dir: &Path, name: &str, body: &str) {
     std::fs::write(dir.join(name), body).expect("write a manifest");
 }
 
-fn gateway(realm: &common::Realm, test_name: &str, jobs: &str) -> axum::Router {
+/// The gateway over the repository, the broker it forwards to, and the Policies of each
+/// Endpoint by slug.
+struct Served {
+    app: axum::Router,
+    broker: common::BrokerStub,
+    policies: Vec<(String, Vec<PolicySpec>)>,
+}
+
+async fn gateway(realm: &common::Realm, test_name: &str, jobs: &str) -> Served {
     let (endpoints, _, accounts, ..) =
         store::load(&repo(test_name, jobs)).expect("the repository loads");
-    router(Arc::new(
+    let policies = endpoints
+        .iter()
+        .map(|endpoint| (endpoint.slug.clone(), endpoint.policies.clone()))
+        .collect();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let app = router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(broker.url.clone()),
             Box::new(PolicyPdp),
             "hel.fi",
         )
         .serve(endpoints)
         .authenticate(Arc::new(realm.verifier()), accounts, None),
-    ))
+    ));
+    Served {
+        app,
+        broker,
+        policies,
+    }
 }
 
 /// A token of the job client: its own service-account user, or a person's it exchanged.
@@ -187,32 +206,33 @@ fn token(realm: &common::Realm, user: &str) -> String {
     }))
 }
 
-/// `GET …/access` on `slug` with `token`: the status, and the permitted types when it is 200.
-async fn access(app: &axum::Router, slug: &str, token: &str) -> (StatusCode, Vec<String>) {
+/// `GET …/access` on `slug` with `token`: the status, and the types of the Endpoint's Policies
+/// that name the caller the gateway pinned for the broker's engine (T-3649).
+async fn access(served: &Served, slug: &str, token: &str) -> (StatusCode, Vec<String>) {
     let request = Request::builder()
         .uri(format!("/api/endpoint/{slug}/access"))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .expect("a request");
-    let response = app
+    let before = served.broker.hops().len();
+    let response = served
+        .app
         .clone()
         .oneshot(request)
         .await
         .expect("the gateway answers");
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("a readable body");
-    let document: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let mut types: Vec<String> = document["permissions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| Some(entry["resource"]["type"].as_str()?.to_owned()))
-        .collect();
-    types.sort();
-    types.dedup();
-    (status, types)
+    let hops = served.broker.hops();
+    let policies = served
+        .policies
+        .iter()
+        .find(|(of, _)| of == slug)
+        .map(|(_, policies)| policies.as_slice())
+        .unwrap_or_default();
+    let types = match hops.get(before..) {
+        Some([hop]) => common::named_types(&hop.headers, policies),
+        _ => Vec::new(),
+    };
+    (response.status(), types)
 }
 
 fn own_user() -> String {
@@ -222,7 +242,7 @@ fn own_user() -> String {
 #[tokio::test]
 async fn the_job_is_its_derived_account_with_the_caller_role_on_its_apps_endpoint() {
     let realm = common::Realm::new();
-    let app = gateway(&realm, "own", JOBS);
+    let app = gateway(&realm, "own", JOBS).await;
     let (status, permitted) = access(&app, APP_SLUG, &token(&realm, &own_user())).await;
     assert_eq!(status, StatusCode::OK);
     // the caller role's grant; not the editor's, not the realm role the token claims
@@ -232,7 +252,7 @@ async fn the_job_is_its_derived_account_with_the_caller_role_on_its_apps_endpoin
 #[tokio::test]
 async fn the_job_reaches_no_other_endpoint() {
     let realm = common::Realm::new();
-    let app = gateway(&realm, "other", JOBS);
+    let app = gateway(&realm, "other", JOBS).await;
     let (status, _) = access(&app, ALL_SLUG, &token(&realm, &own_user())).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -240,7 +260,7 @@ async fn the_job_reaches_no_other_endpoint() {
 #[tokio::test]
 async fn a_persons_token_through_the_job_client_is_refused() {
     let realm = common::Realm::new();
-    let app = gateway(&realm, "person", JOBS);
+    let app = gateway(&realm, "person", JOBS).await;
     let (status, _) = access(&app, APP_SLUG, &token(&realm, "demo.steward@hel.fi")).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "it delegates nothing");
 }
@@ -248,7 +268,7 @@ async fn a_persons_token_through_the_job_client_is_refused() {
 #[tokio::test]
 async fn an_app_without_jobs_has_no_job_client_and_its_token_is_nobody() {
     let realm = common::Realm::new();
-    let app = gateway(&realm, "nojobs", "");
+    let app = gateway(&realm, "nojobs", "").await;
     for user in [own_user(), "demo.steward@hel.fi".to_owned()] {
         let (status, _) = access(&app, APP_SLUG, &token(&realm, &user)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{user}: never a person");

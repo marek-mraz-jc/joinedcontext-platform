@@ -847,7 +847,7 @@ pub(crate) async fn serve_ngsi_ld(
     if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
         return refusal;
     }
-    let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -1335,7 +1335,7 @@ fn query_shape_refusal(params: &[(String, String)]) -> Option<Response<Body>> {
 /// in the operator's log. What a broker says when it fails is whatever it was holding: an entity
 /// id in a message, a fragment of its own query, the name of an attribute an endpoint hides
 /// (T-2260).
-async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
+pub(crate) async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
@@ -1478,6 +1478,34 @@ fn subscription_without_view() -> Response<Body> {
         .into_response()
 }
 
+/// Whether the access documents of this Endpoint are the view's engine's for `subject` (plan
+/// 5.1, T-3643, T-3649); reads follow [`served_by_view`]. What no view can serve yet keeps the gateway's own answer, each until its gap
+/// closes: a view of another model (G18), a projection with `temporalQ` (G6), a slug no view id
+/// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
+/// engine has no agreements to decide on yet, and would judge the connector's own account
+/// instead (map K38).
+pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+    let temporal = endpoint
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.filter.as_ref())
+        .is_some_and(|filter| filter.temporal_q.is_some());
+    endpoint.view_mapping.is_none()
+        && subject.agreement.is_none()
+        && !temporal
+        && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// The broker's view of an Endpoint (plan 5.1): its slug, or `cs-{space}` for a space's
+/// canonical surface, the one whose root is `/cs/{segment}` (T-3643).
+pub(crate) fn view_of(endpoint: &Endpoint) -> String {
+    if endpoint.base_path.starts_with("/cs/") {
+        format!("cs-{}", endpoint.space)
+    } else {
+        endpoint.slug.clone()
+    }
+}
+
 /// One NGSI-LD request through the broker's view of the Endpoint (plan 5.1 and 5.2, T-3643):
 /// `{prefix}{rest}` goes to `/x/views/{view}/ngsi-ld/v1{rest}` with the caller's query as sent,
 /// and the broker's engine decides and narrows it under the `x-jc-*` subject the gateway
@@ -1517,7 +1545,19 @@ pub(crate) async fn serve_ngsi_ld_view(
             return refusal;
         }
     }
-    let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
+    let mut request = request;
+    // The Endpoint's type list as its reads show the caller (T-4080); a caller without a read
+    // grant, and the details form, are the view's to answer.
+    if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
+    {
+        match crate::handlers::reads::listed_types(gateway, &endpoint, &subject, &mut request).await
+        {
+            Ok(Some(list)) => return typed_json_response(&list, "application/json"),
+            Ok(None) => {}
+            Err(answer) => return *answer,
+        }
+    }
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -1532,7 +1572,6 @@ pub(crate) async fn serve_ngsi_ld_view(
         operation = %operation.as_str(),
         "forwarded to the broker's view"
     );
-    let mut request = request;
     match view_request(gateway, &endpoint, &subject, &path, operation, &mut request).await {
         Ok(()) => {}
         Err(answer) => return *answer,
@@ -3005,8 +3044,6 @@ fn unsupported_media_type() -> ProblemDetails {
     )
 }
 
-/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
-/// else is refused openly, without naming the rule that refused it.
 /// A write's share of the gateway's write budget (T-4077), held from before its body is read
 /// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
 /// takes none. Over the budget, the 503 to answer instead.
@@ -3014,15 +3051,23 @@ fn write_share(
     gateway: &Gateway,
     endpoint: &Endpoint,
     operation: Operation,
-    headers: &HeaderMap,
+    request: &Request<Body>,
 ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response<Body>>> {
     if !operation.is_write() {
         return Ok(None);
     }
-    let length = headers
+    // A body without Content-Length still knows its bound when it has one: a DELETE's is 0, so
+    // it takes the smallest share, not the largest (T-4077 re-open).
+    let length = request
+        .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            axum::body::HttpBody::size_hint(request.body())
+                .upper()
+                .and_then(|upper| usize::try_from(upper).ok())
+        });
     match gateway.write_share(length) {
         Some(share) => Ok(Some(share)),
         None => {
@@ -3047,6 +3092,8 @@ fn busy() -> Response<Body> {
     answer
 }
 
+/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
+/// else is refused openly, without naming the rule that refused it.
 fn refused(operation: Operation, path: &str) -> Response<Body> {
     if !operation.is_write() && operations::addressed_entity(path).is_some() {
         ProblemDetails::not_found().into_response()
@@ -4109,7 +4156,8 @@ async fn mcp_answer(
             .as_deref()
             .is_some_and(|tool| mcp::describe::DESCRIBE_TOOLS.contains(&tool))
     {
-        let answer = mcp::describe::call(&gateway, &endpoint, &subject, id, &message["params"]);
+        let answer =
+            mcp::describe::call(&gateway, &endpoint, &subject, id, &message["params"]).await;
         return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
     }
     if message["method"] == "resources/read"
@@ -4119,7 +4167,8 @@ async fn mcp_answer(
                 .any(|scheme| uri.starts_with(scheme))
         })
     {
-        let answer = mcp::describe::read(&gateway, &endpoint, &subject, id, &message["params"]);
+        let answer =
+            mcp::describe::read(&gateway, &endpoint, &subject, id, &message["params"]).await;
         return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
     }
     if !(1..=MAX_VIEW_ID).contains(&view.len()) {

@@ -3,6 +3,12 @@
 //! What a client needs to filter before it asks: one entry per type it may see, the operations
 //! it may call, the attributes it may project, and the conditions the gateway would add anyway.
 //! And nothing about anything else.
+//!
+//! The Endpoint here has a view of another model, which no broker view serves yet, so the router
+//! answers with the gateway's own document (T-3649, `app::has_view`); an Endpoint with a view
+//! gets the broker engine's (`tests/access_view_tests.rs`).
+
+mod common;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -42,7 +48,7 @@ fn endpoint(policies: Vec<PolicySpec>) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
-        view_mapping: None,
+        view_mapping: Some(common::no_view()),
         catalog: None,
         policy_names: Vec::new(),
         policies,
