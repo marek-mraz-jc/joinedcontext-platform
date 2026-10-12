@@ -428,14 +428,20 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let steps = outer[0]["try"].as_sequence().expect("the read");
     assert_eq!(
         names(steps),
-        ["mapping", "unarchive", "mapping", "http", "mapping"]
+        [
+            "mapping",
+            "unarchive",
+            "mapping",
+            "http",
+            "mapping",
+            "wasm",
+            "mapping"
+        ]
     );
     let directory = steps[0]["mapping"].as_str().unwrap();
     assert!(directory.contains(r#"let wanted = ["agency.txt","stops.txt"]"#));
     assert!(directory.contains("let max_bytes = 1048576"));
-    // The directory may lie about sizes, so a deflated member is read only when the most it
-    // can inflate to (1032 times its packed size) is within maxBytes.
-    assert!(directory.contains("e.method == 8 && e.csize * 1032 > $max_bytes"));
+    assert!(directory.contains("e.size > $max_bytes || e.csize > $max_bytes"));
     assert!(!directory.contains("MEMBERS") && !directory.contains("MAX_BYTES"));
     let member = &steps[3]["http"];
     assert_eq!(member["url"], input["url"]);
@@ -444,6 +450,20 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
         member["headers"]["x-key"].as_str(),
         Some("${DS_HSL_GTFS_KEY}")
     );
+    // The directory may lie about sizes, so the inflate stops at the declared one (T-3953):
+    // the local step hands the module its limit, and the check throws the module's refusal.
+    let local = steps[4]["mapping"].as_str().unwrap();
+    assert!(
+        local.contains(r#"meta inflate_limit = if $z.method == 8 { $z.size.int64().string() }"#)
+    );
+    assert!(!local.contains("decompress"));
+    assert_eq!(
+        steps[5]["wasm"]["module_path"].as_str(),
+        Some("/streams/inflate.wasm")
+    );
+    assert_eq!(steps[5]["wasm"]["function"].as_str(), Some("inflate"));
+    let check = steps[6]["mapping"].as_str().unwrap();
+    assert!(check.contains(r#"@inflate_error.or("")"#) && check.contains("the directory says"));
     assert_eq!(
         outer[1]["catch"][1]["mapping"].as_str(),
         Some("root = deleted()")

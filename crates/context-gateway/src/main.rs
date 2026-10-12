@@ -13,10 +13,13 @@ use std::sync::Arc;
 /// The one outbound client: the broker hop and every notification delivery (R46).
 fn broker_of(config: &Config) -> Result<Broker, String> {
     let Some(path) = config.egress_ca_bundle.as_ref() else {
-        return Broker::verified(config.broker_url.clone()).map_err(|error| error.to_string());
+        return Broker::verified(config.broker_url.clone())
+            .map(|broker| broker.with_template(config.broker_url_template.clone()))
+            .map_err(|error| error.to_string());
     };
     let bundle = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     Broker::trusting(config.broker_url.clone(), &bundle)
+        .map(|broker| broker.with_template(config.broker_url_template.clone()))
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -53,7 +56,7 @@ async fn main() -> ExitCode {
             projects,
             assembly: config.assembly_dir.clone(),
         });
-    let (endpoints, spaces, accounts, federations, agreements, limits, servers, brokers) =
+    let (endpoints, spaces, accounts, federations, agreements, limits, servers, homes, brokers) =
         match &config.repo_dir {
             None => (
                 Vec::new(),
@@ -63,6 +66,7 @@ async fn main() -> ExitCode {
                 context_gateway::auth::dataspace_token::Agreements::new(),
                 store::Limits::default(),
                 Vec::new(),
+                store::SpaceBrokers::default(),
                 context_gateway::mqtt::Brokers::new(),
             ),
             Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
@@ -89,6 +93,7 @@ async fn main() -> ExitCode {
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
     gateway.replace_servers(servers);
+    gateway.broker.route(&homes);
     gateway.replace_brokers(brokers);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
