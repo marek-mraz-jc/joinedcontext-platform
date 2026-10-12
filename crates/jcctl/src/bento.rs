@@ -11,6 +11,7 @@
 //! archive's named members (PL-72).
 
 use jc_core::kinds::data_source::{check_class, env_var_of};
+use jc_core::kinds::mqtt_broker;
 use jc_core::kinds::{
     DataSourceSpec, DataSourceType, GtfsFeed, HttpArchive, IdMint, Mint, PipelineSpec, TemplatePart,
 };
@@ -36,9 +37,8 @@ const ZIP_INT: &str = r#"map int {
 /// count, size, method and offset is checked before any member is fetched. `MEMBERS` and
 /// `MAX_BYTES` are replaced by values `HttpArchive::validate` admitted.
 ///
-/// The directory's sizes may lie, and Bloblang's `decompress` has no output limit, so a deflate
-/// member is read only when its packed size times 1032, the most deflate expands, is within
-/// `maxBytes`: no member inflates past the bound, whatever its directory says.
+/// The directory's sizes may lie: the inflate stops at the size the directory declares
+/// (`INFLATE_MODULE`), so no member inflates past `maxBytes`, whatever its data holds.
 const ZIP_DIRECTORY: &str = r#"let wanted = MEMBERS
 let max_bytes = MAX_BYTES
 let tail = if content().length() > 65557 { throw("the archive server ignored Range and sent %v bytes".format(content().length())) } else { content() }
@@ -61,7 +61,7 @@ let all = $cd.split("504b0102").slice(1).map_each(e -> {
 let found = if $all.length() != $entries { throw("the archive's directory lists %v entries, its end record %v".format($all.length(), $entries)) } else { $all.filter(e -> $wanted.contains(e.name)) }
 let missing = $wanted.filter(w -> !$found.map_each(e -> e.name).contains(w))
 root = if $missing.length() > 0 { throw("the archive has no member %v".format($missing)) } else { $found }
-root = root.map_each(e -> if e.size > $max_bytes || e.csize > $max_bytes { throw("%v: %v bytes, %v packed, over maxBytes %v".format(e.name, e.size, e.csize, $max_bytes)) } else if ![0, 8].contains(e.method) { throw("%v: compression method %v, only stored and deflate are read".format(e.name, e.method)) } else if e.method == 8 && e.csize * 1032 > $max_bytes { throw("%v: %v packed may inflate to %v bytes, over maxBytes %v".format(e.name, e.csize, e.csize * 1032, $max_bytes)) } else if e.offset == 4294967295 { throw("%v: a Zip64 archive is not read".format(e.name)) } else { e })
+root = root.map_each(e -> if e.size > $max_bytes || e.csize > $max_bytes { throw("%v: %v bytes, %v packed, over maxBytes %v".format(e.name, e.size, e.csize, $max_bytes)) } else if ![0, 8].contains(e.method) { throw("%v: compression method %v, only stored and deflate are read".format(e.name, e.method)) } else if e.offset == 4294967295 { throw("%v: a Zip64 archive is not read".format(e.name)) } else { e })
 "#;
 
 /// One directory entry to the metadata the member's ranged read needs (PL-72). The range
@@ -72,17 +72,32 @@ meta zip = this.format_json(no_indent: true)
 meta range = "bytes=%v-%v".format(this.offset, this.offset + 30 + this.nlen + this.elen + this.csize + 1024)
 "#;
 
-/// The member's local header and packed bytes to its content, checked against the directory.
-const ZIP_INFLATE: &str = r#"let z = @zip.parse_json()
+/// The member's local header to its packed bytes, checked against the directory; a deflated
+/// member also carries the size its inflate may reach (`INFLATE_MODULE`).
+const ZIP_LOCAL: &str = r#"let z = @zip.parse_json()
 let read = if content().length() > 30 + $z.nlen + $z.elen + $z.csize + 1025 { throw("%v: the archive server ignored Range".format($z.name)) } else { content() }
 let head = $read.slice(0, 30).encode("hex")
 let nlen = $head.slice(52, 56).apply("int")
 let start = 30 + $nlen + $head.slice(56, 60).apply("int")
 let data = $read.slice($start, $start + $z.csize)
-let body = if $head.slice(0, 8) != "504b0304" || $read.slice(30, 30 + $nlen).string() != $z.name || $data.length() != $z.csize { throw("%v: no local header of it at offset %v".format($z.name, $z.offset)) } else if $z.method == 8 { $data.decompress("flate") } else { $data }
-root = if $body.length() != $z.size { throw("%v: inflated to %v bytes, the directory says %v".format($z.name, $body.length(), $z.size)) } else { $body }
+root = if $head.slice(0, 8) != "504b0304" || $read.slice(30, 30 + $nlen).string() != $z.name || $data.length() != $z.csize { throw("%v: no local header of it at offset %v".format($z.name, $z.offset)) } else { $data }
+meta inflate_limit = if $z.method == 8 { $z.size.int64().string() } else { deleted() }
+"#;
+
+/// The module of Bento's `wasm` processor that inflates a deflated member and stops at its
+/// `inflate_limit` (T-3953, joinedcontext-platform tools/bento-inflate). Bloblang's
+/// `decompress` has no output limit, so a lying directory would let it inflate whole before
+/// any check; the runner's ConfigMap carries the module beside the streams.
+const INFLATE_MODULE: &str = "/streams/inflate.wasm";
+
+/// The member's content, checked against the directory: the module's refusal or a size other
+/// than the declared one ends the read.
+const ZIP_CHECK: &str = r#"let z = @zip.parse_json()
+let refused = @inflate_error.or("")
+root = if $refused != "" { throw("%v: %v".format($z.name, $refused)) } else if content().length() != $z.size { throw("%v: inflated to %v bytes, the directory says %v".format($z.name, content().length(), $z.size)) } else { content() }
 meta zip = deleted()
 meta range = deleted()
+meta inflate_limit = deleted()
 "#;
 
 /// The environment variable a mapping mints the `{orgDomain}` of an id from (PF-44, PF-42).
@@ -270,7 +285,7 @@ pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Ve
 ///
 /// The input fetched the archive's last 64 KiB; the directory in it becomes one message per
 /// named member, each member is fetched by its own `Range` with the connection's headers,
-/// authorization and TLS, and inflated. A refused read is logged and dropped, so the author's
+/// authorization and TLS, and inflated no further than its declared size. A refused read is logged and dropped, so the author's
 /// steps never see archive bytes. Stock Bento only: `unarchive: zip` would inflate every member.
 fn archive_processors(
     spec: &DataSourceSpec,
@@ -297,6 +312,9 @@ fn archive_processors(
     };
     let mut unarchive = Mapping::new();
     unarchive.insert(key("format"), text("json_array"));
+    let mut inflate = Mapping::new();
+    inflate.insert(key("module_path"), text(INFLATE_MODULE));
+    inflate.insert(key("function"), text("inflate"));
     let mut log = Mapping::new();
     log.insert(key("level"), text("ERROR"));
     log.insert(key("message"), text("archive read refused: ${! error() }"));
@@ -307,7 +325,9 @@ fn archive_processors(
         one("unarchive", Value::Mapping(unarchive)),
         one("mapping", text(ZIP_MEMBER)),
         one("http", Value::Mapping(member)),
-        one("mapping", text(&format!("{ZIP_INT}{ZIP_INFLATE}"))),
+        one("mapping", text(&format!("{ZIP_INT}{ZIP_LOCAL}"))),
+        one("wasm", Value::Mapping(inflate)),
+        one("mapping", text(ZIP_CHECK)),
     ];
     vec![
         one("try", Value::Sequence(read)),
@@ -442,7 +462,13 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
         return Mapping::new();
     };
     let mut out = Mapping::new();
-    out.insert(key("urls"), sequence(&connection.urls));
+    // A platform broker is read on its internal listener as the runner, with no credential
+    // (PL-76); the gateway grants the runner the topics of the DataSources that name the broker.
+    let urls = match &connection.broker_ref {
+        Some(broker) => vec![mqtt_broker::internal_url(context.project, &broker.name)],
+        None => connection.urls.clone(),
+    };
+    out.insert(key("urls"), sequence(&urls));
     out.insert(key("topics"), sequence(&connection.topics));
     out.insert(
         key("client_id"),
@@ -454,7 +480,9 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
     if let Some(clean) = connection.clean_session {
         out.insert(key("clean_session"), Value::Bool(clean));
     }
-    if let Some(user) = &connection.username {
+    if connection.broker_ref.is_some() {
+        out.insert(key("user"), text(mqtt_broker::RUNNER_USERNAME));
+    } else if let Some(user) = &connection.username {
         out.insert(key("user"), text(user));
     }
     if let Some(password) = &connection.password_ref {
@@ -463,8 +491,7 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
             text(&interpolation(context.source, password)),
         );
     }
-    let encrypted = connection
-        .urls
+    let encrypted = urls
         .iter()
         .any(|url| url.starts_with("tls://") || url.starts_with("wss://"));
     if let Some(tls) = tls_block(spec, context, encrypted) {
