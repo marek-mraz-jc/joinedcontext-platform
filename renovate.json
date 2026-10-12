@@ -1,0 +1,20 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Cargo, npm/pnpm, Dockerfile and GitHub Actions updates as pull requests into main, proved by ci.yml like any change (T-3860). Minor and patch bumps come as one weekly pull request, because each one costs a ci run; a major comes alone. Digests stay pinned; nothing merges by itself.",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "baseBranchPatterns": ["main"],
+  "pinDigests": true,
+  "automerge": false,
+  "labels": ["renovate"],
+  "prConcurrentLimit": 5,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": { "labels": ["renovate", "security"] },
+  "packageRules": [
+    {
+      "description": "One weekly pull request for every minor and patch bump",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major dependencies",
+      "schedule": ["before 6am on monday"]
+    }
+  ]
+}
