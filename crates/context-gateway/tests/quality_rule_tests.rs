@@ -66,7 +66,7 @@ fn policy() -> PolicySpec {
         "contextSpaceRef: {SPACE}\n\
          assigner: did:web:{DOMAIN}\n\
          assignee: {{ kind: role, id: public }}\n\
-         operations: [createEntity, appendAttrs, updateAttrs, upsertBatch]\n\
+         operations: [createEntity, appendAttrs, updateAttrs, upsertBatch, deleteAttrs]\n\
          information:\n\
          \x20 - entities:\n\
          \x20     - type: AirQualityObserved\n"
@@ -201,4 +201,89 @@ async fn a_space_without_rules_forwards_what_it_was_sent() {
     let answer = send(Vec::new(), Method::POST, "/entities", reading(-3.5)).await;
     assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.body);
     assert_eq!(answer.broker_saw, vec![reading(-3.5)]);
+}
+
+fn quarantining() -> Vec<QualityRule> {
+    serde_json::from_value(json!([
+        {"name": "pm10-hide", "entityType": "AirQualityObserved", "kind": "range", "attribute": "pm10", "max": 500, "outcome": "quarantine"}
+    ]))
+    .expect("the rules parse")
+}
+
+/// DM-90: a write a rule quarantines reaches the broker with the mark; on the one-attribute
+/// path, which has nowhere to carry it, it is refused instead of stored unmarked.
+#[tokio::test]
+async fn a_quarantined_write_carries_the_mark_and_the_attribute_path_refuses_it() {
+    let answer = send(quarantining(), Method::POST, "/entities", reading(900.0)).await;
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.body);
+    let stored = &answer.broker_saw[0];
+    assert!(stored.get("quarantinedAt").is_some(), "{stored}");
+    assert_eq!(stored["quarantineRules"]["value"], json!(["pm10-hide"]));
+
+    let uri = format!("/entities/{ID}/attrs/pm10");
+    let one = json!({ "type": "Property", "value": 900.0, "unitCode": "GQ" });
+    let answer = send(quarantining(), Method::PATCH, &uri, one).await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+    assert!(answer.broker_saw.is_empty(), "{:?}", answer.broker_saw);
+}
+
+/// DM-90: the mark is the gateway's. A writer's own copy is dropped, and a delete of it is
+/// refused before the broker is asked, however the attribute is spelled.
+#[tokio::test]
+async fn a_writer_can_neither_forge_nor_delete_the_quarantine_mark() {
+    let mut forged = reading(12.0);
+    forged["quarantinedAt"] = json!({ "type": "Property", "value": "2026-10-12T00:00:00Z" });
+    forged["quarantineRules"] = json!({ "type": "Property", "value": ["pm10-hide"] });
+    let answer = send(quarantining(), Method::POST, "/entities", forged).await;
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.body);
+    let stored = &answer.broker_saw[0];
+    assert!(
+        stored.get("quarantinedAt").is_none() && stored.get("quarantineRules").is_none(),
+        "{stored}"
+    );
+
+    // A space without rules strips it too: a rule added later must not find forged marks.
+    let mut forged = reading(12.0);
+    forged["quarantinedAt"] = json!({ "type": "Property", "value": "2026-10-12T00:00:00Z" });
+    let answer = send(Vec::new(), Method::POST, "/entities", forged).await;
+    assert!(
+        answer.broker_saw[0].get("quarantinedAt").is_none(),
+        "{}",
+        answer.broker_saw[0]
+    );
+
+    for attribute in [
+        "quarantinedAt",
+        "quarantineRules",
+        "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fdefault-context%2FquarantinedAt",
+    ] {
+        let uri = format!("/entities/{ID}/attrs/{attribute}");
+        let answer = send(Vec::new(), Method::DELETE, &uri, Value::Null).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::BAD_REQUEST,
+            "{attribute}: {}",
+            answer.body
+        );
+        assert!(answer.broker_saw.is_empty(), "{attribute}");
+    }
+}
+
+/// A caller the grant refuses learns nothing of the rules: 403, not the rule's 400.
+#[tokio::test]
+async fn a_forbidden_write_that_breaks_a_rule_answers_403() {
+    let answer = send(
+        rules(),
+        Method::PUT,
+        &format!("/entities/{ID}"),
+        reading(-3.5),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+    assert!(
+        !answer.body.to_string().contains("pm10-positive"),
+        "{}",
+        answer.body
+    );
+    assert!(answer.broker_saw.is_empty());
 }

@@ -9,7 +9,7 @@ use crate::units::{types_of, Shape};
 use chrono::{DateTime, Utc};
 use jc_core::error::ProblemDetails;
 use jc_core::kinds::{QualityOutcome, QualityRule};
-use jc_core::quality::{mark, on_write, rejection};
+use jc_core::quality::{mark, on_write, rejection, QUARANTINED_AT, QUARANTINE_RULES};
 use serde_json::{json, Value};
 
 /// Every quality check, by space, type, rule and outcome (DM-93).
@@ -37,6 +37,50 @@ pub fn refusal(rule: &QualityRule) -> ProblemDetails {
         .extensions
         .insert("field".into(), json!(rule.attribute));
     problem
+}
+
+/// The attributes only the gateway writes (DM-90): the quarantine mark. A writer who could set
+/// them would hide good data; one who could delete them would make quarantined data public.
+pub const OWNED: [&str; 2] = [QUARANTINED_AT, QUARANTINE_RULES];
+
+/// Whether `name` is an owned attribute: its term, or an IRI or compact IRI ending in it, so
+/// the expanded `…/default-context/quarantinedAt` is the same attribute.
+pub fn is_owned(name: &str) -> bool {
+    OWNED.iter().any(|owned| {
+        name.strip_suffix(owned)
+            .is_some_and(|head| head.is_empty() || head.ends_with(['/', '#', ':']))
+    })
+}
+
+/// The refusal of a write whose path addresses an attribute the gateway owns, a `DELETE`
+/// included, the attribute written as a term or a percent-encoded IRI; `None` otherwise.
+pub fn owned_path(targeted: Option<&str>) -> Option<ProblemDetails> {
+    let attribute = targeted
+        .map(crate::query::decode)
+        .filter(|attribute| is_owned(attribute))?;
+    Some(ProblemDetails::bad_request().with_detail(format!(
+        "`{attribute}` is written by the space's quality rules alone; a write may not set or \
+         delete it (DM-90)"
+    )))
+}
+
+/// Takes every attribute the gateway owns off the entities of a write body, a batch's
+/// included; `true` when one was there. A body addressed to one attribute is that attribute's
+/// value, not an entity, and is left as it is.
+pub fn strip_owned(payload: &mut Value) -> bool {
+    let mut stripped = false;
+    let mut strip = |entity: &mut Value| {
+        if let Some(object) = entity.as_object_mut() {
+            let before = object.len();
+            object.retain(|name, _| !is_owned(name));
+            stripped |= object.len() != before;
+        }
+    };
+    match payload {
+        Value::Array(entities) => entities.iter_mut().for_each(&mut strip),
+        entity => strip(entity),
+    }
+    stripped
 }
 
 /// Judges every entity of a write payload against `rules` and marks what they flag or
@@ -107,6 +151,23 @@ fn judge(
         tracing::info!(%space, rule = %rule.name, "write refused: it breaks a quality rule");
         return Err(Box::new(refusal(rule)));
     }
+    // A write to one attribute's path carries that attribute alone, with nowhere to put the
+    // entity's quarantine mark: it is refused, and the fragment route carries the mark.
+    if shape.targeted.is_some() {
+        if let Some(verdict) = verdicts
+            .iter()
+            .find(|verdict| verdict.broken == Some(QualityOutcome::Quarantine))
+        {
+            let mut problem = refusal(verdict.rule);
+            problem.detail = Some(format!(
+                "attribute `{}` of `{}` breaks the space's quality rule `{}`, which quarantines \
+                 the entity; write it through PATCH /entities/{{id}}/attrs, which carries the \
+                 mark (DM-90)",
+                verdict.rule.attribute, verdict.rule.entity_type, verdict.rule.name
+            ));
+            return Err(Box::new(problem));
+        }
+    }
     mark(entity, &verdicts, now);
     Ok(())
 }
@@ -127,6 +188,57 @@ mod tests {
         addressed: None,
         targeted: None,
     };
+
+    // DM-90: the quarantine mark is the gateway's, however a writer spells it.
+    #[test]
+    fn a_writer_can_neither_set_nor_delete_the_quarantine_mark() {
+        for owned in [
+            "quarantinedAt",
+            "quarantineRules",
+            "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fdefault-context%2FquarantinedAt",
+            "jc:quarantineRules",
+        ] {
+            assert!(owned_path(Some(owned)).is_some(), "{owned}");
+        }
+        for free in ["speed", "notquarantinedAt", "quarantinedAtX"] {
+            assert!(owned_path(Some(free)).is_none(), "{free}");
+        }
+        assert!(owned_path(None).is_none());
+
+        let mut batch = json!([
+            {"id": "urn:ngsi-ld:Vehicle:1", "type": "Vehicle", "quarantinedAt": {"type": "Property", "value": "x"}},
+            {"id": "urn:ngsi-ld:Vehicle:2", "type": "Vehicle",
+             "https://uri.etsi.org/ngsi-ld/default-context/quarantineRules": {"type": "Property", "value": []}}
+        ]);
+        assert!(strip_owned(&mut batch));
+        assert_eq!(batch[0].as_object().map(|o| o.len()), Some(2));
+        assert_eq!(batch[1].as_object().map(|o| o.len()), Some(2));
+        let mut clean = json!({"speed": {"type": "Property", "value": 3}});
+        assert!(!strip_owned(&mut clean));
+    }
+
+    // DM-90: a one-attribute write that a rule quarantines is refused, never stored unmarked.
+    #[test]
+    fn a_one_attribute_write_that_quarantines_is_refused() {
+        let rules: Vec<QualityRule> = serde_json::from_value(json!([
+            {"name": "speed-hide", "entityType": "Vehicle", "kind": "range", "attribute": "speed", "max": 33.4, "outcome": "quarantine"}
+        ]))
+        .expect("rules");
+        let targeted = Shape {
+            addressed: Some("urn:ngsi-ld:Vehicle:1"),
+            targeted: Some("speed"),
+        };
+        let mut value = json!({"type": "Property", "value": 90});
+        let problem = enforce(&mut value, targeted, &rules, "bikes", Utc::now())
+            .expect_err("quarantined on the attribute path");
+        assert!(problem
+            .detail
+            .unwrap_or_default()
+            .contains("PATCH /entities/{id}/attrs"));
+        let mut fine = json!({"type": "Property", "value": 9});
+        enforce(&mut fine, targeted, &rules, "bikes", Utc::now()).expect("within the rule");
+        assert_eq!(fine, json!({"type": "Property", "value": 9}));
+    }
 
     #[test]
     fn a_rejected_value_is_refused_by_rule_and_attribute_never_by_value() {
