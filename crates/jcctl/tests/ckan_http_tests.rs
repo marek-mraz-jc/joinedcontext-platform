@@ -262,6 +262,29 @@ impl Catalogue {
                 }
                 ok(json!({ "resource_id": resource_id }))
             }
+            ("POST", "resource_patch") => {
+                let id = call.body["id"].clone();
+                let modified = self.mint("modified");
+                let Some(package) = self.packages.values_mut().find(|package| {
+                    package["resources"]
+                        .as_array()
+                        .is_some_and(|all| all.iter().any(|r| r["id"] == id))
+                }) else {
+                    return not_found();
+                };
+                let resource = package["resources"]
+                    .as_array_mut()
+                    .into_iter()
+                    .flatten()
+                    .find(|r| r["id"] == id)
+                    .expect("the resource");
+                for (key, value) in call.body.as_object().into_iter().flatten() {
+                    resource[key] = value.clone();
+                }
+                let patched = resource.clone();
+                package["metadata_modified"] = json!(modified);
+                ok(patched)
+            }
             ("POST", "datastore_delete") => {
                 let resource_id = call.body["resource_id"].as_str().unwrap_or_default();
                 if self.tables.remove(resource_id).is_none() {
@@ -786,7 +809,12 @@ fn the_datastore_mirror_reaches_the_catalogue_and_survives_an_update() {
         let catalogue = catalogue.lock().expect("the catalogue");
         assert_eq!(
             catalogue.writes(),
-            vec!["package_create", "datastore_create", "datastore_upsert"]
+            vec![
+                "package_create",
+                "datastore_create",
+                "datastore_upsert",
+                "resource_patch"
+            ]
         );
         let (_, stored) = &catalogue.tables[&resource];
         assert_eq!(stored.len(), 2);
