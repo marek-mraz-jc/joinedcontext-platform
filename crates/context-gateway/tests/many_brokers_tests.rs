@@ -1,4 +1,4 @@
-//! Many brokers (ADR-N-046, PF-111, PF-112): a request goes to the broker of the space the
+//! Many brokers (ADR-N-047, PF-111, PF-112): a request goes to the broker of the space the
 //! gateway pinned as tenant, or of the view it names, and nowhere else; a space whose broker
 //! has no address is refused, never sent to `main`.
 

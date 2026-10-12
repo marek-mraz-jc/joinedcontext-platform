@@ -35,7 +35,7 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "Project"),
     (WAVE_ROOTS, "DataSpaceParticipant"),
     (WAVE_ROOTS, "AgentProfile"),
-    // A broker stands before the spaces that live on it (PF-111, ADR-N-046).
+    // A broker stands before the spaces that live on it (PF-111, ADR-N-047).
     (WAVE_ROOTS, "ContextBroker"),
     (WAVE_SPACES, "ContextSpace"),
     (WAVE_SPACES, "DataModel"),

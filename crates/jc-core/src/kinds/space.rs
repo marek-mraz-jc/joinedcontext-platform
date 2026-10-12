@@ -252,7 +252,7 @@ pub struct ContextSpaceSpec {
     #[serde(default, skip_serializing_if = "MissingUnitCode::is_fill")]
     pub missing_unit_code: MissingUnitCode,
     /// The `ContextBroker` this space lives on; the organization's default when absent
-    /// (PF-111, ADR-N-046). Changing it on a space that holds entities is a move job (PF-115).
+    /// (PF-111, ADR-N-047). Changing it on a space that holds entities is a move job (PF-115).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_ref: Option<String>,
 }

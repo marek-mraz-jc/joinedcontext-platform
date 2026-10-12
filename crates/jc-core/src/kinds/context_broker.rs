@@ -1,4 +1,4 @@
-//! `kind: ContextBroker`, one Antares broker instance of the organization (PF-110, ADR-N-046).
+//! `kind: ContextBroker`, one Antares broker instance of the organization (PF-110, ADR-N-047).
 //!
 //! A space lives on one broker, named by its `spec.brokerRef` or else the default broker
 //! (PF-111). [`broker_of`] is the one lookup the gateway, the reconciler and the Portal call, so
@@ -11,7 +11,7 @@ use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// The broker of an organization that declares none (ADR-N-046 §2.1).
+/// The broker of an organization that declares none (ADR-N-047 §2.1).
 pub const IMPLICIT_BROKER: &str = "main";
 
 /// One broker instance (PF-110).
@@ -34,7 +34,7 @@ pub struct ContextBrokerSpec {
     pub features: Vec<BrokerFeature>,
 }
 
-/// A resource preset of the broker chart (ADR-N-046 §2.7).
+/// A resource preset of the broker chart (ADR-N-047 §2.7).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BrokerSize {
