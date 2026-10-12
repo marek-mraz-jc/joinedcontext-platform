@@ -122,6 +122,20 @@
           ],
           "description": "What a write through an Endpoint does with a quantity Property of the model that carries no `unitCode`: `fill` writes the model's code and says so, `refuse` answers `400` (DM-06). A `unitCode` other than the model's is refused either way."
         },
+        "quality": {
+          "description": "The space's own quality rules beside its model's constraints, at most 64 (DM-87, ADR-N-046).",
+          "items": {
+            "$ref": "#/definitions/QualityRule"
+          },
+          "type": "array"
+        },
+        "retention": {
+          "description": "How long the broker keeps each type's data; a type without a rule is kept forever (DM-82, ADR-N-046).",
+          "items": {
+            "$ref": "#/definitions/RetentionRule"
+          },
+          "type": "array"
+        },
         "ttlDays": {
           "description": "Enforced time-to-live in days for ephemeral sandboxes (1..=14, PF-19).",
           "format": "uint32",
@@ -275,6 +289,142 @@
         }
       ]
     },
+    "QualityKind": {
+      "description": "What a quality rule checks (DM-87).",
+      "oneOf": [
+        {
+          "description": "A number Property's value against `min` and/or `max`.",
+          "enum": [
+            "range"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every point of a GeoProperty inside `bbox`.",
+          "enum": [
+            "area"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The attribute's `observedAt` against `maxAhead` (on write) and `maxAge` (by the sweep).",
+          "enum": [
+            "freshness"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "QualityOutcome": {
+      "description": "What a broken quality rule does (DM-88, DM-89, DM-90).",
+      "oneOf": [
+        {
+          "description": "The write is refused.",
+          "enum": [
+            "reject"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The entity is stored and the attribute carries `qualityFlags`.",
+          "enum": [
+            "flag"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The entity is stored with `quarantinedAt` and hidden from all but the owner and steward.",
+          "enum": [
+            "quarantine"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "QualityRule": {
+      "additionalProperties": false,
+      "description": "One named quality rule of a space (DM-87, ADR-N-046 2.4).",
+      "properties": {
+        "attribute": {
+          "description": "The slot of `entity_type` the rule reads.",
+          "type": "string"
+        },
+        "bbox": {
+          "description": "`area`: `[minLon, minLat, maxLon, maxLat]` in WGS 84.",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "entityType": {
+          "description": "A class of the space's Data Model.",
+          "type": "string"
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/QualityKind"
+            }
+          ],
+          "description": "What the rule checks."
+        },
+        "max": {
+          "description": "`range`: the largest value allowed.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maxAge": {
+          "description": "`freshness`: how old `observedAt` may be, checked by the sweep.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxAhead": {
+          "description": "`freshness`: how far `observedAt` may lie in the future, checked on write.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "min": {
+          "description": "`range`: the smallest value allowed.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "A DNS-1123 label, unique in the space: it names the rule in a refusal and the metric.",
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/QualityOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Overrides the kind's default outcome."
+        }
+      },
+      "required": [
+        "attribute",
+        "entityType",
+        "kind",
+        "name"
+      ],
+      "type": "object"
+    },
     "Ref": {
       "anyOf": [
         {
@@ -291,6 +441,34 @@
         }
       ],
       "description": "Reference to another resource, either bare name or typed reference (MF-07)."
+    },
+    "RetentionRule": {
+      "additionalProperties": false,
+      "description": "One type's retention in a space (DM-82, ADR-N-046): both durations absent keeps it forever.",
+      "properties": {
+        "current": {
+          "description": "How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entityType": {
+          "description": "A class of the space's Data Model.",
+          "type": "string"
+        },
+        "history": {
+          "description": "How long a temporal instance is kept, in the same form (DM-84).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entityType"
+      ],
+      "type": "object"
     },
     "Status": {
       "additionalProperties": false,

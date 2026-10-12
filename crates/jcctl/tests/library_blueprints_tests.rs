@@ -15,12 +15,13 @@ use jcctl::sync::{self, RemoteError, State, SyncRemote};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-/// The four flows CC-28 names, by the library's folder names.
-const FLOWS: [&str; 4] = [
+/// The four flows CC-28 names and the camera over MQTT (T-3838), by the library's folder names.
+const FLOWS: [&str; 5] = [
     "threshold-alert",
     "data-source-onboarding",
     "dataset-publication",
     "cross-city-sharing",
+    "camera-over-mqtt",
 ];
 
 /// A slug as the Portal mints one: 160 bits in lowercase base32 (EP-02).
@@ -66,6 +67,13 @@ fn full(flow: &str) -> Value {
             "entityTypes": ["Vehicle", "BusStop"], "serviceAccount": "hub-reader",
             "endpointSlug": SLUG,
         }),
+        "camera-over-mqtt" => json!({
+            "name": "entrance-cams", "space": "mobility", "camera": "cam-north",
+            "owner": "aino.virtanen", "keyId": "cam-north-1",
+            "keyX": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+            "keyY": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+            "endpointSlug": SLUG,
+        }),
         other => panic!("no parameters for {other}"),
     }
 }
@@ -102,9 +110,10 @@ fn assert_valid(flow: &str, template: &str, manifest: &str) -> RawManifest {
     }
 }
 
-/// CC-28: the library holds the four common flows, each a valid organization Blueprint.
+/// CC-28: the library holds the four common flows and the camera, each a valid organization
+/// Blueprint.
 #[test]
-fn the_library_ships_the_four_common_flows() {
+fn the_library_ships_the_common_flows_and_the_camera() {
     let mut found: Vec<String> = std::fs::read_dir(library())
         .expect("library/blueprints exists")
         .map(|entry| {
@@ -171,6 +180,16 @@ fn each_flow_renders_the_resources_the_requirement_names() {
         kinds("cross-city-sharing"),
         ["ContextSourceRegistration", "Endpoint"]
     );
+    assert_eq!(
+        kinds("camera-over-mqtt"),
+        [
+            "MqttBroker",
+            "ServiceAccount",
+            "DataSource",
+            "Pipeline",
+            "Endpoint"
+        ]
+    );
 
     // The alert: the watched property, the limit and the channel with its secret by reference.
     let alert = expand(&blueprint("threshold-alert"), &full("threshold-alert")).expect("expands");
@@ -211,6 +230,57 @@ fn each_flow_renders_the_resources_the_requirement_names() {
     assert_eq!(endpoint.spec["allowedProjects"], json!(["tallinn"]));
 }
 
+/// T-3838: the camera publishes under its own client id alone, signs in with its public key, and
+/// its messages reach the space through the Endpoint the flow renders, read from the platform's
+/// broker with no credential.
+#[test]
+fn the_camera_flow_wires_one_camera_to_its_broker_and_its_endpoint() {
+    let rendered =
+        expand(&blueprint("camera-over-mqtt"), &full("camera-over-mqtt")).expect("expands");
+    let of = |template: &str| {
+        let expanded = rendered
+            .iter()
+            .find(|e| e.template == template)
+            .unwrap_or_else(|| panic!("no {template} template"));
+        assert_valid("camera-over-mqtt", template, &expanded.manifest)
+    };
+    let broker = of("broker");
+    assert_eq!(
+        broker.spec["roles"],
+        json!([{ "name": "cameras", "serviceAccounts": ["cam-north"], "publish": ["cameras/${clientid}/#"] }])
+    );
+    let camera = of("camera");
+    let key = &camera.spec["credentials"][0];
+    assert_eq!(key["kind"], "oauth-client");
+    assert_eq!(key["jwks"]["keys"][0]["kid"], "cam-north-1");
+    assert!(key["jwks"]["keys"][0].get("d").is_none(), "no private half");
+    assert_eq!(camera.spec["roles"][0]["types"], json!(["Device"]));
+    let source = of("datasource");
+    assert_eq!(
+        source.spec["mqtt"]["brokerRef"],
+        json!({ "kind": "MqttBroker", "name": "entrance-cams" })
+    );
+    assert!(source.spec["mqtt"].get("urls").is_none());
+    assert!(source.spec["mqtt"].get("passwordRef").is_none());
+    let pipeline = of("pipeline");
+    assert_eq!(
+        pipeline.spec["targetEndpoint"],
+        "urn:ngsi-ld:Endpoint:hel.fi:mobility:entrance-cams"
+    );
+    assert_eq!(
+        pipeline.spec["source"]["dataSourceRef"]["name"],
+        "entrance-cams"
+    );
+    let mapping = pipeline.spec["compute"]["bloblang"]
+        .as_str()
+        .expect("a mapping");
+    assert!(mapping.contains("meta(\"mqtt_topic\").split(\"/\").index(1)"));
+    assert!(mapping.contains("\"type\": \"DeviceMeasurement\""));
+    let endpoint = of("endpoint");
+    assert_eq!(endpoint.spec["slug"], SLUG);
+    assert_eq!(endpoint.spec["contextSpaceRef"]["name"], "mobility");
+}
+
 /// CC-24: a parameter set the schema refuses renders nothing — a plain-http channel, a slug
 /// short of EP-02's entropy, a missing required value, an unknown parameter.
 #[test]
@@ -240,6 +310,17 @@ fn a_parameter_set_the_schema_refuses_renders_nothing() {
     });
     refused("cross-city-sharing", &|p| {
         p.insert("namespace".into(), json!("another-project"));
+    });
+    // A key coordinate is 43 base64url characters and nothing that could close the quote; a
+    // camera is a lowercase name.
+    refused("camera-over-mqtt", &|p| {
+        p.insert(
+            "keyX".into(),
+            json!("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHv\", d: \"x"),
+        );
+    });
+    refused("camera-over-mqtt", &|p| {
+        p.insert("camera".into(), json!("Cam North"));
     });
     // The format keywords are annotations to this validator, so every string a template quotes
     // carries a pattern of its own: a value that closes the quote cannot write a second member.

@@ -27,6 +27,7 @@ pub mod operations;
 pub mod pdp;
 pub mod previews;
 pub mod proxy;
+pub mod quality;
 pub mod query;
 pub mod relationships;
 pub mod resolver;
