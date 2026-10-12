@@ -1,0 +1,132 @@
+# The platform's blueprint library (T-3838, MF-54, PL-76, ADR-N-048): a camera that publishes
+# over MQTT, in one change. The MqttBroker lets the camera's ServiceAccount publish under its own
+# client id, the camera signs in with a key pair whose private half never leaves it (PF-47), the
+# DataSource reads the broker on its internal listener, and the Pipeline maps each message to a
+# Smart Data Models Device and DeviceMeasurement written through the Endpoint and its Policy.
+# More cameras are one ServiceAccount each, named in the broker's role: revoking one is removing
+# its name.
+apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: camera-over-mqtt
+  namespace: org
+  title: { en: "Camera over MQTT", fi: "Kamera MQTT:n kautta", sk: "Kamera cez MQTT" }
+spec:
+  version: 1.0.0
+  category: ingestion
+  riskClass: yellow
+  allowedRoles: [portal-approver]
+  parameterSchema:
+    type: object
+    required: [name, space, camera, owner, keyId, keyX, keyY, endpointSlug]
+    additionalProperties: false
+    properties:
+      name: { type: string, title: "Name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the broker, the DataSource, the Pipeline and the Endpoint." }
+      space: { type: string, title: "Context space", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      camera: { type: string, title: "Camera", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "The camera's ServiceAccount; it signs in as {project}-{camera}." }
+      owner: { type: string, title: "Accountable person", pattern: "^[A-Za-z0-9._@-]{1,64}$", description: "The user who answers for the camera (PF-34)." }
+      keyId: { type: string, title: "Key id", pattern: "^[A-Za-z0-9._-]{1,64}$", description: "The kid the camera names in its signed assertion." }
+      keyX: { type: string, title: "Public key x", pattern: "^[A-Za-z0-9_-]{43}$", description: "The x coordinate of the camera's P-256 public key, base64url." }
+      keyY: { type: string, title: "Public key y", pattern: "^[A-Za-z0-9_-]{43}$", description: "The y coordinate of the camera's P-256 public key, base64url." }
+      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+  templates:
+    - name: broker
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: MqttBroker
+        metadata:
+          name: "{{ name }}"
+          title: { en: "Cameras of {{ name }}" }
+        spec:
+          roles:
+            - name: cameras
+              serviceAccounts: ["{{ camera }}"]
+              publish: ["cameras/${clientid}/#"]
+    - name: camera
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: ServiceAccount
+        metadata:
+          name: "{{ camera }}"
+          title: { en: "Camera {{ camera }}" }
+        spec:
+          owner: { user: "{{ owner }}" }
+          purpose: "Camera {{ camera }} publishes its observations to the MQTT broker {{ name }}"
+          roles:
+            - { role: space-reader, scope: { contextSpace: "{{ space }}" }, types: [Device] }
+          credentials:
+            - kind: oauth-client
+              name: device-key
+              jwks:
+                keys:
+                  - { kty: EC, crv: P-256, kid: "{{ keyId }}", x: "{{ keyX }}", y: "{{ keyY }}", alg: ES256, use: sig }
+    - name: datasource
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: DataSource
+        metadata:
+          name: "{{ name }}"
+          title: { en: "Camera messages of {{ name }}" }
+        spec:
+          type: mqtt
+          mqtt:
+            brokerRef: { kind: MqttBroker, name: "{{ name }}" }
+            topics: ["cameras/+/#"]
+            qos: 1
+            cleanSession: true
+    - name: pipeline
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Pipeline
+        metadata:
+          name: "{{ name }}"
+          title: { en: "Devices and measurements from {{ name }}" }
+        spec:
+          class: auto
+          source:
+            dataSourceRef: { kind: DataSource, name: "{{ name }}" }
+          # The camera is the client id in the topic, which the broker's ACL binds to the camera's
+          # verified token (ADR-N-048 §3), so a camera can only ever write its own Device.
+          compute:
+            kind: bloblang
+            bloblang: |
+              let domain = env("JC_ORG_DOMAIN")
+              let space = env("JC_SPACE")
+              let camera = meta("mqtt_topic").split("/").index(1)
+              let kind = this.measurementType.string()
+              let seen = this.observedAt.or(now()).string()
+              let device = "urn:ngsi-ld:Device:%v:%v:%v".format($domain, $space, $camera)
+              root = [
+                {
+                  "id": $device,
+                  "type": "Device",
+                  "category": { "type": "Property", "value": ["multimedia"] },
+                  "controlledProperty": { "type": "Property", "value": [$kind] },
+                  "deviceState": { "type": "Property", "value": "ok", "observedAt": $seen },
+                  "dateLastValueReported": { "type": "Property", "value": $seen }
+                },
+                {
+                  "id": "urn:ngsi-ld:DeviceMeasurement:%v:%v:%v-%v".format($domain, $space, $camera, this.frame.number()),
+                  "type": "DeviceMeasurement",
+                  "refDevice": { "type": "Relationship", "object": $device },
+                  "controlledProperty": { "type": "Property", "value": $kind },
+                  "numValue": { "type": "Property", "value": this.value.number(), "observedAt": $seen },
+                  "dateObserved": { "type": "Property", "value": $seen }
+                }
+              ]
+          targetEndpoint: "urn:ngsi-ld:Endpoint:{orgDomain}:{{ space }}:{{ name }}"
+          quotas:
+            maxMemoryMb: 64
+            cpuMillicores: 100
+    - name: endpoint
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Endpoint
+        metadata:
+          name: "{{ name }}"
+          title: { en: "Cameras of {{ name }}" }
+        spec:
+          contextSpaceRef: { kind: ContextSpace, name: "{{ space }}" }
+          slug: "{{ endpointSlug }}"
+          audience: organization
+          enabledRepresentations: [ngsi-ld, geojson, csv]
