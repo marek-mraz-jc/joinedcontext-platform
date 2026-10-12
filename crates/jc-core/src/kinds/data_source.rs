@@ -10,7 +10,7 @@
 //!
 //! [`PipelineSpec`]: crate::kinds::PipelineSpec
 
-use crate::envelope::{Kind, ObjectMeta, Scope, SecretRef};
+use crate::envelope::{Kind, ObjectMeta, Scope, SecretRef, TypedRef};
 use crate::error::{Error, Result};
 use crate::kinds::PipelineSpec;
 use crate::names;
@@ -133,8 +133,14 @@ impl JsonSchema for DataSourceType {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MqttConnection {
-    /// Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one.
+    /// Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one, unless `brokerRef`
+    /// names a broker of the platform instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
+    /// An `MqttBroker` of the DataSource's own project, read on its internal listener with no
+    /// credential (PL-76); takes the place of `urls`, `username` and `passwordRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_ref: Option<TypedRef>,
     /// Topic filters to subscribe to; at least one.
     pub topics: Vec<String>,
     /// Quality of service, 0, 1 or 2. Absent leaves Bento's default.
@@ -186,8 +192,7 @@ pub struct HttpArchive {
     /// The member names to read, at most 20, each letters, digits, `.`, `_`, `-` and `/`.
     pub members: Vec<String>,
     /// The largest member accepted, packed and unpacked, in bytes; 32 MiB when absent, at most
-    /// 256 MiB. A deflated member is read only when 1032 times its packed size, the most
-    /// deflate expands, is within it.
+    /// 256 MiB. A deflated member's inflate stops at the size its directory declares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
 }
@@ -750,7 +755,32 @@ impl DataSourceSpec {
 
     fn validate_mqtt(&self) -> Result<()> {
         let mqtt = self.mqtt.as_ref().expect("checked by the caller");
-        if mqtt.urls.is_empty() {
+        if let Some(broker) = &mqtt.broker_ref {
+            let refuse = |field: &'static str, reason: &'static str| Error::Name {
+                field,
+                value: broker.name.clone(),
+                reason,
+            };
+            if broker.kind != "MqttBroker" {
+                return Err(refuse(
+                    "spec.mqtt.brokerRef.kind",
+                    "a brokerRef names an MqttBroker",
+                ));
+            }
+            if broker.namespace.is_some() {
+                return Err(refuse(
+                    "spec.mqtt.brokerRef.namespace",
+                    "a DataSource reads a broker of its own project only (PL-76)",
+                ));
+            }
+            names::validate_dns1123_label(&broker.name)?;
+            if !mqtt.urls.is_empty() || mqtt.username.is_some() || mqtt.password_ref.is_some() {
+                return Err(refuse(
+                    "spec.mqtt.brokerRef",
+                    "a brokerRef takes the place of urls, username and passwordRef: the runner reads a platform broker with no credential (PL-76)",
+                ));
+            }
+        } else if mqtt.urls.is_empty() {
             return Err(Error::Name {
                 field: "spec.mqtt.urls",
                 value: String::new(),

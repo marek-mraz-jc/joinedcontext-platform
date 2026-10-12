@@ -102,7 +102,7 @@ async fn read_surface(
     let view = endpoint.slug.clone();
     // A view of another model (G18) is the view root's alone: the broker hides it from every
     // other surface, OGC included.
-    if endpoint.view_mapping.is_some() || !has_view(&endpoint, &view) {
+    if endpoint.view_mapping.is_some() || !has_view(&view) {
         return no_view(surface);
     }
     // The raw path, still percent-encoded: a decoded `/` or `?` in an item id would be a

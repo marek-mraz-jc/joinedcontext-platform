@@ -731,3 +731,45 @@ fn datasource_schema_spec_type_is_string_with_examples_and_no_enum() {
         );
     }
 }
+
+/// PL-76: a DataSource names a broker of its own project in place of a URL and a credential.
+#[test]
+fn a_broker_ref_names_an_mqtt_broker_of_the_project_and_no_credential() {
+    let broker = |mqtt: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: DataSource\nmetadata: {{ name: cameras, namespace: helsinki }}\nspec:\n  type: mqtt\n  mqtt:\n    topics: [\"cameras/+/frame\"]\n{mqtt}"
+        )
+    };
+    let valid = DataSource::from_yaml(&broker(
+        "    brokerRef: { kind: MqttBroker, name: cameras }\n",
+    ))
+    .expect("parses");
+    assert_eq!(valid.validate().map_err(|e| e.to_string()), Ok(()));
+    assert!(valid.spec.secret_refs().is_empty());
+
+    for (extra, why) in [
+        ("    brokerRef: { kind: Endpoint, name: cameras }\n", "names an MqttBroker"),
+        (
+            "    brokerRef: { kind: MqttBroker, name: cameras, namespace: espoo }\n",
+            "own project",
+        ),
+        ("    brokerRef: { kind: MqttBroker, name: Cameras }\n", "Cameras"),
+        (
+            "    brokerRef: { kind: MqttBroker, name: cameras }\n    urls: [\"tcp://x:1883\"]\n",
+            "takes the place",
+        ),
+        (
+            "    brokerRef: { kind: MqttBroker, name: cameras }\n    passwordRef: { name: s, key: p }\n",
+            "takes the place",
+        ),
+        (
+            "    brokerRef: { kind: MqttBroker, name: cameras }\n    username: someone\n",
+            "takes the place",
+        ),
+        ("", "at least one broker URL"),
+    ] {
+        let source = DataSource::from_yaml(&broker(extra)).expect("parses");
+        let err = source.validate().expect_err(why).to_string();
+        assert!(err.contains(why), "{extra}: {err}");
+    }
+}
