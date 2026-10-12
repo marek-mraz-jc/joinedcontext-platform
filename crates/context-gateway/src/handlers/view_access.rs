@@ -314,12 +314,13 @@ pub(crate) async fn access_check(
 }
 
 /// One `access/simulate` request (EP-103): the `access/check` request with the subject it is
-/// asked for.
+/// asked for, or, with no `action`, the question of everything the subject is granted (T-3792).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Simulation {
     subject: Simulated,
-    action: Action,
+    #[serde(default)]
+    action: Option<Action>,
     #[serde(default)]
     resource: Option<Resource>,
 }
@@ -384,15 +385,6 @@ pub(crate) async fn access_simulate(
                 .into_response()
         }
     };
-    let action = simulation.action.name.as_str();
-    if !Operation::ALL
-        .iter()
-        .any(|operation| operation.as_str() == action)
-    {
-        return ProblemDetails::bad_request()
-            .with_detail(format!("action.name {action:?} is not a CIM 009 operation"))
-            .into_response();
-    }
     let who = &simulation.subject;
     if who.service_account.is_some()
         && (who.user.is_some() || !who.groups.is_empty() || !who.roles.is_empty())
@@ -403,6 +395,44 @@ pub(crate) async fn access_simulate(
     }
 
     let subject = simulated(&gateway, &endpoint, who);
+    let Some(action) = simulation
+        .action
+        .as_ref()
+        .map(|action| action.name.as_str())
+    else {
+        if simulation.resource.is_some() {
+            return ProblemDetails::bad_request()
+                .with_detail("resource needs an action")
+                .into_response();
+        }
+        let answer = match &subject {
+            // The audience refused them before any Policy is read (EP-14): nobody is asked.
+            None => json!({ "admitted": false }),
+            Some(subject) => match granted(&gateway, &endpoint, subject).await {
+                Ok(answer) => answer,
+                Err(answer) => return *answer,
+            },
+        };
+        tracing::info!(
+            caller = PORTAL_CLIENT,
+            slug = %endpoint.slug,
+            simulated_user = who.user.as_deref().unwrap_or_default(),
+            simulated_service_account = who.service_account.as_deref().unwrap_or_default(),
+            simulated_groups = ?who.groups,
+            simulated_roles = ?who.roles,
+            admitted = %answer["admitted"],
+            "access grants simulated"
+        );
+        return json_response(&answer);
+    };
+    if !Operation::ALL
+        .iter()
+        .any(|operation| operation.as_str() == action)
+    {
+        return ProblemDetails::bad_request()
+            .with_detail(format!("action.name {action:?} is not a CIM 009 operation"))
+            .into_response();
+    }
     let entity_type = simulation
         .resource
         .as_ref()
@@ -441,6 +471,31 @@ pub(crate) async fn access_simulate(
         "access simulated"
     );
     json_response(&answer)
+}
+
+/// Everything an admitted `subject` is granted here, for the Portal's Access explorer (EP-103,
+/// T-3792): the `access` document a token of theirs would read, the engine's through the view
+/// ([`document`]), beside `admitted` and the manifest names of the Policies in force for them.
+async fn granted(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+) -> Result<Value, Box<Response<Body>>> {
+    let mut answer = document(gateway, endpoint, subject, AccessFormat::AuthZen).await?;
+    let names: Vec<&str> =
+        crate::pdp::evaluator::effective(subject, &endpoint.policies, crate::pdp::now())
+            .into_iter()
+            .filter_map(|policy| {
+                let index = endpoint
+                    .policies
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, policy))?;
+                endpoint.policy_names.get(index).map(String::as_str)
+            })
+            .collect();
+    answer["admitted"] = json!(true);
+    answer["policies"] = json!(names);
+    Ok(answer)
 }
 
 /// The engine's explanation with the deciding policy under the name the Portal knows it by: the

@@ -2,6 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ArchiveFormat": {
+      "description": "The archive formats an `http` connection reads (PL-72).",
+      "oneOf": [
+        {
+          "description": "A zip archive: stored or deflated members, no Zip64.",
+          "enum": [
+            "zip"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Authorization": {
       "additionalProperties": false,
       "description": "An `Authorization` header whose value is assembled from a secret (CC-06).",
@@ -257,10 +269,56 @@
       ],
       "type": "object"
     },
+    "HttpArchive": {
+      "additionalProperties": false,
+      "description": "The named members of the archive an `http` connection serves (PL-72, Architecture/08 §6).\n\nThe runner reads the directory from the archive's last 64 KiB and then each member by its own range, so a member nobody named is never fetched or inflated.",
+      "properties": {
+        "format": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ArchiveFormat"
+            }
+          ],
+          "description": "The archive format; `zip` is the only one."
+        },
+        "maxBytes": {
+          "description": "The largest member accepted, packed and unpacked, in bytes; 32 MiB when absent, at most 256 MiB. A deflated member's inflate stops at the size its directory declares.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "members": {
+          "description": "The member names to read, at most 20, each letters, digits, `.`, `_`, `-` and `/`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "format",
+        "members"
+      ],
+      "type": "object"
+    },
     "HttpConnection": {
       "additionalProperties": false,
       "description": "An HTTP resource the runner polls (Architecture/08 §6).",
       "properties": {
+        "archive": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HttpArchive"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The members of a zip archive to read, by HTTP `Range`, instead of the whole body (PL-72)."
+        },
         "authorization": {
           "anyOf": [
             {
@@ -307,6 +365,17 @@
       "additionalProperties": false,
       "description": "An MQTT connection (Architecture/08 §6).",
       "properties": {
+        "brokerRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An `MqttBroker` of the DataSource's own project, read on its internal listener with no credential (PL-76); takes the place of `urls`, `username` and `passwordRef`."
+        },
         "cleanSession": {
           "description": "Whether the broker forgets the subscription between connections.",
           "type": [
@@ -342,7 +411,7 @@
           "type": "array"
         },
         "urls": {
-          "description": "Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one.",
+          "description": "Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one, unless `brokerRef` names a broker of the platform instead.",
           "items": {
             "type": "string"
           },
@@ -357,8 +426,7 @@
         }
       },
       "required": [
-        "topics",
-        "urls"
+        "topics"
       ],
       "type": "object"
     },
@@ -594,6 +662,32 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "TypedRef": {
+      "additionalProperties": false,
+      "description": "Structured typed resource reference (MF-07).",
+      "properties": {
+        "kind": {
+          "description": "Target resource kind.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Target resource name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Target resource namespace (defaults to caller namespace if omitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
       "type": "object"
     },
     "WebSocketConnection": {

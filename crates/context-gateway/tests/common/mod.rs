@@ -162,6 +162,17 @@ pub struct BrokerStub {
 impl BrokerStub {
     /// Starts the stub and answers `pages` in order.
     pub async fn start(pages: Vec<Value>) -> Self {
+        Self::serve(pages, None).await
+    }
+
+    /// Starts the stub as the broker's narrowing view `view` (T-3651): a hop to that view is
+    /// answered with `pages` narrowed by the rules of the roles the gateway pinned, as the
+    /// engine narrows them; see [`View`].
+    pub async fn narrowing(pages: Vec<Value>, view: View) -> Self {
+        Self::serve(pages, Some(view)).await
+    }
+
+    async fn serve(pages: Vec<Value>, view: Option<View>) -> Self {
         let hops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let served = std::sync::Arc::new(std::sync::Mutex::new(pages));
         let recorder = std::sync::Arc::clone(&hops);
@@ -231,6 +242,17 @@ impl BrokerStub {
                     if path == "/access/check" {
                         return axum::Json(json!({ "decision": false })).into_response();
                     }
+                    // A view's MCP surface (T-3647, T-3808): a tool call answered with the
+                    // next page as its structured content, the way the broker's tools answer.
+                    if path == "/mcp" {
+                        let asked = hops.iter().filter(|hop| hop.path == "/mcp").count();
+                        let index = asked.saturating_sub(1).min(pages.len().saturating_sub(1));
+                        return axum::Json(mcp_answer(
+                            &hops[hops.len() - 1].body,
+                            pages.get(index).cloned().unwrap_or_else(|| json!([])),
+                        ))
+                        .into_response();
+                    }
 
                     // `GET /types` is how a caller asks what a tenant holds; the answer is
                     // built from the entities this stub was given, so it never disagrees
@@ -268,6 +290,10 @@ impl BrokerStub {
                 }
             },
         ));
+        let app = match view {
+            Some(view) => app.layer(axum::middleware::from_fn_with_state(view, narrowed)),
+            None => app,
+        };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -286,6 +312,168 @@ impl BrokerStub {
     pub fn hops(&self) -> Vec<Hop> {
         self.hops.lock().expect("no poisoned lock").clone()
     }
+}
+
+/// What one role may read through a [`View`]: entities of `types`, with `attrs` alone when
+/// named (`None` is every attribute).
+#[derive(Debug, Clone)]
+pub struct ViewRule {
+    pub role: String,
+    pub types: Vec<String>,
+    pub attrs: Option<Vec<String>>,
+    /// Whether the rule covers the temporal reads too (CIM 009 5.7.3, 5.7.4).
+    pub history: bool,
+}
+
+/// The broker's view `name` and the rules its engine holds (T-3651), the stand-in for
+/// `ANTARES_POLICY=joinedcontext` in the translator tests: a hop to another view is a `404`, a
+/// caller whose pinned `x-jc-roles` match no rule is the engine's `403 AccessDenied`, and the
+/// answer keeps only the entities and attributes the matching rules show, marked
+/// `antares-results-restricted` when the caller asked (`x-jc-restricted`) and something was left
+/// out. A hop that carries no roles matches no rule, so a gateway that forgets to pin the caller
+/// is refused rather than served.
+#[derive(Debug, Clone)]
+pub struct View {
+    pub name: String,
+    pub rules: Vec<ViewRule>,
+}
+
+impl View {
+    /// One view whose `role` reads `types`, every attribute or `attrs` alone.
+    pub fn of(name: &str, role: &str, types: &[&str], attrs: Option<&[&str]>) -> Self {
+        Self {
+            name: name.to_owned(),
+            rules: vec![ViewRule {
+                role: role.to_owned(),
+                types: types.iter().map(|t| (*t).to_owned()).collect(),
+                attrs: attrs.map(|attrs| attrs.iter().map(|a| (*a).to_owned()).collect()),
+                history: true,
+            }],
+        }
+    }
+}
+
+async fn narrowed(
+    axum::extract::State(view): axum::extract::State<View>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let (hop_view, plain) = in_view(request.uri().path());
+    let temporal = plain.starts_with("/ngsi-ld/v1/temporal/");
+    if hop_view.is_empty() {
+        return next.run(request).await;
+    }
+    if hop_view != view.name {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(
+                json!({"type": "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound",
+                "title": "no such view", "status": 404}),
+            ),
+        )
+            .into_response();
+    }
+    let (roles, asked, wanted) = {
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let roles: Vec<String> = header("x-jc-roles")
+            .split(',')
+            .filter(|role| !role.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let asked = header("x-jc-restricted") == "true";
+        // The broker's own selection by `type`, which the stub's pages do not know about.
+        let wanted: Vec<String> = request
+            .uri()
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|pair| pair.strip_prefix("type="))
+            .flat_map(|value| value.split("%2C").flat_map(|part| part.split(',')))
+            .map(str::to_owned)
+            .collect();
+        (roles, asked, wanted)
+    };
+    let rules: Vec<ViewRule> = view
+        .rules
+        .into_iter()
+        .filter(|rule| roles.contains(&rule.role) && (rule.history || !temporal))
+        .collect();
+    if rules.is_empty() {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(json!({"type": "urn:antares:error:AccessDenied", "title": "Forbidden",
+                "status": 403, "detail": "no grant of the joinedcontext policy covers this request"})),
+        )
+            .into_response();
+    }
+    let answer = next.run(request).await;
+    if !answer.status().is_success() {
+        return answer;
+    }
+    let (mut parts, body) = answer.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let mut dropped = false;
+    let mut keep = |entity: &mut Value| -> bool {
+        if !wanted.is_empty()
+            && !entity["type"]
+                .as_str()
+                .is_some_and(|t| wanted.iter().any(|w| w == t))
+        {
+            return false;
+        }
+        let Some(rule) = rules.iter().find(|rule| {
+            entity["type"]
+                .as_str()
+                .is_some_and(|t| rule.types.iter().any(|r| r == t))
+        }) else {
+            dropped = true;
+            return false;
+        };
+        if let (Some(attrs), Some(members)) = (&rule.attrs, entity.as_object_mut()) {
+            let before = members.len();
+            members.retain(|name, _| {
+                matches!(name.as_str(), "id" | "type" | "@context") || attrs.contains(name)
+            });
+            dropped |= members.len() != before;
+        }
+        true
+    };
+    match &mut value {
+        Value::Array(entities) => entities.retain_mut(|entity| keep(entity)),
+        entity if entity.is_object() => {
+            if !keep(entity) {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(
+                        json!({"type": "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound",
+                        "title": "Not Found", "status": 404}),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+        _ => {}
+    }
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    if asked && dropped {
+        parts.headers.insert(
+            "antares-results-restricted",
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
+    axum::response::Response::from_parts(parts, axum::body::Body::from(value.to_string()))
 }
 
 /// A fake broker that answers the broker's view roots as its plain tree (T-3643): the gateway
@@ -321,6 +509,27 @@ fn in_view(path: &str) -> (String, String) {
         Some((view, rest)) => (view.to_owned(), format!("/{rest}")),
         None => (String::new(), path.to_owned()),
     }
+}
+
+/// The broker's answer to one MCP tool call: a list is the `entities` of a page, anything else
+/// the tool's own structured content.
+fn mcp_answer(sent: &[u8], page: Value) -> Value {
+    let id =
+        serde_json::from_slice::<Value>(sent).map_or(Value::Null, |message| message["id"].clone());
+    let structured = if page.is_array() {
+        json!({ "entities": page })
+    } else {
+        page
+    };
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "isError": false,
+            "content": [{ "type": "text", "text": structured.to_string() }],
+            "structuredContent": structured,
+        },
+    })
 }
 
 /// Whether a query selects at all (CIM 009 5.7.2).
@@ -544,4 +753,25 @@ pub fn engine_document(
         .map(|entity_type| json!({ "resource": { "type": entity_type } }))
         .collect();
     json!({ "subject": subject, "permissions": permissions, "prohibitions": [] })
+}
+
+/// A broker whose MCP surface answers every request with `tools` as its tool list and no
+/// resource: the hop an Endpoint's or a space's MCP message takes since T-3647. Returns its URL.
+pub async fn mcp_broker(tools: Value) -> String {
+    let stub = axum::Router::new().fallback(move || {
+        let tools = tools.clone();
+        async move {
+            axum::Json(
+                json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools, "resources": [] } }),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    url
 }

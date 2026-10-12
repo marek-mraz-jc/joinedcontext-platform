@@ -13,3 +13,4 @@ pub mod space_routes;
 pub mod space_surface;
 pub mod sta;
 pub mod view_access;
+pub mod ws;

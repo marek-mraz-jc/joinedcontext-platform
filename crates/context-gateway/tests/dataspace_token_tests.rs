@@ -213,7 +213,49 @@ async fn a_transfer_token_reads_as_the_consumer_did_and_nothing_else() {
 /// the hop names the participant alone: its DID, no account, no role.
 #[tokio::test]
 async fn the_connectors_own_account_never_reaches_the_broker_under_a_transfer_token() {
-    let hops: Arc<Mutex<Vec<(String, HeaderMap)>>> = Arc::default();
+    let (hops, status) = transferred(Representation::NgsiLd, |request| {
+        request
+            .method(Method::GET)
+            .uri(format!(
+                "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+            ))
+            .body(Body::empty())
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    the_participant_alone(&hops, &format!("/x/views/{SLUG}/ngsi-ld/v1/entities"));
+}
+
+/// Map K38, T-3818: the Endpoint's MCP under a transfer token is the broker's view like its
+/// NGSI-LD, never the façade: the hop names the participant alone, so the agreement's grant
+/// decides and not the connector's own account.
+#[tokio::test]
+async fn a_participants_mcp_call_reaches_the_brokers_view_as_its_did_alone() {
+    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "query_entities",
+                                 "arguments": {"type": ["AirQualityObserved"]}}});
+    let (hops, status) = transferred(Representation::Mcp, |request| {
+        request
+            .method(Method::POST)
+            .uri(format!("/api/endpoint/{SLUG}/mcp"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .body(Body::from(call.to_string()))
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    the_participant_alone(&hops, &format!("/x/views/{SLUG}/mcp"));
+}
+
+type Hops = Vec<(String, HeaderMap)>;
+
+/// One request under a transfer token for the consumer, with a forged `x-jc-client` beside it,
+/// against a broker that records every hop and answers each with the station.
+async fn transferred(
+    representation: Representation,
+    build: impl FnOnce(axum::http::request::Builder) -> Result<Request<Body>, axum::http::Error>,
+) -> (Hops, StatusCode) {
+    let hops: Arc<Mutex<Hops>> = Arc::default();
     let recorder = Arc::clone(&hops);
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
@@ -234,35 +276,34 @@ async fn the_connectors_own_account_never_reaches_the_broker_under_a_transfer_to
     });
     let realm = common::Realm::new();
     let token = realm.mint(&transfer(SLUG, 300, CONSUMER, AGREEMENT));
+    let mut served = endpoint(SLUG, "{ kind: serviceAccount, id: dataspace-connector }");
+    served.representations = vec![representation];
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
             .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None)
-            .serve([endpoint(
-                SLUG,
-                "{ kind: serviceAccount, id: dataspace-connector }",
-            )]),
+            .serve([served]),
     );
     gateway.replace_agreements(serving_now());
+    let request = build(
+        Request::builder()
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-jc-client", "dataspace-connector"),
+    )
+    .expect("a request");
     let status = router(gateway)
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
-                ))
-                .header("authorization", format!("Bearer {token}"))
-                .header("x-jc-client", "dataspace-connector")
-                .body(Body::empty())
-                .expect("a request"),
-        )
+        .oneshot(request)
         .await
         .expect("the gateway answers")
         .status();
-    assert_eq!(status, StatusCode::OK);
     let hops = hops.lock().expect("the hop log").clone();
-    assert_eq!(hops.len(), 1);
-    let (path, headers) = &hops[0];
-    assert_eq!(path, &format!("/x/views/{SLUG}/ngsi-ld/v1/entities"));
+    (hops, status)
+}
+
+/// One hop, to `path`, naming the participant's DID and no account, role, group or token.
+fn the_participant_alone(hops: &Hops, path: &str) {
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let (to, headers) = &hops[0];
+    assert_eq!(to, path);
     assert_eq!(headers["x-jc-did"], "did%3Aweb%3Ahelsinki.fi");
     for name in [
         "x-jc-client",

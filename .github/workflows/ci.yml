@@ -24,6 +24,9 @@ jobs:
       # cg is not on the runner (T-3682, as Antares T-3587).
       - name: cg security invariants self-test
         run: python3 dev/cg-invariants.py --selftest
+      # Code no entry point reaches, per crate, against ci/cg-dead-code-baseline.txt (T-3918).
+      - name: cg dead-code ratchet self-test
+        run: python3 dev/cg-dead-code.py --selftest
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -40,6 +43,10 @@ jobs:
       # (schemas, blueprints, CKAN columns; T-3206).
       - run: cargo test --workspace --exclude assistant --lib --bins --locked
       - run: cargo test -p assistant --lib --bins --locked
+      # The runner's bounded inflate (T-3953) is a workspace of its own, built for wasm.
+      - run: |
+          cargo clippy --manifest-path tools/bento-inflate/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path tools/bento-inflate/Cargo.toml --locked
       # The rustdoc of a jc-core field is the JSON Schema `description` the Portal ships, the
       # OpenAPI document publishes and every MCP tool list hands a model, so a broken
       # intra-doc link is a broken sentence in four places (T-2145, UI-02). One crate, no

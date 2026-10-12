@@ -316,7 +316,7 @@ async fn a_malformed_simulation_is_a_bad_request() {
         json!({ "subject": { "user": "ada", "nickname": "a" }, "action": { "name": "retrieveEntity" } }),
         json!({ "subject": { "user": "ada", "serviceAccount": "ovzdusie-bot" }, "action": { "name": "retrieveEntity" } }),
         json!({ "subject": {}, "action": { "name": "readEverything" } }),
-        json!({ "subject": {} }),
+        json!({ "subject": {}, "resource": { "type": "AirQualityObserved" } }),
         json!({ "action": { "name": "retrieveEntity" } }),
     ];
     for body in bad {
@@ -565,4 +565,56 @@ async fn view_an_endpoint_without_a_view_is_simulated_by_nobody() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
     assert!(answer.get("decision").is_none(), "{answer}");
     assert!(taken(&hops).is_empty());
+}
+
+/// T-3792 through the view (T-3650): with no action the answer is the `access` document the
+/// subject's own token would read, the engine's, beside the Policies in force for them; a subject
+/// the audience refuses is not admitted and the broker is not asked; a resource needs an action.
+#[tokio::test]
+async fn with_no_action_the_answer_is_the_subjects_whole_grant() {
+    let realm = common::Realm::new();
+    let engine = json!({
+        "subject": { "type": "user", "id": "ada" },
+        "permissions": [{ "resource": { "type": "AirQualityObserved" },
+                          "actions": ["updateAttrs", "deleteEntity"] }],
+        "prohibitions": []
+    });
+    let (upstream, hops) = recording_broker(StatusCode::OK, engine.clone()).await;
+    let app = view_app(&realm, upstream);
+
+    let ada = json!({ "subject": { "user": "ada", "groups": ["ovzdusie"] } });
+    let (status, answer) = simulate(&app, &realm, CLOSED, ada).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["admitted"], json!(true));
+    assert_eq!(answer["resource"]["id"], json!(CLOSED));
+    assert_eq!(
+        answer["permissions"], engine["permissions"],
+        "the engine's grants"
+    );
+    assert_eq!(
+        answer["policies"],
+        json!(["ovzdusie-writes", "ada-deletes"])
+    );
+    let asked = taken(&hops);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].0, format!("/x/views/{CLOSED}/access"));
+    assert!(
+        asked[0]
+            .1
+            .contains(&("x-jc-subject".to_owned(), "ada".to_owned())),
+        "pinned as ada's own token: {:?}",
+        asked[0].1
+    );
+
+    let (_, public) = simulate(&app, &realm, OPEN, json!({ "subject": {} })).await;
+    assert_eq!(public["policies"], json!(["public-air", "no-history"]));
+    taken(&hops);
+
+    let (_, refused) = simulate(&app, &realm, CLOSED, json!({ "subject": {} })).await;
+    assert_eq!(refused, json!({ "admitted": false }));
+    assert!(taken(&hops).is_empty(), "nobody asks for a refused subject");
+
+    let resource_alone = json!({ "subject": {}, "resource": { "type": "AirQualityObserved" } });
+    let (status, _) = simulate(&app, &realm, OPEN, resource_alone).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

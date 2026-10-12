@@ -8,13 +8,13 @@
 //!
 //! What a download means is the fix. `file.geojson` names a dataset, not a query, so when
 //! nothing else selects, the selector is every type the space holds. It can only narrow: the
-//! PDP has already decided what this caller may see.
+//! broker's view decides what this caller may see and leaves the rest out (T-3651).
 
 mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -272,44 +272,46 @@ async fn the_ngsi_ld_surface_still_refuses_an_unselected_query() {
     );
 }
 
-/// A grant that names a type still decides, and the fallback never runs: the space may hold
-/// more types than this caller may see, and asking for them all would widen the answer.
+/// A grant that names a type still decides, and the fallback never widens it (T-3651): the
+/// download names no selector, so the gateway asks the view for every type the space holds and
+/// the view answers only what the caller's grant shows, the one type and its two attributes.
+/// The engine owns that narrowing now (Antares `views_matrix` tests).
 #[tokio::test]
 async fn a_grant_that_narrows_is_never_widened_by_the_fallback() {
-    let mut endpoint = unrestricted_endpoint();
-    endpoint.policies = vec![serde_norway::from_str(
-        r#"contextSpaceRef: ovzdusie
-assigner: did:web:banskabystrica.sk
-assignee: { kind: role, id: public }
-operations: [queryEntity, retrieveEntity]
-information:
-  - entities:
-      - type: AirQualityObserved
-    propertyNames: [pm10, location]
-"#,
+    let depot = json!({
+        "id": "urn:ngsi-ld:Depot:banskabystrica.sk:ovzdusie:north",
+        "type": "Depot",
+        "capacity": { "type": "Property", "value": 7 },
+    });
+    let mut aqo = station();
+    aqo["no2"] = json!({ "type": "Property", "value": 11 });
+    let broker = BrokerStub::narrowing(
+        vec![json!([aqo, depot])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
     )
-    .expect("the policy spec parses")];
-
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
-    let (status, _) = get(
-        gateway(&broker.url, endpoint),
+    .await;
+    let (status, body) = get(
+        gateway(&broker.url, unrestricted_endpoint()),
         &format!("/api/endpoint/{SLUG}/file.geojson"),
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK);
-    let hops = broker.hops();
-    assert!(
-        hops.iter().all(|hop| hop.path != "/ngsi-ld/v1/types"),
-        "the grant already selected, so there was nothing to fall back to: {hops:?}"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("station-01"), "{body}");
+    for trace in ["Depot", "capacity", "no2"] {
+        assert!(!body.contains(trace), "the view showed {trace}: {body}");
+    }
 }
 
-/// T-3790: the type list is asked on the gateway's account and so names every type the space
-/// holds. It is asked only when nothing selects, which is a caller who may read every type: a
-/// Policy that keeps one type from them is refused before any hop, the list never asked, and
-/// the refusal names nothing of that type. A grant that names types never asks it either
-/// (`a_grant_that_narrows_is_never_widened_by_the_fallback`).
+/// T-3790, restated for the view (T-3651): the type list is asked on the gateway's account and
+/// names every type the space holds, but it only ever selects at the view, never reaches the
+/// caller, and the view leaves out the type the caller's grant keeps from them. No
+/// representation names anything of that type, in its body or its headers.
 #[tokio::test]
 async fn a_type_the_caller_may_not_read_is_never_listed_for_them() {
     let depot = json!({
@@ -319,22 +321,12 @@ async fn a_type_the_caller_may_not_read_is_never_listed_for_them() {
     });
     let mut endpoint = unrestricted_endpoint();
     endpoint.representations.push(Representation::Json);
-    endpoint.policies.push(
-        serde_norway::from_str(
-            r#"contextSpaceRef: ovzdusie
-assigner: did:web:banskabystrica.sk
-assignee: { kind: role, id: public }
-effect: prohibition
-operations: [queryEntity, retrieveEntity]
-information:
-  - entities:
-      - type: Depot
-"#,
-        )
-        .expect("the policy spec parses"),
-    );
     for file in ["file.geojson", "file.csv", "file.json"] {
-        let broker = BrokerStub::start(vec![json!([station(), depot.clone()])]).await;
+        let broker = BrokerStub::narrowing(
+            vec![json!([station(), depot.clone()])],
+            View::of(SLUG, "public", &["AirQualityObserved"], None),
+        )
+        .await;
         let response = gateway(&broker.url, endpoint.clone())
             .oneshot(
                 HttpRequest::builder()
@@ -350,12 +342,8 @@ information:
             .await
             .expect("a readable body");
         let body = String::from_utf8_lossy(&body);
-        assert_eq!(status, StatusCode::FORBIDDEN, "{file}: {body}");
-        assert!(
-            broker.hops().is_empty(),
-            "{file} asked the broker: {:?}",
-            broker.hops()
-        );
+        assert_eq!(status, StatusCode::OK, "{file}: {body}");
+        assert!(body.contains("station-01"), "{file}: {body}");
         for trace in ["Depot", "capacity", "north"] {
             assert!(!body.contains(trace), "{file} names {trace}: {body}");
             assert!(!headers.contains(trace), "{file} names {trace}: {headers}");
