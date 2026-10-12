@@ -46,6 +46,9 @@ pub struct SpaceBrokers {
     pub by_space: BTreeMap<String, String>,
     /// The broker of each view, by the name in `/x/views/{view}`.
     pub by_view: BTreeMap<String, String>,
+    /// The spaces a move job holds read-only, by tenant segment, with the views that reach
+    /// them (PF-115, ADR-N-046 §2.6).
+    pub moving: BTreeSet<String>,
 }
 
 /// [`SpaceBrokers`] of a repository, through the one lookup every component shares
@@ -71,6 +74,17 @@ pub fn brokers_of(repo: &Repository, endpoints: &[Endpoint]) -> SpaceBrokers {
                 String::new()
             }
         };
+        let moving = resource
+            .manifest
+            .metadata
+            .rest
+            .get("annotations")
+            .and_then(|annotations| annotations.get(jc_core::envelope::annotations::MOVING_TO))
+            .is_some();
+        if moving {
+            table.moving.insert(segment.clone());
+            table.moving.insert(format!("cs-{segment}"));
+        }
         table
             .by_view
             .insert(format!("cs-{segment}"), broker.clone());
@@ -79,6 +93,9 @@ pub fn brokers_of(repo: &Repository, endpoints: &[Endpoint]) -> SpaceBrokers {
     for endpoint in endpoints {
         if let Some(broker) = table.by_space.get(&endpoint.space) {
             table.by_view.insert(endpoint.slug.clone(), broker.clone());
+        }
+        if table.moving.contains(&endpoint.space) {
+            table.moving.insert(endpoint.slug.clone());
         }
     }
     table

@@ -15,6 +15,7 @@
 use axum::body::Body;
 use axum::http::header::{HeaderName, CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
+use axum::response::IntoResponse;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -55,7 +56,14 @@ pub struct Broker {
 pub struct Routes {
     by_tenant: std::collections::HashMap<String, Option<String>>,
     by_view: std::collections::HashMap<String, Option<String>>,
+    /// The broker each view lives on, by name, for the hub's label (ADR-N-046 §2.3).
+    named: std::collections::HashMap<String, String>,
+    /// Tenants and views a move job holds read-only (PF-115).
+    moving: std::collections::HashSet<String>,
 }
+
+/// How long a writer is told to wait while its space moves (ADR-N-046 §2.6).
+const MOVING_RETRY_SECONDS: u32 = 30;
 
 /// Why a forwarded request produced no answer.
 #[derive(Debug, thiserror::Error)]
@@ -166,7 +174,44 @@ impl Broker {
         self.routes.store(std::sync::Arc::new(Routes {
             by_tenant: off_main(&brokers.by_space),
             by_view: off_main(&brokers.by_view),
+            named: brokers.by_view.clone().into_iter().collect(),
+            moving: brokers.moving.iter().cloned().collect(),
         }));
+    }
+
+    /// The name of the broker a view (an Endpoint's slug or `cs-{space}`) lives on.
+    pub fn broker_of_view(&self, view: &str) -> String {
+        self.routes
+            .load()
+            .named
+            .get(view)
+            .cloned()
+            .unwrap_or_else(|| jc_core::kinds::IMPLICIT_BROKER.to_owned())
+    }
+
+    /// Whether this request reaches a space a move holds read-only and could write it: every
+    /// method but `GET` and `HEAD`, except a query by `POST` (PF-115). An MCP call may write,
+    /// so it waits too.
+    fn held(&self, method: &Method, path: &str, headers: &HeaderMap) -> bool {
+        if matches!(*method, Method::GET | Method::HEAD) {
+            return false;
+        }
+        let route = path.split('?').next().unwrap_or_default();
+        if *method == Method::POST && route.ends_with("/entityOperations/query") {
+            return false;
+        }
+        let routes = self.routes.load();
+        if routes.moving.is_empty() {
+            return false;
+        }
+        let tenant = headers
+            .get(crate::middleware::tenancy::TENANT)
+            .and_then(|tenant| tenant.to_str().ok());
+        let view = route
+            .strip_prefix("/x/views/")
+            .and_then(|rest| rest.split('/').next());
+        tenant.is_some_and(|t| routes.moving.contains(t))
+            || view.is_some_and(|v| routes.moving.contains(v))
     }
 
     /// The broker a request goes to: the pinned tenant's, else the named view's, else `main`.
@@ -237,6 +282,18 @@ impl Broker {
             return Err(ProxyError::Uri(
                 "the forwarded path is not absolute".to_owned(),
             ));
+        }
+        if self.held(&method, path_and_query, &headers) {
+            let mut answer = ProblemDetails::new(503, "space-moving", "Space Moving")
+                .with_detail(
+                    "the space is moving to another broker and takes no writes until the move ends",
+                )
+                .into_response();
+            answer.headers_mut().insert(
+                "retry-after",
+                axum::http::HeaderValue::from(MOVING_RETRY_SECONDS),
+            );
+            return Ok(answer);
         }
         let base = self.base_for(path_and_query, &headers)?;
         let uri: Uri = format!("{base}{path_and_query}")

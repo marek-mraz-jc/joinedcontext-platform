@@ -270,3 +270,43 @@ async fn the_list_needs_a_token_and_pages() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
     }
 }
+
+/// ADR-N-046 §2.3: across brokers, the list names each Endpoint's broker, in the REST list and
+/// the hub's alike; an Endpoint of no broker of its own is `main`'s.
+#[tokio::test]
+async fn each_listed_endpoint_names_the_broker_its_space_lives_on() {
+    let realm = common::Realm::new();
+    let broker = Broker::new("http://127.0.0.1:1");
+    broker.route(&context_gateway::store::SpaceBrokers {
+        by_view: std::collections::BTreeMap::from([(SLUGS[1].to_owned(), "canary".to_owned())]),
+        ..Default::default()
+    });
+    let gateway = Gateway::new(broker, Box::new(PolicyPdp), "banskabystrica.sk")
+        .serve(SLUGS.iter().map(|slug| endpoint(slug)))
+        .seal_subscribers_with(common::delivery_key())
+        .authenticate(
+            Arc::new(realm.verifier()),
+            accounts(),
+            Some(HOST.to_owned()),
+        );
+    let app = router(Arc::new(gateway));
+    let token = machine(&realm, json!(SLUGS[..2]));
+
+    let brokers = |list: &Value| -> Vec<String> {
+        list["endpoints"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|entry| entry["broker"].as_str().expect("a broker").to_owned())
+            .collect()
+    };
+    let (_, body) = send(app.clone(), get("/api/endpoints", Some(&token))).await;
+    let rest: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(brokers(&rest), ["main", "canary"]);
+    let (_, body) = send(app, hub(&token, "list_endpoints", json!({}))).await;
+    let mcp: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(
+        brokers(&mcp["result"]["structuredContent"]),
+        ["main", "canary"]
+    );
+}
