@@ -297,7 +297,7 @@ async fn a_fragment_is_checked_for_what_it_carries_and_never_for_what_is_require
 }
 
 #[tokio::test]
-async fn every_instance_and_every_member_of_a_batch_is_checked() {
+async fn every_instance_of_an_attribute_is_checked() {
     let model = model();
     let mut two = reading();
     two["pm10"] = json!([
@@ -306,7 +306,49 @@ async fn every_instance_and_every_member_of_a_batch_is_checked() {
     ]);
     let answer = send(Some(&model), Method::POST, "/entities", two).await;
     assert_eq!(refused(&answer), ("sh:minInclusive".into(), "pm10".into()));
-    let batch = json!([reading(), with("window", Some(json!("week")))]);
+}
+
+/// T-4011: a batch is judged per entity (GW18's 207): the refused member is named in `errors`
+/// with its component and never its value, the rest reaches the broker. A pipeline's page of
+/// 1000 no longer loses 999 good records to one bad one.
+#[tokio::test]
+async fn a_batch_forwards_its_valid_members_and_names_each_refused_one() {
+    let model = model();
+    let other = "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:st-2";
+    let mut week = with("window", Some(json!("week")));
+    week["id"] = json!(other);
+    for uri in ["/entityOperations/upsert", "/entityOperations/create"] {
+        let batch = json!([reading(), week.clone()]);
+        let answer = send(Some(&model), Method::POST, uri, batch).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::MULTI_STATUS,
+            "{uri}: {}",
+            answer.body
+        );
+        let errors = answer.body["errors"].as_array().expect("errors").clone();
+        assert_eq!(errors.len(), 1, "{}", answer.body);
+        assert_eq!(errors[0]["entityId"], json!(other));
+        assert_eq!(errors[0]["error"]["rule"], json!("sh:in"));
+        assert!(
+            !answer.body.to_string().contains("week"),
+            "never the value: {}",
+            answer.body
+        );
+        assert_eq!(answer.broker_saw.len(), 1);
+        let forwarded = answer.broker_saw[0].as_array().expect("a batch").clone();
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(forwarded[0]["id"], json!(ID));
+    }
+}
+
+#[tokio::test]
+async fn a_batch_refused_member_by_member_never_reaches_the_broker() {
+    let model = model();
+    let batch = json!([
+        with("pm10", Some(json!(-1))),
+        with("window", Some(json!("week")))
+    ]);
     let answer = send(
         Some(&model),
         Method::POST,
@@ -314,7 +356,16 @@ async fn every_instance_and_every_member_of_a_batch_is_checked() {
         batch,
     )
     .await;
-    assert_eq!(refused(&answer), ("sh:in".into(), "window".into()));
+    assert_eq!(answer.status, StatusCode::MULTI_STATUS, "{}", answer.body);
+    let rules: Vec<_> = answer.body["errors"]
+        .as_array()
+        .expect("errors")
+        .iter()
+        .map(|error| error["error"]["rule"].clone())
+        .collect();
+    assert_eq!(rules, [json!("sh:minInclusive"), json!("sh:in")]);
+    assert_eq!(answer.body["success"], json!([]));
+    assert!(answer.broker_saw.is_empty(), "the broker is not asked");
 }
 
 #[tokio::test]
@@ -349,4 +400,31 @@ async fn the_gateway_and_the_shared_check_reach_one_verdict() {
     let first = checked.first().map(|p| (p.rule.clone(), p.path.clone()));
     let answer = send(Some(&model), Method::POST, "/entities", record).await;
     assert_eq!(Some(refused(&answer)), first, "{checked:?}");
+}
+
+/// DM-88: a caller the Endpoint's Policy refuses learns that, and not which member of its batch
+/// broke which rule: the Policy grants no `updateBatch`.
+#[tokio::test]
+async fn a_batch_the_policy_refuses_names_no_rule_of_its_members() {
+    let model = model();
+    let batch = json!([reading(), with("window", Some(json!("week")))]);
+    let answer = send(
+        Some(&model),
+        Method::POST,
+        "/entityOperations/update",
+        batch,
+    )
+    .await;
+    assert!(
+        answer.status.is_client_error(),
+        "{}: {}",
+        answer.status,
+        answer.body
+    );
+    let said = answer.body.to_string();
+    assert!(
+        !said.contains("sh:in") && !said.contains("window"),
+        "{said}"
+    );
+    assert!(answer.broker_saw.is_empty(), "the broker is not asked");
 }
