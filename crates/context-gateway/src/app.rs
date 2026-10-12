@@ -1501,7 +1501,7 @@ fn query_shape_refusal(params: &[(String, String)]) -> Option<Response<Body>> {
 /// in the operator's log. What a broker says when it fails is whatever it was holding: an entity
 /// id in a message, a fragment of its own query, the name of an attribute an endpoint hides
 /// (T-2260).
-async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
+pub(crate) async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
@@ -1624,6 +1624,34 @@ pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &Head
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
     !conditional && !subscription && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// Whether the access documents of this Endpoint are the view's engine's for `subject` (plan
+/// 5.1, T-3643, T-3649); reads follow [`served_by_view`]. What no view can serve yet keeps the gateway's own answer, each until its gap
+/// closes: a view of another model (G18), a projection with `temporalQ` (G6), a slug no view id
+/// can hold (the writer refuses both). A caller under a data-space agreement stays too: the
+/// engine has no agreements to decide on yet, and would judge the connector's own account
+/// instead (map K38).
+pub(crate) fn has_view(endpoint: &Endpoint, subject: &Subject, view: &str) -> bool {
+    let temporal = endpoint
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.filter.as_ref())
+        .is_some_and(|filter| filter.temporal_q.is_some());
+    endpoint.view_mapping.is_none()
+        && subject.agreement.is_none()
+        && !temporal
+        && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// The broker's view of an Endpoint (plan 5.1): its slug, or `cs-{space}` for a space's
+/// canonical surface, the one whose root is `/cs/{segment}` (T-3643).
+pub(crate) fn view_of(endpoint: &Endpoint) -> String {
+    if endpoint.base_path.starts_with("/cs/") {
+        format!("cs-{}", endpoint.space)
+    } else {
+        endpoint.slug.clone()
+    }
 }
 
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
