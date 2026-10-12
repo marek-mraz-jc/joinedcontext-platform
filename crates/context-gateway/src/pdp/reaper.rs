@@ -101,6 +101,7 @@ impl Reaper {
                 agreements,
                 limits,
                 servers,
+                homes,
                 brokers,
             )) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
@@ -125,6 +126,8 @@ impl Reaper {
                 self.gateway.replace_limits(limits);
                 // ADR-N-043: a named server's members follow the manifest at once.
                 self.gateway.replace_servers(servers);
+                // ADR-N-047: a space follows its broker from the next request on.
+                self.gateway.broker.route(&homes);
                 // ADR-N-048: a broker's roles and its pipelines' topics hold from the next
                 // CONNECT on; open connections keep the ACL they got until their token expires.
                 self.gateway.replace_brokers(brokers);
