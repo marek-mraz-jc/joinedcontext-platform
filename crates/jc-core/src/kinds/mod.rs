@@ -103,8 +103,9 @@ pub use service_account::{
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
 pub use space::{
-    retention_seconds, urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectApps, ProjectSpec,
-    Quotas, RetentionRule,
+    duration_seconds, retention_seconds, urn_segment, ContextSpaceSpec, MissingUnitCode,
+    ProjectApps, ProjectSpec, QualityKind, QualityOutcome, QualityRule, Quotas, RetentionRule,
+    MAX_QUALITY_RULES,
 };
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
