@@ -251,6 +251,10 @@ pub struct ContextSpaceSpec {
     /// A `unitCode` other than the model's is refused either way.
     #[serde(default, skip_serializing_if = "MissingUnitCode::is_fill")]
     pub missing_unit_code: MissingUnitCode,
+    /// The `ContextBroker` this space lives on; the organization's default when absent
+    /// (PF-111, ADR-N-047). Changing it on a space that holds entities is a move job (PF-115).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_ref: Option<String>,
 }
 
 /// What a space does with a quantity written without its `unitCode` (DM-06).
@@ -310,6 +314,10 @@ impl ContextSpaceSpec {
                     });
                 }
             }
+        }
+
+        if let Some(broker) = &self.broker_ref {
+            names::validate_dns1123_label(broker)?;
         }
 
         if let Some(ttl) = self.ttl_days {
