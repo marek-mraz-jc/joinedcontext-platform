@@ -755,21 +755,6 @@ pub fn engine_document(
     json!({ "subject": subject, "permissions": permissions, "prohibitions": [] })
 }
 
-/// A view of another model (G18) for an Endpoint fixture: no broker view serves such an
-/// Endpoint yet, so its access document and check stay the gateway's own (`app::has_view`,
-/// T-3649). The tests of that document use it to reach the gateway's code through the router.
-pub fn no_view() -> std::sync::Arc<context_gateway::translators::view_mapping::ViewMapping> {
-    std::sync::Arc::new(
-        context_gateway::translators::view_mapping::ViewMapping::parse(&json!({
-            "version": 2,
-            "sourceClass": "Senzor",
-            "targetClass": "AirQualityObserved",
-            "slots": [{ "target": "pm10", "source": "pm10", "kind": "rename", "filterable": true }]
-        }))
-        .expect("the IR parses"),
-    )
-}
-
 /// A broker whose MCP surface answers every request with `tools` as its tool list and no
 /// resource: the hop an Endpoint's or a space's MCP message takes since T-3647. Returns its URL.
 pub async fn mcp_broker(tools: Value) -> String {
