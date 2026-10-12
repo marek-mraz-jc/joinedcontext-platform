@@ -1442,7 +1442,7 @@ fn reserve_create(
 /// guard there is (R45, GW16). A subscription is the view's: stored under the verified subscriber
 /// and delivered by the broker itself (plan 5.5, T-3653); so is a projection with `temporalQ`
 /// (G6, T-3801).
-fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
+pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
     !conditional && (1..=MAX_VIEW_ID).contains(&view.len())
 }
@@ -1632,7 +1632,7 @@ async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
 const ANTARES_ACCESS_DENIED: &str = "urn:antares:error:AccessDenied";
 
 /// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
-const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
@@ -3334,7 +3334,7 @@ fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) 
 
 /// Whether the broker's `404` says the tenant does not exist (CIM 009 5.5.2 `NonexistentTenant`)
 /// rather than that the thing asked for does not.
-fn names_no_tenant(body: &[u8]) -> bool {
+pub(crate) fn names_no_tenant(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
         problem
             .get("type")

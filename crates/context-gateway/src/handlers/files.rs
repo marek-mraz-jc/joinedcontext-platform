@@ -51,7 +51,7 @@ pub(crate) async fn file_geojson(
         &gateway,
         &endpoint,
         &subject,
-        &params,
+        (&params, &endpoint.slug),
         &mut request,
         &limits,
     )
@@ -108,7 +108,7 @@ pub(crate) async fn file_json(
         &gateway,
         &endpoint,
         &subject,
-        &params,
+        (&params, &endpoint.slug),
         &mut request,
         &limits,
     )
@@ -175,7 +175,7 @@ async fn tabular_download(
         &gateway,
         &endpoint,
         &subject,
-        &params,
+        (&params, &endpoint.slug),
         &mut request,
         &limits,
     )
@@ -271,7 +271,15 @@ pub(crate) async fn file_zip(
     let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
     let index = schema::index(&endpoint, &visible, sha256_hex);
     let dcat = endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url());
-    zip_download(&gateway, &endpoint, &subject, &params, &dcat, &mut request).await
+    zip_download(
+        &gateway,
+        &endpoint,
+        &subject,
+        (&params, &endpoint.slug),
+        &dcat,
+        &mut request,
+    )
+    .await
 }
 
 /// `/cs/{space}/dump/`: the `file.zip` bundle over everything in the space the caller's grants
@@ -296,11 +304,13 @@ pub(crate) async fn space_dump(
         Err(problem) => return *problem,
     };
     let dcat = space_surface::dataset(&space, gateway.base_url());
+    // The space's dump reads through the space's own view, the one `/cs/{space}` uses (plan 5.1).
+    let view = format!("cs-{}", space.name());
     zip_download(
         &gateway,
         &space.endpoint,
         &subject,
-        &[],
+        (&[], &view),
         &dcat,
         &mut request,
     )
@@ -314,13 +324,13 @@ async fn zip_download(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
-    params: &[(String, String)],
+    (params, view): (&[(String, String)], &str),
     dcat: &serde_json::Value,
     request: &mut Request,
 ) -> Response<Body> {
     let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
     let (entities, restricted) =
-        match paged_entities(gateway, endpoint, subject, params, request, &limits).await {
+        match paged_entities(gateway, endpoint, subject, (params, view), request, &limits).await {
             Ok(answer) => answer,
             Err(problem) => return *problem,
         };

@@ -6,8 +6,10 @@
 //! absent from GeoJSON, CSV, OGC Features and SensorThings alike, for both demo spaces. A
 //! translator added later that reads the broker instead of the projection would fail here
 //! rather than in a leak. NGSI-LD and MCP through the slug are the broker's view since T-3643
-//! and T-3647, and their narrowing is proved there (Antares `views_read.rs`,
-//! `policy_filter_by_type.rs`, `mcp_discovery.rs`) and end to end in `antares_integration_tests`.
+//! and T-3647, the files and SensorThings since T-3651, and their narrowing is proved there
+//! (Antares `views_read.rs`, `policy_filter_by_type.rs`, `mcp_discovery.rs`) and end to end in
+//! `antares_integration_tests`; here the view is the stub's, so the test holds the translators
+//! that read it to the same answer as the ones that still project.
 
 mod common;
 
@@ -113,6 +115,23 @@ information:
     }
 }
 
+/// The broker's view of a demo endpoint as the Portal writes it (T-3651): the public role reads
+/// the one type with what the policy grants less what the endpoint hides. The file and
+/// SensorThings translators read through it; OGC Features and MCP still decide in the gateway,
+/// and the two must agree.
+async fn viewed(slug: &str, entity: &Value) -> common::BrokerStub {
+    let (entity_type, attrs): (&str, &[&str]) = if slug == AIR_SLUG {
+        ("AirQualityObserved", &["pm10", "pm25", "location"])
+    } else {
+        ("Vehicle", &["serviceLine", "speed", "location"])
+    };
+    common::BrokerStub::narrowing(
+        vec![json!([entity.clone()])],
+        common::View::of(slug, "public", &[entity_type], Some(attrs)),
+    )
+    .await
+}
+
 fn app(broker: &str) -> Router {
     router(Arc::new(
         Gateway::new(
@@ -185,7 +204,7 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
         (AIR_SLUG, station(), ["location", "pm10", "pm25"]),
         (BUS_SLUG, vehicle(), ["location", "serviceLine", "speed"]),
     ] {
-        let broker = common::BrokerStub::start(vec![json!([entity.clone()])]).await;
+        let broker = viewed(slug, &entity).await;
         let entity_type = entity["type"].as_str().expect("a type").to_owned();
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
 
@@ -281,7 +300,7 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
         (AIR_SLUG, station(), "calibrationOffset"),
         (BUS_SLUG, vehicle(), "fleetInternalId"),
     ] {
-        let broker = common::BrokerStub::start(vec![json!([entity.clone()])]).await;
+        let broker = viewed(slug, &entity).await;
         let entity_type = entity["type"].as_str().expect("a type").to_owned();
 
         for uri in [
