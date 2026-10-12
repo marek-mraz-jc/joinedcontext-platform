@@ -87,6 +87,7 @@ async fn two_brokers() -> (Broker, Log, Log, String) {
             ("cs-doprava-hfp".to_owned(), port.clone()),
             ("hfp-vehicles".to_owned(), port.clone()),
         ]),
+        ..SpaceBrokers::default()
     });
     (broker, main_log, canary_log, port)
 }
@@ -177,7 +178,7 @@ async fn a_space_whose_broker_has_no_address_is_refused_not_sent_to_main() {
     let untemplated = Broker::new(main);
     untemplated.route(&SpaceBrokers {
         by_space: BTreeMap::from([("doprava-hfp".to_owned(), port)]),
-        by_view: BTreeMap::new(),
+        ..SpaceBrokers::default()
     });
     let refused = untemplated
         .send(
@@ -248,6 +249,14 @@ fn the_repository_says_which_broker_each_space_and_view_lives_on() {
     manifest(&dir, "lost.yaml", &space("lost", "  brokerRef: gone\n"));
     manifest(
         &dir,
+        "moving.yaml",
+        &space("air2", "").replace(
+            "  namespace: helsinki\n",
+            "  namespace: helsinki\n  annotations:\n    joinedcontext.com/moving-to: canary\n",
+        ),
+    );
+    manifest(
+        &dir,
         "endpoint.yaml",
         "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: hfp-all\n  \
          namespace: helsinki\nspec:\n  contextSpaceRef: hfp\n  slug: aaaaaaaaaaaaaaaaaaaaaaaaaa\n  \
@@ -270,5 +279,101 @@ fn the_repository_says_which_broker_each_space_and_view_lives_on() {
     assert_eq!(
         brokers.by_view["aaaaaaaaaaaaaaaaaaaaaaaaaa"], "canary",
         "an Endpoint's view follows its space"
+    );
+    assert_eq!(
+        brokers
+            .moving
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["air2", "cs-air2"],
+        "only the annotated space is held, by tenant and by its own view"
+    );
+}
+
+/// A move holds its space read-only (PF-115, ADR-N-046 §2.6): a write is answered 503 with
+/// Retry-After and never reaches a broker; reads, a query by POST and other spaces pass.
+#[tokio::test]
+async fn a_moving_space_takes_reads_and_answers_writes_503_with_retry_after() {
+    let (main, main_log) = upstream(200, "main", Vec::new()).await;
+    let broker = Broker::new(main);
+    broker.route(&SpaceBrokers {
+        moving: ["air".to_owned(), "cs-air".to_owned(), "air-slug".to_owned()].into(),
+        ..SpaceBrokers::default()
+    });
+    let entities = "/ngsi-ld/v1/entities";
+    for (method, path, headers) in [
+        (Method::POST, entities, tenant("air")),
+        (
+            Method::PATCH,
+            "/ngsi-ld/v1/entities/urn:x/attrs",
+            tenant("air"),
+        ),
+        (Method::DELETE, "/ngsi-ld/v1/entities/urn:x", tenant("air")),
+        (
+            Method::POST,
+            "/ngsi-ld/v1/entityOperations/upsert",
+            tenant("air"),
+        ),
+        (Method::POST, "/x/views/air-slug/mcp", HeaderMap::new()),
+        (
+            Method::PUT,
+            "/x/views/cs-air/ngsi-ld/v1/entities/urn:x/attrs/a",
+            HeaderMap::new(),
+        ),
+    ] {
+        let answer = broker
+            .send(method.clone(), path, headers, Body::empty())
+            .await
+            .expect("an answer");
+        assert_eq!(
+            answer.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {path}"
+        );
+        assert_eq!(answer.headers()["retry-after"], "30", "{method} {path}");
+        assert!(body(answer).await.contains("space-moving"));
+    }
+    assert!(
+        main_log.lock().unwrap().is_empty(),
+        "no write reached the broker"
+    );
+
+    for (method, path, headers) in [
+        (Method::GET, entities, tenant("air")),
+        (Method::HEAD, entities, tenant("air")),
+        (
+            Method::POST,
+            "/ngsi-ld/v1/entityOperations/query?limit=5",
+            tenant("air"),
+        ),
+        (
+            Method::GET,
+            "/x/views/air-slug/ngsi-ld/v1/entities",
+            HeaderMap::new(),
+        ),
+        (Method::POST, entities, tenant("water")),
+    ] {
+        let answer = broker
+            .send(method.clone(), path, headers, Body::empty())
+            .await
+            .expect("an answer");
+        assert_eq!(answer.status(), StatusCode::OK, "{method} {path}");
+    }
+    assert_eq!(main_log.lock().unwrap().len(), 5);
+}
+
+#[test]
+fn each_view_names_the_broker_it_lives_on() {
+    let broker = Broker::new("http://main.invalid");
+    broker.route(&SpaceBrokers {
+        by_view: BTreeMap::from([("hfp-slug".to_owned(), "canary".to_owned())]),
+        ..SpaceBrokers::default()
+    });
+    assert_eq!(broker.broker_of_view("hfp-slug"), "canary");
+    assert_eq!(
+        broker.broker_of_view("air-slug"),
+        "main",
+        "a view of no broker of its own is main's"
     );
 }
