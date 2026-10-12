@@ -5,8 +5,8 @@
 //! surfaces serve, and adds them to the broker's listings (T-3647, T-3648).
 
 use crate::app::{sha256_hex, Gateway};
-use crate::handlers::access_routes::{self, AccessFormat};
 use crate::handlers::schema;
+use crate::handlers::view_access::{self, AccessFormat};
 use crate::mcp::jsonrpc::{answered, error, refused, result};
 use crate::mcp::tools::{granted, validate, ACCESS_FORMATS, TOOLS};
 use crate::pdp::evaluator::Subject;
@@ -191,7 +191,7 @@ async fn access_document(
         "grant-ast" => AccessFormat::GrantAst,
         _ => AccessFormat::AuthZen,
     };
-    access_routes::document(gateway, endpoint, subject, format)
+    view_access::document(gateway, endpoint, subject, format)
         .await
         .map_err(|answer| {
             format!(
