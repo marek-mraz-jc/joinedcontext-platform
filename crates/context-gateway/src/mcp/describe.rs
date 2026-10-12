@@ -29,7 +29,7 @@ pub(crate) fn tools(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -
             json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": (tool.schema)(),
+                "inputSchema": tool.input_schema(),
                 "outputSchema": crate::mcp::tools::output_schema(tool),
                 "annotations": { "readOnlyHint": true, "destructiveHint": false },
             })

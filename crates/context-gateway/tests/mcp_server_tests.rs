@@ -196,7 +196,7 @@ async fn send(app: Router, request: Request<Body>) -> (StatusCode, Value) {
 }
 
 fn every_station() -> Value {
-    call("query_entities", json!({ "type": "AirQualityObserved" }))
+    call("query_entities", json!({ "type": ["AirQualityObserved"] }))
 }
 
 fn slugs(entries: &Value) -> Vec<String> {
@@ -253,7 +253,7 @@ async fn the_server_answers_a_subset_of_the_members_own_urls_and_a_refused_membe
     let named = |slug: &str| {
         call(
             "query_entities",
-            json!({ "endpoint": slug, "type": "AirQualityObserved" }),
+            json!({ "endpoint": slug, "type": ["AirQualityObserved"] }),
         )
     };
     let unknown = raw(
@@ -470,7 +470,7 @@ async fn reads_may_fan_out_and_writes_name_their_endpoint() {
     assert!(!query["inputSchema"]["required"]
         .as_array()
         .is_some_and(|required| required.contains(&json!("endpoint"))));
-    assert!(tool("upsert_entity")["inputSchema"]["required"]
+    assert!(tool("batch_upsert")["inputSchema"]["required"]
         .as_array()
         .expect("required")
         .contains(&json!("endpoint")));
@@ -481,8 +481,8 @@ async fn reads_may_fan_out_and_writes_name_their_endpoint() {
             SERVER,
             Some(&edge),
             call(
-                "upsert_entity",
-                json!({ "entity": { "id": ENTITY, "type": "AirQualityObserved" } }),
+                "batch_upsert",
+                json!({ "entities": [{ "id": ENTITY, "type": "AirQualityObserved" }] }),
             ),
         ),
     )
@@ -521,7 +521,7 @@ async fn a_cursor_object_asks_only_the_members_it_names() {
             Some(&edge),
             call(
                 "query_entities",
-                json!({ "type": "AirQualityObserved", "cursor": { AIR: "q20" } }),
+                json!({ "type": ["AirQualityObserved"], "cursor": { AIR: "q20" } }),
             ),
         ),
     )

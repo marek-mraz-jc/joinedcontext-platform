@@ -361,16 +361,16 @@ async fn a_write_reaches_the_named_endpoints_view_alone_in_the_brokers_form() {
     let sent: Value = serde_json::from_slice(&hops[0].body).expect("a JSON-RPC message");
     assert_eq!(sent["params"]["name"], json!("create_subscription"));
     assert_eq!(
-        sent["params"]["arguments"], subscription,
-        "the subscription is the arguments"
+        sent["params"]["arguments"],
+        json!({ "subscription": subscription }),
+        "the arguments are the broker tool's, as sent (EP-112)"
     );
 }
 
-/// T-3808: the hub's catalogue keeps its names and arguments, and each call reaches the broker
-/// under the name and in the form the broker's tool takes: one `type` as a list, `details` as
-/// its own tool, `ids` as `id`, the cursor as the broker gave it.
+/// EP-112 (T-4115): the hub's tools are the broker's by name and arguments, so each call reaches
+/// the broker under the name it was called by, with its arguments as sent less `endpoint`.
 #[tokio::test]
-async fn a_hub_call_reaches_the_broker_under_its_own_tool_and_arguments() {
+async fn a_hub_call_reaches_the_broker_as_it_was_sent() {
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let air = endpoint(
@@ -399,34 +399,26 @@ async fn a_hub_call_reaches_the_broker_under_its_own_tool_and_arguments() {
         (
             call(
                 "query_entities",
-                json!({ "endpoint": AIR, "type": "AirQualityObserved", "cursor": "b3BhcXVl" }),
+                json!({ "endpoint": AIR, "type": ["AirQualityObserved"], "cursor": "b3BhcXVl" }),
             ),
             "query_entities",
             json!({ "type": ["AirQualityObserved"], "cursor": "b3BhcXVl" }),
         ),
         (
             call(
-                "query_entities",
-                json!({ "endpoint": AIR, "type": ["AirQualityObserved"] }),
-            ),
-            "query_entities",
-            json!({ "type": ["AirQualityObserved"] }),
-        ),
-        (
-            call(
                 "batch_query",
-                json!({ "endpoint": AIR, "ids": [id], "type": "AirQualityObserved" }),
+                json!({ "endpoint": AIR, "id": [id], "type": ["AirQualityObserved"] }),
             ),
             "batch_query",
             json!({ "id": [id], "type": ["AirQualityObserved"] }),
         ),
         (
-            call("list_types", json!({ "endpoint": AIR, "details": true })),
+            call("list_type_details", json!({ "endpoint": AIR })),
             "list_type_details",
             json!({}),
         ),
         (
-            call("list_types", json!({ "endpoint": AIR, "details": false })),
+            call("list_types", json!({ "endpoint": AIR })),
             "list_types",
             json!({}),
         ),
