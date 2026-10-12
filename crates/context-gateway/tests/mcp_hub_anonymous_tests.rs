@@ -1,0 +1,379 @@
+//! The hub as one connector for the whole portal (T-4114, ADR-N-025 §4b, EP-87, EP-88, EP-111).
+//!
+//! Without a token it answers over the public Endpoints alone; `endpoint:*` reaches every
+//! Endpoint the person may read; `list_endpoints` filters and describes enough to pick one. No
+//! internal title, type or count reaches a caller without a token.
+
+mod common;
+
+use axum::body::Body;
+use axum::http::{header::AUTHORIZATION, Method, Request, StatusCode};
+use axum::Router;
+use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::pdp::PolicyPdp;
+use context_gateway::proxy::Broker;
+use context_gateway::resolver::{Endpoint, Model};
+use jc_core::kinds::{Audience, PolicySpec, Representation};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+const HOST: &str = "https://city.example";
+/// Public: anybody reads its air quality, history included.
+const OPEN: &str = "oooooooooooooooooooooooooo";
+/// Internal: a steward of the organization reads its bikes.
+const INNER: &str = "iiiiiiiiiiiiiiiiiiiiiiiiii";
+const UNKNOWN: &str = "zzzzzzzzzzzzzzzzzzzzzzzzzy";
+
+fn grant(role: &str, operations: &str, entity_type: &str) -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: mesto\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: {{ kind: role, id: {role} }}\n\
+         operations: [{operations}]\n\
+         information:\n  \
+         - entities:\n      \
+         - type: {entity_type}\n"
+    ))
+    .expect("the policy spec parses")
+}
+
+fn endpoint(
+    slug: &str,
+    title: &str,
+    audience: Audience,
+    class: &str,
+    policy: PolicySpec,
+) -> Endpoint {
+    let schema = json!({
+        "$defs": {
+            class: {
+                "type": "object",
+                "properties": { "id": {}, "type": {}, "name": {}, "location": {} },
+            }
+        }
+    });
+    Endpoint {
+        declared_types: None,
+        roles: Default::default(),
+        slug: slug.to_owned(),
+        title: [("en".to_owned(), title.to_owned())].into_iter().collect(),
+        description: [("sk".to_owned(), format!("Dáta: {title}"))]
+            .into_iter()
+            .collect(),
+        space: "mesto".to_owned(),
+        project: "mesto".to_owned(),
+        audience,
+        allowed_projects: Vec::new(),
+        representations: vec![Representation::NgsiLd, Representation::Mcp],
+        rate_limit: None,
+        creates: None,
+        file_limits: None,
+        hidden_attributes: Default::default(),
+        projection: None,
+        view_mapping: None,
+        catalog: None,
+        base_path: format!("/api/endpoint/{slug}"),
+        models: vec![Model {
+            name: "mesto".to_owned(),
+            version: "1.0.0".to_owned(),
+            major: 1,
+            classes: vec![class.to_owned()],
+            json_schema: Some(schema),
+            context: None,
+        }],
+        policy_names: Vec::new(),
+        policies: vec![policy],
+    }
+}
+
+fn app(broker: &str, realm: &common::Realm) -> Router {
+    let open = endpoint(
+        OPEN,
+        "Air quality",
+        Audience::Public,
+        "AirQualityObserved",
+        grant("public", "queryEntity, queryTemporal", "AirQualityObserved"),
+    );
+    let inner = endpoint(
+        INNER,
+        "Bike stations",
+        Audience::Organization,
+        "BikeHireDockingStation",
+        grant("steward", "queryEntity", "BikeHireDockingStation"),
+    );
+    router(Arc::new(
+        Gateway::new(
+            Broker::new(broker),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([open, inner])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some(HOST.to_owned()),
+        ),
+    ))
+}
+
+/// A steward's hub token with `scope`.
+fn hub_token(realm: &common::Realm, scope: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "5e1d",
+        "aud": "mcp-hub",
+        "scope": scope,
+        "azp": "mcp-hub",
+        "preferred_username": "jana",
+        "groups": ["/mesto"],
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+fn rpc(token: Option<&str>, body: Value) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri("/api/mcp")
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    builder
+        .body(Body::from(body.to_string()))
+        .expect("a request")
+}
+
+fn call(name: &str, arguments: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": name, "arguments": arguments },
+    })
+}
+
+async fn raw(app: Router, request: Request<Body>) -> (StatusCode, axum::http::HeaderMap, String) {
+    let response = app.oneshot(request).await.expect("the gateway answers");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a body");
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+async fn listed(app: Router, token: Option<&str>, arguments: Value) -> Value {
+    let (status, _, body) = raw(app, rpc(token, call("list_endpoints", arguments))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("JSON");
+    answer["result"].clone()
+}
+
+fn slugs(result: &Value) -> Vec<&str> {
+    result["structuredContent"]["endpoints"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no list: {result}"))
+        .iter()
+        .filter_map(|row| row["slug"].as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn without_a_token_the_hub_lists_the_public_endpoints_and_nothing_internal() {
+    let realm = common::Realm::new();
+    let app = app("http://127.0.0.1:1", &realm);
+
+    let result = listed(app.clone(), None, json!({})).await;
+    assert_eq!(slugs(&result), [OPEN], "{result}");
+    assert_eq!(result["structuredContent"]["total"], json!(1));
+    let (status, _, tools) = raw(
+        app.clone(),
+        rpc(
+            None,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Neither the slug, the title nor the type of the internal Endpoint is in either answer.
+    for text in [result.to_string(), tools] {
+        for secret in [INNER, "Bike stations", "BikeHireDockingStation"] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn without_a_token_an_internal_slug_is_the_login_prompt_like_an_unknown_one() {
+    let realm = common::Realm::new();
+    let app = app("http://127.0.0.1:1", &realm);
+    let mut answers = Vec::new();
+    for slug in [INNER, UNKNOWN] {
+        let message = call("query_entities", json!({ "endpoint": slug, "type": ["X"] }));
+        let (status, headers, body) = raw(app.clone(), rpc(None, message)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{slug}: {body}");
+        assert_eq!(
+            headers["www-authenticate"],
+            format!(
+                "Bearer resource_metadata=\"{HOST}/api/mcp/.well-known/oauth-protected-resource\""
+            )
+            .as_str()
+        );
+        answers.push(body);
+    }
+    assert_eq!(
+        answers[0], answers[1],
+        "an internal slug answers like an unknown one (SP-20)"
+    );
+}
+
+#[tokio::test]
+async fn without_a_token_a_public_endpoint_is_read_as_the_anonymous_caller() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = app(&broker.url, &realm);
+    let message = call(
+        "query_entities",
+        json!({ "endpoint": OPEN, "type": ["AirQualityObserved"] }),
+    );
+    let (status, _, body) = raw(app, rpc(None, message)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{body}");
+    assert_eq!(hops[0].view, OPEN);
+    assert!(
+        hops[0].headers.get(AUTHORIZATION).is_none(),
+        "no credential is invented"
+    );
+}
+
+#[tokio::test]
+async fn the_one_login_scope_adds_the_internal_endpoints_the_person_may_read() {
+    let realm = common::Realm::new();
+    let app = app("http://127.0.0.1:1", &realm);
+
+    let everything = hub_token(&realm, "openid endpoint:*");
+    let result = listed(app.clone(), Some(&everything), json!({})).await;
+    assert_eq!(slugs(&result), [INNER, OPEN], "{result}");
+    let rows = result["structuredContent"]["endpoints"]
+        .as_array()
+        .expect("rows");
+    assert_eq!(rows[0]["access"], json!("internal"));
+    assert_eq!(rows[1]["access"], json!("public"));
+
+    // No scope picks nothing internal; the public Endpoints stay, as their own URLs answer.
+    let none = hub_token(&realm, "openid");
+    assert_eq!(
+        slugs(&listed(app.clone(), Some(&none), json!({})).await),
+        [OPEN]
+    );
+    // A narrower scope narrows.
+    let one = hub_token(&realm, &format!("openid endpoint:{INNER}"));
+    assert_eq!(
+        slugs(&listed(app, Some(&one), json!({})).await),
+        [INNER, OPEN]
+    );
+}
+
+#[tokio::test]
+async fn each_row_says_enough_to_pick_the_endpoint() {
+    let realm = common::Realm::new();
+    let app = app("http://127.0.0.1:1", &realm);
+    let result = listed(app, None, json!({})).await;
+    let row = &result["structuredContent"]["endpoints"][0];
+    assert_eq!(row["types"], json!(["AirQualityObserved"]));
+    assert_eq!(
+        row["attributes"],
+        json!({ "AirQualityObserved": ["location", "name"] })
+    );
+    assert_eq!(row["temporal"], json!(true));
+    assert_eq!(row["description"], json!({ "sk": "Dáta: Air quality" }));
+    assert_eq!(row["dcat"], json!(format!("{HOST}/api/endpoint/{OPEN}/")));
+    assert_eq!(
+        row["schema"],
+        json!(format!(
+            "{HOST}/api/endpoint/{OPEN}/schema/v1/model.linkml.yaml"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn list_endpoints_filters_and_an_empty_match_is_an_empty_list() {
+    let realm = common::Realm::new();
+    let app = app("http://127.0.0.1:1", &realm);
+    let token = hub_token(&realm, "openid endpoint:*");
+    for (arguments, expected) in [
+        (json!({ "q": "BIKE" }), vec![INNER]),
+        (json!({ "q": "dáta: air" }), vec![OPEN]),
+        (json!({ "type": "AirQualityObserved" }), vec![OPEN]),
+        (json!({ "attribute": "location" }), vec![INNER, OPEN]),
+        (json!({ "access": "internal" }), vec![INNER]),
+        (json!({ "space": "mesto", "access": "public" }), vec![OPEN]),
+        (json!({ "q": "trams" }), vec![]),
+    ] {
+        let result = listed(app.clone(), Some(&token), arguments.clone()).await;
+        assert_eq!(result["isError"], json!(false), "{arguments}: {result}");
+        assert_eq!(slugs(&result), expected, "{arguments}");
+        assert_eq!(
+            result["structuredContent"]["total"],
+            json!(expected.len()),
+            "{arguments}"
+        );
+    }
+
+    let first = listed(app.clone(), Some(&token), json!({ "limit": 1 })).await;
+    assert_eq!(first["structuredContent"]["nextCursor"], json!("1"));
+    let next = listed(
+        app.clone(),
+        Some(&token),
+        json!({ "limit": 1, "cursor": "1" }),
+    )
+    .await;
+    assert_eq!(slugs(&next), [OPEN]);
+
+    for arguments in [
+        json!({ "access": "secret" }),
+        json!({ "cursor": "x" }),
+        json!({ "type": 5 }),
+        json!({ "q": "" }),
+        json!({ "spaces": "mesto" }),
+    ] {
+        let result = listed(app.clone(), Some(&token), arguments.clone()).await;
+        assert_eq!(result["isError"], json!(true), "{arguments}: {result}");
+    }
+}
+
+#[tokio::test]
+async fn the_rest_twin_answers_the_same_list_without_a_token() {
+    let realm = common::Realm::new();
+    let app = app("http://127.0.0.1:1", &realm);
+    let get = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("a request")
+    };
+    let (status, _, body) = raw(app.clone(), get("/api/endpoints")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(page["total"], json!(1));
+    assert_eq!(page["endpoints"][0]["slug"], json!(OPEN));
+    assert!(!body.contains(INNER));
+    // A filter is text, even one that looks like a number.
+    let (status, _, body) = raw(app.clone(), get("/api/endpoints?q=2026")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, _, metadata) =
+        raw(app, get("/api/mcp/.well-known/oauth-protected-resource")).await;
+    assert_eq!(status, StatusCode::OK);
+    let metadata: Value = serde_json::from_str(&metadata).expect("JSON");
+    assert_eq!(metadata["scopes_supported"], json!(["endpoint:*"]));
+}
