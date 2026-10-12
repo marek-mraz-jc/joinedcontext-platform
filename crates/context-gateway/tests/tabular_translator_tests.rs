@@ -358,7 +358,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -452,11 +452,21 @@ async fn download(app: axum::Router, path: &str) -> (StatusCode, String, String)
     (status, media, String::from_utf8_lossy(&body).into_owned())
 }
 
-/// EP-06: an attribute no grant names has no column, exactly as it has no member in the
-/// JSON representation. A second format is not a second set of rules.
+/// EP-06: an attribute the view does not show has no column, exactly as it has no member in the
+/// JSON representation. A second format is not a second set of rules (T-3651: the table is cut
+/// from the view's answer).
 #[tokio::test]
 async fn an_ungranted_attribute_is_not_a_column() {
-    let broker = BrokerStub::start(vec![json!([reading(1)])]).await;
+    let broker = BrokerStub::narrowing(
+        vec![json!([reading(1)])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
+    )
+    .await;
     let (status, media, body) = download(
         gateway(&broker.url, endpoint(vec![Representation::Csv], None)),
         &format!("/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"),

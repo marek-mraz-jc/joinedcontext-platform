@@ -82,10 +82,11 @@ async fn broker() -> (String, Hops) {
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
-            recorder
-                .lock()
-                .expect("the hop log")
-                .push(request.uri().query().unwrap_or_default().to_owned());
+            recorder.lock().expect("the hop log").push(format!(
+                "{}?{}",
+                request.uri().path(),
+                request.uri().query().unwrap_or_default()
+            ));
             axum::Json(everything())
         }
     }));
@@ -174,58 +175,24 @@ async fn ask(uri: &str) -> (StatusCode, Value, Vec<String>) {
     (status, body, asked)
 }
 
-/// An answer with the two members that differ for reasons the attack cannot use: the `links` a
-/// surface builds from the caller's own request, which echo the query back, and the timestamp the
-/// page is stamped with. A caller learns nothing from reading their own filter or the clock.
-fn comparable(body: &Value) -> Value {
-    match body {
-        Value::Object(members) => Value::Object(
-            members
-                .iter()
-                .filter(|(name, _)| !matches!(name.as_str(), "links" | "timeStamp"))
-                .map(|(name, value)| (name.clone(), comparable(value)))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.iter().map(comparable).collect()),
-        other => other.clone(),
-    }
-}
-
-/// The same request under two values of the hidden attribute: the caller may learn nothing from
-/// the difference, so there has to be none — in the answer or in what the broker was asked.
-async fn indistinguishable(one: &str, other: &str) {
-    let (first_status, first_body, first_asked) = ask(one).await;
-    let (second_status, second_body, second_asked) = ask(other).await;
-    assert_eq!(first_status, second_status, "{one} vs {other}");
-    assert_eq!(
-        comparable(&first_body),
-        comparable(&second_body),
-        "{one} vs {other}"
-    );
-    assert_eq!(first_asked, second_asked, "{one} vs {other}");
-    for asked in first_asked.iter().chain(second_asked.iter()) {
-        assert!(
-            !asked.contains("secretPin"),
-            "a hidden name reached the broker inside a selector: {asked}"
-        );
-    }
-    let text = comparable(&first_body).to_string();
-    for value in ["1234", "4321"] {
-        assert!(
-            !text.contains(value),
-            "a hidden value is in the answer to {one}: {text}"
-        );
-    }
-}
-
-/// EP-12, EP-61: SensorThings takes its filter in `$filter`, and it is compiled into the same `q`.
+/// EP-12, EP-61: SensorThings takes its filter in `$filter`, compiled into the same `q`, and since
+/// T-3651 it reads through the Endpoint's view: the filter on a hidden attribute goes to the view,
+/// whose engine considers no entity for it (Antares `addons/joinedcontext-policy/tests/engine.rs`
+/// `bisecting_a_hidden_value_learns_nothing`), and never to the broker's plain root.
 #[tokio::test]
-async fn a_sensorthings_filter_on_a_hidden_attribute_is_not_an_oracle() {
-    indistinguishable(
-        "/sta/v1.1/Things?$filter=secretPin%20eq%20%274321%27",
-        "/sta/v1.1/Things?$filter=secretPin%20eq%20%279999%27",
-    )
-    .await;
+async fn a_sensorthings_filter_on_a_hidden_attribute_goes_to_the_view_alone() {
+    for value in ["4321", "9999"] {
+        let (status, _, asked) = ask(&format!(
+            "/sta/v1.1/Things?$filter=secretPin%20eq%20%27{value}%27"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/entities?")),
+            "{asked:?}"
+        );
+    }
 }
 
 /// The SensorThings control.
@@ -235,8 +202,9 @@ async fn a_sensorthings_filter_the_endpoint_serves_is_compiled_and_forwarded() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(asked.len(), 1, "the broker was asked {asked:?}");
     assert!(
-        asked[0].contains("q=%28weight%3E100%29"),
-        "the compiled filter did not reach the broker: {}",
+        asked[0].starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/entities?"))
+            && asked[0].contains("q=weight%3E100"),
+        "the compiled filter did not reach the view: {}",
         asked[0]
     );
     assert!(
