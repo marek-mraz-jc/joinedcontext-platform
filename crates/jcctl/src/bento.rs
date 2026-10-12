@@ -244,7 +244,7 @@ pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
 ///
 /// GTFS-realtime prepends its protobuf decoder: the feed arrives as protobuf and every pipeline
 /// reading it would otherwise decode it again in its own mapping. An `http` connection with an
-/// `archive` prepends the ranged read of its named members ([`archive_processors`]).
+/// `archive` prepends the ranged read of its named members (`archive_processors`).
 pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Vec<Value> {
     if let Some(archive) = spec.http.as_ref().and_then(|http| http.archive.as_ref()) {
         if spec.source_type == DataSourceType::Http {
