@@ -43,7 +43,7 @@
       ]
     },
     "BrokerSize": {
-      "description": "A resource preset of the broker chart (ADR-N-046 §2.7).",
+      "description": "A resource preset of the broker chart (ADR-N-047 §2.7).",
       "oneOf": [
         {
           "description": "The development preset: 100m CPU and 128 Mi requested.",
