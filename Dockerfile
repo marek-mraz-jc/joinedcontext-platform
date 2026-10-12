@@ -2,7 +2,8 @@
 # jc-functions, jc-assistant and jc-token-sidecar = `docker run … <binary>`, which is how the agent runner,
 # the functions component, the assistant's crawl worker and the pipelines' token service run them).
 # Published by .github/workflows/image.yml as ghcr.io/marek-mraz-jc/joinedcontext-platform, pinned by digest in the deployment.
-FROM rust:1.97-slim-bookworm AS build
+# Debian 13 throughout, every base by digest: the build stage's glibc is the runtime's (T-4126).
+FROM rust:1.97-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS build
 WORKDIR /src
 # g++: the tokenizer behind the assistant's embedder links C++ (esaxx, oniguruma; T-3053).
 # libclang-dev: jc-wasm-host reads an App's SQL with libpg_query, whose bindings bindgen makes (T-3364).
@@ -56,14 +57,14 @@ RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace --excl
 # `jcctl checkouts`, the sidecar that keeps every registered project checked out at its ref
 # for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
 # own image, built as `--target checkouts`, so git never enters the gateway's.
-FROM debian:bookworm-slim AS checkouts
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS checkouts
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/* && useradd --uid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/jcctl", "checkouts"]
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 COPY --from=build /src/target/release/context-gateway /usr/local/bin/context-gateway
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
