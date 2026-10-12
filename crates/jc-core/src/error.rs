@@ -163,6 +163,7 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "upstream-unavailable", status: 0, title: "Upstream Unavailable", hint: "A service behind the platform did not answer; try again in a minute." },
     ProblemType { slug: "upstream-redirect", status: 502, title: "Upstream Redirect", hint: "The service behind the platform answered with a redirect it may not follow; ask its owner for the final address." },
     ProblemType { slug: "service-unavailable", status: 503, title: "Service Unavailable", hint: "The platform is not ready for this yet; try again in a minute." },
+    ProblemType { slug: "space-moving", status: 503, title: "Space Moving", hint: "The space is moving to another broker and takes no writes; send the write again after the seconds Retry-After names." },
     ProblemType { slug: "delivery-timeout", status: 504, title: "Delivery Timeout", hint: "The receiver did not answer in time; check that it is reachable and try again." },
 ];
 
