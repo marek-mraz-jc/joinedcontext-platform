@@ -12,7 +12,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -243,11 +243,20 @@ async fn the_three_shapes_describe_the_same_entities() {
     assert_eq!(manifest["types"], json!(["AirQualityObserved"]));
 }
 
-/// EP-07, EP-61: a bundle is a second way to read what the endpoint already allows, never a
-/// second set of rules. An attribute the endpoint hides is in none of the three shapes.
+/// EP-07, EP-61: a bundle is a second way to read what the view already answers, never a second
+/// set of rules. An attribute the view withholds is in none of the three shapes (T-3651).
 #[tokio::test]
 async fn a_hidden_attribute_is_absent_from_every_shape_in_the_bundle() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2)])]).await;
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 34.2)])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
+    )
+    .await;
     let (_, archive, _) = download(
         gateway(&broker.url, endpoint(None, &["secret"])),
         &format!("/api/endpoint/{SLUG}/file.zip"),
