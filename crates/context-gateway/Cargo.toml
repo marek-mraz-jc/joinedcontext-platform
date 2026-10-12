@@ -12,7 +12,11 @@ arc-swap = "1"
 # base64url for the opaque OGC page cursor (EP-36); already in the tree via jsonwebtoken
 base64 = "0.22"
 argon2 = "0.5"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+# The Endpoint's WebSocket (EP-106) is relayed to the broker view's own: the client half of the
+# tungstenite axum's `ws` already links, and the stream split of the futures it already uses.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 http-body-util = "0.1"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }

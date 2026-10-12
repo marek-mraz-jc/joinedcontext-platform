@@ -163,11 +163,7 @@ pub(crate) async fn read_entities(
     request: &mut Request,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    if !served_by_view(
-        endpoint,
-        subject,
-        (slug, Operation::QueryEntity, request.headers()),
-    ) {
+    if !served_by_view(endpoint, (slug, Operation::QueryEntity, request.headers())) {
         return query_entities(gateway, endpoint, subject, params, request).await;
     }
     view_hop(endpoint, subject, request)?;
@@ -204,7 +200,6 @@ pub(crate) async fn query_temporal(
     let slug = endpoint.slug.as_str();
     if served_by_view(
         endpoint,
-        subject,
         (slug, Operation::RetrieveTemporal, request.headers()),
     ) {
         view_hop(endpoint, subject, request)?;
@@ -373,11 +368,7 @@ pub(crate) async fn paged_entities(
     limits: &tabular::Limits,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    if served_by_view(
-        endpoint,
-        subject,
-        (view, Operation::QueryEntity, request.headers()),
-    ) {
+    if served_by_view(endpoint, (view, Operation::QueryEntity, request.headers())) {
         return paged_view(gateway, endpoint, subject, (params, view), request, limits).await;
     }
     let verdict = gateway.pdp.decide(

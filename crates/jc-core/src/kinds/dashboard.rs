@@ -260,17 +260,6 @@ impl DashboardSpec {
         }
         Ok(())
     }
-
-    /// Every layer name any page draws, in page order, once each.
-    pub fn layer_refs(&self) -> Vec<&str> {
-        let mut seen = Vec::new();
-        for name in self.pages.iter().flat_map(|p| p.layers.iter()) {
-            if !seen.contains(&name.as_str()) {
-                seen.push(name.as_str());
-            }
-        }
-        seen
-    }
 }
 
 /// How a layer draws (UI-20, UI-21): the three MapLibre styles and the aggregations only

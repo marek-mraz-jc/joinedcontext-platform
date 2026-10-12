@@ -33,6 +33,7 @@ const FORGED: &[(&str, &str)] = &[
     ("x-jc-roles", "admin"),
     ("x-jc-client", "portal-api"),
     ("x-jc-restricted", "true"),
+    ("x-jc-did", "did:web:forged.example"),
     ("cookie", "session=stolen"),
 ];
 
@@ -173,6 +174,7 @@ fn assert_verified(headers: &HeaderMap, groups: &[&str]) {
     assert!(!roles.contains(&"admin".to_owned()), "{headers:?}");
     assert!(values(headers, "x-jc-client").is_empty(), "{headers:?}");
     assert!(values(headers, "x-jc-restricted").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-did").is_empty(), "{headers:?}");
     assert!(headers.get("authorization").is_none(), "{headers:?}");
     assert!(headers.get("cookie").is_none(), "{headers:?}");
 }

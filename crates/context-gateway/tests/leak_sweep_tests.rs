@@ -266,8 +266,10 @@ fn mcp(label: &'static str, tool: &str, arguments: Value) -> Probe {
     }
 }
 
+/// The data tools and the listings of `/mcp` are the broker's since T-3647 (Antares sweeps its
+/// MCP surface); what the gateway still answers itself is probed here.
 fn probes() -> Vec<Probe> {
-    let mut all = vec![
+    vec![
         get("file json", "/file.json"),
         get("file json two types", "/file.json?type=User,Vehicle"),
         get("file json q foreign", "/file.json?type=Vehicle&q=age%3E30"),
@@ -321,77 +323,8 @@ fn probes() -> Vec<Probe> {
         get("schema markdown", "/schema/1/model.md"),
         get("access", "/access"),
         get("endpoint record", ""),
-        mcp(
-            "mcp query one type",
-            "query_entities",
-            json!({ "type": "Vehicle" }),
-        ),
-        mcp(
-            "mcp query q foreign",
-            "query_entities",
-            json!({ "type": "Vehicle", "q": "age>30" }),
-        ),
-        mcp(
-            "mcp query attrs foreign",
-            "query_entities",
-            json!({ "type": "Vehicle", "attrs": ["age", "odometer"] }),
-        ),
-        mcp(
-            "mcp query outside",
-            "query_entities",
-            json!({ "type": "Depot" }),
-        ),
-        mcp("mcp get", "get_entity", json!({ "id": VEHICLE })),
-        mcp("mcp get depot", "get_entity", json!({ "id": DEPOT })),
-        mcp(
-            "mcp batch ids",
-            "batch_query",
-            json!({ "ids": [VEHICLE, USER, DEPOT] }),
-        ),
-        mcp(
-            "mcp batch type",
-            "batch_query",
-            json!({ "type": "Vehicle", "q": "odometer>1" }),
-        ),
-        mcp(
-            "mcp temporal",
-            "query_temporal",
-            json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" }),
-        ),
-        mcp(
-            "mcp temporal batch",
-            "batch_query_temporal",
-            json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" }),
-        ),
-        mcp(
-            "mcp retrieve temporal",
-            "retrieve_temporal",
-            json!({ "id": VEHICLE }),
-        ),
-        mcp("mcp types", "list_types", json!({ "details": true })),
         // The two registry item reads: one name the grant covers and one it does not, because the
         // answer to a type nobody granted must not differ from the answer to a type nobody has.
-        mcp("mcp type info", "get_type", json!({ "type": "Vehicle" })),
-        mcp(
-            "mcp type info outside",
-            "get_type",
-            json!({ "type": "Depot" }),
-        ),
-        mcp(
-            "mcp attribute info",
-            "get_attribute",
-            json!({ "attrId": "odometer" }),
-        ),
-        mcp(
-            "mcp attribute info outside",
-            "get_attribute",
-            json!({ "attrId": "secretPin" }),
-        ),
-        mcp(
-            "mcp attributes",
-            "list_attributes",
-            json!({ "details": true }),
-        ),
         mcp("mcp schema summary", "describe_schema", json!({})),
         mcp(
             "mcp schema linkml",
@@ -414,22 +347,7 @@ fn probes() -> Vec<Probe> {
             json!({ "format": "linkml", "entityType": "Depot" }),
         ),
         mcp("mcp access", "describe_access", json!({})),
-    ];
-    all.push(Probe {
-        label: "mcp resources list",
-        method: Method::POST,
-        uri: "/mcp".to_owned(),
-        accept: "application/json, text/event-stream",
-        body: Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" })),
-    });
-    all.push(Probe {
-        label: "mcp tools list",
-        method: Method::POST,
-        uri: "/mcp".to_owned(),
-        accept: "application/json, text/event-stream",
-        body: Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })),
-    });
-    all
+    ]
 }
 
 /// What in one answer may not be there: the canary or the schema description of an attribute its
@@ -654,7 +572,7 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    assert!(probed >= 60, "the sweep stopped after {probed} probes");
+    assert!(probed >= 40, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -695,6 +613,8 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::Zip => "/file.zip",
             Representation::OgcFeatures => "/ogc/features",
             Representation::Sta => "/sta/v1.1",
+            Representation::Odata => "/odata/v4",
+            Representation::WebSocket => "/ws",
         };
         assert!(
             swept(path),
@@ -703,41 +623,8 @@ async fn every_representation_and_tool_has_a_probe() {
         );
     }
 
-    // The tools the endpoint itself offers, asked of the running facade rather than of a list
-    // written down here, so a tool added tomorrow is caught by this test today.
-    let (upstream, _) = broker(true).await;
-    let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
-    );
-    let response = router(gateway)
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(format!("/api/endpoint/{SLUG}/mcp"))
-                .header("content-type", "application/json")
-                .header("accept", "application/json, text/event-stream")
-                .body(Body::from(
-                    json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
-                ))
-                .expect("a request"),
-        )
-        .await
-        .expect("the facade answers");
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("a body");
-    let listed: Value = serde_json::from_slice(&bytes).expect("the tool list is JSON");
-    let tools = listed["result"]["tools"]
-        .as_array()
-        .expect("the facade lists its tools")
-        .clone();
-    assert!(!tools.is_empty(), "the facade offered no tool at all");
-    for tool in tools {
-        // A writing tool creates something and is not a read surface; the sweep is about reads.
-        if tool["annotations"]["readOnlyHint"] != json!(true) {
-            continue;
-        }
-        let name = tool["name"].as_str().expect("a tool has a name");
+    // The tools the gateway still answers itself (T-3647); the rest are the broker's view's.
+    for name in ["describe_schema", "describe_access"] {
         assert!(
             swept(&format!("\"name\":\"{name}\"")),
             "the tool {name} is offered and never probed"
@@ -812,7 +699,7 @@ async fn no_surface_of_the_space_leaks() {
         .filter(|probe| probe.uri.starts_with("/mcp"))
         .collect();
     assert!(
-        asked.len() >= 25,
+        asked.len() >= 6,
         "the space sweep asks {} probes",
         asked.len()
     );

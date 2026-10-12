@@ -608,3 +608,24 @@ pub fn public_subscribe_policy(
     ))
     .expect("the policy spec parses")
 }
+
+/// A broker whose MCP surface answers every request with `tools` as its tool list and no
+/// resource: the hop an Endpoint's or a space's MCP message takes since T-3647. Returns its URL.
+pub async fn mcp_broker(tools: Value) -> String {
+    let stub = axum::Router::new().fallback(move || {
+        let tools = tools.clone();
+        async move {
+            axum::Json(
+                json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": tools, "resources": [] } }),
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    url
+}
