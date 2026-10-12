@@ -1068,7 +1068,11 @@ pub(crate) async fn serve_ngsi_ld(
                     return problem.into_response();
                 }
             }
-            if !units_filled.is_empty() {
+            let before = sent.len();
+            if let Err(problem) = quality_judged(&mut sent, &path, &endpoint) {
+                return problem.into_response();
+            }
+            if !units_filled.is_empty() || sent.len() != before {
                 parts.headers.remove(CONTENT_LENGTH);
                 parts
                     .headers
@@ -1814,6 +1818,8 @@ async fn view_payload(
                 tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
                 Box::new(problem.into_response())
             })?;
+            quality_judged(sent, path, endpoint)
+                .map_err(|problem| Box::new(problem.into_response()))?;
         }
     }
     if let Some(rules) = declared
@@ -2640,6 +2646,47 @@ fn filled_units(
         })?;
     }
     Ok(filled)
+}
+
+/// Judges a write against the space's quality rules (DM-87..DM-93): a rejecting rule refuses
+/// it, a flag or a quarantine is written into `sent` before it is forwarded.
+fn quality_judged(
+    sent: &mut Vec<u8>,
+    path: &str,
+    endpoint: &Endpoint,
+) -> Result<(), Box<ProblemDetails>> {
+    let Some(rules) = endpoint
+        .declared_types
+        .as_ref()
+        .map(|declared| &declared.quality)
+        .filter(|rules| !rules.is_empty())
+    else {
+        return Ok(());
+    };
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        // `judge_write` already refused a body that is not JSON; nothing is left to check.
+        return Ok(());
+    };
+    let addressed = operations::addressed_entity(path).map(query::decode);
+    let shape = crate::units::Shape {
+        addressed: addressed.as_deref(),
+        targeted: operations::targeted_attribute(path),
+    };
+    let before = payload.clone();
+    crate::quality::enforce(
+        &mut payload,
+        shape,
+        rules,
+        &endpoint.space,
+        chrono::Utc::now(),
+    )?;
+    if payload != before {
+        *sent = serde_json::to_vec(&payload).map_err(|error| {
+            tracing::error!(%error, "a write with its quality marks does not serialize");
+            Box::new(ProblemDetails::internal())
+        })?;
+    }
+    Ok(())
 }
 
 /// The answer to a write whose units the gateway filled, saying which (DM-06). A refused

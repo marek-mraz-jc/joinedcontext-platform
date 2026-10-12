@@ -743,6 +743,7 @@ fn declared_types(
                             .as_ref()
                             .map(RelationshipRules::from_schema)
                             .unwrap_or_default(),
+                        quality: space.quality.clone(),
                     },
                 );
             }
