@@ -137,6 +137,7 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "bad-request", status: 400, title: "Bad Request", hint: "Correct the request as the detail says and send it again." },
     ProblemType { slug: "invalid-body", status: 400, title: "Invalid Body", hint: "Send a JSON body of the documented shape; the detail names what is wrong." },
     ProblemType { slug: "urn-scheme", status: 400, title: "Entity Identifier Violates the URN Scheme", hint: "Use an entity id of the form urn:ngsi-ld:{Type}:{id}." },
+    ProblemType { slug: "quality-rule", status: 400, title: "Quality Rule Broken", hint: "Correct the attribute the detail names: a quality rule of the space refuses its value." },
     ProblemType { slug: "unauthorized", status: 401, title: "Authentication Required", hint: "Sign in again, or send a valid bearer token for this audience." },
     ProblemType { slug: "forbidden", status: 403, title: "Access Denied by Policy", hint: "Ask a project owner or an organization administrator for the role this needs." },
     ProblemType { slug: "domain-not-verified", status: 403, title: "Domain Not Verified", hint: "Verify the domain in the organization settings first." },
