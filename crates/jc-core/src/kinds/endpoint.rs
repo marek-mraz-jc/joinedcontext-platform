@@ -170,8 +170,10 @@ pub enum Representation {
     /// OGC API - Features Part 1 collections and items (`/ogc/features/`).
     #[serde(rename = "ogc-features")]
     OgcFeatures,
-    /// SensorThings API v1.1 read projection (`/sta/v1.1/`).
+    /// SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104).
     Sta,
+    /// OData v4 service of the Endpoint's view (`/odata/v4/`, EP-104).
+    Odata,
 }
 
 impl Representation {
@@ -187,8 +189,23 @@ impl Representation {
             Self::Zip => "zip",
             Self::OgcFeatures => "ogc-features",
             Self::Sta => "sta",
+            Self::Odata => "odata",
         }
     }
+
+    /// Every representation, in the order a record lists them.
+    pub const ALL: [Self; 10] = [
+        Self::NgsiLd,
+        Self::Mcp,
+        Self::GeoJson,
+        Self::Csv,
+        Self::Xlsx,
+        Self::Json,
+        Self::Zip,
+        Self::OgcFeatures,
+        Self::Sta,
+        Self::Odata,
+    ];
 }
 
 impl fmt::Display for Representation {
@@ -354,8 +371,13 @@ pub struct EndpointSpec {
     /// Optional NGSI-LD Policy URN attached to this endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_ref: Option<Urn>,
-    /// Set of enabled representation formats (EP-05).
-    pub enabled_representations: Vec<Representation>,
+    /// The representations this Endpoint serves, listed (EP-05). Omitted: every one but `sta`,
+    /// less `disabledRepresentations` (EP-104); see [`EndpointSpec::served_representations`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_representations: Option<Vec<Representation>>,
+    /// Representations an Endpoint without `enabledRepresentations` does not serve (EP-104).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_representations: Vec<Representation>,
     /// `false` turns the Endpoint's MCP instance off. Every Endpoint serves `mcp` without
     /// listing it, public or internal, gated by its own Policy (EP-24, T-2901); see
     /// [`EndpointSpec::served_representations`].
@@ -450,12 +472,21 @@ impl Kind for EndpointSpec {
 }
 
 impl EndpointSpec {
-    /// The representations this Endpoint serves: the ones it lists, then `ngsi-ld` and
-    /// `geojson`, which every Endpoint serves (EP-10, T-2939), and `mcp` unless `mcp: false`
-    /// (EP-24, T-2901). The gateway, the catalogue records and the publishers all read this,
-    /// never the list alone.
+    /// The representations this Endpoint serves: the ones it lists, or, when it lists none,
+    /// every one but `sta` less the disabled ones (EP-104); then `ngsi-ld` and `geojson`, which
+    /// every Endpoint serves (EP-10, T-2939), and `mcp` unless `mcp: false` (EP-24, T-2901).
+    /// The gateway, the catalogue records and the publishers all read this, never the list
+    /// alone.
     pub fn served_representations(&self) -> Vec<Representation> {
-        let mut served = self.enabled_representations.clone();
+        let mut served: Vec<Representation> = match &self.enabled_representations {
+            Some(listed) => listed.clone(),
+            None => Representation::ALL
+                .into_iter()
+                .filter(|r| *r != Representation::Sta)
+                .filter(|r| !self.disabled_representations.contains(r))
+                .filter(|r| *r != Representation::Mcp || self.mcp != Some(false))
+                .collect(),
+        };
         let mut always = vec![Representation::NgsiLd, Representation::GeoJson];
         if self.mcp != Some(false) {
             always.push(Representation::Mcp);
@@ -539,14 +570,40 @@ impl EndpointSpec {
             })?;
         }
 
-        if self.enabled_representations.is_empty() {
+        let listed = self.enabled_representations.as_deref().unwrap_or_default();
+        if self.enabled_representations.is_some() && listed.is_empty() {
             return Err(Error::Name {
                 field: "enabledRepresentations",
                 value: String::new(),
-                reason: "enabledRepresentations must not be empty",
+                reason: "enabledRepresentations must not be empty; omit it to serve every standard but sta (EP-104)",
             });
         }
-        if self.mcp == Some(false) && self.enabled_representations.contains(&Representation::Mcp) {
+        if self.enabled_representations.is_some() && !self.disabled_representations.is_empty() {
+            return Err(Error::Name {
+                field: "disabledRepresentations",
+                value: String::new(),
+                reason: "disabledRepresentations narrows the default set; beside enabledRepresentations drop one of the two (EP-104)",
+            });
+        }
+        let mut disabled = std::collections::BTreeSet::new();
+        for rep in &self.disabled_representations {
+            let reason = match rep {
+                Representation::NgsiLd | Representation::GeoJson => {
+                    "every Endpoint serves ngsi-ld and geojson (EP-10)"
+                }
+                Representation::Mcp => "mcp: false turns the MCP instance off (EP-24)",
+                _ if !disabled.insert(*rep) => {
+                    "duplicate representation in disabledRepresentations"
+                }
+                _ => continue,
+            };
+            return Err(Error::Name {
+                field: "disabledRepresentations",
+                value: rep.as_str().to_string(),
+                reason,
+            });
+        }
+        if self.mcp == Some(false) && listed.contains(&Representation::Mcp) {
             return Err(Error::Name {
                 field: "mcp",
                 value: "false".to_string(),
@@ -554,7 +611,7 @@ impl EndpointSpec {
             });
         }
         let mut seen = std::collections::BTreeSet::new();
-        for rep in &self.enabled_representations {
+        for rep in listed {
             if !seen.insert(*rep) {
                 return Err(Error::Name {
                     field: "enabledRepresentations",
@@ -581,7 +638,7 @@ impl EndpointSpec {
         }
 
         if let Some(ref publish) = self.publish {
-            publish.validate(&self.enabled_representations)?;
+            publish.validate(&self.served_representations())?;
         }
 
         if let Some(ref catalog) = self.catalog {

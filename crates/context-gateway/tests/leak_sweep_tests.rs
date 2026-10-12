@@ -582,6 +582,7 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::Zip => "/file.zip",
             Representation::OgcFeatures => "/ogc/features",
             Representation::Sta => "/sta/v1.1",
+            Representation::Odata => "/odata/v4",
         };
         assert!(
             swept(path),

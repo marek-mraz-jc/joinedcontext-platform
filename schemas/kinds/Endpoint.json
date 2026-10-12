@@ -569,12 +569,22 @@
           ],
           "description": "How the Endpoint takes new entities: minted ids and a daily cap (EP-97)."
         },
-        "enabledRepresentations": {
-          "description": "Set of enabled representation formats (EP-05).",
+        "disabledRepresentations": {
+          "description": "Representations an Endpoint without `enabledRepresentations` does not serve (EP-104).",
           "items": {
             "$ref": "#/definitions/Representation"
           },
           "type": "array"
+        },
+        "enabledRepresentations": {
+          "description": "The representations this Endpoint serves, listed (EP-05). Omitted: every one but `sta`, less `disabledRepresentations` (EP-104); see [`EndpointSpec::served_representations`].",
+          "items": {
+            "$ref": "#/definitions/Representation"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "fileLimits": {
           "anyOf": [
@@ -679,7 +689,6 @@
       "required": [
         "audience",
         "contextSpaceRef",
-        "enabledRepresentations",
         "slug"
       ],
       "type": "object"
@@ -1104,9 +1113,16 @@
           "type": "string"
         },
         {
-          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`).",
+          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104).",
           "enum": [
             "sta"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "OData v4 service of the Endpoint's view (`/odata/v4/`, EP-104).",
+          "enum": [
+            "odata"
           ],
           "type": "string"
         }

@@ -95,6 +95,12 @@ fn served(representation: Representation) -> Served {
             media_type: "application/json",
             conforms_to: Some("http://www.opengis.net/spec/sensorthings/1.1"),
         },
+        Representation::Odata => Served {
+            path: "odata/v4/",
+            title: "OData v4",
+            media_type: "application/json",
+            conforms_to: Some("https://docs.oasis-open.org/odata/odata/v4.01/"),
+        },
     }
 }
 
@@ -221,7 +227,10 @@ fn file_type_iri(representation: Representation) -> String {
         Representation::Csv => "CSV",
         Representation::Xlsx => "XLSX",
         Representation::Zip => "ZIP",
-        Representation::Mcp | Representation::Json | Representation::Sta => "JSON",
+        Representation::Mcp
+        | Representation::Json
+        | Representation::Sta
+        | Representation::Odata => "JSON",
     };
     format!("http://publications.europa.eu/resource/authority/file-type/{code}")
 }
