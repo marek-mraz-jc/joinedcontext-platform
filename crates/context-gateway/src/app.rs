@@ -589,7 +589,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
-        // The OData v4 service of the view (EP-104, T-3830), read-only until T-3939.
+        // The OData v4 service of the view (EP-104, T-3830), its writes after the Endpoint's write guards (T-3939).
         .route("/api/endpoint/{slug}/odata/v4", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
@@ -1502,7 +1502,10 @@ fn operation_or_answer(
 }
 
 /// The request body, up to the organization's limit, or the answer that names the limit.
-async fn read_body(gateway: &Gateway, body: Body) -> Result<Vec<u8>, Box<Response<Body>>> {
+pub(crate) async fn read_body(
+    gateway: &Gateway,
+    body: Body,
+) -> Result<Vec<u8>, Box<Response<Body>>> {
     let limit = gateway.max_request_body();
     axum::body::to_bytes(body, limit)
         .await
@@ -1525,7 +1528,7 @@ async fn read_body(gateway: &Gateway, body: Body) -> Result<Vec<u8>, Box<Respons
 /// Reserves one of the day's creates of a form Endpoint (EP-97), per caller as the rate limit
 /// keys them, so one sender takes a tenth at most (T-3285). `Some(now)` is the reservation to
 /// release when the broker does not take the create.
-fn reserve_create(
+pub(crate) fn reserve_create(
     gateway: &Gateway,
     endpoint: &Endpoint,
     caller: &str,
@@ -1858,7 +1861,7 @@ fn federated_refusal(
     )
 }
 
-async fn view_request(
+pub(crate) async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,

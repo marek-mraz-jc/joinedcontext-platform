@@ -235,26 +235,3 @@ async fn a_caller_without_a_grant_is_refused_on_every_surface() {
         "nothing reached the broker"
     );
 }
-
-/// OData is read-only at the gateway until the Endpoint's write guards cover it (T-3939).
-#[tokio::test]
-async fn odata_writes_are_refused_with_the_methods_it_offers() {
-    let realm = common::Realm::new();
-    let dir = repo("writes");
-    let (upstream, hops) = broker().await;
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(format!(
-            "/api/endpoint/{DEFAULTED}/odata/v4/BikeHireDockingStation"
-        ))
-        .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(Body::from("{}"))
-        .expect("a request");
-    let response = app(&dir, &upstream, &realm)
-        .oneshot(request)
-        .await
-        .expect("the gateway answers");
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-    assert!(response.headers().contains_key(axum::http::header::ALLOW));
-    assert!(hops.lock().expect("the hop log").is_empty());
-}
