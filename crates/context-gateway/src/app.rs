@@ -1625,6 +1625,18 @@ pub(crate) async fn serve_ngsi_ld_view(
             return refusal;
         }
     }
+    let mut request = request;
+    // The Endpoint's type list as its reads show the caller (T-4080); a caller without a read
+    // grant, and the details form, are the view's to answer.
+    if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
+    {
+        match crate::handlers::reads::listed_types(gateway, &endpoint, &subject, &mut request).await
+        {
+            Ok(Some(list)) => return typed_json_response(&list, "application/json"),
+            Ok(None) => {}
+            Err(answer) => return *answer,
+        }
+    }
     // The audit line names the principal the gateway established (PF-46); the decision is the
     // broker's, and its answer says what it was.
     tracing::info!(
@@ -1636,7 +1648,6 @@ pub(crate) async fn serve_ngsi_ld_view(
         operation = %operation.as_str(),
         "forwarded to the broker's view"
     );
-    let mut request = request;
     match view_request(gateway, &endpoint, &subject, &path, operation, &mut request).await {
         Ok(()) => {}
         Err(answer) => return *answer,
