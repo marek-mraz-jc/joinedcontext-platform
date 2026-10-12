@@ -60,6 +60,14 @@ pub fn is_derived(name: &str) -> bool {
     name.starts_with(ACCOUNT_PREFIX)
 }
 
+/// The name of each project's pipeline-test harness principal (PL-43, T-4050): the Portal tests an
+/// unsaved spec and probes a DataSource as `{project}/pipeline-test` through the token service,
+/// so the harness presents no client secret. Its account is [`account_name`] of it, its
+/// Kubernetes ServiceAccount [`kubernetes_service_account`] of it, and its one audience the
+/// Portal's internal listener. No Pipeline may take the name: it would share the harness's
+/// principal.
+pub const HARNESS: &str = "pipeline-test";
+
 /// What one Pipeline brings with it: its principal and the Policies granted to it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Derived {
@@ -248,6 +256,18 @@ targetEndpoint: urn:ngsi-ld:Endpoint:zilina.sk:zilina-uniza:zilina-uniza
 output: { type: CreativeWork, mode: upsert }
 expiry: { after: 21d, types: [CreativeWork] }
 "#;
+
+    /// T-4050: the harness is a pipeline name like any other to the token service, so its account
+    /// and Kubernetes ServiceAccount follow the same derivation.
+    #[test]
+    fn the_harness_principal_is_derived_like_a_pipeline() {
+        assert_eq!(account_name(HARNESS), "pl-pipeline-test");
+        assert_eq!(
+            kubernetes_service_account("helsinki", HARNESS),
+            "pl-helsinki-pipeline-test"
+        );
+        assert!(crate::names::validate_dns1123_label(HARNESS).is_ok());
+    }
 
     /// PL-19: the principal, its Kubernetes ServiceAccount and the namespace are the pipeline's
     /// own, and the client derived from the name is `{project}-pl-{pipeline}`.
