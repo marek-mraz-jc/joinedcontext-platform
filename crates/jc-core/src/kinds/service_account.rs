@@ -128,6 +128,141 @@ pub struct Credential {
     /// Whitelist of allowed client IP CIDR blocks (PF-36).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ip_allow_list: Vec<String>,
+    /// The public keys a device outside the cluster signs its client assertion with (PF-47,
+    /// T-4015); only on an `oauth-client` credential, never beside `workload`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Jwks>,
+}
+
+/// The most keys one credential may list: enough for a rotation, not a key store.
+pub const MAX_DEVICE_KEYS: usize = 5;
+
+/// A JSON Web Key Set of public keys (RFC 7517), the device's half of its key pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Jwks {
+    /// One to five public keys, each with its own `kid`.
+    pub keys: Vec<PublicJwk>,
+}
+
+/// One public key (RFC 7517/7518). It has no member for a private or symmetric key, so a JWK
+/// carrying `d`, `p`, `q`, `dp`, `dq`, `qi` or `k` does not read at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublicJwk {
+    /// Key type: `EC` (P-256) or `RSA` (2048 bits or more).
+    pub kty: String,
+    /// Key id, unique within the set; the device names it in its assertion header.
+    pub kid: String,
+    /// Curve of an `EC` key: `P-256`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crv: Option<String>,
+    /// X coordinate of an `EC` key, base64url.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<String>,
+    /// Y coordinate of an `EC` key, base64url.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<String>,
+    /// Modulus of an `RSA` key, base64url.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<String>,
+    /// Public exponent of an `RSA` key, base64url.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e: Option<String>,
+    /// Intended algorithm: `ES256` for an `EC` key, `RS256` for an `RSA` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alg: Option<String>,
+    /// Intended use: `sig`.
+    #[serde(default, rename = "use", skip_serializing_if = "Option::is_none")]
+    pub use_: Option<String>,
+}
+
+impl Jwks {
+    /// Every rule of PF-47 for a device's keys: one to five, each `kid` once, each a public
+    /// P-256 or RSA-2048+ signing key whose members are what its type needs and no more.
+    pub fn validate(&self) -> Result<()> {
+        fn refuse(value: String, reason: &'static str) -> Result<()> {
+            Err(Error::Name {
+                field: "spec.credentials.jwks",
+                value,
+                reason,
+            })
+        }
+        if self.keys.is_empty() || self.keys.len() > MAX_DEVICE_KEYS {
+            return refuse(
+                self.keys.len().to_string(),
+                "a device key set holds one to five keys",
+            );
+        }
+        let mut kids = std::collections::BTreeSet::new();
+        for key in &self.keys {
+            if key.kid.trim().is_empty() || key.kid.len() > 128 {
+                return refuse(
+                    key.kid.clone(),
+                    "every key needs a kid of 1 to 128 characters",
+                );
+            }
+            if !kids.insert(key.kid.as_str()) {
+                return refuse(key.kid.clone(), "two keys share this kid");
+            }
+            if key.use_.as_deref().is_some_and(|u| u != "sig") {
+                return refuse(
+                    key.kid.clone(),
+                    "a device key is for signing: `use` is `sig`",
+                );
+            }
+            match key.kty.as_str() {
+                "EC" => {
+                    if key.crv.as_deref() != Some("P-256")
+                        || key.alg.as_deref().is_some_and(|a| a != "ES256")
+                    {
+                        return refuse(key.kid.clone(), "an EC key is P-256, for ES256");
+                    }
+                    // A P-256 coordinate is 32 bytes: 43 base64url characters.
+                    if b64(&key.x).map(str::len) != Some(43)
+                        || b64(&key.y).map(str::len) != Some(43)
+                    {
+                        return refuse(
+                            key.kid.clone(),
+                            "an EC key needs x and y of 32 bytes each, base64url",
+                        );
+                    }
+                    if key.n.is_some() || key.e.is_some() {
+                        return refuse(key.kid.clone(), "an EC key carries no n or e");
+                    }
+                }
+                "RSA" => {
+                    if key.alg.as_deref().is_some_and(|a| a != "RS256") {
+                        return refuse(key.kid.clone(), "an RSA key is for RS256");
+                    }
+                    // 2048 bits are 256 bytes: at least 342 base64url characters.
+                    if b64(&key.n).is_none_or(|n| n.len() < 342) || b64(&key.e).is_none() {
+                        return refuse(
+                            key.kid.clone(),
+                            "an RSA key needs n of 2048 bits or more and e, base64url",
+                        );
+                    }
+                    if key.crv.is_some() || key.x.is_some() || key.y.is_some() {
+                        return refuse(key.kid.clone(), "an RSA key carries no crv, x or y");
+                    }
+                }
+                _ => return refuse(key.kty.clone(), "a device key is EC (P-256) or RSA"),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A member's value when it is non-empty base64url, the form RFC 7518 writes it in.
+fn b64(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|v| is_base64url(v))
+}
+
+fn is_base64url(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Category of service account credential.
@@ -314,6 +449,25 @@ impl ServiceAccountSpec {
             for cidr in &cred.ip_allow_list {
                 validate_cidr(cidr)?;
             }
+
+            if let Some(jwks) = &cred.jwks {
+                if cred.kind != CredentialKind::OauthClient {
+                    return Err(Error::Name {
+                        field: "spec.credentials.jwks",
+                        value: cred.name.clone(),
+                        reason: "only an oauth-client credential signs in by a key pair",
+                    });
+                }
+                if self.workload.is_some() {
+                    return Err(Error::Name {
+                        field: "spec.credentials.jwks",
+                        value: cred.name.clone(),
+                        reason: "an account bound to a workload signs in by its pod's token, \
+                                 not by a key pair as well (PF-47)",
+                    });
+                }
+                jwks.validate()?;
+            }
         }
 
         if let Some(ref limits) = self.limits {
@@ -332,6 +486,15 @@ impl ServiceAccountSpec {
         }
 
         Ok(())
+    }
+
+    /// The public keys a device signs in with, when one `oauth-client` credential declares them
+    /// (PF-47, T-4015); the first such credential wins, `validate` having refused a mixed one.
+    pub fn device_keys(&self) -> Option<&Jwks> {
+        self.credentials
+            .iter()
+            .filter(|c| c.kind == CredentialKind::OauthClient)
+            .find_map(|c| c.jwks.as_ref())
     }
 
     /// Returns `true` if this service account registers any credential of kind [`CredentialKind::ApiKey`] (PF-37).

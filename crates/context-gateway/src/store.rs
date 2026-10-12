@@ -34,8 +34,73 @@ pub type Tables = (
     Agreements,
     Limits,
     McpServers,
+    SpaceBrokers,
     crate::mqtt::Brokers,
 );
+
+/// The broker each space lives on, by its tenant segment, and each view, by its name: an
+/// Endpoint's slug or `cs-{space}` (PF-111, ADR-N-047). A space whose `brokerRef` names no
+/// broker maps to `""`, which the proxy refuses rather than sending to `main`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SpaceBrokers {
+    /// The broker of each space, by the tenant segment the gateway pins.
+    pub by_space: BTreeMap<String, String>,
+    /// The broker of each view, by the name in `/x/views/{view}`.
+    pub by_view: BTreeMap<String, String>,
+    /// The spaces a move job holds read-only, by tenant segment, with the views that reach
+    /// them (PF-115, ADR-N-046 §2.6).
+    pub moving: BTreeSet<String>,
+}
+
+/// [`SpaceBrokers`] of a repository, through the one lookup every component shares
+/// ([`jc_core::kinds::broker_of`]).
+pub fn brokers_of(repo: &Repository, endpoints: &[Endpoint]) -> SpaceBrokers {
+    let brokers: Vec<(String, jc_core::kinds::ContextBrokerSpec)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "ContextBroker")
+        .filter_map(|(id, resource)| Some((id.name.clone(), spec_of(&resource.manifest)?)))
+        .collect();
+    let mut table = SpaceBrokers::default();
+    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "ContextSpace") {
+        let Some(spec) = spec_of::<ContextSpaceSpec>(&resource.manifest) else {
+            continue;
+        };
+        let project = id.namespace.clone().unwrap_or_default();
+        let segment = repo.space_segment(&project, &id.name);
+        let named = brokers.iter().map(|(name, spec)| (name.as_str(), spec));
+        let broker = match jc_core::kinds::broker_of(spec.broker_ref.as_deref(), named) {
+            Ok(broker) => broker.to_owned(),
+            Err(error) => {
+                tracing::error!(space = %segment, %error, "the space's broker is not declared; its requests are refused");
+                String::new()
+            }
+        };
+        let moving = resource
+            .manifest
+            .metadata
+            .rest
+            .get("annotations")
+            .and_then(|annotations| annotations.get(jc_core::envelope::annotations::MOVING_TO))
+            .is_some();
+        if moving {
+            table.moving.insert(segment.clone());
+            table.moving.insert(format!("cs-{segment}"));
+        }
+        table
+            .by_view
+            .insert(format!("cs-{segment}"), broker.clone());
+        table.by_space.insert(segment, broker);
+    }
+    for endpoint in endpoints {
+        if let Some(broker) = table.by_space.get(&endpoint.space) {
+            table.by_view.insert(endpoint.slug.clone(), broker.clone());
+        }
+        if table.moving.contains(&endpoint.space) {
+            table.moving.insert(endpoint.slug.clone());
+        }
+    }
+    table
+}
 
 const GATEWAY_BODY: &str = "spec.limits.gateway.maxRequestBodyMegabytes";
 
@@ -169,14 +234,17 @@ pub fn load_from(
 }
 
 fn tables(repo: &Repository, root: &Path) -> Tables {
+    let endpoints = endpoints_with_models(repo, Some(root));
+    let homes = brokers_of(repo, &endpoints);
     (
-        endpoints_with_models(repo, Some(root)),
+        endpoints,
         spaces_of(repo, Some(root)),
         accounts_of(repo),
         federations_of(repo),
         agreements_of(repo),
         limits_of(repo),
         servers_of(repo),
+        homes,
         crate::mqtt::brokers_of(repo),
     )
 }
@@ -249,8 +317,17 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers, brokers) =
-        load_from(dir, checkouts)?;
+    let (
+        mut endpoints,
+        mut spaces,
+        accounts,
+        federations,
+        agreements,
+        limits,
+        servers,
+        homes,
+        brokers,
+    ) = load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -292,6 +369,7 @@ pub fn load_with_previews(
         agreements,
         limits,
         servers,
+        homes,
         brokers,
     ))
 }
@@ -743,6 +821,7 @@ fn declared_types(
                             .as_ref()
                             .map(RelationshipRules::from_schema)
                             .unwrap_or_default(),
+                        quality: space.quality.clone(),
                     },
                 );
             }

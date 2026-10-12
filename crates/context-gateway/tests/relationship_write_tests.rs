@@ -153,6 +153,7 @@ fn endpoint(readable: &[&str]) -> Endpoint {
                 .collect(),
             units: Default::default(),
             relationships: rules(),
+            quality: Vec::new(),
         }),
         catalog: None,
         roles: Default::default(),
