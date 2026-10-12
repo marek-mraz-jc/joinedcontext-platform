@@ -60,6 +60,8 @@ pub struct Routes {
     named: std::collections::HashMap<String, String>,
     /// Tenants and views a move job holds read-only (PF-115).
     moving: std::collections::HashSet<String>,
+    /// The tenants alone of `moving`: the series the move job reads, never a view's slug.
+    held: std::collections::HashSet<String>,
 }
 
 /// How long a writer is told to wait while its space moves (ADR-N-046 §2.6).
@@ -171,12 +173,20 @@ impl Broker {
                 .map(|(key, broker)| (key.clone(), address(broker)))
                 .collect()
         };
-        self.routes.store(std::sync::Arc::new(Routes {
+        let routes = Routes {
             by_tenant: off_main(&brokers.by_space),
             by_view: off_main(&brokers.by_view),
             named: brokers.by_view.clone().into_iter().collect(),
             moving: brokers.moving.iter().cloned().collect(),
-        }));
+            held: brokers
+                .moving
+                .iter()
+                .filter(|key| brokers.by_space.contains_key(*key))
+                .cloned()
+                .collect(),
+        };
+        crate::telemetry::held(&self.routes.load().held, &routes.held);
+        self.routes.store(std::sync::Arc::new(routes));
     }
 
     /// The name of the broker a view (an Endpoint's slug or `cs-{space}`) lives on.
