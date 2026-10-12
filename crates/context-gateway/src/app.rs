@@ -4227,12 +4227,16 @@ async fn mcp_answer(
         // The Portal writes no view whose id the broker refuses (`[a-z0-9-]{1,63}`), so a space
         // whose name leaves no room for `cs-` has no MCP surface to forward to.
         tracing::info!(%view, "MCP refused: no broker view can carry this id");
-        return ProblemDetails::new(501, "no-view", "Not Implemented")
-            .with_detail(
-                "this space's name is too long for a broker view, so its MCP surface is not \
+        return ProblemDetails::new(
+            503,
+            "no-view",
+            "The access surface of this endpoint is not served",
+        )
+        .with_detail(
+            "this space's name is too long for a broker view, so its MCP surface is not \
                  served; a space name of at most 60 characters is",
-            )
-            .into_response();
+        )
+        .into_response();
     }
 
     let operation = mcp_operation(calls.then_some(tool.as_deref().unwrap_or_default()));
