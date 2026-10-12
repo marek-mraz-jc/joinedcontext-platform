@@ -35,6 +35,7 @@ pub type Tables = (
     Limits,
     McpServers,
     SpaceBrokers,
+    crate::mqtt::Brokers,
 );
 
 /// The broker each space lives on, by its tenant segment, and each view, by its name: an
@@ -234,7 +235,7 @@ pub fn load_from(
 
 fn tables(repo: &Repository, root: &Path) -> Tables {
     let endpoints = endpoints_with_models(repo, Some(root));
-    let brokers = brokers_of(repo, &endpoints);
+    let homes = brokers_of(repo, &endpoints);
     (
         endpoints,
         spaces_of(repo, Some(root)),
@@ -243,7 +244,8 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         agreements_of(repo),
         limits_of(repo),
         servers_of(repo),
-        brokers,
+        homes,
+        crate::mqtt::brokers_of(repo),
     )
 }
 
@@ -315,8 +317,17 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers, brokers) =
-        load_from(dir, checkouts)?;
+    let (
+        mut endpoints,
+        mut spaces,
+        accounts,
+        federations,
+        agreements,
+        limits,
+        servers,
+        homes,
+        brokers,
+    ) = load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -358,6 +369,7 @@ pub fn load_with_previews(
         agreements,
         limits,
         servers,
+        homes,
         brokers,
     ))
 }

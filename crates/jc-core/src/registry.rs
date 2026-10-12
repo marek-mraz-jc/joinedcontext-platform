@@ -91,6 +91,7 @@ catalogue!(
     crate::kinds::KnowledgeSourceSpec,
     crate::kinds::AssistantDeploymentSpec,
     crate::kinds::McpServerSpec,
+    crate::kinds::MqttBrokerSpec,
     crate::kinds::BlueprintSpec,
     crate::kinds::AgentProfileSpec,
     crate::kinds::DataSpaceParticipantSpec,

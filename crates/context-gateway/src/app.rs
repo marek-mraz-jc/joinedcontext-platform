@@ -110,6 +110,8 @@ pub struct Gateway {
     agreements: ArcSwap<Agreements>,
     /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
     servers: ArcSwap<crate::mcp::server::McpServers>,
+    /// The MQTT edge brokers, swapped whole with the rest (ADR-N-048, PL-75).
+    brokers: ArcSwap<crate::mqtt::Brokers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// The base a rewritten notification endpoint carries, when it is not the public one.
@@ -185,6 +187,7 @@ impl Gateway {
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
             servers: ArcSwap::from_pointee(Vec::new()),
+            brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
             egress_url: None,
             private_hosts: Vec::new(),
@@ -299,6 +302,21 @@ impl Gateway {
             audiences.push(format!("{base}{}", server.path()));
         }
         audiences
+    }
+
+    /// Replaces the MQTT edge brokers (ADR-N-048): from the next CONNECT on.
+    pub fn replace_brokers(&self, brokers: crate::mqtt::Brokers) {
+        self.brokers.store(Arc::new(brokers));
+    }
+
+    /// The MQTT edge brokers served now.
+    pub fn brokers(&self) -> Arc<crate::mqtt::Brokers> {
+        self.brokers.load_full()
+    }
+
+    /// The service accounts a token's `azp` resolves through now.
+    pub fn service_accounts(&self) -> Arc<ServiceAccounts> {
+        self.accounts.load_full()
     }
 
     /// Replaces the named MCP servers (ADR-N-043): from the next request on.

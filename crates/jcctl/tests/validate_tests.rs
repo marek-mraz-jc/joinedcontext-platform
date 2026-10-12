@@ -1353,3 +1353,81 @@ fn a_space_on_an_undeclared_broker_or_two_defaults_are_refused() {
         report.findings
     );
 }
+
+// --- T-3837: MQTT edge brokers resolved in the repository (MF-54, PL-76, ADR-N-048) ---
+
+fn camera_account(dir: &Path, name: &str) {
+    write(
+        dir,
+        &format!("projects/ovzdusie/access/serviceaccounts/{name}.yaml"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"a camera\"\n  roles:\n    - role: space-writer\n      scope:\n        project: ovzdusie\n  credentials:\n    - kind: oauth-client\n      name: default\n"),
+    );
+}
+
+fn mqtt_broker(dir: &Path, name: &str, accounts: &str, port: &str) {
+    write(
+        dir,
+        &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  roles:\n    - name: camera\n      serviceAccounts: [{accounts}]\n      publish: [\"cameras/${{clientid}}/#\"]\n{port}"),
+    );
+}
+
+fn broker_source(dir: &Path, broker: &str) {
+    write(
+        dir,
+        "projects/ovzdusie/datasources/cameras.yaml",
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: DataSource\nmetadata:\n  name: cameras\n  namespace: ovzdusie\nspec:\n  type: mqtt\n  mqtt:\n    brokerRef: {{ kind: MqttBroker, name: {broker} }}\n    topics: [\"cameras/+/frame\"]\n"),
+    );
+}
+
+fn with_mqtt(report: &validate::Report) -> Vec<&str> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("MF-54") || f.message.contains("PL-76"))
+        .map(|f| f.message.as_str())
+        .collect()
+}
+
+/// MF-54, PL-76: two brokers of a project, each on its own port, with their cameras declared
+/// and a DataSource reading one of them, are no finding.
+#[test]
+fn brokers_with_their_accounts_ports_and_a_reading_data_source_are_valid() {
+    let dir = valid_repo("mqtt-broker-ok");
+    camera_account(&dir, "cam-north");
+    mqtt_broker(&dir, "cameras", "cam-north", "  port: 18830\n");
+    mqtt_broker(&dir, "meters", "cam-north", "  port: 18831\n");
+    broker_source(&dir, "cameras");
+    let report = validate::run(&dir);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-54, PL-76: an account the project does not declare, a port another broker holds (named),
+/// and a brokerRef to no broker are each a finding.
+#[test]
+fn an_unknown_account_a_taken_port_and_a_missing_broker_are_named() {
+    let dir = valid_repo("mqtt-broker-refused");
+    mqtt_broker(&dir, "cameras", "cam-gone", "  port: 18830\n");
+    mqtt_broker(&dir, "meters", "cam-gone", "  port: 18830\n");
+    broker_source(&dir, "nowhere");
+    let report = validate::run(&dir);
+    let found = with_mqtt(&report);
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("ServiceAccount `cam-gone`")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("18830 is already held by") && m.contains("cameras")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|m| m.contains("MqttBroker `nowhere`")),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
