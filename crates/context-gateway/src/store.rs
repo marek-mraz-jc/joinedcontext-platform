@@ -34,6 +34,7 @@ pub type Tables = (
     Agreements,
     Limits,
     McpServers,
+    crate::mqtt::Brokers,
 );
 
 const GATEWAY_BODY: &str = "spec.limits.gateway.maxRequestBodyMegabytes";
@@ -176,6 +177,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         agreements_of(repo),
         limits_of(repo),
         servers_of(repo),
+        crate::mqtt::brokers_of(repo),
     )
 }
 
@@ -247,7 +249,7 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers) =
+    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers, brokers) =
         load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -290,15 +292,8 @@ pub fn load_with_previews(
         agreements,
         limits,
         servers,
+        brokers,
     ))
-}
-
-/// The endpoint table a loaded repository describes.
-///
-/// Deterministic: the repository is indexed by resource identity, so two runs on the same
-/// commit build the same table in the same order (CC-27).
-pub fn endpoints_of(repo: &Repository) -> Vec<Endpoint> {
-    endpoints_with_models(repo, None)
 }
 
 /// The client `app-{name}` when Endpoint `endpoint` of `project` is the one the Portal generates
@@ -316,7 +311,8 @@ fn app_of(repo: &Repository, project: &str, endpoint: &str) -> Option<String> {
 ///
 /// `DataModel.spec.artifacts` names files committed beside the LinkML source, so the
 /// schema surface publishes what was reviewed rather than what a compiler produces now
-/// (DM-02, EP-46).
+/// (DM-02, EP-46). Deterministic: the repository is indexed by resource identity, so two runs
+/// on the same commit build the same table in the same order (CC-27).
 pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endpoint> {
     let policies = policies_by_space(repo);
     let models = models_by_space(repo, root);

@@ -13,7 +13,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Method, Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -86,6 +86,21 @@ fn station() -> Value {
             "value": { "type": "Point", "coordinates": [19.146, 48.736] }
         }
     })
+}
+
+/// The broker's view of this endpoint for `public` (T-3651): the station without `operatorPhone`,
+/// the attribute the endpoint hides, which the Portal writes into the view.
+async fn viewed() -> BrokerStub {
+    BrokerStub::narrowing(
+        vec![json!([station()])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["name", "pm10", "location"]),
+        ),
+    )
+    .await
 }
 
 fn sta(path: &str) -> String {
@@ -327,7 +342,7 @@ async fn an_expand_the_profile_does_not_have_adds_nothing() {
         "operatorPhone",
         "../../etc/passwd",
     ] {
-        let broker = BrokerStub::start(vec![json!([station()])]).await;
+        let broker = viewed().await;
         let (status, body) = get(
             gateway(&broker.url, endpoint(&["operatorPhone"])),
             &sta(&format!("/Things?$expand={raw}")),
@@ -343,15 +358,19 @@ async fn an_expand_the_profile_does_not_have_adds_nothing() {
     }
 }
 
-/// A `$filter` on an attribute the endpoint hides asks the broker nothing and answers nothing: the
-/// type whose attributes do not cover the filter leaves the query (T-1862, EP-61).
+/// A `$filter` on an attribute the endpoint hides answers nothing of it (T-1862, EP-61). Through
+/// the broker's view (T-3651) the filter reaches the engine, which reads a hidden attribute as
+/// absent, so the match is the one an attribute that does not exist would give and is no oracle
+/// (Antares `policy_filter_by_type::q_on_an_attribute_hidden_for_user_reads_it_as_absent`,
+/// `views_props::q_over_hidden_equals_q_over_absent`). What stays the gateway's is that the
+/// hop goes to the view and nothing hidden comes back.
 #[tokio::test]
 async fn a_filter_on_a_hidden_attribute_reaches_neither_the_broker_nor_the_answer() {
     for filter in [
         "operatorPhone%20eq%20%27x%27",
         "operatorPhone%20ne%20%27y%27",
     ] {
-        let broker = BrokerStub::start(vec![json!([station()])]).await;
+        let broker = viewed().await;
         let (status, body) = get(
             gateway(&broker.url, endpoint(&["operatorPhone"])),
             &sta(&format!("/Things?$filter={filter}")),
@@ -359,15 +378,14 @@ async fn a_filter_on_a_hidden_attribute_reaches_neither_the_broker_nor_the_answe
         .await;
 
         assert_eq!(status, StatusCode::OK, "{filter}: {body}");
-        let collection: Value = serde_json::from_str(&body).expect("a collection");
-        assert_eq!(collection["value"], json!([]), "{filter}: {body}");
         assert!(
-            broker
-                .hops()
-                .iter()
-                .all(|hop| !hop.query.contains("operatorPhone")),
-            "{filter}: {:?}",
-            broker.hops()
+            !body.contains("operatorPhone") && !body.contains("+421"),
+            "{filter}: {body}"
+        );
+        let hops = broker.hops();
+        assert!(
+            !hops.is_empty() && hops.iter().all(|hop| hop.view == SLUG),
+            "{filter}: {hops:?}"
         );
     }
 }
@@ -426,8 +444,9 @@ async fn the_service_document_is_one_document_for_every_spelling_of_the_root() {
     }
 }
 
-/// A caller no grant names reaches no set at all, and the broker is not asked; the service document
-/// stays readable, because it describes the surface and not the data.
+/// A caller no grant names reaches no set at all: the view's engine refuses them, and nothing of
+/// the data comes back (T-3651; before, the gateway's PDP refused before the hop). The service
+/// document stays readable, because it describes the surface and not the data.
 #[tokio::test]
 async fn a_caller_no_grant_names_reaches_no_set() {
     for path in [
@@ -437,7 +456,14 @@ async fn a_caller_no_grant_names_reaches_no_set() {
         "/Observations",
         &format!("/Datastreams({URN}%2Fpm10)/Observations"),
     ] {
-        let broker = BrokerStub::start(vec![json!([station()])]).await;
+        let broker = BrokerStub::narrowing(
+            vec![json!([station()])],
+            View {
+                name: SLUG.to_owned(),
+                rules: Vec::new(),
+            },
+        )
+        .await;
         let mut ungranted = endpoint(&[]);
         ungranted.policies = Vec::new();
 
@@ -448,7 +474,7 @@ async fn a_caller_no_grant_names_reaches_no_set() {
             "{path}: {status} {body}"
         );
         assert!(!body.contains("Kallio"), "{path}: {body}");
-        assert!(broker.hops().is_empty(), "{path}: {:?}", broker.hops());
+        assert!(!body.contains("AccessDenied"), "{path}: {body}");
     }
 }
 
@@ -483,7 +509,7 @@ async fn a_forged_tenant_neither_reaches_the_broker_nor_comes_back() {
 /// simply what it is (R22, GW12).
 #[tokio::test]
 async fn the_narrowing_signal_is_only_sent_to_a_caller_who_asked() {
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
+    let broker = viewed().await;
     let (_, _, quiet) = call(
         gateway(&broker.url, endpoint(&["operatorPhone"])),
         Method::GET,
@@ -495,7 +521,7 @@ async fn the_narrowing_signal_is_only_sent_to_a_caller_who_asked() {
         "{quiet:?}"
     );
 
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
+    let broker = viewed().await;
     let response = gateway(&broker.url, endpoint(&["operatorPhone"]))
         .oneshot(
             HttpRequest::builder()

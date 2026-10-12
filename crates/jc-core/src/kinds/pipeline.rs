@@ -84,6 +84,10 @@ pub struct PipelineSpec {
     /// Where the result is written, each through its own Endpoint (PL-52, PL-55); `v1alpha2`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<PipelineOutput>,
+    /// Routes by condition (PL-73): a message after `steps` takes the first route whose `when`
+    /// holds; one no route takes is written through `outputs`; `v1alpha2`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<PipelineRoute>,
     /// Secret references injected into runner environments (PL-14..PL-16).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_refs: Vec<SecretRef>,
@@ -576,6 +580,24 @@ pub struct PipelineOutput {
     pub mode: Option<OutputMode>,
 }
 
+/// The most routes one pipeline holds (PL-73).
+pub const MAX_ROUTES: usize = 8;
+
+/// One route of a `v1alpha2` pipeline (PL-73): its condition, its own steps and its outputs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PipelineRoute {
+    /// A DNS label, unique among the pipeline's routes.
+    pub name: String,
+    /// A Bloblang query; the messages it is true for take this route.
+    pub when: String,
+    /// The route's own steps, after the pipeline's `steps`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
+    /// Where the route writes, each through its own Endpoint (PL-55).
+    pub outputs: Vec<PipelineOutput>,
+}
+
 /// Resource quotas for a pipeline runner (PL-11).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -645,7 +667,10 @@ impl PipelineSpec {
 
     /// Whether the spec is written in the `v1alpha2` shape: any of `sources`, `steps`, `outputs`.
     pub fn is_second_shape(&self) -> bool {
-        !self.sources.is_empty() || !self.steps.is_empty() || !self.outputs.is_empty()
+        !self.sources.is_empty()
+            || !self.steps.is_empty()
+            || !self.outputs.is_empty()
+            || !self.routes.is_empty()
     }
 
     fn has_first_shape(&self) -> bool {
@@ -677,8 +702,17 @@ impl PipelineSpec {
         }
     }
 
-    /// The outputs, in either shape (PL-54): `v1alpha1`'s `targetEndpoint` with its `output`.
+    /// Every output the pipeline writes through, in either shape (PL-54): `v1alpha1`'s
+    /// `targetEndpoint` with its `output`, or `outputs` then each route's (PL-73), so a grant
+    /// covers every Endpoint a route writes. [`Self::lane_outputs`] is the default lane alone.
     pub fn outputs(&self) -> Vec<PipelineOutput> {
+        let mut outputs = self.lane_outputs();
+        outputs.extend(self.routes.iter().flat_map(|route| route.outputs.clone()));
+        outputs
+    }
+
+    /// The outputs of the default lane: where a message no route takes is written (PL-73).
+    pub fn lane_outputs(&self) -> Vec<PipelineOutput> {
         match self.is_second_shape() {
             true => self.outputs.clone(),
             false => self
@@ -1338,42 +1372,114 @@ impl PipelineSpec {
                 names::validate_entity_type(entity_type)?;
             }
         }
-        for step in &self.steps {
-            match step {
-                Step::Compute(compute) => {
-                    validate_compute(compute, &own)?;
-                    if compute.kind == ComputeKind::Container
-                        && (self.steps.len() > 1 || !self.is_scheduled())
-                    {
-                        return Err(Error::Name {
-                            field: "spec.steps",
-                            value: "container".to_owned(),
-                            reason: "a container step is the only step of a scheduled pipeline: it runs as a Job, not inside a Bento stream (PL-35, PL-55)",
-                        });
-                    }
-                }
-                Step::Processor(step) => {
-                    let mut names = step.processor.keys();
-                    let (Some(name), None) = (names.next(), names.next()) else {
-                        return Err(Error::Name {
-                            field: "spec.steps.processor",
-                            value: step
-                                .processor
-                                .keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            reason: "a processor step names exactly one processor (PL-52)",
-                        });
-                    };
-                    validate_processor_reading(
-                        "spec.steps.processor",
-                        &serde_json::json!({ name: step.processor[name] }),
-                        &own,
-                    )?;
+        validate_steps("spec.steps", &self.steps, &own, self.is_scheduled())?;
+        self.validate_routes()
+    }
+
+    /// The routes (PL-73): at most [`MAX_ROUTES`], unique DNS-label names, a `when` held to the
+    /// author-Bloblang rules, one level deep (no `switch` among a route's steps), no `container`
+    /// step, and at least one output each.
+    fn validate_routes(&self) -> Result<()> {
+        if self.routes.len() > MAX_ROUTES {
+            return Err(Error::Name {
+                field: "spec.routes",
+                value: self.routes.len().to_string(),
+                reason: "a pipeline holds at most 8 routes (PL-73)",
+            });
+        }
+        let own = self.own_variables();
+        let mut seen = std::collections::BTreeSet::new();
+        for route in &self.routes {
+            names::validate_dns1123_label(&route.name)?;
+            if !seen.insert(route.name.as_str()) {
+                return Err(Error::Name {
+                    field: "spec.routes.name",
+                    value: route.name.clone(),
+                    reason: "two routes of one pipeline share a name (PL-73)",
+                });
+            }
+            if route.when.trim().is_empty() {
+                return Err(Error::Name {
+                    field: "spec.routes.when",
+                    value: route.name.clone(),
+                    reason: "a route names the condition its messages meet (PL-73)",
+                });
+            }
+            validate_author_bloblang("spec.routes.when", &route.when)?;
+            if route.outputs.is_empty() {
+                return Err(Error::Name {
+                    field: "spec.routes.outputs",
+                    value: route.name.clone(),
+                    reason: "every route ends in at least one output (PL-73)",
+                });
+            }
+            for output in &route.outputs {
+                validate_target(&output.target_endpoint)?;
+                if let Some(entity_type) = &output.entity_type {
+                    names::validate_entity_type(entity_type)?;
                 }
             }
+            for step in &route.steps {
+                let nested = match step {
+                    Step::Processor(step) => step.processor.contains_key("switch"),
+                    Step::Compute(compute) => compute.kind == ComputeKind::Container,
+                };
+                if nested {
+                    return Err(Error::Name {
+                        field: "spec.routes.steps",
+                        value: route.name.clone(),
+                        reason: "a route's steps run inside the stream and route no further: \
+                                 no `switch` processor and no `container` step (PL-73)",
+                    });
+                }
+            }
+            validate_steps("spec.routes.steps", &route.steps, &own, false)?;
         }
         Ok(())
     }
+}
+
+/// The steps of one list (PL-52): each compute checked as `v1alpha1`'s is, a processor the
+/// runner ships, and a `container` step only as the one step of a `scheduled` pipeline.
+fn validate_steps(
+    field: &'static str,
+    steps: &[Step],
+    own: &[&str],
+    scheduled: bool,
+) -> Result<()> {
+    for step in steps {
+        match step {
+            Step::Compute(compute) => {
+                validate_compute(compute, own)?;
+                if compute.kind == ComputeKind::Container && (steps.len() > 1 || !scheduled) {
+                    return Err(Error::Name {
+                        field,
+                        value: "container".to_owned(),
+                        reason: "a container step is the only step of a scheduled pipeline: it runs as a Job, not inside a Bento stream (PL-35, PL-55)",
+                    });
+                }
+            }
+            Step::Processor(step) => {
+                let mut names = step.processor.keys();
+                let (Some(name), None) = (names.next(), names.next()) else {
+                    return Err(Error::Name {
+                        field: "spec.steps.processor",
+                        value: step
+                            .processor
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        reason: "a processor step names exactly one processor (PL-52)",
+                    });
+                };
+                validate_processor_reading(
+                    "spec.steps.processor",
+                    &serde_json::json!({ name: step.processor[name] }),
+                    own,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }

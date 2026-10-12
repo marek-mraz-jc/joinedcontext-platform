@@ -237,23 +237,6 @@ pub enum DataTheme {
 }
 
 impl DataTheme {
-    /// Every theme, in the table's order.
-    pub const ALL: [DataTheme; 13] = [
-        Self::Agri,
-        Self::Econ,
-        Self::Educ,
-        Self::Ener,
-        Self::Envi,
-        Self::Gove,
-        Self::Heal,
-        Self::Intr,
-        Self::Just,
-        Self::Regi,
-        Self::Soci,
-        Self::Tech,
-        Self::Tran,
-    ];
-
     /// The table code.
     pub const fn code(self) -> &'static str {
         match self {
@@ -328,20 +311,6 @@ pub enum Frequency {
 }
 
 impl Frequency {
-    /// Every frequency, fastest first.
-    pub const ALL: [Frequency; 10] = [
-        Self::Cont,
-        Self::Hourly,
-        Self::Daily,
-        Self::Weekly,
-        Self::Monthly,
-        Self::Quarterly,
-        Self::Annual,
-        Self::Irreg,
-        Self::Never,
-        Self::Unknown,
-    ];
-
     /// The table code.
     pub const fn code(self) -> &'static str {
         match self {

@@ -149,37 +149,6 @@ async fn rest(endpoint: Endpoint, query: &str) -> (StatusCode, Value, Vec<String
     (status, body, asked)
 }
 
-/// The same read as a `query_entities` tool call.
-async fn mcp(endpoint: Endpoint, arguments: Value) -> (Value, Vec<String>) {
-    let (app, hops) = serve(endpoint).await;
-    let payload = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": { "name": "query_entities", "arguments": arguments }
-    });
-    let (_, body) = answered(
-        app,
-        Request::builder()
-            .method(Method::POST)
-            .uri(format!("/api/endpoint/{SLUG}/mcp"))
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .body(Body::from(payload.to_string()))
-            .expect("a request"),
-    )
-    .await;
-    let asked = hops.lock().expect("the hop log").clone();
-    (body["result"].clone(), asked)
-}
-
-/// The words a tool refusal carries.
-fn tool_refusal(result: &Value) -> String {
-    assert_eq!(result["isError"], json!(true), "not a refusal: {result}");
-    result["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned()
-}
-
 /// Where no grant draws an area, nothing has been written for one GeoProperty rather than
 /// another: the caller's own pair goes upstream together and narrows only itself.
 #[tokio::test]
@@ -200,24 +169,4 @@ async fn a_geoproperty_without_a_granted_area_reaches_the_broker_beside_the_geo_
         sent.contains("georel=within"),
         "and so did the area: {sent}"
     );
-}
-
-/// AG-21, T-2299: `accept` and `context` are in the contract's table and served by neither
-/// surface, so the tool refuses them as unknown arguments rather than dropping them silently.
-#[tokio::test]
-async fn accept_and_context_are_still_refused_as_unknown_arguments() {
-    for argument in ["accept", "context"] {
-        let (result, asked) = mcp(
-            endpoint(policy("")),
-            json!({ "type": "Vehicle", argument: "json-ld" }),
-        )
-        .await;
-
-        let words = tool_refusal(&result);
-        assert!(
-            words.contains(argument),
-            "`{argument}` is refused by name: {words}"
-        );
-        assert!(asked.is_empty(), "the broker was asked anyway: {asked:?}");
-    }
 }

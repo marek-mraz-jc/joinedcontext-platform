@@ -2,8 +2,9 @@
 // `i % shards`, as the fleet provisioner placed it.
 //
 //   mix   RATE requests a second for DURATION: HOT_SHARE of them to the hot 1 % of the Apps, the
-//         rest spread over the rare ones; 90 % read the App's notes (one SQL query as the App),
-//         10 % add one (one insert).
+//         rest spread over the rare ones; each reads the App's notice (one SQL query as the
+//         App). The template writes only for a signed-in caller (T-3825) and the rig runs no
+//         Portal, so the mix has no writes.
 //   cold  then, PROBE Apps the mix never touched, one request each: every one fetches and
 //         compiles its component first, so this is the cold latency with the cache already full.
 //   warm  then the hot Apps again, compiled and kept: the warm latency.
@@ -81,15 +82,9 @@ export const options = {
 // Warm runs after cold: the probe's worst case is its components compiled one after another.
 options.scenarios.warm.startTime = `${MIX_SECONDS + 10 + Math.ceil(PROBE / 2) + 30}s`;
 
-function call(app, kind, write) {
+function call(app, kind) {
   const base = SHARDS[app % SHARDS.length];
-  const url = `${base}/apps/load-${app}/api/notes`;
-  const res = write
-    ? http.post(url, JSON.stringify({ body: `k6 ${exec.scenario.iterationInTest}` }), {
-        headers: { 'content-type': 'application/json' },
-        tags: { kind },
-      })
-    : http.get(url, { tags: { kind } });
+  const res = http.get(`${base}/apps/load-${app}/api/notice`, { tags: { kind } });
   latency[kind].add(res.timings.duration);
   outcomes.add(1, { kind, status: String(res.status) });
   if (res.status >= 400 || res.status === 0) (failed[String(res.status)] ?? failedOther).add(1, { kind });
@@ -99,13 +94,13 @@ export function mix() {
   const hot = Math.random() < HOT_SHARE;
   // Hot: [0, HOT). Rare: [HOT, APPS - PROBE); the last PROBE Apps are kept for the cold probe.
   const app = hot ? Math.floor(Math.random() * HOT) : HOT + Math.floor(Math.random() * (APPS - PROBE - HOT));
-  call(app, hot ? 'hot' : 'rare', Math.random() < 0.1);
+  call(app, hot ? 'hot' : 'rare');
 }
 
 export function cold() {
-  call(APPS - PROBE + exec.scenario.iterationInTest, 'cold', false);
+  call(APPS - PROBE + exec.scenario.iterationInTest, 'cold');
 }
 
 export function warm() {
-  call(exec.scenario.iterationInTest % HOT, 'warm', false);
+  call(exec.scenario.iterationInTest % HOT, 'warm');
 }

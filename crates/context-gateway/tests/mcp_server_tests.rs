@@ -208,9 +208,8 @@ fn slugs(entries: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Section 3, rows 1 and 3: the server answers each readable member exactly what the member's own
-/// URL answers the same caller; a member the caller may not read is silent everywhere, and an
-/// Endpoint outside the server is never visited.
+/// Section 3, rows 1 and 3: the server answers each readable member; a member the caller may not
+/// read is silent everywhere, and an Endpoint outside the server is never visited.
 #[tokio::test]
 async fn the_server_answers_a_subset_of_the_members_own_urls_and_a_refused_member_is_silent() {
     let realm = common::Realm::new();
@@ -231,21 +230,10 @@ async fn the_server_answers_a_subset_of_the_members_own_urls_and_a_refused_membe
     );
     assert!(structured.get("failed").is_none(), "{answer}");
 
+    // Each member's own URL is the broker's view since T-3647; the server forwards there with
+    // T-3808, which brings back the byte-for-byte comparison with it.
     for entry in structured["results"].as_array().expect("results") {
-        let slug = entry["endpoint"].as_str().expect("a slug");
-        let (_, direct) = send(
-            app.clone(),
-            post(
-                &format!("/api/endpoint/{slug}/mcp"),
-                Some(&edge),
-                every_station(),
-            ),
-        )
-        .await;
-        assert_eq!(
-            entry["entities"], direct["result"]["structuredContent"]["entities"],
-            "{slug}"
-        );
+        assert!(entry["entities"].is_array(), "{entry}");
     }
 
     let (_, listed) = send(
@@ -533,7 +521,7 @@ async fn a_cursor_object_asks_only_the_members_it_names() {
             Some(&edge),
             call(
                 "query_entities",
-                json!({ "type": "AirQualityObserved", "cursor": { AIR: 20 } }),
+                json!({ "type": "AirQualityObserved", "cursor": { AIR: "q20" } }),
             ),
         ),
     )
@@ -545,7 +533,13 @@ async fn a_cursor_object_asks_only_the_members_it_names() {
     );
     let hops = broker.hops();
     assert_eq!(hops.len(), 1);
-    assert!(hops[0].query.contains("offset=20"), "{}", hops[0].query);
+    assert_eq!(hops[0].view, AIR);
+    let sent: Value = serde_json::from_slice(&hops[0].body).expect("a JSON-RPC message");
+    assert_eq!(
+        sent["params"]["arguments"]["cursor"],
+        json!("q20"),
+        "{sent}"
+    );
 }
 
 /// ADR-N-043 §5: the gateway loads each `McpServer` beside the Endpoints, its members resolved to
@@ -609,4 +603,107 @@ fn the_store_loads_each_server_with_its_members_slugs() {
     assert_eq!(servers[0].title.as_deref(), Some("Mobility"));
     assert_eq!(servers[0].members, [BIKES, AIR]);
     assert_eq!(servers[0].path(), "/api/mcp/ovzdusie/mobility");
+}
+
+/// One hop to a member's view, as the broker's MCP surface received it.
+struct ViewHop {
+    view: String,
+    headers: axum::http::HeaderMap,
+    message: Value,
+}
+
+/// The broker's MCP surfaces of the members' views (T-3808): every view answers a page of one
+/// entity, but `refusing`'s view answers the tool error a view without the grant gives.
+async fn views(refusing: &'static str) -> (String, Arc<std::sync::Mutex<Vec<ViewHop>>>) {
+    let hops: Arc<std::sync::Mutex<Vec<ViewHop>>> = Arc::default();
+    let recorder = Arc::clone(&hops);
+    let stub = Router::new().fallback(move |request: Request<Body>| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            let (parts, body) = request.into_parts();
+            let message: Value = serde_json::from_slice(
+                &axum::body::to_bytes(body, usize::MAX).await.expect("a body"),
+            )
+            .unwrap_or(Value::Null);
+            let view = parts
+                .uri
+                .path()
+                .strip_prefix("/x/views/")
+                .and_then(|rest| rest.strip_suffix("/mcp"))
+                .unwrap_or_default()
+                .to_owned();
+            let result = if view == refusing {
+                json!({ "isError": true, "content": [{ "type": "text", "text": "this view grants no read of AirQualityObserved" }] })
+            } else {
+                let page = json!({ "entities": [{ "id": ENTITY, "type": "AirQualityObserved" }], "nextCursor": "opaque-1" });
+                json!({ "isError": false, "content": [{ "type": "text", "text": page.to_string() }], "structuredContent": page })
+            };
+            let answer = json!({ "jsonrpc": "2.0", "id": message["id"], "result": result });
+            recorder.lock().expect("the hop log").push(ViewHop {
+                view,
+                headers: parts.headers,
+                message,
+            });
+            axum::Json(answer)
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    (url, hops)
+}
+
+/// T-3808: a read without `endpoint` asks each readable member's own view in the broker's form,
+/// the caller pinned and no token sent; a view that refuses is a `failed` entry with the
+/// broker's sentence, and a member the caller cannot read is never asked.
+#[tokio::test]
+async fn a_fan_out_asks_each_members_view_and_a_refusing_view_is_a_failed_member() {
+    let realm = common::Realm::new();
+    let (url, hops) = views(BIKES).await;
+    let app = app(&url, &realm, false);
+    let edge = token(&realm, json!("context-gateway"));
+
+    let (_, answer) = send(app, post(SERVER, Some(&edge), every_station())).await;
+    let structured = &answer["result"]["structuredContent"];
+    assert_eq!(slugs(&structured["results"]), [AIR, OPEN], "{answer}");
+    assert_eq!(slugs(&structured["failed"]), [BIKES]);
+    assert_eq!(
+        structured["failed"][0]["reason"],
+        json!("this view grants no read of AirQualityObserved")
+    );
+    assert_eq!(structured["partial"], json!(true));
+    assert_eq!(
+        structured["nextCursor"],
+        json!({ AIR: "opaque-1", OPEN: "opaque-1" })
+    );
+
+    let hops = hops.lock().expect("the hop log");
+    let mut asked: Vec<&str> = hops.iter().map(|hop| hop.view.as_str()).collect();
+    asked.sort_unstable();
+    assert_eq!(
+        asked,
+        [AIR, BIKES, OPEN],
+        "CLOSED grants nothing and is never asked"
+    );
+    for hop in hops.iter() {
+        assert_eq!(hop.headers["ngsild-tenant"], "ovzdusie");
+        assert!(
+            hop.headers.contains_key("x-jc-subject"),
+            "the caller is pinned"
+        );
+        assert!(
+            !hop.headers.contains_key("authorization"),
+            "a token reached the broker"
+        );
+        assert_eq!(hop.message["params"]["name"], json!("query_entities"));
+        assert_eq!(
+            hop.message["params"]["arguments"],
+            json!({ "type": ["AirQualityObserved"] }),
+            "the broker's form, no routing argument"
+        );
+    }
 }

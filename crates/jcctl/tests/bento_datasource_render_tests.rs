@@ -124,6 +124,32 @@ fn an_mqtt_connection_becomes_bentos_mqtt_input() {
     assert_eq!(rendered(&source(MQTT), "mqtt-mesto"), MQTT_INPUT);
 }
 
+/// PL-76: a broker of the platform is read on its internal listener as the runner, with no
+/// credential and no TLS block, the namespace filled by the runner.
+#[test]
+fn a_platform_broker_is_read_on_its_internal_listener_without_a_credential() {
+    const BROKER: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: cameras, namespace: bb-ovzdusie }
+spec:
+  type: mqtt
+  mqtt:
+    brokerRef: { kind: MqttBroker, name: cameras }
+    topics: ["cameras/+/frame"]
+"#;
+    assert_eq!(
+        rendered(&source(BROKER), "cameras"),
+        r#"mqtt:
+  urls:
+  - tcp://mqtt-bb-ovzdusie-cameras.${JC_MQTT_NAMESPACE}.svc.cluster.local:1883
+  topics:
+  - cameras/+/frame
+  client_id: jc-bb-ovzdusie-aq-mqtt-ingest
+  user: pipeline-runner
+"#
+    );
+}
+
 #[test]
 fn an_http_connection_becomes_an_http_client_poll() {
     assert_eq!(rendered(&source(HTTP), "aq-opendata"), HTTP_INPUT);
@@ -343,4 +369,114 @@ targetEndpoint: urn:ngsi-ld:Endpoint:example.org:helsinki:ep-writer
         matches!(err, RenderError::Class(_)),
         "expected RenderError::Class, got: {err:?}"
     );
+}
+
+const ZIP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: hsl-gtfs, namespace: helsinki }
+spec:
+  type: http
+  http:
+    url: https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
+    authorization: { header: x-key, headerRef: { name: hsl, key: key } }
+    archive:
+      format: zip
+      members: [agency.txt, stops.txt]
+      maxBytes: 1048576
+"#;
+
+/// PL-72: an archive is read by range: the input asks for the tail, the directory names the
+/// members, and each member's own request carries the connection's credential and its range.
+/// A refused read is logged and dropped before the author's processors see archive bytes.
+#[test]
+fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
+    let spec = source(ZIP);
+    let out = render(
+        "pipeline:\n  processors:\n    - unarchive: { format: csv }\n",
+        &spec,
+        &context("hsl-gtfs"),
+    )
+    .expect("renders");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let input = &doc["input"]["http_client"];
+    assert_eq!(input["headers"]["Range"].as_str(), Some("bytes=-65557"));
+    assert_eq!(
+        input["headers"]["x-key"].as_str(),
+        Some("${DS_HSL_GTFS_KEY}")
+    );
+
+    let names = |steps: &[serde_norway::Value]| -> Vec<String> {
+        steps
+            .iter()
+            .map(|step| {
+                step.as_mapping()
+                    .unwrap()
+                    .keys()
+                    .next()
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    };
+    let outer = doc["pipeline"]["processors"]
+        .as_sequence()
+        .expect("processors");
+    assert_eq!(names(outer), ["try", "catch", "unarchive"]);
+    // The first refusal skips the rest, so an unchecked directory never reaches a request.
+    let steps = outer[0]["try"].as_sequence().expect("the read");
+    assert_eq!(
+        names(steps),
+        [
+            "mapping",
+            "unarchive",
+            "mapping",
+            "http",
+            "mapping",
+            "wasm",
+            "mapping"
+        ]
+    );
+    let directory = steps[0]["mapping"].as_str().unwrap();
+    assert!(directory.contains(r#"let wanted = ["agency.txt","stops.txt"]"#));
+    assert!(directory.contains("let max_bytes = 1048576"));
+    assert!(directory.contains("e.size > $max_bytes || e.csize > $max_bytes"));
+    assert!(!directory.contains("MEMBERS") && !directory.contains("MAX_BYTES"));
+    let member = &steps[3]["http"];
+    assert_eq!(member["url"], input["url"]);
+    assert_eq!(member["headers"]["Range"].as_str(), Some("${! @range }"));
+    assert_eq!(
+        member["headers"]["x-key"].as_str(),
+        Some("${DS_HSL_GTFS_KEY}")
+    );
+    // The directory may lie about sizes, so the inflate stops at the declared one (T-3953):
+    // the local step hands the module its limit, and the check throws the module's refusal.
+    let local = steps[4]["mapping"].as_str().unwrap();
+    assert!(
+        local.contains(r#"meta inflate_limit = if $z.method == 8 { $z.size.int64().string() }"#)
+    );
+    assert!(!local.contains("decompress"));
+    assert_eq!(
+        steps[5]["wasm"]["module_path"].as_str(),
+        Some("/streams/inflate.wasm")
+    );
+    assert_eq!(steps[5]["wasm"]["function"].as_str(), Some("inflate"));
+    let check = steps[6]["mapping"].as_str().unwrap();
+    assert!(check.contains(r#"@inflate_error.or("")"#) && check.contains("the directory says"));
+    assert_eq!(
+        outer[1]["catch"][1]["mapping"].as_str(),
+        Some("root = deleted()")
+    );
+    assert_eq!(outer[2]["unarchive"]["format"].as_str(), Some("csv"));
+
+    // Without `archive` the same connection renders as it did: no range, nothing prepended.
+    let plain = source(
+        &ZIP.split("    archive:")
+            .next()
+            .unwrap()
+            .replace("hsl.zip", "x.json"),
+    );
+    let out = render("", &plain, &context("hsl-gtfs")).expect("renders");
+    assert!(!out.contains("Range") && !out.contains("pipeline"), "{out}");
 }
