@@ -9,6 +9,7 @@ pub mod bento_processors;
 pub mod blueprint;
 pub mod catalog;
 pub mod ckan;
+pub mod context_broker;
 pub mod csr;
 pub mod dashboard;
 pub mod data_model;
@@ -52,6 +53,9 @@ pub use catalog::{
     Catalog, ContactPoint, DataTheme, Duty, Frequency, Licence, Publisher, Source, Temporal,
 };
 pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
+pub use context_broker::{
+    broker_of, validate_brokers, BrokerFeature, BrokerSize, ContextBrokerSpec, IMPLICIT_BROKER,
+};
 pub use csr::{ContextSourceRegistrationSpec, Federation, FederationIdentity, RegistrationMode};
 pub use dashboard::{
     ColorBy, DashboardSpec, DashboardVisibility, LayerFilter, LayerSpec, LayerStyle, Page, SizeBy,
@@ -178,6 +182,8 @@ pub type Environment = crate::envelope::ResourceEnvelope<EnvironmentSpec>;
 
 /// `kind: Group` as a whole manifest.
 pub type Group = crate::envelope::ResourceEnvelope<GroupSpec>;
+/// `kind: ContextBroker` as a whole manifest.
+pub type ContextBroker = crate::envelope::ResourceEnvelope<ContextBrokerSpec>;
 
 /// The default mirror interval of DM-49, in seconds: 24 hours.
 pub const MIRROR_INTERVAL_DEFAULT_SECONDS: u64 = 24 * 60 * 60;
