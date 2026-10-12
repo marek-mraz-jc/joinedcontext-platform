@@ -192,8 +192,7 @@ pub struct HttpArchive {
     /// The member names to read, at most 20, each letters, digits, `.`, `_`, `-` and `/`.
     pub members: Vec<String>,
     /// The largest member accepted, packed and unpacked, in bytes; 32 MiB when absent, at most
-    /// 256 MiB. A deflated member is read only when 1032 times its packed size, the most
-    /// deflate expands, is within it.
+    /// 256 MiB. A deflated member's inflate stops at the size its directory declares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
 }
