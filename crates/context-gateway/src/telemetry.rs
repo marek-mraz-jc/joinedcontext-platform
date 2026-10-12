@@ -83,6 +83,10 @@ fn describe() {
         SPACE_HELD,
         "1 while a move holds the space read-only, 0 once it no longer does (PF-115)"
     );
+    metrics::describe_counter!(
+        crate::quality::CHECKS,
+        "quality checks on writes, by space, type, rule and outcome"
+    );
 }
 
 /// The spaces a move holds read-only, as this gateway loaded them (PF-115). The Portal's move

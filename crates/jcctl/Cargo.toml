@@ -29,6 +29,8 @@ thiserror = "2"
 tracing = "0.1"
 walkdir = "2"
 zeroize = "1"
+# The Portal renders `model_schema`'s problems and attributes into its OpenAPI document.
+utoipa = { version = "5", optional = true }
 
 [dev-dependencies]
 aes-gcm = "0.10"
