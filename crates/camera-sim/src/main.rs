@@ -14,7 +14,10 @@
 //! (a PEM bundle, the system's by default), `JC_CAMERA_COUNT` (10), `JC_CAMERA_INTERVAL_MS`
 //! (1000) and `JC_CAMERA_MEASUREMENT` (`peopleCount`).
 
+mod mqtt;
+
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -25,16 +28,15 @@ use p256::elliptic_curve::rand_core::{OsRng, RngCore};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use p256::SecretKey;
-use rumqttc::{
-    AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS, TlsConfiguration, Transport,
-};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, ServerName};
 use serde_json::{json, Value};
 
 /// The client-assertion type of RFC 7523, which Keycloak's signed-JWT client authenticator reads.
 const ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 /// How long a signed assertion is good for: one token request.
 const ASSERTION_SECONDS: u64 = 60;
-/// How long the camera waits for the broker to acknowledge what it sent, past the last message.
+/// How long the camera waits for the broker to answer a connection or acknowledge a message.
 const SETTLE: Duration = Duration::from_secs(10);
 
 #[tokio::main]
@@ -359,66 +361,97 @@ async fn token(config: &Config, key: &SigningKey) -> Result<String, Failure> {
 }
 
 async fn publish(config: &Config, token: &str) -> Result<u32, Failure> {
-    let mut options = MqttOptions::new(&config.client_id, &config.broker.host, config.broker.port);
-    options.set_credentials(&config.client_id, token);
-    options.set_clean_session(true);
-    options.set_keep_alive(Duration::from_secs(30));
-    if config.broker.tls {
-        options.set_transport(Transport::Tls(TlsConfiguration::Simple {
-            ca: config.ca.clone().into_bytes(),
-            alpn: None,
-            client_auth: None,
-        }));
+    let address = (config.broker.host.as_str(), config.broker.port);
+    let tcp = tokio::net::TcpStream::connect(address)
+        .await
+        .map_err(|e| error(format!("broker connection: {e}")))?;
+    if !config.broker.tls {
+        return session(tcp, config, token).await;
     }
-    let (client, mut events) = AsyncClient::new(options, 64);
-    let topic = topic(&config.client_id, &config.measurement);
-    let (count, interval, measurement) =
-        (config.count, config.interval, config.measurement.clone());
-    let sender = tokio::spawn(async move {
-        for frame in 1..=count {
-            let value = u64::from(random_bytes::<1>()[0] % 20);
-            let body = observation(frame, &rfc3339(unix_now()), &measurement, value);
-            if client
-                .publish(&topic, QoS::AtLeastOnce, false, body)
-                .await
-                .is_err()
-            {
-                break;
-            }
-            tokio::time::sleep(interval).await;
-        }
-    });
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(config.ca.as_bytes()) {
+        let certificate = certificate.map_err(|e| error(format!("JC_CAMERA_CA: {e}")))?;
+        roots
+            .add(certificate)
+            .map_err(|e| error(format!("JC_CAMERA_CA: {e}")))?;
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| error(format!("TLS: {e}")))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let name = ServerName::try_from(config.broker.host.clone())
+        .map_err(|e| error(format!("JC_CAMERA_BROKER host: {e}")))?;
+    let stream = tokio_rustls::TlsConnector::from(Arc::new(tls))
+        .connect(name, tcp)
+        .await
+        .map_err(|e| error(format!("broker connection: TLS: {e}")))?;
+    session(stream, config, token).await
+}
 
-    let deadline = tokio::time::Instant::now() + interval.saturating_mul(count) + SETTLE;
-    let mut acknowledged = 0u32;
-    while acknowledged < count {
-        let event = tokio::time::timeout_at(deadline, events.poll()).await;
-        match event {
-            Err(_) => break,
-            Ok(Ok(Event::Incoming(Packet::ConnAck(ack))))
-                if ack.code != ConnectReturnCode::Success =>
-            {
-                sender.abort();
+/// Connects, then publishes one message at a time and waits for its PUBACK, so the count is
+/// what the broker took. A broker that drops the connection (a publish its ACL refused) ends
+/// the run with the count so far.
+async fn session(
+    mut stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    config: &Config,
+    token: &str,
+) -> Result<u32, Failure> {
+    let io = |e: std::io::Error| error(format!("broker connection: {e}"));
+    let connect = mqtt::connect(&config.client_id, &config.client_id, token, 30);
+    mqtt::send(&mut stream, &connect).await.map_err(io)?;
+    match tokio::time::timeout(SETTLE, mqtt::read(&mut stream)).await {
+        Err(_) => return Err(error("the broker did not answer the connection")),
+        Ok(Err(e)) => return Err(io(e)),
+        Ok(Ok(None)) => return Err(Failure::Refused("the broker closed the connection".into())),
+        Ok(Ok(Some(packet))) if packet.kind != mqtt::CONNACK => {
+            return Err(error(format!(
+                "the broker answered packet type {}",
+                packet.kind
+            )))
+        }
+        Ok(Ok(Some(packet))) => {
+            if let Some(reason) = mqtt::refusal(&packet.body) {
                 return Err(Failure::Refused(format!(
-                    "the broker refused the connection: {:?}",
-                    ack.code
+                    "the broker refused the connection: {reason}"
                 )));
-            }
-            Ok(Ok(Event::Incoming(Packet::PubAck(_)))) => acknowledged += 1,
-            Ok(Ok(_)) => {}
-            Ok(Err(rumqttc::ConnectionError::ConnectionRefused(code))) => {
-                sender.abort();
-                return Err(Failure::Refused(format!(
-                    "the broker refused the connection: {code:?}"
-                )));
-            }
-            Ok(Err(e)) => {
-                sender.abort();
-                return Err(error(format!("broker connection: {e}")));
             }
         }
     }
-    sender.abort();
+
+    let topic = topic(&config.client_id, &config.measurement);
+    let mut acknowledged = 0u32;
+    for frame in 1..=config.count {
+        if frame > 1 {
+            tokio::time::sleep(config.interval).await;
+        }
+        let value = u64::from(random_bytes::<1>()[0] % 20);
+        let body = observation(frame, &rfc3339(unix_now()), &config.measurement, value);
+        // Packet ids are 1..=65535; a run longer than that reuses them, one in flight at a time.
+        let id = (frame - 1) % 65_535 + 1;
+        let id = id as u16;
+        if mqtt::send(&mut stream, &mqtt::publish(&topic, id, &body))
+            .await
+            .is_err()
+        {
+            break;
+        }
+        let acked = loop {
+            match tokio::time::timeout(SETTLE, mqtt::read(&mut stream)).await {
+                Ok(Ok(Some(packet))) if packet.kind == mqtt::PUBACK => {
+                    break mqtt::acknowledged(&packet.body) == Some(id)
+                }
+                Ok(Ok(Some(_))) => continue,
+                _ => break false,
+            }
+        };
+        if !acked {
+            break;
+        }
+        acknowledged += 1;
+    }
     Ok(acknowledged)
 }
 
