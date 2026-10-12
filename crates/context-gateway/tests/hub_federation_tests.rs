@@ -86,6 +86,7 @@ fn member(name: &str, identity: FederationIdentity) -> Member {
         name: name.to_owned(),
         identity,
         external: false,
+        view: None,
     }
 }
 
@@ -515,8 +516,10 @@ async fn the_space_surface_of_a_federating_space_is_its_view_and_names_its_membe
     assert_eq!(*calls, vec![format!("/x/views/cs-{HUB}/mcp")], "{calls:?}");
 }
 
-/// PF-48 on the MCP surface: a registration that would need the caller's own token stops the
-/// message with the same refusal the NGSI-LD surface gives, and nothing reaches the broker.
+/// PF-48 on the MCP surface: a `caller` registration whose member this gateway does not serve
+/// (the fixture writes no Endpoint for it) stops the message with the same refusal the NGSI-LD
+/// surface gives, and nothing reaches the broker. A served member gets an exchanged token
+/// instead (T-3999, federation_exchange_tests.rs).
 #[tokio::test]
 async fn a_call_under_a_caller_identity_registration_is_refused_without_a_hop() {
     let (broker, calls) = partial_broker().await;
@@ -566,9 +569,9 @@ async fn a_partial_merge_reaches_the_caller_as_the_broker_sent_it() {
     assert_eq!(body.as_array().map(Vec::len), Some(1), "{body}");
 }
 
-/// PF-48: `caller` identity needs an RFC 8693 exchange this platform does not have. Answering
-/// as the hub's own account instead would hand back data the caller was never granted on the
-/// member, so the read stops and says so.
+/// PF-48: a `caller` registration whose member the gateway cannot place on a broker of this
+/// platform gets no token at all. Answering as the hub's own account instead would hand back
+/// data the caller was never granted on the member, so the read stops and says so (T-3999).
 #[tokio::test]
 async fn a_registration_that_forwards_the_callers_token_is_not_served_yet() {
     let (broker, calls) = partial_broker().await;
@@ -616,6 +619,7 @@ fn the_table_is_what_the_repository_says_and_nothing_else() {
             name: "regional".to_owned(),
             identity: FederationIdentity::Caller,
             external: true,
+            view: None,
         },
     ];
     let table = federations_of(&written(&members));
