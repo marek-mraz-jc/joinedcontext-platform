@@ -256,27 +256,6 @@ fn probes() -> Vec<Probe> {
         get("file geojson", "/file.geojson?type=User,Vehicle"),
         get("file xlsx", "/file.xlsx?type=User,Vehicle"),
         get("file zip", "/file.zip?type=User,Vehicle"),
-        get("ogc landing", "/ogc/features"),
-        get("ogc collections", "/ogc/features/collections"),
-        get("ogc collection outside", "/ogc/features/collections/Depot"),
-        get("ogc items", "/ogc/features/collections/Vehicle/items"),
-        get("ogc items outside", "/ogc/features/collections/Depot/items"),
-        get(
-            "ogc items properties",
-            "/ogc/features/collections/Vehicle/items?properties=age,odometer",
-        ),
-        get(
-            "ogc items filter",
-            "/ogc/features/collections/Vehicle/items?age=CANARY-Vehicle-age",
-        ),
-        get(
-            "ogc queryables",
-            "/ogc/features/collections/Vehicle/queryables",
-        ),
-        get(
-            "ogc item",
-            &format!("/ogc/features/collections/Vehicle/items/{VEHICLE}"),
-        ),
         get("sta root", "/sta/v1.1"),
         get("sta things", "/sta/v1.1/Things"),
         get("sta things expand", "/sta/v1.1/Things?$expand=Datastreams"),
@@ -541,7 +520,7 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    assert!(probed >= 40, "the sweep stopped after {probed} probes");
+    assert!(probed >= 31, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -572,15 +551,14 @@ async fn every_representation_and_tool_has_a_probe() {
 
     for representation in endpoint().representations {
         let path = match representation {
-            // The broker's view serves it since T-3643 and Antares sweeps it there.
-            Representation::NgsiLd => continue,
+            // The broker's view serves them since T-3643 and T-3752, and Antares sweeps them there.
+            Representation::NgsiLd | Representation::OgcFeatures => continue,
             Representation::Mcp => "/mcp",
             Representation::GeoJson => "/file.geojson",
             Representation::Csv => "/file.csv",
             Representation::Xlsx => "/file.xlsx",
             Representation::Json => "/file.json",
             Representation::Zip => "/file.zip",
-            Representation::OgcFeatures => "/ogc/features",
             Representation::Sta => "/sta/v1.1",
             Representation::Odata => "/odata/v4",
             Representation::WebSocket => "/ws",

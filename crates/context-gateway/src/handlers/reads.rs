@@ -1,5 +1,5 @@
 //! The reads every export surface shares: the types a dataset holds, one query through the
-//! PDP, a temporal query, and the capped page walk the downloads and the OGC items are made of.
+//! PDP, a temporal query, and the capped page walk the downloads are made of.
 
 use crate::app::Gateway;
 use crate::app::MAX_BODY;
@@ -233,7 +233,7 @@ pub(crate) async fn query_temporal(
 /// The gateway's own answer to a broker that failed a read behind one of its representations
 /// (T-2340, EP-26, R22).
 ///
-/// A download, an OGC page and a SensorThings collection are the gateway's documents, and what a
+/// A download and a SensorThings collection are the gateway's documents, and what a
 /// failing broker prints is whatever it was holding: a DSN with its password, a host inside the
 /// cluster, a source path, the tenant. None of it reaches the caller, most of whom need no token
 /// to ask; the operator reads it in the log beside the endpoint's slug. A `400` is the broker
