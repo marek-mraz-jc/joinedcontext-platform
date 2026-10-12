@@ -9,17 +9,22 @@
 //! narrowing are the broker's (ADR-0026 rules 4 and 8).
 
 use crate::app::{admit, principal_of, Gateway};
+use crate::handlers::space_surface::escape;
 use crate::middleware::rate_limit::caller_key;
 use crate::middleware::tenancy;
+use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::ws::{self, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Path, Request, State};
-use axum::http::header::{AUTHORIZATION, ORIGIN, SEC_WEBSOCKET_PROTOCOL};
+use axum::http::header::{
+    ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, LINK, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE,
+};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
-use jc_core::kinds::Representation;
+use jc_core::kinds::{Audience, Representation};
 use jc_core::ProblemDetails;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -109,6 +114,11 @@ pub(crate) async fn endpoint_ws(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
+    // A browser tab or a plain curl is no upgrade: it is told how to use the address instead
+    // of axum's bare 400 (T-4064). It holds no connection, so it counts against no cap.
+    if !asks_to_upgrade(request.headers()) {
+        return guide(&endpoint, gateway.base_url(), request.headers());
+    }
     if !origin_allowed(request.headers(), gateway.base_url()) {
         tracing::info!(slug = %endpoint.slug, "WebSocket refused: a foreign Origin");
         return ProblemDetails::new(403, "origin-refused", "Forbidden")
@@ -184,6 +194,119 @@ pub(crate) async fn endpoint_ws(
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |client| relay(client, broker, held, endpoint.slug.clone()))
+}
+
+/// Whether the request asks for a WebSocket at all (RFC 6455 §4.1: `Upgrade: websocket`).
+fn asks_to_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+        })
+}
+
+/// The answer to a plain `GET` of `{endpoint}/ws` (T-4064, API/07 §1): `426` with the address,
+/// the subprotocol, whether a token is needed, one `x-subscribe` message and the guide, as an
+/// HTML page for a browser and a problem+json otherwise.
+fn guide(endpoint: &Endpoint, base: &str, headers: &HeaderMap) -> Response<Body> {
+    let address = ws_address(&format!("{base}{}/ws", endpoint.base_path));
+    let help = format!("{base}/docs/API/07-websocket");
+    let example = json!({
+        "metadata": { "x-op": "x-subscribe", "x-id": "s1" },
+        "body": { "type": "Subscription", "entities": [{ "type": example_type(endpoint) }] },
+    });
+    let public = endpoint.audience == Audience::Public;
+    let token = if public {
+        "none: this Endpoint is public"
+    } else {
+        "an access token for the Endpoint's audience, in the Authorization header or as the \
+         bearer.<token> subprotocol entry"
+    };
+    let credential = if public {
+        ""
+    } else {
+        " -H \"Authorization: Bearer $TOKEN\""
+    };
+    let websocat = format!("websocat --protocol {PROTOCOL}{credential} \"{address}\"");
+    let html = headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"));
+    let mut response = if html {
+        let page = format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <title>Live updates over WebSocket</title></head><body>\
+             <h1>Live updates over WebSocket</h1><p>This address is a WebSocket. Open \
+             <code>{address}</code> with the subprotocol <code>{PROTOCOL}</code>, then send an \
+             <code>x-subscribe</code> message; each change the Endpoint lets you read arrives as \
+             a message.</p><p>Token: {token}.</p><p>Example message:</p><pre>{example}</pre>\
+             <p>With websocat:</p><pre>{websocat}</pre><p><a href=\"{help}\">How to use it</a></p>\
+             </body></html>",
+            address = escape(&address),
+            token = escape(token),
+            example = escape(&example.to_string()),
+            websocat = escape(&websocat),
+            help = escape(&help),
+        );
+        (
+            StatusCode::UPGRADE_REQUIRED,
+            [(CONTENT_TYPE, "text/html; charset=utf-8")],
+            page,
+        )
+            .into_response()
+    } else {
+        ProblemDetails::new(426, "upgrade-required", "Upgrade Required")
+            .with_detail(format!(
+                "open {address} as a WebSocket with the subprotocol {PROTOCOL}, then send an \
+                 x-subscribe message"
+            ))
+            .with_extension("address", json!(address))
+            .with_extension("protocol", json!(PROTOCOL))
+            .with_extension("token", json!(token))
+            .with_extension("example", example)
+            .with_extension("websocat", json!(websocat))
+            .with_extension("guide", json!(help))
+            .into_response()
+    };
+    let answer = response.headers_mut();
+    answer.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    answer.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    if let Ok(link) = HeaderValue::from_str(&format!("<{help}>; rel=\"help\"")) {
+        answer.insert(LINK, link);
+    }
+    response
+}
+
+/// An `http(s)` address as the `ws(s)` one a WebSocket client opens.
+pub(crate) fn ws_address(url: &str) -> String {
+    match url.split_once("://") {
+        Some(("https", rest)) => format!("wss://{rest}"),
+        Some(("http", rest)) => format!("ws://{rest}"),
+        _ => url.to_owned(),
+    }
+}
+
+/// The first entity type the Endpoint's policies name, else the first class of its models: a
+/// type the example can subscribe to.
+fn example_type(endpoint: &Endpoint) -> String {
+    endpoint
+        .policies
+        .iter()
+        .flat_map(|policy| &policy.information)
+        .flat_map(|information| &information.entities)
+        .map(|selector| selector.entity_type.as_str())
+        .chain(
+            endpoint
+                .models
+                .iter()
+                .flat_map(|model| model.classes.iter().map(String::as_str)),
+        )
+        .find(|name| !name.is_empty() && *name != "*")
+        .unwrap_or("Type")
+        .to_owned()
 }
 
 /// Whether a query names a credential (`access_token`, `token`, `bearer`, any case).
