@@ -334,3 +334,23 @@ fn period_parses_every_bento_unit_and_refuses_anything_else() {
     spec.validate()
         .expect("a push-based pipeline needs no period");
 }
+
+/// T-4050: `pipeline-test` is each project's test-harness principal (PL-43); a Pipeline of that
+/// name would share it, so the name is refused and every other stays as it was.
+#[test]
+fn a_pipeline_may_not_take_the_harness_name() {
+    let mut harness = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");
+    harness.metadata.name = jc_core::kinds::pipeline_identity::HARNESS.to_owned();
+    let err = harness
+        .validate()
+        .expect_err("the harness name")
+        .to_string();
+    assert!(
+        err.contains("pipeline-test") && err.contains("PL-43"),
+        "{err}"
+    );
+
+    let mut near = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");
+    near.metadata.name = "pipeline-tests".to_owned();
+    near.validate().expect("a name beside it");
+}
