@@ -17,8 +17,6 @@ use serde::Deserialize;
 
 const TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
-/// The problem type of a federated read the exchange could not serve.
-pub const PROBLEM: &str = "federation-exchange-failed";
 
 /// The realm's token endpoint and the gateway's own client.
 pub struct Exchanger {
@@ -45,16 +43,20 @@ impl ExchangeError {
     /// The answer to the caller: `502` when the realm refused, `503` when it could not answer.
     pub fn problem(&self) -> ProblemDetails {
         match self {
-            Self::Refused(_) => ProblemDetails::new(502, PROBLEM, "Bad Gateway").with_detail(
-                "the identity provider refused to issue your token for the brokers this read \
+            Self::Refused(_) => {
+                ProblemDetails::new(502, "federation-exchange-failed", "Bad Gateway").with_detail(
+                    "the identity provider refused to issue your token for the brokers this read \
                  federates to; sign in again, or ask the space's steward whether the member \
                  broker is registered for token exchange",
-            ),
-            Self::Unavailable(_) => ProblemDetails::new(503, PROBLEM, "Service Unavailable")
-                .with_detail(
-                    "the identity provider did not answer the token exchange this federated \
+                )
+            }
+            Self::Unavailable(_) => {
+                ProblemDetails::new(503, "federation-exchange-failed", "Service Unavailable")
+                    .with_detail(
+                        "the identity provider did not answer the token exchange this federated \
                      read needs; try again shortly",
-                ),
+                    )
+            }
         }
     }
 }
@@ -230,7 +232,10 @@ mod tests {
             .await
             .expect_err("down");
         assert_eq!(down.problem().status, 503);
-        assert!(down.problem().type_uri.ends_with(PROBLEM));
+        assert!(down
+            .problem()
+            .type_uri
+            .ends_with("federation-exchange-failed"));
 
         // Nobody listens on port 9.
         let gone = exchanger("http://127.0.0.1:9/token".to_owned())
