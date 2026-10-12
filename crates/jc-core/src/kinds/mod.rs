@@ -9,6 +9,7 @@ pub mod bento_processors;
 pub mod blueprint;
 pub mod catalog;
 pub mod ckan;
+pub mod context_broker;
 pub mod csr;
 pub mod dashboard;
 pub mod data_model;
@@ -21,6 +22,7 @@ pub mod group;
 pub mod mapping;
 pub mod mcp_server;
 pub mod model_projection;
+pub mod mqtt_broker;
 pub mod org_settings;
 pub mod organization;
 pub mod pipeline;
@@ -51,6 +53,9 @@ pub use catalog::{
     Catalog, ContactPoint, DataTheme, Duty, Frequency, Licence, Publisher, Source, Temporal,
 };
 pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
+pub use context_broker::{
+    broker_of, validate_brokers, BrokerFeature, BrokerSize, ContextBrokerSpec, IMPLICIT_BROKER,
+};
 pub use csr::{ContextSourceRegistrationSpec, Federation, FederationIdentity, RegistrationMode};
 pub use dashboard::{
     ColorBy, DashboardSpec, DashboardVisibility, LayerFilter, LayerSpec, LayerStyle, Page, SizeBy,
@@ -60,8 +65,9 @@ pub use data_model::{
     DataModelLifecycle, DataModelSource, DataModelSpec, GeneratedArtifacts, RemoteSource, SemVer,
 };
 pub use data_source::{
-    check_class, Authorization, DataSourceSpec, DataSourceType, GtfsFeed, GtfsRtConnection,
-    HttpConnection, MqttConnection, TlsSettings, WebSocketConnection,
+    check_class, ArchiveFormat, Authorization, DataSourceSpec, DataSourceType, GtfsFeed,
+    GtfsRtConnection, HttpArchive, HttpConnection, MqttConnection, TlsSettings,
+    WebSocketConnection,
 };
 pub use dataspace::{
     AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,
@@ -80,6 +86,7 @@ pub use mapping::{
 };
 pub use mcp_server::McpServerSpec;
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
+pub use mqtt_broker::{MqttBrokerSpec, MqttLimits, MqttRole};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
     Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
@@ -101,7 +108,11 @@ pub use service_account::{
     Credential, CredentialKind, KubernetesBinding, Owner, RoleBinding, RoleScope,
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
-pub use space::{urn_segment, ContextSpaceSpec, MissingUnitCode, ProjectApps, ProjectSpec, Quotas};
+pub use space::{
+    duration_seconds, retention_seconds, urn_segment, ContextSpaceSpec, MissingUnitCode,
+    ProjectApps, ProjectSpec, QualityKind, QualityOutcome, QualityRule, Quotas, RetentionRule,
+    MAX_QUALITY_RULES,
+};
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
 };
@@ -143,6 +154,8 @@ pub type KnowledgeSource = crate::envelope::ResourceEnvelope<KnowledgeSourceSpec
 pub type AssistantDeployment = crate::envelope::ResourceEnvelope<AssistantDeploymentSpec>;
 /// `kind: McpServer` as a whole manifest (MF-53).
 pub type McpServer = crate::envelope::ResourceEnvelope<McpServerSpec>;
+/// `kind: MqttBroker` as a whole manifest (MF-54).
+pub type MqttBroker = crate::envelope::ResourceEnvelope<MqttBrokerSpec>;
 /// `kind: CkanInstance` as a whole manifest.
 pub type CkanInstance = crate::envelope::ResourceEnvelope<CkanInstanceSpec>;
 /// `kind: Blueprint` as a whole manifest.
@@ -173,6 +186,8 @@ pub type Environment = crate::envelope::ResourceEnvelope<EnvironmentSpec>;
 
 /// `kind: Group` as a whole manifest.
 pub type Group = crate::envelope::ResourceEnvelope<GroupSpec>;
+/// `kind: ContextBroker` as a whole manifest.
+pub type ContextBroker = crate::envelope::ResourceEnvelope<ContextBrokerSpec>;
 
 /// The default mirror interval of DM-49, in seconds: 24 hours.
 pub const MIRROR_INTERVAL_DEFAULT_SECONDS: u64 = 24 * 60 * 60;

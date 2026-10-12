@@ -35,6 +35,8 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "Project"),
     (WAVE_ROOTS, "DataSpaceParticipant"),
     (WAVE_ROOTS, "AgentProfile"),
+    // A broker stands before the spaces that live on it (PF-111, ADR-N-047).
+    (WAVE_ROOTS, "ContextBroker"),
     (WAVE_SPACES, "ContextSpace"),
     (WAVE_SPACES, "DataModel"),
     // A projection is checked against its model, so the model converges first (MP-01).
@@ -47,6 +49,7 @@ const ORDER: &[(u8, &str)] = &[
     // `spec.publish.ckan` block can be acted on (EP-62, EP-67).
     (WAVE_EXPOSURE, "CkanInstance"),
     (WAVE_EXPOSURE, "Endpoint"),
+    (WAVE_EXPOSURE, "MqttBroker"),
     // A subscription watches a space through its endpoints, so both stand before it
     // converges (Architecture/06, Wave 4).
     // A named MCP server reads Endpoints, so it follows them (MF-53, ADR-N-043).

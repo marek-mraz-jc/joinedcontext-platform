@@ -256,3 +256,128 @@ fn an_account_written_by_hand_cannot_take_a_pipelines_name() {
             .unwrap_or_else(|err| panic!("{name} is an ordinary account: {err}"));
     }
 }
+
+/// T-4015, PF-47: a device signs in by its own key pair. The manifest holds the public half only.
+fn device(credential: &str) -> String {
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: cam-north
+  namespace: helsinki
+spec:
+  owner: {{ user: \"jana.k@bb\" }}
+  purpose: \"Camera north publishes frames to the cameras broker\"
+  roles:
+    - {{ role: space-writer, scope: {{ contextSpace: cameras }} }}
+  credentials:
+{credential}"
+    )
+}
+
+const EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
+const EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
+
+fn ec_key(kid: &str) -> String {
+    format!("{{ kty: EC, crv: P-256, kid: {kid}, x: {EC_X}, y: {EC_Y}, alg: ES256, use: sig }}")
+}
+
+fn oauth_with(keys: &[String]) -> String {
+    format!(
+        "    - kind: oauth-client\n      name: main\n      jwks:\n        keys: [{}]\n",
+        keys.join(", ")
+    )
+}
+
+fn refusal(yaml: &str) -> String {
+    match ServiceAccount::from_yaml(yaml) {
+        Ok(account) => account.validate().expect_err("refused").to_string(),
+        Err(error) => error.to_string(),
+    }
+}
+
+#[test]
+fn a_device_account_with_a_public_ec_key_reads_and_names_it() {
+    let account =
+        ServiceAccount::from_yaml(&device(&oauth_with(&[ec_key("cam-2026")]))).expect("parses");
+    account.validate().expect("a public P-256 key is valid");
+    let keys = account.spec.device_keys().expect("the device's keys");
+    assert_eq!(keys.keys[0].kid, "cam-2026");
+    let again = ServiceAccount::from_yaml(&account.to_yaml().expect("yaml")).expect("reads back");
+    assert_eq!(again.spec.device_keys(), Some(keys));
+}
+
+#[test]
+fn a_private_or_symmetric_key_never_reads() {
+    let private = format!(
+        "{{ kty: EC, crv: P-256, kid: k, x: {EC_X}, y: {EC_Y}, d: jpsQnnGQmL-YBIffH1136cspYG6-0iY7X1fCE9-E9LI }}"
+    );
+    assert!(refusal(&device(&oauth_with(&[private]))).contains("unknown field `d`"));
+    let symmetric = "{ kty: oct, kid: k, k: c2VjcmV0 }".to_owned();
+    assert!(refusal(&device(&oauth_with(&[symmetric]))).contains("unknown field `k`"));
+    let oct_shape = "{ kty: oct, kid: k }".to_owned();
+    assert!(refusal(&device(&oauth_with(&[oct_shape]))).contains("EC (P-256) or RSA"));
+}
+
+#[test]
+fn a_device_key_set_is_one_to_five_keys_each_named_once_and_well_formed() {
+    assert!(refusal(&device(&oauth_with(&[]))).contains("one to five"));
+    let six: Vec<String> = (0..6).map(|i| ec_key(&format!("k{i}"))).collect();
+    assert!(refusal(&device(&oauth_with(&six))).contains("one to five"));
+    assert!(refusal(&device(&oauth_with(&[ec_key("k"), ec_key("k")]))).contains("share this kid"));
+    for (key, why) in [
+        (
+            format!("{{ kty: EC, crv: P-384, kid: k, x: {EC_X}, y: {EC_Y} }}"),
+            "P-256",
+        ),
+        (
+            format!("{{ kty: EC, crv: P-256, kid: k, x: short, y: {EC_Y} }}"),
+            "32 bytes",
+        ),
+        (
+            format!("{{ kty: EC, crv: P-256, kid: k, x: \"{EC_X}=\", y: {EC_Y} }}"),
+            "32 bytes",
+        ),
+        (
+            format!("{{ kty: EC, crv: P-256, kid: k, x: {EC_X}, y: {EC_Y}, use: enc }}"),
+            "signing",
+        ),
+        (
+            format!("{{ kty: EC, crv: P-256, kid: k, x: {EC_X}, y: {EC_Y}, n: AQAB }}"),
+            "no n or e",
+        ),
+        (
+            format!("{{ kty: EC, crv: P-256, kid: \"\", x: {EC_X}, y: {EC_Y} }}"),
+            "kid",
+        ),
+        (
+            "{ kty: RSA, kid: k, n: AQAB, e: AQAB }".to_owned(),
+            "2048 bits",
+        ),
+    ] {
+        let message = refusal(&device(&oauth_with(std::slice::from_ref(&key))));
+        assert!(message.contains(why), "{key}: {message}");
+    }
+    let rsa = format!(
+        "{{ kty: RSA, kid: k, n: {}, e: AQAB, alg: RS256 }}",
+        "u".repeat(342)
+    );
+    ServiceAccount::from_yaml(&device(&oauth_with(&[rsa])))
+        .expect("parses")
+        .validate()
+        .expect("an RSA-2048 key is valid");
+}
+
+#[test]
+fn keys_belong_on_an_oauth_client_of_an_account_bound_to_no_workload() {
+    let on_api_key = format!(
+        "    - kind: api-key\n      name: main\n      jwks:\n        keys: [{}]\n",
+        ec_key("k")
+    );
+    assert!(refusal(&device(&on_api_key)).contains("only an oauth-client"));
+    let bound = format!(
+        "{}  workload:\n    kubernetes: {{ namespace: cams, serviceAccount: north }}\n",
+        device(&oauth_with(&[ec_key("k")]))
+    );
+    assert!(refusal(&bound).contains("pod's token"));
+}

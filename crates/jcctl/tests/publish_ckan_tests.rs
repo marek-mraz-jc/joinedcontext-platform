@@ -185,6 +185,8 @@ fn a_second_run_over_an_unchanged_repository_writes_nothing() {
             dataset: "kvalita-ovzdusia".to_owned(),
             outcome: Outcome::Created,
             mirror: None,
+            // The record lists no model, so no LinkML is missing (T-3886, EP-68).
+            no_linkml: false,
         }
     );
     assert_eq!(
@@ -259,6 +261,36 @@ urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1,AirQualityObserved,12.5,,\r\n";
     );
 }
 
+/// T-3886, EP-109: every run upserts every row, so the dataset's `metadata_modified` moves only
+/// when the rows did: a reload of the same rows leaves it, one changed cell moves it.
+#[test]
+fn metadata_modified_moves_when_the_rows_change_and_only_then() {
+    let dir = repo("mirror-modified");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let target = &found[1];
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+    let mut run = |csv: &str| {
+        publish_one(
+            &mut api,
+            target,
+            &record("air-rows"),
+            Some(&answer(csv)),
+            &settings(),
+        )
+        .expect("a run");
+        api.package(target.dataset_name()).expect("the dataset")["metadata_modified"]
+            .as_str()
+            .expect("a date")
+            .to_owned()
+    };
+
+    let first = run(CSV);
+    assert_eq!(run(CSV), first, "the same rows moved the date");
+    let moved = run(&CSV.replace("12.5", "14"));
+    assert!(moved > first, "{first} -> {moved}");
+}
+
 /// EP-65: a target with a mirror gets its table created and filled from the CSV the
 /// gateway answers, typed from the cells; a second run leaves the table's fields alone
 /// and reloads the rows.
@@ -298,7 +330,8 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
             "datastore_create",
             "resource_view_create",
             "datastore_upsert",
-            "datastore_search"
+            "datastore_search",
+            "resource_patch"
         ]
     );
     // EP-62: the sheet opens as a grid on the dataset page.
@@ -351,10 +384,12 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
             "resource_view_create",
             "datastore_upsert",
             "datastore_search",
+            "resource_patch",
             "datastore_upsert",
             "datastore_search"
         ],
-        "a reload writes rows, reads which entities the table holds, and removes none that stayed"
+        "a reload writes rows, reads which entities the table holds, removes none that stayed, \
+         and leaves the dataset's date where the same rows found it"
     );
     assert_eq!(api.views(AIR).len(), 1, "a second grid");
 }
@@ -547,6 +582,7 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
             "resource_view_create",
             "datastore_upsert",
             "datastore_search",
+            "resource_patch",
             "datastore_delete",
             "package_delete"
         ]
@@ -555,7 +591,7 @@ fn a_withdrawal_drops_the_table_and_the_dataset_once() {
 
     let again = withdraw_one(&mut api, target).expect("nothing to withdraw");
     assert_eq!(again.outcome, Outcome::Unchanged);
-    assert_eq!(api.actions().len(), 7, "a second withdrawal writes nothing");
+    assert_eq!(api.actions().len(), 8, "a second withdrawal writes nothing");
 }
 
 // --- the CSV the gateway writes ------------------------------------------------------------
@@ -1292,5 +1328,78 @@ urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:4,,2\r\n";
             .any(|action| action.starts_with("datastore_") || *action == "resource_delete"),
         "{:?}",
         &api.actions()[calls..]
+    );
+}
+
+/// T-3903, DM-95: the pass rate and the freshness reach the record as W3C DQV measurements and
+/// the CKAN dataset as extras; a measurement not taken adds nothing, and the same measurements
+/// on a second run write nothing.
+#[test]
+fn the_quality_measurements_reach_the_record_and_the_dataset() {
+    let dir = repo("dqv");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let target = &targets(&repo, "ovzdusie").expect("the walk")[0];
+    let mut api = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
+    let mut base = record("air-public");
+    base["@context"] = json!({ "dcat": "http://www.w3.org/ns/dcat#" });
+
+    assert_eq!(ckan::measured(&base, &ckan::Measurements::default()), base);
+    let both = ckan::Measurements {
+        pass_rate: Some(0.97),
+        freshness_seconds: Some(240),
+    };
+    let measured = ckan::measured(&base, &both);
+    assert_eq!(measured["@context"]["dqv"], json!(ckan::DQV));
+    let nodes = measured["dqv:hasQualityMeasurement"]
+        .as_array()
+        .expect("the measurements");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["@type"], json!("dqv:QualityMeasurement"));
+    assert_eq!(
+        nodes[0]["dqv:isMeasurementOf"]["@id"],
+        json!(ckan::PASS_RATE)
+    );
+    assert_eq!(nodes[0]["dqv:value"], json!(0.97));
+    assert_eq!(
+        nodes[1]["dqv:isMeasurementOf"]["@id"],
+        json!(ckan::FRESHNESS)
+    );
+
+    publish_one(&mut api, target, &measured, None, &settings()).expect("the first run");
+    let extras: Vec<(String, String)> = api.package("kvalita-ovzdusia").expect("the dataset")
+        ["extras"]
+        .as_array()
+        .expect("extras")
+        .iter()
+        .filter(|extra| {
+            extra["key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("quality_"))
+        })
+        .map(|extra| {
+            (
+                extra["key"].as_str().unwrap_or_default().to_owned(),
+                extra["value"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        extras,
+        vec![
+            ("quality_pass_rate".to_owned(), "0.97".to_owned()),
+            ("quality_freshness_seconds".to_owned(), "240".to_owned()),
+        ]
+    );
+    let again = publish_one(&mut api, target, &measured, None, &settings()).expect("again");
+    assert_eq!(again.outcome, Outcome::Unchanged);
+
+    let only_rate = ckan::Measurements {
+        pass_rate: Some(0.5),
+        freshness_seconds: None,
+    };
+    let rate = ckan::measured(&base, &only_rate);
+    assert_eq!(
+        rate["dqv:hasQualityMeasurement"].as_array().map(Vec::len),
+        Some(1)
     );
 }

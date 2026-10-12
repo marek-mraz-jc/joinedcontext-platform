@@ -389,6 +389,15 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
         });
     }
 
+    for (location, message) in mqtt_brokers(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in federation_topology(&repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -412,6 +421,7 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
 
     for (location, message) in roles_that_do_not_resolve(&repo)
         .into_iter()
+        .chain(brokers_that_do_not_resolve(&repo))
         .filter(|_| organization)
     {
         report.findings.push(Finding {
@@ -581,6 +591,48 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
                 format!(
                     "{id} names group `{group}`, which no Group manifest of this organization \
                      declares: add `users/groups/{group}.yaml` (PF-62, PF-64)"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// Refused: brokers without exactly one default, and a space whose `brokerRef` names no
+/// `ContextBroker` of the organization (PF-110, PF-111). The brokers are the organization's, so
+/// a project repository checked alone is not judged here.
+fn brokers_that_do_not_resolve(repo: &Repository) -> Vec<(Location, String)> {
+    let brokers: Vec<(&str, jc_core::kinds::ContextBrokerSpec, Location)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "ContextBroker")
+        .filter_map(|(id, resource)| {
+            let spec = serde_json::from_value(resource.manifest.spec.clone()).ok()?;
+            let at = (resource.path.clone(), resource.document, resource.line);
+            Some((id.name.as_str(), spec, at))
+        })
+        .collect();
+    let named = || brokers.iter().map(|(name, spec, _)| (*name, spec));
+    let mut findings = Vec::new();
+    if let (Err(err), Some((_, _, at))) =
+        (jc_core::kinds::validate_brokers(named()), brokers.first())
+    {
+        findings.push((at.clone(), format!("ContextBroker: {err} (PF-110)")));
+    }
+    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "ContextSpace") {
+        let broker_ref = resource
+            .manifest
+            .spec
+            .get("brokerRef")
+            .and_then(|b| b.as_str());
+        if broker_ref.is_none() {
+            continue;
+        }
+        if let Err(err) = jc_core::kinds::broker_of(broker_ref, named()) {
+            findings.push((
+                (resource.path.clone(), resource.document, resource.line),
+                format!(
+                    "{id}: {err}: add `brokers/{}.yaml`",
+                    broker_ref.unwrap_or_default()
                 ),
             ));
         }
@@ -991,6 +1043,77 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                             )));
                         }
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// The MQTT edge brokers checked against the repository (MF-54, PL-76): every role names
+/// ServiceAccounts its project declares, no two brokers hold one dedicated port (the finding
+/// names the holder), and a DataSource's `brokerRef` names a broker of its own project.
+fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
+    use jc_core::kinds::MqttBrokerSpec;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let accounts: BTreeSet<(Option<String>, String)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "ServiceAccount")
+        .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+        .collect();
+    let brokers: BTreeSet<(Option<String>, String)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "MqttBroker")
+        .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+        .collect();
+    let mut ports: BTreeMap<u16, String> = BTreeMap::new();
+    let mut found = Vec::new();
+    for (id, resource) in repo.iter() {
+        let at = (resource.path.clone(), resource.document, resource.line);
+        match id.kind.as_str() {
+            "MqttBroker" => {
+                // A spec the kind refuses is reported by the schema check.
+                let Ok(broker) =
+                    serde_json::from_value::<MqttBrokerSpec>(resource.manifest.spec.clone())
+                else {
+                    continue;
+                };
+                for role in &broker.roles {
+                    for account in &role.service_accounts {
+                        if !accounts.contains(&(id.namespace.clone(), account.clone())) {
+                            found.push((at.clone(), format!(
+                                "{id}: role `{}` names ServiceAccount `{account}`, which no manifest of this project declares (MF-54)",
+                                role.name
+                            )));
+                        }
+                    }
+                }
+                if let Some(port) = broker.port {
+                    match ports.get(&port) {
+                        Some(holder) => found.push((at.clone(), format!(
+                            "{id}: spec.port {port} is already held by {holder}; pick another port from the reserved range (MF-54)"
+                        ))),
+                        None => {
+                            ports.insert(port, id.to_string());
+                        }
+                    }
+                }
+            }
+            "DataSource" => {
+                let Some(name) = resource
+                    .manifest
+                    .spec
+                    .pointer("/mqtt/brokerRef/name")
+                    .and_then(|v| v.as_str())
+                else {
+                    continue;
+                };
+                if !brokers.contains(&(id.namespace.clone(), name.to_owned())) {
+                    found.push((at, format!(
+                        "{id}: spec.mqtt.brokerRef names MqttBroker `{name}`, which no manifest of this project declares (PL-76)"
+                    )));
                 }
             }
             _ => {}

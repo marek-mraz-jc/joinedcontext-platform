@@ -30,6 +30,9 @@ pub struct Settings {
     /// several: the Endpoint space's `defaultLocale`. English, then the first, when absent or
     /// not in the record (EP-63).
     pub language: Option<String>,
+    /// The installation's documentation base URL (branding `documentationBaseUrl`), under
+    /// which the WebSocket resource links its guide (API/07). No link when absent.
+    pub documentation: Option<String>,
 }
 
 impl Settings {
@@ -39,7 +42,14 @@ impl Settings {
             host: host.into(),
             organization_title: None,
             language: None,
+            documentation: None,
         }
+    }
+
+    /// Where the installation's documentation lives, for the usage texts (EP-108).
+    pub fn documented_at(mut self, base: impl Into<String>) -> Self {
+        self.documentation = Some(base.into().trim_end_matches('/').to_owned());
+        self
     }
 
     /// The language the dataset is written in (EP-63).
@@ -140,6 +150,7 @@ pub fn package(
     let name = publication.dataset_name(&endpoint.metadata.name);
     let url = settings.endpoint_url(spec.slug.as_str());
     let language = settings.language.as_deref();
+    let served = spec.served_representations();
 
     let mut payload = json!({
         "name": name,
@@ -147,7 +158,7 @@ pub fn package(
         "title": text_in(record.get("dct:title"), language).unwrap_or_else(|| name.to_owned()),
         "url": format!("{url}/"),
         "private": spec.audience != Audience::Public,
-        "resources": resources(&spec.served_representations(), &url, record),
+        "resources": resources(&served, &url, record),
         "extras": extras(record, &url, language),
     });
     if let Some(notes) = text_in(record.get("dct:description"), language) {
@@ -185,55 +196,148 @@ pub fn package(
                 .to_owned()
         })
         .or_else(|| text(record.get("dct:license")));
-    describe_mcp(
+    describe(
         &mut payload["resources"],
-        name,
-        &url,
-        licence.as_deref(),
-        spec.audience == Audience::Public,
+        &served,
+        &Usage {
+            dataset: name,
+            url: &url,
+            licence: licence.as_deref(),
+            public: spec.audience == Audience::Public,
+            documentation: settings.documentation.as_deref(),
+        },
     );
     Ok(Some(payload))
 }
 
-/// Gives the MCP resource the words an AI client acts on (T-3152, EP-81): what the server is
-/// and which Endpoint it reads, its tools and what each returns, the licence, and a client
-/// configuration to copy, as an indented block CKAN's Markdown shows as code. The tools are the
-/// gateway's own (`query_entities`, `get_entity`, `describe_schema`, `describe_access`).
-fn describe_mcp(
-    resources: &mut Value,
-    dataset: &str,
-    url: &str,
-    licence: Option<&str>,
+/// What a usage text says about the dataset it sits in (EP-108, API/02 §10).
+struct Usage<'a> {
+    dataset: &'a str,
+    url: &'a str,
+    licence: Option<&'a str>,
     public: bool,
-) {
-    let Some(mcp) = resources
-        .as_array_mut()
-        .into_iter()
-        .flatten()
-        .find(|resource| resource["format"] == "MCP")
-    else {
+    documentation: Option<&'a str>,
+}
+
+/// Gives every surface resource the words a person or an AI client starts from (T-3152,
+/// T-3886, EP-81, EP-108): a request to copy, the program to open it in, and who may read it.
+/// The served surfaces are the first resources, in `served` order. Code sits in indented
+/// blocks, which CKAN's Markdown shows as code. A text never carries a token: `$TOKEN` stands
+/// where the caller's own goes (EP-110).
+fn describe(resources: &mut Value, served: &[Representation], usage: &Usage) {
+    let Some(resources) = resources.as_array_mut() else {
         return;
     };
-    let server = mcp["url"].as_str().unwrap_or_default().to_owned();
-    let who = if public {
-        "answers anyone, with no sign-in, what the endpoint serves the public"
-    } else {
-        "answers what the endpoint lets the signed-in caller read: the client sends the caller's token"
-    };
-    let config = json!({ "mcpServers": { dataset: { "type": "http", "url": server } } });
-    let licence = licence.map_or_else(
-        || "Licence: as the dataset states.".to_owned(),
-        |licence| format!("Licence: {licence}; the data is reused under it."),
-    );
-    mcp["description"] = json!(format!(
-        "For AI assistants: a Model Context Protocol server over this dataset's endpoint {url}. \
-         It {who}.\n\n\
-         Tools: `query_entities` (the rows of an entity type, with an NGSI-LD `q` filter, `attrs`, \
-         `count` and paging), `get_entity` (one entity by its URN), `describe_schema` (the data \
-         model: read it first) and `describe_access` (what you may read).\n\n\
-         {licence}\n\n\
-         An MCP client reaches it with this configuration:\n\n    {config}\n"
-    ));
+    for (resource, representation) in resources.iter_mut().zip(served) {
+        let address = resource["url"].as_str().unwrap_or_default().to_owned();
+        resource["description"] = json!(usage.of(*representation, &address));
+    }
+}
+
+impl Usage<'_> {
+    fn of(&self, representation: Representation, address: &str) -> String {
+        let access = if self.public {
+            "Open to anyone, with no sign-in."
+        } else {
+            "Answers what the endpoint's policy lets the caller read: send a bearer token for the \
+             endpoint; without one it answers 401."
+        };
+        let auth = if self.public {
+            ""
+        } else {
+            " -H \"Authorization: Bearer $TOKEN\""
+        };
+        // What the catalogue keeps current, per resource kind (EP-109).
+        let live = "Always live: the catalogue holds this link, never a copy.";
+        let file = |what: &str| {
+            let name = address.rsplit('/').next().unwrap_or("file");
+            format!(
+                "{what}, generated on each download from the endpoint's live data.\n\n    \
+                 curl{auth} -o {name} '{address}'\n\n{access}"
+            )
+        };
+        match representation {
+            Representation::Mcp => self.mcp(address),
+            Representation::NgsiLd => format!(
+                "The NGSI-LD API (ETSI GS CIM 009) of this dataset: query, filter and page its \
+                 entities. The first ten of a type:\n\n    \
+                 curl{auth} -H 'Accept: application/ld+json' '{address}entities?type=<Type>&limit=10'\
+                 \n\n{live} {access}"
+            ),
+            Representation::WebSocket => {
+                let socket = address.replacen("https://", "wss://", 1);
+                let browser = if self.public {
+                    ""
+                } else {
+                    " A browser sends the token as the subprotocol `bearer.$TOKEN` beside \
+                     `ngsi-ld-ws`, never in the URL."
+                };
+                let guide = self.documentation.map_or_else(String::new, |base| {
+                    format!(
+                        "\n\nThe message format, the limits and examples in JavaScript and \
+                         Python: {base}/API/07-websocket"
+                    )
+                });
+                format!(
+                    "Live updates: open one WebSocket, subscribe to the entities you want, and \
+                     each change arrives as a message, with no server of your own. With \
+                     websocat, then type the subscription:\n\n    \
+                     websocat{auth} '{socket}'\n    \
+                     {{\"metadata\":{{\"x-op\":\"x-subscribe\",\"x-id\":\"s1\"}},\"body\":{{\"type\":\"Subscription\",\"entities\":[{{\"type\":\"<Type>\"}}]}}}}\
+                     \n\n{live} {access}{browser}{guide}"
+                )
+            }
+            Representation::OgcFeatures => format!(
+                "OGC API - Features, read-only: Part 1 (Core: collections and items), Part 2 \
+                 (coordinate reference systems by reference) and Part 3 (Filtering with CQL2). \
+                 {address}conformance lists the classes this endpoint serves. In QGIS: Layer, \
+                 Add Layer, Add WFS / OGC API - Features Layer, a new connection with the URL \
+                 {address}. With curl:\n\n    curl{auth} '{address}collections'\n\n{live} {access}"
+            ),
+            Representation::Odata => format!(
+                "OData v4, read-only: each entity type is an entity set, with $filter, $select, \
+                 $orderby and $top. In Excel: Data, Get Data, From Other Sources, From OData \
+                 Feed, then the URL {address}. In Power BI: Get data, OData feed, the same URL. \
+                 With curl:\n\n    curl{auth} '{address}'\n\n{live} {access}"
+            ),
+            Representation::Sta => format!(
+                "OGC SensorThings API 1.1, read-only: Things, Datastreams and Observations.\
+                 \n\n    curl{auth} '{address}Things'\n\n{live} {access}"
+            ),
+            Representation::Xlsx => file("An Excel spreadsheet that opens in Excel or LibreOffice"),
+            Representation::Csv => file("A CSV table"),
+            Representation::GeoJson => file("A GeoJSON feature collection that opens in QGIS"),
+            Representation::Json => file("The entities as one JSON document"),
+            Representation::Zip => file("Every file format of this dataset in one ZIP archive"),
+        }
+    }
+
+    /// The words an AI client acts on (T-3152, EP-81): what the server is and which Endpoint
+    /// it reads, its tools and what each returns, the licence, and a client configuration to
+    /// copy. The tools are the gateway's own (`query_entities`, `get_entity`,
+    /// `describe_schema`, `describe_access`).
+    fn mcp(&self, server: &str) -> String {
+        let who = if self.public {
+            "answers anyone, with no sign-in, what the endpoint serves the public"
+        } else {
+            "answers what the endpoint lets the signed-in caller read: the client sends the caller's token"
+        };
+        let config = json!({ "mcpServers": { self.dataset: { "type": "http", "url": server } } });
+        let licence = self.licence.map_or_else(
+            || "Licence: as the dataset states.".to_owned(),
+            |licence| format!("Licence: {licence}; the data is reused under it."),
+        );
+        format!(
+            "For AI assistants: a Model Context Protocol server over this dataset's endpoint {}. \
+             It {who}.\n\n\
+             Tools: `query_entities` (the rows of an entity type, with an NGSI-LD `q` filter, `attrs`, \
+             `count` and paging), `get_entity` (one entity by its URN), `describe_schema` (the data \
+             model: read it first) and `describe_access` (what you may read).\n\n\
+             {licence}\n\n\
+             An MCP client reaches it with this configuration:\n\n    {config}\n",
+            self.url
+        )
+    }
 }
 
 /// Creates or updates the dataset of one Endpoint, and the organization it lands in.
@@ -318,6 +422,87 @@ pub fn withdraw(api: &mut impl CkanApi, name: &str) -> Result<Outcome, PublishEr
     Ok(Outcome::Withdrawn)
 }
 
+/// Whether the record lists a model's artifacts and not its LinkML: an Endpoint with a model
+/// lists `model.linkml.yaml` in its dataset, and one whose record lacks it still links the
+/// schema index, which the publisher reports (EP-68, T-3886).
+pub fn missing_linkml(record: &Value) -> bool {
+    let artifacts = schema_resources(record);
+    !artifacts.is_empty()
+        && !artifacts
+            .iter()
+            .any(|artifact| artifact["format"] == "LinkML")
+}
+
+/// The W3C Data Quality Vocabulary, which DCAT-AP's own quality terms build on (DM-95).
+pub const DQV: &str = "http://www.w3.org/ns/dqv#";
+/// The metric of the share of checks a dataset's writes passed over seven days.
+pub const PASS_RATE: &str = "https://joinedcontext.com/ns/quality#passRate";
+/// The metric of the age, in seconds, of the newest data when the space was last read.
+pub const FRESHNESS: &str = "https://joinedcontext.com/ns/quality#freshness";
+
+/// What the platform measured of one dataset's data (DM-95, ADR-N-046 2.7). `None` is "not
+/// measured", which adds nothing, never a zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Measurements {
+    /// Checks passed over all checks of the space's quality rules in seven days, 0..=1.
+    pub pass_rate: Option<f64>,
+    /// Seconds between the newest data and the daily quality run that read it.
+    pub freshness_seconds: Option<i64>,
+}
+
+/// `record` with a `dqv:hasQualityMeasurement` for each measurement taken (DM-95).
+pub fn measured(record: &Value, measurements: &Measurements) -> Value {
+    let node = |metric: &str, value: Value| {
+        json!({
+            "@type": "dqv:QualityMeasurement",
+            "dqv:isMeasurementOf": { "@id": metric },
+            "dqv:value": value,
+        })
+    };
+    let nodes: Vec<Value> = [
+        measurements
+            .pass_rate
+            .map(|rate| node(PASS_RATE, json!(rate))),
+        measurements
+            .freshness_seconds
+            .map(|seconds| node(FRESHNESS, json!(seconds))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut record = record.clone();
+    if nodes.is_empty() {
+        return record;
+    }
+    if let Some(context) = record.get_mut("@context").and_then(Value::as_object_mut) {
+        context.entry("dqv").or_insert_with(|| json!(DQV));
+    }
+    record["dqv:hasQualityMeasurement"] = Value::Array(nodes);
+    record
+}
+
+/// The record's quality measurements as the extras a CKAN dataset page shows: ckanext-dcat maps
+/// only `dqv:hasQualityAnnotation`, so they are plain keys (DM-95).
+fn quality_extras(record: &Value) -> Vec<Value> {
+    let measurements = record
+        .get("dqv:hasQualityMeasurement")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    measurements
+        .iter()
+        .filter_map(|node| {
+            let key = match node.pointer("/dqv:isMeasurementOf/@id")?.as_str()? {
+                PASS_RATE => "quality_pass_rate",
+                FRESHNESS => "quality_freshness_seconds",
+                _ => return None,
+            };
+            let value = node.get("dqv:value")?;
+            Some(json!({ "key": key, "value": value.to_string() }))
+        })
+        .collect()
+}
+
 /// Whether CKAN holds the dataset as deleted: `package_delete` marks rather than purges.
 fn deleted(live: &Value) -> bool {
     live.get("state").and_then(Value::as_str) == Some("deleted")
@@ -354,6 +539,8 @@ fn resources(enabled: &[Representation], url: &str, record: &Value) -> Value {
         "url": format!("{url}/schema/index.json"),
         "format": "JSON",
         "mimetype": "application/json",
+        "description": "The data model in every formalism, for every model version, each artifact \
+                        with its sha256 (EP-68).",
     }));
     resources.extend(schema_resources(record));
     Value::Array(resources)
@@ -377,10 +564,12 @@ fn schema_resources(record: &Value) -> Vec<Value> {
                 .get("spdx:checksumValue")?
                 .as_str()?;
             let url = distribution.get("dcat:accessURL")?.as_str()?;
+            let format = format_of(url);
             let mut resource = json!({
                 "name": text(distribution.get("dct:title")).unwrap_or_else(|| url.to_owned()),
                 "url": url,
-                "format": format_of(url),
+                "description": format!("The data model as {format}; sha256 {sha256}."),
+                "format": format,
                 "hash": sha256,
                 "hash_algorithm": "sha256",
             });
@@ -456,6 +645,13 @@ const fn distribution(
             "application/json",
             "OGC SensorThings API",
         ),
+        Representation::Odata => ("/odata/v4/", "OData", "application/json", "OData v4"),
+        Representation::WebSocket => (
+            "/ws",
+            "WebSocket",
+            "application/json",
+            "Live updates over WebSocket",
+        ),
     }
 }
 
@@ -491,6 +687,7 @@ fn extras(record: &Value, url: &str, language: Option<&str>) -> Value {
         })
         .collect();
     extras.extend(catalog_extras(record, language));
+    extras.extend(quality_extras(record));
     // Who wrote this dataset and where it came from, so a manual edit in CKAN is visible
     // as drift rather than being silently overwritten without a trace (MF-08).
     extras.push(json!({ "key": "endpoint", "value": format!("{url}/") }));
@@ -731,6 +928,7 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
                         "url": resource.get("url"),
                         "format": resource.get("format"),
                         "mimetype": resource.get("mimetype"),
+                        "description": resource.get("description"),
                         // A regenerated model keeps its file names and changes its digest;
                         // without this a stale hash would sit in CKAN as "unchanged". CKAN
                         // answers `""` for a resource that has none, which is no hash either.
@@ -756,6 +954,8 @@ pub struct InMemoryCkan {
     views: BTreeMap<String, Vec<Value>>,
     calls: Vec<(String, Value)>,
     token: String,
+    /// Writes so far: the clock `metadata_modified` is read off.
+    revision: u64,
 }
 
 impl InMemoryCkan {
@@ -889,6 +1089,7 @@ impl CkanApi for InMemoryCkan {
                 let mut stored = payload.clone();
                 // CKAN mints an id on creation and keeps it for the life of the dataset.
                 stored["id"] = json!(format!("pkg-{key}"));
+                stored["metadata_modified"] = json!(self.tick());
                 // and answers an empty `hash` for every resource that was given none.
                 if let Some(resources) = stored["resources"].as_array_mut() {
                     for resource in resources {
@@ -903,6 +1104,32 @@ impl CkanApi for InMemoryCkan {
             "package_delete" => {
                 self.packages.remove(&self.key_of(payload, &name));
                 Ok(json!({}))
+            }
+            "resource_patch" => {
+                let stamp = self.tick();
+                let listed = self.packages.values_mut().find_map(|package| {
+                    let index = package["resources"]
+                        .as_array()?
+                        .iter()
+                        .position(|r| r["id"] == json!(name))?;
+                    Some((package, index))
+                });
+                let Some((package, index)) = listed else {
+                    // A table made without its dataset, as the DataStore tests make them.
+                    return if self.tables.contains_key(&name) {
+                        Ok(payload.clone())
+                    } else {
+                        Err(Self::rejected(action, "unknown resource"))
+                    };
+                };
+                let resource = &mut package["resources"][index];
+                for (key, value) in payload.as_object().into_iter().flatten() {
+                    resource[key] = value.clone();
+                }
+                let patched = resource.clone();
+                // A resource that changes changes its dataset, as CKAN's resource_update does.
+                package["metadata_modified"] = json!(stamp);
+                Ok(patched)
             }
             "resource_delete" => {
                 let mut found = false;
@@ -1061,6 +1288,12 @@ impl InMemoryCkan {
             }
             other => Err(Self::rejected(other, "unknown action")),
         }
+    }
+
+    /// The next `metadata_modified`, later than every one before it.
+    fn tick(&mut self) -> String {
+        self.revision += 1;
+        format!("2026-01-01T00:00:00.{:06}", self.revision)
     }
 
     fn resource_of(action: &str, payload: &Value) -> Result<String, CkanError> {

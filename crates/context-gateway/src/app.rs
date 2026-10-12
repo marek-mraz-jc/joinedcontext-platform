@@ -99,6 +99,9 @@ pub struct Gateway {
     pub org_domain: String,
     /// The realm's token verifier; absent means no token is accepted at all (PF-46).
     pub verifier: Option<Arc<Verifier>>,
+    /// Exchanges a caller's token for the member brokers of a federated read (T-3999); absent
+    /// answers such a read `503`, never forwards it as anyone else.
+    pub exchanger: Option<Arc<crate::federation::exchange::Exchanger>>,
     /// The service accounts a token's `azp` can name; swapped whole when the repository
     /// changes, so a withdrawn credential stops resolving without a restart (R48).
     accounts: ArcSwap<ServiceAccounts>,
@@ -110,6 +113,8 @@ pub struct Gateway {
     agreements: ArcSwap<Agreements>,
     /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
     servers: ArcSwap<crate::mcp::server::McpServers>,
+    /// The MQTT edge brokers, swapped whole with the rest (ADR-N-048, PL-75).
+    brokers: ArcSwap<crate::mqtt::Brokers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// The base a rewritten notification endpoint carries, when it is not the public one.
@@ -123,6 +128,8 @@ pub struct Gateway {
     pub rate_limiter: RateLimiter,
     /// The creates each form Endpoint has taken today (EP-97).
     pub creates: crate::creates::DailyCreates,
+    /// The WebSocket connections each caller holds open (EP-107).
+    pub ws_open: crate::handlers::ws::Open,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -168,6 +175,9 @@ pub enum Door {
     Hub,
     /// `/api/mcp/{project}/{name}`, a named server over chosen Endpoints (EP-92, ADR-N-043).
     Server,
+    /// An Endpoint's NGSI-LD surface, which also admits a token the gateway exchanged for the
+    /// broker the Endpoint's space lives on: the forward of a federated read (T-3999, PF-114).
+    Federated,
 }
 
 impl Gateway {
@@ -179,16 +189,19 @@ impl Gateway {
             pdp,
             org_domain: org_domain.into(),
             verifier: None,
+            exchanger: None,
             accounts: ArcSwap::from_pointee(ServiceAccounts::new()),
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
             servers: ArcSwap::from_pointee(Vec::new()),
+            brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
             egress_url: None,
             private_hosts: Vec::new(),
             delivery_key: None,
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
+            ws_open: Default::default(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
@@ -196,6 +209,13 @@ impl Gateway {
             hub_rate_limit: HUB_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
         }
+    }
+
+    /// Exchanges a caller's token with `exchanger` for a read over a space whose
+    /// registrations ask for `identity: caller` (T-3999, ADR-N-047 §2.4).
+    pub fn exchange_with(mut self, exchanger: crate::federation::exchange::Exchanger) -> Self {
+        self.exchanger = Some(Arc::new(exchanger));
+        self
     }
 
     /// Spends at most `limits` a minute per subject on the MCP hub (ADR-N-025 section 3).
@@ -259,6 +279,15 @@ impl Gateway {
         )
     }
 
+    /// The audience of the broker `endpoint`'s space lives on, the one a federated read's
+    /// exchanged token names (T-3999, PF-114).
+    pub(crate) fn broker_audience(&self, endpoint: &Endpoint) -> String {
+        format!(
+            "context-broker-{}",
+            self.broker.broker_of_view(&endpoint.slug)
+        )
+    }
+
     /// Every value that names the hub as an RFC 8707 resource: its Keycloak client and, when
     /// the deployment names its public URL, `{url}/api/mcp` (ADR-N-025 section 4).
     pub(crate) fn hub_audiences(&self) -> Vec<String> {
@@ -274,6 +303,7 @@ impl Gateway {
         let mut audiences = self.audiences_for(endpoint);
         match door {
             Door::Endpoint => {}
+            Door::Federated => audiences.push(self.broker_audience(endpoint)),
             Door::Hub => audiences.extend(self.hub_audiences()),
             // A server's token reaches the members of that server and nothing else (EP-94).
             Door::Server => audiences.extend(
@@ -296,6 +326,21 @@ impl Gateway {
             audiences.push(format!("{base}{}", server.path()));
         }
         audiences
+    }
+
+    /// Replaces the MQTT edge brokers (ADR-N-048): from the next CONNECT on.
+    pub fn replace_brokers(&self, brokers: crate::mqtt::Brokers) {
+        self.brokers.store(Arc::new(brokers));
+    }
+
+    /// The MQTT edge brokers served now.
+    pub fn brokers(&self) -> Arc<crate::mqtt::Brokers> {
+        self.brokers.load_full()
+    }
+
+    /// The service accounts a token's `azp` resolves through now.
+    pub fn service_accounts(&self) -> Arc<ServiceAccounts> {
+        self.accounts.load_full()
     }
 
     /// Replaces the named MCP servers (ADR-N-043): from the next request on.
@@ -355,14 +400,77 @@ impl Gateway {
         self.federation.load().members(project, space).to_vec()
     }
 
-    /// The registrations of one space that ask for the caller's own identity (PF-48).
-    fn caller_identity_members(&self, project: &str, space: &str) -> Vec<String> {
-        self.federation
-            .load()
-            .needing_caller_identity(project, space)
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+    /// The `Authorization` a hop over `endpoint`'s space carries for its `identity: caller`
+    /// registrations (PF-48, PF-113, T-3999): none when it has none or the caller is anonymous,
+    /// else the caller's token exchanged for the brokers those members live on. A member outside
+    /// this platform never receives one (`501`); an exchange that fails is `502` or `503`, and
+    /// nothing is forwarded in its place.
+    pub(crate) async fn federation_token(
+        &self,
+        endpoint: &Endpoint,
+        presented: Option<&HeaderValue>,
+    ) -> Result<Option<HeaderValue>, Box<Response<Body>>> {
+        let federation = self.federation.load();
+        let members: Vec<&crate::federation::Member> = federation
+            .caller_members(&endpoint.project, &endpoint.space)
+            .collect();
+        if members.is_empty() {
+            return Ok(None);
+        }
+        let outside: Vec<&str> = members
+            .iter()
+            .filter(|member| member.view.is_none())
+            .map(|member| member.name.as_str())
+            .collect();
+        if !outside.is_empty() {
+            tracing::warn!(
+                slug = %endpoint.slug,
+                registrations = %outside.join(", "),
+                "caller identity on a source outside this platform or not served here"
+            );
+            return Err(Box::new(
+                ProblemDetails::new(501, "federation-identity-unavailable", "Not Implemented")
+                    .with_detail(
+                        "a source registered on this space asks for the caller's own token, but \
+                         it is an address outside this platform or an Endpoint this gateway does \
+                         not serve, and the token never leaves the platform; register it with \
+                         spec.federation.identity: serviceAccount",
+                    )
+                    .into_response(),
+            ));
+        }
+        // The anonymous caller is the member's anonymous caller too: nothing to exchange.
+        let Some(subject) = presented
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| token::bearer(Some(value)).ok())
+        else {
+            return Ok(None);
+        };
+        let brokers: std::collections::BTreeSet<String> = members
+            .iter()
+            .filter_map(|member| member.view.as_deref())
+            .map(|view| self.broker.broker_of_view(view))
+            .collect();
+        let Some(exchanger) = &self.exchanger else {
+            tracing::warn!(slug = %endpoint.slug, "a federated read needs a token exchange and none is configured");
+            return Err(Box::new(
+                crate::federation::exchange::ExchangeError::Unavailable(String::new())
+                    .problem()
+                    .into_response(),
+            ));
+        };
+        match exchanger.exchange(subject, &brokers).await {
+            Ok(exchanged) => HeaderValue::from_str(&format!("Bearer {exchanged}"))
+                .map(|mut value| {
+                    value.set_sensitive(true);
+                    Some(value)
+                })
+                .map_err(|_| Box::new(ProblemDetails::internal().into_response())),
+            Err(error) => {
+                tracing::warn!(slug = %endpoint.slug, %error, "token exchange for a federated read failed");
+                Err(Box::new(error.problem().into_response()))
+            }
+        }
     }
 
     /// Replaces the service account table (R48, PF-46).
@@ -469,6 +577,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
+        // Live updates: the broker view's WebSocket, relayed under the caller (EP-106, T-3885).
+        .route(
+            "/api/endpoint/{slug}/ws",
+            get(crate::handlers::ws::endpoint_ws),
+        )
         .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))
@@ -833,30 +946,30 @@ pub(crate) async fn serve_ngsi_ld(
             return refusal.into_response();
         }
     }
+    // Every NGSI-LD door ends here, the conditional writes and subscriptions a view hands on
+    // included, so the federated token's limit is enforced here too (T-3999).
+    if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
+        return refusal;
+    }
 
-    // PF-48: a registration asking for `caller` identity needs the caller's own token
-    // rewritten for the member's audience, which is an RFC 8693 exchange this platform does
-    // not have yet. Forwarding as the hub's own service account instead would answer with data
-    // the caller was never granted on that member, so the read stops here.
+    // PF-48, T-3999: a registration asking for `caller` identity forwards a token of the
+    // caller exchanged for its broker's audience, never the hub's account or the caller's own
+    // token. Read before the hop is pinned, which takes the caller's credential off it.
     //
     // After the decision, not before it: a caller who may not use this endpoint at all learns
     // that it is refused, never that it federates (EP-03, EP-23).
-    let waiting = gateway.caller_identity_members(&endpoint.project, &endpoint.space);
-    if !waiting.is_empty() {
-        tracing::warn!(
-            slug = %endpoint.slug,
-            space = %endpoint.space,
-            registrations = %waiting.join(", "),
-            "caller identity is registered but token exchange is not implemented"
-        );
-        return ProblemDetails::new(501, "federation-identity-unavailable", "Not Implemented")
-            .with_detail(
-                "a source registered on this space forwards the caller's own token, which \
-                 needs an RFC 8693 token exchange this deployment does not have yet; \
-                 spec.federation.identity: serviceAccount is served today",
-            )
-            .into_response();
-    }
+    // A write's hop carries no exchanged token: the exchange serves federated reads only.
+    let federated = if operation.is_write() {
+        None
+    } else {
+        match gateway
+            .federation_token(&endpoint, request.headers().get(AUTHORIZATION))
+            .await
+        {
+            Ok(federated) => federated,
+            Err(answer) => return *answer,
+        }
+    };
 
     // AG-85, T-2299: `geoproperty` and `geometryProperty` each choose the attribute a
     // decision is taken on, so each is judged against the grants that were just read rather
@@ -921,6 +1034,9 @@ pub(crate) async fn serve_ngsi_ld(
     if let Err(problem) = tenancy::pin_caller(&mut request, &endpoint.space, &subject) {
         tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
         return ProblemDetails::internal().into_response();
+    }
+    if let Some(federated) = federated {
+        request.headers_mut().insert(AUTHORIZATION, federated);
     }
 
     let (mut parts, body) = request.into_parts();
@@ -1025,6 +1141,21 @@ pub(crate) async fn serve_ngsi_ld(
         }
     }
 
+    // The quarantine mark is the gateway's (DM-90): a path addressing it is refused, a body's
+    // copy dropped, so only the space's rules set it below.
+    if operation.is_write() && !subscribing {
+        match owned_guarded(&mut sent, &path) {
+            Err(problem) => return problem.into_response(),
+            Ok(true) => {
+                parts.headers.remove(CONTENT_LENGTH);
+                parts
+                    .headers
+                    .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
+            }
+            Ok(false) => {}
+        }
+    }
+
     // A quantity is written in its model's unit or not at all (DM-06, T-2810): a wrong
     // `unitCode` is refused, a missing one filled with the model's code unless the space
     // refuses that. A view endpoint writes in its target model, which the space's rules do not
@@ -1043,7 +1174,11 @@ pub(crate) async fn serve_ngsi_ld(
                     return problem.into_response();
                 }
             }
-            if !units_filled.is_empty() {
+            let before = sent.len();
+            if let Err(problem) = quality_judged(&mut sent, &path, &endpoint) {
+                return problem.into_response();
+            }
+            if !units_filled.is_empty() || sent.len() != before {
                 parts.headers.remove(CONTENT_LENGTH);
                 parts
                     .headers
@@ -1429,14 +1564,12 @@ fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
-/// Endpoint has a view ([`has_view`]), and the request is none of the kinds the view does not
-/// serve yet: a subscription, whose delivery the gateway still seals and routes back (plan 5.5, T-3653). So
-/// does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
-/// compare and conditional write is the only lost-update guard there is (R45, GW16).
-fn served_by_view(
-    endpoint: &Endpoint,
-    (view, operation, headers): (&str, Operation, &HeaderMap),
-) -> bool {
+/// broker can hold the view ([`has_view`]), and the request is none of the kinds the view does
+/// not serve yet: a subscription, whose delivery the gateway still seals and routes back (plan
+/// 5.5, T-3653). So does a write with `If-Match`: the broker publishes no entity tags, and the
+/// gateway's read, compare and conditional write is the only lost-update guard there is (R45,
+/// GW16).
+pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let subscription = matches!(
         operation,
         Operation::CreateSubscription
@@ -1446,19 +1579,13 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    has_view(endpoint, view) && !conditional && !subscription
+    has_view(view) && !conditional && !subscription
 }
 
-/// Whether the broker holds a view `view` of this Endpoint (plan 5.1, T-3643, T-3752). What no
-/// view can serve yet keeps the gateway's own answer, each until its gap closes: a projection
-/// with `temporalQ` (G6) and a slug no view id can hold (the writer refuses both).
-pub(crate) fn has_view(endpoint: &Endpoint, view: &str) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
-    !temporal && (1..=MAX_VIEW_ID).contains(&view.len())
+/// Whether the broker can hold a view `view` (plan 5.1, T-3643, T-3752): a slug no view id can
+/// hold keeps the gateway's own answer (the writer refuses it).
+pub(crate) fn has_view(view: &str) -> bool {
+    (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
@@ -1495,7 +1622,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !served_by_view(&endpoint, (&view, operation, request.headers())) {
+    if !served_by_view((&view, operation, request.headers())) {
         return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
     }
     if operation == Operation::QueryEntity {
@@ -1515,7 +1642,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         "forwarded to the broker's view"
     );
     let mut request = request;
-    match view_request(gateway, &endpoint, &subject, &path, operation, &mut request) {
+    match view_request(gateway, &endpoint, &subject, &path, operation, &mut request).await {
         Ok(()) => {}
         Err(answer) => return *answer,
     }
@@ -1646,7 +1773,7 @@ pub(crate) async fn with_platform_slug(answer: Response<Body>) -> Response<Body>
 const ANTARES_ACCESS_DENIED: &str = "urn:antares:error:AccessDenied";
 
 /// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
-const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
@@ -1692,10 +1819,40 @@ fn capped_query(raw: &str) -> String {
         .join("&")
 }
 
-/// The checks of a view request that need no body: the domain gate on a write (PF-41), the
-/// federation the platform cannot serve yet (PF-48), the identifier (PF-43), then the tenant
-/// and the verified caller pinned for the hop (T-3641).
-fn view_request(
+/// The checks of a view request that need no body: the domain gate on a write (PF-41), a
+/// federated read's write refused (T-3999), the identifier (PF-43), then the tenant and the
+/// verified caller pinned for the hop (T-3641), with the token a `caller` registration of the
+/// space receives (PF-48, PF-113).
+/// A token the gateway exchanged for a federated read reads entities; it never writes and never
+/// touches a subscription, which would outlive it (T-3999, PF-114).
+fn federated_refusal(
+    endpoint: &Endpoint,
+    subject: &Subject,
+    operation: Operation,
+) -> Option<Response<Body>> {
+    if subject.via.as_deref() != Some(tenancy::GATEWAY_CLIENT) {
+        return None;
+    }
+    let subscription = matches!(
+        operation,
+        Operation::CreateSubscription
+            | Operation::UpdateSubscription
+            | Operation::RetrieveSubscription
+            | Operation::QuerySubscription
+            | Operation::DeleteSubscription
+    );
+    if !operation.is_write() && !subscription {
+        return None;
+    }
+    tracing::info!(slug = %endpoint.slug, %operation, "refused: a federated read's token");
+    Some(
+        ProblemDetails::forbidden()
+            .with_detail("a token exchanged for a federated read only reads entities")
+            .into_response(),
+    )
+}
+
+async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
@@ -1709,23 +1866,16 @@ fn view_request(
             return Err(Box::new(refusal.into_response()));
         }
     }
-    let waiting = gateway.caller_identity_members(&endpoint.project, &endpoint.space);
-    if !waiting.is_empty() {
-        tracing::warn!(
-            slug = %endpoint.slug,
-            registrations = %waiting.join(", "),
-            "caller identity is registered but token exchange is not implemented"
-        );
-        return Err(Box::new(
-            ProblemDetails::new(501, "federation-identity-unavailable", "Not Implemented")
-                .with_detail(
-                    "a source registered on this space forwards the caller's own token, which \
-                     needs an RFC 8693 token exchange this deployment does not have yet; \
-                     spec.federation.identity: serviceAccount is served today",
-                )
-                .into_response(),
-        ));
+    if let Some(refusal) = federated_refusal(endpoint, subject, operation) {
+        return Err(Box::new(refusal));
     }
+    let federated = if operation.is_write() {
+        None
+    } else {
+        gateway
+            .federation_token(endpoint, request.headers().get(AUTHORIZATION))
+            .await?
+    };
     if let Some(raw) = operations::addressed_entity(path) {
         if let Err(refusal) = write_guard::check_identifier(&query::decode(raw), None) {
             return Err(Box::new(ProblemDetails::from(refusal).into_response()));
@@ -1734,7 +1884,11 @@ fn view_request(
     tenancy::pin_caller(request, &endpoint.space, subject).map_err(|problem| {
         tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
         Box::new(ProblemDetails::internal().into_response())
-    })
+    })?;
+    if let Some(federated) = federated {
+        request.headers_mut().insert(AUTHORIZATION, federated);
+    }
+    Ok(())
 }
 
 /// The payload of a view request as the gateway keeps it: the media type (CIM 009 6.3.2), the
@@ -1795,6 +1949,9 @@ async fn view_payload(
             }
         }
     }
+    if operation.is_write() {
+        owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
+    }
     let declared = endpoint.declared_types.as_ref();
     let mut filled = Vec::new();
     if operation.is_write() && !sent.is_empty() {
@@ -1802,6 +1959,19 @@ async fn view_payload(
             filled = filled_units(sent, path, &declared.units).map_err(|problem| {
                 tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
                 Box::new(problem.into_response())
+            })?;
+            quality_judged(sent, path, endpoint).map_err(|problem| {
+                // The broker decides a view's grants after this; a caller the Endpoint's
+                // Policy refuses learns that, never a rule's name or bound (DM-88).
+                let verdict =
+                    gateway
+                        .pdp
+                        .decide(subject, operation, &query::requested(params), endpoint);
+                if verdict.is_deny() {
+                    Box::new(refused(operation, path))
+                } else {
+                    Box::new(problem.into_response())
+                }
             })?;
         }
     }
@@ -2631,6 +2801,72 @@ fn filled_units(
     Ok(filled)
 }
 
+/// The quarantine mark is written by the space's rules alone (DM-90): a write whose path
+/// addresses it is refused, a `DELETE` included, and a body's own copy is dropped. `true` when
+/// the body changed.
+fn owned_guarded(sent: &mut Vec<u8>, path: &str) -> Result<bool, Box<ProblemDetails>> {
+    let targeted = operations::targeted_attribute(path);
+    if let Some(problem) = crate::quality::owned_path(targeted) {
+        tracing::info!("write refused: it addresses the quarantine mark");
+        return Err(Box::new(problem));
+    }
+    if sent.is_empty() || targeted.is_some() {
+        return Ok(false);
+    }
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        return Ok(false);
+    };
+    if !crate::quality::strip_owned(&mut payload) {
+        return Ok(false);
+    }
+    *sent = serde_json::to_vec(&payload).map_err(|error| {
+        tracing::error!(%error, "a write without the quarantine mark does not serialize");
+        Box::new(ProblemDetails::internal())
+    })?;
+    Ok(true)
+}
+
+/// Judges a write against the space's quality rules (DM-87..DM-93): a rejecting rule refuses
+/// it, a flag or a quarantine is written into `sent` before it is forwarded.
+fn quality_judged(
+    sent: &mut Vec<u8>,
+    path: &str,
+    endpoint: &Endpoint,
+) -> Result<(), Box<ProblemDetails>> {
+    let Some(rules) = endpoint
+        .declared_types
+        .as_ref()
+        .map(|declared| &declared.quality)
+        .filter(|rules| !rules.is_empty())
+    else {
+        return Ok(());
+    };
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        // `judge_write` already refused a body that is not JSON; nothing is left to check.
+        return Ok(());
+    };
+    let addressed = operations::addressed_entity(path).map(query::decode);
+    let shape = crate::units::Shape {
+        addressed: addressed.as_deref(),
+        targeted: operations::targeted_attribute(path),
+    };
+    let before = payload.clone();
+    crate::quality::enforce(
+        &mut payload,
+        shape,
+        rules,
+        &endpoint.space,
+        chrono::Utc::now(),
+    )?;
+    if payload != before {
+        *sent = serde_json::to_vec(&payload).map_err(|error| {
+            tracing::error!(%error, "a write with its quality marks does not serialize");
+            Box::new(ProblemDetails::internal())
+        })?;
+    }
+    Ok(())
+}
+
 /// The answer to a write whose units the gateway filled, saying which (DM-06). A refused
 /// write changed nothing, so it says nothing either.
 fn with_filled_units(mut answer: Response<Body>, filled: &[String]) -> Response<Body> {
@@ -3319,7 +3555,7 @@ fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) 
 
 /// Whether the broker's `404` says the tenant does not exist (CIM 009 5.5.2 `NonexistentTenant`)
 /// rather than that the thing asked for does not.
-fn names_no_tenant(body: &[u8]) -> bool {
+pub(crate) fn names_no_tenant(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
         problem
             .get("type")
@@ -3523,6 +3759,24 @@ pub(crate) fn authenticate_by(
     // than it would about a slug that does not exist (EP-88, SP-20).
     if door == Door::Hub && !gateway.reaches(&claims, endpoint) {
         return Err(Box::new(ProblemDetails::not_found()));
+    }
+    // A token naming only the broker's audience is a federated read's (T-3999, PF-114): the
+    // gateway's own exchange alone mints one, and it reads as the person it names.
+    if door == Door::Federated && !claims.names_audience(&gateway.audiences_for(endpoint)) {
+        if claims.azp.as_deref() != Some(tenancy::GATEWAY_CLIENT) {
+            tracing::warn!(
+                azp = claims.azp.as_deref().unwrap_or_default(),
+                slug = %endpoint.slug,
+                "a broker-audience token not from the gateway's exchange"
+            );
+            return Err(Box::new(ProblemDetails::unauthorized()));
+        }
+        let mut subject = subject_from(gateway, endpoint, &claims)?;
+        if subject.user.is_none() {
+            return Err(Box::new(ProblemDetails::unauthorized()));
+        }
+        subject.via = Some(tenancy::GATEWAY_CLIENT.to_owned());
+        return Ok(subject);
     }
     subject_from(gateway, endpoint, &claims)
 }
@@ -3801,6 +4055,11 @@ pub(crate) fn admit_by(
     if representation.is_some_and(|wanted| !endpoint.serves(wanted)) {
         return Err(Box::new(ProblemDetails::not_found().into_response()));
     }
+    // The NGSI-LD surface is where a federated read arrives from another broker (T-3999).
+    let door = match (door, representation) {
+        (Door::Endpoint, Some(Representation::NgsiLd)) => Door::Federated,
+        (door, _) => door,
+    };
     let subject = authenticate_by(gateway, &endpoint, headers, door)
         .map_err(|problem| Box::new(problem.into_response()))?;
     Ok((endpoint, subject))
@@ -3846,8 +4105,9 @@ async fn mcp_message(
 /// broker has no tool or resource for, `describe_access`, `describe_schema` and their
 /// `access://` and `schema://` documents, added to the broker's listings and answered from the
 /// documents the access and schema surfaces serve, and what no view serves yet (a view
-/// mapping, a federating space) stays on its own façade. A caller under a data space
-/// agreement is the view's too: the hop names its DID alone (map K38, T-3818).
+/// mapping) stays on its own façade. A caller under a data space agreement is the view's too:
+/// the hop names its DID alone (map K38, T-3818). A federating space's registrations are named
+/// in the answer, see [`federated`].
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
@@ -3879,35 +4139,19 @@ async fn mcp_answer(
     // What is no single request (a batch, a scalar, a notification that changes nothing) is
     // answered here as JSON-RPC says, before a hop.
     let request_message = message.is_object() && message.get("id").is_some();
-    // A space that federates registrations says so in its instructions, tool descriptions and
-    // results (EP-71); the broker's view does not know the platform's members, so that space's
-    // MCP stays on the façade until the hub forwards (T-3808).
-    let federates = !gateway
-        .members_of(&endpoint.project, &endpoint.space)
-        .is_empty();
-    let viewed = request_message
-        && !federates
-        && endpoint.view_mapping.is_none()
-        && (1..=MAX_VIEW_ID).contains(&view.len());
+    let viewed = request_message && view_serves(&endpoint, &view);
     if described || !viewed {
         return facade_answer(gateway, endpoint, subject, credential, message).await;
     }
 
-    // A tool the gateway does not know as a read is a write for the domain gate (PF-41); the
-    // operation stands for the class of the call, the broker gates the tool's own clause.
-    let writes = calls
-        && !tool
-            .as_deref()
-            .is_some_and(|tool| MCP_READ_TOOLS.contains(&tool));
-    let operation = if writes {
-        Operation::UpsertBatch
-    } else {
-        Operation::QueryEntity
-    };
+    let operation = mcp_operation(calls.then_some(tool.as_deref().unwrap_or_default()));
     let mut request = Request::from_parts(parts, Body::empty());
-    if let Err(answer) = view_request(&gateway, &endpoint, &subject, "", operation, &mut request) {
+    if let Err(answer) =
+        view_request(&gateway, &endpoint, &subject, "", operation, &mut request).await
+    {
         return *answer;
     }
+    let federates = member_names(&gateway, &endpoint);
     let (mut parts, _) = request.into_parts();
     if calls {
         capped_arguments(&mut message["params"]["arguments"]);
@@ -3949,14 +4193,14 @@ async fn mcp_answer(
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json"));
-    let Some(key) = OWN_LISTINGS
+    let key = OWN_LISTINGS
         .iter()
         .find(|(listing, _)| *listing == method)
-        .map(|(_, key)| *key)
-        .filter(|_| answer.status().is_success() && json)
-    else {
+        .map(|(_, key)| *key);
+    let decorated = !federates.is_empty() && FEDERATED_METHODS.contains(&method.as_str());
+    if key.is_none() && !decorated || !answer.status().is_success() || !json {
         return answer;
-    };
+    }
     let (parts, body) = answer.into_parts();
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -3964,20 +4208,226 @@ async fn mcp_answer(
     let Ok(mut listed) = serde_json::from_slice::<Value>(&held) else {
         return proxy::with_body(parts, held.to_vec());
     };
-    let ask = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": method });
-    let own = mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, ask).await;
-    let kept: Vec<Value> = own
-        .as_ref()
-        .and_then(|own| own["result"][key].as_array())
-        .into_iter()
-        .flatten()
-        .filter(|item| gateway_owns(item))
-        .cloned()
-        .collect();
-    if let Some(items) = listed["result"][key].as_array_mut() {
-        items.extend(kept);
+    if decorated {
+        federated(&mut listed, &method, &federates);
+    }
+    if let Some(key) = key {
+        let ask = serde_json::json!({ "jsonrpc": "2.0", "id": 0, "method": method });
+        let own = mcp::endpoint_facade::handle(gateway, endpoint, subject, credential, ask).await;
+        let kept: Vec<Value> = own
+            .as_ref()
+            .and_then(|own| own["result"][key].as_array())
+            .into_iter()
+            .flatten()
+            .filter(|item| gateway_owns(item))
+            .cloned()
+            .collect();
+        let items = listed
+            .get_mut("result")
+            .and_then(|result| result.get_mut(key))
+            .and_then(Value::as_array_mut);
+        if let Some(items) = items {
+            items.extend(kept);
+        }
     }
     proxy::with_body(parts, listed.to_string().into_bytes())
+}
+
+/// The registrations of the endpoint's space, by name and never by address (EP-71).
+fn member_names(gateway: &Gateway, endpoint: &Endpoint) -> Vec<String> {
+    gateway
+        .members_of(&endpoint.project, &endpoint.space)
+        .into_iter()
+        .map(|member| member.name)
+        .collect()
+}
+
+/// The messages whose answer says what a federating space federates (EP-71, AG-30).
+const FEDERATED_METHODS: &[&str] = &["initialize", "tools/list", "tools/call"];
+
+/// What a federating space adds to the broker's answer of its view (EP-70, EP-71, AG-30): the
+/// broker merges the space's registrations and its view says nothing of them, so the gateway
+/// names them, by name only, where a model reads them: the server's instructions, each read
+/// tool's description and output schema, and the result of a read that succeeded, as
+/// `jc:source`. A write goes to this space alone and is described as it is.
+fn federated(answer: &mut Value, method: &str, members: &[String]) {
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let names = members.join(", ");
+    match method {
+        "initialize" => {
+            if let Some(Value::String(instructions)) = result.get_mut("instructions") {
+                instructions.push_str(&format!(
+                    " This space federates {names}: every read answers over their union, a \
+                     result carries the names it came from as `jc:source`, and an answer can be \
+                     partial when one of them does not respond."
+                ));
+            }
+        }
+        "tools/list" => {
+            let tools = result.get_mut("tools").and_then(Value::as_array_mut);
+            for tool in tools.into_iter().flatten().filter_map(Value::as_object_mut) {
+                let read = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| MCP_READ_TOOLS.contains(&name));
+                if !read {
+                    continue;
+                }
+                if let Some(Value::String(description)) = tool.get_mut("description") {
+                    description.push_str(&format!(
+                        " This space federates {names}: the answer is the union of their data \
+                         and can be partial."
+                    ));
+                }
+                let properties = tool
+                    .get_mut("outputSchema")
+                    .and_then(|schema| schema.get_mut("properties"))
+                    .and_then(Value::as_object_mut);
+                if let Some(properties) = properties {
+                    properties.insert(
+                        "jc:source".to_owned(),
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "The registrations this answer is a union over, by name (EP-71)",
+                        }),
+                    );
+                }
+            }
+        }
+        "tools/call" if result.get("isError") != Some(&Value::Bool(true)) => {
+            let structured = result
+                .get_mut("structuredContent")
+                .and_then(Value::as_object_mut);
+            if let Some(structured) = structured {
+                structured.insert("jc:source".to_owned(), Value::from(members.to_vec()));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether the broker's MCP surface of `view` answers this Endpoint: not what no view serves
+/// yet, a view mapping. An agreement's caller is the view's too (T-3818), and a space that
+/// federates registrations is served by its own view, which merges them as its NGSI-LD surface
+/// does; the gateway names them in the answer (EP-71, T-3819).
+fn view_serves(endpoint: &Endpoint, view: &str) -> bool {
+    endpoint.view_mapping.is_none() && (1..=MAX_VIEW_ID).contains(&view.len())
+}
+
+/// The operation the domain gate (PF-41) weighs a message as: a tool the gateway does not know
+/// as a read is a write. It stands for the class of the call; the broker gates the tool's own
+/// clause.
+fn mcp_operation(tool: Option<&str>) -> Operation {
+    if tool.is_some_and(|tool| !MCP_READ_TOOLS.contains(&tool)) {
+        Operation::UpsertBatch
+    } else {
+        Operation::QueryEntity
+    }
+}
+
+/// Whether a member's call to `tool` goes to the broker's view of the member (T-3808): not the
+/// describe tools the gateway answers, and not a member no view serves yet.
+pub(crate) fn member_viewed(endpoint: &Endpoint, tool: &str) -> bool {
+    !DESCRIBE_TOOLS.contains(&tool) && view_serves(endpoint, &endpoint.slug)
+}
+
+/// One `tools/call` of the hub or of a named server as the broker's view of the member answers
+/// it (T-3808): the member's slug is its view, the tenant and the verified caller are pinned, and
+/// no token travels. What fails on the way is the call's tool error, so a fan-out names the
+/// member it failed on; the broker's own explanation of a failure is not passed on.
+pub(crate) async fn member_call(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    mut message: Value,
+) -> Value {
+    let id = message["id"].clone();
+    let operation = mcp_operation(message["params"]["name"].as_str());
+    let mut request = Request::new(Body::empty());
+    if let Err(refusal) =
+        view_request(gateway, endpoint, subject, "", operation, &mut request).await
+    {
+        let held = axum::body::to_bytes(refusal.into_body(), MAX_BODY)
+            .await
+            .unwrap_or_default();
+        return member_refusal(id, problem_text(&held));
+    }
+    let (mut parts, _) = request.into_parts();
+    capped_arguments(&mut message["params"]["arguments"]);
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    parts.headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/json, text/event-stream"),
+    );
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        principal = %principal_of(subject),
+        tool = message["params"]["name"].as_str().unwrap_or_default(),
+        "member call forwarded to the broker's view"
+    );
+    let path = format!("/x/views/{}/mcp", endpoint.slug);
+    let answer = match gateway
+        .broker
+        .send(
+            Method::POST,
+            &path,
+            parts.headers,
+            Body::from(message.to_string()),
+        )
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => {
+            tracing::warn!(slug = %endpoint.slug, %error, "the broker's view did not answer a member call");
+            return member_refusal(id, None);
+        }
+    };
+    let status = answer.status();
+    let held = axum::body::to_bytes(answer.into_body(), MAX_BODY)
+        .await
+        .unwrap_or_default();
+    match serde_json::from_slice::<Value>(&held) {
+        Ok(mut answer) if status.is_success() && answer.get("jsonrpc").is_some() => {
+            let federates = member_names(gateway, endpoint);
+            if !federates.is_empty() {
+                federated(&mut answer, "tools/call", &federates);
+            }
+            answer
+        }
+        _ if status.is_client_error() => member_refusal(id, problem_text(&held)),
+        _ => {
+            tracing::warn!(
+                slug = %endpoint.slug,
+                status = status.as_u16(),
+                broker = %String::from_utf8_lossy(&held),
+                "the broker failed a member call; its own explanation is not passed on"
+            );
+            member_refusal(id, None)
+        }
+    }
+}
+
+/// The sentence of a Problem Details body: its `detail`, else its `title`.
+fn problem_text(body: &[u8]) -> Option<String> {
+    let problem = serde_json::from_slice::<Value>(body).ok()?;
+    problem["detail"]
+        .as_str()
+        .or_else(|| problem["title"].as_str())
+        .map(str::to_owned)
+}
+
+/// A member call that ended before the broker's tool answered, as the tool error MCP gives it.
+fn member_refusal(id: Value, why: Option<String>) -> Value {
+    let why = why.unwrap_or_else(|| {
+        "the context broker behind this Endpoint failed to answer this call".to_owned()
+    });
+    mcp::endpoint_facade::result(id, mcp::endpoint_facade::refused(&why, &Value::Null))
 }
 
 /// The listings the gateway adds its own entries to, by method and result member.
@@ -4358,6 +4808,35 @@ pub(crate) fn json_response(payload: &Value) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-3819: what the broker answers is not trusted to be the shape MCP says; an answer that
+    /// is no object, or whose parts are not, is left as it came and never panics the request.
+    #[test]
+    fn a_federated_answer_of_any_shape_is_decorated_or_left_alone() {
+        let members = ["transport".to_owned()];
+        for method in FEDERATED_METHODS {
+            for shape in [
+                serde_json::json!([1, 2]),
+                serde_json::json!("text"),
+                serde_json::json!({ "result": [1] }),
+                serde_json::json!({ "result": { "tools": [1, "x"], "structuredContent": [] } }),
+                serde_json::json!({ "result": { "tools": { "a": 1 }, "instructions": 3 } }),
+            ] {
+                let mut answer = shape.clone();
+                federated(&mut answer, method, &members);
+                assert_eq!(answer, shape, "{method}");
+            }
+        }
+        let mut answer = serde_json::json!({ "result": {
+            "isError": false,
+            "structuredContent": { "entities": [] },
+        }});
+        federated(&mut answer, "tools/call", &members);
+        assert_eq!(
+            answer["result"]["structuredContent"]["jc:source"],
+            serde_json::json!(["transport"])
+        );
+    }
 
     /// AG-95: the audit line of a delegated call names the person and the account it came
     /// through; an ordinary person or workload is named alone.

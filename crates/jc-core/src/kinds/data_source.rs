@@ -10,7 +10,7 @@
 //!
 //! [`PipelineSpec`]: crate::kinds::PipelineSpec
 
-use crate::envelope::{Kind, ObjectMeta, Scope, SecretRef};
+use crate::envelope::{Kind, ObjectMeta, Scope, SecretRef, TypedRef};
 use crate::error::{Error, Result};
 use crate::kinds::PipelineSpec;
 use crate::names;
@@ -133,8 +133,14 @@ impl JsonSchema for DataSourceType {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MqttConnection {
-    /// Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one.
+    /// Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one, unless `brokerRef`
+    /// names a broker of the platform instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
+    /// An `MqttBroker` of the DataSource's own project, read on its internal listener with no
+    /// credential (PL-76); takes the place of `urls`, `username` and `passwordRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_ref: Option<TypedRef>,
     /// Topic filters to subscribe to; at least one.
     pub topics: Vec<String>,
     /// Quality of service, 0, 1 or 2. Absent leaves Bento's default.
@@ -169,6 +175,105 @@ pub struct HttpConnection {
     /// Request timeout as a Bento duration, `10s`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
+    /// The members of a zip archive to read, by HTTP `Range`, instead of the whole body (PL-72).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<HttpArchive>,
+}
+
+/// The named members of the archive an `http` connection serves (PL-72, Architecture/08 §6).
+///
+/// The runner reads the directory from the archive's last 64 KiB and then each member by its
+/// own range, so a member nobody named is never fetched or inflated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HttpArchive {
+    /// The archive format; `zip` is the only one.
+    pub format: ArchiveFormat,
+    /// The member names to read, at most 20, each letters, digits, `.`, `_`, `-` and `/`.
+    pub members: Vec<String>,
+    /// The largest member accepted, packed and unpacked, in bytes; 32 MiB when absent, at most
+    /// 256 MiB. A deflated member's inflate stops at the size its directory declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+impl HttpArchive {
+    /// The member size bound when the manifest names none.
+    pub const DEFAULT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+    /// The largest bound a manifest may set.
+    pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
+    /// The most members one connection reads.
+    pub const MAX_MEMBERS: usize = 20;
+
+    /// The bound in force.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes.unwrap_or(Self::DEFAULT_MAX_BYTES)
+    }
+
+    fn validate(&self, http: &HttpConnection) -> Result<()> {
+        let refuse = |field, value: String, reason| {
+            Err(Error::Name {
+                field,
+                value,
+                reason,
+            })
+        };
+        if self.members.is_empty() || self.members.len() > Self::MAX_MEMBERS {
+            return refuse(
+                "spec.http.archive.members",
+                self.members.len().to_string(),
+                "an archive names 1 to 20 members",
+            );
+        }
+        for member in &self.members {
+            let plain = !member.is_empty()
+                && member.len() <= 255
+                && member
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c));
+            if !plain {
+                return refuse(
+                    "spec.http.archive.members",
+                    member.clone(),
+                    "a member name is 1 to 255 letters, digits, '.', '_', '-' and '/'",
+                );
+            }
+        }
+        if !(1..=Self::MAX_BYTES).contains(&self.max_bytes()) {
+            return refuse(
+                "spec.http.archive.maxBytes",
+                self.max_bytes().to_string(),
+                "maxBytes is 1 to 268435456 (256 MiB)",
+            );
+        }
+        if http.verb.as_deref().is_some_and(|verb| verb != "GET") {
+            return refuse(
+                "spec.http.verb",
+                http.verb.clone().unwrap_or_default(),
+                "an archive is read with GET",
+            );
+        }
+        if let Some(range) = http
+            .headers
+            .keys()
+            .find(|h| h.eq_ignore_ascii_case("range"))
+        {
+            return refuse(
+                "spec.http.headers",
+                range.clone(),
+                "an archive read sets its own Range header",
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The archive formats an `http` connection reads (PL-72).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveFormat {
+    /// A zip archive: stored or deflated members, no Zip64.
+    Zip,
 }
 
 /// A WebSocket the runner keeps open (Architecture/08 §6).
@@ -435,6 +540,9 @@ impl DataSourceSpec {
                 if let Some(authorization) = &http.authorization {
                     header_name(authorization.header_name())?;
                 }
+                if let Some(archive) = &http.archive {
+                    archive.validate(http)?;
+                }
                 verb(http.verb.as_deref())
             }
             DataSourceType::WebSocket => {
@@ -647,7 +755,32 @@ impl DataSourceSpec {
 
     fn validate_mqtt(&self) -> Result<()> {
         let mqtt = self.mqtt.as_ref().expect("checked by the caller");
-        if mqtt.urls.is_empty() {
+        if let Some(broker) = &mqtt.broker_ref {
+            let refuse = |field: &'static str, reason: &'static str| Error::Name {
+                field,
+                value: broker.name.clone(),
+                reason,
+            };
+            if broker.kind != "MqttBroker" {
+                return Err(refuse(
+                    "spec.mqtt.brokerRef.kind",
+                    "a brokerRef names an MqttBroker",
+                ));
+            }
+            if broker.namespace.is_some() {
+                return Err(refuse(
+                    "spec.mqtt.brokerRef.namespace",
+                    "a DataSource reads a broker of its own project only (PL-76)",
+                ));
+            }
+            names::validate_dns1123_label(&broker.name)?;
+            if !mqtt.urls.is_empty() || mqtt.username.is_some() || mqtt.password_ref.is_some() {
+                return Err(refuse(
+                    "spec.mqtt.brokerRef",
+                    "a brokerRef takes the place of urls, username and passwordRef: the runner reads a platform broker with no credential (PL-76)",
+                ));
+            }
+        } else if mqtt.urls.is_empty() {
             return Err(Error::Name {
                 field: "spec.mqtt.urls",
                 value: String::new(),

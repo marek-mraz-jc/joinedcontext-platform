@@ -427,6 +427,53 @@ fn narrowed(
     render(&out)
 }
 
+/// The caller's selectors a read through the broker's view carries on (T-3651): the view
+/// narrows each to what the caller's grants show and never widens one, so they go as sent.
+const VIEW_SELECTORS: &[&str] = &[
+    "type",
+    "attrs",
+    "q",
+    "georel",
+    "geometry",
+    "coordinates",
+    "geoproperty",
+    "geometryProperty",
+    "timerel",
+    "timeAt",
+    "endTimeAt",
+];
+
+/// The query string of an entity read through the broker's view (plan 5.7, T-3651): the
+/// caller's harmless parameters and their own selectors, and `fallback_types` as the selector of
+/// last resort when the caller named none (a download names a dataset, EP-09). No grant is
+/// folded in: the view decides and narrows.
+pub fn view_read(params: &[(String, String)], fallback_types: &[String]) -> String {
+    let mut out = kept(params);
+    out.extend(
+        params
+            .iter()
+            .filter(|(name, _)| VIEW_SELECTORS.contains(&name.as_str()))
+            .cloned(),
+    );
+    if unselected(params) && !fallback_types.is_empty() {
+        out.push(("type".to_owned(), fallback_types.join(",")));
+    }
+    render(&out)
+}
+
+/// [`view_read`] for the history of one entity by id: no `type` beside an id (CIM 009
+/// 6.19.3.1), which the broker refuses.
+pub fn view_read_by_id(params: &[(String, String)]) -> String {
+    let mut out = kept(params);
+    out.extend(
+        params
+            .iter()
+            .filter(|(name, _)| name != "type" && VIEW_SELECTORS.contains(&name.as_str()))
+            .cloned(),
+    );
+    render(&out)
+}
+
 /// The caller's own parameters that survive, in the order they were sent.
 fn kept(params: &[(String, String)]) -> Vec<(String, String)> {
     params
@@ -682,6 +729,38 @@ pub fn decode(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_read_carries_the_callers_selectors_and_falls_back_only_when_none() {
+        let read = |raw: &str, fallback: &[&str]| {
+            let fallback: Vec<String> = fallback.iter().map(|t| (*t).to_owned()).collect();
+            view_read(&parse(raw), &fallback)
+        };
+        // A caller's own selector goes as sent: the view narrows, the fallback is not added.
+        let own = read("type=Depot&attrs=capacity&limit=5", &["A", "B"]);
+        assert!(own.contains("type=Depot"), "{own}");
+        assert!(own.contains("attrs=capacity"), "{own}");
+        assert!(!own.contains("A%2CB") && !own.contains("A,B"), "{own}");
+        // No selector: every type the space holds selects, as a download names a dataset.
+        let dataset = read("limit=5", &["A", "B"]);
+        assert!(dataset.contains("type=A"), "{dataset}");
+        // An empty space has no type to fall back to, and nothing is invented.
+        assert!(!read("", &[]).contains("type="));
+        // A name the reads do not have never passes: a tenant or a role is the gateway's to pin.
+        let forged = read("type=A&NGSILD-Tenant=other&x-jc-roles=admin", &[]);
+        for owned in ["Tenant", "roles", "admin"] {
+            assert!(!forged.contains(owned), "{owned} passed: {forged}");
+        }
+        // The history of one entity by id never carries a `type` beside the id.
+        let by_id = view_read_by_id(&parse(
+            "type=A&attrs=pm10&timerel=after&timeAt=2026-01-01T00:00:00Z",
+        ));
+        assert!(!by_id.contains("type="), "{by_id}");
+        assert!(
+            by_id.contains("attrs=pm10") && by_id.contains("timerel=after"),
+            "{by_id}"
+        );
+    }
 
     #[test]
     fn a_type_or_q_the_specification_refuses_is_named_before_any_grant_narrows_it() {

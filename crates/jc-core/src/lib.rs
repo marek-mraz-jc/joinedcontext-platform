@@ -19,15 +19,16 @@ pub mod logs;
 pub mod names;
 pub mod project;
 pub mod qb;
+pub mod quality;
 pub mod registry;
 pub mod secret;
 pub mod units;
 pub mod urn;
 
 pub use envelope::{
-    annotations, de_api_version, de_api_version_of, de_kind, serves, validate_locales, Build,
-    Condition, Kind, ObjectMeta, Phase, Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef,
-    API_VERSION, API_VERSION_V1ALPHA2,
+    annotations, de_api_version_of, de_kind, serves, validate_locales, Build, Condition, Kind,
+    ObjectMeta, Phase, Ref, ResourceEnvelope, Scope, SecretRef, Status, TypedRef, API_VERSION,
+    API_VERSION_V1ALPHA2,
 };
 pub use error::{Error, ProblemDetails, Result, UrnError, PROBLEM_JSON, PROBLEM_TYPE_BASE};
 pub use i18n::{MultiLanguageMap, Text};
@@ -37,23 +38,24 @@ pub use kinds::{
     App, AppBuild, AppClass, AppLifecycle, AppLimits, AppSource, AppSpec, AppVisibility,
     AssistantDeployment, AssistantDeploymentSpec, Audience, Bundle, BundleItem, BundleOrigin,
     BundleSpec, Caching, CkanInstance, CkanInstanceSpec, CkanPublication, Compute, ComputeKind,
-    ConflictPolicy, ConnectorEngine, Contact, ContactRole, ContentSecurityPolicy, ContextSpace,
-    ContextSpaceSpec, Credential, CredentialKind, Dashboard, DashboardSpec, DashboardVisibility,
-    DataAgreement, DataAgreementSpec, DataModel, DataModelLifecycle, DataModelRef, DataModelSource,
-    DataModelSpec, DataNeed, DataOffer, DataOfferSpec, DataSpaceParticipant,
-    DataSpaceParticipantSpec, Did, Endpoint, EndpointSlug, EndpointSpec, EntitySelector,
-    Environment, EnvironmentSpec, FileLimits, GeneratedArtifacts, GeoConstraint, GeoWithin,
-    GitOrigin, GitSource, KnowledgeSource, KnowledgeSourceSpec, KubernetesBinding, Layer,
-    LayerFilter, LayerSpec, LayerStyle, Mapping, MappingSpec, MappingTest, McpServer,
-    McpServerSpec, ModelProvider, NativeBlock, NativeLanguage, Operation, OperationGroup,
-    OperationRef, Organization, OrganizationSpec, Output, OutputMode, Owner, Pipeline,
-    PipelineClass, PipelineQuotas, PipelineSource, PipelineSpec, PlatformApiOrigin, Policy,
-    PolicyEffect, PolicySpec, Principal, PrincipalKind, Project, ProjectSpec, Projection, Quotas,
-    RateLimits, RegistrationInfo, RemoteSource, Representation, Role, RoleBinding, RoleBindingSpec,
-    RoleScope, RoleSpec, Schedule, ScopeDefinition, ScopeDefinitionSpec, SemVer, ServiceAccount,
-    ServiceAccountLimits, ServiceAccountSpec, SharedSpaceReference, SharedSpaceReferenceSpec,
-    SourceQuery, SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource, SyncSourceSpec,
-    TemporalConstraint, TemporalWindow, Trigger, Validity, VocabularyAlignment, Widget, Workload,
+    ConflictPolicy, ConnectorEngine, Contact, ContactRole, ContentSecurityPolicy, ContextBroker,
+    ContextBrokerSpec, ContextSpace, ContextSpaceSpec, Credential, CredentialKind, Dashboard,
+    DashboardSpec, DashboardVisibility, DataAgreement, DataAgreementSpec, DataModel,
+    DataModelLifecycle, DataModelRef, DataModelSource, DataModelSpec, DataNeed, DataOffer,
+    DataOfferSpec, DataSpaceParticipant, DataSpaceParticipantSpec, Did, Endpoint, EndpointSlug,
+    EndpointSpec, EntitySelector, Environment, EnvironmentSpec, FileLimits, GeneratedArtifacts,
+    GeoConstraint, GeoWithin, GitOrigin, GitSource, KnowledgeSource, KnowledgeSourceSpec,
+    KubernetesBinding, Layer, LayerFilter, LayerSpec, LayerStyle, Mapping, MappingSpec,
+    MappingTest, McpServer, McpServerSpec, ModelProvider, MqttBroker, MqttBrokerSpec, NativeBlock,
+    NativeLanguage, Operation, OperationGroup, OperationRef, Organization, OrganizationSpec,
+    Output, OutputMode, Owner, Pipeline, PipelineClass, PipelineQuotas, PipelineSource,
+    PipelineSpec, PlatformApiOrigin, Policy, PolicyEffect, PolicySpec, Principal, PrincipalKind,
+    Project, ProjectSpec, Projection, Quotas, RateLimits, RegistrationInfo, RemoteSource,
+    Representation, Role, RoleBinding, RoleBindingSpec, RoleScope, RoleSpec, Schedule,
+    ScopeDefinition, ScopeDefinitionSpec, SemVer, ServiceAccount, ServiceAccountLimits,
+    ServiceAccountSpec, SharedSpaceReference, SharedSpaceReferenceSpec, SourceQuery,
+    SubscriptionTrigger, SyncMode, SyncOrigin, SyncSource, SyncSourceSpec, TemporalConstraint,
+    TemporalWindow, Trigger, Validity, VocabularyAlignment, Widget, Workload,
     DEFAULT_EGRESS_BYTES_PER_RUN,
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};

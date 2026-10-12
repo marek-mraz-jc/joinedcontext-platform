@@ -17,8 +17,20 @@ pub use jc_core::ClientCredential as Credential;
 pub struct Config {
     /// The address to listen on (`JC_GATEWAY_BIND`, default `0.0.0.0:8080`).
     pub bind: SocketAddr,
-    /// The broker to forward to, scheme and authority only (`JC_GATEWAY_BROKER_URL`).
+    /// The internal listener, for the MQTT brokers' CONNECT checks only
+    /// (`JC_GATEWAY_INTERNAL_BIND`, e.g. `0.0.0.0:8082`); absent serves none (ADR-N-048).
+    pub internal_bind: Option<SocketAddr>,
+    /// The pipeline runner's headless Service (`JC_GATEWAY_MQTT_RUNNER_HOST`, e.g.
+    /// `pipeline-runner-pods.dev.svc.cluster.local`): a broker admits the runner's tokenless
+    /// CONNECT only from an address this name resolves to; absent admits none (PL-76, T-4004).
+    pub mqtt_runner_host: Option<String>,
+    /// The broker to forward to, scheme and authority only (`JC_GATEWAY_BROKER_URL`): the
+    /// implicit `main`, and every space when the organization declares no broker.
     pub broker_url: String,
+    /// The address of every other `ContextBroker`, `{broker}` replaced by its name
+    /// (`JC_GATEWAY_BROKER_URL_TEMPLATE`, ADR-N-047); absent refuses the spaces that live on
+    /// one rather than sending them to `main`.
+    pub broker_url_template: Option<String>,
     /// The manifest repository the endpoint table is built from
     /// (`JC_GATEWAY_REPO_DIR`); absent means an empty table until one is loaded.
     pub repo_dir: Option<PathBuf>,
@@ -122,9 +134,23 @@ impl Config {
                 reason: e.to_string(),
             })?;
 
+        let internal_bind = std::env::var("JC_GATEWAY_INTERNAL_BIND")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|e: std::net::AddrParseError| ConfigError::Invalid {
+                name: "JC_GATEWAY_INTERNAL_BIND",
+                reason: e.to_string(),
+            })?;
+
         let broker_url = std::env::var("JC_GATEWAY_BROKER_URL")
             .map_err(|_| ConfigError::Missing("JC_GATEWAY_BROKER_URL"))?;
         let broker_url = normalize_broker_url(&broker_url)?;
+        let broker_url_template = match std::env::var("JC_GATEWAY_BROKER_URL_TEMPLATE") {
+            Ok(raw) if !raw.trim().is_empty() => Some(broker_url_template(&raw)?),
+            _ => None,
+        };
 
         let org_domain = std::env::var("JC_GATEWAY_ORG_DOMAIN")
             .map_err(|_| ConfigError::Missing("JC_GATEWAY_ORG_DOMAIN"))?;
@@ -200,7 +226,13 @@ impl Config {
             domain_verification,
             domain_verifications_url,
             bind,
+            internal_bind,
+            mqtt_runner_host: std::env::var("JC_GATEWAY_MQTT_RUNNER_HOST")
+                .ok()
+                .map(|host| host.trim().to_owned())
+                .filter(|host| !host.is_empty()),
             broker_url,
+            broker_url_template,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
             projects_dir: std::env::var("JC_GATEWAY_PROJECTS_DIR")
                 .ok()
@@ -273,6 +305,21 @@ fn normalize_broker_url(raw: &str) -> Result<String, ConfigError> {
     Ok(trimmed.to_owned())
 }
 
+/// A broker address template: `scheme://authority` once `{broker}` is put in, with `{broker}`
+/// in the authority, so one broker's name can never point at another host's path.
+fn broker_url_template(raw: &str) -> Result<String, ConfigError> {
+    let invalid = |reason: &str| ConfigError::Invalid {
+        name: "JC_GATEWAY_BROKER_URL_TEMPLATE",
+        reason: reason.to_owned(),
+    };
+    if !raw.contains("{broker}") {
+        return Err(invalid("must contain {broker}"));
+    }
+    normalize_broker_url(&raw.replace("{broker}", "b"))
+        .map_err(|_| invalid("must be scheme and authority only, with no path"))?;
+    Ok(raw.trim().trim_end_matches('/').to_owned())
+}
+
 /// The token endpoint of `Config::token_url`, apart from the struct so both branches are readable:
 /// what the deployment named wins, and the realm's own is derived from the issuer only when it did
 /// not name one.
@@ -296,7 +343,10 @@ mod tests {
     fn config_with_a_client_secret() -> Config {
         Config {
             bind: "0.0.0.0:8080".parse().expect("a socket address"),
+            internal_bind: None,
+            mqtt_runner_host: None,
             broker_url: "http://broker:1026".to_owned(),
+            broker_url_template: None,
             repo_dir: None,
             projects_dir: None,
             assembly_dir: PathBuf::from("/tmp/jc-assembly"),
@@ -393,6 +443,21 @@ mod tests {
     #[test]
     fn no_realm_is_no_endpoint_and_no_identity_presented_anywhere() {
         assert_eq!(token_endpoint(None, None), None);
+    }
+
+    #[test]
+    fn a_broker_template_names_the_broker_in_its_authority() {
+        assert_eq!(
+            broker_url_template("http://context-broker-{broker}.brokers.svc:9090/").unwrap(),
+            "http://context-broker-{broker}.brokers.svc:9090"
+        );
+        for bad in [
+            "http://context-broker.brokers.svc:9090",
+            "http://broker:9090/{broker}",
+            "context-broker-{broker}:9090",
+        ] {
+            assert!(broker_url_template(bad).is_err(), "{bad:?} was accepted");
+        }
     }
 
     #[test]
