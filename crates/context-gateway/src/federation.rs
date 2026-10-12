@@ -16,6 +16,9 @@
 /// Turning an accepted ODRL agreement into the policies that enforce it (DS-10).
 pub mod odrl_compiler;
 
+/// The caller's token, exchanged for the brokers a federated read reaches (T-3999).
+pub mod exchange;
+
 use jc_core::kinds::{ContextSourceRegistrationSpec, FederationIdentity};
 use jcctl::loader::Repository;
 use std::collections::BTreeMap;
