@@ -27,6 +27,7 @@ use jc_core::ProblemDetails;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
@@ -42,8 +43,21 @@ pub const PER_CALLER: usize = 10;
 /// crosses the hop.
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_FRAME: usize = 16 * 1024;
+/// What the broker writes: a notification of up to 1 MiB, in one frame (Antares
+/// `MAX_NOTIFICATION_BYTES`). Its 64 KiB bound is on what it reads; held against what it writes,
+/// the first notification over 16 KiB ended the relay without a close frame (T-4131).
+const FROM_BROKER: usize = 1024 * 1024;
+/// RFC 6455 7.4.1: the server met a condition that prevented it from fulfilling the request.
+const BROKER_FAILED: u16 = 1011;
 /// RFC 6455 7.4.1: the message was too big to process.
 const TOO_BIG: u16 = 1009;
+/// RFC 6455 7.4.1: the connection fulfilled its purpose.
+const NORMAL: u16 = 1000;
+/// A token caller's socket ends when its access token would (Keycloak's default 300 s), since
+/// nothing re-checks the token on an open socket (Antares ADR-0026 §8, API/07 §3).
+pub const TOKEN_LIFETIME: Duration = Duration::from_secs(300);
+/// What the client reads before that end: the broker's own `x-closing` (ADR-0026 §2).
+const LIFETIME_CLOSING: &str = r#"{"metadata":{"x-op":"x-closing","x-reason":"lifetime"}}"#;
 
 /// The WebSocket connections each caller holds open (EP-107).
 #[derive(Debug, Default)]
@@ -127,7 +141,10 @@ pub(crate) async fn endpoint_ws(
     }
     // A person or an account is one caller however many tokens it holds; an anonymous caller
     // is its address.
-    let caller = match principal_of(&subject) {
+    let principal = principal_of(&subject);
+    // An anonymous socket has no token to expire (T-4132): the broker's lifetime bounds it.
+    let lifetime = (principal != "anonymous").then_some(gateway.ws_token_lifetime);
+    let caller = match principal {
         anonymous if anonymous == "anonymous" => caller_key(request.headers()),
         principal => principal,
     };
@@ -168,8 +185,8 @@ pub(crate) async fn endpoint_ws(
         Err(refused) => return *refused,
     };
     let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE))
-        .max_frame_size(Some(MAX_FRAME));
+        .max_message_size(Some(FROM_BROKER))
+        .max_frame_size(Some(FROM_BROKER));
     let broker = match tokio_tungstenite::connect_async_with_config(upstream, Some(config), false)
         .await
     {
@@ -193,7 +210,7 @@ pub(crate) async fn endpoint_ws(
         .protocols([PROTOCOL])
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |client| relay(client, broker, held, endpoint.slug.clone()))
+        .on_upgrade(move |client| relay(client, broker, held, endpoint.slug.clone(), lifetime))
 }
 
 /// Whether the request asks for a WebSocket at all (RFC 6455 §4.1: `Upgrade: websocket`).
@@ -424,15 +441,30 @@ fn refused_by_broker(status: StatusCode) -> Response<Body> {
 type Upstream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// How the client side ended.
+/// How the relay ended.
 #[derive(Debug, PartialEq, Eq)]
 enum Ended {
+    /// The client closed, went away, or broke no bound.
     Closed,
+    /// The client sent a message over the bound.
     TooBig,
+    /// The broker sent its close frame, which the client already has.
+    BrokerClosed,
+    /// The broker's side failed or ended without a close frame.
+    BrokerFailed,
+    /// A token caller's socket reached [`TOKEN_LIFETIME`].
+    Lifetime,
 }
 
-/// Frames both ways until either side ends; the connection is counted until then.
-async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
+/// Frames both ways until either side ends; the connection is counted until then. However it
+/// ends, a client that is still there gets a close frame, never a bare end of the stream.
+async fn relay(
+    client: WebSocket,
+    broker: Upstream,
+    held: Held,
+    slug: String,
+    lifetime: Option<Duration>,
+) {
     let (mut to_client, mut from_client) = client.split();
     let (mut to_broker, mut from_broker) = broker.split();
     let ended = {
@@ -447,32 +479,64 @@ async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
                 let Some(message) = upstream_message(message) else {
                     continue;
                 };
-                if to_broker.send(message).await.is_err() || closing {
-                    break;
+                if closing {
+                    let _ = to_broker.send(message).await;
+                    return Ended::Closed;
+                }
+                if let Err(error) = to_broker.send(message).await {
+                    tracing::warn!(%slug, %error, "the broker's side of a WebSocket failed");
+                    return Ended::BrokerFailed;
                 }
             }
             Ended::Closed
         };
         let down = async {
-            while let Some(Ok(message)) = from_broker.next().await {
+            loop {
+                let message = match from_broker.next().await {
+                    Some(Ok(message)) => message,
+                    Some(Err(error)) => {
+                        tracing::warn!(%slug, %error, "the broker's side of a WebSocket failed");
+                        return Ended::BrokerFailed;
+                    }
+                    None => return Ended::BrokerFailed,
+                };
                 let closing = matches!(message, Message::Close(_));
                 let Some(message) = client_message(message) else {
                     continue;
                 };
-                if to_client.send(message).await.is_err() || closing {
-                    break;
+                if to_client.send(message).await.is_err() {
+                    return Ended::Closed;
                 }
+                if closing {
+                    return Ended::BrokerClosed;
+                }
+            }
+        };
+        let expired = async {
+            match lifetime {
+                Some(lifetime) => tokio::time::sleep(lifetime).await,
+                None => std::future::pending().await,
             }
         };
         tokio::select! {
             ended = up => ended,
-            () = down => Ended::Closed,
+            ended = down => ended,
+            () = expired => Ended::Lifetime,
         }
     };
-    if ended == Ended::TooBig {
+    if ended == Ended::Lifetime {
+        let _ = to_client.send(ws::Message::text(LIFETIME_CLOSING)).await;
+    }
+    let close = match ended {
+        Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
+        Ended::BrokerFailed => Some((BROKER_FAILED, "the broker ended the connection")),
+        Ended::Lifetime => Some((NORMAL, "lifetime")),
+        Ended::Closed | Ended::BrokerClosed => None,
+    };
+    if let Some((code, reason)) = close {
         let frame = ws::CloseFrame {
-            code: TOO_BIG,
-            reason: "a message over 64 KiB".into(),
+            code,
+            reason: reason.into(),
         };
         let _ = to_client.send(ws::Message::Close(Some(frame))).await;
     }

@@ -33,6 +33,7 @@ const REQUEST_SECONDS: &str = "jc_gateway_request_duration_seconds";
 const DECISIONS: &str = "jc_gateway_pdp_decisions_total";
 /// The broker round trip inside one answer, which is most of a slow request.
 const BROKER_SECONDS: &str = "jc_gateway_broker_request_duration_seconds";
+const SPACE_HELD: &str = "jc_gateway_space_held";
 
 /// The paths that describe the process rather than the traffic. Counting a scrape as a
 /// request would make the rate a function of the scrape interval.
@@ -78,10 +79,25 @@ fn describe() {
     metrics::describe_histogram!(REQUEST_SECONDS, "seconds to answer one request");
     metrics::describe_counter!(DECISIONS, "policy decisions, by operation and verdict");
     metrics::describe_histogram!(BROKER_SECONDS, "seconds of one broker round trip");
+    metrics::describe_gauge!(
+        SPACE_HELD,
+        "1 while a move holds the space read-only, 0 once it no longer does (PF-115)"
+    );
     metrics::describe_counter!(
         crate::quality::CHECKS,
         "quality checks on writes, by space, type, rule and outcome"
     );
+}
+
+/// The spaces a move holds read-only, as this gateway loaded them (PF-115). The Portal's move
+/// job reads the series to know the hold is in force before it exports (ADR-N-047 §2.6).
+pub fn held(before: &std::collections::HashSet<String>, now: &std::collections::HashSet<String>) {
+    for space in before.difference(now) {
+        metrics::gauge!(SPACE_HELD, "space" => space.clone()).set(0.0);
+    }
+    for space in now {
+        metrics::gauge!(SPACE_HELD, "space" => space.clone()).set(1.0);
+    }
 }
 
 /// The scrape.

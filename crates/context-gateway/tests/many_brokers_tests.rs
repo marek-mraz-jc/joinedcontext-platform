@@ -272,7 +272,7 @@ fn the_repository_says_which_broker_each_space_and_view_lives_on() {
     );
 }
 
-/// A move holds its space read-only (PF-115, ADR-N-046 §2.6): a write is answered 503 with
+/// A move holds its space read-only (PF-115, ADR-N-047 §2.6): a write is answered 503 with
 /// Retry-After and never reaches a broker; reads, a query by POST and other spaces pass.
 #[tokio::test]
 async fn a_moving_space_takes_reads_and_answers_writes_503_with_retry_after() {
@@ -357,4 +357,43 @@ fn each_view_names_the_broker_it_lives_on() {
         "main",
         "a view of no broker of its own is main's"
     );
+}
+
+/// PF-115: the gateway says which spaces it holds on its scrape, so the Portal's move job reads
+/// the hold before it exports; a view's slug never becomes a label, and a released space reads 0.
+#[tokio::test]
+async fn the_scrape_says_which_spaces_are_held() {
+    context_gateway::telemetry::install();
+    let (main, _) = upstream(200, "main", Vec::new()).await;
+    let broker = Broker::new(main);
+    let held = |moving: &[&str]| SpaceBrokers {
+        by_space: [("scrape-air".to_owned(), "main".to_owned())].into(),
+        moving: moving.iter().map(|s| (*s).to_owned()).collect(),
+        ..SpaceBrokers::default()
+    };
+    broker.route(&held(&["scrape-air", "cs-scrape-air", "scrape-slug"]));
+    let scrape = scraped().await;
+    assert!(
+        scrape.contains("jc_gateway_space_held{space=\"scrape-air\"} 1"),
+        "{scrape}"
+    );
+    assert!(
+        !scrape.contains("scrape-slug") && !scrape.contains("cs-scrape-air"),
+        "{scrape}"
+    );
+
+    broker.route(&held(&[]));
+    let scrape = scraped().await;
+    assert!(
+        scrape.contains("jc_gateway_space_held{space=\"scrape-air\"} 0"),
+        "{scrape}"
+    );
+}
+
+async fn scraped() -> String {
+    let answer = context_gateway::telemetry::metrics().await;
+    let bytes = axum::body::to_bytes(answer.into_body(), usize::MAX)
+        .await
+        .expect("a scrape");
+    String::from_utf8_lossy(&bytes).into_owned()
 }
