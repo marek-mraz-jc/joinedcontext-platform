@@ -465,7 +465,8 @@ impl Hub {
         if describe::DESCRIBE_TOOLS.contains(&name) {
             let mut asked = params.as_object().cloned().unwrap_or_default();
             asked.insert("arguments".to_owned(), Value::Object(arguments));
-            return describe::call(&self.gateway, endpoint, subject, id, &Value::Object(asked));
+            return describe::call(&self.gateway, endpoint, subject, id, &Value::Object(asked))
+                .await;
         }
         let mut forwarded = params.as_object().cloned().unwrap_or_default();
         let (tool, arguments) = broker_call(name, arguments);
