@@ -990,7 +990,7 @@ pub(crate) async fn serve_ngsi_ld(
     if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
         return refusal;
     }
-    let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -1703,7 +1703,19 @@ pub(crate) async fn serve_ngsi_ld_view(
             return refusal;
         }
     }
-    let _share = match write_share(gateway, &endpoint, operation, request.headers()) {
+    let mut request = request;
+    // The Endpoint's type list as its reads show the caller (T-4080); a caller without a read
+    // grant, and the details form, are the view's to answer.
+    if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
+    {
+        match crate::handlers::reads::listed_types(gateway, &endpoint, &subject, &mut request).await
+        {
+            Ok(Some(list)) => return typed_json_response(&list, "application/json"),
+            Ok(None) => {}
+            Err(answer) => return *answer,
+        }
+    }
+    let _share = match write_share(gateway, &endpoint, operation, &request) {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -1718,7 +1730,6 @@ pub(crate) async fn serve_ngsi_ld_view(
         operation = %operation.as_str(),
         "forwarded to the broker's view"
     );
-    let mut request = request;
     match view_request(gateway, &endpoint, &subject, &path, operation, &mut request).await {
         Ok(()) => {}
         Err(answer) => return *answer,
@@ -3162,8 +3173,6 @@ fn unsupported_media_type() -> ProblemDetails {
     )
 }
 
-/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
-/// else is refused openly, without naming the rule that refused it.
 /// A write's share of the gateway's write budget (T-4077), held from before its body is read
 /// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
 /// takes none. Over the budget, the 503 to answer instead.
@@ -3171,15 +3180,23 @@ fn write_share(
     gateway: &Gateway,
     endpoint: &Endpoint,
     operation: Operation,
-    headers: &HeaderMap,
+    request: &Request<Body>,
 ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response<Body>>> {
     if !operation.is_write() {
         return Ok(None);
     }
-    let length = headers
+    // A body without Content-Length still knows its bound when it has one: a DELETE's is 0, so
+    // it takes the smallest share, not the largest (T-4077 re-open).
+    let length = request
+        .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            axum::body::HttpBody::size_hint(request.body())
+                .upper()
+                .and_then(|upper| usize::try_from(upper).ok())
+        });
     match gateway.write_share(length) {
         Some(share) => Ok(Some(share)),
         None => {
@@ -3204,6 +3221,8 @@ fn busy() -> Response<Body> {
     answer
 }
 
+/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
+/// else is refused openly, without naming the rule that refused it.
 fn refused(operation: Operation, path: &str) -> Response<Body> {
     if !operation.is_write() && operations::addressed_entity(path).is_some() {
         ProblemDetails::not_found().into_response()
