@@ -34,6 +34,7 @@ pub type Tables = (
     Agreements,
     Limits,
     McpServers,
+    crate::mqtt::Brokers,
 );
 
 const GATEWAY_BODY: &str = "spec.limits.gateway.maxRequestBodyMegabytes";
@@ -176,6 +177,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         agreements_of(repo),
         limits_of(repo),
         servers_of(repo),
+        crate::mqtt::brokers_of(repo),
     )
 }
 
@@ -247,7 +249,7 @@ pub fn load_with_previews(
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers) =
+    let (mut endpoints, mut spaces, accounts, federations, agreements, limits, servers, brokers) =
         load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -290,6 +292,7 @@ pub fn load_with_previews(
         agreements,
         limits,
         servers,
+        brokers,
     ))
 }
 

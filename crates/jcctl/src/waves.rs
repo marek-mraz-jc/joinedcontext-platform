@@ -47,6 +47,7 @@ const ORDER: &[(u8, &str)] = &[
     // `spec.publish.ckan` block can be acted on (EP-62, EP-67).
     (WAVE_EXPOSURE, "CkanInstance"),
     (WAVE_EXPOSURE, "Endpoint"),
+    (WAVE_EXPOSURE, "MqttBroker"),
     // A subscription watches a space through its endpoints, so both stand before it
     // converges (Architecture/06, Wave 4).
     // A named MCP server reads Endpoints, so it follows them (MF-53, ADR-N-043).

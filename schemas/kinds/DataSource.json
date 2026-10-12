@@ -365,6 +365,17 @@
       "additionalProperties": false,
       "description": "An MQTT connection (Architecture/08 §6).",
       "properties": {
+        "brokerRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TypedRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "An `MqttBroker` of the DataSource's own project, read on its internal listener with no credential (PL-76); takes the place of `urls`, `username` and `passwordRef`."
+        },
         "cleanSession": {
           "description": "Whether the broker forgets the subscription between connections.",
           "type": [
@@ -400,7 +411,7 @@
           "type": "array"
         },
         "urls": {
-          "description": "Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one.",
+          "description": "Broker URLs, `tcp://host:1883` or `tls://host:8883`; at least one, unless `brokerRef` names a broker of the platform instead.",
           "items": {
             "type": "string"
           },
@@ -415,8 +426,7 @@
         }
       },
       "required": [
-        "topics",
-        "urls"
+        "topics"
       ],
       "type": "object"
     },
@@ -652,6 +662,32 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "TypedRef": {
+      "additionalProperties": false,
+      "description": "Structured typed resource reference (MF-07).",
+      "properties": {
+        "kind": {
+          "description": "Target resource kind.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Target resource name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Target resource namespace (defaults to caller namespace if omitted).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ],
       "type": "object"
     },
     "WebSocketConnection": {

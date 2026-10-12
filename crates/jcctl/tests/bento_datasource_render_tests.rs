@@ -124,6 +124,32 @@ fn an_mqtt_connection_becomes_bentos_mqtt_input() {
     assert_eq!(rendered(&source(MQTT), "mqtt-mesto"), MQTT_INPUT);
 }
 
+/// PL-76: a broker of the platform is read on its internal listener as the runner, with no
+/// credential and no TLS block, the namespace filled by the runner.
+#[test]
+fn a_platform_broker_is_read_on_its_internal_listener_without_a_credential() {
+    const BROKER: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: cameras, namespace: bb-ovzdusie }
+spec:
+  type: mqtt
+  mqtt:
+    brokerRef: { kind: MqttBroker, name: cameras }
+    topics: ["cameras/+/frame"]
+"#;
+    assert_eq!(
+        rendered(&source(BROKER), "cameras"),
+        r#"mqtt:
+  urls:
+  - tcp://mqtt-bb-ovzdusie-cameras.${JC_MQTT_NAMESPACE}.svc.cluster.local:1883
+  topics:
+  - cameras/+/frame
+  client_id: jc-bb-ovzdusie-aq-mqtt-ingest
+  user: pipeline-runner
+"#
+    );
+}
+
 #[test]
 fn an_http_connection_becomes_an_http_client_poll() {
     assert_eq!(rendered(&source(HTTP), "aq-opendata"), HTTP_INPUT);
