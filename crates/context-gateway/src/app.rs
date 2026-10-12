@@ -110,6 +110,8 @@ pub struct Gateway {
     agreements: ArcSwap<Agreements>,
     /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
     servers: ArcSwap<crate::mcp::server::McpServers>,
+    /// The MQTT edge brokers, swapped whole with the rest (ADR-N-048, PL-75).
+    brokers: ArcSwap<crate::mqtt::Brokers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
     /// Hosts inside the platform's networks a notification may be delivered to (T-1302).
@@ -118,6 +120,8 @@ pub struct Gateway {
     pub rate_limiter: RateLimiter,
     /// The creates each form Endpoint has taken today (EP-97).
     pub creates: crate::creates::DailyCreates,
+    /// The WebSocket connections each caller holds open (EP-107).
+    pub ws_open: crate::handlers::ws::Open,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
@@ -150,10 +154,12 @@ impl Gateway {
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
             servers: ArcSwap::from_pointee(Vec::new()),
+            brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
             private_hosts: Vec::new(),
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
+            ws_open: Default::default(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
@@ -223,6 +229,21 @@ impl Gateway {
             audiences.push(format!("{base}{}", server.path()));
         }
         audiences
+    }
+
+    /// Replaces the MQTT edge brokers (ADR-N-048): from the next CONNECT on.
+    pub fn replace_brokers(&self, brokers: crate::mqtt::Brokers) {
+        self.brokers.store(Arc::new(brokers));
+    }
+
+    /// The MQTT edge brokers served now.
+    pub fn brokers(&self) -> Arc<crate::mqtt::Brokers> {
+        self.brokers.load_full()
+    }
+
+    /// The service accounts a token's `azp` resolves through now.
+    pub fn service_accounts(&self) -> Arc<ServiceAccounts> {
+        self.accounts.load_full()
     }
 
     /// Replaces the named MCP servers (ADR-N-043): from the next request on.
@@ -351,6 +372,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/mcp", post(mcp_message))
         // One connector over every Endpoint the token reaches (EP-87, ADR-N-025).
         .route(HUB_PATH, post(mcp::hub::message))
+        .route("/api/endpoints", get(mcp::hub::endpoints))
         .route(
             "/api/mcp/.well-known/oauth-protected-resource",
             get(mcp::hub::protected_resource),
@@ -380,6 +402,11 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
+        // Live updates: the broker view's WebSocket, relayed under the caller (EP-106, T-3885).
+        .route(
+            "/api/endpoint/{slug}/ws",
+            get(crate::handlers::ws::endpoint_ws),
+        )
         .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
         .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))
@@ -1261,23 +1288,14 @@ fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a projection
-/// with `temporalQ` (G6) and a slug no view id can hold (the writer refuses it). So does a write
-/// with `If-Match`: the broker publishes no entity tags, and the gateway's read, compare and
-/// conditional write is the only lost-update guard there is (R45, GW16). A view mapping (G18,
-/// T-3799), an agreement's caller (K38, T-3800) and a subscription (plan 5.5, T-3653) are the
-/// view's.
-fn served_by_view(
-    endpoint: &Endpoint,
-    (view, operation, headers): (&str, Operation, &HeaderMap),
-) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
+/// view can serve yet keeps the gateway's own pipeline, until its gap closes: a slug no view id
+/// can hold (the writer refuses it), and a write with `If-Match`: the broker publishes no entity
+/// tags, and the gateway's read, compare and conditional write is the only lost-update guard
+/// there is (R45, GW16). A view mapping (G18, T-3799), an agreement's caller (K38, T-3800), a
+/// projection with `temporalQ` (G6, T-3801) and a subscription (plan 5.5, T-3653) are the view's.
+pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    !conditional && !temporal && (1..=MAX_VIEW_ID).contains(&view.len())
+    !conditional && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
@@ -1300,8 +1318,8 @@ fn subscription_without_view() -> Response<Body> {
     ProblemDetails::new(501, "subscription-without-view", "Not Implemented")
         .with_detail(
             "subscriptions are kept and delivered by the broker's view of this endpoint, and \
-             this request cannot go through it: a projection with temporalQ and a conditional \
-             write (If-Match) are not served by a view yet",
+             this request cannot go through it: a conditional write (If-Match) and an endpoint \
+             slug longer than a view id are not served by a view yet",
         )
         .into_response()
 }
@@ -1337,7 +1355,7 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !served_by_view(&endpoint, (&view, operation, request.headers())) {
+    if !served_by_view((&view, operation, request.headers())) {
         return serve_ngsi_ld(gateway, Ok((endpoint, subject)), prefix, request).await;
     }
     if operation == Operation::QueryEntity {
@@ -1488,7 +1506,7 @@ async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
 const ANTARES_ACCESS_DENIED: &str = "urn:antares:error:AccessDenied";
 
 /// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
-const ANTARES_RESTRICTED: &str = "antares-results-restricted";
+pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
@@ -3161,7 +3179,7 @@ fn warn_about_dropped_types(headers: &mut HeaderMap, constraints: &Constraints) 
 
 /// Whether the broker's `404` says the tenant does not exist (CIM 009 5.5.2 `NonexistentTenant`)
 /// rather than that the thing asked for does not.
-fn names_no_tenant(body: &[u8]) -> bool {
+pub(crate) fn names_no_tenant(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
         problem
             .get("type")

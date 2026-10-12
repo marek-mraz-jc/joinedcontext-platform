@@ -11,7 +11,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, Response, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -220,31 +220,23 @@ async fn a_tenant_the_caller_forged_never_reaches_the_broker() {
     );
 }
 
-/// An entity of a type the grant does not name does not come out, even when the broker hands it
-/// over: the answer is filtered here and not only asked for narrowly (T-1862, R9).
+/// The download reads through the Endpoint's view (T-3651, plan 5.7): an entity of a type the
+/// view does not show the public is not in the collection, and the hop carried the caller the
+/// engine narrows for.
 #[tokio::test]
-async fn an_entity_of_an_ungranted_type_is_dropped_on_the_way_back() {
+async fn an_entity_of_an_ungranted_type_is_not_in_the_collection() {
     let mut intruder = station("station-02", 19.15, 48.74);
     intruder["type"] = json!("WaterQualityObserved");
     intruder["id"] =
         json!("urn:ngsi-ld:WaterQualityObserved:banskabystrica.sk:ovzdusie:station-02");
-    let broker =
-        BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73), intruder])]).await;
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 19.14, 48.73), intruder])],
+        View::of(SLUG, "public", &["AirQualityObserved"], None),
+    )
+    .await;
 
     let (status, body) = get(
-        gateway(
-            &broker.url,
-            with_policy(
-                r#"contextSpaceRef: ovzdusie
-assigner: did:web:banskabystrica.sk
-assignee: { kind: role, id: public }
-operations: [queryEntity, retrieveEntity]
-information:
-  - entities:
-      - type: AirQualityObserved
-"#,
-            ),
-        ),
+        gateway(&broker.url, endpoint()),
         &format!("/api/endpoint/{SLUG}/file.geojson"),
     )
     .await;
@@ -252,18 +244,32 @@ information:
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(!body.contains("WaterQualityObserved"), "{body}");
     assert!(body.contains("station-01"), "{body}");
+    let hops = broker.hops();
+    let query = hops
+        .iter()
+        .find(|hop| hop.path == "/ngsi-ld/v1/entities")
+        .expect("a query");
+    assert_eq!(query.view, SLUG, "{hops:?}");
+    assert_eq!(query.headers["x-jc-roles"], "public");
 }
 
-/// An attribute the endpoint hides is in no feature: the grant said the whole entity, the endpoint
-/// takes that one name back, and what is published is what comes out (EP-61).
+/// An attribute the view withholds is in no feature (EP-61): the Portal writes the endpoint's
+/// hidden names into the view's rules, and the collection holds what the view answers.
 #[tokio::test]
 async fn a_hidden_attribute_is_in_no_feature() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
-    let mut hiding = endpoint();
-    hiding.hidden_attributes = BTreeSet::from(["operator".to_owned()]);
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 19.14, 48.73)])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
+    )
+    .await;
 
     let (status, body) = get(
-        gateway(&broker.url, hiding),
+        gateway(&broker.url, endpoint()),
         &format!("/api/endpoint/{SLUG}/file.geojson?type=AirQualityObserved"),
     )
     .await;
@@ -277,106 +283,104 @@ async fn a_hidden_attribute_is_in_no_feature() {
     assert!(!body.contains("SHMU"), "its value neither: {body}");
 }
 
-/// A query that names a hidden attribute answers nothing and asks nothing: the type whose
-/// attributes do not cover the filter leaves the query before the broker is asked, so the answer
-/// cannot be narrowed by trying names one at a time (T-1862, EP-61).
+/// A filter naming an attribute goes to the view as the caller wrote it, under the caller the
+/// gateway verified: the engine judges a filter on a hidden attribute (Antares
+/// `addons/joinedcontext-policy/tests/engine.rs` `bisecting_a_hidden_value_learns_nothing`), and
+/// the gateway neither drops the filter nor widens it with a grant (T-3651).
 #[tokio::test]
-async fn a_query_naming_a_hidden_attribute_answers_nothing_and_asks_nothing() {
-    for query in [
-        "type=AirQualityObserved&attrs=pm10,operator",
-        "type=AirQualityObserved&attrs=operator",
-        "type=AirQualityObserved&q=operator==%22SHMU%22",
-        "type=AirQualityObserved&orderBy=operator",
-        "type=AirQualityObserved&attrs=OPERATOR,operator",
+async fn a_filter_goes_to_the_view_as_the_caller_wrote_it() {
+    for (query, sent) in [
+        (
+            "type=AirQualityObserved&attrs=pm10,operator",
+            "attrs=pm10%2Coperator",
+        ),
+        (
+            "type=AirQualityObserved&q=operator==%22SHMU%22",
+            "q=operator%3D%3D%22SHMU%22",
+        ),
+        (
+            "type=AirQualityObserved&orderBy=operator",
+            "type=AirQualityObserved",
+        ),
     ] {
-        let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
-        let mut hiding = endpoint();
-        hiding.hidden_attributes = BTreeSet::from(["operator".to_owned()]);
+        let broker = BrokerStub::narrowing(
+            vec![json!([station("station-01", 19.14, 48.73)])],
+            View::of(
+                SLUG,
+                "public",
+                &["AirQualityObserved"],
+                Some(&["pm10", "location"]),
+            ),
+        )
+        .await;
 
         let (status, body) = get(
-            gateway(&broker.url, hiding),
+            gateway(&broker.url, endpoint()),
             &format!("/api/endpoint/{SLUG}/file.geojson?{query}"),
         )
         .await;
 
         assert_eq!(status, StatusCode::OK, "{query}: {body}");
-        let collection: Value = serde_json::from_str(&body).expect("a FeatureCollection");
-        assert_eq!(
-            collection["features"].as_array().map(Vec::len),
-            Some(0),
-            "{query}: {body}"
-        );
+        assert!(!body.contains("SHMU"), "{query}: {body}");
+        let hops = broker.hops();
+        let hop = hops
+            .iter()
+            .find(|hop| hop.path == "/ngsi-ld/v1/entities")
+            .expect("a query");
+        assert_eq!(hop.view, SLUG, "{query}");
+        assert!(hop.query.contains(sent), "{query}: {}", hop.query);
+    }
+}
+
+/// The gateway adds no grant to the query: a download the caller drew no area for asks the view
+/// with no area, and the view's engine applies the grant's own (Antares `views_q.rs`, map 7.6);
+/// a caller's own area goes on as drawn.
+#[tokio::test]
+async fn no_grant_is_folded_into_the_query_and_the_callers_area_goes_as_drawn() {
+    let wide = "georel=within&geometry=Polygon&coordinates=%5B%5B%5B0.0%2C40.0%5D%2C%5B30.0%2C40.0%5D%2C%5B30.0%2C70.0%5D%2C%5B0.0%2C70.0%5D%2C%5B0.0%2C40.0%5D%5D%5D";
+    for (asked, area) in [("", false), (wide, true)] {
+        let broker = BrokerStub::narrowing(
+            vec![json!([station("inside", 19.14, 48.73)])],
+            View::of(SLUG, "public", &["AirQualityObserved"], None),
+        )
+        .await;
+
+        let (status, body) = get(
+            gateway(&broker.url, with_geo_grant()),
+            &format!("/api/endpoint/{SLUG}/file.geojson?{asked}"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let hops = broker.hops();
+        let query = &hops.last().expect("an entity query").query;
+        assert_eq!(query.contains("georel=within"), area, "{query}");
         assert!(
-            broker.hops().is_empty(),
-            "{query}: a filter on a hidden attribute never reaches the broker: {:?}",
-            broker.hops()
+            !query.contains("19.3"),
+            "the grant's corner is the engine's: {query}"
         );
     }
 }
 
-/// The grant's own area is what the broker is asked with, exactly as the policy wrote it: a
-/// download the caller drew no area for is still the granted area and not the whole space (GW11).
+/// A caller no rule of the view names is refused by the engine, and the gateway's answer is the
+/// platform's own `403`, which names nothing behind it.
 #[tokio::test]
-async fn the_grants_area_is_what_the_broker_is_asked_with() {
-    let broker = BrokerStub::start(vec![json!([station("inside", 19.14, 48.73)])]).await;
-
-    let (status, body) = get(
-        gateway(&broker.url, with_geo_grant()),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+async fn a_caller_the_view_does_not_serve_is_refused() {
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 19.14, 48.73)])],
+        View::of(SLUG, "steward", &["AirQualityObserved"], None),
     )
     .await;
 
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let hops = broker.hops();
-    let query = &hops.last().expect("an entity query").query;
-    assert!(query.contains("georel=within"), "{query}");
-    assert!(query.contains("19.3"), "the grant's own corner: {query}");
-}
-
-/// An entity outside the granted area does not come out when the broker was given something wider:
-/// a caller that draws its own area gets the grant forwarded and both areas applied here, so an
-/// answer the broker did not narrow is narrowed on the way back (GW11, T-0149).
-#[tokio::test]
-async fn an_entity_outside_the_granted_area_is_dropped_on_the_way_back() {
-    let broker = BrokerStub::start(vec![json!([
-        station("inside", 19.14, 48.73),
-        station("outside", 24.94, 60.17),
-    ])])
-    .await;
-    // The caller asks for half of Europe, which is wider than its grant: the grant goes upstream
-    // and the caller's own area is applied here.
-    let wide = "georel=within&geometry=Polygon&coordinates=%5B%5B%5B0.0%2C40.0%5D%2C%5B30.0%2C40.0%5D%2C%5B30.0%2C70.0%5D%2C%5B0.0%2C70.0%5D%2C%5B0.0%2C40.0%5D%5D%5D";
-
     let (status, body) = get(
-        gateway(&broker.url, with_geo_grant()),
-        &format!("/api/endpoint/{SLUG}/file.geojson?{wide}"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("inside"), "{body}");
-    assert!(
-        !body.contains("outside"),
-        "the station beyond the grant is not in the answer: {body}"
-    );
-}
-
-/// A caller no grant names is refused, and the broker is not asked at all: a refusal that still
-/// made a hop would be a way to ask questions with somebody else's endpoint.
-#[tokio::test]
-async fn a_caller_no_grant_names_is_refused_before_the_broker() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
-    let mut ungranted = endpoint();
-    ungranted.policies = Vec::new();
-
-    let (status, body) = get(
-        gateway(&broker.url, ungranted),
+        gateway(&broker.url, endpoint()),
         &format!("/api/endpoint/{SLUG}/file.geojson"),
     )
     .await;
 
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert!(broker.hops().is_empty(), "{:?}", broker.hops());
+    assert!(!body.contains("station-01"), "{body}");
+    assert!(!body.contains("urn:antares"), "{body}");
 }
 
 /// A non-spatial answer is a `200` collection whose Features carry a `null` geometry: every
@@ -445,11 +449,14 @@ async fn the_answer_is_geojson_whatever_the_caller_accepts() {
     }
 }
 
-/// A grant that reaches no entity is an empty collection, not a question the broker answers with
-/// everything: nothing is asked for when nothing was granted.
+/// A type the view holds nothing of is an empty collection, not an error.
 #[tokio::test]
-async fn a_grant_that_reaches_nothing_is_an_empty_collection_and_no_question() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
+async fn a_type_the_view_holds_nothing_of_is_an_empty_collection() {
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 19.14, 48.73)])],
+        View::of(SLUG, "public", &["AirQualityObserved"], None),
+    )
+    .await;
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
@@ -463,23 +470,31 @@ async fn a_grant_that_reaches_nothing_is_an_empty_collection_and_no_question() {
     assert_eq!(collection["features"].as_array().map(Vec::len), Some(0));
 }
 
-/// A refusal the gateway builds itself says nothing about what is behind it: no address, no tenant,
-/// no file path. What the broker says when *it* fails is a finding of its own — the body is
-/// forwarded verbatim today, which is T-2340 (priority 1) and holds that red test.
+/// A refusal says nothing about what is behind it: no address, no tenant, no file path, not the
+/// broker's own error type.
 #[tokio::test]
-async fn a_refusal_the_gateway_builds_names_nothing_internal() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 0.0, 0.0)])]).await;
-    let mut ungranted = endpoint();
-    ungranted.policies = Vec::new();
+async fn a_refusal_names_nothing_internal() {
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 0.0, 0.0)])],
+        View::of(SLUG, "steward", &["AirQualityObserved"], None),
+    )
+    .await;
 
     let (status, body) = get(
-        gateway(&broker.url, ungranted),
+        gateway(&broker.url, endpoint()),
         &format!("/api/endpoint/{SLUG}/file.geojson?type=AirQualityObserved"),
     )
     .await;
 
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    for internal in ["127.0.0.1", "ovzdusie", "/src/", "Bearer", "policy"] {
+    for internal in [
+        "127.0.0.1",
+        "ovzdusie",
+        "/src/",
+        "Bearer",
+        "policy",
+        "antares",
+    ] {
         assert!(!body.contains(internal), "{internal} came out in {body}");
     }
 }
@@ -502,5 +517,44 @@ async fn a_write_method_on_a_download_is_refused() {
             "{method}: {status} {body}"
         );
         assert!(broker.hops().is_empty(), "{method}: {:?}", broker.hops());
+    }
+}
+
+/// A caller who asks about narrowing has the view asked too, and a download the view narrowed
+/// says so in `NGSILD-Results-Restricted` (EP-43, R22); one it did not narrow, or a caller who
+/// did not ask, carries no mark.
+#[tokio::test]
+async fn a_narrowed_download_says_so_to_a_caller_who_asked() {
+    for (attrs, asked, marked) in [
+        (Some(&["pm10", "location"][..]), true, true),
+        (None, true, false),
+        (Some(&["pm10", "location"][..]), false, false),
+    ] {
+        let broker = BrokerStub::narrowing(
+            vec![json!([station("station-01", 19.14, 48.73)])],
+            View::of(SLUG, "public", &["AirQualityObserved"], attrs),
+        )
+        .await;
+        let mut request = HttpRequest::builder().uri(format!("/api/endpoint/{SLUG}/file.geojson"));
+        if asked {
+            request = request.header("NGSILD-Results-Restricted", "true");
+        }
+        let response = gateway(&broker.url, endpoint())
+            .oneshot(request.body(Body::empty()).expect("a request"))
+            .await
+            .expect("the gateway answers");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().contains_key("ngsild-results-restricted"),
+            marked,
+            "{attrs:?} asked {asked}"
+        );
+        let hops = broker.hops();
+        let hop = hops
+            .iter()
+            .find(|hop| !hop.view.is_empty())
+            .expect("a view hop");
+        assert_eq!(hop.headers.contains_key("x-jc-restricted"), asked);
     }
 }

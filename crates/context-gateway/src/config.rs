@@ -17,6 +17,9 @@ pub use jc_core::ClientCredential as Credential;
 pub struct Config {
     /// The address to listen on (`JC_GATEWAY_BIND`, default `0.0.0.0:8080`).
     pub bind: SocketAddr,
+    /// The internal listener, for the MQTT brokers' CONNECT checks only
+    /// (`JC_GATEWAY_INTERNAL_BIND`, e.g. `0.0.0.0:8082`); absent serves none (ADR-N-048).
+    pub internal_bind: Option<SocketAddr>,
     /// The broker to forward to, scheme and authority only (`JC_GATEWAY_BROKER_URL`).
     pub broker_url: String,
     /// The manifest repository the endpoint table is built from
@@ -112,6 +115,16 @@ impl Config {
                 reason: e.to_string(),
             })?;
 
+        let internal_bind = std::env::var("JC_GATEWAY_INTERNAL_BIND")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|e: std::net::AddrParseError| ConfigError::Invalid {
+                name: "JC_GATEWAY_INTERNAL_BIND",
+                reason: e.to_string(),
+            })?;
+
         let broker_url = std::env::var("JC_GATEWAY_BROKER_URL")
             .map_err(|_| ConfigError::Missing("JC_GATEWAY_BROKER_URL"))?;
         let broker_url = normalize_broker_url(&broker_url)?;
@@ -172,6 +185,7 @@ impl Config {
             domain_verification,
             domain_verifications_url,
             bind,
+            internal_bind,
             broker_url,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
             projects_dir: std::env::var("JC_GATEWAY_PROJECTS_DIR")
@@ -264,6 +278,7 @@ mod tests {
     fn config_with_a_client_secret() -> Config {
         Config {
             bind: "0.0.0.0:8080".parse().expect("a socket address"),
+            internal_bind: None,
             broker_url: "http://broker:1026".to_owned(),
             repo_dir: None,
             projects_dir: None,

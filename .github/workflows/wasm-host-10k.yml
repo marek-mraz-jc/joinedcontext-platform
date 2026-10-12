@@ -37,7 +37,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rig"
           cp target/release/jc-wasm-host target/release/examples/fleet \
              examples/apps/rust-wasm-server/server/target/wasm32-wasip2/release/rust_wasm_server.wasm \
-             examples/apps/rust-wasm-server/migrations/0001_notes.sql "$RUNNER_TEMP/rig/"
+             "$RUNNER_TEMP/rig/"
+          cat examples/apps/rust-wasm-server/migrations/*.sql > "$RUNNER_TEMP/rig/migrations.sql"
       - name: Run the rig
         env:
           RIG_DIR: ${{ runner.temp }}/rig

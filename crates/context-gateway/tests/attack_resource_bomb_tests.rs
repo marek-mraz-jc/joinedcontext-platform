@@ -55,6 +55,10 @@ async fn broker_answering(per_page: usize) -> (String, Hops) {
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
+            // A download that names no type asks what the space holds first (T-3651).
+            if request.uri().path().ends_with("/types") {
+                return axum::Json(type_list());
+            }
             recorder
                 .lock()
                 .expect("the hop log")
@@ -71,6 +75,12 @@ async fn broker_answering(per_page: usize) -> (String, Hops) {
         let _ = axum::serve(listener, app).await;
     });
     (format!("http://{address}"), hops)
+}
+
+/// The space's `EntityTypeList`: the one type every station is.
+fn type_list() -> Value {
+    json!({ "id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList",
+            "typeList": ["AirQualityObserved"] })
 }
 
 fn station(n: usize) -> Value {
@@ -242,9 +252,12 @@ async fn a_dataset_inside_the_ceiling_is_served() {
 async fn a_download_larger_than_one_broker_page_is_served_whole() {
     let pages = Arc::new(Mutex::new(0usize));
     let counter = Arc::clone(&pages);
-    let app = Router::new().fallback(any(move |_request: Request| {
+    let app = Router::new().fallback(any(move |request: Request| {
         let counter = Arc::clone(&counter);
         async move {
+            if request.uri().path().ends_with("/types") {
+                return axum::Json(type_list());
+            }
             let mut seen = counter.lock().expect("the page count");
             *seen += 1;
             // Two full pages and then a short one, which is how a broker says "no more".

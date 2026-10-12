@@ -52,43 +52,44 @@ async fn main() -> ExitCode {
             projects,
             assembly: config.assembly_dir.clone(),
         });
-    let (endpoints, spaces, accounts, federations, agreements, limits, servers) = match &config
-        .repo_dir
-    {
-        None => (
-            Vec::new(),
-            Vec::new(),
-            context_gateway::auth::accounts::ServiceAccounts::new(),
-            context_gateway::federation::Federations::new(),
-            context_gateway::auth::dataspace_token::Agreements::new(),
-            store::Limits::default(),
-            Vec::new(),
-        ),
-        Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
-            Ok(loaded) => {
-                tracing::info!(
-                    endpoints = loaded.0.len(),
-                    spaces = loaded.1.len(),
-                    accounts = loaded.2.len(),
-                    dir = %dir.display(),
-                    "repository loaded"
-                );
-                loaded
-            }
-            Err(error) => {
-                // An unreadable repository is a deployment fault, not a request fault:
-                // serving an empty table would answer 404 for endpoints that exist.
-                tracing::error!(%error, dir = %dir.display(), "cannot read the manifest repository");
-                return ExitCode::FAILURE;
-            }
-        },
-    };
+    let (endpoints, spaces, accounts, federations, agreements, limits, servers, brokers) =
+        match &config.repo_dir {
+            None => (
+                Vec::new(),
+                Vec::new(),
+                context_gateway::auth::accounts::ServiceAccounts::new(),
+                context_gateway::federation::Federations::new(),
+                context_gateway::auth::dataspace_token::Agreements::new(),
+                store::Limits::default(),
+                Vec::new(),
+                context_gateway::mqtt::Brokers::new(),
+            ),
+            Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
+                Ok(loaded) => {
+                    tracing::info!(
+                        endpoints = loaded.0.len(),
+                        spaces = loaded.1.len(),
+                        accounts = loaded.2.len(),
+                        dir = %dir.display(),
+                        "repository loaded"
+                    );
+                    loaded
+                }
+                Err(error) => {
+                    // An unreadable repository is a deployment fault, not a request fault:
+                    // serving an empty table would answer 404 for endpoints that exist.
+                    tracing::error!(%error, dir = %dir.display(), "cannot read the manifest repository");
+                    return ExitCode::FAILURE;
+                }
+            },
+        };
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone());
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
     gateway.replace_servers(servers);
+    gateway.replace_brokers(brokers);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
     let gateway = match (&config.oidc_issuer, &config.oidc_jwks_url) {
@@ -166,6 +167,25 @@ async fn main() -> ExitCode {
             None => reaper,
         };
         tokio::spawn(reaper.run());
+    }
+
+    // The MQTT brokers' CONNECT checks answer on a listener of their own, which APISIX does not
+    // route to and the NetworkPolicy opens to broker pods only (ADR-N-048, PL-75).
+    if let Some(internal) = config.internal_bind {
+        let listener = match tokio::net::TcpListener::bind(internal).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!(%error, bind = %internal, "cannot listen internally");
+                return ExitCode::FAILURE;
+            }
+        };
+        let app = context_gateway::mqtt::internal_router(Arc::clone(&gateway));
+        tracing::info!(bind = %internal, "internal listener for the MQTT brokers");
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                tracing::error!(%error, "the internal listener stopped");
+            }
+        });
     }
 
     let app = router(gateway).layer(tower_http::trace::TraceLayer::new_for_http());

@@ -5,9 +5,10 @@ with a draft-07 validator (CC-12, stack verdict S4), and a 2019-09 keyword there
 validation error but a silently ignored constraint, so the dialect is converted here rather
 than hoped for.
 
-It also knows nothing about NGSI-LD, and for two kinds the JSON shape is not the LinkML range:
+It also knows nothing about NGSI-LD, and for three kinds the JSON shape is not the LinkML range:
 a LanguageProperty carries a language map and a GeoProperty a GeoJSON geometry, both objects
-where the range is a string. The `@context` and the SHACL shapes are already driven by
+where the range is a string, and a JsonProperty any JSON value (ETSI 4.5.24), which a schema
+leaves to the model's prose. The `@context` and the SHACL shapes are already driven by
 `ngsi_ld_kind` for the same reason (DM-05); this generator follows the same rule, because a
 schema that calls a language map a string rejects exactly what ETSI 9.3.2.3 prescribes.
 """
@@ -113,7 +114,8 @@ def _shape_of(kind: str, node: dict[str, Any]) -> dict[str, Any] | None:
     """The JSON shape of one NGSI-LD kind, or None where the range already describes it.
 
     A Property and a Relationship are what LinkML rendered: a value of the declared type, and
-    an entity id, which is a string either way. The other two are objects.
+    an entity id, which is a string either way. A language map and a geometry are objects; a
+    JsonProperty is any JSON value, so its node keeps no type at all.
     """
     declared = node.get("type")
     nullable = isinstance(declared, list) and "null" in declared
@@ -122,6 +124,8 @@ def _shape_of(kind: str, node: dict[str, Any]) -> dict[str, Any] | None:
     if kind == "LanguageProperty":
         # A language map: one string per language tag, keys the model cannot enumerate.
         return {"type": types, "additionalProperties": {"type": "string"}}
+    if kind == "JsonProperty":
+        return {}
     if kind == "GeoProperty":
         return {
             "type": types,
@@ -141,8 +145,9 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
     travels with the schema without changing what it validates. Exports read the unit for the
     column header, the editor reads the kind to pick a form control (DM-20).
 
-    The kind also decides the shape of a LanguageProperty and of a GeoProperty, which the
-    range cannot express, so those two are rewritten here rather than described wrongly.
+    The kind also decides the shape of a LanguageProperty, a GeoProperty and a JsonProperty,
+    which the range cannot express, so those three are rewritten here rather than described
+    wrongly.
     """
     definitions = schema.get("definitions", {})
     for cls in view.all_classes().values():
