@@ -291,7 +291,7 @@ fn the_repository_says_which_broker_each_space_and_view_lives_on() {
     );
 }
 
-/// A move holds its space read-only (PF-115, ADR-N-046 §2.6): a write is answered 503 with
+/// A move holds its space read-only (PF-115, ADR-N-047 §2.6): a write is answered 503 with
 /// Retry-After and never reaches a broker; reads, a query by POST and other spaces pass.
 #[tokio::test]
 async fn a_moving_space_takes_reads_and_answers_writes_503_with_retry_after() {

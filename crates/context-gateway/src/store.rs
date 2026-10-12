@@ -47,7 +47,7 @@ pub struct SpaceBrokers {
     /// The broker of each view, by the name in `/x/views/{view}`.
     pub by_view: BTreeMap<String, String>,
     /// The spaces a move job holds read-only, by tenant segment, with the views that reach
-    /// them (PF-115, ADR-N-046 §2.6).
+    /// them (PF-115, ADR-N-047 §2.6).
     pub moving: BTreeSet<String>,
 }
 

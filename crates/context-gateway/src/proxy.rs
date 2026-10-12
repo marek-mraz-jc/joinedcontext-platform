@@ -56,7 +56,7 @@ pub struct Broker {
 pub struct Routes {
     by_tenant: std::collections::HashMap<String, Option<String>>,
     by_view: std::collections::HashMap<String, Option<String>>,
-    /// The broker each view lives on, by name, for the hub's label (ADR-N-046 §2.3).
+    /// The broker each view lives on, by name, for the hub's label (ADR-N-047 §2.3).
     named: std::collections::HashMap<String, String>,
     /// Tenants and views a move job holds read-only (PF-115).
     moving: std::collections::HashSet<String>,
@@ -64,7 +64,7 @@ pub struct Routes {
     held: std::collections::HashSet<String>,
 }
 
-/// How long a writer is told to wait while its space moves (ADR-N-046 §2.6).
+/// How long a writer is told to wait while its space moves (ADR-N-047 §2.6).
 const MOVING_RETRY_SECONDS: u32 = 30;
 
 /// Why a forwarded request produced no answer.

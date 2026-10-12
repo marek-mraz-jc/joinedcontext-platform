@@ -86,7 +86,7 @@ fn describe() {
 }
 
 /// The spaces a move holds read-only, as this gateway loaded them (PF-115). The Portal's move
-/// job reads the series to know the hold is in force before it exports (ADR-N-046 §2.6).
+/// job reads the series to know the hold is in force before it exports (ADR-N-047 §2.6).
 pub fn held(before: &std::collections::HashSet<String>, now: &std::collections::HashSet<String>) {
     for space in before.difference(now) {
         metrics::gauge!(SPACE_HELD, "space" => space.clone()).set(0.0);
