@@ -112,8 +112,8 @@ pub(crate) async fn space_schema_artifact(
 }
 
 /// One `schema/` request through the broker's LinkML surface of `view` (plan 5.4, T-3645), or
-/// the request back when no view serves this Endpoint (a view of another model, a projection
-/// with `temporalQ`): those are still rendered here.
+/// the request back when no view serves this Endpoint (a projection with `temporalQ`, a slug no
+/// view id can hold): those are still rendered here.
 ///
 /// The path after `schema` goes on as the caller sent it, still percent-encoded, with `Accept`
 /// and `If-None-Match`, so the broker's formalism negotiation and its `304` hold. A hidden
@@ -126,7 +126,7 @@ async fn through_view(
     view: &str,
     mut request: Request,
 ) -> Result<Response<Body>, Box<Request>> {
-    if !served_by_view(endpoint, view) {
+    if !has_view(endpoint, view) {
         return Err(Box::new(request));
     }
     let path = request.uri().path();
@@ -168,11 +168,6 @@ async fn through_view(
     })
 }
 
-/// Whether the broker's LinkML surface of `view` answers this Endpoint's schema.
-pub(crate) fn served_by_view(endpoint: &Endpoint, view: &str) -> bool {
-    endpoint.view_mapping.is_none() && has_view(endpoint, view)
-}
-
 /// One document of the broker's LinkML surface of the Endpoint's view, read as `subject` reads
 /// it (T-3645): the record, the catalogue feed and the MCP schema tool name the same bytes and
 /// digests the `schema/` routes serve (EP-46, EP-68). `None` when no view serves the Endpoint;
@@ -184,7 +179,7 @@ pub(crate) async fn view_document(
     rest: &str,
 ) -> Option<Result<Vec<u8>, StatusCode>> {
     let view = endpoint.slug.as_str();
-    if !served_by_view(endpoint, view) {
+    if !has_view(endpoint, view) {
         return None;
     }
     let mut request = Request::new(Body::empty());

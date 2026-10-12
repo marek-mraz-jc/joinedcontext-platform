@@ -19,7 +19,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -347,10 +347,20 @@ async fn every_distribution_an_endpoint_record_names_is_one_the_router_serves() 
 }
 
 /// The download the record has always promised: the projected entities, as an attachment
-/// named after the endpoint (EP-41, EP-43).
+/// named after the endpoint (EP-41, EP-43). The broker's view narrows them to the grant since
+/// T-3651.
 #[tokio::test]
 async fn file_json_serves_the_projected_entities_as_an_attachment() {
-    let broker = BrokerStub::start(vec![json!([station()]), json!([])]).await;
+    let broker = BrokerStub::narrowing(
+        vec![json!([station()]), json!([])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
+    )
+    .await;
     let app = gateway(&broker.url);
 
     let response = app

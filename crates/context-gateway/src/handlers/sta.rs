@@ -6,8 +6,8 @@ use crate::app::typed_json_response;
 use crate::app::Gateway;
 use crate::app::MAX_SKIP;
 use crate::app::PAGE;
-use crate::handlers::reads::query_entities;
 use crate::handlers::reads::query_temporal;
+use crate::handlers::reads::read_entities;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -135,7 +135,7 @@ pub(crate) async fn sensorthings(
     }
 
     let (entities, restricted) =
-        match query_entities(&gateway, &endpoint, &subject, &upstream, &mut request).await {
+        match read_entities(&gateway, &endpoint, &subject, &upstream, &mut request).await {
             Ok(answer) => answer,
             Err(problem) => return *problem,
         };

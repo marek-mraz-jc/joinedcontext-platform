@@ -16,7 +16,6 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{Endpoint, Model, Space};
-use context_gateway::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -307,26 +306,21 @@ async fn a_refusal_carries_the_platform_slug() {
     assert_eq!(problem["code"], "forbidden", "{body}");
 }
 
-/// An Endpoint no view serves (here a view of another model, G18) is still answered by the
-/// gateway's own rendering, and the broker is not asked.
+/// An Endpoint no view serves (here a slug longer than a view id may be) is still answered by
+/// the gateway's own rendering, and the broker is not asked.
 #[tokio::test]
 async fn an_endpoint_without_a_view_is_answered_locally() {
     let (upstream, hops) = broker(StatusCode::OK).await;
-    let mapping = ViewMapping::parse(&json!({
-        "version": 2,
-        "sourceClass": "Senzor",
-        "targetClass": "AirQualityObserved",
-        "slots": [{ "target": "pm10", "source": "pm10", "kind": "rename", "filterable": true }]
-    }))
-    .expect("the IR parses");
-    let mapped = Endpoint {
-        view_mapping: Some(Arc::new(mapping)),
+    let slug = "a".repeat(64);
+    let unviewed = Endpoint {
+        slug: slug.clone(),
+        base_path: format!("/api/endpoint/{slug}"),
         ..endpoint()
     };
     let (status, _, body) = call(
         &upstream,
-        mapped,
-        get(&format!("/api/endpoint/{SLUG}/schema/index.json")),
+        unviewed,
+        get(&format!("/api/endpoint/{slug}/schema/index.json")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
