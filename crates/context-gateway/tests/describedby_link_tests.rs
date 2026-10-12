@@ -42,7 +42,17 @@ fn station() -> Value {
 }
 
 async fn broker() -> String {
-    let app = Router::new().fallback(any(|| async { axum::Json(json!([station()])) }));
+    // A view's access surface answers the engine's document (T-3649); every other path the
+    // station.
+    let app = Router::new().fallback(any(|uri: axum::http::Uri| async move {
+        if uri.path() == "/access" {
+            axum::Json(json!({ "subject": { "type": "role", "id": "public" },
+                               "resource": { "type": "view", "id": SLUG },
+                               "permissions": [], "prohibitions": [] }))
+        } else {
+            axum::Json(json!([station()]))
+        }
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a free port");

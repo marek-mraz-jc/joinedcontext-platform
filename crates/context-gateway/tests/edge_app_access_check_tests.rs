@@ -12,6 +12,10 @@
 //! caller holds that grant; a no names nothing, because the reason is the rule (GW6). And the
 //! decision itself, which must be the same one the data path would make — an operation the
 //! caller may not perform is `false` here and refused there.
+//!
+//! The Endpoints here have a view of another model, which no broker view serves yet, so the
+//! gateway decides (T-3649, `app::has_view`); through a view the broker's engine does
+//! (`tests/access_view_tests.rs`).
 
 mod common;
 
@@ -81,7 +85,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
-        view_mapping: None,
+        view_mapping: Some(common::no_view()),
         catalog: None,
         policy_names: Vec::new(),
         policies: grants(),

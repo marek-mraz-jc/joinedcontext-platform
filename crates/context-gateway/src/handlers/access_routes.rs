@@ -7,15 +7,19 @@ use crate::app::sha256_hex;
 use crate::app::text_response;
 use crate::app::typed_json_response;
 use crate::app::Gateway;
+use crate::app::{access_by_view, broker_failure, principal_of, view_of, MAX_BODY};
 use crate::app::{anonymous_on, subject_from, PORTAL_CLIENT, SIMULATE_AUDIENCE};
 use crate::auth::token::{self, Claims};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
-use crate::{handlers, middleware::tenancy};
+use crate::{handlers, middleware::tenancy, proxy};
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
+use axum::http::header::{ACCEPT, CONTENT_TYPE};
 use axum::http::HeaderMap;
 use axum::http::Response;
+use axum::http::{HeaderValue, Method};
 use axum::response::IntoResponse;
 use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
@@ -24,7 +28,11 @@ use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
 
-/// What the caller may do here, from the same PDP that enforces it (T-0163, EP-55).
+/// What the caller may do here (T-0163, EP-55), as the broker's engine holds it: the document
+/// is the view's `access` surface (plan 5.6, T-3649), read from the rule table the broker decides
+/// with, so the description cannot drift from the enforcement (EP-60). The gateway adds what
+/// belongs to the Endpoint and not to the grants: its `resource` (slug and space), its rate
+/// (EP-56), its licence's duties and its own access URL in the ODRL `uid` (EP-57, EP-79).
 pub(crate) async fn access(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
@@ -35,53 +43,198 @@ pub(crate) async fn access(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
-
-    let accept = request
-        .headers()
-        .get(axum::http::header::ACCEPT)
-        .and_then(|value| value.to_str().ok());
-    let now = crate::pdp::now();
-
-    // The same grants in whichever language the caller reads (EP-56, EP-57, EP-58). The
-    // document is computed once per representation from the same PDP answer; a second
-    // implementation of "what may this caller do" is the thing EP-60 forbids.
-    match access_format(accept) {
-        AccessFormat::AuthZen => {
-            json_response(&handlers::access::permissions(&subject, &endpoint, now))
-        }
-        AccessFormat::Odrl => {
-            let document = handlers::access_odrl::policy(
-                &subject,
-                &endpoint,
-                now,
-                gateway.base_url(),
-                sha256_hex,
-            );
-            typed_json_response(&document, handlers::access_odrl::ODRL_JSON)
-        }
-        AccessFormat::Turtle => {
-            let document = handlers::access_odrl::policy(
-                &subject,
-                &endpoint,
-                now,
-                gateway.base_url(),
-                sha256_hex,
-            );
-            text_response(
-                handlers::access_odrl::turtle(&document),
-                handlers::access_odrl::TURTLE,
-            )
-        }
+    let format = access_format(
+        request
+            .headers()
+            .get(axum::http::header::ACCEPT)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let document = match document(&gateway, &endpoint, &subject, format).await {
+        Ok(document) => document,
+        Err(answer) => return *answer,
+    };
+    match format {
+        AccessFormat::AuthZen => json_response(&document),
+        AccessFormat::Odrl => typed_json_response(&document, handlers::access_odrl::ODRL_JSON),
+        AccessFormat::Turtle => text_response(
+            handlers::access_odrl::turtle(&document),
+            handlers::access_odrl::TURTLE,
+        ),
         AccessFormat::GrantAst => {
-            let document = handlers::access_ucast::grant_ast(&subject, &endpoint, now);
             typed_json_response(&document, handlers::access_ucast::GRANT_AST_JSON)
         }
     }
 }
 
+/// The caller's grants on `endpoint` in `format`, the document `GET …/access` serves (EP-55 to
+/// EP-58), ODRL JSON-LD standing for Turtle too: the broker view's with what the gateway adds,
+/// or the gateway's own for an Endpoint no view serves yet ([`access_by_view`]). The MCP façade's
+/// `describe_access` reads this same function, so the two surfaces cannot disagree (EP-60).
+pub(crate) async fn document(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    format: AccessFormat,
+) -> Result<Value, Box<Response<Body>>> {
+    if !access_by_view(endpoint, subject, &view_of(endpoint)) {
+        return Ok(own_document(gateway, endpoint, subject, format));
+    }
+    // ODRL and Turtle are both read as ODRL JSON-LD: the gateway adds the licence's duties and
+    // writes the Turtle from the result, so the two serializations still say one thing.
+    let asked = match format {
+        AccessFormat::AuthZen => "application/json",
+        AccessFormat::Odrl | AccessFormat::Turtle => handlers::access_odrl::ODRL_JSON,
+        AccessFormat::GrantAst => handlers::access_ucast::GRANT_AST_JSON,
+    };
+    let document = from_view(gateway, endpoint, subject, ViewCall::Document(asked)).await?;
+    match format {
+        AccessFormat::AuthZen => Ok(endpoint_document(document, endpoint)),
+        AccessFormat::GrantAst => Ok(document),
+        AccessFormat::Odrl | AccessFormat::Turtle => handlers::access_odrl::published(
+            document,
+            endpoint,
+            gateway.base_url(),
+            sha256_hex,
+        )
+        .ok_or_else(|| {
+            tracing::error!(slug = %endpoint.slug, "the broker's ODRL document is not a Set");
+            Box::new(not_a_document())
+        }),
+    }
+}
+
+/// The gateway's own document, for an Endpoint no view serves yet ([`access_by_view`]); it goes with
+/// the gateway's pipeline when those gaps close (T-3646).
+fn own_document(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    format: AccessFormat,
+) -> Value {
+    let now = crate::pdp::now();
+    match format {
+        AccessFormat::AuthZen => handlers::access::permissions(subject, endpoint, now),
+        AccessFormat::Odrl | AccessFormat::Turtle => {
+            handlers::access_odrl::policy(subject, endpoint, now, gateway.base_url(), sha256_hex)
+        }
+        AccessFormat::GrantAst => handlers::access_ucast::grant_ast(subject, endpoint, now),
+    }
+}
+
+/// The view's AuthZEN document under the Endpoint's own name. The broker names the view alone
+/// (a view says its Tenant only to a caller who named it); the caller here was admitted to this
+/// Endpoint and its space, and the Portal's matrix shows both (EP-55). The Endpoint's rate goes
+/// beside it, the same for every caller, and an Endpoint without one says nothing (EP-56).
+fn endpoint_document(mut document: Value, endpoint: &Endpoint) -> Value {
+    let Some(members) = document.as_object_mut() else {
+        return document;
+    };
+    members.insert(
+        "resource".to_owned(),
+        json!({ "type": "endpoint", "id": endpoint.slug, "space": endpoint.space }),
+    );
+    if let Some(limits) = &endpoint.rate_limit {
+        let mut named = serde_json::Map::new();
+        named.insert(
+            "requestsPerMinute".to_owned(),
+            json!(limits.requests_per_minute),
+        );
+        if let Some(burst) = limits.burst {
+            named.insert("burst".to_owned(), json!(burst));
+        }
+        members.insert("limits".to_owned(), Value::Object(named));
+    }
+    document
+}
+
+/// One call to the view's `access` surface.
+enum ViewCall {
+    /// `GET access`, asking for this media type.
+    Document(&'static str),
+    /// `POST access/check` with this AuthZEN request.
+    Check(Bytes),
+}
+
+/// The view's answer as JSON, or the answer the caller gets instead: the broker's own refusal
+/// as it came (an unknown view is its `404`), and the gateway's `5xx` document for a failure.
+///
+/// The hop carries the tenant and the verified caller ([`tenancy::pin_caller`]) and nothing of
+/// the caller's request: not their token or cookie, not an encoding the gateway would then have
+/// to undo.
+async fn from_view(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    call: ViewCall,
+) -> Result<Value, Box<Response<Body>>> {
+    let (method, path, accept, body) = match call {
+        ViewCall::Document(accept) => (
+            Method::GET,
+            format!("/x/views/{}/access", view_of(endpoint)),
+            accept,
+            Body::empty(),
+        ),
+        ViewCall::Check(bytes) => (
+            Method::POST,
+            format!("/x/views/{}/access/check", view_of(endpoint)),
+            "application/json",
+            Body::from(bytes),
+        ),
+    };
+    let mut hop = Request::new(Body::empty());
+    tenancy::pin_caller(&mut hop, &endpoint.space, subject).map_err(|problem| {
+        tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
+        Box::new(ProblemDetails::internal().into_response())
+    })?;
+    let mut headers = std::mem::take(hop.headers_mut());
+    headers.insert(ACCEPT, HeaderValue::from_static(accept));
+    if method == Method::POST {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    }
+    tracing::info!(
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        principal = %principal_of(subject),
+        %path,
+        "access asked of the broker's view"
+    );
+    let answer = gateway
+        .broker
+        .send(method, &path, headers, body)
+        .await
+        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
+    let (parts, body) = answer.into_parts();
+    if parts.status.is_server_error() {
+        return Err(Box::new(broker_failure(parts.status, body).await));
+    }
+    let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
+        return Err(Box::new(not_a_document()));
+    };
+    if !parts.status.is_success() {
+        return Err(Box::new(proxy::with_body(parts, held.to_vec())));
+    }
+    // Every document and decision of the surface is a JSON object; anything else is not an
+    // answer the gateway can add to or pass on.
+    match serde_json::from_slice::<Value>(&held) {
+        Ok(answer) if answer.is_object() => Ok(answer),
+        _ => {
+            tracing::error!(slug = %endpoint.slug, %path, "the broker's access answer is not a JSON object");
+            Err(Box::new(not_a_document()))
+        }
+    }
+}
+
+/// A broker answer the gateway cannot read: the caller learns that the broker failed, the
+/// operator's log says how.
+fn not_a_document() -> Response<Body> {
+    ProblemDetails::new(502, "broker-failure", "The context broker could not answer")
+        .with_detail("the context broker behind this endpoint failed to answer this request")
+        .into_response()
+}
+
 /// Which representation of the access surface the caller asked for (EP-56, EP-57, EP-58).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccessFormat {
+pub(crate) enum AccessFormat {
     /// The AuthZEN resource-search document, and the default.
     AuthZen,
     /// ODRL 2.2 in the `ngsi-ld:` profile, as JSON-LD.
@@ -114,7 +267,9 @@ fn access_format(accept: Option<&str>) -> AccessFormat {
     AccessFormat::AuthZen
 }
 
-/// One prospective request, answered yes or no (T-0163, R51).
+/// One prospective request, answered yes or no (T-0163, R51) by the broker's engine through the
+/// view (plan 5.6, T-3649). The gateway still caps and reads the request first, so a malformed
+/// one is refused the same way whoever decides.
 pub(crate) async fn access_check(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
@@ -145,16 +300,23 @@ pub(crate) async fn access_check(
             .into_response();
     };
 
-    json_response(&handlers::access::check(
-        &subject,
-        &endpoint,
-        action,
-        query
-            .get("resource")
-            .and_then(|resource| resource.get("type"))
-            .and_then(Value::as_str),
-        crate::pdp::now(),
-    ))
+    if !access_by_view(&endpoint, &subject, &view_of(&endpoint)) {
+        return json_response(&handlers::access::check(
+            &subject,
+            &endpoint,
+            action,
+            query
+                .get("resource")
+                .and_then(|resource| resource.get("type"))
+                .and_then(Value::as_str),
+            crate::pdp::now(),
+        ));
+    }
+    // The broker's engine decides, on the request as the caller wrote it (plan 5.6, T-3649).
+    match from_view(&gateway, &endpoint, &subject, ViewCall::Check(bytes)).await {
+        Ok(decision) => json_response(&decision),
+        Err(answer) => *answer,
+    }
 }
 
 /// One `access/simulate` request (EP-103): the `access/check` request with the subject it is

@@ -142,7 +142,15 @@ async fn broker(honest: bool) -> (String, Hops) {
                 .filter(|(_, kind)| !(honest || view) || types.is_empty() || types.iter().any(|t| t == kind))
                 .map(|(id, kind)| shape(entity(id, kind))).collect();
             let all = Value::Array(listed);
-            let answer = if path.ends_with("/types") {
+            // The access surface of a view is the engine's (T-3649): it writes the caller's
+            // rules from its own table and is swept in Antares (`joinedcontext-policy`
+            // `tests/access.rs`). Its stub holds no rule, so a canary in an access answer is one
+            // the gateway added.
+            let answer = if path == "/access" || path == "/access/check" {
+                json!({ "subject": { "type": "role", "id": "public" },
+                        "resource": { "type": "view", "id": "v" },
+                        "permissions": [], "prohibitions": [] })
+            } else if path.ends_with("/types") {
                 json!({ "id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList",
                         "typeList": ["User", "Vehicle", "Depot"] })
             } else if path.ends_with("/attributes") {

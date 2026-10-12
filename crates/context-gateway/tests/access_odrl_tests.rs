@@ -3,6 +3,12 @@
 //! Two questions. Does the document say the same grants the AuthZEN one says, in the words a
 //! data-space connector negotiates in — and does it survive the journey back, which is what
 //! R26 asks for and what an agreement compiled from an offer depends on.
+//!
+//! The Endpoint here has a view of another model, which no broker view serves yet, so the router
+//! answers with the gateway's own document (T-3649, `app::has_view`); an Endpoint with a view
+//! gets the broker engine's (`tests/access_view_tests.rs`).
+
+mod common;
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -44,7 +50,7 @@ fn endpoint() -> Endpoint {
         projection: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
-        view_mapping: None,
+        view_mapping: Some(common::no_view()),
         catalog: None,
         policy_names: Vec::new(),
         policies: vec![
