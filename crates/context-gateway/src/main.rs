@@ -15,10 +15,13 @@ use std::sync::Arc;
 /// The one outbound client: the broker hop and every notification delivery (R46).
 fn broker_of(config: &Config) -> Result<Broker, String> {
     let Some(path) = config.egress_ca_bundle.as_ref() else {
-        return Broker::verified(config.broker_url.clone()).map_err(|error| error.to_string());
+        return Broker::verified(config.broker_url.clone())
+            .map(|broker| broker.with_template(config.broker_url_template.clone()))
+            .map_err(|error| error.to_string());
     };
     let bundle = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     Broker::trusting(config.broker_url.clone(), &bundle)
+        .map(|broker| broker.with_template(config.broker_url_template.clone()))
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
@@ -54,7 +57,7 @@ async fn main() -> ExitCode {
             projects,
             assembly: config.assembly_dir.clone(),
         });
-    let (endpoints, spaces, accounts, federations, agreements, limits, servers, brokers) =
+    let (endpoints, spaces, accounts, federations, agreements, limits, servers, homes, brokers) =
         match &config.repo_dir {
             None => (
                 Vec::new(),
@@ -64,6 +67,7 @@ async fn main() -> ExitCode {
                 context_gateway::auth::dataspace_token::Agreements::new(),
                 store::Limits::default(),
                 Vec::new(),
+                store::SpaceBrokers::default(),
                 context_gateway::mqtt::Brokers::new(),
             ),
             Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
@@ -98,6 +102,7 @@ async fn main() -> ExitCode {
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
     gateway.replace_servers(servers);
+    gateway.broker.route(&homes);
     gateway.replace_brokers(brokers);
 
     // The realm's keys are refreshed in the background; a request never fetches (PF-46).
@@ -117,6 +122,20 @@ async fn main() -> ExitCode {
             );
             gateway
         }
+    };
+
+    // A read over a space with `identity: caller` registrations exchanges the caller's token,
+    // as the gateway's own client, for the member brokers' audiences (T-3999, ADR-N-047 §2.4).
+    // Without a client such a read answers 503; it is never forwarded as anyone else.
+    let gateway = match (config.token_url(), config.oidc_client.as_ref()) {
+        (Some(token_url), Some((id, credential))) => {
+            gateway.exchange_with(context_gateway::federation::exchange::Exchanger::new(
+                token_url,
+                id.clone(),
+                credential.clone(),
+            ))
+        }
+        _ => gateway,
     };
 
     // Where the broker delivers a notification, which is not where a caller's token is
@@ -205,7 +224,10 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let app = context_gateway::mqtt::internal_router(Arc::clone(&gateway));
+        let app = context_gateway::mqtt::internal_router(
+            Arc::clone(&gateway),
+            config.mqtt_runner_host.clone(),
+        );
         tracing::info!(bind = %internal, "internal listener for the MQTT brokers");
         tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
