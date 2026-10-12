@@ -767,12 +767,16 @@ async fn view_page(
     target: &str,
     headers: &HeaderMap,
 ) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
+    // An entity array is read here, whatever the caller accepts: asked with its geo+json, the
+    // view answers a FeatureCollection that reads as no entity (T-4111, as T-4106 for the PDP path).
+    let mut headers = headers.clone();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
         .send(
             axum::http::Method::GET,
             &format!("/x/views/{view}/ngsi-ld/v1/{target}"),
-            headers.clone(),
+            headers,
             Body::empty(),
         )
         .await
