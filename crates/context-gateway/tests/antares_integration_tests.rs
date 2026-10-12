@@ -70,7 +70,9 @@ impl Antares {
                 "-e",
                 "ANTARES_STORE=memory",
                 "-e",
-                "ANTARES_API_SURFACES=admin,views,access,mcp",
+                // `access` mounts /x/views/{view}/access, where the gateway's access documents
+                // come from since T-3649 (T-4112); dev serves it as the joinedcontext image does.
+                "ANTARES_API_SURFACES=admin,views,mcp,access",
                 "-e",
                 "ANTARES_POLICY=joinedcontext",
                 "-e",
