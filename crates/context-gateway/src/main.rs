@@ -96,7 +96,8 @@ async fn main() -> ExitCode {
         surfaces.extend(spaces.iter().map(|space| Surface::of(&space.endpoint)));
         return migrate_r12(&broker, &config, &surfaces, &args[1..]).await;
     }
-    let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone());
+    let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone())
+        .budget_writes(config.write_budget_mib);
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
