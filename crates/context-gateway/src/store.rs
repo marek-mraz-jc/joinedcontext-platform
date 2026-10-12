@@ -38,7 +38,7 @@ pub type Tables = (
 );
 
 /// The broker each space lives on, by its tenant segment, and each view, by its name: an
-/// Endpoint's slug or `cs-{space}` (PF-111, ADR-N-046). A space whose `brokerRef` names no
+/// Endpoint's slug or `cs-{space}` (PF-111, ADR-N-047). A space whose `brokerRef` names no
 /// broker maps to `""`, which the proxy refuses rather than sending to `main`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SpaceBrokers {

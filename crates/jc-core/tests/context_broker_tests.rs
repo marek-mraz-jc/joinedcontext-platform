@@ -1,4 +1,4 @@
-//! `kind: ContextBroker` and `ContextSpace.spec.brokerRef` (PF-110, PF-111, ADR-N-046).
+//! `kind: ContextBroker` and `ContextSpace.spec.brokerRef` (PF-110, PF-111, ADR-N-047).
 use jc_core::envelope::Kind;
 use jc_core::kinds::{broker_of, validate_brokers, ContextBrokerSpec, IMPLICIT_BROKER};
 use jc_core::registry;

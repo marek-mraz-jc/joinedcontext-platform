@@ -2,7 +2,7 @@
 //!
 //! The upstream is chosen by the gateway, never by the client: the broker of the space the
 //! gateway pinned as tenant, or of the view it named, else the one fixed at start-up
-//! (ADR-N-046). The forwarded path is built from the route the router matched, so nothing a
+//! (ADR-N-047). The forwarded path is built from the route the router matched, so nothing a
 //! client sends can point the gateway at a different host or a different resource tree.
 //!
 //! Hop-by-hop headers are dropped in both directions: they describe one TCP connection,
@@ -44,7 +44,7 @@ pub struct Broker {
     client: Client<HttpsConnector<HttpConnector>, Body>,
     base: String,
     /// The address of every broker but `main`: `{broker}` replaced by its name
-    /// (`JC_GATEWAY_BROKER_URL_TEMPLATE`, ADR-N-046).
+    /// (`JC_GATEWAY_BROKER_URL_TEMPLATE`, ADR-N-047).
     template: Option<String>,
     /// Which broker each space and view lives on, swapped whole on a reload.
     routes: std::sync::Arc<arc_swap::ArcSwap<Routes>>,
@@ -155,7 +155,7 @@ impl Broker {
         self
     }
 
-    /// Routes each space and view to the broker it lives on (ADR-N-046), from the next request
+    /// Routes each space and view to the broker it lives on (ADR-N-047), from the next request
     /// on. A broker without an address (no template, or a space naming no broker) is kept as
     /// `None`, so its requests are refused instead of reaching `main`.
     pub fn route(&self, brokers: &crate::store::SpaceBrokers) {

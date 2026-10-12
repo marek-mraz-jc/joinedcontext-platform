@@ -21,7 +21,7 @@ pub struct Config {
     /// implicit `main`, and every space when the organization declares no broker.
     pub broker_url: String,
     /// The address of every other `ContextBroker`, `{broker}` replaced by its name
-    /// (`JC_GATEWAY_BROKER_URL_TEMPLATE`, ADR-N-046); absent refuses the spaces that live on
+    /// (`JC_GATEWAY_BROKER_URL_TEMPLATE`, ADR-N-047); absent refuses the spaces that live on
     /// one rather than sending them to `main`.
     pub broker_url_template: Option<String>,
     /// The manifest repository the endpoint table is built from
