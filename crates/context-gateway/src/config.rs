@@ -20,6 +20,10 @@ pub struct Config {
     /// The internal listener, for the MQTT brokers' CONNECT checks only
     /// (`JC_GATEWAY_INTERNAL_BIND`, e.g. `0.0.0.0:8082`); absent serves none (ADR-N-048).
     pub internal_bind: Option<SocketAddr>,
+    /// The pipeline runner's headless Service (`JC_GATEWAY_MQTT_RUNNER_HOST`, e.g.
+    /// `pipeline-runner-pods.dev.svc.cluster.local`): a broker admits the runner's tokenless
+    /// CONNECT only from an address this name resolves to; absent admits none (PL-76, T-4004).
+    pub mqtt_runner_host: Option<String>,
     /// The broker to forward to, scheme and authority only (`JC_GATEWAY_BROKER_URL`).
     pub broker_url: String,
     /// The manifest repository the endpoint table is built from
@@ -214,6 +218,10 @@ impl Config {
             domain_verifications_url,
             bind,
             internal_bind,
+            mqtt_runner_host: std::env::var("JC_GATEWAY_MQTT_RUNNER_HOST")
+                .ok()
+                .map(|host| host.trim().to_owned())
+                .filter(|host| !host.is_empty()),
             broker_url,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
             projects_dir: std::env::var("JC_GATEWAY_PROJECTS_DIR")
@@ -311,6 +319,7 @@ mod tests {
         Config {
             bind: "0.0.0.0:8080".parse().expect("a socket address"),
             internal_bind: None,
+            mqtt_runner_host: None,
             broker_url: "http://broker:1026".to_owned(),
             repo_dir: None,
             projects_dir: None,
