@@ -305,7 +305,8 @@ def test_the_index_hands_the_browser_no_fetchable_address(catalogue_documents):
             assert "http" not in json.dumps({k: v for k, v in model.items() if k != "description"})
 
 
-def test_the_index_is_cached_and_refreshed_only_when_asked(catalogue_documents):
+def test_the_index_is_cached_and_refreshed_only_when_asked(monkeypatch, catalogue_documents):
+    monkeypatch.setattr(service, "CATALOGUE_REFRESH_FLOOR_SECONDS", 0)
     call("GET", "/catalog")
     fetched_once = len(catalogue_documents)
     call("GET", "/catalog")
@@ -319,6 +320,7 @@ def test_a_catalogue_that_cannot_be_refreshed_degrades_to_the_cached_index(
     monkeypatch, catalogue_documents
 ):
     """DM-12: unavailability degrades to the cache, it never blocks editing."""
+    monkeypatch.setattr(service, "CATALOGUE_REFRESH_FLOOR_SECONDS", 0)
     _, filled = call("GET", "/catalog")
 
     def unavailable(url: str):
@@ -331,6 +333,44 @@ def test_a_catalogue_that_cannot_be_refreshed_degrades_to_the_cached_index(
     assert body["stale"] is True
     assert body["subjects"] == filled["subjects"]
     assert body["refreshedAt"] == filled["refreshedAt"], "it says when the data is from"
+
+
+def test_a_refresh_reaches_the_catalogue_at_most_once_a_floor(monkeypatch, catalogue_documents):
+    """T-4012: `refresh=true` is a value anyone signed in sends; a loop of them is one fetch."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(service.time, "time", lambda: clock[0])
+    call("GET", "/catalog")
+    fetched_once = len(catalogue_documents)
+    for _ in range(5):
+        status, body = call("GET", "/catalog", query="refresh=true")
+        assert status == 200 and body["subjects"]
+    assert len(catalogue_documents) == fetched_once, "a refresh inside the floor answers the cache"
+
+    clock[0] += service.CATALOGUE_REFRESH_FLOOR_SECONDS
+    call("GET", "/catalog", query="refresh=true")
+    assert len(catalogue_documents) > fetched_once, "after the floor a refresh refills"
+
+
+def test_an_unreachable_catalogue_is_asked_at_most_once_a_floor(monkeypatch):
+    """Nothing cached and upstream down: a read inside the floor does not ask again (T-4012)."""
+    clock = [1_000_000.0]
+    monkeypatch.setattr(service.time, "time", lambda: clock[0])
+    asked: list[str] = []
+
+    def unavailable(url: str):
+        asked.append(url)
+        raise service.ImportError_(f"{url} answered 503")
+
+    monkeypatch.setattr(service, "_document", unavailable)
+    call("GET", "/catalog")
+    tried = len(asked)
+    assert tried
+    status, body = call("GET", "/catalog", query="refresh=true")
+    assert (status, body["subjects"], body["stale"]) == (200, [], True)
+    assert len(asked) == tried
+    clock[0] += service.CATALOGUE_REFRESH_FLOOR_SECONDS
+    call("GET", "/catalog")
+    assert len(asked) > tried
 
 
 def test_a_catalogue_that_was_never_reached_answers_an_empty_index(monkeypatch):
@@ -419,7 +459,8 @@ def test_a_subject_nobody_opened_still_lists_its_models(catalogue_schemas):
     assert subject["models"][0]["attributes"] == ["no2", "temperature"], "the fill is cached"
 
 
-def test_a_subject_is_filled_once_and_survives_a_refresh(catalogue_schemas):
+def test_a_subject_is_filled_once_and_survives_a_refresh(monkeypatch, catalogue_schemas):
+    monkeypatch.setattr(service, "CATALOGUE_REFRESH_FLOOR_SECONDS", 0)
     call("GET", "/catalog", query="subject=dataModel.Environment")
     filled_once = len(catalogue_schemas)
     call("GET", "/catalog", query="subject=dataModel.Environment")
