@@ -15,6 +15,7 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
+use futures_util::stream::{self, StreamExt};
 use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
 use serde_json::Value;
@@ -179,7 +180,7 @@ pub(crate) async fn read_entities(
     };
     if fallback.len() < 2 {
         let target = format!("entities?{}", query::view_read(params, &fallback));
-        let (page, restricted, _) =
+        let (page, restricted, _, _) =
             view_page(gateway, slug, slug, &target, request.headers()).await?;
         return Ok((Value::Array(page), restricted));
     }
@@ -205,7 +206,7 @@ pub(crate) async fn read_entities(
         let mut from = 0usize;
         loop {
             let target = format!("entities?{narrowed}&limit={PAGE}&offset={from}");
-            let (page, narrowed_page, bytes) =
+            let (page, narrowed_page, bytes, _) =
                 view_page(gateway, slug, slug, &target, request.headers()).await?;
             restricted |= narrowed_page;
             let fetched = page.len();
@@ -402,6 +403,9 @@ pub(crate) fn too_large() -> Response<Body> {
     response
 }
 
+/// How many broker pages one download reads at once (T-4082).
+const PARALLEL_PAGES: usize = 4;
+
 /// Every entity the query reaches, read from the broker one page at a time (EP-44).
 ///
 /// A file representation answers with the whole result set rather than one broker page,
@@ -563,30 +567,95 @@ async fn paged_view(
             .collect()
     };
 
-    let mut collected: Vec<Value> = Vec::new();
+    // Every selector's first page with the broker's count, then every further page the counts
+    // name, PARALLEL_PAGES at a time (T-4082): read one after another, a 25 000-entity download
+    // took 20-28 s behind a broker answering a page in about 0.9 s. Each selector's pages stay
+    // in their order, and the ceilings hold as each page arrives.
+    let headers = request.headers().clone();
+    let read = |target: String| {
+        let headers = &headers;
+        async move { view_page(gateway, slug, view, &target, headers).await }
+    };
+    let targets: Vec<String> = selectors
+        .iter()
+        .map(|narrowed| format!("entities?{narrowed}&limit={PAGE}&offset=0&count=true"))
+        .collect();
+    let firsts: Vec<_> = stream::iter(targets)
+        .map(read)
+        .buffered(PARALLEL_PAGES)
+        .collect()
+        .await;
+
+    let mut chunks: Vec<Vec<Value>> = Vec::with_capacity(selectors.len());
+    let mut further: Vec<(usize, String)> = Vec::new();
     let mut restricted = false;
     let mut held = 0u64;
-    for narrowed in &selectors {
-        let mut offset = 0usize;
-        loop {
-            let target = format!("entities?{narrowed}&limit={PAGE}&offset={offset}");
-            let (page, narrowed_page, bytes) =
-                view_page(gateway, slug, view, &target, request.headers()).await?;
-            restricted |= narrowed_page;
-            let fetched = page.len();
-            // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
-            held += bytes as u64;
-            collected.extend(page);
-            if collected.len() as u64 > wanted || held > MAX_COLLECTED {
-                return Err(Box::new(too_large()));
+    let mut rows = 0u64;
+    for (index, (narrowed, first)) in selectors.iter().zip(firsts).enumerate() {
+        let (page, narrowed_page, bytes, total) = first?;
+        restricted |= narrowed_page;
+        // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
+        held += bytes as u64;
+        let full = page.len() >= PAGE;
+        let mut chunk = page;
+        if full {
+            match total {
+                // The ceiling is known before the rest is read.
+                Some(total) if total > wanted => return Err(Box::new(too_large())),
+                Some(total) => further.extend(
+                    (PAGE..usize::try_from(total).unwrap_or(usize::MAX))
+                        .step_by(PAGE)
+                        .map(|offset| {
+                            (
+                                index,
+                                format!("entities?{narrowed}&limit={PAGE}&offset={offset}"),
+                            )
+                        }),
+                ),
+                // A broker that sends no count is walked page by page, as before.
+                None => {
+                    let mut offset = PAGE;
+                    loop {
+                        let target = format!("entities?{narrowed}&limit={PAGE}&offset={offset}");
+                        let (page, narrowed_page, bytes, _) = read(target).await?;
+                        restricted |= narrowed_page;
+                        held += bytes as u64;
+                        let fetched = page.len();
+                        chunk.extend(page);
+                        if rows + chunk.len() as u64 > wanted || held > MAX_COLLECTED {
+                            return Err(Box::new(too_large()));
+                        }
+                        if fetched < PAGE {
+                            break;
+                        }
+                        offset += PAGE;
+                    }
+                }
             }
-            if fetched < PAGE {
-                break;
-            }
-            offset += PAGE;
+        }
+        rows += chunk.len() as u64;
+        if rows > wanted || held > MAX_COLLECTED {
+            return Err(Box::new(too_large()));
+        }
+        chunks.push(chunk);
+    }
+
+    let (owners, targets): (Vec<usize>, Vec<String>) = further.into_iter().unzip();
+    let mut pages = stream::iter(targets).map(read).buffered(PARALLEL_PAGES);
+    let mut owners = owners.into_iter();
+    while let (Some(page), Some(index)) = (pages.next().await, owners.next()) {
+        let (page, narrowed_page, bytes, _) = page?;
+        restricted |= narrowed_page;
+        held += bytes as u64;
+        rows += page.len() as u64;
+        if rows > wanted || held > MAX_COLLECTED {
+            return Err(Box::new(too_large()));
+        }
+        if let Some(chunk) = chunks.get_mut(index) {
+            chunk.extend(page);
         }
     }
-    Ok((Value::Array(collected), restricted))
+    Ok((Value::Array(chunks.concat()), restricted))
 }
 
 /// The type list of an Endpoint as its reads show the caller (CIM 009 5.7.1, T-4080): every
@@ -621,7 +690,7 @@ pub(crate) async fn listed_types(
             query::view_read(&[], std::slice::from_ref(&name))
         );
         match view_page(gateway, slug, slug, &target, request.headers()).await {
-            Ok((page, _, _)) if !page.is_empty() => shown.push(name),
+            Ok((page, _, _, _)) if !page.is_empty() => shown.push(name),
             Ok(_) => {}
             // A type the view refuses this caller is a type they are not shown.
             Err(refused) if refused.status() == StatusCode::FORBIDDEN => {}
@@ -695,7 +764,7 @@ async fn view_page(
     view: &str,
     target: &str,
     headers: &HeaderMap,
-) -> Result<(Vec<Value>, bool, usize), Box<Response<Body>>> {
+) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
     let answer = gateway
         .broker
         .send(
@@ -707,12 +776,18 @@ async fn view_page(
         .await
         .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
     let restricted = restricted_by(answer.headers());
+    // The total a `count=true` read is answered with (CIM 009 6.3.13).
+    let total = answer
+        .headers()
+        .get("NGSILD-Results-Count")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     let (parts, body) = answer.into_parts();
     let bytes = axum::body::to_bytes(body, MAX_BODY)
         .await
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
     if parts.status == StatusCode::NOT_FOUND && names_no_tenant(&bytes) {
-        return Ok((Vec::new(), false, 0));
+        return Ok((Vec::new(), false, 0, Some(0)));
     }
     if parts.status == StatusCode::FORBIDDEN {
         return Err(Box::new(ProblemDetails::forbidden().into_response()));
@@ -727,7 +802,7 @@ async fn view_page(
         entity if entity.is_object() => vec![entity],
         _ => Vec::new(),
     };
-    Ok((page, restricted, bytes.len()))
+    Ok((page, restricted, bytes.len(), total))
 }
 
 /// Whether the broker marked its answer narrowed (Antares `ANTARES_POLICY`, R22).
