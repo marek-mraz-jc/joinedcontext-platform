@@ -1,4 +1,4 @@
-//! A space's quality rules judged on one NGSI-LD entity (DM-86..DM-91, ADR-N-046 2.4-2.6).
+//! A space's quality rules judged on one NGSI-LD entity (DM-87..DM-92, ADR-N-046 2.4-2.6).
 //!
 //! The one evaluation the gateway's write path, the Portal's rejected route and its `maxAge`
 //! sweep share: no network, no store, nothing but the entity, the rules and the clock the caller
@@ -9,11 +9,11 @@ use crate::kinds::{duration_seconds, QualityKind, QualityOutcome, QualityRule};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{json, Map, Value};
 
-/// The sub-Property a flagged attribute carries (DM-88).
+/// The sub-Property a flagged attribute carries (DM-89).
 pub const QUALITY_FLAGS: &str = "qualityFlags";
-/// The Property a quarantined entity carries (DM-89).
+/// The Property a quarantined entity carries (DM-90).
 pub const QUARANTINED_AT: &str = "quarantinedAt";
-/// The Property naming the rules that quarantined an entity (DM-89).
+/// The Property naming the rules that quarantined an entity (DM-90).
 pub const QUARANTINE_RULES: &str = "quarantineRules";
 
 /// One rule's verdict on one entity: `None` passed.
@@ -122,7 +122,7 @@ fn breaks_on_write(rule: &QualityRule, instance: &Value, now: DateTime<Utc>) -> 
     }
 }
 
-/// The verdict of each rule of `entity`'s type on a write, the `maxAge` half aside (DM-86).
+/// The verdict of each rule of `entity`'s type on a write, the `maxAge` half aside (DM-87).
 pub fn on_write<'a>(
     entity: &Value,
     rules: &'a [QualityRule],
@@ -142,7 +142,7 @@ pub fn on_write<'a>(
         .collect()
 }
 
-/// The sweep's verdict of each `maxAge` rule of `entity`'s type (DM-90): broken when an
+/// The sweep's verdict of each `maxAge` rule of `entity`'s type (DM-91): broken when an
 /// instance's `observedAt` is older than `maxAge`.
 pub fn on_sweep<'a>(
     entity: &Value,
@@ -164,7 +164,7 @@ pub fn on_sweep<'a>(
         .collect()
 }
 
-/// The first rejecting verdict, the one a refusal names (DM-87).
+/// The first rejecting verdict, the one a refusal names (DM-88).
 pub fn rejection<'a>(verdicts: &[Verdict<'a>]) -> Option<&'a QualityRule> {
     verdicts
         .iter()
@@ -173,7 +173,7 @@ pub fn rejection<'a>(verdicts: &[Verdict<'a>]) -> Option<&'a QualityRule> {
 }
 
 /// Writes the flags and the quarantine of `verdicts` into `entity` before it is stored
-/// (DM-88, DM-89). Every judged attribute loses the `qualityFlags` it came with, so a write
+/// (DM-89, DM-90). Every judged attribute loses the `qualityFlags` it came with, so a write
 /// that breaks nothing stores none and a writer never sets a flag of its own. Nothing is
 /// written when a verdict rejects: the write is refused instead.
 pub fn mark(entity: &mut Value, verdicts: &[Verdict<'_>], now: DateTime<Utc>) {
@@ -225,7 +225,7 @@ pub fn mark(entity: &mut Value, verdicts: &[Verdict<'_>], now: DateTime<Utc>) {
     }
 }
 
-/// The Properties that hide an entity from all but its space's owner and steward (DM-89).
+/// The Properties that hide an entity from all but its space's owner and steward (DM-90).
 pub fn quarantine(entity: &mut Map<String, Value>, rules: &[&str], now: DateTime<Utc>) {
     entity.insert(
         QUARANTINED_AT.into(),

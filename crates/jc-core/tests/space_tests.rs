@@ -287,7 +287,7 @@ fn a_space_fills_a_missing_unit_code_unless_it_refuses_dm_06() {
     .is_err());
 }
 
-/// DM-81: a space's retention round-trips, holds one rule per type, and refuses a duration
+/// DM-82: a space's retention round-trips, holds one rule per type, and refuses a duration
 /// the broker cannot run (zero, negative, under a minute, over ten years, an unknown unit).
 #[test]
 fn retention_rules_round_trip_and_refuse_what_the_broker_cannot_run_dm_81() {
@@ -388,7 +388,7 @@ fn with_quality(rules: &str) -> String {
     )
 }
 
-/// DM-86: the ADR's three rules round-trip, each kind takes its default outcome, and an
+/// DM-87: the ADR's three rules round-trip, each kind takes its default outcome, and an
 /// explicit outcome overrides it.
 #[test]
 fn quality_rules_round_trip_with_their_default_outcomes_dm_86() {
@@ -416,7 +416,7 @@ fn quality_rules_round_trip_with_their_default_outcomes_dm_86() {
     assert!(empty.get("quality").is_none(), "no rule, no field");
 }
 
-/// DM-86, DM-91: a rule that mixes kinds, a bad bound, an unknown field or outcome, a duplicate
+/// DM-87, DM-92: a rule that mixes kinds, a bad bound, an unknown field or outcome, a duplicate
 /// name and a 65th rule are refused.
 #[test]
 fn quality_rules_refuse_what_cannot_be_checked_dm_86_dm_91() {

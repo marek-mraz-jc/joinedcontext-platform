@@ -252,19 +252,19 @@ pub struct ContextSpaceSpec {
     #[serde(default, skip_serializing_if = "MissingUnitCode::is_fill")]
     pub missing_unit_code: MissingUnitCode,
     /// How long the broker keeps each type's data; a type without a rule is kept forever
-    /// (DM-81, ADR-N-046).
+    /// (DM-82, ADR-N-046).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retention: Vec<RetentionRule>,
-    /// The space's own quality rules beside its model's constraints, at most 64 (DM-86,
+    /// The space's own quality rules beside its model's constraints, at most 64 (DM-87,
     /// ADR-N-046).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quality: Vec<QualityRule>,
 }
 
-/// The most quality rules a space declares (DM-91).
+/// The most quality rules a space declares (DM-92).
 pub const MAX_QUALITY_RULES: usize = 64;
 
-/// What a quality rule checks (DM-86).
+/// What a quality rule checks (DM-87).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum QualityKind {
@@ -276,7 +276,7 @@ pub enum QualityKind {
     Freshness,
 }
 
-/// What a broken quality rule does (DM-87, DM-88, DM-89).
+/// What a broken quality rule does (DM-88, DM-89, DM-90).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum QualityOutcome {
@@ -288,7 +288,7 @@ pub enum QualityOutcome {
     Quarantine,
 }
 
-/// One named quality rule of a space (DM-86, ADR-N-046 2.4).
+/// One named quality rule of a space (DM-87, ADR-N-046 2.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct QualityRule {
@@ -321,7 +321,7 @@ pub struct QualityRule {
 }
 
 impl QualityRule {
-    /// The outcome of a check on write: `range` and `area` flag, `maxAhead` rejects (DM-86).
+    /// The outcome of a check on write: `range` and `area` flag, `maxAhead` rejects (DM-87).
     pub fn write_outcome(&self) -> QualityOutcome {
         self.outcome.unwrap_or(match self.kind {
             QualityKind::Freshness => QualityOutcome::Reject,
@@ -346,7 +346,7 @@ impl QualityRule {
             return refuse(
                 "spec.quality.name",
                 self.name.clone(),
-                "a quality rule's name is a DNS-1123 label (DM-86)",
+                "a quality rule's name is a DNS-1123 label (DM-87)",
             );
         }
         names::validate_entity_type(&self.entity_type)?;
@@ -360,7 +360,7 @@ impl QualityRule {
             return refuse(
                 "spec.quality.attribute",
                 self.attribute.clone(),
-                "an attribute is a slot name of the type (DM-86)",
+                "an attribute is a slot name of the type (DM-87)",
             );
         }
         let number = |n: &serde_json::Number| n.as_f64().filter(|v| v.is_finite());
@@ -379,7 +379,7 @@ impl QualityRule {
                 "spec.quality",
                 self.name.clone(),
                 "a range rule sets min or max, an area rule bbox, a freshness rule maxAhead \
-                 or maxAge, and nothing else (DM-86)",
+                 or maxAge, and nothing else (DM-87)",
             );
         }
         if let (Some(min), Some(max)) = (self.min.as_ref(), self.max.as_ref()) {
@@ -387,7 +387,7 @@ impl QualityRule {
                 return refuse(
                     "spec.quality.min",
                     self.name.clone(),
-                    "min is at most max (DM-86)",
+                    "min is at most max (DM-87)",
                 );
             }
         }
@@ -402,7 +402,7 @@ impl QualityRule {
                 return refuse(
                     "spec.quality.bbox",
                     self.name.clone(),
-                    "bbox is [minLon, minLat, maxLon, maxLat] in WGS 84, min <= max (DM-86)",
+                    "bbox is [minLon, minLat, maxLon, maxLat] in WGS 84, min <= max (DM-87)",
                 );
             }
         }
@@ -414,7 +414,7 @@ impl QualityRule {
                 return refuse(
                     field,
                     v.to_owned(),
-                    "a freshness duration is PT1S to P3650D, as PT30S, PT5M or P1D (DM-86)",
+                    "a freshness duration is PT1S to P3650D, as PT30S, PT5M or P1D (DM-87)",
                 );
             }
         }
@@ -422,28 +422,28 @@ impl QualityRule {
     }
 }
 
-/// One type's retention in a space (DM-81, ADR-N-046): both durations absent keeps it forever.
+/// One type's retention in a space (DM-82, ADR-N-046): both durations absent keeps it forever.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RetentionRule {
     /// A class of the space's Data Model.
     pub entity_type: String,
-    /// How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-82).
+    /// How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
-    /// How long a temporal instance is kept, in the same form (DM-83).
+    /// How long a temporal instance is kept, in the same form (DM-84).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<String>,
 }
 
 /// Seconds of a retention duration `P[nD][T[nH][nM][nS]]` from one minute to 3650 days, the
-/// form the broker's `/q/retention` reads; `None` for anything else (DM-81).
+/// form the broker's `/q/retention` reads; `None` for anything else (DM-82).
 pub fn retention_seconds(raw: &str) -> Option<u64> {
     duration_seconds(raw).filter(|total| *total >= 60)
 }
 
 /// Seconds of a duration `P[nD][T[nH][nM][nS]]` from one second to 3650 days; `None` for
-/// anything else (DM-81, DM-86).
+/// anything else (DM-82, DM-87).
 pub fn duration_seconds(raw: &str) -> Option<u64> {
     let rest = raw.strip_prefix('P')?;
     let (days, time) = match rest.split_once('T') {
@@ -538,7 +538,7 @@ impl ContextSpaceSpec {
                 return Err(Error::Name {
                     field: "spec.retention",
                     value: rule.entity_type.clone(),
-                    reason: "a type has at most one retention rule (DM-81)",
+                    reason: "a type has at most one retention rule (DM-82)",
                 });
             }
             for (field, value) in [
@@ -550,7 +550,7 @@ impl ContextSpaceSpec {
                         field,
                         value: v.to_owned(),
                         reason: "a retention duration is PT1M to P3650D, as PT5M, PT8H, \
-                                 P30D or P1DT12H (DM-81)",
+                                 P30D or P1DT12H (DM-82)",
                     });
                 }
             }
@@ -560,7 +560,7 @@ impl ContextSpaceSpec {
             return Err(Error::Name {
                 field: "spec.quality",
                 value: self.quality.len().to_string(),
-                reason: "a space declares at most 64 quality rules (DM-91)",
+                reason: "a space declares at most 64 quality rules (DM-92)",
             });
         }
         let mut named = std::collections::BTreeSet::new();
@@ -570,7 +570,7 @@ impl ContextSpaceSpec {
                 return Err(Error::Name {
                     field: "spec.quality.name",
                     value: rule.name.clone(),
-                    reason: "a quality rule's name is unique in the space (DM-86)",
+                    reason: "a quality rule's name is unique in the space (DM-87)",
                 });
             }
         }
