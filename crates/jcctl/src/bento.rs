@@ -11,6 +11,7 @@
 //! archive's named members (PL-72).
 
 use jc_core::kinds::data_source::{check_class, env_var_of};
+use jc_core::kinds::mqtt_broker;
 use jc_core::kinds::{
     DataSourceSpec, DataSourceType, GtfsFeed, HttpArchive, IdMint, Mint, PipelineSpec, TemplatePart,
 };
@@ -442,7 +443,13 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
         return Mapping::new();
     };
     let mut out = Mapping::new();
-    out.insert(key("urls"), sequence(&connection.urls));
+    // A platform broker is read on its internal listener as the runner, with no credential
+    // (PL-76); the gateway grants the runner the topics of the DataSources that name the broker.
+    let urls = match &connection.broker_ref {
+        Some(broker) => vec![mqtt_broker::internal_url(context.project, &broker.name)],
+        None => connection.urls.clone(),
+    };
+    out.insert(key("urls"), sequence(&urls));
     out.insert(key("topics"), sequence(&connection.topics));
     out.insert(
         key("client_id"),
@@ -454,7 +461,9 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
     if let Some(clean) = connection.clean_session {
         out.insert(key("clean_session"), Value::Bool(clean));
     }
-    if let Some(user) = &connection.username {
+    if connection.broker_ref.is_some() {
+        out.insert(key("user"), text(mqtt_broker::RUNNER_USERNAME));
+    } else if let Some(user) = &connection.username {
         out.insert(key("user"), text(user));
     }
     if let Some(password) = &connection.password_ref {
@@ -463,8 +472,7 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
             text(&interpolation(context.source, password)),
         );
     }
-    let encrypted = connection
-        .urls
+    let encrypted = urls
         .iter()
         .any(|url| url.starts_with("tls://") || url.starts_with("wss://"));
     if let Some(tls) = tls_block(spec, context, encrypted) {
