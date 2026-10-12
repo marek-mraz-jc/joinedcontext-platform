@@ -3155,8 +3155,6 @@ fn unsupported_media_type() -> ProblemDetails {
     )
 }
 
-/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
-/// else is refused openly, without naming the rule that refused it.
 /// A write's share of the gateway's write budget (T-4077), held from before its body is read
 /// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
 /// takes none. Over the budget, the 503 to answer instead.
@@ -3197,6 +3195,8 @@ fn busy() -> Response<Body> {
     answer
 }
 
+/// GW1 and R20: a refused read of one entity is indistinguishable from a miss; everything
+/// else is refused openly, without naming the rule that refused it.
 fn refused(operation: Operation, path: &str) -> Response<Body> {
     if !operation.is_write() && operations::addressed_entity(path).is_some() {
         ProblemDetails::not_found().into_response()
