@@ -141,18 +141,6 @@ pub struct Contact {
     pub phone: Option<String>,
 }
 
-impl Contact {
-    /// Creates a new contact with required role, name, and email.
-    pub fn new(role: ContactRole, name: impl Into<String>, email: impl Into<String>) -> Self {
-        Self {
-            role,
-            name: name.into(),
-            email: email.into(),
-            phone: None,
-        }
-    }
-}
-
 /// Functional responsibility of an organization contact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]

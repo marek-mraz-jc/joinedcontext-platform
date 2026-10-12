@@ -64,6 +64,8 @@ fn representation_variants_serialize_to_expected_wire_names() {
         (Representation::Zip, "zip"),
         (Representation::OgcFeatures, "ogc-features"),
         (Representation::Sta, "sta"),
+        (Representation::Odata, "odata"),
+        (Representation::WebSocket, "websocket"),
     ];
 
     let expected_names: Vec<&str> = representations.iter().map(|(_, name)| *name).collect();
@@ -78,7 +80,9 @@ fn representation_variants_serialize_to_expected_wire_names() {
             "json",
             "zip",
             "ogc-features",
-            "sta"
+            "sta",
+            "odata",
+            "websocket"
         ]
     );
 
@@ -169,12 +173,12 @@ fn endpoint_spec_invariants_and_rate_limits() {
 
     // Empty representations fails
     let mut empty_rep = ep.spec.clone();
-    empty_rep.enabled_representations = vec![];
+    empty_rep.enabled_representations = Some(vec![]);
     assert!(empty_rep.validate().is_err());
 
     // Duplicate representations fails
     let mut dup_rep = ep.spec.clone();
-    dup_rep.enabled_representations = vec![Representation::NgsiLd, Representation::NgsiLd];
+    dup_rep.enabled_representations = Some(vec![Representation::NgsiLd, Representation::NgsiLd]);
     assert!(dup_rep.validate().is_err());
 
     // requestsPerMinute: 0 fails
@@ -608,4 +612,112 @@ fn a_form_names_the_sites_that_may_frame_it_as_https_origins() {
         .collect();
     assert!(with(many[..20].to_vec()).is_ok());
     assert!(with(many).is_err(), "at most 20");
+}
+
+/// The golden Endpoint without `enabledRepresentations`, plus the given `spec` lines.
+fn defaulted(extra: &str) -> Result<Endpoint, String> {
+    let without: String = GOLDEN
+        .lines()
+        .filter(|l| !l.starts_with("  enabledRepresentations:") && !l.starts_with("    - "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    Endpoint::from_yaml(&format!("{without}{extra}")).map_err(|e| e.to_string())
+}
+
+#[test]
+fn an_endpoint_that_lists_nothing_serves_every_standard_but_sta() {
+    let ep = defaulted("").expect("parses");
+    ep.validate().expect("validates");
+    use Representation as R;
+    assert_eq!(
+        ep.spec.served_representations(),
+        [
+            R::NgsiLd,
+            R::Mcp,
+            R::GeoJson,
+            R::Csv,
+            R::Xlsx,
+            R::Json,
+            R::Zip,
+            R::OgcFeatures,
+            R::Odata,
+            R::WebSocket
+        ],
+        "EP-104: SensorThings is opt-in"
+    );
+    let narrowed =
+        defaulted("  disabledRepresentations: [odata, xlsx, websocket]\n").expect("parses");
+    narrowed.validate().expect("validates");
+    assert_eq!(
+        narrowed.spec.served_representations(),
+        [
+            R::NgsiLd,
+            R::Mcp,
+            R::GeoJson,
+            R::Csv,
+            R::Json,
+            R::Zip,
+            R::OgcFeatures
+        ]
+    );
+    let no_mcp = defaulted("  mcp: false\n").expect("parses");
+    no_mcp.validate().expect("validates");
+    assert!(!no_mcp.spec.served_representations().contains(&R::Mcp));
+    let round = Endpoint::from_yaml(&narrowed.to_yaml().expect("yaml")).expect("re-import");
+    assert_eq!(round, narrowed, "an omitted list stays omitted");
+    assert!(!narrowed
+        .to_yaml()
+        .expect("yaml")
+        .contains("enabledRepresentations"));
+}
+
+#[test]
+fn an_explicit_list_serves_what_it_served_before() {
+    let ep = Endpoint::from_yaml(GOLDEN).expect("golden");
+    use Representation as R;
+    assert_eq!(
+        ep.spec.served_representations(),
+        [
+            R::NgsiLd,
+            R::Mcp,
+            R::GeoJson,
+            R::Csv,
+            R::OgcFeatures,
+            R::Sta
+        ],
+        "the list, and nothing the default would add"
+    );
+}
+
+#[test]
+fn disabled_representations_are_checked() {
+    for (extra, why) in [
+        (
+            "  disabledRepresentations: [ngsi-ld]\n",
+            "ngsi-ld is always served",
+        ),
+        (
+            "  disabledRepresentations: [geojson]\n",
+            "geojson is always served",
+        ),
+        (
+            "  disabledRepresentations: [mcp]\n",
+            "mcp: false is the switch",
+        ),
+        ("  disabledRepresentations: [csv, csv]\n", "a duplicate"),
+    ] {
+        let ep = defaulted(extra).expect("parses");
+        assert!(ep.validate().is_err(), "{why}");
+    }
+    let mut beside = Endpoint::from_yaml(GOLDEN).expect("golden");
+    beside.spec.disabled_representations = vec![Representation::Csv];
+    assert!(beside.validate().is_err(), "beside an explicit list");
+    assert!(
+        defaulted("  disabledRepresentations: [graphql]\n").is_err(),
+        "an unknown name"
+    );
+    assert!(
+        defaulted("  disabledRepresentation: [csv]\n").is_err(),
+        "an unknown field (deny_unknown_fields)"
+    );
 }

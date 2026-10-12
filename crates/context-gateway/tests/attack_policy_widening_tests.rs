@@ -80,10 +80,11 @@ async fn broker() -> (String, Hops) {
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
-            recorder
-                .lock()
-                .expect("the hop log")
-                .push(request.uri().query().unwrap_or_default().to_owned());
+            recorder.lock().expect("the hop log").push(format!(
+                "{}?{}",
+                request.uri().path(),
+                request.uri().query().unwrap_or_default()
+            ));
             axum::Json(everything())
         }
     }));
@@ -285,14 +286,24 @@ async fn a_cql2_filter_the_endpoint_serves_is_compiled_and_forwarded() {
     );
 }
 
-/// EP-12, EP-61: SensorThings takes its filter in `$filter`, and it is compiled into the same `q`.
+/// EP-12, EP-61: SensorThings takes its filter in `$filter`, compiled into the same `q`, and since
+/// T-3651 it reads through the Endpoint's view: the filter on a hidden attribute goes to the view,
+/// whose engine considers no entity for it (Antares `addons/joinedcontext-policy/tests/engine.rs`
+/// `bisecting_a_hidden_value_learns_nothing`), and never to the broker's plain root.
 #[tokio::test]
-async fn a_sensorthings_filter_on_a_hidden_attribute_is_not_an_oracle() {
-    indistinguishable(
-        "/sta/v1.1/Things?$filter=secretPin%20eq%20%274321%27",
-        "/sta/v1.1/Things?$filter=secretPin%20eq%20%279999%27",
-    )
-    .await;
+async fn a_sensorthings_filter_on_a_hidden_attribute_goes_to_the_view_alone() {
+    for value in ["4321", "9999"] {
+        let (status, _, asked) = ask(&format!(
+            "/sta/v1.1/Things?$filter=secretPin%20eq%20%27{value}%27"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0].starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/entities?")),
+            "{asked:?}"
+        );
+    }
 }
 
 /// The SensorThings control.
@@ -302,8 +313,9 @@ async fn a_sensorthings_filter_the_endpoint_serves_is_compiled_and_forwarded() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(asked.len(), 1, "the broker was asked {asked:?}");
     assert!(
-        asked[0].contains("q=%28weight%3E100%29"),
-        "the compiled filter did not reach the broker: {}",
+        asked[0].starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/entities?"))
+            && asked[0].contains("q=weight%3E100"),
+        "the compiled filter did not reach the view: {}",
         asked[0]
     );
     assert!(

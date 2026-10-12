@@ -82,20 +82,18 @@ fn repo(test: &str) -> PathBuf {
     dir
 }
 
-fn app(dir: &Path, realm: &common::Realm) -> axum::Router {
+/// The broker's MCP surface lists one read tool for every view (T-3647).
+async fn app(dir: &Path, realm: &common::Realm) -> axum::Router {
     let (endpoints, ..) = store::load(dir).expect("the repository loads");
+    let broker = common::mcp_broker(json!([{ "name": "query_entities" }])).await;
     router(Arc::new(
-        Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
-            Box::new(PolicyPdp),
-            "hel.fi",
-        )
-        .serve(endpoints)
-        .authenticate(
-            Arc::new(realm.verifier()),
-            ServiceAccounts::new(),
-            Some(HOST.to_owned()),
-        ),
+        Gateway::new(Broker::new(broker), Box::new(PolicyPdp), "hel.fi")
+            .serve(endpoints)
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(HOST.to_owned()),
+            ),
     ))
 }
 
@@ -153,7 +151,7 @@ fn entities(slug: &str, token: &str) -> Request<Body> {
 async fn an_endpoint_serves_mcp_without_listing_it() {
     let realm = common::Realm::new();
     let dir = repo("listed");
-    let (status, body) = send(app(&dir, &realm), tools_list(LISTED_NGSI, None)).await;
+    let (status, body) = send(app(&dir, &realm).await, tools_list(LISTED_NGSI, None)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let answer: Value = serde_json::from_str(&body).expect("a JSON-RPC answer");
     let tools = answer["result"]["tools"].as_array().expect("a tool list");
@@ -190,7 +188,7 @@ async fn an_endpoint_serves_geojson_without_listing_it() {
         .uri(format!("/api/endpoint/{LISTED_NGSI}/file.geojson"))
         .body(Body::empty())
         .expect("a request");
-    let (status, body) = send(app(&dir, &realm), request).await;
+    let (status, body) = send(app(&dir, &realm).await, request).await;
     assert_ne!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
@@ -201,14 +199,14 @@ async fn an_opted_out_endpoint_serves_no_mcp_and_says_nothing_about_it() {
     let realm = common::Realm::new();
     let dir = repo("off");
     let token = person(&realm, "helsinki", OPTED_OUT);
-    let off = send(app(&dir, &realm), tools_list(OPTED_OUT, Some(&token))).await;
-    let unknown = send(app(&dir, &realm), tools_list(UNKNOWN, Some(&token))).await;
+    let off = send(app(&dir, &realm).await, tools_list(OPTED_OUT, Some(&token))).await;
+    let unknown = send(app(&dir, &realm).await, tools_list(UNKNOWN, Some(&token))).await;
     assert_eq!(off.0, StatusCode::NOT_FOUND, "{}", off.1);
     assert_eq!(off, unknown);
 
     // Its NGSI-LD surface is untouched by the opt-out: resolved and admitted, it goes on to the
     // broker (none listens here), rather than 404.
-    let data = send(app(&dir, &realm), entities(OPTED_OUT, &token)).await;
+    let data = send(app(&dir, &realm).await, entities(OPTED_OUT, &token)).await;
     assert_ne!(data.0, StatusCode::NOT_FOUND, "{}", data.1);
 }
 
@@ -220,12 +218,20 @@ async fn an_internal_endpoints_mcp_refuses_an_outsider_like_its_data_does() {
     let dir = repo("internal");
 
     let insider = person(&realm, "helsinki", INTERNAL);
-    let (status, body) = send(app(&dir, &realm), tools_list(INTERNAL, Some(&insider))).await;
+    let (status, body) = send(
+        app(&dir, &realm).await,
+        tools_list(INTERNAL, Some(&insider)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let outsider = person(&realm, "doprava", INTERNAL);
-    let mcp = send(app(&dir, &realm), tools_list(INTERNAL, Some(&outsider))).await;
-    let data = send(app(&dir, &realm), entities(INTERNAL, &outsider)).await;
+    let mcp = send(
+        app(&dir, &realm).await,
+        tools_list(INTERNAL, Some(&outsider)),
+    )
+    .await;
+    let data = send(app(&dir, &realm).await, entities(INTERNAL, &outsider)).await;
     assert!(
         mcp.0.is_client_error(),
         "an outsider is refused: {} {}",
@@ -235,6 +241,6 @@ async fn an_internal_endpoints_mcp_refuses_an_outsider_like_its_data_does() {
     assert_eq!(mcp.0, data.0, "MCP {} / data {}", mcp.1, data.1);
 
     // Without a token, a client is told where to get one, as on any internal instance (AG-32).
-    let (status, _) = send(app(&dir, &realm), tools_list(INTERNAL, None)).await;
+    let (status, _) = send(app(&dir, &realm).await, tools_list(INTERNAL, None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

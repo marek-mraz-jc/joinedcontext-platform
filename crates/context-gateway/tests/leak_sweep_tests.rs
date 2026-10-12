@@ -18,7 +18,11 @@
 //!
 //! An answer is judged by what it carries and a request by what it selects on: a filter is a
 //! read, so a name outside the endpoint's own vocabulary may not reach the broker inside anything
-//! that decides which entities come back. `every_representation_and_tool_has_a_probe` fails when
+//! that decides which entities come back. Since T-3651 the file downloads and SensorThings read
+//! the broker's view: both brokers answer a view hop as the engine would (projection ∩ grants −
+//! hidden, no `Depot`), and a view hop is not judged for oracles, because the engine reads a hidden
+//! name as absent there (Antares `views_props::q_over_hidden_equals_q_over_absent`). The answers
+//! of those probes are still judged byte by byte. `every_representation_and_tool_has_a_probe` fails when
 //! a surface is added without a probe, because an unswept surface is where the next leak lives.
 //!
 //! First measured on 2026-09-18 with 42 leaking and 24 oracle probes (T-1862 … T-2135 come from
@@ -28,6 +32,7 @@ mod common;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
@@ -82,17 +87,27 @@ fn entity(id: &str, kind: &str) -> Value {
 
 type Hops = Arc<Mutex<Vec<String>>>;
 
+/// The mark of a hop that went to the broker's view (T-3651).
+const VIEW_HOP: &str = "VIEW ";
+
 async fn broker(honest: bool) -> (String, Hops) {
     let hops: Hops = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&hops);
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
-            let path = request.uri().path().to_owned();
+            // A hop to the broker's view is answered as its engine answers it (T-3651): the
+            // projection ∩ grants − hidden the Portal writes into the rules, honest or not, because
+            // the view is where the narrowing happens now.
+            let raw = request.uri().path().to_owned();
+            let (view, path) = match raw.strip_prefix("/x/views/").and_then(|rest| rest.split_once('/')) {
+                Some((_, rest)) => (true, format!("/{rest}")),
+                None => (false, raw),
+            };
             let query = request.uri().query().unwrap_or_default().to_owned();
             let body = axum::body::to_bytes(request.into_body(), 1 << 20).await.unwrap_or_default();
             recorder.lock().expect("log").push(format!(
-                "{path}?{query} {}", String::from_utf8_lossy(&body)
+                "{}{path}?{query} {}", if view { VIEW_HOP } else { "" }, String::from_utf8_lossy(&body)
             ));
             let param = |name: &str| -> Option<Vec<String>> {
                 query.split('&').find_map(|pair| pair.strip_prefix(&format!("{name}="))).map(|v| {
@@ -107,7 +122,15 @@ async fn broker(honest: bool) -> (String, Hops) {
             }
             let attrs = param("attrs");
             let shape = |mut e: Value| -> Value {
-                if let (true, Some(attrs)) = (honest, &attrs) {
+                if view {
+                    let kind = e["type"].as_str().unwrap_or_default().to_owned();
+                    if let Some(members) = e.as_object_mut() {
+                        members.retain(|k, _| {
+                            matches!(k.as_str(), "id" | "type" | "location") || allowed(&kind, k)
+                        });
+                    }
+                }
+                if let (true, Some(attrs)) = (honest || view, &attrs) {
                     if let Some(members) = e.as_object_mut() {
                         members.retain(|k, _| k == "id" || k == "type" || attrs.contains(k));
                     }
@@ -115,7 +138,8 @@ async fn broker(honest: bool) -> (String, Hops) {
                 e
             };
             let listed: Vec<Value> = [(USER, "User"), (VEHICLE, "Vehicle"), (DEPOT, "Depot")].into_iter()
-                .filter(|(_, kind)| !honest || types.is_empty() || types.iter().any(|t| t == kind))
+                .filter(|(_, kind)| !view || *kind != "Depot")
+                .filter(|(_, kind)| !(honest || view) || types.is_empty() || types.iter().any(|t| t == kind))
                 .map(|(id, kind)| shape(entity(id, kind))).collect();
             let all = Value::Array(listed);
             let answer = if path.ends_with("/types") {
@@ -128,6 +152,8 @@ async fn broker(honest: bool) -> (String, Hops) {
                 json!({ "id": "urn:x", "type": "Attribute", "attributeName": "odometer",
                         "attributeCount": 3, "typeNames": ["User", "Vehicle", "Depot"],
                         "attributeDetails": [{ "id": "odometer", "type": "Attribute", "attributeName": "odometer" }] })
+            } else if path.contains("Depot") && view {
+                return (StatusCode::NOT_FOUND, axum::Json(json!({"type": "https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound"}))).into_response();
             } else if path.contains("Depot") {
                 shape(entity(DEPOT, "Depot"))
             } else if path.contains("Vehicle:") || path.contains("Vehicle%3A") {
@@ -137,7 +163,7 @@ async fn broker(honest: bool) -> (String, Hops) {
             } else {
                 all
             };
-            axum::Json(answer)
+            axum::Json(answer).into_response()
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -145,7 +171,7 @@ async fn broker(honest: bool) -> (String, Hops) {
         .expect("a port");
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move {
-        let _ = axum::serve(listener, common::plain_tree(app)).await;
+        let _ = axum::serve(listener, app).await;
     });
     (format!("http://{address}"), hops)
 }
@@ -240,8 +266,10 @@ fn mcp(label: &'static str, tool: &str, arguments: Value) -> Probe {
     }
 }
 
+/// The data tools and the listings of `/mcp` are the broker's since T-3647 (Antares sweeps its
+/// MCP surface); what the gateway still answers itself is probed here.
 fn probes() -> Vec<Probe> {
-    let mut all = vec![
+    vec![
         get("file json", "/file.json"),
         get("file json two types", "/file.json?type=User,Vehicle"),
         get("file json q foreign", "/file.json?type=Vehicle&q=age%3E30"),
@@ -295,77 +323,8 @@ fn probes() -> Vec<Probe> {
         get("schema markdown", "/schema/1/model.md"),
         get("access", "/access"),
         get("endpoint record", ""),
-        mcp(
-            "mcp query one type",
-            "query_entities",
-            json!({ "type": "Vehicle" }),
-        ),
-        mcp(
-            "mcp query q foreign",
-            "query_entities",
-            json!({ "type": "Vehicle", "q": "age>30" }),
-        ),
-        mcp(
-            "mcp query attrs foreign",
-            "query_entities",
-            json!({ "type": "Vehicle", "attrs": ["age", "odometer"] }),
-        ),
-        mcp(
-            "mcp query outside",
-            "query_entities",
-            json!({ "type": "Depot" }),
-        ),
-        mcp("mcp get", "get_entity", json!({ "id": VEHICLE })),
-        mcp("mcp get depot", "get_entity", json!({ "id": DEPOT })),
-        mcp(
-            "mcp batch ids",
-            "batch_query",
-            json!({ "ids": [VEHICLE, USER, DEPOT] }),
-        ),
-        mcp(
-            "mcp batch type",
-            "batch_query",
-            json!({ "type": "Vehicle", "q": "odometer>1" }),
-        ),
-        mcp(
-            "mcp temporal",
-            "query_temporal",
-            json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" }),
-        ),
-        mcp(
-            "mcp temporal batch",
-            "batch_query_temporal",
-            json!({ "type": "Vehicle", "timerel": "after", "timeAt": "2026-01-01T00:00:00Z" }),
-        ),
-        mcp(
-            "mcp retrieve temporal",
-            "retrieve_temporal",
-            json!({ "id": VEHICLE }),
-        ),
-        mcp("mcp types", "list_types", json!({ "details": true })),
         // The two registry item reads: one name the grant covers and one it does not, because the
         // answer to a type nobody granted must not differ from the answer to a type nobody has.
-        mcp("mcp type info", "get_type", json!({ "type": "Vehicle" })),
-        mcp(
-            "mcp type info outside",
-            "get_type",
-            json!({ "type": "Depot" }),
-        ),
-        mcp(
-            "mcp attribute info",
-            "get_attribute",
-            json!({ "attrId": "odometer" }),
-        ),
-        mcp(
-            "mcp attribute info outside",
-            "get_attribute",
-            json!({ "attrId": "secretPin" }),
-        ),
-        mcp(
-            "mcp attributes",
-            "list_attributes",
-            json!({ "details": true }),
-        ),
         mcp("mcp schema summary", "describe_schema", json!({})),
         mcp(
             "mcp schema linkml",
@@ -388,22 +347,7 @@ fn probes() -> Vec<Probe> {
             json!({ "format": "linkml", "entityType": "Depot" }),
         ),
         mcp("mcp access", "describe_access", json!({})),
-    ];
-    all.push(Probe {
-        label: "mcp resources list",
-        method: Method::POST,
-        uri: "/mcp".to_owned(),
-        accept: "application/json, text/event-stream",
-        body: Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" })),
-    });
-    all.push(Probe {
-        label: "mcp tools list",
-        method: Method::POST,
-        uri: "/mcp".to_owned(),
-        accept: "application/json, text/event-stream",
-        body: Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })),
-    });
-    all
+    ]
 }
 
 /// What in one answer may not be there: the canary or the schema description of an attribute its
@@ -496,9 +440,14 @@ fn selectors(hop: &str) -> String {
 /// selector. `age` belongs to `User` alone, so it may appear beside `User` and never beside
 /// `Vehicle` on its own. `Depot` is outside the projection, so it may never be asked for as a
 /// type at all.
+///
+/// A hop to the broker's view carries the caller's query as sent: the engine judges what it
+/// selects on there (Antares `addons/joinedcontext-policy/tests/engine.rs`
+/// `bisecting_a_hidden_value_learns_nothing`, `views_q.rs`), so only the hops to the plain root
+/// are read here (T-3651).
 fn oracle(hops: &[String], probe: &Probe) -> Vec<String> {
     let mut found = Vec::new();
-    for hop in hops {
+    for hop in hops.iter().filter(|hop| !hop.starts_with(VIEW_HOP)) {
         let asked = selectors(hop);
         for name in ["odometer", "secretPin"] {
             if asked.contains(name) {
@@ -623,7 +572,7 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    assert!(probed >= 60, "the sweep stopped after {probed} probes");
+    assert!(probed >= 40, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -664,6 +613,8 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::Zip => "/file.zip",
             Representation::OgcFeatures => "/ogc/features",
             Representation::Sta => "/sta/v1.1",
+            Representation::Odata => "/odata/v4",
+            Representation::WebSocket => "/ws",
         };
         assert!(
             swept(path),
@@ -672,41 +623,8 @@ async fn every_representation_and_tool_has_a_probe() {
         );
     }
 
-    // The tools the endpoint itself offers, asked of the running facade rather than of a list
-    // written down here, so a tool added tomorrow is caught by this test today.
-    let (upstream, _) = broker(true).await;
-    let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
-    );
-    let response = router(gateway)
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(format!("/api/endpoint/{SLUG}/mcp"))
-                .header("content-type", "application/json")
-                .header("accept", "application/json, text/event-stream")
-                .body(Body::from(
-                    json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string(),
-                ))
-                .expect("a request"),
-        )
-        .await
-        .expect("the facade answers");
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("a body");
-    let listed: Value = serde_json::from_slice(&bytes).expect("the tool list is JSON");
-    let tools = listed["result"]["tools"]
-        .as_array()
-        .expect("the facade lists its tools")
-        .clone();
-    assert!(!tools.is_empty(), "the facade offered no tool at all");
-    for tool in tools {
-        // A writing tool creates something and is not a read surface; the sweep is about reads.
-        if tool["annotations"]["readOnlyHint"] != json!(true) {
-            continue;
-        }
-        let name = tool["name"].as_str().expect("a tool has a name");
+    // The tools the gateway still answers itself (T-3647); the rest are the broker's view's.
+    for name in ["describe_schema", "describe_access"] {
         assert!(
             swept(&format!("\"name\":\"{name}\"")),
             "the tool {name} is offered and never probed"
@@ -781,7 +699,7 @@ async fn no_surface_of_the_space_leaks() {
         .filter(|probe| probe.uri.starts_with("/mcp"))
         .collect();
     assert!(
-        asked.len() >= 25,
+        asked.len() >= 6,
         "the space sweep asks {} probes",
         asked.len()
     );

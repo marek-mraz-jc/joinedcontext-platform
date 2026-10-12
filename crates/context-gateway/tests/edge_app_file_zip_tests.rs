@@ -10,7 +10,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
-use common::BrokerStub;
+use common::{BrokerStub, View};
 use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -167,7 +167,18 @@ fn member<'a>(members: &'a [(String, Vec<u8>)], suffix: &str) -> &'a [u8] {
 /// leak cannot spread to another member while that task is open.
 #[tokio::test]
 async fn no_schema_document_in_the_bundle_describes_a_hidden_attribute() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2)])]).await;
+    // The data members are the view's answer, which the Portal's rules narrow to the published
+    // names (T-3651); the schema members are the gateway's own projection.
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 34.2)])],
+        View::of(
+            SLUG,
+            "public",
+            &["AirQualityObserved"],
+            Some(&["pm10", "location"]),
+        ),
+    )
+    .await;
     let answer = get(
         gateway(&broker.url, endpoint(None, &["secret"])),
         &format!("/api/endpoint/{SLUG}/file.zip"),
@@ -195,16 +206,19 @@ async fn no_schema_document_in_the_bundle_describes_a_hidden_attribute() {
     assert!(schema.contains("pm10"), "{schema}");
 }
 
-/// An entity of a type no grant names is in none of the three shapes, even when the broker hands it
-/// over: a bundle is a second way to read what the endpoint allows and never a second set of rules
-/// (EP-07, T-1862).
+/// An entity of a type the view does not show is in none of the three shapes: a bundle is a
+/// second way to read what the view answers and never a second set of rules (EP-07, T-3651).
 #[tokio::test]
 async fn an_entity_of_an_ungranted_type_is_in_no_shape_of_the_bundle() {
     let mut intruder = station("invoice-1", 0.0);
     intruder["type"] = json!("Invoice");
     intruder["id"] = json!("urn:ngsi-ld:Invoice:banskabystrica.sk:ovzdusie:invoice-1");
     intruder["amount"] = json!({ "type": "Property", "value": 4200.25 });
-    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2), intruder])]).await;
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 34.2), intruder])],
+        View::of(SLUG, "public", &["AirQualityObserved"], None),
+    )
+    .await;
 
     let mut narrowed = endpoint(None, &[]);
     narrowed.policies = vec![serde_norway::from_str(
@@ -328,15 +342,17 @@ async fn the_saved_filename_is_the_slug_and_a_date() {
     );
 }
 
-/// A caller no grant names gets no archive at all, and the broker is not asked.
+/// A caller the view refuses gets no archive at all, only the platform's `403`.
 #[tokio::test]
-async fn a_caller_no_grant_names_gets_no_archive() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2)])]).await;
-    let mut ungranted = endpoint(None, &[]);
-    ungranted.policies = Vec::new();
+async fn a_caller_the_view_refuses_gets_no_archive() {
+    let broker = BrokerStub::narrowing(
+        vec![json!([station("station-01", 34.2)])],
+        View::of(SLUG, "steward", &["AirQualityObserved"], None),
+    )
+    .await;
 
     let answer = get(
-        gateway(&broker.url, ungranted),
+        gateway(&broker.url, endpoint(None, &[])),
         &format!("/api/endpoint/{SLUG}/file.zip"),
     )
     .await;
@@ -346,7 +362,6 @@ async fn a_caller_no_grant_names_gets_no_archive() {
         !answer.body.starts_with(b"PK"),
         "a refusal is not an archive"
     );
-    assert!(broker.hops().is_empty(), "{:?}", broker.hops());
 }
 
 /// An empty answer is an empty bundle, not a refusal: the files are there, the manifest counts

@@ -5,6 +5,13 @@
 //! model, and what goes out — `attrs`, `q`, `geoQ` — is written back into the source model
 //! the broker actually stores. A translation that works in one direction only is a view that
 //! answers correctly right up until somebody filters.
+//!
+//! Since T-3799 the slug's NGSI-LD surface of such an Endpoint is the broker's view, which
+//! inverts and rebuilds in Antares (`crates/antares-views/tests/views/views_mapped.rs`: the
+//! target-model answer, the filter in the source model, a non-invertible or unserved filter and a
+//! write refused, another type answered empty, `pick`/`omit` and `attrs` of a computed slot), so
+//! the request-level cases left here; the translator's own rules stay until the MCP façade and the
+//! preview stop calling it (T-3647, T-3802, then T-3644).
 
 mod common;
 
@@ -93,21 +100,17 @@ fn stored() -> Value {
 
 /// One request the gateway made upstream.
 #[derive(Debug, Clone, Default)]
-struct Hop {
-    query: String,
-}
+struct Hop;
 
 type Hops = Arc<Mutex<Vec<Hop>>>;
 
 async fn broker() -> (String, Hops) {
     let hops: Hops = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&hops);
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(any(move |_: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
-            recorder.lock().expect("the hop log").push(Hop {
-                query: request.uri().query().unwrap_or_default().to_owned(),
-            });
+            recorder.lock().expect("the hop log").push(Hop);
             axum::Json(json!([stored()]))
         }
     }));
@@ -154,204 +157,6 @@ fn endpoint(view: Option<ViewMapping>) -> Endpoint {
         models: Vec::new(),
         policy_names: Vec::new(),
         policies: vec![policy()],
-    }
-}
-
-/// One request through a view endpoint, and everything the broker was asked.
-async fn through(method: Method, uri: &str) -> (StatusCode, Value, Vec<Hop>, Option<String>) {
-    let (upstream, hops) = broker().await;
-    let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
-            .serve([endpoint(Some(mapping()))]),
-    );
-
-    let response = router(gateway)
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(format!("/api/endpoint/{SLUG}{uri}"))
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "pm25": { "type": "Property", "value": 1 } }).to_string(),
-                ))
-                .expect("a request"),
-        )
-        .await
-        .expect("the gateway answers");
-
-    let status = response.status();
-    let allow = response
-        .headers()
-        .get("allow")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("a body");
-    let made = hops.lock().expect("the hop log").clone();
-    (
-        status,
-        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        made,
-        allow,
-    )
-}
-
-#[tokio::test]
-async fn an_answer_comes_back_in_the_target_model() {
-    let (status, body, _, _) =
-        through(Method::GET, "/ngsi-ld/v1/entities?type=AirQualityObserved").await;
-    assert_eq!(status, StatusCode::OK);
-
-    let entity = &body[0];
-    assert_eq!(
-        entity["type"],
-        json!("AirQualityObserved"),
-        "the target class"
-    );
-    assert_eq!(entity["pm25"]["value"], json!(12.5), "a rename");
-    assert_eq!(
-        entity["temperature"]["value"],
-        json!(19.0),
-        "kelvin to celsius"
-    );
-    assert_eq!(
-        entity["reliability"]["value"],
-        json!("high"),
-        "a value mapping"
-    );
-    assert_eq!(entity["stationCount"]["value"], json!(4), "a cast");
-    assert_eq!(
-        entity["dataProvider"],
-        json!({ "type": "Property", "value": "bb" }),
-        "a constant, in the normalized form the rest of the entity is in (T-0473)"
-    );
-    assert_eq!(
-        entity["label"],
-        json!({ "type": "Property", "value": "Senzor Fončorda (vysoka)" }),
-        "a computed slot, evaluated from the source attributes its expression reads (DM-51)"
-    );
-    for (name, attribute) in entity.as_object().expect("an entity") {
-        if ["id", "type", "@context", "createdAt", "modifiedAt"].contains(&name.as_str()) {
-            continue;
-        }
-        assert!(
-            attribute.get("type").is_some() && attribute.get("value").is_some(),
-            "every attribute of a normalized answer has a type and a value: {name} = {attribute}"
-        );
-    }
-
-    assert_eq!(entity["id"], json!(STATION), "still an NGSI-LD entity");
-    assert_eq!(
-        entity["modifiedAt"],
-        json!("2026-09-07T08:00:00Z"),
-        "provenance the broker generated survives the translation"
-    );
-    assert!(
-        entity.get("pm2p5").is_none() && entity.get("teplota").is_none(),
-        "no source name survives into a view: {entity}"
-    );
-    assert!(
-        entity.get("nazov").is_none(),
-        "an attribute an expression reads is an input, not a member of the target model: \
-         {entity}"
-    );
-    assert!(
-        entity.get("kalibracia").is_none(),
-        "an attribute the mapping does not derive is not part of the target model: {entity}"
-    );
-}
-
-#[tokio::test]
-async fn a_filter_written_in_the_target_model_reaches_the_broker_in_the_source_model() {
-    let (status, _, hops, _) = through(
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=AirQualityObserved&attrs=pm25,temperature\
-         &q=reliability==%22high%22;temperature%3E19",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let asked = hops.first().expect("the broker was asked");
-    let query = context_gateway::query::decode(&asked.query);
-    assert!(
-        query.contains("type=MestskySenzor"),
-        "the source class: {query}"
-    );
-    assert!(
-        query.contains("attrs=pm2p5,teplota"),
-        "source names: {query}"
-    );
-    assert!(
-        query.contains("spolahlivost==\"vysoka\""),
-        "the value goes back through the inverse table: {query}"
-    );
-    assert!(
-        query.contains("teplota>292.15"),
-        "and a converted value back through the inverse conversion: {query}"
-    );
-}
-
-/// DM-51: a slot with no inverse cannot be filtered on, and saying so is better than
-/// forwarding a name the broker does not know or dropping the filter silently.
-#[tokio::test]
-async fn a_filter_on_a_slot_the_mapping_cannot_invert_is_refused() {
-    for filter in ["label==%22x%22", "dataProvider==%22bb%22"] {
-        let (status, body, hops, _) = through(
-            Method::GET,
-            &format!("/ngsi-ld/v1/entities?type=AirQualityObserved&q={filter}"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{filter}");
-        assert!(hops.is_empty(), "nothing was asked upstream for {filter}");
-        assert!(
-            body["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("query"),
-            "the refusal says why: {body}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_filter_on_an_attribute_the_view_does_not_serve_is_refused() {
-    let (status, _, hops, _) = through(
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=AirQualityObserved&q=kalibracia%3E0",
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        hops.is_empty(),
-        "the source name is not smuggled through by a caller who guessed it"
-    );
-}
-
-/// EP-54: every write, before authentication and before anything is forwarded.
-#[tokio::test]
-async fn a_view_endpoint_refuses_every_write() {
-    for (method, uri) in [
-        (Method::POST, "/ngsi-ld/v1/entities"),
-        (
-            Method::PATCH,
-            "/ngsi-ld/v1/entities/urn:ngsi-ld:X:a:b:c/attrs",
-        ),
-        (Method::PUT, "/ngsi-ld/v1/entities/urn:ngsi-ld:X:a:b:c"),
-        (Method::DELETE, "/ngsi-ld/v1/entities/urn:ngsi-ld:X:a:b:c"),
-    ] {
-        let (status, _, hops, allow) = through(method.clone(), uri).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {uri}");
-        assert_eq!(
-            allow.as_deref(),
-            Some("GET, HEAD, OPTIONS"),
-            "a 405 names what is allowed (RFC 9110 section 15.5.6)"
-        );
-        assert!(
-            hops.is_empty(),
-            "nothing reached the broker for {method} {uri}"
-        );
     }
 }
 
@@ -446,25 +251,6 @@ fn a_slot_that_does_not_say_it_is_filterable_is_not() {
 }
 
 // --- computed slots (T-0455, DM-51) ---------------------------------------------------
-
-/// DM-51's other half. A computed slot is produced from the attributes its expression reads,
-/// so a caller who asks only for it has to have those attributes fetched on their behalf;
-/// before, the broker was asked for nothing and the attribute could never be built.
-#[tokio::test]
-async fn attrs_asks_the_broker_for_what_a_computed_slot_reads() {
-    let (status, _, hops, _) = through(
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=AirQualityObserved&attrs=label,pm25",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let query = context_gateway::query::decode(&hops.first().expect("asked").query);
-    assert!(
-        query.contains("attrs=nazov,spolahlivost,pm2p5"),
-        "the inputs of the expression, then the renamed slot: {query}"
-    );
-}
 
 /// One IR whose every slot is computed, so the forms can be checked without a broker.
 fn computed(slots: Value) -> ViewMapping {
@@ -753,69 +539,6 @@ fn an_unparsable_q_is_a_bad_request() {
         mapping.invert_q("name.sub==1").is_err(),
         "a path below the attribute is not mapped"
     );
-}
-
-/// The value of one parameter of a forwarded query, decoded.
-fn sent(hops: &[Hop], name: &str) -> Option<String> {
-    let hop = hops.last()?;
-    hop.query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key == name).then(|| context_gateway::query::decode(value))
-    })
-}
-
-/// `type` is translated per type, not replaced: the view serves its target class only, so a
-/// selection of another type selects nothing the broker stores, never the source class.
-#[tokio::test]
-async fn a_type_the_view_does_not_serve_is_not_asked_as_the_source_class() {
-    let (_, _, hops, _) =
-        through(Method::GET, "/ngsi-ld/v1/entities?type=AirQualityObserved").await;
-    assert_eq!(sent(&hops, "type").as_deref(), Some("MestskySenzor"));
-    let (_, _, hops, _) = through(Method::GET, "/ngsi-ld/v1/entities?type=Device").await;
-    let asked = sent(&hops, "type").unwrap_or_default();
-    assert!(
-        !asked.is_empty() && !asked.contains("MestskySenzor"),
-        "{asked}"
-    );
-    let (_, _, hops, _) = through(
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=Device,AirQualityObserved",
-    )
-    .await;
-    let asked = sent(&hops, "type").unwrap_or_default();
-    assert!(
-        asked.contains("MestskySenzor") && !asked.contains("Device,"),
-        "{asked}"
-    );
-}
-
-/// `pick` and `omit` name target members, which the broker does not hold: they are applied
-/// to the translated answer, and never reach the broker.
-#[tokio::test]
-async fn pick_and_omit_apply_to_the_target_model() {
-    let (status, body, hops, _) = through(
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=AirQualityObserved&pick=id,pm25,dataProvider",
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let mut members: Vec<&String> = body[0].as_object().expect("an entity").keys().collect();
-    members.sort();
-    assert_eq!(members, ["dataProvider", "id", "pm25"], "{body}");
-    assert_eq!(sent(&hops, "pick"), None);
-
-    let (_, body, hops, _) = through(
-        Method::GET,
-        "/ngsi-ld/v1/entities?type=AirQualityObserved&omit=temperature,label",
-    )
-    .await;
-    let entity = body[0].as_object().expect("an entity");
-    assert!(
-        !entity.contains_key("temperature") && !entity.contains_key("label"),
-        "{body}"
-    );
-    assert!(entity.contains_key("pm25"), "{body}");
-    assert_eq!(sent(&hops, "omit"), None);
 }
 
 /// The vocabulary answers (5.7.5 to 5.7.10) come back in the target model too: the source
