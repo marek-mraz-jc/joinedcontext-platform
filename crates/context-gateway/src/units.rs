@@ -166,7 +166,7 @@ fn type_of_id(id: &str) -> Option<&str> {
     }
 }
 
-fn types_of<'a>(
+pub(crate) fn types_of<'a>(
     entity: &'a serde_json::Map<String, Value>,
     addressed: Option<&'a str>,
 ) -> Vec<&'a str> {

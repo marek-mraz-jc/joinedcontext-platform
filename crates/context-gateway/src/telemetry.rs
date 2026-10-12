@@ -78,6 +78,10 @@ fn describe() {
     metrics::describe_histogram!(REQUEST_SECONDS, "seconds to answer one request");
     metrics::describe_counter!(DECISIONS, "policy decisions, by operation and verdict");
     metrics::describe_histogram!(BROKER_SECONDS, "seconds of one broker round trip");
+    metrics::describe_counter!(
+        crate::quality::CHECKS,
+        "quality checks on writes, by space, type, rule and outcome"
+    );
 }
 
 /// The scrape.
