@@ -645,7 +645,13 @@ async fn a_space_too_long_for_a_view_id_is_refused_without_a_hop() {
         .serve_spaces([space]);
     let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
     let (status, answer) = post(gateway, &format!("/cs/{long}/mcp"), &list).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{answer}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+    assert!(
+        answer["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("/no-view")),
+        "{answer}"
+    );
     assert!(
         answer["detail"]
             .as_str()

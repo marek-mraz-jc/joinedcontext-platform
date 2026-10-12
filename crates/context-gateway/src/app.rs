@@ -130,6 +130,9 @@ pub struct Gateway {
     pub creates: crate::creates::DailyCreates,
     /// The WebSocket connections each caller holds open (EP-107).
     pub ws_open: crate::handlers::ws::Open,
+    /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
+    /// bounded only by the broker's own lifetime.
+    pub ws_token_lifetime: std::time::Duration,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
@@ -192,6 +195,7 @@ impl Gateway {
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
+            ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
@@ -4230,12 +4234,16 @@ async fn mcp_answer(
         // The Portal writes no view whose id the broker refuses (`[a-z0-9-]{1,63}`), so a space
         // whose name leaves no room for `cs-` has no MCP surface to forward to.
         tracing::info!(%view, "MCP refused: no broker view can carry this id");
-        return ProblemDetails::new(501, "no-view", "Not Implemented")
-            .with_detail(
-                "this space's name is too long for a broker view, so its MCP surface is not \
+        return ProblemDetails::new(
+            503,
+            "no-view",
+            "The access surface of this endpoint is not served",
+        )
+        .with_detail(
+            "this space's name is too long for a broker view, so its MCP surface is not \
                  served; a space name of at most 60 characters is",
-            )
-            .into_response();
+        )
+        .into_response();
     }
 
     let operation = mcp_operation(calls.then_some(tool.as_deref().unwrap_or_default()));
