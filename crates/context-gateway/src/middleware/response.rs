@@ -7,12 +7,164 @@
 //! cannot forget it.
 
 use crate::app::Gateway;
-use crate::handlers::schema::Artifact;
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
+
+// The schema documents the broker's LinkML surface of a view serves (plan 5.4, T-3646): the
+// names, file names and media types the `describedby` links, the `schema/` routes, the MCP
+// schema tool and the bundle agree on. The documents themselves are the broker's.
+
+/// The media type of a JSON Schema document (EP-49).
+pub const JSON_SCHEMA: &str = "application/schema+json";
+/// The media type of a JSON-LD `@context` (EP-49).
+pub const JSON_LD: &str = "application/ld+json";
+
+/// The media type of a Turtle document (EP-49).
+pub const TURTLE: &str = "text/turtle";
+/// The media type the OWL rendering is negotiated by, a Turtle profile (EP-49).
+pub const TURTLE_OWL: &str = "text/turtle; profile=\"owl\"";
+/// The media type of the LinkML source (EP-49).
+pub const YAML: &str = "text/yaml";
+/// The media type of the human documentation (EP-49).
+pub const MARKDOWN: &str = "text/markdown";
+
+/// Which schema document was asked for (EP-49).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Artifact {
+    /// The JSON Schema draft-07 of the model, `model.schema.json` (DM-03).
+    JsonSchema,
+    /// The JSON-LD `@context` of the model (DM-05).
+    Context,
+    /// The SHACL shapes, rendered from the projection (T-0284).
+    Shacl,
+    /// The OWL ontology, rendered from the projection (T-0284).
+    Owl,
+    /// The RDFS rendering of the projection (T-0284).
+    Rdf,
+    /// The LinkML source of the projection (T-0284).
+    LinkMl,
+    /// The human documentation of the projection (T-0284).
+    Markdown,
+    /// The RDF Data Cube structure of the projection, published only where a granted class is
+    /// a Data Structure Definition (DM-60, T-1187).
+    Qb,
+}
+
+impl Artifact {
+    /// The media type the artifact is served as.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Artifact::JsonSchema => JSON_SCHEMA,
+            Artifact::Context => JSON_LD,
+            Artifact::Shacl | Artifact::Rdf | Artifact::Qb => TURTLE,
+            Artifact::Owl => TURTLE_OWL,
+            Artifact::LinkMl => YAML,
+            Artifact::Markdown => MARKDOWN,
+        }
+    }
+
+    /// Whether the artifact is a JSON document rather than a rendered text one.
+    pub fn is_json(self) -> bool {
+        matches!(self, Artifact::JsonSchema | Artifact::Context)
+    }
+
+    /// The file name this artifact is published under (API/02 section 7a).
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Artifact::JsonSchema => "model.schema.json",
+            Artifact::Context => "context.jsonld",
+            Artifact::Shacl => "model.shacl.ttl",
+            Artifact::Owl => "model.owl.ttl",
+            Artifact::Rdf => "model.rdf.ttl",
+            Artifact::LinkMl => "model.linkml.yaml",
+            Artifact::Markdown => "model.md",
+            Artifact::Qb => "model.qb.ttl",
+        }
+    }
+
+    /// The name this artifact is asked for by on the agent surface (`format`), which is the
+    /// same word in the MCP tool, in the `schema://` resource URI and in the summary's
+    /// catalogue, so an agent never has to translate one spelling into another (EP-46, AG-84).
+    pub fn format_name(self) -> &'static str {
+        match self {
+            Artifact::JsonSchema => "json-schema",
+            Artifact::Context => "context",
+            Artifact::Shacl => "shacl",
+            Artifact::Owl => "owl",
+            Artifact::Rdf => "rdf",
+            Artifact::LinkMl => "linkml",
+            Artifact::Markdown => "markdown",
+            Artifact::Qb => "qb",
+        }
+    }
+
+    /// The artifact one [`Self::format_name`] names, or `None` for a word this surface does
+    /// not serve. Exact names only: the path aliases of [`artifact_of`] are the REST route's.
+    pub fn from_format(name: &str) -> Option<Artifact> {
+        Artifact::ALL
+            .into_iter()
+            .chain([Artifact::Qb])
+            .find(|artifact| artifact.format_name() == name)
+    }
+
+    /// The seven documents an endpoint publishes about every major (EP-46); the index lists
+    /// [`Artifact::Qb`] beside them where the projection holds a Data Structure Definition.
+    pub const ALL: [Artifact; 7] = [
+        Artifact::LinkMl,
+        Artifact::JsonSchema,
+        Artifact::Context,
+        Artifact::Shacl,
+        Artifact::Owl,
+        Artifact::Rdf,
+        Artifact::Markdown,
+    ];
+}
+
+/// Names the artifact behind one path segment, or `None` when the surface has no such
+/// document at all.
+///
+/// `model` is the negotiated name: `Accept` picks the formalism (EP-49).
+pub fn artifact_of(segment: &str, accept: &str) -> Option<Artifact> {
+    match segment {
+        "json-schema" | "model.schema.json" => Some(Artifact::JsonSchema),
+        "context.jsonld" | "context" => Some(Artifact::Context),
+        "model.shacl.ttl" | "shacl" => Some(Artifact::Shacl),
+        "model.owl.ttl" | "owl" => Some(Artifact::Owl),
+        "model.rdf.ttl" | "rdf" => Some(Artifact::Rdf),
+        "model.linkml.yaml" | "linkml" => Some(Artifact::LinkMl),
+        "model.md" | "docs" => Some(Artifact::Markdown),
+        "model.qb.ttl" | "qb" => Some(Artifact::Qb),
+        "model" => Some(negotiated(accept)),
+        _ => None,
+    }
+}
+
+/// The formalism an `Accept` header asks `schema/v{major}/model` for (EP-49).
+///
+/// `text/turtle` alone is the SHACL, which is what a validator wants; the OWL is the same
+/// media type with the `owl` profile, so the two share a name without sharing an answer.
+fn negotiated(accept: &str) -> Artifact {
+    if accept.contains("turtle") {
+        if accept.contains("owl") {
+            Artifact::Owl
+        } else if accept.contains("rdf") {
+            Artifact::Rdf
+        } else {
+            Artifact::Shacl
+        }
+    } else if accept.contains("yaml") {
+        Artifact::LinkMl
+    } else if accept.contains("markdown") {
+        Artifact::Markdown
+    } else if accept.contains("ld+json") {
+        Artifact::Context
+    } else {
+        Artifact::JsonSchema
+    }
+}
 
 /// The narrowing signal. Opt-in: a caller who sends it on the request is told when an answer
 /// was narrowed, and a caller who does not ask is answered as if the result were simply what
