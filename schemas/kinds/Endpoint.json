@@ -1125,6 +1125,13 @@
             "odata"
           ],
           "type": "string"
+        },
+        {
+          "description": "Notifications over one WebSocket (`/ws`, EP-106).",
+          "enum": [
+            "websocket"
+          ],
+          "type": "string"
         }
       ]
     },

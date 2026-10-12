@@ -101,6 +101,12 @@ fn served(representation: Representation) -> Served {
             media_type: "application/json",
             conforms_to: Some("https://docs.oasis-open.org/odata/odata/v4.01/"),
         },
+        Representation::WebSocket => Served {
+            path: "ws",
+            title: "Live updates over WebSocket",
+            media_type: "application/json",
+            conforms_to: None,
+        },
     }
 }
 
@@ -230,7 +236,8 @@ fn file_type_iri(representation: Representation) -> String {
         Representation::Mcp
         | Representation::Json
         | Representation::Sta
-        | Representation::Odata => "JSON",
+        | Representation::Odata
+        | Representation::WebSocket => "JSON",
     };
     format!("http://publications.europa.eu/resource/authority/file-type/{code}")
 }
