@@ -498,6 +498,40 @@
       },
       "type": "object"
     },
+    "PipelineRoute": {
+      "additionalProperties": false,
+      "description": "One route of a `v1alpha2` pipeline (PL-73): its condition, its own steps and its outputs.",
+      "properties": {
+        "name": {
+          "description": "A DNS label, unique among the pipeline's routes.",
+          "type": "string"
+        },
+        "outputs": {
+          "description": "Where the route writes, each through its own Endpoint (PL-55).",
+          "items": {
+            "$ref": "#/definitions/PipelineOutput"
+          },
+          "type": "array"
+        },
+        "steps": {
+          "description": "The route's own steps, after the pipeline's `steps`.",
+          "items": {
+            "$ref": "#/definitions/Step"
+          },
+          "type": "array"
+        },
+        "when": {
+          "description": "A Bloblang query; the messages it is true for take this route.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "outputs",
+        "when"
+      ],
+      "type": "object"
+    },
     "PipelineSource": {
       "additionalProperties": false,
       "description": "Source specification for derived pipelines (PL-31).",
@@ -626,6 +660,13 @@
             }
           ],
           "description": "Resource quotas allocated to this pipeline runner (PL-11)."
+        },
+        "routes": {
+          "description": "Routes by condition (PL-73): a message after `steps` takes the first route whose `when` holds; one no route takes is written through `outputs`; `v1alpha2`.",
+          "items": {
+            "$ref": "#/definitions/PipelineRoute"
+          },
+          "type": "array"
         },
         "schedule": {
           "description": "Standard cron schedule expression for scheduled runs (PL-04, PL-26..PL-28).",

@@ -18,6 +18,7 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
+use context_gateway::translators::view_mapping::ViewMapping;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::process::Command;
@@ -33,6 +34,8 @@ const MEMBERS_SLUG: &str = "t9x2wqvn7mzc4hd6bkp3rjs5ga";
 const WRITER_SLUG: &str = "p3mq8vzt5xkc2nhw7brj4gd6sy";
 /// The dev seed's shape: a public grant that narrows nothing (T-0379).
 const OPEN_SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
+/// An Endpoint serving the space in another model through a view mapping (G18, T-3799).
+const MAPPED_SLUG: &str = "w8ck3nzq6vtm2xh5brj7pgd4sf";
 const STATION: &str =
     "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-integration-01";
 
@@ -67,7 +70,7 @@ impl Antares {
                 "-e",
                 "ANTARES_STORE=memory",
                 "-e",
-                "ANTARES_API_SURFACES=admin,views",
+                "ANTARES_API_SURFACES=admin,views,mcp",
                 "-e",
                 "ANTARES_POLICY=joinedcontext",
                 "-e",
@@ -304,7 +307,11 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         project: SPACE.to_owned(),
         audience,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![
+            Representation::NgsiLd,
+            Representation::GeoJson,
+            Representation::Mcp,
+        ],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -403,6 +410,22 @@ fn get(slug: &str, path: &str) -> Request<Body> {
         .header("accept", "application/ld+json")
         .body(Body::empty())
         .expect("a request")
+}
+
+/// One JSON-RPC request to an Endpoint's MCP through the gateway, as its answer.
+async fn mcp(app: &axum::Router, slug: &str, method: &str, params: Value) -> Value {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/endpoint/{slug}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .body(Body::from(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string(),
+        ))
+        .expect("a request");
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK, "{method}: {}", body_text(&body));
+    serde_json::from_slice(&body).expect("a JSON-RPC answer")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -795,6 +818,67 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
         "the Portal's key for its hint"
     );
 
+    // T-3647: the Endpoint's MCP is the broker's view under the verified caller. The tool
+    // list is the view's plus the two the gateway answers; a result is narrowed like the
+    // NGSI-LD read (the seeded phone stays out); a type no grant names and a type nobody has
+    // answer alike; an argument naming a tenant is refused (carried over from the façade's
+    // `mcp_read_security_tests`).
+    let listed = mcp(&app, PUBLIC_SLUG, "tools/list", json!({})).await;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    for wanted in [
+        "query_entities",
+        "get_entity",
+        "describe_access",
+        "describe_schema",
+    ] {
+        assert!(names.contains(&wanted), "{wanted}: {listed}");
+    }
+    let queried = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "query_entities", "arguments": { "type": ["AirQualityObserved"], "count": true } }),
+    )
+    .await;
+    let found = &queried["result"]["structuredContent"]["entities"];
+    assert!(
+        found
+            .as_array()
+            .is_some_and(|entities| entities.iter().any(|entity| entity["id"] == json!(seeded))),
+        "{queried}"
+    );
+    assert!(!queried.to_string().contains("+421"), "{queried}");
+    let fetched = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "get_entity", "arguments": { "id": seeded } }),
+    )
+    .await;
+    assert_eq!(fetched["result"]["isError"], json!(false), "{fetched}");
+    assert!(!fetched.to_string().contains("operatorPhone"), "{fetched}");
+    let hidden = |name: &str| json!({ "name": "query_entities", "arguments": { "type": [name] } });
+    let denied = mcp(&app, PUBLIC_SLUG, "tools/call", hidden("Depot")).await;
+    let absent = mcp(&app, PUBLIC_SLUG, "tools/call", hidden("Ghost")).await;
+    assert_eq!(denied["result"]["isError"], json!(true), "{denied}");
+    assert_eq!(
+        denied["result"], absent["result"],
+        "a hidden and an absent type answer alike"
+    );
+    let aimed = mcp(
+        &app,
+        PUBLIC_SLUG,
+        "tools/call",
+        json!({ "name": "query_entities", "arguments": { "type": ["AirQualityObserved"], "tenant": "doprava" } }),
+    )
+    .await;
+    assert_eq!(aimed["result"]["isError"], json!(true), "{aimed}");
+
     // Delete, and it is gone.
     let (status, body) = call(
         &app,
@@ -819,6 +903,73 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
 }
 
 /// The probes the deployment uses answer before any endpoint exists (OPS-12).
+/// T-3799: an Endpoint with a view mapping is its broker view. The Portal writes the Mapping IR
+/// into the view of the slug (T-3671); the broker inverts the target-model query into the source
+/// model and rebuilds the answer (T-3669), and a write is its 405, never the source model's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mapped_endpoint_reads_in_the_target_model_through_its_view() {
+    let Some(antares) = Antares::start() else {
+        return;
+    };
+    let ir = json!({
+        "version": 2,
+        "sourceClass": "AirQualityObserved",
+        "targetClass": "AirQuality",
+        "slots": [{ "target": "particulates", "source": "pm10", "kind": "rename", "filterable": true }]
+    });
+    let (mut views, mut rules) = public_rules();
+    let mut mapped = view(
+        MAPPED_SLUG,
+        &["pm10"],
+        &["query_entities", "retrieve_entity"],
+    );
+    mapped["mapping"] = ir.clone();
+    views.push(mapped);
+    rules["views"][MAPPED_SLUG] = json!([format!("{SPACE}/public-air")]);
+    antares.load(&views, rules).await;
+    let mut stored = station(None);
+    if let Some(members) = stored.as_object_mut() {
+        members.remove("@context");
+    }
+    antares.seed(&stored).await;
+    let endpoint = Endpoint {
+        view_mapping: Some(std::sync::Arc::new(
+            ViewMapping::parse(&ir).expect("the IR parses"),
+        )),
+        ..endpoint(MAPPED_SLUG, Audience::Public)
+    };
+    let app = router(std::sync::Arc::new(
+        Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG).serve([endpoint]),
+    ));
+
+    let (status, body) = call(&app, get(MAPPED_SLUG, "/entities?type=AirQuality")).await;
+    let text = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(status, StatusCode::OK, "read: {text}");
+    let entities: Value = serde_json::from_slice(&body).expect("a list");
+    assert_eq!(entities[0]["id"], json!(STATION), "{text}");
+    assert_eq!(entities[0]["type"], json!("AirQuality"), "{text}");
+    assert_eq!(entities[0]["particulates"]["value"], json!(34.2), "{text}");
+    assert!(!text.contains("pm10") && !text.contains("pm25"), "{text}");
+
+    for (q, found) in [("particulates%3E30", 1), ("particulates%3E40", 0)] {
+        let (status, body) = call(
+            &app,
+            get(MAPPED_SLUG, &format!("/entities?type=AirQuality&q={q}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{q}");
+        let entities: Value = serde_json::from_slice(&body).expect("a list");
+        assert_eq!(entities.as_array().map(Vec::len), Some(found), "{q}");
+    }
+
+    let (status, _) = call(&app, post(MAPPED_SLUG, "/entities", &station(None))).await;
+    assert_eq!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "a mapped view takes no write"
+    );
+}
+
 #[tokio::test]
 async fn the_health_probes_need_no_endpoints_and_no_broker() {
     let app = router(std::sync::Arc::new(Gateway::new(
@@ -1083,4 +1234,97 @@ fn authorized(request: Request<Body>, token: &str) -> Request<Body> {
 
 fn body_text(body: &[u8]) -> String {
     String::from_utf8_lossy(body).into_owned()
+}
+
+/// T-3801 (G6, T-3632, T-3812): a projection's `temporalQ` reaches the broker as the window of the
+/// view's permit, as the Portal's writer puts it, and a temporal read through the Endpoint
+/// returns only the instances inside it; the gateway clamps nothing itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_window_narrows_a_temporal_read_through_the_view() {
+    let Some(antares) = Antares::start() else {
+        return;
+    };
+    let public = json!({"kind": "role", "id": "public"});
+    let information = json!([{
+        "entities": [{"type": "AirQualityObserved"}],
+        "propertyNames": ["pm10"]
+    }]);
+    let window = "timerel=after;timeAt=2026-01-01T00:00:00Z";
+    let mut recent = rule(
+        &format!("public-air@{WRITER_SLUG}"),
+        public,
+        &["5.7.3"],
+        Some(information),
+    );
+    recent["temporalQ"] = json!(window);
+    let rules = json!({
+        "policies": [
+            recent,
+            rule("seeder", json!({"kind": "serviceAccount", "id": "seeder"}), &["5.6.1", "5.6.2"], None),
+        ],
+        "views": { WRITER_SLUG: [format!("{SPACE}/public-air@{WRITER_SLUG}")] },
+    });
+    antares
+        .load(
+            &[view(WRITER_SLUG, &["pm10"], &["temporal_retrieve"])],
+            rules,
+        )
+        .await;
+    // Two instances of pm10, one each side of the window: a create, then an update.
+    let instance =
+        |value: f64, at: &str| json!({"type": "Property", "value": value, "observedAt": at});
+    antares
+        .seed(&json!({
+            "id": STATION,
+            "type": "AirQualityObserved",
+            "pm10": instance(1.0, "2025-06-01T00:00:00Z"),
+        }))
+        .await;
+    let updated = reqwest::Client::new()
+        .patch(format!(
+            "{}/ngsi-ld/v1/entities/{STATION}/attrs",
+            antares.url()
+        ))
+        .header("ngsild-tenant", SPACE)
+        .header("x-jc-client", "seeder")
+        .json(&json!({"pm10": instance(2.0, "2026-06-01T00:00:00Z")}))
+        .send()
+        .await
+        .expect("the broker answers");
+    let code = updated.status();
+    assert!(
+        code.is_success(),
+        "update: {code} {}",
+        updated.text().await.unwrap_or_default()
+    );
+
+    let projection = serde_json::from_value(json!({
+        "contextSpaceRef": SPACE, "dataModelRef": {"name": "air", "version": "1.0.0"},
+        "classes": [{"name": "AirQualityObserved"}],
+        "filter": {"temporalQ": window}
+    }))
+    .expect("a projection");
+    let windowed = Endpoint {
+        projection: Some(std::sync::Arc::new(projection)),
+        ..endpoint(WRITER_SLUG, Audience::Public)
+    };
+    let app = router(std::sync::Arc::new(
+        Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG).serve([windowed]),
+    ));
+    let (status, body) = call(
+        &app,
+        get(WRITER_SLUG, &format!("/temporal/entities/{STATION}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "temporal: {}", body_text(&body));
+    let answer: Value = serde_json::from_slice(&body).expect("a JSON answer");
+    let values: Vec<&Value> = answer["pm10"]
+        .as_array()
+        .map(|instances| instances.iter().map(|i| &i["value"]).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        values,
+        [&json!(2.0)],
+        "only the instance inside the window: {answer}"
+    );
 }

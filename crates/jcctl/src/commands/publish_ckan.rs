@@ -99,6 +99,9 @@ pub struct Line {
     pub outcome: Outcome,
     /// What happened to the mirror, when the Endpoint declares one.
     pub mirror: Option<Mirror>,
+    /// The published record lists a model without its LinkML artifact, so the dataset links the
+    /// schema index for it (EP-68).
+    pub no_linkml: bool,
 }
 
 impl fmt::Display for Line {
@@ -121,6 +124,12 @@ impl fmt::Display for Line {
                 write!(f, ", {} gone", mirror.removed)?;
             }
             write!(f, ")")?;
+        }
+        if self.no_linkml {
+            write!(
+                f,
+                "; the record lists no model.linkml.yaml, the dataset links /schema/index.json only"
+            )?;
         }
         Ok(())
     }
@@ -464,6 +473,7 @@ pub fn publish_one(
         dataset: target.dataset_name().to_owned(),
         outcome,
         mirror,
+        no_linkml: outcome != Outcome::NotPublished && ckan::missing_linkml(record),
     })
 }
 
@@ -475,7 +485,7 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
     let name = target.dataset_name().to_owned();
     let mirror = match &target.publication.datastore {
         Some(_) => {
-            let (_, tables) = live_tables(api, &name)?;
+            let (_, tables, _) = live_tables(api, &name)?;
             let mut table = datastore::Outcome::Unchanged;
             for resource_id in tables.values() {
                 if datastore::drop_table(api, resource_id)? == datastore::Outcome::NotMirrored {
@@ -496,6 +506,7 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
         dataset: name,
         outcome,
         mirror,
+        no_linkml: false,
     })
 }
 
@@ -559,7 +570,7 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
     }
     let languages = languages(&columns, target.language.as_deref());
 
-    let (package_id, live) = live_tables(api, target.dataset_name())?;
+    let (package_id, live, digests) = live_tables(api, target.dataset_name())?;
     let mut table = datastore::Outcome::Unchanged;
     let mut written = 0;
     let mut removed = 0;
@@ -623,17 +634,25 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
         if let Err(error) = datastore::ensure_view(api, &resource_id) {
             refused_view.get_or_insert(error);
         }
+        let mut each = Vec::with_capacity(indices.len());
         for chunk in indices.chunks(datastore::UPSERT_BATCH) {
             let batch = chunk
                 .iter()
                 .map(|&row| datastore::record(&names, row, values(&raw[row])))
                 .collect::<Result<Vec<_>, _>>()?;
             written += batch.len();
+            each.extend(batch.iter().map(datastore::row_hash));
             datastore::upsert(api, &resource_id, batch)?;
         }
         // The answer is the whole dataset, so a row it no longer holds is an entity gone.
         let keep: BTreeSet<&str> = indices.iter().map(|&row| raw[row][id].as_str()).collect();
-        removed += datastore::prune(api, &resource_id, &keep)?.len();
+        let gone = datastore::prune(api, &resource_id, &keep)?.len();
+        removed += gone;
+        // Every row is upserted on every run, so only a changed digest says the rows changed.
+        let rows_now = datastore::digest(each);
+        if gone > 0 || digests.get(&resource_id) != Some(&rows_now) {
+            datastore::touch(api, &resource_id, Some(&rows_now))?;
+        }
     }
 
     // An answer without a row says nothing about which types are gone, so it removes nothing.
@@ -769,39 +788,47 @@ fn languages(columns: &[String], space: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// The live dataset's id and its DataStore resources by name, when the dataset exists.
+/// The live dataset's id, its DataStore resources by name, and the digest of the rows each last
+/// held by resource id, when the dataset exists.
 ///
 /// CKAN addresses a resource by id only, and the id was minted when the table was
 /// created; the dataset is where a later run finds it again, by the name it was given.
-fn live_tables(
-    api: &impl CkanApi,
-    dataset: &str,
-) -> Result<(String, BTreeMap<String, String>), Error> {
+type LiveTables = (String, BTreeMap<String, String>, BTreeMap<String, String>);
+
+fn live_tables(api: &impl CkanApi, dataset: &str) -> Result<LiveTables, Error> {
     let Some(live) = api
         .show("package_show", dataset)
         .map_err(PublishError::from)?
     else {
-        return Ok((dataset.to_owned(), BTreeMap::new()));
+        return Ok((dataset.to_owned(), BTreeMap::new(), BTreeMap::new()));
     };
     let package_id = live
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or(dataset)
         .to_owned();
-    let tables = live
+    let resources: Vec<&Value> = live
         .get("resources")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|resource| resource.get("url_type").and_then(Value::as_str) == Some("datastore"))
+        .collect();
+    let field = |resource: &Value, key: &str| Some(resource.get(key)?.as_str()?.to_owned());
+    let tables = resources
+        .iter()
+        .filter_map(|resource| Some((field(resource, "name")?, field(resource, "id")?)))
+        .collect();
+    let digests = resources
+        .iter()
         .filter_map(|resource| {
             Some((
-                resource.get("name")?.as_str()?.to_owned(),
-                resource.get("id")?.as_str()?.to_owned(),
+                field(resource, "id")?,
+                field(resource, datastore::ROWS_DIGEST)?,
             ))
         })
         .collect();
-    Ok((package_id, tables))
+    Ok((package_id, tables, digests))
 }
 
 /// The header and the rows of one CSV file as the gateway writes it (RFC 4180): quoted

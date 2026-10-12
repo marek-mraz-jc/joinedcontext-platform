@@ -145,18 +145,6 @@ pub struct ResourceEnvelope<S: Kind> {
     pub status: Option<Status>,
 }
 
-/// Deserializes and validates that `apiVersion` matches [`API_VERSION`].
-pub fn de_api_version<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    if s != API_VERSION {
-        return Err(serde::de::Error::custom(Error::ApiVersion(s)));
-    }
-    Ok(s)
-}
-
 /// Deserializes and validates that this platform serves the kind `S` at `apiVersion` (PL-54).
 pub fn de_api_version_of<'de, S: Kind, D: serde::Deserializer<'de>>(
     deserializer: D,

@@ -329,12 +329,13 @@ pub(crate) async fn access_check(
 }
 
 /// One `access/simulate` request (EP-103): the `access/check` request with the subject it is
-/// asked for.
+/// asked for, or, with no `action`, the question of everything the subject is granted (T-3792).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Simulation {
     subject: Simulated,
-    action: Action,
+    #[serde(default)]
+    action: Option<Action>,
     #[serde(default)]
     resource: Option<Resource>,
 }
@@ -400,15 +401,6 @@ pub(crate) async fn access_simulate(
                 .into_response()
         }
     };
-    let action = simulation.action.name.as_str();
-    if !Operation::ALL
-        .iter()
-        .any(|operation| operation.as_str() == action)
-    {
-        return ProblemDetails::bad_request()
-            .with_detail(format!("action.name {action:?} is not a CIM 009 operation"))
-            .into_response();
-    }
     let who = &simulation.subject;
     if who.service_account.is_some()
         && (who.user.is_some() || !who.groups.is_empty() || !who.roles.is_empty())
@@ -419,6 +411,42 @@ pub(crate) async fn access_simulate(
     }
 
     let subject = simulated(&gateway, &endpoint, who);
+    let Some(action) = simulation
+        .action
+        .as_ref()
+        .map(|action| action.name.as_str())
+    else {
+        if simulation.resource.is_some() {
+            return ProblemDetails::bad_request()
+                .with_detail("resource needs an action")
+                .into_response();
+        }
+        let answer = handlers::access::granted(
+            subject.as_ref().unwrap_or(&Subject::anonymous()),
+            subject.is_some(),
+            &endpoint,
+            crate::pdp::now(),
+        );
+        tracing::info!(
+            caller = PORTAL_CLIENT,
+            slug = %endpoint.slug,
+            simulated_user = who.user.as_deref().unwrap_or_default(),
+            simulated_service_account = who.service_account.as_deref().unwrap_or_default(),
+            simulated_groups = ?who.groups,
+            simulated_roles = ?who.roles,
+            admitted = %answer["admitted"],
+            "access grants simulated"
+        );
+        return json_response(&answer);
+    };
+    if !Operation::ALL
+        .iter()
+        .any(|operation| operation.as_str() == action)
+    {
+        return ProblemDetails::bad_request()
+            .with_detail(format!("action.name {action:?} is not a CIM 009 operation"))
+            .into_response();
+    }
     let entity_type = simulation
         .resource
         .as_ref()

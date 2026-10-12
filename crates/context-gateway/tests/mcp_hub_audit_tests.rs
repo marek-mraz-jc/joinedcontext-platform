@@ -149,10 +149,10 @@ async fn the_audit_line_names_the_endpoint_the_tool_and_the_subject() {
     ] {
         assert!(line.contains(&field), "{field} missing from: {line}");
     }
-    // The Endpoint's own decision line follows, as for a call to its URL.
+    // The hop to the Endpoint's view follows, as for a call to its URL (T-3808).
     assert!(
         log.lines()
-            .any(|line| line.contains("decision") && line.contains(SLUG)),
+            .any(|line| line.contains("forwarded to the broker's view") && line.contains(SLUG)),
         "{log}"
     );
     assert!(!log.contains(&token), "a token reached the log");

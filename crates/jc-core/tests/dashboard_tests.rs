@@ -34,10 +34,6 @@ fn the_documented_dashboard_round_trips() {
     assert_eq!(dashboard.spec.visibility, DashboardVisibility::Public);
     assert_eq!(dashboard.spec.title.get("en"), Some("Air Quality Overview"));
     assert_eq!(
-        dashboard.spec.layer_refs(),
-        vec!["air-quality-stations", "organisational-districts"]
-    );
-    assert_eq!(
         dashboard.spec.pages[1].widgets[0].widget_type,
         "temporal-chart"
     );

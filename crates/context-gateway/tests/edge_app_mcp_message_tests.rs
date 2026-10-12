@@ -12,8 +12,9 @@
 //! error. A third must not be bypassed: the representation check, so an endpoint that serves
 //! NGSI-LD only has no MCP instance however the message is shaped.
 //!
-//! The broker is an address nothing listens on: a message that reached the data path shows up
-//! as an upstream failure rather than passing quietly.
+//! The message goes to the broker's MCP surface of the Endpoint's view (T-3647); the broker
+//! here is a stub that lists no tool, so what these cases hold is what the gateway does before
+//! and around that hop.
 
 mod common;
 
@@ -82,11 +83,11 @@ fn endpoint(slug: &str, audience: Audience, representations: Vec<Representation>
 
 const HOST: &str = "https://bb.example.sk";
 
-fn app() -> axum::Router {
+async fn app() -> axum::Router {
     let realm = common::Realm::new();
     router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(common::mcp_broker(json!([])).await),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )
@@ -109,7 +110,11 @@ fn app() -> axum::Router {
 
 /// One message, with the status, the `WWW-Authenticate` challenge and the body as bytes.
 async fn call(request: Request<Body>) -> (StatusCode, String, String) {
-    let response = app().oneshot(request).await.expect("the gateway answers");
+    let response = app()
+        .await
+        .oneshot(request)
+        .await
+        .expect("the gateway answers");
     let status = response.status();
     let challenge = response
         .headers()
@@ -351,6 +356,7 @@ async fn the_challenge_names_nothing_of_the_deployment() {
 async fn nothing_but_post_reaches_the_instance() {
     for method in ["GET", "PUT", "PATCH", "DELETE"] {
         let response = app()
+            .await
             .oneshot(
                 Request::builder()
                     .method(method)

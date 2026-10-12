@@ -44,7 +44,12 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         project: "zilina".to_owned(),
         audience,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd],
+        representations: vec![
+            Representation::NgsiLd,
+            Representation::Json,
+            Representation::Csv,
+            Representation::Sta,
+        ],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -209,4 +214,25 @@ async fn a_refused_caller_and_an_unknown_endpoint_get_their_errors_never_an_empt
     assert_eq!(missing, StatusCode::NOT_FOUND, "{body}");
     assert_ne!(body, json!([]));
     assert_eq!(hits.load(Ordering::SeqCst), 0, "neither reached the broker");
+}
+
+/// The translators read the broker's view since T-3651, and the view of a space with no tenant
+/// answers `NonexistentTenant` too: a download and a SensorThings set of it are empty, with or
+/// without a selector of the caller's, never the broker's `404` and never a `502`.
+#[tokio::test]
+async fn a_download_and_a_sensorthings_set_of_a_space_with_no_tenant_are_empty() {
+    let (upstream, hits) = broker("NonexistentTenant").await;
+    for rest in [
+        "file.json",
+        "file.json?type=KeyPerformanceIndicator",
+        "sta/v1.1/Things",
+    ] {
+        let (status, body) = call(&upstream, &format!("/api/endpoint/{OPEN}/{rest}")).await;
+        assert_eq!(status, StatusCode::OK, "{rest}: {body}");
+        let rows = body.get("value").unwrap_or(&body);
+        assert_eq!(rows, &json!([]), "{rest}: {body}");
+    }
+    let (status, csv) = call(&upstream, &format!("/api/endpoint/{OPEN}/file.csv")).await;
+    assert_eq!(status, StatusCode::OK, "{csv}");
+    assert!(hits.load(Ordering::SeqCst) > 0, "the broker was asked");
 }
