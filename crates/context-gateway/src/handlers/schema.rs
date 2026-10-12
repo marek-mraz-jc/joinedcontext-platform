@@ -1,18 +1,13 @@
-//! What the data behind an endpoint contains, narrowed to the grant (T-0162, EP-46…EP-52).
+//! What one caller may read of an endpoint's models, as the gateway's own policy evaluator sees
+//! it: the types and attributes in force, and the JSON Schema projected to them (EP-47).
 //!
-//! The gateway is not a compiler. `DataModel.spec.artifacts` names the files Model Tools
-//! generated beside the LinkML source and committed in the same commit (DM-02), so what
-//! an endpoint publishes is exactly what was reviewed. A model whose artifacts are not in
-//! the checkout is still described: the JSON Schema and the `@context` are derived from
-//! the grants, which is a narrower answer than the compiled one but never a wrong one.
+//! The schema documents themselves are the broker's LinkML surface of the Endpoint's view
+//! (plan 5.4, T-3645, T-3646); nothing here renders one for a caller. What is left serves the
+//! NGSI-LD entry document, the OpenAPI document, the MCP hub's type list and the projection's
+//! `@context` reading, all of them map 7.1 code that T-3644 deletes with the evaluator.
 //!
-//! Whichever half answers, the document is a projection of the policy set: a class or a slot the
-//! caller may not read is absent, and the index says only *that* something was left out —
-//! `redacted: true`, no names, no count (EP-47, T-2133). A list of what is hidden publishes what was
-//! being kept back: that the attribute exists, on which type, and that somebody thought it worth
-//! hiding. A caller for whom nothing was left out gets no such key at all.
+//! A class or a slot the caller may not read is absent, and nothing says which (EP-47, T-2133).
 
-use super::formalisms;
 use crate::pdp::evaluator::{
     effective, granted_attrs, granted_types, narrow, narrow_to_identity, Subject,
 };
@@ -20,15 +15,6 @@ use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-
-/// The media type of a JSON Schema document (EP-49).
-pub const JSON_SCHEMA: &str = "application/schema+json";
-/// The media type of a JSON-LD `@context` (EP-49).
-pub const JSON_LD: &str = "application/ld+json";
-
-/// The NGSI-LD core context every derived `@context` starts from, so a client that
-/// expands a derived document still resolves `id`, `type` and the core terms.
-const CORE_CONTEXT: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";
 
 /// Members of an NGSI-LD entity that are the format rather than the data: no grant lists
 /// them and no projection may remove them, or the schema stops describing NGSI-LD.
@@ -43,201 +29,6 @@ const STRUCTURAL: &[&str] = &[
     "modifiedAt",
     "deletedAt",
 ];
-
-/// The media type of a Turtle document (EP-49).
-pub const TURTLE: &str = "text/turtle";
-/// The media type the OWL rendering is negotiated by, a Turtle profile (EP-49).
-pub const TURTLE_OWL: &str = "text/turtle; profile=\"owl\"";
-/// The media type of the LinkML source (EP-49).
-pub const YAML: &str = "text/yaml";
-/// The media type of the human documentation (EP-49).
-pub const MARKDOWN: &str = "text/markdown";
-
-/// Which schema document was asked for (EP-49).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Artifact {
-    /// The JSON Schema draft-07 of the model, `model.schema.json` (DM-03).
-    JsonSchema,
-    /// The JSON-LD `@context` of the model (DM-05).
-    Context,
-    /// The SHACL shapes, rendered from the projection (T-0284).
-    Shacl,
-    /// The OWL ontology, rendered from the projection (T-0284).
-    Owl,
-    /// The RDFS rendering of the projection (T-0284).
-    Rdf,
-    /// The LinkML source of the projection (T-0284).
-    LinkMl,
-    /// The human documentation of the projection (T-0284).
-    Markdown,
-    /// The RDF Data Cube structure of the projection, published only where a granted class is
-    /// a Data Structure Definition (DM-60, T-1187).
-    Qb,
-}
-
-impl Artifact {
-    /// The media type the artifact is served as.
-    pub fn media_type(self) -> &'static str {
-        match self {
-            Artifact::JsonSchema => JSON_SCHEMA,
-            Artifact::Context => JSON_LD,
-            Artifact::Shacl | Artifact::Rdf | Artifact::Qb => TURTLE,
-            Artifact::Owl => TURTLE_OWL,
-            Artifact::LinkMl => YAML,
-            Artifact::Markdown => MARKDOWN,
-        }
-    }
-
-    /// Whether the artifact is a JSON document rather than a rendered text one.
-    pub fn is_json(self) -> bool {
-        matches!(self, Artifact::JsonSchema | Artifact::Context)
-    }
-
-    /// The file name this artifact is published under (API/02 section 7a).
-    pub fn file_name(self) -> &'static str {
-        match self {
-            Artifact::JsonSchema => "model.schema.json",
-            Artifact::Context => "context.jsonld",
-            Artifact::Shacl => "model.shacl.ttl",
-            Artifact::Owl => "model.owl.ttl",
-            Artifact::Rdf => "model.rdf.ttl",
-            Artifact::LinkMl => "model.linkml.yaml",
-            Artifact::Markdown => "model.md",
-            Artifact::Qb => "model.qb.ttl",
-        }
-    }
-
-    /// The name this artifact is asked for by on the agent surface (`format`), which is the
-    /// same word in the MCP tool, in the `schema://` resource URI and in the summary's
-    /// catalogue, so an agent never has to translate one spelling into another (EP-46, AG-84).
-    pub fn format_name(self) -> &'static str {
-        match self {
-            Artifact::JsonSchema => "json-schema",
-            Artifact::Context => "context",
-            Artifact::Shacl => "shacl",
-            Artifact::Owl => "owl",
-            Artifact::Rdf => "rdf",
-            Artifact::LinkMl => "linkml",
-            Artifact::Markdown => "markdown",
-            Artifact::Qb => "qb",
-        }
-    }
-
-    /// The artifact one [`Self::format_name`] names, or `None` for a word this surface does
-    /// not serve. Exact names only: the path aliases of [`artifact_of`] are the REST route's.
-    pub fn from_format(name: &str) -> Option<Artifact> {
-        Artifact::ALL
-            .into_iter()
-            .chain([Artifact::Qb])
-            .find(|artifact| artifact.format_name() == name)
-    }
-
-    /// The seven documents an endpoint publishes about every major (EP-46); [`published`]
-    /// adds [`Artifact::Qb`] where the projection holds a Data Structure Definition.
-    pub const ALL: [Artifact; 7] = [
-        Artifact::LinkMl,
-        Artifact::JsonSchema,
-        Artifact::Context,
-        Artifact::Shacl,
-        Artifact::Owl,
-        Artifact::Rdf,
-        Artifact::Markdown,
-    ];
-}
-
-/// Names the artifact behind one path segment, or `None` when the surface has no such
-/// document at all.
-///
-/// `model` is the negotiated name: `Accept` picks the formalism (EP-49), and the two
-/// formalisms the gateway can produce itself are the JSON Schema and the `@context`.
-pub fn artifact_of(segment: &str, accept: &str) -> Option<Artifact> {
-    match segment {
-        "json-schema" | "model.schema.json" => Some(Artifact::JsonSchema),
-        "context.jsonld" | "context" => Some(Artifact::Context),
-        "model.shacl.ttl" | "shacl" => Some(Artifact::Shacl),
-        "model.owl.ttl" | "owl" => Some(Artifact::Owl),
-        "model.rdf.ttl" | "rdf" => Some(Artifact::Rdf),
-        "model.linkml.yaml" | "linkml" => Some(Artifact::LinkMl),
-        "model.md" | "docs" => Some(Artifact::Markdown),
-        "model.qb.ttl" | "qb" => Some(Artifact::Qb),
-        "model" => Some(negotiated(accept)),
-        _ => None,
-    }
-}
-
-/// The formalism an `Accept` header asks `schema/v{major}/model` for (EP-49).
-///
-/// `text/turtle` alone is the SHACL, which is what a validator wants; the OWL is the same
-/// media type with the `owl` profile, so the two share a name without sharing an answer.
-fn negotiated(accept: &str) -> Artifact {
-    if accept.contains("turtle") {
-        if accept.contains("owl") {
-            Artifact::Owl
-        } else if accept.contains("rdf") {
-            Artifact::Rdf
-        } else {
-            Artifact::Shacl
-        }
-    } else if accept.contains("yaml") {
-        Artifact::LinkMl
-    } else if accept.contains("markdown") {
-        Artifact::Markdown
-    } else if accept.contains("ld+json") {
-        Artifact::Context
-    } else {
-        Artifact::JsonSchema
-    }
-}
-
-/// One rendered formalism, as the caller receives it (T-0284, EP-47).
-///
-/// Every non-JSON formalism is built from the projected JSON Schema rather than from a
-/// committed file, so a slot the projection removed cannot reappear in a Turtle document.
-pub fn render(models: &[&Model], wanted: Artifact, visible: &Visible) -> String {
-    let mut redacted = Vec::new();
-    let schema = json_schema(models, visible, &mut redacted);
-    let empty = Map::new();
-    let defs = schema
-        .get("$defs")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let classes = formalisms::classes(models, defs);
-
-    match wanted {
-        Artifact::Shacl => formalisms::shacl(&classes),
-        Artifact::Owl => formalisms::owl(&classes),
-        Artifact::Rdf => formalisms::rdf(&classes),
-        Artifact::LinkMl => formalisms::linkml(models, &classes),
-        Artifact::Markdown => formalisms::markdown(models, &classes),
-        Artifact::Qb => formalisms::qb(&classes).unwrap_or_default(),
-        // The two JSON documents have their own builders; this is not the way to them.
-        Artifact::JsonSchema | Artifact::Context => String::new(),
-    }
-}
-
-/// Whether a class this caller may read is a Data Structure Definition, which is what makes
-/// `model.qb.ttl` a document of this major rather than a `404` (DM-60).
-pub fn declares_dsd(models: &[&Model], visible: &Visible) -> bool {
-    let schema = json_schema(models, visible, &mut Vec::new());
-    let empty = Map::new();
-    let defs = schema
-        .get("$defs")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    formalisms::classes(models, defs)
-        .iter()
-        .any(|class| jc_core::qb::is_dsd(class.definition))
-}
-
-/// The documents one major publishes to this caller, in reading order: [`Artifact::ALL`],
-/// and the cube where a granted class is a Data Structure Definition (DM-60).
-pub fn published(models: &[&Model], visible: &Visible) -> Vec<Artifact> {
-    let mut artifacts = Artifact::ALL.to_vec();
-    if declares_dsd(models, visible) {
-        artifacts.push(Artifact::Qb);
-    }
-    artifacts
-}
 
 /// What one caller may read here: the union of the permissions in force, less whatever a
 /// prohibition takes back (GW8, EP-47).
@@ -398,92 +189,6 @@ pub fn visible_types(endpoint: &Endpoint, visible: &Visible) -> Vec<String> {
     types.into_iter().map(str::to_owned).collect()
 }
 
-/// The catalogue of what this endpoint publishes (EP-46).
-///
-/// Only the artifacts the gateway can actually serve are listed, with the size and digest
-/// of the projected document rather than of the file on disk: what a client fetches is
-/// the projection, so that is what its `ETag` has to match.
-pub fn index(endpoint: &Endpoint, visible: &Visible, digest: impl Fn(&[u8]) -> String) -> Value {
-    let mut models = Vec::new();
-    for model in &endpoint.models {
-        let mut redacted = Vec::new();
-        json_schema(std::slice::from_ref(&model), visible, &mut redacted);
-        // Both builders fill the same list, and only for its sake here. A term the committed
-        // `@context` carries and no `$defs` mentions is redacted by the context builder alone,
-        // so `redacted: true` has to be raised from that too (EP-47, T-2341).
-        context(std::slice::from_ref(&model), visible, &mut redacted);
-
-        let types: Vec<&String> = model
-            .classes
-            .iter()
-            .filter(|class| visible.covers_type(class))
-            .collect();
-        // Whether anything was left out, and nothing about what: the names stay here (EP-47).
-        let anything_redacted = !redacted.is_empty()
-            || model
-                .classes
-                .iter()
-                .any(|class| !visible.covers_type(class));
-
-        let mut described = json!({
-            "name": model.name,
-            "version": model.major,
-            "semver": model.version,
-            "types": types,
-            "artifacts": artifacts(std::slice::from_ref(&model), visible, &digest),
-        });
-        if anything_redacted {
-            described["redacted"] = json!(true);
-        }
-        models.push(described);
-    }
-
-    json!({ "endpoint": endpoint.slug, "models": models })
-}
-
-/// The documents one model publishes, each described by the projection a caller would
-/// actually fetch rather than by the file on disk (EP-46, EP-48).
-fn artifacts(models: &[&Model], visible: &Visible, digest: &impl Fn(&[u8]) -> String) -> Value {
-    let mut described = Map::new();
-    for (wanted, bytes, sha256) in measured(models, visible, digest) {
-        described.insert(
-            wanted.file_name().to_owned(),
-            json!({ "type": wanted.media_type(), "bytes": bytes, "sha256": sha256 }),
-        );
-    }
-    Value::Object(described)
-}
-
-/// The size and digest of every artifact of one model major, in the order an agent should
-/// read them (LinkML first, [`Artifact::ALL`]).
-///
-/// Measured on the document a caller would actually fetch for these models rather than on a
-/// file on disk, so the catalogue, the `ETag` and the rendered answer agree (EP-46, EP-48).
-/// The unit is whatever `models` holds: one model for the index's per-model entry, every
-/// model of one major for the document `/schema/v{major}/…` renders.
-pub fn measured(
-    models: &[&Model],
-    visible: &Visible,
-    digest: &impl Fn(&[u8]) -> String,
-) -> Vec<(Artifact, usize, String)> {
-    published(models, visible)
-        .into_iter()
-        .map(|wanted| {
-            let body = match wanted {
-                Artifact::JsonSchema => {
-                    serde_json::to_vec(&json_schema(models, visible, &mut Vec::new()))
-                        .unwrap_or_default()
-                }
-                Artifact::Context => serde_json::to_vec(&context(models, visible, &mut Vec::new()))
-                    .unwrap_or_default(),
-                other => render(models, other, visible).into_bytes(),
-            };
-            let sha256 = digest(&body);
-            (wanted, body.len(), sha256)
-        })
-        .collect()
-}
-
 /// The JSON Schema of every model of one major, projected to the grant (EP-47, DM-03).
 ///
 /// A model whose artifact the checkout carries is projected; one whose artifact is
@@ -610,69 +315,6 @@ fn derive_defs(model: &Model, visible: &Visible, into: &mut Map<String, Value>) 
             }),
         );
     }
-}
-
-/// The JSON-LD `@context` of every model of one major, projected to the grant (DM-05).
-pub fn context(models: &[&Model], visible: &Visible, redacted: &mut Vec<String>) -> Value {
-    let mut terms = Map::new();
-    let mut derived = false;
-    // One document, several models: a term one model calls a class and another an attribute,
-    // or one derives and another has committed, is kept when any model covers it. What it is
-    // reported as is therefore decided once, against the finished document.
-    let mut left_out: Vec<String> = Vec::new();
-    for model in models {
-        match model.context.as_ref().and_then(inner_context) {
-            Some(compiled) => {
-                for (term, definition) in compiled {
-                    // A term is either a class of this model or an attribute, and the two are
-                    // not asked the same question. Answering both with one `||` chain meant a
-                    // caller with no type whitelist — a grant that names no `information`, the
-                    // dev seed's `public-read` among them — covered every name by the class
-                    // test, and the attribute test in front of it could never refuse anything.
-                    // Both things it protects were lost that way: the endpoint's
-                    // `hiddenAttributes` (EP-61) and the attributes a prohibition takes back
-                    // (GW8), because both live in `denied_attrs` (T-2341).
-                    let covered = term.starts_with('@')
-                        || if model.classes.iter().any(|class| class == term) {
-                            visible.covers_type(term)
-                        } else {
-                            visible.covers_attr(term)
-                        };
-                    if covered {
-                        terms.insert(term.clone(), definition.clone());
-                    } else {
-                        left_out.push(term.clone());
-                    }
-                }
-            }
-            None => {
-                derived = true;
-                for class in model.classes.iter().filter(|c| visible.covers_type(c)) {
-                    terms.insert(class.clone(), json!(format!("#{class}")));
-                }
-                for attr in model
-                    .classes
-                    .iter()
-                    .flat_map(|class| visible.slots_of(class))
-                {
-                    terms.insert(attr.clone(), json!(format!("#{attr}")));
-                }
-            }
-        }
-    }
-
-    // A derived context has no vocabulary IRI of its own to point at, and inventing an
-    // external one would be claiming an ontology nobody published: the terms resolve
-    // against the document that carries them.
-    if derived && !terms.contains_key("@vocab") {
-        terms.insert("@vocab".to_owned(), json!("#"));
-    }
-    redacted.extend(
-        left_out
-            .into_iter()
-            .filter(|term| !terms.contains_key(term)),
-    );
-    json!({ "@context": [CORE_CONTEXT, terms] })
 }
 
 /// The term map of a committed `@context`, whether the file is the map itself or the

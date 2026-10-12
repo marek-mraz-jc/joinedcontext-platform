@@ -467,9 +467,9 @@ async fn a_token_the_gateway_cannot_accept_never_reaches_the_broker_as_its_holde
     }
 }
 
-/// The broker lists its view's resources; the gateway adds the `schema://` and `access://`
-/// documents behind the two describe tools and reads them itself, so every URI it advertises
-/// answers (EP-52) and none of them is asked of the broker.
+/// The broker lists its view's resources; the gateway adds the `access://` document behind
+/// `describe_access` and reads it itself, and the `schema://` documents the view's schema index
+/// lists (T-3646), so every URI it advertises answers (EP-52).
 #[tokio::test]
 async fn the_resource_listing_carries_the_gateways_documents_and_reads_them_without_a_hop() {
     let listed = json!({ "jsonrpc": "2.0", "id": 1, "result": { "resources": [
@@ -499,7 +499,19 @@ async fn the_resource_listing_carries_the_gateways_documents_and_reads_them_with
         .find(|uri| uri.starts_with("access://"))
         .unwrap_or_else(|| panic!("the access document is listed: {answer}"))
         .to_string();
-    assert_eq!(hops.lock().expect("the hop log").len(), 1);
+    // The list asks the view's MCP surface and the view's schema index, whose documents the
+    // `schema://` URIs name (T-3646), and nothing else.
+    let paths: Vec<String> = hops
+        .lock()
+        .expect("the hop log")
+        .iter()
+        .map(|hop| hop.path.clone())
+        .collect();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(
+        paths.contains(&format!("/x/views/{SLUG}/linkml/schema/index.json")),
+        "{paths:?}"
+    );
 
     let read = json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": access } });
     let (status, answer) = post(gateway(upstream, endpoint()), &endpoint_mcp(), &read).await;
@@ -507,8 +519,8 @@ async fn the_resource_listing_carries_the_gateways_documents_and_reads_them_with
     assert!(answer["result"]["contents"].is_array(), "{answer}");
     assert_eq!(
         hops.lock().expect("the hop log").len(),
-        1,
-        "read without a hop"
+        2,
+        "the access document is read without a hop"
     );
 }
 

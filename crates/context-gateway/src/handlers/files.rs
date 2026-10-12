@@ -5,14 +5,13 @@ use crate::app::admit;
 use crate::app::admit_space;
 use crate::app::broker_speaks_json;
 use crate::app::json_response;
-use crate::app::sha256_hex;
 use crate::app::Gateway;
 use crate::handlers::reads::paged_entities;
 use crate::handlers::reads::too_large;
-use crate::handlers::{endpoint_surface, schema, space_surface};
+use crate::handlers::{endpoint_surface, schema_routes, space_surface};
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Subject;
-use crate::resolver::{Endpoint, Model};
+use crate::resolver::Endpoint;
 use crate::translators::{geojson, tabular, zip_export};
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
@@ -268,8 +267,7 @@ pub(crate) async fn file_zip(
 
     let params = query::parse(request.uri().query().unwrap_or_default());
     let space = gateway.resolver.resolve_space(&endpoint.space);
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    let index = schema::index(&endpoint, &visible, sha256_hex);
+    let index = schema_routes::index_for(&gateway, &endpoint, &endpoint.slug, &subject).await;
     let dcat = endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url());
     zip_download(
         &gateway,
@@ -335,8 +333,7 @@ async fn zip_download(
             Err(problem) => return *problem,
         };
 
-    let visible = schema::visible(subject, endpoint, crate::pdp::now());
-    let schemas = schema_directory(endpoint, &visible);
+    let schemas = schema_directory(gateway, endpoint, view, subject).await;
 
     let exported_at = crate::pdp::now().to_rfc3339();
     let query = params
@@ -380,35 +377,36 @@ async fn zip_download(
     response
 }
 
-/// Every schema document the endpoint publishes, as the bundle stores them (EP-51).
+/// Every schema document the caller's view publishes, as the bundle stores them (EP-51).
 ///
-/// One directory per major version, seven artifacts in each, each rendered from the caller's own
-/// projection by the same functions the `schema/` surface calls (EP-47).
-fn schema_directory(endpoint: &Endpoint, visible: &schema::Visible) -> Vec<(String, Vec<u8>)> {
-    let mut majors: Vec<u32> = endpoint.models.iter().map(|model| model.major).collect();
-    majors.sort_unstable();
-    majors.dedup();
-
+/// One directory per major version, each artifact the broker's index lists for it, read from
+/// the broker's LinkML surface of the view as the caller reads `schema/` (EP-47, T-3646). A
+/// document the broker does not answer is left out rather than replaced by another rendering.
+async fn schema_directory(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    view: &str,
+    subject: &Subject,
+) -> Vec<(String, Vec<u8>)> {
+    let index = schema_routes::index_for(gateway, endpoint, view, subject).await;
     let mut documents = Vec::new();
-    for major in majors {
-        let models: Vec<&Model> = endpoint
-            .models
-            .iter()
-            .filter(|model| model.major == major)
-            .collect();
-        for artifact in schema::published(&models, visible) {
-            let mut redacted = Vec::new();
-            let body = match artifact {
-                schema::Artifact::JsonSchema => {
-                    serde_json::to_vec_pretty(&schema::json_schema(&models, visible, &mut redacted))
-                }
-                schema::Artifact::Context => {
-                    serde_json::to_vec_pretty(&schema::context(&models, visible, &mut redacted))
-                }
-                other => Ok(schema::render(&models, other, visible).into_bytes()),
-            };
-            if let Ok(body) = body {
-                documents.push((format!("v{major}/{}", artifact.file_name()), body));
+    for model in index["models"].as_array().into_iter().flatten() {
+        let Some(major) = schema_routes::major_of(model) else {
+            continue;
+        };
+        let names = model["artifacts"].as_object().into_iter().flatten();
+        for name in names.map(|(name, _)| name) {
+            let path = format!("v{major}/{name}");
+            if let Some(Ok(body)) = schema_routes::view_document(
+                gateway,
+                endpoint,
+                view,
+                subject,
+                &format!("schema/{path}"),
+            )
+            .await
+            {
+                documents.push((path, body));
             }
         }
     }

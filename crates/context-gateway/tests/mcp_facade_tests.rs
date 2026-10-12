@@ -199,10 +199,10 @@ async fn a_body_that_is_not_json_is_the_parse_error() {
     // (T-3647, Antares `mcp_transport`).
 }
 
-/// EP-47, EP-55: the two describing tools are the access and schema projections, answered
-/// from the endpoint itself, so an agent can orient without a single broker round trip. The
-/// schema of the whole model is the broker's LinkML surface since T-3645; narrowed to a type it
-/// is still the endpoint's own.
+/// EP-47, EP-55: `describe_access` is answered from the endpoint itself, so an agent can orient
+/// without a single broker round trip. The schema is the broker's LinkML surface (T-3645,
+/// T-3646, `mcp_schema_tests.rs`); a narrowed call for a formalism the broker renders for no one
+/// class is refused before any hop.
 #[tokio::test]
 async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker() {
     let realm = common::Realm::new();
@@ -231,24 +231,6 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
         "the anonymous caller sees the public grant and nobody else's (R20)"
     );
 
-    let (_, summary) = send(
-        app(&broker, &realm),
-        message(
-            SLUG,
-            None,
-            call(
-                12,
-                "describe_schema",
-                json!({ "entityType": "AirQualityObserved" }),
-            ),
-        ),
-    )
-    .await;
-    assert_eq!(
-        summary["result"]["structuredContent"]["schema"]["endpoint"],
-        SLUG
-    );
-
     let (_, shacl) = send(
         app(&broker, &realm),
         message(
@@ -264,12 +246,12 @@ async fn the_describing_tools_answer_from_the_endpoint_and_never_from_the_broker
     .await;
     assert_eq!(
         shacl["result"]["isError"], true,
-        "a formalism the gateway cannot compile is named, never approximated"
+        "a formalism no class description carries is named, never approximated"
     );
 
     assert!(
         log.lock().expect("the log").is_empty(),
-        "neither tool asks the broker anything"
+        "neither call asks the broker anything"
     );
 }
 

@@ -514,7 +514,7 @@ fn described(base: &str, endpoint: &Endpoint, subject: &Subject) -> Value {
         entry["schema"] = json!(format!(
             "{base}{}/schema/v{major}/{}",
             endpoint.base_path,
-            schema::Artifact::LinkMl.file_name()
+            crate::middleware::response::Artifact::LinkMl.file_name()
         ));
     }
     entry

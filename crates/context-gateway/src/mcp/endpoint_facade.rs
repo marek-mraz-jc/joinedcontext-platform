@@ -35,15 +35,16 @@
 //!   shot, bound to the caller, the space and the arguments, so the answer cannot be the
 //!   model's own (AG-08, Architecture/07 §3).
 //!
-//! `resources/list` serves the entity types, the access document and the schema artifacts
-//! the gateway can render; `describe_schema` renders the two formalisms the gateway
-//! compiles and names the rest as served beside the model.
+//! `resources/list` serves the entity types and the schema artifacts the broker's index of the
+//! Endpoint's view lists, and the access document; `describe_schema` reads the broker's LinkML
+//! surface of the view (T-3645, T-3646).
 
-use crate::app::{ngsi_ld_request, sha256_hex, Credential, Gateway};
-use crate::handlers::{access, schema, schema_routes};
+use crate::app::{ngsi_ld_request, Credential, Gateway};
+use crate::handlers::{access, schema_routes};
 use crate::mcp::elicitation;
+use crate::middleware::response::{self, Artifact};
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
-use crate::resolver::{Endpoint, Model};
+use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::http::{Method, Response, StatusCode};
 use jc_core::kinds::Operation;
@@ -307,7 +308,7 @@ const TOOLS: &[Tool] = &[
                                 "maxItems": 64,
                             },
                         ],
-                        "description": "One entity type, or the list of the classes you need",
+                        "description": "One entity type, or the list of the classes you need: the answer is the LinkML description of each (format summary or linkml)",
                     },
                     "version": { "type": "integer", "minimum": 1, "description": "Model major version" },
                 },
@@ -1463,7 +1464,7 @@ pub async fn handle(
             json!({ "tools": tools_for(&gateway, &endpoint, &subject) }),
         )),
         "tools/call" => Some(call_tool(gateway, endpoint, subject, credential, id, &params).await),
-        "resources/list" => Some(result(id, resources(&endpoint, &subject))),
+        "resources/list" => Some(result(id, resources(&gateway, &endpoint, &subject).await)),
         "resources/templates/list" => Some(result(
             id,
             json!({
@@ -1686,12 +1687,20 @@ async fn call_tool(
 
 /// What this caller may attach to their context without calling a tool (EP-52, EP-60).
 ///
-/// The entity types come from the same projection the schema surface uses, so a type the
-/// caller may not read is not listed here either; an unlisted resource read by name
-/// answers exactly as an unknown one does (SP-20).
-fn resources(endpoint: &Endpoint, subject: &Subject) -> Value {
-    let visible = schema::visible(subject, endpoint, crate::pdp::now());
-    let mut listed: Vec<Value> = schema::visible_types(endpoint, &visible)
+/// The entity types and the schema documents are the ones the broker's index of the Endpoint's
+/// view lists for this caller (T-3646), so a type the caller may not read is not listed here
+/// either; an unlisted resource read by name answers exactly as an unknown one does (SP-20).
+async fn resources(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Value {
+    let index = schema_routes::index_for(gateway, endpoint, &endpoint.slug, subject).await;
+    let models = index["models"].as_array().cloned().unwrap_or_default();
+    let mut types: Vec<&str> = models
+        .iter()
+        .flat_map(|model| model["types"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect();
+    types.sort_unstable();
+    types.dedup();
+    let mut listed: Vec<Value> = types
         .into_iter()
         .map(|entity_type| {
             json!({
@@ -1710,15 +1719,17 @@ fn resources(endpoint: &Endpoint, subject: &Subject) -> Value {
         "mimeType": "application/json",
     }));
 
-    // Every formalism the schema surface renders, in reading order, so a client that attaches
-    // resources rather than calling tools reaches the same documents (EP-46, T-1858).
-    for model in &endpoint.models {
-        // The cube is listed only where this caller's projection of the model holds a Data
-        // Structure Definition, as the REST index lists it (DM-60).
-        for artifact in schema::published(&[model], &visible) {
+    // Every formalism the index lists, in reading order, so a client that attaches resources
+    // rather than calling tools reaches the same documents (EP-46, T-1858).
+    for model in &models {
+        let Some(major) = schema_routes::major_of(model).and_then(|m| u32::try_from(m).ok()) else {
+            continue;
+        };
+        let name = model["name"].as_str().unwrap_or_default();
+        for artifact in listed_artifacts(model) {
             listed.push(json!({
-                "uri": schema_uri(&endpoint.slug, model.major, artifact),
-                "name": format!("{} v{} {}", model.name, model.major, artifact.format_name()),
+                "uri": schema_uri(&endpoint.slug, major, artifact),
+                "name": format!("{name} v{major} {}", artifact.format_name()),
                 "description": "A rendered schema artifact of this space's data model.",
                 "mimeType": artifact.media_type(),
             }));
@@ -1726,6 +1737,15 @@ fn resources(endpoint: &Endpoint, subject: &Subject) -> Value {
     }
 
     json!({ "resources": listed })
+}
+
+/// The artifacts one model of the broker's index lists, LinkML first.
+fn listed_artifacts(model: &Value) -> Vec<Artifact> {
+    Artifact::ALL
+        .into_iter()
+        .chain([Artifact::Qb])
+        .filter(|artifact| !model["artifacts"][artifact.file_name()].is_null())
+        .collect()
 }
 
 /// Reads one resource, through the same enforcement path a tool call takes (EP-26).
@@ -1855,8 +1875,8 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
         let major = version.strip_prefix('v')?.parse().ok()?;
         // The `format` name the summary publishes, and the REST file name for the same
         // document: one artifact, whichever spelling the client copied (EP-52).
-        return schema::Artifact::from_format(artifact)
-            .or_else(|| schema::artifact_of(artifact, ""))
+        return Artifact::from_format(artifact)
+            .or_else(|| response::artifact_of(artifact, ""))
             .map(|artifact| Resource::Schema {
                 major,
                 format: artifact.format_name().to_owned(),
@@ -2054,67 +2074,7 @@ const DOCUMENT_BOUND: usize = 1024 * 1024;
 /// LinkML carries the classes, the slots, their ranges and their descriptions in one small
 /// YAML document; the Turtle renderings say the same in more bytes, and the JSON Schema says
 /// less about the meaning of a slot.
-const RECOMMENDED: schema::Artifact = schema::Artifact::LinkMl;
-
-/// The entity types a `describe_schema` call narrows to: one name, or the list of classes an
-/// agent needs (T-1858). Absent means every type the caller may be described.
-fn narrowed_to<'a>(
-    visible: &schema::Visible,
-    argument: Option<&'a Value>,
-) -> Result<schema::Visible, String> {
-    let wanted: Vec<&'a str> = match argument {
-        None => return Ok(visible.clone()),
-        Some(Value::String(one)) => vec![one.as_str()],
-        Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
-        Some(_) => return Err("`entityType` is one entity type or a list of them".to_owned()),
-    };
-    visible.only_each(wanted).map_err(|unknown| {
-        format!("`{unknown}` is not an entity type this endpoint describes for you")
-    })
-}
-
-/// The catalogue of what this endpoint describes, as an agent reads it (EP-46, T-1858).
-///
-/// The models and their digests are the ones the REST index publishes, so the two doors
-/// cannot disagree about what exists; what is added here is the reading order. `recommended`
-/// names the one formalism to load first, and every artifact is listed with the `format` that
-/// asks for it, its media type, its size, the digest of the very bytes a fetch returns, and
-/// the `schema://` URI that attaches it as a resource.
-///
-/// The artifacts are listed per model major rather than per model, because the major is what
-/// a fetch addresses: two models of one major render into one document, and a digest taken
-/// per model would then be the digest of nothing a caller can ask for.
-fn schema_summary(endpoint: &Endpoint, visible: &schema::Visible) -> Value {
-    // The very digest function the REST index is built with: the two doors publish one
-    // catalogue of one set of documents, so a client may cache on either (EP-46, SP-16).
-    let digest = |body: &[u8]| sha256_hex(body);
-    let document = schema::index(endpoint, visible, digest);
-
-    let mut majors: Vec<u32> = endpoint.models.iter().map(|model| model.major).collect();
-    majors.sort_unstable();
-    majors.dedup();
-
-    let mut listed = Vec::new();
-    for major in majors {
-        let models: Vec<&Model> = endpoint
-            .models
-            .iter()
-            .filter(|model| model.major == major)
-            .collect();
-        for (artifact, bytes, sha256) in schema::measured(&models, visible, &digest) {
-            listed.push(json!({
-                "format": artifact.format_name(),
-                "mediaType": artifact.media_type(),
-                "version": major,
-                "bytes": bytes,
-                "sha256": sha256,
-                "uri": schema_uri(&endpoint.slug, major, artifact),
-            }));
-        }
-    }
-
-    recommended(document, listed)
-}
+const RECOMMENDED: Artifact = Artifact::LinkMl;
 
 /// The catalogue with its per-model copies of the digests taken out and the reading order and
 /// the flat artifact list put in.
@@ -2137,48 +2097,54 @@ fn recommended(mut document: Value, listed: Vec<Value>) -> Value {
     document
 }
 
-/// `describe_schema` and the `schema://` resources (EP-46, EP-47): from the broker's LinkML
-/// surface of the Endpoint's view when one serves it (T-3645), so an agent reads the very bytes
-/// and digests the REST `schema/` routes serve. A call narrowed with `entityType` has no REST
-/// counterpart and is still rendered here, and so is an Endpoint no view serves.
+/// `describe_schema` and the `schema://` resources (EP-46, EP-47), from the broker's LinkML
+/// surface of the Endpoint's view (T-3645), so an agent reads the very bytes and digests the
+/// REST `schema/` routes serve. Nothing is rendered here (T-3646): an Endpoint no view serves
+/// describes no model.
 async fn describe_schema_for(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
     arguments: &Map<String, Value>,
 ) -> Result<Value, String> {
-    if !arguments.contains_key("entityType") {
-        if let Some(answer) = schema_from_view(gateway, endpoint, subject, arguments).await {
-            return answer;
-        }
-    }
-    describe_schema(endpoint, subject, arguments)
-}
-
-/// [`describe_schema`] answered from the broker's documents; `None` hands the call back (no
-/// view, or a format name only the local answer explains).
-async fn schema_from_view(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    arguments: &Map<String, Value>,
-) -> Option<Result<Value, String>> {
+    let view = endpoint.slug.as_str();
     let unavailable = |status: StatusCode| {
         tracing::warn!(slug = %endpoint.slug, %status, "the broker's schema surface did not answer");
         "the data model cannot be read right now; try again later".to_owned()
+    };
+    let read = |rest: String| async move {
+        schema_routes::view_document(gateway, endpoint, view, subject, &rest)
+            .await
+            .unwrap_or(Err(StatusCode::NOT_FOUND))
     };
     let format = arguments
         .get("format")
         .and_then(Value::as_str)
         .unwrap_or("summary");
-    let artifact = schema::Artifact::from_format(format);
-    if format != "summary" && artifact.is_none() {
-        return None;
+    if let Some(wanted) = arguments.get("entityType") {
+        return classes_of(endpoint, format, wanted, read).await;
     }
-    let index = match schema_routes::view_document(gateway, endpoint, subject, "index.json").await?
-    {
+    let Some(artifact) = Artifact::from_format(format) else {
+        if format != "summary" {
+            return Err(format!(
+                "`{format}` is not a formalism this endpoint renders: it serves summary, \
+                 json-schema, context, linkml, shacl, owl, rdf, markdown, and qb where the model \
+                 declares a Data Structure Definition"
+            ));
+        }
+        return match read("schema/index.json".to_owned()).await {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(index) => Ok(view_summary(&endpoint.slug, index)),
+                Err(_) => Err(unavailable(StatusCode::BAD_GATEWAY)),
+            },
+            Err(StatusCode::NOT_FOUND) => Err(NO_MODEL.to_owned()),
+            Err(status) => Err(unavailable(status)),
+        };
+    };
+    let index = match read("schema/index.json".to_owned()).await {
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
-        Err(status) => return Some(Err(unavailable(status))),
+        Err(StatusCode::NOT_FOUND) => return Err(NO_MODEL.to_owned()),
+        Err(status) => return Err(unavailable(status)),
     };
     let majors: Vec<u64> = index["models"]
         .as_array()
@@ -2186,31 +2152,20 @@ async fn schema_from_view(
         .flatten()
         .filter_map(schema_routes::major_of)
         .collect();
-    let Some(artifact) = artifact else {
-        return Some(Ok(view_summary(&endpoint.slug, index)));
-    };
     let wanted = arguments.get("version").and_then(Value::as_u64);
     let Some(major) = wanted
         .or_else(|| majors.first().copied())
         .filter(|m| majors.contains(m))
     else {
-        return Some(Err(
-            "this endpoint publishes no model of that version".to_owned()
-        ));
+        return Err("this endpoint publishes no model of that version".to_owned());
     };
-    let path = format!("v{major}/{}", artifact.file_name());
-    let bytes = match schema_routes::view_document(gateway, endpoint, subject, &path).await? {
+    let bytes = match read(format!("schema/v{major}/{}", artifact.file_name())).await {
         Ok(bytes) => bytes,
-        Err(StatusCode::NOT_FOUND) if artifact == schema::Artifact::Qb => {
-            return Some(Err(NO_CUBE.to_owned()));
-        }
-        Err(status) => return Some(Err(unavailable(status))),
+        Err(StatusCode::NOT_FOUND) if artifact == Artifact::Qb => return Err(NO_CUBE.to_owned()),
+        Err(status) => return Err(unavailable(status)),
     };
     let rendered = if artifact.is_json() {
-        match serde_json::from_slice(&bytes) {
-            Ok(document) => document,
-            Err(_) => return Some(Err(unavailable(StatusCode::BAD_GATEWAY))),
-        }
+        serde_json::from_slice(&bytes).map_err(|_| unavailable(StatusCode::BAD_GATEWAY))?
     } else {
         json!({
             "format": format,
@@ -2218,8 +2173,64 @@ async fn schema_from_view(
             "document": String::from_utf8_lossy(&bytes),
         })
     };
-    Some(within_bound(format, &rendered).map(|()| rendered))
+    within_bound(format, &rendered)?;
+    Ok(rendered)
 }
+
+/// A `describe_schema` narrowed with `entityType`: the broker's description of each class
+/// (`linkml/classes/{type}`: its slots with their ranges and descriptions, narrowed to the
+/// caller), which is what an agent with a model too large for one answer reads (T-1858).
+///
+/// Decided (worker-6, T-3646, owner may override): the broker renders no formalism for one
+/// class, so a narrowed call answers the LinkML class descriptions, and a narrowed call for any
+/// other formalism is refused with the call that serves it. A type the caller may not read and
+/// one that does not exist answer the same words (EP-47, SP-15).
+async fn classes_of<F, R>(
+    endpoint: &Endpoint,
+    format: &str,
+    wanted: &Value,
+    read: F,
+) -> Result<Value, String>
+where
+    F: Fn(String) -> R,
+    R: std::future::Future<Output = Result<Vec<u8>, StatusCode>>,
+{
+    let names: Vec<&str> = match wanted {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => return Err("`entityType` is one entity type or a list of them".to_owned()),
+    };
+    if !matches!(format, "summary" | "linkml") {
+        return Err(format!(
+            "`entityType` narrows the LinkML description of a class; ask for {format} \
+             without `entityType`, or for linkml with it"
+        ));
+    }
+    let mut classes = Vec::new();
+    for name in names {
+        let segment = crate::query::encode(name);
+        let described = match read(format!("classes/{segment}")).await {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+            Err(StatusCode::NOT_FOUND) => None,
+            Err(status) => {
+                tracing::warn!(slug = %endpoint.slug, %status, "the broker's class description did not answer");
+                return Err("the data model cannot be read right now; try again later".to_owned());
+            }
+        };
+        let Some(described) = described else {
+            return Err(format!(
+                "`{name}` is not an entity type this endpoint describes for you"
+            ));
+        };
+        classes.push(described);
+    }
+    let rendered = json!({ "format": "linkml", "classes": classes });
+    within_bound("linkml", &rendered)?;
+    Ok(rendered)
+}
+
+/// Why an Endpoint describes no model: no view serves it, or its Tenant has no schema.
+const NO_MODEL: &str = "this endpoint publishes no data model you may read";
 
 /// The summary of the broker's catalogue: its models, and every artifact with the `format`
 /// that asks for it, its size, digest and `schema://` URI, as [`schema_summary`] lists them.
@@ -2230,10 +2241,7 @@ fn view_summary(slug: &str, index: Value) -> Value {
             continue;
         };
         // LinkML first, in the order the local summary lists them.
-        for artifact in schema::Artifact::ALL
-            .into_iter()
-            .chain([schema::Artifact::Qb])
-        {
+        for artifact in Artifact::ALL.into_iter().chain([Artifact::Qb]) {
             let described = &model["artifacts"][artifact.file_name()];
             if described.is_null() {
                 continue;
@@ -2256,66 +2264,8 @@ const NO_CUBE: &str = "this endpoint's model declares no Data Structure Definiti
                        read, so it has no RDF Data Cube; ask for shacl, owl or rdf instead";
 
 /// The `resources/read` URI of one artifact of one major.
-fn schema_uri(slug: &str, major: u32, artifact: schema::Artifact) -> String {
+fn schema_uri(slug: &str, major: u32, artifact: Artifact) -> String {
     format!("schema://{slug}/v{major}/{}", artifact.format_name())
-}
-
-/// The data model, in the formalism asked for and narrowed to the caller's grant (EP-47).
-///
-/// Every formalism the REST schema surface renders is rendered here from the same projected
-/// JSON Schema, so an agent reads exactly what a browser reads for the same token (EP-46,
-/// EP-52, T-0845); the text ones come back as `{format, mediaType, document}`.
-fn describe_schema(
-    endpoint: &Endpoint,
-    subject: &Subject,
-    arguments: &Map<String, Value>,
-) -> Result<Value, String> {
-    let visible = schema::visible(subject, endpoint, crate::pdp::now());
-    let visible = narrowed_to(&visible, arguments.get("entityType"))?;
-    let format = arguments
-        .get("format")
-        .and_then(Value::as_str)
-        .unwrap_or("summary");
-    if format == "summary" {
-        return Ok(schema_summary(endpoint, &visible));
-    }
-
-    let major = arguments.get("version").and_then(Value::as_u64);
-    let models: Vec<&Model> = endpoint
-        .models
-        .iter()
-        .filter(|model| major.is_none_or(|wanted| u64::from(model.major) == wanted))
-        .collect();
-    if models.is_empty() {
-        return Err("this endpoint publishes no model of that version".to_owned());
-    }
-
-    let Some(artifact) = schema::Artifact::from_format(format) else {
-        return Err(format!(
-            "`{format}` is not a formalism this endpoint renders: it serves summary, \
-             json-schema, context, linkml, shacl, owl, rdf, markdown, and qb where the model \
-             declares a Data Structure Definition"
-        ));
-    };
-    if artifact == schema::Artifact::Qb && !schema::declares_dsd(&models, &visible) {
-        return Err(NO_CUBE.to_owned());
-    }
-
-    let mut redacted = Vec::new();
-    let rendered = match artifact {
-        // The two JSON formalisms answer as the object they are; the five text ones as
-        // `{format, mediaType, document}`, rendered the way the REST route renders them.
-        // `Accept` plays no part here, the name of the format decides.
-        schema::Artifact::JsonSchema => schema::json_schema(&models, &visible, &mut redacted),
-        schema::Artifact::Context => schema::context(&models, &visible, &mut redacted),
-        other => json!({
-            "format": format,
-            "mediaType": other.media_type(),
-            "document": schema::render(&models, other, &visible),
-        }),
-    };
-    within_bound(format, &rendered)?;
-    Ok(rendered)
 }
 
 /// A document too large for one answer is refused with the way to make it smaller, never cut
