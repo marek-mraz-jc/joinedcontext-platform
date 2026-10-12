@@ -74,6 +74,8 @@ fn endpoint(declared: Option<&[&str]>) -> Endpoint {
             classes: classes.iter().map(|class| (*class).to_owned()).collect(),
             units: Default::default(),
             relationships: Default::default(),
+            quality: Vec::new(),
+            schema: None,
         }),
         catalog: None,
         roles: Default::default(),
@@ -163,6 +165,8 @@ fn an_expanded_or_compacted_type_names_the_same_class() {
         classes: ["AirQualityObserved".to_owned()].into(),
         units: Default::default(),
         relationships: Default::default(),
+        quality: Vec::new(),
+        schema: None,
     };
     for written in [
         "AirQualityObserved",
@@ -260,6 +264,8 @@ fn the_table_narrows_a_space_to_the_model_it_names_and_only_then() {
         classes: ["AirQualityObserved".to_owned(), "Device".to_owned()].into(),
         units: Default::default(),
         relationships: Default::default(),
+        quality: Vec::new(),
+        schema: None,
     };
     assert_eq!(endpoint.as_ref(), Some(&expected));
     assert_eq!(
@@ -275,6 +281,21 @@ fn the_table_narrows_a_space_to_the_model_it_names_and_only_then() {
         "urnSegment: ovzdusie\n  dataModelRef: { kind: DataModel, name: gone }",
     );
     assert_eq!(declared_of(&repo("dangling", &dangling)), (None, None));
+}
+
+/// DM-87: the space's `spec.quality` reaches the table beside its model's classes.
+#[test]
+fn the_table_carries_the_spaces_quality_rules() {
+    let ruled = SPACE_MANIFEST.replace(
+        "urnSegment: ovzdusie",
+        "urnSegment: ovzdusie\n  dataModelRef: { kind: DataModel, name: bb-air-quality }\n  quality:\n    - { name: pm10-plausible, entityType: AirQualityObserved, kind: range, attribute: pm10, max: 500 }",
+    );
+    let (endpoint, space) = declared_of(&repo("ruled", &ruled));
+    for declared in [endpoint, space] {
+        let rules = declared.expect("declared").quality;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name, "pm10-plausible");
+    }
 }
 
 #[tokio::test]

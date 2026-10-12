@@ -11,8 +11,8 @@ use jc_core::kinds::Blueprint;
 use minijinja::{Environment, UndefinedBehavior};
 use serde_json::Value;
 
-/// Annotation naming the blueprint a manifest was rendered from (CC-27).
-pub const ANNOTATION_BLUEPRINT: &str = "joinedcontext.com/blueprint";
+/// Annotation naming the blueprint a manifest was rendered from (CC-27), jc-core's name.
+pub use jc_core::envelope::annotations::BLUEPRINT as ANNOTATION_BLUEPRINT;
 /// Annotation naming the blueprint version (CC-26, CC-27).
 pub const ANNOTATION_VERSION: &str = "joinedcontext.com/blueprint-version";
 /// Annotation carrying the parameter values as canonical JSON (CC-27, CC-32).

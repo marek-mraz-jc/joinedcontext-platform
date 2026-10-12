@@ -83,6 +83,8 @@ fn endpoint(missing: MissingUnitCode) -> Endpoint {
             classes: ["AirQualityObserved".to_owned()].into(),
             units: UnitRules::from_schema(&schema(), missing),
             relationships: Default::default(),
+            quality: Vec::new(),
+            schema: None,
         }),
         catalog: None,
         roles: Default::default(),

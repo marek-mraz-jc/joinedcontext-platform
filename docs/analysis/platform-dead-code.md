@@ -129,8 +129,6 @@ Checked with GREP; the graph has no edge for these uses.
 | `jc_core::envelope::Kind::PLURAL` | read as `<$spec as Kind>::PLURAL` inside the `catalogue!` macro |
 | `jc_core::registry::catalogue` | a `macro_rules!`, invoked once in its own file |
 | `urn::EntityRef::fmt`, `jcctl::commands::import::Reference::fmt`, `organization::String::from` | `Display` in `format!` and `From` through `.into()` on a type the walk reaches only from tests |
-| `jc_core::envelope::annotations::BLUEPRINT` | not a blind spot: jcctl repeats the string as `blueprints::ANNOTATION_BLUEPRINT`; the copy goes in a later slice |
-| `jc_core::envelope::annotations::PROMPT_DIGEST` | not a blind spot: the Portal repeats the string in `src/api/agent_runs.rs`; filed in `chyby.md` |
 | `jc_core::kinds::bento_inputs::RUNNER_VERSION` | a generated file; the Portal's `bento-inputs.mjs` writes it |
 
 ### 3.5 Checks no production path calls: decision pending

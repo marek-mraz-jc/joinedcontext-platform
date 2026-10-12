@@ -286,6 +286,8 @@ fn endpoint(writable: &[&str]) -> Endpoint {
             classes: CLASSES.iter().map(|class| (*class).to_owned()).collect(),
             units: Default::default(),
             relationships: rules(),
+            quality: Vec::new(),
+            schema: None,
         }),
         catalog: None,
         roles: Default::default(),

@@ -115,6 +115,20 @@ async fn main() -> ExitCode {
         }
     };
 
+    // A read over a space with `identity: caller` registrations exchanges the caller's token,
+    // as the gateway's own client, for the member brokers' audiences (T-3999, ADR-N-047 §2.4).
+    // Without a client such a read answers 503; it is never forwarded as anyone else.
+    let gateway = match (config.token_url(), config.oidc_client.as_ref()) {
+        (Some(token_url), Some((id, credential))) => {
+            gateway.exchange_with(context_gateway::federation::exchange::Exchanger::new(
+                token_url,
+                id.clone(),
+                credential.clone(),
+            ))
+        }
+        _ => gateway,
+    };
+
     // The Portal's internal listener answers a workload it can name (PF-46, AG-52): the
     // gateway's own client, audience-bound to that listener. Without a client configured the
     // pollers send no token and the Portal refuses them, which says so in the log rather
