@@ -32,6 +32,7 @@ struct Hop {
     path: String,
     query: Option<String>,
     headers: HeaderMap,
+    body: Value,
 }
 
 type Hops = Arc<Mutex<Vec<Hop>>>;
@@ -48,11 +49,16 @@ async fn broker(
     let app = Router::new().fallback(move |request: Request<Body>| {
         let (recorder, headers, body) = (Arc::clone(&recorder), headers.clone(), body.clone());
         async move {
+            let (parts, sent) = request.into_parts();
+            let sent = axum::body::to_bytes(sent, usize::MAX)
+                .await
+                .expect("a body");
             recorder.lock().expect("the hop log").push(Hop {
-                method: request.method().clone(),
-                path: request.uri().path().to_owned(),
-                query: request.uri().query().map(str::to_owned),
-                headers: request.headers().clone(),
+                method: parts.method.clone(),
+                path: parts.uri.path().to_owned(),
+                query: parts.uri.query().map(str::to_owned),
+                headers: parts.headers.clone(),
+                body: serde_json::from_slice(&sent).unwrap_or(Value::Null),
             });
             let mut answer = (status, axum::Json(body)).into_response();
             for (name, value) in headers {
@@ -221,26 +227,12 @@ async fn last_n_and_join_level_are_capped_and_nothing_else_is_touched() {
 }
 
 /// What no view serves yet stays on the gateway's own pipeline: a conditional write (R45,
-/// T-3789) and a subscription (5.5).
+/// T-3789).
 #[tokio::test]
 async fn what_no_view_serves_stays_on_the_gateway() {
     let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
-    let subscription = json!({
-        "type": "Subscription",
-        "entities": [{ "type": "AirQualityObserved" }],
-        "notification": { "endpoint": { "uri": "https://hooks.example/air" } },
-    });
-    // The broker answers every hop 201; these two answers are the gateway's own pipeline's:
-    // a subscription with no egress configured, a write the grant has no update for.
-    let (status, _, _) = call(
-        app(upstream.clone(), endpoint()),
-        post(
-            &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"),
-            subscription,
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    // The broker answers every hop 201; this answer is the gateway's own pipeline's: a write
+    // the grant has no update for.
     let mut conditional = post(
         &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities/{STATION}/attrs"),
         json!({ "pm10": { "type": "Property", "value": 2.0 } }),
@@ -317,6 +309,148 @@ async fn a_mapped_endpoint_is_served_by_its_view() {
             Method::POST,
             format!("/x/views/{SLUG}/ngsi-ld/v1/entities").as_str()
         )
+    );
+}
+
+fn subscription(uri: &str) -> Value {
+    json!({
+        "id": "urn:ngsi-ld:Subscription:air-1",
+        "type": "Subscription",
+        "entities": [{ "type": "AirQualityObserved" }],
+        "notification": { "endpoint": { "uri": uri, "accept": "application/json" } },
+    })
+}
+
+/// T-3653, plan 5.5: a subscription is the view's. It reaches the view as sent, its subscriber's
+/// own address untouched and no route through the gateway written into it, under the verified
+/// subscriber, so the broker delivers to it directly under `pre_notify`. It is no entity: no
+/// model check refuses its type.
+#[tokio::test]
+async fn a_subscription_goes_to_the_view_with_its_own_target() {
+    let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
+    let sent = subscription("https://hooks.example/air");
+    let (status, _, body) = call(
+        app(upstream.clone(), endpoint()),
+        post(
+            &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"),
+            sent.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for (method, rest) in [
+        (Method::GET, "/subscriptions"),
+        (Method::GET, "/subscriptions/urn:ngsi-ld:Subscription:air-1"),
+        (
+            Method::DELETE,
+            "/subscriptions/urn:ngsi-ld:Subscription:air-1",
+        ),
+    ] {
+        let mut request = get(&format!("/api/endpoint/{SLUG}/ngsi-ld/v1{rest}"));
+        *request.method_mut() = method;
+        call(app(upstream.clone(), endpoint()), request).await;
+    }
+
+    let hops = hops.lock().expect("the hop log").clone();
+    let paths: Vec<&str> = hops.iter().map(|hop| hop.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            format!("/x/views/{SLUG}/ngsi-ld/v1/subscriptions"),
+            format!("/x/views/{SLUG}/ngsi-ld/v1/subscriptions"),
+            format!("/x/views/{SLUG}/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:air-1"),
+            format!("/x/views/{SLUG}/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:air-1"),
+        ]
+    );
+    assert_eq!(
+        hops[0].body, sent,
+        "the subscription reached the view as sent"
+    );
+    // The anonymous caller of this public Endpoint is its `public` role: the subscriber the
+    // broker stores and decides each notification under (T-3499).
+    assert_eq!(
+        hops[0]
+            .headers
+            .get("x-jc-roles")
+            .and_then(|v| v.to_str().ok()),
+        Some("public"),
+        "the subscriber is pinned for the broker to store"
+    );
+}
+
+/// G11, T-3653: the broker delivers to whatever a stored subscription names, so a target inside
+/// the platform's networks is refused before the view sees it, in every spelling the delivering
+/// client would dial, on a create and on a PATCH; and so is anything but HTTP(S).
+#[tokio::test]
+async fn a_subscription_aimed_inside_the_platform_never_reaches_the_view() {
+    let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
+    for uri in [
+        "http://127.0.0.1?x",
+        "http://0x7f.1/",
+        "http://2130706433:9090/q/admin",
+        "http://localhost./",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/",
+        "http://10.43.0.10/",
+        "mqtt://broker.example/air",
+    ] {
+        let (status, _, body) = call(
+            app(upstream.clone(), endpoint()),
+            post(
+                &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"),
+                subscription(uri),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+
+        let mut patch = post(
+            &format!(
+                "/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:air-1"
+            ),
+            json!({ "notification": { "endpoint": { "uri": uri } } }),
+        );
+        *patch.method_mut() = Method::PATCH;
+        let (status, _, body) = call(app(upstream.clone(), endpoint()), patch).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "PATCH {uri}: {body}");
+    }
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
+/// T-1302 kept: a host the installation names in `JC_GATEWAY_EGRESS_PRIVATE_HOSTS` may be a
+/// subscriber inside the cluster.
+#[tokio::test]
+async fn a_named_private_host_may_be_subscribed() {
+    let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
+    let space = Space {
+        endpoint: Arc::new(Endpoint {
+            slug: SPACE.to_owned(),
+            base_path: format!("/cs/{SPACE}"),
+            ..endpoint()
+        }),
+        title: Default::default(),
+        description: Default::default(),
+        is_sandbox: false,
+        default_locale: None,
+    };
+    let gateway = Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+        .serve([endpoint()])
+        .serve_spaces([space])
+        .deliver_privately_to(vec!["receiver.cluster.local".to_owned()]);
+    let (status, _, body) = call(
+        router(Arc::new(gateway)),
+        post(
+            &format!("/cs/{SPACE}/ngsi-ld/v1/subscriptions"),
+            subscription("http://receiver.cluster.local/air"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let hops = hops.lock().expect("the hop log");
+    assert_eq!(hops.len(), 1);
+    assert_eq!(
+        hops[0].path,
+        format!("/x/views/cs-{SPACE}/ngsi-ld/v1/subscriptions")
     );
 }
 

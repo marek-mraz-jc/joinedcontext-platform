@@ -21,6 +21,7 @@ pub mod federation;
 pub mod handlers;
 pub mod mcp;
 pub mod middleware;
+pub(crate) mod notification_target;
 pub mod operations;
 pub mod pdp;
 pub mod previews;
