@@ -4,7 +4,8 @@
 use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
-    package, publish, withdraw, CkanApi, InMemoryCkan, Outcome, PublishError, Settings, GENERATOR,
+    missing_linkml, package, publish, withdraw, CkanApi, InMemoryCkan, Outcome, PublishError,
+    Settings, GENERATOR,
 };
 use serde_json::{json, Value};
 
@@ -312,15 +313,15 @@ fn the_mcp_resource_says_how_an_ai_client_uses_it() {
     );
     assert_eq!(config["mcpServers"]["kvalita-ovzdusia"]["type"], "http");
 
-    // Only the MCP resource is described this way.
+    // Only the MCP resource is described this way; every resource has its own text (T-3886).
     let others = dataset["resources"]
         .as_array()
         .expect("resources")
         .iter()
         .filter(|r| r["format"] != "MCP");
-    assert!(others
-        .into_iter()
-        .all(|resource| resource.get("description").is_none()));
+    assert!(others.into_iter().all(|resource| resource["description"]
+        .as_str()
+        .is_some_and(|text| !text.is_empty() && !text.contains("mcpServers"))));
 }
 
 /// EP-24, EP-64: MCP is published for every Endpoint without being listed, because the
@@ -1030,4 +1031,244 @@ fn the_catalogue_block_becomes_the_ckan_dataset_fields() {
         .expect("the schema artifact resource");
     assert_eq!(schema["mimetype"], json!("application/schema+json"));
     assert_eq!(schema["size"], json!(812));
+}
+
+// --- every surface, with its usage (T-3886, EP-108..EP-110) --------------------------------
+
+/// An Endpoint that names no representation: it serves the default set (EP-104), less what
+/// `extra` disables, to `audience`.
+fn default_endpoint(audience: &str, extra: &str) -> RawManifest {
+    manifest(&format!(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: ovzdusie-public
+  namespace: ovzdusie
+spec:
+  contextSpaceRef: ovzdusie
+  slug: zt4qm7ge2xdv6ksb3ncf5arw2y
+  audience: {audience}
+{extra}{PUBLISH}"#
+    ))
+}
+
+fn documented() -> Settings {
+    settings().documented_at("https://docs.example.org/")
+}
+
+fn description<'a>(package: &'a Value, url_suffix: &str) -> &'a str {
+    resource(package, url_suffix)["description"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{url_suffix} has no description"))
+}
+
+/// EP-108: a default Endpoint is one resource per surface it serves (SensorThings is opt-in),
+/// each with its format, media type and a usage text naming the request or the program to
+/// open it in; the WebSocket text links the guide (API/07).
+#[test]
+fn a_default_endpoint_publishes_every_surface_with_its_usage() {
+    let dataset = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &record(),
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    for (suffix, format, mimetype, says) in [
+        ("/ngsi-ld/v1/", "NGSI-LD", "application/ld+json", "curl"),
+        ("/ws", "WebSocket", "application/json", "websocat"),
+        ("/mcp", "MCP", "application/json", "mcpServers"),
+        ("/ogc/features/", "OGCFEAT", "application/geo+json", "QGIS"),
+        ("/odata/v4/", "OData", "application/json", "Power BI"),
+        ("/file.geojson", "GeoJSON", "application/geo+json", "curl"),
+        ("/file.csv", "CSV", "text/csv", "live data"),
+        (
+            "/file.xlsx",
+            "XLSX",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "Excel",
+        ),
+        ("/file.json", "JSON", "application/json", "live data"),
+        ("/file.zip", "ZIP", "application/zip", "live data"),
+        ("/schema/index.json", "JSON", "application/json", "sha256"),
+    ] {
+        let found = resource(&dataset, suffix);
+        assert_eq!(found["url"], json!(format!("{base}{suffix}")), "{suffix}");
+        assert_eq!(found["format"], json!(format), "{suffix}");
+        assert_eq!(found["mimetype"], json!(mimetype), "{suffix}");
+        let said = description(&dataset, suffix);
+        assert!(said.contains(says), "{suffix}: {said}");
+    }
+    assert_eq!(resource_urls(&dataset).len(), 11, "{dataset:#}");
+    assert!(!resource_urls(&dataset)
+        .iter()
+        .any(|url| url.contains("/sta/")));
+
+    let ws = description(&dataset, "/ws");
+    assert!(
+        ws.contains("wss://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/ws"),
+        "{ws}"
+    );
+    assert!(ws.contains("\"x-op\":\"x-subscribe\""), "{ws}");
+    assert!(
+        ws.contains("https://docs.example.org/API/07-websocket"),
+        "{ws}"
+    );
+    assert!(ws.contains("no sign-in"), "{ws}");
+    let odata = description(&dataset, "/odata/v4/");
+    assert!(odata.contains("From OData Feed"), "{odata}");
+    let ogc = description(&dataset, "/ogc/features/");
+    for part in ["Part 1", "Part 2", "Part 3"] {
+        assert!(ogc.contains(part), "{part}: {ogc}");
+    }
+}
+
+/// EP-108: a surface switched off loses exactly its resource in the same run.
+#[test]
+fn disabling_websocket_withdraws_exactly_that_resource() {
+    let mut api = ckan();
+    publish(
+        &mut api,
+        &default_endpoint("public", ""),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the first run publishes");
+    let before: Vec<String> = resource_urls(api.package("kvalita-ovzdusia").expect("the dataset"))
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+    let outcome = publish(
+        &mut api,
+        &default_endpoint("public", "  disabledRepresentations: [websocket]\n"),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the second run publishes");
+
+    assert_eq!(outcome, Outcome::Updated);
+    let after = resource_urls(api.package("kvalita-ovzdusia").expect("the dataset"));
+    let expected: Vec<&str> = before
+        .iter()
+        .map(String::as_str)
+        .filter(|url| !url.ends_with("/ws"))
+        .collect();
+    assert_eq!(after, expected);
+    assert_eq!(before.len(), after.len() + 1);
+}
+
+/// EP-69, EP-110: an Endpoint without a publication block never reaches CKAN, and one that is
+/// not public is a private dataset whose texts tell the caller to bring a token and carry none.
+#[test]
+fn a_restricted_endpoint_is_private_and_no_text_carries_a_token() {
+    let mut unpublished = default_endpoint("organization", "");
+    unpublished
+        .spec
+        .as_object_mut()
+        .expect("a spec")
+        .remove("publish");
+    assert_eq!(
+        package(&unpublished, &instance(), &record(), &documented()).expect("an endpoint"),
+        None
+    );
+
+    let mut api = ckan();
+    publish(
+        &mut api,
+        &default_endpoint("organization", ""),
+        &instance(),
+        &record(),
+        &documented(),
+    )
+    .expect("publishes");
+    let dataset = api.package("kvalita-ovzdusia").expect("the dataset");
+    assert_eq!(dataset["private"], json!(true));
+    let written = dataset.to_string();
+    assert!(
+        !written.contains(TOKEN),
+        "the API token reached the dataset"
+    );
+    for resource in dataset["resources"].as_array().expect("resources") {
+        let url = resource["url"].as_str().expect("a url");
+        assert!(!url.contains('?'), "{url} carries a query");
+    }
+    for suffix in [
+        "/ngsi-ld/v1/",
+        "/ws",
+        "/ogc/features/",
+        "/odata/v4/",
+        "/file.csv",
+    ] {
+        let said = description(dataset, suffix);
+        assert!(
+            said.contains("Authorization: Bearer $TOKEN"),
+            "{suffix}: {said}"
+        );
+        assert!(!said.contains("no sign-in"), "{suffix}: {said}");
+    }
+    assert!(description(dataset, "/ws").contains("bearer.$TOKEN"));
+}
+
+/// EP-68: a record with the model's LinkML lists it as a LinkML resource; a model without it
+/// still lists the schema index, and the publisher reports the gap.
+#[test]
+fn a_model_with_linkml_lists_it_and_one_without_keeps_the_index() {
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    let mut with = record_with_schema();
+    with["dcat:distribution"]
+        .as_array_mut()
+        .expect("distributions")
+        .push(json!({
+            "@type": "dcat:Distribution",
+            "dct:title": "bb-air-quality model.linkml.yaml",
+            "dcat:accessURL": format!("{base}/schema/v2/model.linkml.yaml"),
+            "dcat:mediaType": "application/yaml",
+            "spdx:checksum": { "spdx:checksumValue": "cc33" }
+        }));
+    let dataset = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &with,
+        &settings(),
+    )
+    .expect("publishes")
+    .expect("a dataset");
+    let linkml = resource(&dataset, "/model.linkml.yaml");
+    assert_eq!(linkml["format"], json!("LinkML"));
+    assert!(description(&dataset, "/model.linkml.yaml").contains("cc33"));
+    assert!(!missing_linkml(&with));
+    // A record without a model misses nothing.
+    assert!(!missing_linkml(&record()));
+
+    let without = record_with_schema();
+    assert!(missing_linkml(&without));
+    let dataset = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &without,
+        &settings(),
+    )
+    .expect("publishes")
+    .expect("a dataset");
+    resource(&dataset, "/schema/index.json");
+}
+
+/// CC-18: a usage text that changed is a change, and an unchanged one is none.
+#[test]
+fn a_changed_usage_text_updates_the_dataset_once() {
+    let mut api = ckan();
+    let endpoint = default_endpoint("public", "");
+    publish(&mut api, &endpoint, &instance(), &record(), &settings()).expect("first");
+    let outcome = publish(&mut api, &endpoint, &instance(), &record(), &documented())
+        .expect("the guide link arrives");
+    assert_eq!(outcome, Outcome::Updated);
+    let outcome =
+        publish(&mut api, &endpoint, &instance(), &record(), &documented()).expect("again");
+    assert_eq!(outcome, Outcome::Unchanged);
 }

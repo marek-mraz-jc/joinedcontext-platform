@@ -1,9 +1,9 @@
 diff --git a/crates/context-gateway/src/cg_fixture.rs b/crates/context-gateway/src/cg_fixture.rs
 new file mode 100644
-index 0000000..7afa28d
+index 0000000..bf92d2b
 --- /dev/null
 +++ b/crates/context-gateway/src/cg_fixture.rs
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,35 @@
 +//! dev/cg-invariants/fixture.patch: one violation per statement of dev/security.cypher.
 +
 +/// A token request outside the owners.
@@ -18,6 +18,26 @@ index 0000000..7afa28d
 +/// A client nobody reviewed.
 +pub fn cg_fixture_client() -> reqwest::Client {
 +    reqwest::Client::new()
++}
++
++/// A child process nobody reviewed.
++pub fn cg_fixture_spawn() -> std::io::Result<std::process::Output> {
++    std::process::Command::new("true").output()
++}
++
++/// SQL text nobody reviewed (sqlx is not a dependency here: the statement greps the wrapper).
++pub fn cg_fixture_sql() -> &'static str {
++    "sqlx::AssertSqlSafe"
++}
++
++/// A file written by a server, its path unchecked.
++pub fn cg_fixture_write(path: &str) -> std::io::Result<()> {
++    std::fs::write(path, b"")
++}
++
++/// A secret out of its wrapper.
++pub fn cg_fixture_secret(secret: &jc_core::Secret) -> String {
++    secret.expose().to_owned()
 +}
 diff --git a/crates/context-gateway/src/lib.rs b/crates/context-gateway/src/lib.rs
 index 3ad41b0..df9246c 100644

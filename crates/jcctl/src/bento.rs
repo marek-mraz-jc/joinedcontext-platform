@@ -7,11 +7,12 @@
 //! Two rules make the result reviewable. A credential is never written, only its environment
 //! variable interpolation (PL-16), and nothing below the input is touched: the author's
 //! `bento.yaml` comes back with an `input` in front of it and everything else byte for byte,
-//! except for the decoder the GTFS-realtime type has to prepend.
+//! except for the decoder the GTFS-realtime type has to prepend and the ranged read of an
+//! archive's named members (PL-72).
 
 use jc_core::kinds::data_source::{check_class, env_var_of};
 use jc_core::kinds::{
-    DataSourceSpec, DataSourceType, GtfsFeed, IdMint, Mint, PipelineSpec, TemplatePart,
+    DataSourceSpec, DataSourceType, GtfsFeed, HttpArchive, IdMint, Mint, PipelineSpec, TemplatePart,
 };
 use serde_norway::{Mapping, Value};
 
@@ -19,6 +20,70 @@ use serde_norway::{Mapping, Value};
 const GTFS_IMPORT_PATH: &str = "/opt/bento/gtfs-realtime";
 /// The protobuf message every GTFS-realtime feed is wrapped in.
 const GTFS_MESSAGE: &str = "transit_realtime.FeedMessage";
+
+/// The archive's tail the directory is read from: the 22-byte end of central directory record
+/// and the longest comment it may carry (PL-72).
+const ZIP_TAIL: &str = "bytes=-65557";
+
+/// A little-endian hex field to an integer. Stock Bloblang has neither a byte reader nor a
+/// hex parser, so the bytes are reversed in pairs and folded digit by digit.
+const ZIP_INT: &str = r#"map int {
+  root = range(0, this.length(), 2).fold("", acc -> this.slice(acc.value, acc.value + 2) + acc.tally).split("").fold(0, acc -> acc.tally * 16 + "0123456789abcdef".index_of(acc.value))
+}
+"#;
+
+/// The directory of the archive's tail to the named entries, one JSON array (PL-72): every
+/// count, size, method and offset is checked before any member is fetched. `MEMBERS` and
+/// `MAX_BYTES` are replaced by values `HttpArchive::validate` admitted.
+///
+/// The directory's sizes may lie, and Bloblang's `decompress` has no output limit, so a deflate
+/// member is read only when its packed size times 1032, the most deflate expands, is within
+/// `maxBytes`: no member inflates past the bound, whatever its directory says.
+const ZIP_DIRECTORY: &str = r#"let wanted = MEMBERS
+let max_bytes = MAX_BYTES
+let tail = if content().length() > 65557 { throw("the archive server ignored Range and sent %v bytes".format(content().length())) } else { content() }
+let h = $tail.encode("hex")
+let eocd = $h.length() - $h.split("504b0506").index(-1).length() - 8
+let eocd = if $eocd < 0 || $eocd % 2 != 0 { throw("no end of central directory in the archive's last 64 KiB") } else { $eocd }
+let entries = $h.slice($eocd + 20, $eocd + 24).apply("int")
+let cd_size = $h.slice($eocd + 24, $eocd + 32).apply("int")
+let cd_at = $eocd - $cd_size * 2
+let cd = if $cd_at < 0 { throw("the archive's central directory is larger than the 64 KiB read") } else { $h.slice($cd_at, $eocd) }
+let all = $cd.split("504b0102").slice(1).map_each(e -> {
+  "method": e.slice(12, 16).apply("int"),
+  "csize": e.slice(32, 40).apply("int"),
+  "size": e.slice(40, 48).apply("int"),
+  "nlen": e.slice(48, 52).apply("int"),
+  "elen": e.slice(52, 56).apply("int"),
+  "offset": e.slice(76, 84).apply("int"),
+  "name": e.slice(84, 84 + e.slice(48, 52).apply("int") * 2).decode("hex").string()
+})
+let found = if $all.length() != $entries { throw("the archive's directory lists %v entries, its end record %v".format($all.length(), $entries)) } else { $all.filter(e -> $wanted.contains(e.name)) }
+let missing = $wanted.filter(w -> !$found.map_each(e -> e.name).contains(w))
+root = if $missing.length() > 0 { throw("the archive has no member %v".format($missing)) } else { $found }
+root = root.map_each(e -> if e.size > $max_bytes || e.csize > $max_bytes { throw("%v: %v bytes, %v packed, over maxBytes %v".format(e.name, e.size, e.csize, $max_bytes)) } else if ![0, 8].contains(e.method) { throw("%v: compression method %v, only stored and deflate are read".format(e.name, e.method)) } else if e.method == 8 && e.csize * 1032 > $max_bytes { throw("%v: %v packed may inflate to %v bytes, over maxBytes %v".format(e.name, e.csize, e.csize * 1032, $max_bytes)) } else if e.offset == 4294967295 { throw("%v: a Zip64 archive is not read".format(e.name)) } else { e })
+"#;
+
+/// One directory entry to the metadata the member's ranged read needs (PL-72). The range
+/// covers the 30-byte local header, its name and extra field as the directory gives them, the
+/// packed bytes, and 1 KiB in case the local extra field is longer than the directory's.
+const ZIP_MEMBER: &str = r#"meta archive_filename = this.name
+meta zip = this.format_json(no_indent: true)
+meta range = "bytes=%v-%v".format(this.offset, this.offset + 30 + this.nlen + this.elen + this.csize + 1024)
+"#;
+
+/// The member's local header and packed bytes to its content, checked against the directory.
+const ZIP_INFLATE: &str = r#"let z = @zip.parse_json()
+let read = if content().length() > 30 + $z.nlen + $z.elen + $z.csize + 1025 { throw("%v: the archive server ignored Range".format($z.name)) } else { content() }
+let head = $read.slice(0, 30).encode("hex")
+let nlen = $head.slice(52, 56).apply("int")
+let start = 30 + $nlen + $head.slice(56, 60).apply("int")
+let data = $read.slice($start, $start + $z.csize)
+let body = if $head.slice(0, 8) != "504b0304" || $read.slice(30, 30 + $nlen).string() != $z.name || $data.length() != $z.csize { throw("%v: no local header of it at offset %v".format($z.name, $z.offset)) } else if $z.method == 8 { $data.decompress("flate") } else { $data }
+root = if $body.length() != $z.size { throw("%v: inflated to %v bytes, the directory says %v".format($z.name, $body.length(), $z.size)) } else { $body }
+meta zip = deleted()
+meta range = deleted()
+"#;
 
 /// The environment variable a mapping mints the `{orgDomain}` of an id from (PF-44, PF-42).
 ///
@@ -177,9 +242,15 @@ pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
 
 /// The processors the connection contributes before the author's own (PL-39).
 ///
-/// Only GTFS-realtime has any: the feed arrives as protobuf and every pipeline reading it would
-/// otherwise decode it again in its own mapping.
-pub fn prepended_processors(spec: &DataSourceSpec) -> Vec<Value> {
+/// GTFS-realtime prepends its protobuf decoder: the feed arrives as protobuf and every pipeline
+/// reading it would otherwise decode it again in its own mapping. An `http` connection with an
+/// `archive` prepends the ranged read of its named members ([`archive_processors`]).
+pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Vec<Value> {
+    if let Some(archive) = spec.http.as_ref().and_then(|http| http.archive.as_ref()) {
+        if spec.source_type == DataSourceType::Http {
+            return archive_processors(spec, archive, context);
+        }
+    }
     if spec.source_type != DataSourceType::GtfsRt {
         return Vec::new();
     }
@@ -193,6 +264,61 @@ pub fn prepended_processors(spec: &DataSourceSpec) -> Vec<Value> {
     let mut processor = Mapping::new();
     processor.insert(key("protobuf"), Value::Mapping(protobuf));
     vec![Value::Mapping(processor)]
+}
+
+/// The ranged read of an archive's named members (PL-72, Architecture/08 §6).
+///
+/// The input fetched the archive's last 64 KiB; the directory in it becomes one message per
+/// named member, each member is fetched by its own `Range` with the connection's headers,
+/// authorization and TLS, and inflated. A refused read is logged and dropped, so the author's
+/// steps never see archive bytes. Stock Bento only: `unarchive: zip` would inflate every member.
+fn archive_processors(
+    spec: &DataSourceSpec,
+    archive: &HttpArchive,
+    context: &InputContext,
+) -> Vec<Value> {
+    let members = serde_json::to_string(&archive.members).expect("strings serialize");
+    let directory = ZIP_DIRECTORY.replacen("MEMBERS", &members, 1).replacen(
+        "MAX_BYTES",
+        &archive.max_bytes().to_string(),
+        1,
+    );
+    let mut member = http(spec, context);
+    let mut headers = match member.remove(key("headers")) {
+        Some(Value::Mapping(headers)) => headers,
+        _ => Mapping::new(),
+    };
+    headers.insert(key("Range"), text("${! @range }"));
+    member.insert(key("headers"), Value::Mapping(headers));
+    let one = |name: &str, body: Value| {
+        let mut processor = Mapping::new();
+        processor.insert(key(name), body);
+        Value::Mapping(processor)
+    };
+    let mut unarchive = Mapping::new();
+    unarchive.insert(key("format"), text("json_array"));
+    let mut log = Mapping::new();
+    log.insert(key("level"), text("ERROR"));
+    log.insert(key("message"), text("archive read refused: ${! error() }"));
+    // `try` skips the steps after the first refusal: an unchecked directory must never reach
+    // the member request, whose empty range would fetch the whole archive.
+    let read = vec![
+        one("mapping", text(&format!("{ZIP_INT}{directory}"))),
+        one("unarchive", Value::Mapping(unarchive)),
+        one("mapping", text(ZIP_MEMBER)),
+        one("http", Value::Mapping(member)),
+        one("mapping", text(&format!("{ZIP_INT}{ZIP_INFLATE}"))),
+    ];
+    vec![
+        one("try", Value::Sequence(read)),
+        one(
+            "catch",
+            Value::Sequence(vec![
+                one("log", Value::Mapping(log)),
+                one("mapping", text("root = deleted()")),
+            ]),
+        ),
+    ]
 }
 
 /// The author's `bento.yaml` with the connection's input in front of it (PL-03, PL-39).
@@ -222,7 +348,7 @@ pub fn render(
         return Err(RenderError::InputAlreadyDeclared);
     }
 
-    let decoders = prepended_processors(spec);
+    let decoders = prepended_processors(spec, context);
     if !decoders.is_empty() {
         let mut pipeline = match config.remove(key("pipeline")) {
             Some(Value::Mapping(existing)) => existing,
@@ -371,6 +497,9 @@ fn http(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
             scheme => format!("{scheme} {value}"),
         };
         headers.insert(key(authorization.header_name()), text(&value));
+    }
+    if connection.archive.is_some() {
+        headers.insert(key("Range"), text(ZIP_TAIL));
     }
     if !headers.is_empty() {
         out.insert(key("headers"), Value::Mapping(headers));

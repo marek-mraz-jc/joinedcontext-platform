@@ -17,7 +17,8 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue};
 pub const TENANT: HeaderName = HeaderName::from_static("ngsild-tenant");
 
 /// Headers a client must never be able to set, because a downstream component would
-/// believe them (Deployment/10 section 4, GW25).
+/// believe them (Deployment/10 section 4, GW25); every name under [`IDENTITY_PREFIX`] is
+/// removed besides these.
 pub const FORGEABLE: &[&str] = &[
     "ngsild-tenant",
     "x-userinfo",
@@ -25,12 +26,24 @@ pub const FORGEABLE: &[&str] = &[
     "x-allowed-scope-ids",
     "x-endpoint-slug",
     "x-consumer-identity",
-    "x-jc-subject",
-    "x-jc-groups",
-    "x-jc-roles",
-    "x-jc-client",
-    "x-jc-restricted",
 ];
+
+/// The prefix of every identity header the broker's `joinedcontext` engine believes (T-3641):
+/// only the gateway sets one, so a client's is removed whatever its name, including one no
+/// code reads yet (T-3816).
+pub const IDENTITY_PREFIX: &str = "x-jc-";
+
+/// Removes every header under [`IDENTITY_PREFIX`], each with all its values.
+fn drop_identity(headers: &mut HeaderMap) {
+    let names: Vec<HeaderName> = headers
+        .keys()
+        .filter(|name| name.as_str().starts_with(IDENTITY_PREFIX))
+        .cloned()
+        .collect();
+    for name in names {
+        while headers.remove(&name).is_some() {}
+    }
+}
 
 /// The user the gateway verified, as the broker's `joinedcontext` engine reads it (T-3641).
 pub const SUBJECT: HeaderName = HeaderName::from_static("x-jc-subject");
@@ -42,6 +55,8 @@ pub const ROLES: HeaderName = HeaderName::from_static("x-jc-roles");
 pub const CLIENT: HeaderName = HeaderName::from_static("x-jc-client");
 /// `true` when the caller asked to be told about narrowing (O-3 (b), R22).
 pub const RESTRICTED: HeaderName = HeaderName::from_static("x-jc-restricted");
+/// The data-space participant a transfer token names (DS-02, map K38, T-3800).
+pub const DID: HeaderName = HeaderName::from_static("x-jc-did");
 
 /// The service account the gateway's own hops to the broker run as (T-3767): its Keycloak
 /// client. The rule document the Portal writes grants it the reads and the unlinking those hops
@@ -57,6 +72,7 @@ pub fn strip_client_headers(request: &mut Request) {
     for name in FORGEABLE {
         while headers.remove(*name).is_some() {}
     }
+    drop_identity(headers);
 }
 
 /// Pins the tenant for the internal hop to the broker (EP-22, GW20).
@@ -78,7 +94,9 @@ pub fn pin_tenant(request: &mut Request, space: &str) -> Result<(), InvalidHeade
 /// `x-jc-*` headers instead, and reads a request carrying none of them as the cluster's own, so
 /// `x-jc-roles` is always set, to `public` at least for an anonymous caller. Every value and
 /// list member is percent-encoded (T-3770), so a name with a diacritic or a comma reaches the
-/// broker whole.
+/// broker whole. A caller under a data-space agreement is its participant's DID alone
+/// (`x-jc-did`, DS-02): no role, no account, no opt-in, so a broker that does not read the
+/// header yet takes the hop as the cluster's own and refuses it, never as the public's.
 pub fn pin_caller(
     request: &mut Request,
     space: &str,
@@ -87,16 +105,13 @@ pub fn pin_caller(
     pin_tenant(request, space)?;
     let asked = super::response::asked_about_narrowing(request);
     let headers = request.headers_mut();
-    for name in [
-        AUTHORIZATION,
-        COOKIE,
-        SUBJECT,
-        GROUPS,
-        ROLES,
-        CLIENT,
-        RESTRICTED,
-    ] {
+    for name in [AUTHORIZATION, COOKIE] {
         while headers.remove(&name).is_some() {}
+    }
+    drop_identity(headers);
+    if subject.agreement.is_some() {
+        one(headers, DID, subject.did.as_deref());
+        return Ok(());
     }
     one(headers, SUBJECT, subject.user.as_deref());
     // Only the gateway's own hops speak as the gateway, never a token of its client.
@@ -156,17 +171,10 @@ fn list<'a>(
 /// [`GATEWAY_CLIENT`] with no role, so the engine decides it by the gateway's own grant and a
 /// hop that forgot this is refused, never served as the cluster's own.
 pub fn as_gateway(headers: &mut HeaderMap) {
-    for name in [
-        AUTHORIZATION,
-        COOKIE,
-        SUBJECT,
-        GROUPS,
-        ROLES,
-        CLIENT,
-        RESTRICTED,
-    ] {
+    for name in [AUTHORIZATION, COOKIE] {
         while headers.remove(&name).is_some() {}
     }
+    drop_identity(headers);
     headers.insert(CLIENT, HeaderValue::from_static(GATEWAY_CLIENT));
     headers.insert(ROLES, HeaderValue::from_static(""));
 }

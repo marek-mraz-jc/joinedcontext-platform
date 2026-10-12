@@ -404,15 +404,6 @@ impl OperationGroup {
             Self::RedirectionOps => "redirectionOps",
         }
     }
-
-    /// All five operation groups in Table 4.20-2 order.
-    pub const ALL: &'static [OperationGroup] = &[
-        Self::FederationOps,
-        Self::AssociationOps,
-        Self::UpdateOps,
-        Self::RetrieveOps,
-        Self::RedirectionOps,
-    ];
 }
 
 impl fmt::Display for OperationGroup {
@@ -778,14 +769,6 @@ impl PolicySpec {
                 matches!(g, OperationGroup::UpdateOps | OperationGroup::FederationOps)
             }
         })
-    }
-
-    /// Returns `true` if all residual constraints (`q`, `scopeQ`, `geoQ`, `temporalQ`) are absent (EP-56).
-    pub fn residual_is_empty(&self) -> bool {
-        self.q.is_none()
-            && self.scope_q.is_none()
-            && self.geo_q.is_none()
-            && self.temporal_q.is_none()
     }
 }
 
