@@ -171,8 +171,9 @@ const PREFIXES: [(&str, &str); 13] = [
 ///
 /// The record keeps compact keys and plain strings, which is what a reader that reads keys
 /// expects; the `@context` built from this list is what makes an RDF reader see IRIs.
-const IRI_KEYS: [&str; 22] = [
+const IRI_KEYS: [&str; 23] = [
     "dct:accessRights",
+    "foaf:page",
     "dct:conformsTo",
     "dct:format",
     "dct:license",
@@ -284,10 +285,45 @@ fn representation_distributions(endpoint: &Endpoint, iri: &str) -> Vec<Value> {
         if let Some(standard) = served.conforms_to {
             distribution["dct:conformsTo"] = json!(standard);
         }
+        if *representation == Representation::WebSocket {
+            let base = iri
+                .strip_suffix(endpoint.base_path.as_str())
+                .unwrap_or_default();
+            explain_websocket(&mut distribution, endpoint, &url, base);
+        }
         licensed(&mut distribution, endpoint.catalog.as_deref());
         out.push(distribution);
     }
     out
+}
+
+/// What the WebSocket distribution says of itself (T-4064, API/07 §1): one sentence in the
+/// Endpoint's languages, and the guide as its page and as the message format it conforms to.
+const WEBSOCKET_SENTENCES: [(&str, &str); 3] = [
+    ("en", "Open {address} with the subprotocol ngsi-ld-ws and send an x-subscribe message; each change arrives as a message."),
+    ("fi", "Avaa {address} aliprotokollalla ngsi-ld-ws ja lähetä x-subscribe-viesti; jokainen muutos saapuu viestinä."),
+    ("sk", "Otvorte {address} s podprotokolom ngsi-ld-ws a pošlite správu x-subscribe; každá zmena príde ako správa."),
+];
+
+fn explain_websocket(distribution: &mut Value, endpoint: &Endpoint, url: &str, base: &str) {
+    let address = crate::handlers::ws::ws_address(url);
+    let described: Vec<Value> = WEBSOCKET_SENTENCES
+        .iter()
+        .filter(|(language, _)| {
+            *language == "en"
+                || endpoint
+                    .title
+                    .get(*language)
+                    .is_some_and(|title| !title.trim().is_empty())
+        })
+        .map(|(language, sentence)| {
+            json!({ "@value": sentence.replace("{address}", &address), "@language": language })
+        })
+        .collect();
+    let guide = format!("{base}/docs/API/07-websocket");
+    distribution["dct:description"] = json!(described);
+    distribution["foaf:page"] = json!(guide);
+    distribution["dct:conformsTo"] = json!(guide);
 }
 
 /// One distribution per schema artifact, with the digest of the projected document (EP-68).
@@ -922,8 +958,21 @@ pub fn dataset_html(
                 .get("dct:title")
                 .and_then(Value::as_str)
                 .unwrap_or(url);
+            // The WebSocket says how to use it, in English, beside its guide (T-4064).
+            let note = distribution
+                .get("dct:description")
+                .and_then(Value::as_array)
+                .and_then(|values| values.iter().find(|value| value["@language"] == "en"))
+                .and_then(|value| value["@value"].as_str())
+                .map(|note| format!("<br>{}", escape(note)))
+                .unwrap_or_default();
+            let page = distribution
+                .get("foaf:page")
+                .and_then(Value::as_str)
+                .map(|page| format!(" <a href=\"{}\">Guide</a>", escape(page)))
+                .unwrap_or_default();
             Some(format!(
-                "<li><a href=\"{}\">{}</a></li>",
+                "<li><a href=\"{}\">{}</a>{note}{page}</li>",
                 escape(url),
                 escape(label)
             ))

@@ -435,3 +435,88 @@ async fn an_unknown_slug_answers_404_rather_than_an_empty_record() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// T-4064: the WebSocket distribution says how to use it, one sentence in each of the
+/// Endpoint's languages it has words for, and names the guide as its page and as the message
+/// format it conforms to; the HTML page shows the sentence and the guide under the link.
+#[tokio::test]
+async fn the_websocket_distribution_explains_itself_and_links_its_guide() {
+    let mut resolved = endpoint(Audience::Public);
+    resolved.representations.push(Representation::WebSocket);
+    resolved.title = BTreeMap::from([
+        ("en".to_owned(), "Buses".to_owned()),
+        ("fi".to_owned(), "Bussit".to_owned()),
+    ]);
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1"),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([resolved.clone()])
+        .serve_spaces([space(resolved)]),
+    ));
+    let read = |accept: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/endpoint/{SLUG}/"))
+                        .header("accept", accept)
+                        .body(Body::empty())
+                        .expect("a request"),
+                )
+                .await
+                .expect("the gateway answers");
+            let body = axum::body::to_bytes(response.into_body(), 512 * 1024)
+                .await
+                .expect("a body");
+            String::from_utf8_lossy(&body).into_owned()
+        }
+    };
+
+    let record: Value = serde_json::from_str(&read("*/*").await).expect("JSON-LD");
+    let ws = distributions(&record)
+        .into_iter()
+        .find(|d| {
+            d["dcat:accessURL"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/ws"))
+        })
+        .expect("the WebSocket is a distribution");
+    let described = ws["dct:description"].as_array().expect("a description");
+    let languages: Vec<&str> = described
+        .iter()
+        .filter_map(|value| value["@language"].as_str())
+        .collect();
+    assert_eq!(
+        languages,
+        ["en", "fi"],
+        "the Endpoint's languages, never sk"
+    );
+    let english = described[0]["@value"].as_str().expect("words");
+    assert!(
+        english.contains("ngsi-ld-ws") && english.contains("x-subscribe"),
+        "{english}"
+    );
+    assert!(
+        english.contains(&format!("/api/endpoint/{SLUG}/ws")),
+        "{english}"
+    );
+    assert!(ws["foaf:page"]
+        .as_str()
+        .is_some_and(|page| page.ends_with("/docs/API/07-websocket")));
+    assert_eq!(ws["dct:conformsTo"], ws["foaf:page"]);
+    assert_eq!(
+        record["@context"]["foaf:page"]["@type"], "@id",
+        "the page is an IRI"
+    );
+
+    let html = read("text/html").await;
+    assert!(html.contains("ngsi-ld-ws"), "{html}");
+    assert!(
+        html.contains("/docs/API/07-websocket\">Guide</a>"),
+        "{html}"
+    );
+}
