@@ -61,12 +61,18 @@ fn manifest(yaml: &str) -> RawManifest {
 /// The table the reconciler holds: an Endpoint name to the broker that holds its space and the
 /// tenant that space is (PF-48 direct read).
 fn endpoints() -> impl Endpoints {
-    |name: &str| match name {
+    |name: &str| {
+        match name {
         "ovzdusie-read" => Some(MemberSource {
             endpoint: "http://antares.brokers.svc.cluster.local/ngsi-ld/v1".into(),
             tenant: "bb-ovzdusie".into(),
+            gateway: Some(
+                "http://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/bb-ovzdusie-read"
+                    .into(),
+            ),
         }),
         _ => None,
+    }
     }
 }
 
@@ -275,6 +281,7 @@ fn no_identity_and_no_credential_reaches_the_broker() {
                 Some(MemberSource {
                     endpoint: format!("https://elsewhere.example/{name}"),
                     tenant: "a-member-space".into(),
+                    gateway: None,
                 })
             }),
         )
@@ -485,4 +492,49 @@ fn an_information_entry_with_an_empty_entities_list_is_refused() {
         "  information:\n    - entities: []\n      propertyNames: [speed]\n",
     );
     assert!(registration(&manifest(&yaml), &no_endpoints()).is_err());
+}
+
+/// T-3999, PF-113: a member read as the caller is read through its own Endpoint on the gateway,
+/// with the request's `Authorization` passed on, and never as a tenant the broker reads directly.
+#[test]
+fn a_caller_member_is_registered_at_its_gateway_endpoint_with_the_request_token() {
+    let yaml = LOCAL.replace(
+        "    identity: serviceAccount\n    serviceAccountRef: { kind: ServiceAccount, name: hub-reader }\n",
+        "    identity: caller\n",
+    );
+    assert!(yaml.contains("identity: caller"), "{yaml}");
+    let body = registration(&manifest(&yaml), &endpoints()).expect("builds");
+    assert_eq!(
+        body["endpoint"],
+        json!(
+            "http://context-gateway.joinedcontext.svc.cluster.local/api/endpoint/bb-ovzdusie-read"
+        )
+    );
+    assert!(body.get("tenant").is_none(), "{body}");
+    assert_eq!(
+        body["contextSourceInfo"],
+        json!([{ "key": "Authorization", "value": "urn:ngsi-ld:request" }])
+    );
+
+    // Without the gateway's address there is nowhere the member's Policy could decide, so
+    // nothing is registered rather than a direct read of the tenant.
+    let unknown = registration(
+        &manifest(&yaml),
+        &(|_: &str| {
+            Some(MemberSource {
+                endpoint: "http://antares/ngsi-ld/v1".into(),
+                tenant: "bb-ovzdusie".into(),
+                gateway: None,
+            })
+        }),
+    );
+    assert!(
+        matches!(unknown, Err(CsrError::UnresolvedEndpoint(ref name)) if name == "ovzdusie-read"),
+        "{unknown:?}"
+    );
+
+    // A service-account member keeps the direct read and passes no token on.
+    let direct = registration(&manifest(LOCAL), &endpoints()).expect("builds");
+    assert!(direct.get("contextSourceInfo").is_none(), "{direct}");
+    assert_eq!(direct["tenant"], json!("bb-ovzdusie"));
 }
