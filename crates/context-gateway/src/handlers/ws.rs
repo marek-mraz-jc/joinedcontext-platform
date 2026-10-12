@@ -146,7 +146,14 @@ pub(crate) async fn endpoint_ws(
         Ok(upgrade) => upgrade,
         Err(rejection) => return rejection.into_response(),
     };
-    let upstream = match upstream_request(gateway.broker.base(), &view, &parts.headers) {
+    let base = match gateway
+        .broker
+        .base_for(&format!("/x/views/{view}/ws"), &parts.headers)
+    {
+        Ok(base) => base,
+        Err(error) => return ProblemDetails::from(error).into_response(),
+    };
+    let upstream = match upstream_request(&base, &view, &parts.headers) {
         Ok(upstream) => upstream,
         Err(refused) => return *refused,
     };

@@ -176,6 +176,7 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         ttl_days: Some(7),
         urn_segment: None,
         missing_unit_code: MissingUnitCode::Fill,
+        broker_ref: None,
     };
     assert!(spec.validate().is_ok());
 
