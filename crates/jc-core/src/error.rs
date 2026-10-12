@@ -159,10 +159,12 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "odata-view-unavailable", status: 501, title: "OData View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its OData surface needs a broker view it does not have." },
     ProblemType { slug: "odata-batch-unavailable", status: 501, title: "OData Batch Unavailable", hint: "Send each OData write as a request of its own; $batch is not served through an endpoint." },
     ProblemType { slug: "broker-failure", status: 0, title: "Broker Failure", hint: "The context broker failed this request; try again in a minute, and report the requestId if it repeats." },
+    ProblemType { slug: "federation-exchange-failed", status: 0, title: "Federation Exchange Failed", hint: "The identity provider did not issue your token for a federated read; sign in again or try again shortly." },
     ProblemType { slug: "broker-unavailable", status: 502, title: "Broker Unavailable", hint: "The context broker did not open the WebSocket; try again in a minute." },
     ProblemType { slug: "upstream-unavailable", status: 0, title: "Upstream Unavailable", hint: "A service behind the platform did not answer; try again in a minute." },
     ProblemType { slug: "upstream-redirect", status: 502, title: "Upstream Redirect", hint: "The service behind the platform answered with a redirect it may not follow; ask its owner for the final address." },
     ProblemType { slug: "service-unavailable", status: 503, title: "Service Unavailable", hint: "The platform is not ready for this yet; try again in a minute." },
+    ProblemType { slug: "space-moving", status: 503, title: "Space Moving", hint: "The space is moving to another broker and takes no writes; send the write again after the seconds Retry-After names." },
     ProblemType { slug: "delivery-timeout", status: 504, title: "Delivery Timeout", hint: "The receiver did not answer in time; check that it is reachable and try again." },
 ];
 

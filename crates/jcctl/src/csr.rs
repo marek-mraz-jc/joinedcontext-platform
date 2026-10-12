@@ -91,6 +91,10 @@ pub struct MemberSource {
     pub endpoint: String,
     /// The tenant the member's Context Space is, sent by the broker on every forward.
     pub tenant: String,
+    /// The member Endpoint's base on the gateway (`…/api/endpoint/{slug}`), where a forward
+    /// carrying the caller's exchanged token is decided by the member's own Policy (T-3999,
+    /// PF-113). `None` when the reconciler does not know it.
+    pub gateway: Option<String>,
 }
 
 /// Where a registration's target lives, resolved by the caller.
@@ -137,6 +141,7 @@ pub fn registration(manifest: &RawManifest, endpoints: &impl Endpoints) -> Resul
         (None, Some(url)) => MemberSource {
             endpoint: url.clone(),
             tenant: String::new(),
+            gateway: None,
         },
         // validate() has already refused this, so reaching it means the spec changed without
         // this match changing with it.
@@ -146,9 +151,26 @@ pub fn registration(manifest: &RawManifest, endpoints: &impl Endpoints) -> Resul
     let mut body = Map::new();
     body.insert("id".into(), json!(registration_id(&manifest.metadata.name)));
     body.insert("type".into(), json!("ContextSourceRegistration"));
-    body.insert("endpoint".into(), json!(member.endpoint));
-    if !member.tenant.is_empty() {
-        body.insert("tenant".into(), json!(member.tenant));
+    // A member read as the caller is read through its own Endpoint on the gateway, which pins
+    // the tenant and lets the member's Policy decide; the broker passes on the request's
+    // `Authorization`, the token the gateway exchanged for this hop (ADR-N-047 §2.4).
+    match (forwards_caller_identity(&spec), &spec.endpoint_ref) {
+        (true, Some(reference)) => {
+            let gateway = member
+                .gateway
+                .ok_or_else(|| CsrError::UnresolvedEndpoint(reference.name().to_owned()))?;
+            body.insert("endpoint".into(), json!(gateway));
+            body.insert(
+                "contextSourceInfo".into(),
+                json!([{ "key": "Authorization", "value": "urn:ngsi-ld:request" }]),
+            );
+        }
+        _ => {
+            body.insert("endpoint".into(), json!(member.endpoint));
+            if !member.tenant.is_empty() {
+                body.insert("tenant".into(), json!(member.tenant));
+            }
+        }
     }
     body.insert("information".into(), information(&spec));
     body.insert("mode".into(), json!(mode(spec.mode)));
