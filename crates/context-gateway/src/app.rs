@@ -17,7 +17,7 @@ use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::access_routes::{access, access_check, access_simulate};
 use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
-use crate::handlers::ogc::ogc_features;
+use crate::handlers::ogc::{odata, ogc_features};
 use crate::handlers::schema_routes::{
     schema_artifact, schema_index, space_schema_artifact, space_schema_index,
 };
@@ -466,8 +466,9 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
         .route("/api/endpoint/{slug}/file.zip", get(file_zip))
-        // The OGC surface is one handler over its own resource tree: three spellings of the
-        // landing page, because a GIS client stores whichever one it was given (EP-29).
+        // The OGC surface is the broker's view (T-3752), one forward over its resource tree:
+        // three spellings of the landing page, because a GIS client stores whichever one it was
+        // given (EP-29).
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
@@ -483,6 +484,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
+        // The OData v4 service of the view (EP-104, T-3830), read-only until T-3939.
+        .route("/api/endpoint/{slug}/odata/v4", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))
@@ -1329,7 +1334,7 @@ fn query_shape_refusal(params: &[(String, String)]) -> Option<Response<Body>> {
 /// in the operator's log. What a broker says when it fails is whatever it was holding: an entity
 /// id in a message, a fragment of its own query, the name of an attribute an endpoint hides
 /// (T-2260).
-async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
+pub(crate) async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
@@ -1435,21 +1440,15 @@ fn reserve_create(
     Err(Box::new(refusal))
 }
 
-/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a projection
-/// with `temporalQ` (G6), a slug no view id can hold (the writer refuses it), and a
-/// subscription, whose delivery the gateway still seals and routes back (plan 5.5, T-3653). So
+/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
+/// Endpoint has a view ([`has_view`]), and the request is none of the kinds the view does not
+/// serve yet: a subscription, whose delivery the gateway still seals and routes back (plan 5.5, T-3653). So
 /// does a write with `If-Match`: the broker publishes no entity tags, and the gateway's read,
 /// compare and conditional write is the only lost-update guard there is (R45, GW16).
 fn served_by_view(
     endpoint: &Endpoint,
     (view, operation, headers): (&str, Operation, &HeaderMap),
 ) -> bool {
-    let temporal = endpoint
-        .projection
-        .as_ref()
-        .and_then(|projection| projection.filter.as_ref())
-        .is_some_and(|filter| filter.temporal_q.is_some());
     let subscription = matches!(
         operation,
         Operation::CreateSubscription
@@ -1459,7 +1458,19 @@ fn served_by_view(
             | Operation::DeleteSubscription
     );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    !conditional && !temporal && !subscription && (1..=MAX_VIEW_ID).contains(&view.len())
+    has_view(endpoint, view) && !conditional && !subscription
+}
+
+/// Whether the broker holds a view `view` of this Endpoint (plan 5.1, T-3643, T-3752). What no
+/// view can serve yet keeps the gateway's own answer, each until its gap closes: a projection
+/// with `temporalQ` (G6) and a slug no view id can hold (the writer refuses both).
+pub(crate) fn has_view(endpoint: &Endpoint, view: &str) -> bool {
+    let temporal = endpoint
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.filter.as_ref())
+        .is_some_and(|filter| filter.temporal_q.is_some());
+    !temporal && (1..=MAX_VIEW_ID).contains(&view.len())
 }
 
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
@@ -1621,7 +1632,7 @@ pub(crate) async fn serve_ngsi_ld_view(
 /// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
 /// `code` with its hint, the members the NGSI-LD surface carries them in (API/00 §4, T-3243), so
 /// a client keyed on the slug still says who can give access.
-async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
+pub(crate) async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
     let (parts, body) = answer.into_parts();
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -1651,7 +1662,7 @@ const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
-fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
+pub(crate) fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
     for name in [LOCATION, CONTENT_LOCATION, LINK] {
         let rewritten: Vec<HeaderValue> = headers
             .get_all(&name)
