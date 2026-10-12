@@ -1295,3 +1295,61 @@ fn a_public_id_declared_twice_is_refused_naming_both_deployments() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn broker(name: &str, default: bool) -> String {
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextBroker\nmetadata:\n  name: {name}\n  \
+         namespace: org\nspec:\n  default: {default}\n  image: ghcr.io/joinedcontext/antares@sha256:{}\n",
+        "0".repeat(64)
+    )
+}
+
+fn space_on(dir: &Path, broker_ref: &str) {
+    write(
+        dir,
+        "projects/ovzdusie/spaces/ovzdusie/space.yaml",
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ovzdusie\n  \
+             namespace: ovzdusie\nspec:\n  isSandbox: false\n  brokerRef: {broker_ref}\n"
+        ),
+    );
+}
+
+/// PF-110, PF-111: a space names a broker the organization declares, and one broker is the
+/// default; `main` needs no manifest while the organization declares none.
+#[test]
+fn a_space_on_an_undeclared_broker_or_two_defaults_are_refused() {
+    let dir = valid_repo("brokers");
+    space_on(&dir, "main");
+    assert_eq!(validate::run(&dir).findings, vec![], "the implicit main");
+
+    space_on(&dir, "canary");
+    let report = validate::run(&dir);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.message.contains("'canary'") && f.message.contains("brokers/canary.yaml")),
+        "{:?}",
+        report.findings
+    );
+
+    write(&dir, "brokers/main.yaml", &broker("main", true));
+    write(&dir, "brokers/canary.yaml", &broker("canary", false));
+    assert_eq!(
+        validate::run(&dir).findings,
+        vec![],
+        "both declared, one default"
+    );
+
+    write(&dir, "brokers/canary.yaml", &broker("canary", true));
+    let report = validate::run(&dir);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.message.contains("exactly one broker")),
+        "{:?}",
+        report.findings
+    );
+}

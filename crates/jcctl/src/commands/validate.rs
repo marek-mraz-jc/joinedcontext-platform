@@ -412,6 +412,7 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
 
     for (location, message) in roles_that_do_not_resolve(&repo)
         .into_iter()
+        .chain(brokers_that_do_not_resolve(&repo))
         .filter(|_| organization)
     {
         report.findings.push(Finding {
@@ -581,6 +582,48 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
                 format!(
                     "{id} names group `{group}`, which no Group manifest of this organization \
                      declares: add `users/groups/{group}.yaml` (PF-62, PF-64)"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// Refused: brokers without exactly one default, and a space whose `brokerRef` names no
+/// `ContextBroker` of the organization (PF-110, PF-111). The brokers are the organization's, so
+/// a project repository checked alone is not judged here.
+fn brokers_that_do_not_resolve(repo: &Repository) -> Vec<(Location, String)> {
+    let brokers: Vec<(&str, jc_core::kinds::ContextBrokerSpec, Location)> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "ContextBroker")
+        .filter_map(|(id, resource)| {
+            let spec = serde_json::from_value(resource.manifest.spec.clone()).ok()?;
+            let at = (resource.path.clone(), resource.document, resource.line);
+            Some((id.name.as_str(), spec, at))
+        })
+        .collect();
+    let named = || brokers.iter().map(|(name, spec, _)| (*name, spec));
+    let mut findings = Vec::new();
+    if let (Err(err), Some((_, _, at))) =
+        (jc_core::kinds::validate_brokers(named()), brokers.first())
+    {
+        findings.push((at.clone(), format!("ContextBroker: {err} (PF-110)")));
+    }
+    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "ContextSpace") {
+        let broker_ref = resource
+            .manifest
+            .spec
+            .get("brokerRef")
+            .and_then(|b| b.as_str());
+        if broker_ref.is_none() {
+            continue;
+        }
+        if let Err(err) = jc_core::kinds::broker_of(broker_ref, named()) {
+            findings.push((
+                (resource.path.clone(), resource.document, resource.line),
+                format!(
+                    "{id}: {err}: add `brokers/{}.yaml`",
+                    broker_ref.unwrap_or_default()
                 ),
             ));
         }
