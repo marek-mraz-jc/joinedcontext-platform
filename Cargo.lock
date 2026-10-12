@@ -3497,6 +3497,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "age",
+ "antares-jsonld",
  "base64 0.22.1",
  "chrono",
  "jc-core",
