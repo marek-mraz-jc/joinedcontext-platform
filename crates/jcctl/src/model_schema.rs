@@ -54,6 +54,28 @@ pub struct ModelSchema {
     validators: BTreeMap<String, Option<Arc<jsonschema::Validator>>>,
 }
 
+/// Two compilations are equal when they compile the same model to the same class schemas; the
+/// validators follow from those.
+impl PartialEq for ModelSchema {
+    fn eq(&self, other: &Self) -> bool {
+        (
+            &self.model,
+            &self.version,
+            &self.classes,
+            &self.ends,
+            &self.definitions,
+        ) == (
+            &other.model,
+            &other.version,
+            &other.classes,
+            &other.ends,
+            &other.definitions,
+        )
+    }
+}
+
+impl Eq for ModelSchema {}
+
 /// One attribute of a class as the space's model states it (T-3223): what an editor needs to map
 /// a field onto it.
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -1069,7 +1069,7 @@ pub(crate) async fn serve_ngsi_ld(
                 }
             }
             let before = sent.len();
-            if let Err(problem) = quality_judged(&mut sent, &path, &endpoint) {
+            if let Err(problem) = quality_judged(&mut sent, &path, operation, &endpoint) {
                 return problem.into_response();
             }
             if !units_filled.is_empty() || sent.len() != before {
@@ -1818,7 +1818,7 @@ async fn view_payload(
                 tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
                 Box::new(problem.into_response())
             })?;
-            quality_judged(sent, path, endpoint)
+            quality_judged(sent, path, operation, endpoint)
                 .map_err(|problem| Box::new(problem.into_response()))?;
         }
     }
@@ -2648,21 +2648,21 @@ fn filled_units(
     Ok(filled)
 }
 
-/// Judges a write against the space's quality rules (DM-87..DM-93): a rejecting rule refuses
-/// it, a flag or a quarantine is written into `sent` before it is forwarded.
+/// Judges a write against the slot constraints of the space's model (DM-86) and the space's
+/// quality rules (DM-87..DM-93): a broken constraint or a rejecting rule refuses it, a flag or
+/// a quarantine is written into `sent` before it is forwarded.
 fn quality_judged(
     sent: &mut Vec<u8>,
     path: &str,
+    operation: Operation,
     endpoint: &Endpoint,
 ) -> Result<(), Box<ProblemDetails>> {
-    let Some(rules) = endpoint
-        .declared_types
-        .as_ref()
-        .map(|declared| &declared.quality)
-        .filter(|rules| !rules.is_empty())
-    else {
+    let Some(declared) = endpoint.declared_types.as_ref() else {
         return Ok(());
     };
+    if declared.schema.is_none() && declared.quality.is_empty() {
+        return Ok(());
+    }
     let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
         // `judge_write` already refused a body that is not JSON; nothing is left to check.
         return Ok(());
@@ -2672,6 +2672,18 @@ fn quality_judged(
         addressed: addressed.as_deref(),
         targeted: operations::targeted_attribute(path),
     };
+    if let Some(schema) = &declared.schema {
+        // A create or a replace carries the whole entity; every other write a part of it.
+        let whole = matches!(
+            operation,
+            Operation::CreateEntity | Operation::CreateBatch | Operation::ReplaceEntity
+        );
+        crate::quality::check_model(&payload, shape, whole, schema, &endpoint.space)?;
+    }
+    let rules = &declared.quality;
+    if rules.is_empty() {
+        return Ok(());
+    }
     let before = payload.clone();
     crate::quality::enforce(
         &mut payload,

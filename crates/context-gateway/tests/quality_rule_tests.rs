@@ -82,6 +82,7 @@ fn endpoint(quality: Vec<QualityRule>) -> Endpoint {
             units: UnitRules::from_schema(&schema(), MissingUnitCode::Fill),
             relationships: Default::default(),
             quality,
+            schema: None,
         }),
         catalog: None,
         roles: Default::default(),
