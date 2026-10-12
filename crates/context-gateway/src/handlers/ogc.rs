@@ -42,22 +42,18 @@ struct Surface {
     representation: Representation,
     /// The child path under the Endpoint and under `/x/views/{view}`.
     path: &'static str,
-    /// The problem slug of an Endpoint or caller without a view.
-    no_view: &'static str,
     name: &'static str,
 }
 
 const OGC: Surface = Surface {
     representation: Representation::OgcFeatures,
     path: "ogc/features",
-    no_view: "ogc-view-unavailable",
     name: "OGC API Features",
 };
 
 const ODATA: Surface = Surface {
     representation: Representation::Odata,
     path: "odata/v4",
-    no_view: "odata-view-unavailable",
     name: "OData",
 };
 
@@ -522,7 +518,13 @@ fn authority(base: &str) -> &str {
 /// `temporalQ`, a caller under a data-space agreement, a slug no view id holds): the surface
 /// is the broker's alone, so there is no other answer (ADR-0029 decision 3).
 fn no_view(surface: &Surface) -> Response<Body> {
-    ProblemDetails::new(501, surface.no_view, "Not Implemented")
+    // One literal slug per surface: the catalogue test reads them from the source (API/00 §4).
+    let problem = if surface.representation == Representation::Odata {
+        ProblemDetails::new(501, "odata-view-unavailable", "Not Implemented")
+    } else {
+        ProblemDetails::new(501, "ogc-view-unavailable", "Not Implemented")
+    };
+    problem
         .with_detail(format!(
             "the {} surface is served from the broker's view of this endpoint, and this \
              endpoint or caller has none yet; read it through the NGSI-LD surface",
