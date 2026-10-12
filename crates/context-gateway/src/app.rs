@@ -757,6 +757,10 @@ pub(crate) async fn serve_ngsi_ld(
     // delivered by the broker under the engine. Stored here it would deliver with nothing
     // deciding what leaves, so a request no view can take is refused, never stored around it.
     if is_subscription(operation) {
+        // A federated read's token is refused for what it is, whatever a view could take.
+        if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
+            return refusal;
+        }
         tracing::info!(slug = %endpoint.slug, %operation, "refused: a subscription no view serves");
         return subscription_without_view();
     }
