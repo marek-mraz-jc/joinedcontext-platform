@@ -13,7 +13,8 @@ use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::http::header::ACCEPT;
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::stream::{self, StreamExt};
 use jc_core::kinds::Operation;
@@ -36,6 +37,7 @@ async fn dataset_types(
 ) -> Result<Vec<String>, Box<Response<Body>>> {
     let mut headers = headers.clone();
     tenancy::as_gateway(&mut headers);
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
         .send(
@@ -120,14 +122,14 @@ pub(crate) async fn query_entities(
         "/ngsi-ld/v1/entities?{}",
         query::upstream(params, &constraints, &fallback)
     );
+    // The entity array is read here and rendered by the caller's handler: asked with the
+    // caller's `application/geo+json`, the broker answers a FeatureCollection, which reads as
+    // no entity (T-4106).
+    let mut headers = request.headers().clone();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
-        .send(
-            axum::http::Method::GET,
-            &target,
-            request.headers().clone(),
-            Body::empty(),
-        )
+        .send(axum::http::Method::GET, &target, headers, Body::empty())
         .await
         .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
 
@@ -765,12 +767,16 @@ async fn view_page(
     target: &str,
     headers: &HeaderMap,
 ) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
+    // An entity array is read here, whatever the caller accepts: asked with its geo+json, the
+    // view answers a FeatureCollection that reads as no entity (T-4111, as T-4106 for the PDP path).
+    let mut headers = headers.clone();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway
         .broker
         .send(
             axum::http::Method::GET,
             &format!("/x/views/{view}/ngsi-ld/v1/{target}"),
-            headers.clone(),
+            headers,
             Body::empty(),
         )
         .await
