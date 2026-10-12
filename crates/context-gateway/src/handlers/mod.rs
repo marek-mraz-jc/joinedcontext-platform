@@ -16,3 +16,4 @@ pub mod schema_routes;
 pub mod space_routes;
 pub mod space_surface;
 pub mod sta;
+pub mod ws;
