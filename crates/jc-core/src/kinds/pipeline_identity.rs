@@ -277,6 +277,43 @@ expiry: { after: 21d, types: [CreativeWork] }
             .all(|c| c.kind == CredentialKind::OauthClient));
     }
 
+    /// PL-73, PL-55: a route writes only where the pipeline is granted, so each route output
+    /// gets its write policy after the default lane's, and the lane's keeps its name.
+    #[test]
+    fn every_route_output_gets_its_own_write_grant() {
+        let routed = pipeline(
+            r#"
+class: resident
+sources: [{ dataSourceRef: { kind: DataSource, name: uniza-drepo } }]
+routes:
+  - name: kpi
+    when: this.kpi == true
+    outputs: [{ targetEndpoint: "urn:ngsi-ld:Endpoint:zilina.sk:zilina-kpi:zilina-kpi" }]
+outputs: [{ targetEndpoint: "urn:ngsi-ld:Endpoint:zilina.sk:zilina-uniza:zilina-uniza" }]
+"#,
+        );
+        let derived = derive(
+            "zilina",
+            "drepo",
+            &routed,
+            "pipeline-runner",
+            "zilina.sk",
+            spaces,
+        );
+        let grants: Vec<(&str, &str)> = derived
+            .policies
+            .iter()
+            .map(|(name, policy)| (name.as_str(), policy.context_space_ref.name()))
+            .collect();
+        assert_eq!(
+            grants,
+            [
+                ("pl-drepo-w-1", "zilina-uniza"),
+                ("pl-drepo-w-2", "zilina-kpi")
+            ]
+        );
+    }
+
     /// PL-20: the write grant is on the output's space over its type, with the sweep's delete
     /// only because the pipeline expires; nothing on any other space.
     #[test]
