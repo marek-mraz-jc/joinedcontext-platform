@@ -1,0 +1,23 @@
+[package]
+name = "camera-sim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A camera for the demo: signs in with its own key pair and publishes over MQTT (T-3838)"
+
+[[bin]]
+name = "jc-camera-sim"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+# The camera's key pair (PF-47): the private half in a PKCS#8 file, the public half as a JWK.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# MQTT is three packets (src/mqtt.rs) over the TLS the workspace already uses.
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
+rustls-pki-types = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

@@ -434,6 +434,8 @@ fn quality_rules_refuse_what_cannot_be_checked_dm_86_dm_91() {
         ("{ name: s, entityType: Vehicle, kind: area, attribute: location, bbox: [24.5, 60.0, 25.3, 91] }", "spec.quality.bbox"),
         ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location, maxAge: PT0S }", "spec.quality.maxAge"),
         ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location, maxAhead: P1Y }", "spec.quality.maxAhead"),
+        ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location, maxAge: PT5M, outcome: reject }", "spec.quality.outcome"),
+        ("{ name: s, entityType: Vehicle, kind: freshness, attribute: location, maxAhead: PT30S, maxAge: PT5M, outcome: flag }", "spec.quality.outcome"),
     ] {
         let space = ContextSpace::from_yaml(&with_quality(&format!("    - {rule}"))).expect(rule);
         let err = space

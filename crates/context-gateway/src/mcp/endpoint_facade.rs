@@ -40,7 +40,8 @@
 //! compiles and names the rest as served beside the model.
 
 use crate::app::{ngsi_ld_request, sha256_hex, Credential, Gateway};
-use crate::handlers::{access, schema};
+use crate::handlers::access_routes::{self, AccessFormat};
+use crate::handlers::schema;
 use crate::mcp::elicitation;
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
 use crate::resolver::{Endpoint, Model};
@@ -1533,8 +1534,10 @@ async fn call_tool(
                 .get("format")
                 .and_then(Value::as_str)
                 .unwrap_or("permissions");
-            let document = access_document(&gateway, &subject, &endpoint, format);
-            return result(id, answered(&document, tool.result_key, false, &[]));
+            return match access_document(&gateway, &subject, &endpoint, format).await {
+                Ok(document) => result(id, answered(&document, tool.result_key, false, &[])),
+                Err(message) => result(id, refused(&message, &Value::Null)),
+            };
         }
         "describe_schema" => {
             return match describe_schema(&endpoint, &subject, &arguments) {
@@ -1744,8 +1747,10 @@ async fn read_resource(
     let arguments: Map<String, Value> = Map::new();
     let (tool, call): (&str, Map<String, Value>) = match parse_resource(&endpoint, uri) {
         Some(Resource::Access(format)) => {
-            let document = access_document(&gateway, &subject, &endpoint, &format);
-            return result(id, contents(uri, &document));
+            return match access_document(&gateway, &subject, &endpoint, &format).await {
+                Ok(document) => result(id, contents(uri, &document)),
+                Err(message) => result(id, refused(&message, &Value::Null)),
+            };
         }
         Some(Resource::Schema { major, format }) => {
             let mut asked = arguments;
@@ -1868,26 +1873,28 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
 /// The words `describe_access` and the `access://` resource answer in (EP-56, EP-57, EP-58).
 const ACCESS_FORMATS: [&str; 3] = ["permissions", "odrl", "grant-ast"];
 
-/// The caller's grants in one of [`ACCESS_FORMATS`], computed by the very functions the HTTP
-/// access surface uses, so MCP and HTTP answer the same document (EP-60, T-0425).
-fn access_document(
+/// The caller's grants in one of [`ACCESS_FORMATS`], read by the very function the HTTP access
+/// surface serves, so MCP and HTTP answer the same document (EP-60, T-0425, T-3649). A broker
+/// failure is the text a tool error carries, naming nothing the broker said.
+async fn access_document(
     gateway: &Gateway,
     subject: &Subject,
     endpoint: &Endpoint,
     format: &str,
-) -> Value {
-    let now = crate::pdp::now();
-    match format {
-        "odrl" => crate::handlers::access_odrl::policy(
-            subject,
-            endpoint,
-            now,
-            gateway.base_url(),
-            crate::app::sha256_hex,
-        ),
-        "grant-ast" => crate::handlers::access_ucast::grant_ast(subject, endpoint, now),
-        _ => access::permissions(subject, endpoint, now),
-    }
+) -> Result<Value, String> {
+    let format = match format {
+        "odrl" => AccessFormat::Odrl,
+        "grant-ast" => AccessFormat::GrantAst,
+        _ => AccessFormat::AuthZen,
+    };
+    access_routes::document(gateway, endpoint, subject, format)
+        .await
+        .map_err(|answer| {
+            format!(
+                "the access document could not be read (HTTP {}); try again in a moment",
+                answer.status().as_u16()
+            )
+        })
 }
 
 /// One resource, in the envelope `resources/read` answers with.
