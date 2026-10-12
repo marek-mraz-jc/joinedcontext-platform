@@ -343,6 +343,69 @@ fn a_header_name_that_is_not_a_token_is_refused() {
     }
 }
 
+const ZIP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata:
+  name: hsl-gtfs
+  namespace: helsinki
+spec:
+  type: http
+  http:
+    url: https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
+    archive:
+      format: zip
+      members: [agency.txt, routes.txt, stops.txt]
+"#;
+
+/// PL-72: an archive names the members the runner reads; each name and the bound end up in the
+/// rendered mapping, so anything that could be code there is refused here.
+#[test]
+fn an_archive_names_plain_members_within_a_bound() {
+    let source = DataSource::from_yaml(ZIP).expect("parses");
+    source.validate().expect("three members of a zip");
+    let archive = source.spec.http.as_ref().unwrap().archive.clone().unwrap();
+    assert_eq!(archive.max_bytes(), 32 * 1024 * 1024, "the default bound");
+
+    let twenty_one = (0..21)
+        .map(|n| format!("f{n}.txt"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (from, to) in [
+        ("[agency.txt, routes.txt, stops.txt]", "[]".to_owned()),
+        (
+            "[agency.txt, routes.txt, stops.txt]",
+            format!("[{twenty_one}]"),
+        ),
+        ("stops.txt]", "'stops\".txt']".to_owned()),
+        ("stops.txt]", "'${! meta(\"x\") }']".to_owned()),
+        ("stops.txt]", "'a b.txt']".to_owned()),
+        ("stops.txt]", "stops.txt]\n      maxBytes: 0".to_owned()),
+        (
+            "stops.txt]",
+            "stops.txt]\n      maxBytes: 268435457".to_owned(),
+        ),
+        ("    archive:", "    verb: POST\n    archive:".to_owned()),
+        (
+            "    archive:",
+            "    headers: { range: bytes=0-1 }\n    archive:".to_owned(),
+        ),
+    ] {
+        let yaml = ZIP.replace(from, &to);
+        let refused = DataSource::from_yaml(&yaml).map_or(true, |s| s.validate().is_err());
+        assert!(refused, "{to:?} is refused");
+    }
+    let tar = ZIP.replace("format: zip", "format: tar");
+    assert!(
+        DataSource::from_yaml(&tar).is_err(),
+        "zip is the only format"
+    );
+    let largest = ZIP.replace("stops.txt]", "stops.txt]\n      maxBytes: 268435456");
+    DataSource::from_yaml(&largest)
+        .unwrap()
+        .validate()
+        .expect("256 MiB is allowed");
+}
+
 const KAFKA: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource
 metadata:
