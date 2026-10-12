@@ -658,6 +658,52 @@ async fn paged_view(
     Ok((Value::Array(chunks.concat()), restricted))
 }
 
+/// The type list of an Endpoint as its reads show the caller (CIM 009 5.7.1, T-4080): every
+/// type the space holds that the Endpoint's view answers at least one entity of to this caller.
+/// A read grant is enough to be shown it, as it is for the schema (EP-47), and each type is the
+/// view's decision, so no type name outside what the caller may read is listed. `None` when the
+/// caller holds no read through the Endpoint: the view then answers the operation itself.
+pub(crate) async fn listed_types(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    request: &mut Request,
+) -> Result<Option<Value>, Box<Response<Body>>> {
+    let slug = endpoint.slug.as_str();
+    let reads = gateway.pdp.decide(
+        subject,
+        Operation::QueryEntity,
+        &query::requested(&[]),
+        endpoint,
+    );
+    if !matches!(reads, Verdict::Rewrite(_)) {
+        return Ok(None);
+    }
+    view_hop(endpoint, subject, request)?;
+    let held = view_fallback(gateway, (endpoint, subject, slug), &[], request.headers())
+        .await?
+        .unwrap_or_default();
+    let mut shown = Vec::new();
+    for name in held {
+        let target = format!(
+            "entities?{}&limit=1",
+            query::view_read(&[], std::slice::from_ref(&name))
+        );
+        match view_page(gateway, slug, slug, &target, request.headers()).await {
+            Ok((page, _, _, _)) if !page.is_empty() => shown.push(name),
+            Ok(_) => {}
+            // A type the view refuses this caller is a type they are not shown.
+            Err(refused) if refused.status() == StatusCode::FORBIDDEN => {}
+            Err(failed) => return Err(failed),
+        }
+    }
+    Ok(Some(serde_json::json!({
+        "id": format!("urn:ngsi-ld:EntityTypeList:{slug}"),
+        "type": "EntityTypeList",
+        "typeList": shown,
+    })))
+}
+
 /// Pins the tenant and the verified caller for a hop to the view; a caller who asked about
 /// narrowing has the broker asked too (R22).
 fn view_hop(
