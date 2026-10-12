@@ -218,8 +218,16 @@ async fn the_callers_accept_never_reaches_the_broker() {
         assert_eq!(response.status(), StatusCode::OK, "{path}");
         let hops = broker.hops();
         assert!(!hops.is_empty(), "{path}: no hop");
+        // The data hops ask for JSON; the bundle's schema hops to the view's LinkML surface
+        // (T-3646) name their document by path and carry no `Accept` of the caller's either.
         assert!(
-            hops.iter().all(|hop| hop.accept == "application/json"),
+            hops.iter()
+                .filter(|hop| hop.path.starts_with("/ngsi-ld/"))
+                .all(|hop| hop.accept == "application/json"),
+            "{path}: {hops:?}"
+        );
+        assert!(
+            hops.iter().all(|hop| hop.accept != accept),
             "{path}: {hops:?}"
         );
     }

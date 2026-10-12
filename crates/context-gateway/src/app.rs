@@ -4773,7 +4773,7 @@ async fn endpoint_record(
     };
 
     // The catalogue the caller's `schema/` routes serve, so the digests are their ETags (EP-68).
-    let index = schema_routes::index_for(&gateway, &endpoint, &subject).await;
+    let index = schema_routes::index_for(&gateway, &endpoint, &endpoint.slug, &subject).await;
     let space = gateway.resolver.resolve_space(&endpoint.space);
     let space = space.as_deref();
 
@@ -4812,7 +4812,7 @@ async fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
         if endpoint.audience != Audience::Public {
             continue;
         }
-        let index = schema_routes::index_for(gateway, &endpoint, &anonymous).await;
+        let index = schema_routes::index_for(gateway, &endpoint, &endpoint.slug, &anonymous).await;
         let space = gateway.resolver.resolve_space(&endpoint.space);
         records.push(endpoint_surface::dataset(
             &endpoint,

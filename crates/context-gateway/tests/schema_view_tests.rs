@@ -6,7 +6,7 @@
 //! sent and the tenant and the verified caller pinned. The broker narrows every document; these
 //! tests hold what the gateway does around that hop: the path, the revalidation, a hidden name
 //! answered as an unknown one (LK8), a broker failure in the gateway's own words, the refusal's
-//! platform slug, and the local answer for an Endpoint no view serves.
+//! platform slug, and the `404` of an Endpoint no view serves (T-3646).
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
@@ -306,10 +306,10 @@ async fn a_refusal_carries_the_platform_slug() {
     assert_eq!(problem["code"], "forbidden", "{body}");
 }
 
-/// An Endpoint no view serves (here a slug longer than a view id may be) is still answered by
-/// the gateway's own rendering, and the broker is not asked.
+/// An Endpoint no view serves (here a slug longer than a view id may be) has no schema child:
+/// the plain `404`, no document rendered by the gateway, and the broker is not asked (T-3646).
 #[tokio::test]
-async fn an_endpoint_without_a_view_is_answered_locally() {
+async fn an_endpoint_without_a_view_has_no_schema() {
     let (upstream, hops) = broker(StatusCode::OK).await;
     let slug = "a".repeat(64);
     let unviewed = Endpoint {
@@ -323,9 +323,21 @@ async fn an_endpoint_without_a_view_is_answered_locally() {
         get(&format!("/api/endpoint/{slug}/schema/index.json")),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("bb-air-quality"), "{body}");
-    assert!(!body.contains(DIGEST), "{body}");
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(!body.contains("bb-air-quality"), "{body}");
+    for artifact in ["v1/model.linkml.yaml", "v1/model.schema.json", "v1/model"] {
+        let (status, _, body) = call(
+            &upstream,
+            Endpoint {
+                slug: slug.clone(),
+                base_path: format!("/api/endpoint/{slug}"),
+                ..endpoint()
+            },
+            get(&format!("/api/endpoint/{slug}/schema/{artifact}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{artifact}: {body}");
+    }
     assert!(paths(&hops).is_empty());
 }
 

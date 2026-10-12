@@ -90,8 +90,8 @@ fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) ->
     }
 }
 
-/// MP-03: the schema surface describes the projected classes and slots only, and the
-/// document (so its ETag) changes when the projection does.
+/// MP-03: the projection narrows the types the gateway names (the schema documents themselves
+/// are the broker's since T-3646, `schema_view_tests.rs`).
 #[test]
 fn the_schema_surface_serves_the_projected_model() {
     let now = context_gateway::pdp::now();
@@ -113,15 +113,5 @@ fn the_schema_surface_serves_the_projected_model() {
         types,
         BTreeSet::from(["Vehicle".to_owned(), "User".to_owned()]),
         "exactly the projected classes"
-    );
-    let index_before = schema::index(
-        &unprojected,
-        &schema::visible(&subject, &unprojected, now),
-        |b| format!("{:x}", b.len()),
-    );
-    let index_after = schema::index(&projected, &visible, |b| format!("{:x}", b.len()));
-    assert_ne!(
-        index_before, index_after,
-        "the projection changes what is published"
     );
 }

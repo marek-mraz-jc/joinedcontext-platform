@@ -3,9 +3,9 @@
 //! Two doors onto one artifact. Since T-3645 both read the broker's LinkML surface of the
 //! Endpoint's view, so whatever the REST route serves for a caller is byte for byte what
 //! `describe_schema` answers; the stub broker here is that surface. A call narrowed with
-//! `entityType` has no REST counterpart and is still rendered by the gateway, and may not name a
-//! slot the projection gives to another type, which would tell an agent an attribute exists on
-//! a type whose data door hides it.
+//! `entityType` answers the broker's description of each class (`linkml/classes/{type}`,
+//! T-3646), which may not name a slot the projection gives to another type, which would tell an
+//! agent an attribute exists on a type whose data door hides it.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -95,6 +95,25 @@ const FILES: [(&str, &str); 7] = [
 async fn broker() -> String {
     let app = Router::new().fallback(any(|request: Request| async move {
         let path = request.uri().path().to_owned();
+        // One class as the broker describes it to this caller (T-3646): its own visible slots,
+        // `ssn` hidden, `Depot` outside the grant and so the same 404 as an unknown name.
+        for slug in [SLUG, BIG_SLUG] {
+            let Some(name) = path.strip_prefix(&format!("/x/views/{slug}/linkml/classes/")) else {
+                continue;
+            };
+            let slots: &[&str] = match (slug, name) {
+                (SLUG, "User") => &["name", "age"],
+                (SLUG, "Vehicle") => &["name", "weight"],
+                (BIG_SLUG, "Class3") => &["slot0"],
+                _ => return StatusCode::NOT_FOUND.into_response(),
+            };
+            let slots: Vec<Value> = slots
+                .iter()
+                .map(|slot| json!({ "name": slot, "description": format!("DESC-{name}-{slot}") }))
+                .collect();
+            return axum::Json(json!({ "name": name, "iri": format!("https://hel.fi/schema/{name}"), "slots": slots }))
+                .into_response();
+        }
         let surface = [SLUG, BIG_SLUG]
             .into_iter()
             .find_map(|slug| Some((slug, path.strip_prefix(&format!("/x/views/{slug}/linkml/schema/"))?)));
@@ -485,12 +504,13 @@ async fn a_type_outside_the_grant_is_refused_like_an_unknown_type() {
     );
 }
 
-/// EP-46, T-0284: each formalism is the language it claims to be, so a client that parses one
-/// is not handed another. No Turtle parser is a dependency of this workspace, so the three
-/// Turtle documents are checked structurally; the LinkML is parsed as the YAML it is.
+/// EP-46, T-0284: each formalism reaches the agent as the language the broker served it in, so
+/// a client that parses one is not handed another. No Turtle parser is a dependency of this
+/// workspace, so the three Turtle documents are checked structurally; the LinkML is parsed as
+/// the YAML it is.
 #[tokio::test]
 async fn linkml_parses_as_yaml_and_shacl_rdf_owl_parse_as_turtle() {
-    let linkml: Value = serde_norway::from_str(&mcp_list("linkml", &["User", "Vehicle"]).await)
+    let linkml: Value = serde_norway::from_str(&mcp("linkml", None).await)
         .unwrap_or_else(|error| panic!("the LinkML is not YAML: {error}"));
     assert!(
         linkml.get("classes").is_some(),
@@ -498,7 +518,7 @@ async fn linkml_parses_as_yaml_and_shacl_rdf_owl_parse_as_turtle() {
     );
 
     for format in ["shacl", "owl", "rdf"] {
-        let document = mcp_list(format, &["User", "Vehicle"]).await;
+        let document = mcp(format, None).await;
         assert!(
             document.contains("@prefix"),
             "{format} declares its prefixes:\n{document}"
@@ -550,15 +570,14 @@ async fn a_document_over_the_bound_says_how_to_narrow() {
         "nothing of the document is served with the refusal: {refused}"
     );
 
-    // And the way out works: one class of the same model is under the bound.
+    // And the way out works: one class of the same model is under the bound, the broker's
+    // description of that class and of no other (T-3646).
     let narrowed = describe(BIG_SLUG, "linkml", Some(json!("Class3"))).await;
-    let document = narrowed["structuredContent"]["schema"]["document"]
-        .as_str()
-        .unwrap_or_else(|| panic!("one class renders: {narrowed}"));
-    assert!(
-        document.contains("Class3") && !document.contains("Class40"),
-        "the narrowed document holds the class that was asked for and no other"
-    );
+    let classes = narrowed["structuredContent"]["schema"]["classes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("one class is described: {narrowed}"));
+    let names: Vec<&Value> = classes.iter().map(|class| &class["name"]).collect();
+    assert_eq!(names, [&json!("Class3")], "{narrowed}");
 }
 
 /// EP-46, EP-48: the digest in the catalogue is the digest of the bytes a fetch returns, so a
@@ -684,4 +703,37 @@ async fn rpc(slug: &str, method: &str, params: Value) -> Value {
     let answer: Value = serde_json::from_str(raw.trim_start_matches("data: ").trim())
         .unwrap_or_else(|error| panic!("the façade answered {raw}: {error}"));
     answer["result"].clone()
+}
+
+/// T-3646: a narrowed call reads the broker's class descriptions and nothing it renders itself;
+/// a narrowed call for a formalism no class description carries is refused with the call that
+/// serves it, so an agent is never handed an approximation.
+#[tokio::test]
+async fn a_narrowed_call_is_the_brokers_class_description() {
+    let answer = structured("linkml", Some(json!("Vehicle"))).await;
+    assert_eq!(answer["format"], json!("linkml"), "{answer}");
+    assert_eq!(answer["classes"][0]["name"], json!("Vehicle"), "{answer}");
+    assert_eq!(
+        answer["classes"][0]["slots"][1]["description"],
+        json!("DESC-Vehicle-weight"),
+        "{answer}"
+    );
+
+    for format in [
+        "json-schema",
+        "context",
+        "shacl",
+        "owl",
+        "rdf",
+        "markdown",
+        "qb",
+    ] {
+        let refused = describe(SLUG, format, Some(json!("Vehicle"))).await;
+        assert_eq!(refused["isError"], json!(true), "{format}: {refused}");
+        let words = refused["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            words.contains(format) && words.contains("without `entityType`"),
+            "{format}: the refusal names the call that serves it: {words}"
+        );
+    }
 }

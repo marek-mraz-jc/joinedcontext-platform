@@ -180,23 +180,12 @@ async fn the_bundle_carries_the_data_the_schemas_and_the_catalogue_record() {
         );
     }
 
-    // EP-51: the complete schema directory of every major the endpoint publishes, seven
-    // documents each, the same names the `schema/` surface serves.
-    for artifact in [
-        "model.linkml.yaml",
-        "model.schema.json",
-        "context.jsonld",
-        "model.shacl.ttl",
-        "model.owl.ttl",
-        "model.rdf.ttl",
-        "model.md",
-    ] {
-        let path = format!("schema/v1/{artifact}");
-        assert!(
-            paths.iter().any(|found| **found == path),
-            "{path} missing from {paths:?}"
-        );
-    }
+    // EP-51: the schema directory is every document the broker's index of the view lists, its
+    // bytes as the broker serves them under the same names as `schema/` (T-3646).
+    assert_eq!(
+        member(&members, "schema/v1/model.shacl.ttl"),
+        common::LINKML_SHAPES.as_bytes()
+    );
 
     // EP-43: the browser saves it under a name that says what it is and when.
     let disposition = disposition.expect("a content-disposition header");
@@ -358,46 +347,4 @@ async fn a_dataset_without_geometry_still_bundles() {
     assert_eq!(features["features"][0]["properties"]["pm10"], json!(12.0));
     let csv = String::from_utf8(member(&members, "data/entities.csv").to_vec()).expect("utf-8");
     assert_eq!(csv.lines().count(), 2, "the row is still there:\n{csv}");
-}
-
-/// EP-61, MP-02, T-2341: the bundle's `schema/v1/context.jsonld` is a schema document like the
-/// six beside it, and a term is a name *and* an IRI. A grant that names no `information` — the
-/// dev seed's own `public-read` is exactly that — leaves the caller with no type whitelist, and
-/// a whitelist-free caller used to cover every term of the committed context by the class test,
-/// which the hidden-attribute test in front of it could then never refuse.
-#[tokio::test]
-async fn no_schema_document_in_the_bundle_describes_a_hidden_attribute() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2)])]).await;
-    let (_, archive, _) = download(
-        gateway(&broker.url, endpoint(None, &["secret"])),
-        &format!("/api/endpoint/{SLUG}/file.zip"),
-    )
-    .await;
-
-    let schemas: Vec<_> = members(&archive)
-        .into_iter()
-        .filter(|(path, _)| path.starts_with("schema/"))
-        .collect();
-    assert!(
-        schemas
-            .iter()
-            .any(|(path, _)| path.ends_with("context.jsonld")),
-        "the bundle carries no @context to check: {:?}",
-        schemas.iter().map(|(p, _)| p).collect::<Vec<_>>()
-    );
-    for (path, body) in &schemas {
-        let text = String::from_utf8_lossy(body);
-        assert!(
-            !text.contains("secret"),
-            "{path} names an attribute the endpoint hides: {text:.400}"
-        );
-    }
-
-    // The attribute the endpoint does serve is still described, or the check above would pass
-    // on an empty document.
-    let context = member(&members(&archive), "schema/v1/context.jsonld").to_vec();
-    assert!(
-        String::from_utf8_lossy(&context).contains("pm10"),
-        "the granted attribute was narrowed away with the hidden one"
-    );
 }

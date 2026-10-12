@@ -142,6 +142,9 @@ pub struct Hop {
     pub headers: axum::http::HeaderMap,
 }
 
+/// The one schema document [`BrokerStub`]'s LinkML surface serves, `v1/model.shacl.ttl`.
+pub const LINKML_SHAPES: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .\n# the broker's\n";
+
 /// A broker on a real socket, because the gateway forwards over HTTP and what these tests
 /// assert is what comes out of the other end.
 ///
@@ -162,17 +165,23 @@ pub struct BrokerStub {
 impl BrokerStub {
     /// Starts the stub and answers `pages` in order.
     pub async fn start(pages: Vec<Value>) -> Self {
-        Self::serve(pages, None).await
+        Self::serve(pages, None, true).await
+    }
+
+    /// Starts the stub as a broker whose Tenant holds no schema: its LinkML surface answers
+    /// every path `404` (T-3646).
+    pub async fn schemaless(pages: Vec<Value>) -> Self {
+        Self::serve(pages, None, false).await
     }
 
     /// Starts the stub as the broker's narrowing view `view` (T-3651): a hop to that view is
     /// answered with `pages` narrowed by the rules of the roles the gateway pinned, as the
     /// engine narrows them; see [`View`].
     pub async fn narrowing(pages: Vec<Value>, view: View) -> Self {
-        Self::serve(pages, Some(view)).await
+        Self::serve(pages, Some(view), true).await
     }
 
-    async fn serve(pages: Vec<Value>, view: Option<View>) -> Self {
+    async fn serve(pages: Vec<Value>, view: Option<View>, schema: bool) -> Self {
         let hops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let served = std::sync::Arc::new(std::sync::Mutex::new(pages));
         let recorder = std::sync::Arc::clone(&hops);
@@ -252,6 +261,26 @@ impl BrokerStub {
                             pages.get(index).cloned().unwrap_or_else(|| json!([])),
                         ))
                         .into_response();
+                    }
+                    // The view's LinkML surface (T-3646): one model of one document, the
+                    // bytes [`LINKML_SHAPES`], so a bundle or a record can be checked against
+                    // what the broker served rather than against a rendering of its own.
+                    if !schema && path.starts_with("/linkml/") {
+                        return axum::http::StatusCode::NOT_FOUND.into_response();
+                    }
+                    if path == "/linkml/schema/index.json" {
+                        return axum::Json(json!({ "endpoint": "stub", "models": [{
+                            "name": "stub", "version": 1, "types": [],
+                            "artifacts": { "model.shacl.ttl": { "type": "text/turtle",
+                                "bytes": LINKML_SHAPES.len(), "sha256": "stub" } },
+                        }] }))
+                        .into_response();
+                    }
+                    if path == "/linkml/schema/v1/model.shacl.ttl" {
+                        return LINKML_SHAPES.into_response();
+                    }
+                    if path.starts_with("/linkml/") {
+                        return axum::http::StatusCode::NOT_FOUND.into_response();
                     }
 
                     // `GET /types` is how a caller asks what a tenant holds; the answer is
@@ -414,7 +443,8 @@ async fn narrowed(
             .into_response();
     }
     let answer = next.run(request).await;
-    if !answer.status().is_success() {
+    // The LinkML surface is narrowed by the broker itself (LK1); its documents are no entities.
+    if !answer.status().is_success() || plain.starts_with("/linkml/") {
         return answer;
     }
     let (mut parts, body) = answer.into_parts();
