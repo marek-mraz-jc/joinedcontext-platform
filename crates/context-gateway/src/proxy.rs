@@ -340,7 +340,7 @@ impl Broker {
 }
 
 /// Where a Debian-derived image keeps its trust anchors. The gateway's own image is
-/// `gcr.io/distroless/cc-debian12`, which ships `ca-certificates`.
+/// `gcr.io/distroless/cc-debian13`, which ships `ca-certificates`.
 const SYSTEM_ROOTS: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// The public trust anchors the image carries, read at start-up rather than compiled in (R46).
