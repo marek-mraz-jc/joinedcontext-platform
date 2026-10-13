@@ -5,6 +5,9 @@
 //! from, so the two properties that matter are that it names every artifact with the digest
 //! of the document this caller would actually download, and that it never names one the
 //! caller may not read.
+//!
+//! The schema index the record lists is the broker's LinkML surface of the Endpoint's view
+//! since T-3645, so the broker here is a stub that answers it the way Antares does.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -114,11 +117,86 @@ fn space(endpoint: Endpoint) -> Space {
     }
 }
 
+/// The documents of the stub's view, the bytes the index digests: `(file name, media type)`.
+const DOCUMENTS: [(&str, &str); 7] = [
+    ("model.linkml.yaml", "application/yaml"),
+    ("model.schema.json", "application/schema+json"),
+    ("context.jsonld", "application/ld+json"),
+    ("model.shacl.ttl", "text/turtle"),
+    ("model.owl.ttl", "text/turtle"),
+    ("model.rdf.ttl", "text/turtle"),
+    ("model.md", "text/markdown"),
+];
+
+fn sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The broker's LinkML surface of the view: the index, and each document with the strong ETag
+/// of its bytes. `InternalIncident` is left out, as the public grant leaves it out.
+fn linkml_broker() -> String {
+    let artifacts: serde_json::Map<String, Value> = DOCUMENTS
+        .iter()
+        .map(|(file, media)| {
+            let body = format!("{file} of AirQualityObserved");
+            let described =
+                json!({ "type": media, "bytes": body.len(), "sha256": sha256(body.as_bytes()) });
+            ((*file).to_owned(), described)
+        })
+        .collect();
+    let index = json!({ "endpoint": SLUG, "models": [{
+        "name": "bb-air-quality", "version": 1, "semver": "1.4.0",
+        "types": ["AirQualityObserved"], "artifacts": artifacts, "redacted": true,
+    }] });
+    let app = axum::Router::new().fallback(move |request: Request<Body>| {
+        let index = index.clone();
+        async move {
+            let path = request.uri().path().to_owned();
+            let prefix = format!("/x/views/{SLUG}/linkml/schema/");
+            let Some(rest) = path.strip_prefix(&prefix) else {
+                return axum::http::Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .expect("a response");
+            };
+            let body = match rest.strip_prefix("v1/") {
+                None if rest == "index.json" => index.to_string(),
+                Some(file) if DOCUMENTS.iter().any(|(name, _)| *name == file) => {
+                    format!("{file} of AirQualityObserved")
+                }
+                _ => String::new(),
+            };
+            let status = if body.is_empty() {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            axum::http::Response::builder()
+                .status(status)
+                .header("etag", format!("\"{}\"", sha256(body.as_bytes())))
+                .body(Body::from(body))
+                .expect("a response")
+        }
+    });
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+    let address = listener.local_addr().expect("an address");
+    listener
+        .set_nonblocking(true)
+        .expect("a non-blocking socket");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("a tokio listener");
+    tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+    format!("http://{address}")
+}
+
 fn app(audience: Audience) -> axum::Router {
     let resolved = endpoint(audience);
     router(Arc::new(
         Gateway::new(
-            Broker::new("http://127.0.0.1:1"),
+            Broker::new(linkml_broker()),
             Box::new(PolicyPdp),
             "banskabystrica.sk",
         )

@@ -214,9 +214,10 @@ async fn a_body_that_is_not_json_is_the_parse_error() {
     // (T-3647, Antares `mcp_transport`).
 }
 
-/// EP-47, EP-55: the two describing tools are the access and schema projections: the schema
-/// from the endpoint itself, the access document from the view's access surface the HTTP
-/// document reads too (T-3649), so an agent orients with one small read and no data query.
+/// EP-47, EP-55: the two describing tools are the access and schema projections: the access
+/// document from the view's access surface the HTTP document reads too (T-3649), the schema of
+/// the whole model from the broker's LinkML surface (T-3645), narrowed to a type the endpoint's
+/// own, so an agent orients with small reads and no data query.
 #[tokio::test]
 async fn the_describing_tools_answer_from_the_endpoint_and_its_view() {
     let realm = common::Realm::new();
@@ -247,7 +248,15 @@ async fn the_describing_tools_answer_from_the_endpoint_and_its_view() {
 
     let (_, summary) = send(
         app(&broker, &realm),
-        message(SLUG, None, call(12, "describe_schema", json!({}))),
+        message(
+            SLUG,
+            None,
+            call(
+                12,
+                "describe_schema",
+                json!({ "entityType": "AirQualityObserved" }),
+            ),
+        ),
     )
     .await;
     assert_eq!(
@@ -260,7 +269,11 @@ async fn the_describing_tools_answer_from_the_endpoint_and_its_view() {
         message(
             SLUG,
             None,
-            call(13, "describe_schema", json!({ "format": "shacl" })),
+            call(
+                13,
+                "describe_schema",
+                json!({ "format": "shacl", "entityType": "AirQualityObserved" }),
+            ),
         ),
     )
     .await;

@@ -6,13 +6,12 @@ use crate::app::typed_json_response;
 use crate::app::Gateway;
 use crate::app::MAX_SKIP;
 use crate::app::PAGE;
-use crate::handlers::ogc::bad_parameter;
 use crate::handlers::reads::query_temporal;
 use crate::handlers::reads::read_entities;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
-use crate::translators::{ogc, sta};
+use crate::translators::sta;
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -127,7 +126,7 @@ pub(crate) async fn sensorthings(
         match sta::filter_to_q(filter) {
             Ok(q) => upstream.push(("q".to_owned(), q)),
             Err(problem) => {
-                return bad_parameter(&ogc::ParamError {
+                return bad_parameter(&ParamError {
                     parameter: "$filter",
                     detail: problem.0,
                 })
@@ -241,7 +240,7 @@ async fn sta_series(
     // wrong rows, so it is refused by name; a `$filter` window reaches older observations.
     let deepest = (query::LAST_N_CAP as usize).saturating_sub(1);
     if ceiling > deepest {
-        return bad_parameter(&ogc::ParamError {
+        return bad_parameter(&ParamError {
             parameter: "$skip",
             detail: format!(
                 "$top and $skip together reach at most {deepest} observations back; narrow the series with $filter on phenomenonTime"
@@ -261,7 +260,7 @@ async fn sta_series(
                 }
             }
             Err(problem) => {
-                return bad_parameter(&ogc::ParamError {
+                return bad_parameter(&ParamError {
                     parameter: "$filter",
                     detail: problem.0,
                 })
@@ -311,7 +310,7 @@ async fn sta_series(
 
 /// `$top`, `$skip` and `$count`: the page an STA request asked for, bounded by the gateway's
 /// own ceiling. One place, because the entity page and the temporal series have to agree on it.
-fn sta_paging(caller: &[(String, String)]) -> Result<(usize, usize, bool), ogc::ParamError> {
+fn sta_paging(caller: &[(String, String)]) -> Result<(usize, usize, bool), ParamError> {
     let top = query::first(caller, "$top")
         .and_then(|top| top.parse::<usize>().ok())
         .unwrap_or(sta::DEFAULT_TOP)
@@ -326,7 +325,7 @@ fn sta_paging(caller: &[(String, String)]) -> Result<(usize, usize, bool), ogc::
         Some(raw) => match raw.parse::<usize>() {
             Ok(skip) if skip <= MAX_SKIP => skip,
             _ => {
-                return Err(ogc::ParamError {
+                return Err(ParamError {
                     parameter: "$skip",
                     detail: format!("$skip must be a whole number of items, at most {MAX_SKIP}"),
                 })
@@ -386,4 +385,28 @@ fn sta_set(segment: &str) -> (&str, Option<String>) {
         }
         None => (segment, None),
     }
+}
+
+/// A query parameter the caller sent that this representation cannot honour.
+///
+/// Named rather than generic, because a client that gets `400` without knowing which
+/// parameter was wrong retries the same request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{parameter}: {detail}")]
+pub(crate) struct ParamError {
+    /// The parameter as the caller spelled it.
+    pub(crate) parameter: &'static str,
+    /// What is wrong with it, in the words a client shows its user.
+    pub(crate) detail: String,
+}
+
+/// A parameter the representation cannot honour, naming it so the client can fix it (EP-34).
+fn bad_parameter(problem: &ParamError) -> Response<Body> {
+    let mut body = ProblemDetails::bad_request()
+        .with_detail(problem.detail.clone())
+        .into_response();
+    *body.status_mut() = StatusCode::BAD_REQUEST;
+    let _ = HeaderValue::from_str(problem.parameter)
+        .map(|value| body.headers_mut().insert("x-parameter", value));
+    body
 }

@@ -336,7 +336,7 @@ fn schema_distributions(endpoint: &Endpoint, index: &Value, iri: &str) -> Vec<Va
         return out;
     };
     for model in models {
-        let Some(major) = model.get("version").and_then(Value::as_u64) else {
+        let Some(major) = crate::handlers::schema_routes::major_of(model) else {
             continue;
         };
         let Some(artifacts) = model.get("artifacts").and_then(Value::as_object) else {
