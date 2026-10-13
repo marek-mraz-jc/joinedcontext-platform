@@ -130,6 +130,9 @@ pub struct Gateway {
     pub creates: crate::creates::DailyCreates,
     /// The WebSocket connections each caller holds open (EP-107).
     pub ws_open: crate::handlers::ws::Open,
+    /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
+    /// bounded only by the broker's own lifetime.
+    pub ws_token_lifetime: std::time::Duration,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
@@ -142,18 +145,24 @@ pub struct Gateway {
     writes: Arc<tokio::sync::Semaphore>,
     /// The budget `writes` was made with, in KiB: what one write may take at most.
     write_budget_kib: u32,
+    write_wait: std::time::Duration,
 }
 
 /// The MiB of write bodies in the gateway at once unless the deployment names another
 /// (`JC_GATEWAY_WRITE_BUDGET_MIB`, T-4077). A write is parsed and judged several times on its way
 /// (grants, units, the model, the relationships), so its peak is a multiple of its body: dev's
 /// gateway, 365 MiB at rest under a 512 MiB limit, was OOMKilled by a burst of about 160 MiB
-/// while a slow broker held pages of 1000 entities. A write past the budget is answered 503 with
-/// `Retry-After`, which a pipeline retries, before its body is read.
+/// while a slow broker held pages of 1000 entities. A write waits for its share in arrival order,
+/// before its body is read, and one that waits [`WRITE_WAIT`] in vain is answered 503 with
+/// `Retry-After`, which a pipeline retries.
 pub const WRITE_BUDGET_MIB: usize = 16;
 
 /// The seconds a write over the budget is told to wait.
 const WRITE_RETRY_SECONDS: u32 = 1;
+
+/// How long a write waits for its share of the write budget before it is answered 503: well
+/// under the 30 s a pipeline's client waits for an answer (T-4123).
+pub const WRITE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The hub's per-subject quota unless the deployment names another: ten Endpoint calls a
 /// second, sustained, is more than one person's agent makes and less than a scraper wants.
@@ -186,6 +195,7 @@ impl Gateway {
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
+            ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
@@ -193,6 +203,7 @@ impl Gateway {
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
             writes: Arc::new(tokio::sync::Semaphore::new(WRITE_BUDGET_MIB * 1024)),
             write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
+            write_wait: WRITE_WAIT,
         }
     }
 
@@ -206,16 +217,31 @@ impl Gateway {
         self
     }
 
-    /// A share of the write budget for a body of `length` bytes, or `None` when the gateway
-    /// already holds all it may (T-4077). A body of unknown length counts as the largest one the
-    /// organization accepts; one larger than the whole budget takes the whole budget, so it
-    /// waits for an idle gateway instead of never fitting.
-    fn write_share(&self, length: Option<usize>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    /// How long a write waits for its share before it is answered 503 (T-4123).
+    pub fn wait_for_writes(mut self, wait: std::time::Duration) -> Self {
+        self.write_wait = wait;
+        self
+    }
+
+    /// A share of the write budget for a body of `length` bytes, or `None` when the gateway held
+    /// all it may for the whole of its wait (T-4077, T-4123). The semaphore is fair: a page that
+    /// waits for most of the budget holds back the small writes that come after it, so a steady
+    /// stream of small writes never starves it. A body of unknown length counts as the largest
+    /// one the organization accepts; one larger than the whole budget takes the whole budget, so
+    /// it waits for an idle gateway instead of never fitting.
+    async fn write_share(
+        &self,
+        length: Option<usize>,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
         let bytes = length.unwrap_or_else(|| self.max_request_body());
         let kib = u32::try_from(bytes.div_ceil(1024))
             .unwrap_or(u32::MAX)
             .clamp(1, self.write_budget_kib);
-        self.writes.clone().try_acquire_many_owned(kib).ok()
+        let waiting = self.writes.clone().acquire_many_owned(kib);
+        tokio::time::timeout(self.write_wait, waiting)
+            .await
+            .ok()?
+            .ok()
     }
 
     /// Exchanges a caller's token with `exchanger` for a read over a space whose
@@ -878,7 +904,7 @@ pub(crate) async fn serve_ngsi_ld(
     if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
         return refusal;
     }
-    let _share = match write_share(gateway, &endpoint, operation, &request) {
+    let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -1585,7 +1611,7 @@ pub(crate) async fn serve_ngsi_ld_view(
             Err(answer) => return *answer,
         }
     }
-    let _share = match write_share(gateway, &endpoint, operation, &request) {
+    let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
         Ok(share) => share,
         Err(answer) => return *answer,
     };
@@ -3043,21 +3069,11 @@ fn unsupported_media_type() -> ProblemDetails {
     )
 }
 
-/// A write's share of the gateway's write budget (T-4077), held from before its body is read
-/// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
-/// takes none. Over the budget, the 503 to answer instead.
-fn write_share(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    operation: Operation,
-    request: &Request<Body>,
-) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response<Body>>> {
-    if !operation.is_write() {
-        return Ok(None);
-    }
-    // A body without Content-Length still knows its bound when it has one: a DELETE's is 0, so
-    // it takes the smallest share, not the largest (T-4077 re-open).
-    let length = request
+/// The size of a request's body as its head states it. A body without Content-Length still knows
+/// its bound when it has one: a DELETE's is 0, so it takes the smallest share, not the largest
+/// (T-4077 re-open).
+fn body_length(request: &Request<Body>) -> Option<usize> {
+    request
         .headers()
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -3066,11 +3082,26 @@ fn write_share(
             axum::body::HttpBody::size_hint(request.body())
                 .upper()
                 .and_then(|upper| usize::try_from(upper).ok())
-        });
-    match gateway.write_share(length) {
+        })
+}
+
+/// A write's share of the gateway's write budget (T-4077), held from before its body is read
+/// until it is answered, so a slow broker fills the budget and not the gateway's memory; a read
+/// takes none. A write that waited its whole wait in vain, the 503 to answer
+/// instead (T-4123).
+async fn write_share(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    operation: Operation,
+    length: Option<usize>,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, Box<Response<Body>>> {
+    if !operation.is_write() {
+        return Ok(None);
+    }
+    match gateway.write_share(length).await {
         Some(share) => Ok(Some(share)),
         None => {
-            tracing::info!(slug = %endpoint.slug, %operation, "write answered 503: the gateway holds its whole write budget");
+            tracing::info!(slug = %endpoint.slug, %operation, "write answered 503: the gateway held its whole write budget for the write's wait");
             Err(Box::new(busy()))
         }
     }

@@ -307,7 +307,7 @@ fn page(
         .iter()
         .map(|(endpoint, subject)| {
             let mut entry = described(gateway, endpoint, subject);
-            // Each Endpoint names the broker its space lives on (ADR-N-046 §2.3).
+            // Each Endpoint names the broker its space lives on (ADR-N-047 §2.3).
             entry["broker"] = json!(gateway.broker.broker_of_view(&endpoint.slug));
             entry
         })
