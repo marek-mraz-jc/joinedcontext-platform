@@ -549,8 +549,9 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
         .route("/api/endpoint/{slug}/file.zip", get(file_zip))
-        // The OGC surface is one handler over its own resource tree: three spellings of the
-        // landing page, because a GIS client stores whichever one it was given (EP-29).
+        // The OGC surface is the broker's view (T-3752), one forward over its resource tree:
+        // three spellings of the landing page, because a GIS client stores whichever one it was
+        // given (EP-29).
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
@@ -1471,12 +1472,12 @@ fn reserve_create(
     Err(Box::new(refusal))
 }
 
-/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, until its gap closes: a slug no view id
-/// can hold (the writer refuses it), and a write with `If-Match`: the broker publishes no entity
-/// tags, and the gateway's read, compare and conditional write is the only lost-update guard
-/// there is (R45, GW16). A view mapping (G18, T-3799), an agreement's caller (K38, T-3800), a
-/// projection with `temporalQ` (G6, T-3801) and a subscription (plan 5.5, T-3653) are the view's.
+/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
+/// broker can hold the view ([`has_view`]), and the request is no write with `If-Match`: the
+/// broker publishes no entity tags, and the gateway's read, compare and conditional write is the
+/// only lost-update guard there is (R45, GW16). A view mapping (G18, T-3799), an agreement's
+/// caller (K38, T-3800), a projection with `temporalQ` (G6, T-3801) and a subscription (plan
+/// 5.5, T-3653) are the view's.
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
     !conditional && has_view(view)
@@ -1695,7 +1696,7 @@ pub(crate) async fn serve_ngsi_ld_view(
 /// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
 /// `code` with its hint, the members the NGSI-LD surface carries them in (API/00 §4, T-3243), so
 /// a client keyed on the slug still says who can give access.
-async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
+pub(crate) async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
     let (parts, body) = answer.into_parts();
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -1725,7 +1726,7 @@ pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
-fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
+pub(crate) fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
     for name in [LOCATION, CONTENT_LOCATION, LINK] {
         let rewritten: Vec<HeaderValue> = headers
             .get_all(&name)
