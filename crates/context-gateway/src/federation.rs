@@ -13,9 +13,6 @@
 //! It also holds the member names, which the MCP surface lists so a tool description can say
 //! what an endpoint federates. Names only: an address never leaves this platform (EP-71).
 
-/// Turning an accepted ODRL agreement into the policies that enforce it (DS-10).
-pub mod odrl_compiler;
-
 /// The caller's token, exchanged for the brokers a federated read reaches (T-3999).
 pub mod exchange;
 
