@@ -158,7 +158,8 @@ pub(crate) async fn endpoint_ws(
     let joined = gateway
         .hubs
         .join(&gateway, Arc::clone(&endpoint), subject, principal.clone());
-    let Ok((hub, conn, queue)) = joined else {
+    // Held until the upgrade runs: a failed upgrade drops it, and the connection leaves the hub.
+    let Ok(joined) = joined else {
         return ProblemDetails::new(503, "space-full", "Service Unavailable")
             .with_detail(format!(
                 "a space holds at most {} WebSocket connections at once",
@@ -172,6 +173,7 @@ pub(crate) async fn endpoint_ws(
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |client| async move {
+            let (hub, conn, queue) = joined.take();
             let ended =
                 crate::fanout::socket::session(client, hub, conn, queue, principal, lifetime).await;
             tracing::info!(slug = %endpoint.slug, closed = ?ended, "WebSocket closed");

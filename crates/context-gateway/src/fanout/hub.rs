@@ -211,6 +211,32 @@ impl Answer {
     }
 }
 
+/// A connection opened before its upgrade: dropped without [`Joined::take`] (the upgrade
+/// failed and no session ever runs), it leaves the hub, so it never holds a space-cap slot.
+pub struct Joined(Option<(Arc<Hub>, u64, Arc<Queue>)>);
+
+impl Joined {
+    /// Guards connection `conn` of `hub`.
+    pub fn new(hub: Arc<Hub>, conn: u64, queue: Arc<Queue>) -> Self {
+        Joined(Some((hub, conn, queue)))
+    }
+
+    /// The connection, for the session that now owns its close.
+    pub fn take(mut self) -> (Arc<Hub>, u64, Arc<Queue>) {
+        self.0
+            .take()
+            .unwrap_or_else(|| unreachable!("taken once, by value"))
+    }
+}
+
+impl Drop for Joined {
+    fn drop(&mut self) {
+        if let Some((hub, conn, _)) = self.0.take() {
+            hub.discard(conn);
+        }
+    }
+}
+
 /// One Endpoint's live state.
 pub struct Hub {
     /// The Endpoint's slug, which is its broker view's id.
@@ -305,6 +331,20 @@ impl Hub {
         );
         if state.conns.is_empty() {
             state.idle_since = Some(now);
+        }
+    }
+
+    /// Drops connection `id` that never reached a session (its upgrade failed): nothing is held
+    /// for a resume.
+    fn discard(&self, id: u64) {
+        let mut state = self.state();
+        if let Some(conn) = state.conns.remove(&id) {
+            for sub in conn.subs.values() {
+                state.index.remove(sub.filter);
+            }
+        }
+        if state.conns.is_empty() && state.idle_since.is_none() {
+            state.idle_since = Some(Instant::now());
         }
     }
 
@@ -723,6 +763,22 @@ mod tests {
             "anonymous".into(),
             constraints,
         )
+    }
+
+    /// A connection whose upgrade failed leaves the hub with its guard; a taken one stays.
+    #[test]
+    fn a_joined_connection_without_a_session_leaves_the_hub() {
+        let hub = Arc::new(Hub::new("s", 10));
+        let (conn, queue) = open(&hub, Some(grant(&[])));
+        subscribe(&hub, conn, json!({}));
+        drop(Joined::new(Arc::clone(&hub), conn, queue));
+        assert_eq!(hub.connections(), 0);
+        assert!(hub.idle_for().is_some());
+        assert!(hub.state().index.is_empty());
+
+        let (conn, queue) = open(&hub, Some(grant(&[])));
+        let (_, taken, _) = Joined::new(Arc::clone(&hub), conn, queue).take();
+        assert_eq!((taken, hub.connections()), (conn, 1));
     }
 
     fn subscribe(hub: &Hub, conn: u64, extra: Value) -> String {

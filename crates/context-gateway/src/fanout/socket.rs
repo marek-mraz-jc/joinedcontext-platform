@@ -86,7 +86,7 @@ impl Hubs {
         endpoint: Arc<Endpoint>,
         subject: Subject,
         principal: String,
-    ) -> Result<(Arc<Hub>, u64, Arc<Queue>), Refused> {
+    ) -> Result<hub::Joined, Refused> {
         let constraints = hub::decide(&*gateway.pdp, &subject, &endpoint);
         let mut hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let in_space: usize = hubs
@@ -114,7 +114,7 @@ impl Hubs {
             }
         };
         let (conn, queue) = hub.open(endpoint, subject, principal, constraints);
-        Ok((hub, conn, queue))
+        Ok(hub::Joined::new(hub, conn, queue))
     }
 
     /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did.
