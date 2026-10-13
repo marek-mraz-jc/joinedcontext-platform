@@ -121,7 +121,10 @@ pub(crate) async fn endpoint_ws(
     }
     // A person or an account is one caller however many tokens it holds; an anonymous caller
     // is its address.
-    let caller = match principal_of(&subject) {
+    let principal = principal_of(&subject);
+    // An anonymous socket has no token to expire (T-4132): the broker's lifetime bounds it.
+    let lifetime = (principal != "anonymous").then_some(gateway.ws_token_lifetime);
+    let caller = match principal {
         anonymous if anonymous == "anonymous" => caller_key(request.headers()),
         principal => principal,
     };
@@ -146,8 +149,6 @@ pub(crate) async fn endpoint_ws(
         Err(rejection) => return rejection.into_response(),
     };
     let principal = principal_of(&subject);
-    // A token caller's socket ends when its token would; an anonymous one has none to expire.
-    let lifetime = (principal != "anonymous").then_some(TOKEN_LIFETIME);
     let joined = gateway
         .hubs
         .join(&gateway, Arc::clone(&endpoint), subject, principal.clone());
