@@ -5,7 +5,7 @@ use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     missing_linkml, package, publish, withdraw, CkanApi, InMemoryCkan, Outcome, PublishError,
-    Settings, GENERATOR,
+    Settings, EXAMPLE_TYPE, GENERATOR,
 };
 use serde_json::{json, Value};
 
@@ -1123,6 +1123,66 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
     let ogc = description(&dataset, "/ogc/features/");
     for part in ["Part 1", "Part 2", "Part 3"] {
         assert!(ogc.contains(part), "{part}: {ogc}");
+    }
+}
+
+/// T-4132: the usage texts a reader copies name the type the gateway's WebSocket guide names,
+/// the websocat line names the subprotocol, and the private member never reaches CKAN.
+#[test]
+fn usage_texts_name_the_guides_type_and_never_a_placeholder() {
+    let mut typed = record();
+    typed[EXAMPLE_TYPE] = json!("Vehicle");
+    let dataset = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &typed,
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    let ngsi = description(&dataset, "/ngsi-ld/v1/");
+    assert!(
+        ngsi.contains("ngsi-ld/v1/entities?type=Vehicle&limit=10'"),
+        "{ngsi}"
+    );
+    let ws = description(&dataset, "/ws");
+    assert!(
+        ws.contains("websocat --protocol ngsi-ld-ws 'wss://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/ws'"),
+        "{ws}"
+    );
+    assert!(ws.contains(r#""entities":[{"type":"Vehicle"}]"#), "{ws}");
+    let published = dataset.to_string();
+    assert!(!published.contains("<Type>"), "{published}");
+    assert!(!published.contains(EXAMPLE_TYPE), "{published}");
+
+    // A record without the type: the texts list the types instead of a placeholder.
+    let dataset = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &record(),
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert!(!dataset.to_string().contains("<Type>"), "{dataset}");
+    assert!(description(&dataset, "/ngsi-ld/v1/").contains("ngsi-ld/v1/types'"));
+    let ws = description(&dataset, "/ws");
+    assert!(ws.contains(r#""watchedAttributes":["location"]"#), "{ws}");
+    for blank in ["", "   "] {
+        let mut odd = record();
+        odd[EXAMPLE_TYPE] = json!(blank);
+        let dataset = package(
+            &default_endpoint("public", ""),
+            &instance(),
+            &odd,
+            &documented(),
+        )
+        .expect("the endpoint publishes")
+        .expect("a dataset");
+        assert!(
+            description(&dataset, "/ngsi-ld/v1/").contains("ngsi-ld/v1/types'"),
+            "{blank:?}"
+        );
     }
 }
 

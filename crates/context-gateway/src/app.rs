@@ -130,6 +130,12 @@ pub struct Gateway {
     pub creates: crate::creates::DailyCreates,
     /// The WebSocket connections each caller holds open (EP-107).
     pub ws_open: crate::handlers::ws::Open,
+    /// Each Endpoint's WebSocket fan-out: one broker subscription, its entities, its clients'
+    /// filters (ADR-N-049, EP-114).
+    pub hubs: crate::fanout::socket::Hubs,
+    /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
+    /// bounded only by the broker's own lifetime.
+    pub ws_token_lifetime: std::time::Duration,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -223,6 +229,8 @@ impl Gateway {
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
+            hubs: Default::default(),
+            ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
@@ -1634,12 +1642,12 @@ fn reserve_create(
     Err(Box::new(refusal))
 }
 
-/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a slug no view
-/// id can hold (the writer refuses it), and a subscription, whose delivery the gateway still seals
-/// and routes back (plan 5.5, T-3653). So does a write with `If-Match`: the broker publishes no
-/// entity tags, and the gateway's read,
-/// compare and conditional write is the only lost-update guard there is (R45, GW16).
+/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
+/// broker can hold the view ([`has_view`]), and the request is none of the kinds the view does
+/// not serve yet: a subscription, whose delivery the gateway still seals and routes back (plan
+/// 5.5, T-3653). So does a write with `If-Match`: the broker publishes no entity tags, and the
+/// gateway's read, compare and conditional write is the only lost-update guard there is (R45,
+/// GW16).
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let subscription = matches!(
         operation,
