@@ -31,7 +31,7 @@ use crate::pdp::{geo, projection, temporal, vocabulary, Pdp};
 use crate::proxy::{self, Broker};
 use crate::resolver::{Endpoint, SlugResolver, Space};
 use crate::translators::{geojson, view_mapping};
-use crate::{egress, mcp, middleware::tenancy, operations, query, telemetry};
+use crate::{mcp, middleware::tenancy, operations, query, telemetry};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -117,13 +117,8 @@ pub struct Gateway {
     brokers: ArcSwap<crate::mqtt::Brokers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
-    /// The base a rewritten notification endpoint carries, when it is not the public one.
-    pub egress_url: Option<String>,
     /// Hosts inside the platform's networks a notification may be delivered to (T-1302).
     pub private_hosts: Vec<String>,
-    /// The key a subscription's subscriber is sealed with, so each delivery is decided again
-    /// for them (GW27, T-2383). Absent refuses every subscription that routes a delivery.
-    pub delivery_key: Option<Arc<crate::egress::subject::DeliveryKey>>,
     /// One token bucket per endpoint and caller (EP-20).
     pub rate_limiter: RateLimiter,
     /// The creates each form Endpoint has taken today (EP-97).
@@ -192,9 +187,7 @@ impl Gateway {
             servers: ArcSwap::from_pointee(Vec::new()),
             brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
-            egress_url: None,
             private_hosts: Vec::new(),
-            delivery_key: None,
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
@@ -271,25 +264,6 @@ impl Gateway {
         self.verifier = Some(verifier);
         self.accounts.store(Arc::new(accounts));
         self.public_url = public_url;
-        self
-    }
-
-    /// Hands the broker `egress_url` as the base of every rewritten notification endpoint,
-    /// instead of the public URL (R46).
-    ///
-    /// The two are separate because they answer to different readers. The public URL is what
-    /// a caller's token may name as its audience (PF-45); this is what the broker dials to
-    /// deliver, and pointing it at the in-cluster Service is what keeps that hop off the
-    /// public edge, where it would arrive indistinguishable from any request off the internet.
-    pub fn deliver_through(mut self, egress_url: Option<String>) -> Self {
-        self.egress_url = egress_url;
-        self
-    }
-
-    /// Seals each subscription's subscriber with `key` and decides every delivery again for
-    /// them (GW27, T-2383).
-    pub fn seal_subscribers_with(mut self, key: crate::egress::subject::DeliveryKey) -> Self {
-        self.delivery_key = Some(Arc::new(key));
         self
     }
 
@@ -529,14 +503,6 @@ impl Gateway {
     pub(crate) fn base_url(&self) -> &str {
         self.public_url.as_deref().unwrap_or_default()
     }
-
-    /// The base a rewritten notification endpoint carries: the egress URL where the
-    /// deployment names one, and the public URL otherwise (R46).
-    fn egress_base(&self) -> &str {
-        self.egress_url
-            .as_deref()
-            .unwrap_or_else(|| self.base_url())
-    }
 }
 
 /// The router: two probes and the endpoint surface.
@@ -581,12 +547,6 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/preview",
             post(crate::handlers::preview::preview),
         )
-        // Where a rewritten notification endpoint points, and the only surface the
-        // broker calls rather than answers (R46).
-        .route(
-            "/api/endpoint/{slug}/egress/notifications",
-            post(egress::notifications::deliver),
-        )
         .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
         .route("/api/endpoint/{slug}/file.json", get(file_json))
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
@@ -610,7 +570,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
-        // The OData v4 service of the view (EP-104, T-3830), read-only until T-3939.
+        // The OData v4 service of the view (EP-104, T-3830), its writes after the Endpoint's write guards (T-3939).
         .route("/api/endpoint/{slug}/odata/v4", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
@@ -870,6 +830,18 @@ pub(crate) async fn serve_ngsi_ld(
         Err(answer) => return *answer,
     };
 
+    // A subscription is the view's (plan 5.5, T-3654): stored there under its subscriber and
+    // delivered by the broker under the engine. Stored here it would deliver with nothing
+    // deciding what leaves, so a request no view can take is refused, never stored around it.
+    if is_subscription(operation) {
+        // A federated read's token is refused for what it is, whatever a view could take.
+        if let Some(refusal) = federated_refusal(&endpoint, &subject, operation) {
+            return refusal;
+        }
+        tracing::info!(slug = %endpoint.slug, %operation, "refused: a subscription no view serves");
+        return subscription_without_view();
+    }
+
     // GW31: a type or q the specification refuses is refused as the caller sent it, before an
     // empty intersection with the grants answers it with nothing.
     if operation == Operation::QueryEntity {
@@ -1030,13 +1002,6 @@ pub(crate) async fn serve_ngsi_ld(
             .into_response();
     }
 
-    // A subscription is a standing query, not an entity: it is narrowed to the grants and
-    // its delivery routed back through the gateway, rather than checked as a write payload
-    // whose members would all read as ungranted attributes (GW27, R46).
-    let subscribing = matches!(
-        operation,
-        Operation::CreateSubscription | Operation::UpdateSubscription
-    );
     let mut sent = sent.to_vec();
     // A form Endpoint takes one entity per create, under an id the gateway mints (EP-97): a
     // batch or an upsert would let the caller name the id, so neither passes.
@@ -1063,24 +1028,7 @@ pub(crate) async fn serve_ngsi_ld(
     // The ids a divided batch forwards and the entities it refused, merged into one answer once
     // the broker has spoken (GW18).
     let mut divided: Option<(Vec<String>, Refused)> = None;
-    if subscribing && !sent.is_empty() {
-        match narrowed_subscription(
-            &sent,
-            &constraints,
-            &endpoint,
-            gateway.egress_base(),
-            &gateway.private_hosts,
-            operation,
-            (gateway.delivery_key.as_deref(), &subject),
-        ) {
-            Ok(narrowed) => sent = narrowed,
-            Err(problem) => return problem.into_response(),
-        }
-        parts.headers.remove(CONTENT_LENGTH);
-        parts
-            .headers
-            .insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
-    } else if operation.is_write() && !sent.is_empty() {
+    if operation.is_write() && !sent.is_empty() {
         match judge_write(&sent, &path, operation, &constraints, &endpoint) {
             Err(problem) => return problem.into_response(),
             Ok(Judged::Whole) => {}
@@ -1109,7 +1057,7 @@ pub(crate) async fn serve_ngsi_ld(
 
     // The quarantine mark is the gateway's (DM-90): a path addressing it is refused, a body's
     // copy dropped, so only the space's rules set it below.
-    if operation.is_write() && !subscribing {
+    if operation.is_write() {
         match owned_guarded(&mut sent, &path) {
             Err(problem) => return problem.into_response(),
             Ok(true) => {
@@ -1127,7 +1075,7 @@ pub(crate) async fn serve_ngsi_ld(
     // refuses that. A view endpoint writes in its target model, which the space's rules do not
     // describe, so it is left to the mapping.
     let mut units_filled = Vec::new();
-    if operation.is_write() && !subscribing && !sent.is_empty() && endpoint.view_mapping.is_none() {
+    if operation.is_write() && !sent.is_empty() && endpoint.view_mapping.is_none() {
         if let Some(rules) = endpoint
             .declared_types
             .as_ref()
@@ -1159,7 +1107,7 @@ pub(crate) async fn serve_ngsi_ld(
     // one target on a single end, a required end, and a target the writer can read in the space.
     // A batch is answered per entity (207); anything else is refused whole. A view endpoint
     // writes in its target model, which the space's rules do not describe.
-    if operation.is_write() && !subscribing && endpoint.view_mapping.is_none() {
+    if operation.is_write() && endpoint.view_mapping.is_none() {
         if let Some(rules) = endpoint
             .declared_types
             .as_ref()
@@ -1464,7 +1412,10 @@ fn operation_or_answer(
 }
 
 /// The request body, up to the organization's limit, or the answer that names the limit.
-async fn read_body(gateway: &Gateway, body: Body) -> Result<Vec<u8>, Box<Response<Body>>> {
+pub(crate) async fn read_body(
+    gateway: &Gateway,
+    body: Body,
+) -> Result<Vec<u8>, Box<Response<Body>>> {
     let limit = gateway.max_request_body();
     axum::body::to_bytes(body, limit)
         .await
@@ -1487,7 +1438,7 @@ async fn read_body(gateway: &Gateway, body: Body) -> Result<Vec<u8>, Box<Respons
 /// Reserves one of the day's creates of a form Endpoint (EP-97), per caller as the rate limit
 /// keys them, so one sender takes a tenth at most (T-3285). `Some(now)` is the reservation to
 /// release when the broker does not take the create.
-fn reserve_create(
+pub(crate) fn reserve_create(
     gateway: &Gateway,
     endpoint: &Endpoint,
     caller: &str,
@@ -1534,11 +1485,38 @@ fn reserve_create(
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
 /// broker can hold the view ([`has_view`]), and the request is no write with `If-Match`: the
 /// broker publishes no entity tags, and the gateway's read, compare and conditional write is the
-/// only lost-update guard there is (R45, GW16). A subscription is the view's: stored under the
-/// verified subscriber and delivered by the broker itself (plan 5.5, T-3653).
+/// only lost-update guard there is (R45, GW16). A view mapping (G18, T-3799), an agreement's
+/// caller (K38, T-3800), a projection with `temporalQ` (G6, T-3801) and a subscription (plan
+/// 5.5, T-3653) are the view's.
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    has_view(view) && !conditional
+    !conditional && has_view(view)
+}
+
+/// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
+const MAX_VIEW_ID: usize = 63;
+
+/// Whether an operation reads or writes a subscription.
+fn is_subscription(operation: Operation) -> bool {
+    matches!(
+        operation,
+        Operation::CreateSubscription
+            | Operation::UpdateSubscription
+            | Operation::RetrieveSubscription
+            | Operation::QuerySubscription
+            | Operation::DeleteSubscription
+    )
+}
+
+/// The answer to a subscription request the broker's view cannot take (T-3654).
+fn subscription_without_view() -> Response<Body> {
+    ProblemDetails::new(501, "subscription-without-view", "Not Implemented")
+        .with_detail(
+            "subscriptions are kept and delivered by the broker's view of this endpoint, and \
+             this request cannot go through it: a conditional write (If-Match) and an endpoint \
+             slug longer than a view id are not served by a view yet",
+        )
+        .into_response()
 }
 
 /// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
@@ -1556,9 +1534,6 @@ pub(crate) fn view_of(endpoint: &Endpoint) -> String {
         endpoint.slug.clone()
     }
 }
-
-/// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
-const MAX_VIEW_ID: usize = 63;
 
 /// One NGSI-LD request through the broker's view of the Endpoint (plan 5.1 and 5.2, T-3643):
 /// `{prefix}{rest}` goes to `/x/views/{view}/ngsi-ld/v1{rest}` with the caller's query as sent,
@@ -1836,7 +1811,7 @@ fn federated_refusal(
     )
 }
 
-async fn view_request(
+pub(crate) async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
@@ -3407,35 +3382,6 @@ fn undeclared_type(entity: &Value, endpoint: &Endpoint) -> Option<ProblemDetails
         "entity type `{missing}` is not a class of the space's data model `{}` (DM-61)",
         declared.model
     )))
-}
-
-/// Narrows a subscription payload to the grants and routes its delivery through the
-/// gateway (GW27, R46).
-fn narrowed_subscription(
-    body: &[u8],
-    constraints: &Constraints,
-    endpoint: &Endpoint,
-    base_url: &str,
-    private_hosts: &[String],
-    operation: Operation,
-    (key, subject): (Option<&egress::subject::DeliveryKey>, &Subject),
-) -> Result<Vec<u8>, Box<ProblemDetails>> {
-    let mut payload: Value = serde_json::from_slice(body).map_err(|_| {
-        Box::new(ProblemDetails::bad_request().with_detail("request body is not JSON"))
-    })?;
-    egress::notifications::narrow_subscription(
-        &mut payload,
-        constraints,
-        endpoint,
-        base_url,
-        private_hosts,
-        operation == Operation::CreateSubscription,
-    )?;
-    egress::notifications::seal_route(&mut payload, &endpoint.base_path, key, subject)?;
-    serde_json::to_vec(&payload).map_err(|error| {
-        tracing::error!(%error, "the narrowed subscription does not serialize");
-        Box::new(ProblemDetails::internal())
-    })
 }
 
 /// The body of a batch query, narrowed to the grants, with the decision it leaves behind

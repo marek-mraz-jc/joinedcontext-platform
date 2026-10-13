@@ -86,7 +86,6 @@ fn app(broker: &str, realm: &common::Realm) -> Router {
         endpoint(AIR, Audience::Organization, "steward"),
         endpoint(OPEN, Audience::Public, "public"),
     ])
-    .seal_subscribers_with(common::delivery_key())
     .authenticate(
         Arc::new(realm.verifier()),
         ServiceAccounts::new(),

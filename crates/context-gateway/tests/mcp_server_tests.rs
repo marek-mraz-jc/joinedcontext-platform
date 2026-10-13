@@ -115,7 +115,6 @@ fn app(broker: &str, realm: &common::Realm, limited: bool) -> Router {
         endpoint(OUTSIDE, vec![grant("steward", "queryEntity")]),
         open,
     ])
-    .seal_subscribers_with(common::delivery_key())
     .authenticate(
         Arc::new(realm.verifier()),
         ServiceAccounts::new(),

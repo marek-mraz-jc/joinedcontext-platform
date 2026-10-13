@@ -195,25 +195,6 @@ async fn a_space_whose_broker_has_no_address_is_refused_not_sent_to_main() {
     assert!(main_log.lock().unwrap().is_empty());
 }
 
-#[tokio::test]
-async fn a_delivery_to_a_subscriber_is_never_rerouted_by_a_tenant() {
-    let (broker, _, canary_log, _) = two_brokers().await;
-    let (subscriber, subscriber_log) =
-        upstream(StatusCode::NO_CONTENT.as_u16(), "", Vec::new()).await;
-    broker
-        .aimed_at(subscriber)
-        .send(
-            Method::POST,
-            "/notify",
-            tenant("doprava-hfp"),
-            Body::empty(),
-        )
-        .await
-        .expect("delivered");
-    assert_eq!(subscriber_log.lock().unwrap().len(), 1);
-    assert!(canary_log.lock().unwrap().is_empty());
-}
-
 fn manifest(dir: &std::path::Path, name: &str, body: &str) {
     std::fs::write(dir.join(name), body).expect("write a manifest");
 }
