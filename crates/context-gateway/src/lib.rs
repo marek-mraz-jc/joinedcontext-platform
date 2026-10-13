@@ -16,6 +16,7 @@ pub mod config;
 pub mod context_guard;
 pub mod creates;
 pub mod domain_gate;
+pub mod fanout;
 pub mod federation;
 pub mod handlers;
 pub mod mcp;
