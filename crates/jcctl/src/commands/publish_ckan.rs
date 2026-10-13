@@ -384,14 +384,47 @@ pub fn fetch(url: &str, accept: &str) -> Result<String, Error> {
     Ok(text)
 }
 
-/// The DCAT-AP record of one target, read from the gateway (EP-27, EP-63).
+/// The DCAT-AP record of one target, read from the gateway (EP-27, EP-63), with the entity type
+/// the Endpoint's WebSocket guide names under [`ckan::EXAMPLE_TYPE`] when it names one (T-4132).
 pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
-    let url = format!("{}/", settings.endpoint_url(&target.slug));
+    let base = settings.endpoint_url(&target.slug);
+    let url = format!("{base}/");
     let text = fetch(&url, "application/ld+json")?;
-    serde_json::from_str(&text).map_err(|e| Error::Gateway {
+    let mut record: Value = serde_json::from_str(&text).map_err(|e| Error::Gateway {
         url,
         message: format!("the record is not JSON: {e}"),
-    })
+    })?;
+    if let (Some(kind), Some(members)) = (example_type(&base), record.as_object_mut()) {
+        members.insert(ckan::EXAMPLE_TYPE.to_owned(), Value::String(kind));
+    }
+    Ok(record)
+}
+
+/// The type the gateway's `426` guide of `{endpoint}/ws` subscribes its example to: the type a
+/// usage text names (T-4132). `None` for an Endpoint without a WebSocket, or any other failure:
+/// the texts then say how to list the types.
+fn example_type(base: &str) -> Option<String> {
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(FETCH_TIMEOUT)
+        .user_agent(ckan::GENERATOR)
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!("{base}/ws"))
+        .header("Accept", "application/json")
+        .send()
+        .ok()?;
+    if response.status() != reqwest::StatusCode::UPGRADE_REQUIRED {
+        return None;
+    }
+    guide_type(&response.json().ok()?)
+}
+
+/// The type of a guide's example subscription.
+fn guide_type(guide: &Value) -> Option<String> {
+    let kind = guide.pointer("/example/body/entities/0/type")?.as_str()?;
+    (!kind.is_empty()).then(|| kind.to_owned())
 }
 
 /// What one target's mirror is filled from: the Endpoint's tabular answer, and the JSON Schema
@@ -924,5 +957,29 @@ fn table_word(outcome: datastore::Outcome) -> &'static str {
         datastore::Outcome::Created => "created",
         datastore::Outcome::Extended => "extended",
         datastore::Outcome::Unchanged => "unchanged",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guide_type;
+    use serde_json::json;
+
+    /// T-4132: the guide's example names the type; a guide without one names none.
+    #[test]
+    fn the_guides_example_names_the_type() {
+        let guide = json!({
+            "status": 426,
+            "example": { "metadata": { "x-op": "x-subscribe" },
+                         "body": { "type": "Subscription", "entities": [{ "type": "Vehicle" }] } }
+        });
+        assert_eq!(guide_type(&guide).as_deref(), Some("Vehicle"));
+        for other in [
+            json!({}),
+            json!({ "example": { "body": { "entities": [] } } }),
+            json!({ "example": { "body": { "entities": [{ "type": "" }] } } }),
+        ] {
+            assert_eq!(guide_type(&other), None, "{other}");
+        }
     }
 }

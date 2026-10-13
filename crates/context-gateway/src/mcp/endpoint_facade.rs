@@ -40,7 +40,7 @@
 //! surface of the view (T-3645, T-3646).
 
 use crate::app::{ngsi_ld_request, Credential, Gateway};
-use crate::handlers::access_routes::{self, AccessFormat};
+use crate::handlers::view_access::{self, AccessFormat};
 use crate::handlers::schema_routes;
 use crate::mcp::elicitation;
 use crate::middleware::response::{self, Artifact};
@@ -1907,7 +1907,7 @@ async fn access_document(
         "grant-ast" => AccessFormat::GrantAst,
         _ => AccessFormat::AuthZen,
     };
-    access_routes::document(gateway, endpoint, subject, format)
+    view_access::document(gateway, endpoint, subject, format)
         .await
         .map_err(|answer| {
             format!(

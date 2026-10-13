@@ -96,7 +96,7 @@ pub struct Config {
     /// listener's `/internal/domain-verifications`); required under `enforce`.
     pub domain_verifications_url: Option<String>,
     /// How many MiB of write bodies may be in the gateway at once
-    /// (`JC_GATEWAY_WRITE_BUDGET_MIB`, default [`crate::app::WRITE_BUDGET_MIB`]); a write past
+    /// (`JC_GATEWAY_WRITE_BUDGET_MIB`, default `16`, [`crate::app::WRITE_BUDGET_MIB`]); a write past
     /// it is answered 503 with `Retry-After` (T-4077).
     pub write_budget_mib: usize,
 }
@@ -497,5 +497,19 @@ mod tests {
         ] {
             assert!(normalize_broker_url(bad).is_err(), "{bad:?} was accepted");
         }
+    }
+
+    /// The docs' config reference reads a default as "default `N`" (T-4121): the number
+    /// written beside the write budget is the constant's.
+    #[test]
+    fn the_write_budget_documents_its_default_as_a_number() {
+        let documented = format!(
+            "`JC_GATEWAY_WRITE_BUDGET_MIB`, default `{}`",
+            crate::app::WRITE_BUDGET_MIB
+        );
+        assert!(
+            include_str!("config.rs").contains(&documented),
+            "{documented}"
+        );
     }
 }
