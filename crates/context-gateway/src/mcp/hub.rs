@@ -8,7 +8,7 @@
 //! documents its access and schema surfaces serve (SP-16). Nothing is remembered between calls (SP-19):
 //! the agent names the Endpoint on every call, and the list is rebuilt from the token each time.
 
-use crate::app::{self, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
+use crate::app::{self, anonymous_on, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
 use crate::mcp::describe;
@@ -23,7 +23,7 @@ use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
-use jc_core::kinds::Representation;
+use jc_core::kinds::{Audience, Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -75,7 +75,10 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
     tenancy::strip_client_headers(&mut request);
 
     let Reached {
-        reach, decision, ..
+        reach,
+        decision,
+        anonymous,
+        ..
     } = match reached(&gateway, request.headers(), Some(Representation::Mcp)) {
         Ok(reached) => reached,
         Err(refusal) => return *refusal,
@@ -95,6 +98,7 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         reach,
         caller,
         server: None,
+        anonymous,
     };
     let mut response = match hub.answer(message).await {
         Answer::Json(answer) => jsonrpc::json_response(StatusCode::OK, &answer),
@@ -113,6 +117,8 @@ pub(crate) struct Reached {
     pub(crate) reach: Vec<(Arc<Endpoint>, Subject)>,
     /// The per-subject bucket after this request spent from it (ADR-N-025 section 3).
     pub(crate) decision: rate_limit::Decision,
+    /// No token was presented: `reach` is the public Endpoints alone (T-4114).
+    pub(crate) anonymous: bool,
 }
 
 /// Verifies the bearer token against every audience the hub could honour (its own and each
@@ -124,20 +130,16 @@ pub(crate) fn reached(
     headers: &HeaderMap,
     serving: Option<Representation>,
 ) -> Result<Reached, Box<Response<Body>>> {
-    // The hub is its own protected resource: a client without a token is told where to get one
-    // for it (AG-32, RFC 9728). It lists nothing anonymously; a public Endpoint's own URL still
-    // answers without a token.
+    // Without a token the hub answers over the public Endpoints alone, each as its own URL
+    // answers an anonymous caller (T-4114, EP-87); a slug outside them answers `401` with the
+    // hub's resource metadata (`Hub::call`), which is how a client learns to log in.
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
     let raw = match token::bearer(presented) {
-        Ok(raw) => raw,
-        Err(token::Rejected::NoToken) => return Err(Box::new(unauthorized(gateway))),
+        Ok(raw) => Some(raw),
+        Err(token::Rejected::NoToken) => None,
         Err(rejected) => return Err(Box::new(ProblemDetails::from(rejected).into_response())),
-    };
-    let Some(verifier) = gateway.verifier.as_ref() else {
-        tracing::warn!("a token was presented to the hub but no realm is configured");
-        return Err(Box::new(ProblemDetails::unauthorized().into_response()));
     };
 
     // Which Endpoints the token then reaches is decided per Endpoint by `reaches`.
@@ -147,46 +149,70 @@ pub(crate) fn reached(
         .into_iter()
         .filter(|endpoint| serving.is_none_or(|wanted| endpoint.serves(wanted)))
         .collect();
-    let mut audiences = gateway.hub_audiences();
-    for endpoint in &served {
-        audiences.extend(gateway.audiences_for(endpoint));
-    }
-    audiences.sort_unstable();
-    audiences.dedup();
-    let claims = verifier
-        .verify(raw, &audiences)
-        .map_err(|rejected| Box::new(ProblemDetails::from(rejected).into_response()))?;
+    let claims = match raw {
+        None => None,
+        Some(raw) => {
+            let Some(verifier) = gateway.verifier.as_ref() else {
+                tracing::warn!("a token was presented to the hub but no realm is configured");
+                return Err(Box::new(ProblemDetails::unauthorized().into_response()));
+            };
+            let mut audiences = gateway.hub_audiences();
+            for endpoint in &served {
+                audiences.extend(gateway.audiences_for(endpoint));
+            }
+            audiences.sort_unstable();
+            audiences.dedup();
+            Some(
+                verifier
+                    .verify(raw, &audiences)
+                    .map_err(|rejected| Box::new(ProblemDetails::from(rejected).into_response()))?,
+            )
+        }
+    };
 
     // One bucket per subject across every Endpoint, spent on every hub request, so fifty
-    // Endpoints are not fifty bursts (ADR-N-025 section 3).
-    let subject_key = format!("subject:{}", claims.sub);
-    let decision = gateway.rate_limiter.check(
-        HUB_BUCKET,
-        &subject_key,
-        &gateway.hub_rate_limit,
-        Instant::now(),
-    );
+    // Endpoints are not fifty bursts (ADR-N-025 section 3); an anonymous caller's is its
+    // client address, the key a public Endpoint's own URL spends.
+    let bucket = match &claims {
+        Some(claims) => format!("subject:{}", claims.sub),
+        None => rate_limit::caller_key(headers),
+    };
+    let decision =
+        gateway
+            .rate_limiter
+            .check(HUB_BUCKET, &bucket, &gateway.hub_rate_limit, Instant::now());
     if !decision.allowed {
-        tracing::info!(principal = %claims.sub, "hub rate limit reached");
+        tracing::info!(caller = %bucket, "hub rate limit reached");
         return Err(Box::new(rate_limit::too_many(
             &decision,
             "the hub's per-subject rate limit is spent; retry after the seconds the RateLimit-Reset header names",
         )));
     }
 
+    // What the token reaches as its own caller; a public Endpoint it does not reach, as the
+    // anonymous caller the Endpoint's URL would see. Nothing internal without a token.
     let mut reach: Vec<(Arc<Endpoint>, Subject)> = served
         .into_iter()
-        .filter(|endpoint| gateway.reaches(&claims, endpoint))
         .filter_map(|endpoint| {
-            let subject = subject_from(gateway, &endpoint, &claims).ok()?;
+            let own = claims
+                .as_ref()
+                .filter(|claims| gateway.reaches(claims, &endpoint))
+                .and_then(|claims| subject_from(gateway, &endpoint, claims).ok())
+                .filter(|subject| tools::reads_anything(gateway, &endpoint, subject));
+            let subject = match own {
+                Some(subject) => subject,
+                None if endpoint.audience == Audience::Public => anonymous_on(&endpoint),
+                None => return None,
+            };
             tools::reads_anything(gateway, &endpoint, &subject).then_some((endpoint, subject))
         })
         .collect();
     reach.sort_by(|(a, _), (b, _)| a.slug.cmp(&b.slug));
     Ok(Reached {
-        principal: claims.sub,
+        principal: claims.map_or_else(|| "anonymous".to_owned(), |claims| claims.sub),
         reach,
         decision,
+        anonymous: raw.is_none(),
     })
 }
 
@@ -201,19 +227,23 @@ pub async fn endpoints(
         principal,
         reach,
         decision,
+        ..
     } = match reached(&gateway, request.headers(), None) {
         Ok(reached) => reached,
         Err(refusal) => return *refusal,
     };
-    // The query as `list_endpoints` takes its arguments: a number is a number, anything else
-    // stays a string and is refused by the same words.
+    // The query as `list_endpoints` takes its arguments: `limit` is a number, the filters and
+    // the cursor stay text, and anything else is refused by the same words.
     let arguments: Map<String, Value> =
         crate::query::parse(request.uri().query().unwrap_or_default())
             .into_iter()
             .map(|(name, value)| {
-                let value = value
-                    .parse::<u64>()
-                    .map_or_else(|_| json!(value), |number| json!(number));
+                let value = match name.as_str() {
+                    "limit" => value
+                        .parse::<u64>()
+                        .map_or_else(|_| json!(value), |number| json!(number)),
+                    _ => json!(value),
+                };
                 (name, value)
             })
             .collect();
@@ -238,7 +268,7 @@ fn page(
 ) -> Result<Value, String> {
     if let Some(unknown) = arguments
         .keys()
-        .find(|key| !matches!(key.as_str(), "limit" | "cursor"))
+        .find(|key| !matches!(key.as_str(), "limit" | "cursor") && !FILTERS.contains(&key.as_str()))
     {
         return Err(format!("`{unknown}` is not an argument of list_endpoints"));
     }
@@ -249,30 +279,91 @@ fn page(
             .filter(|limit| (1..=100).contains(limit))
             .ok_or("`limit` is a whole number from 1 to 100")? as usize,
     };
+    // The cursor this hub hands out is an offset written as a string; one an older client
+    // kept as a number still reads.
     let offset = match arguments.get("cursor") {
-        None => 0,
-        Some(value) => value
-            .as_u64()
-            .ok_or("`cursor` is the previous page's nextCursor, a whole number")?
-            as usize,
-    };
-    let endpoints: Vec<Value> = reach
+        None => Some(0),
+        Some(Value::String(cursor)) => cursor.parse::<usize>().ok(),
+        Some(value) => value.as_u64().and_then(|n| usize::try_from(n).ok()),
+    }
+    .ok_or("`cursor` is the previous page's nextCursor, passed back as given")?;
+    let mut wanted = Vec::new();
+    for name in FILTERS {
+        match arguments.get(*name) {
+            None => {}
+            Some(Value::String(text)) if !text.trim().is_empty() && text.len() <= 200 => {
+                wanted.push((*name, text.trim().to_lowercase()));
+            }
+            Some(_) => return Err(format!("`{name}` is a text of 1 to 200 characters")),
+        }
+    }
+    if let Some((_, access)) = wanted.iter().find(|(name, _)| *name == "access") {
+        if !matches!(access.as_str(), "public" | "internal") {
+            return Err("`access` is `public` or `internal`".to_owned());
+        }
+    }
+
+    let rows: Vec<Value> = reach
         .iter()
-        .skip(offset)
-        .take(limit)
         .map(|(endpoint, subject)| {
-            let mut entry = described(gateway.base_url(), endpoint, subject);
+            let mut entry = described(gateway, endpoint, subject);
             // Each Endpoint names the broker its space lives on (ADR-N-047 §2.3).
             entry["broker"] = json!(gateway.broker.broker_of_view(&endpoint.slug));
             entry
         })
+        .filter(|entry| {
+            wanted
+                .iter()
+                .all(|(name, value)| matches(entry, name, value))
+        })
         .collect();
-    let mut page = json!({ "endpoints": endpoints, "total": reach.len() });
+    let total = rows.len();
+    let endpoints: Vec<Value> = rows.into_iter().skip(offset).take(limit).collect();
+    let mut page = json!({ "endpoints": endpoints, "total": total });
     let next = offset.saturating_add(limit);
-    if next < reach.len() {
-        page["nextCursor"] = json!(next);
+    if next < total {
+        page["nextCursor"] = json!(next.to_string());
     }
     Ok(page)
+}
+
+/// The filters `list_endpoints` takes beside its paging (EP-111), each one text.
+const FILTERS: &[&str] = &["q", "type", "attribute", "space", "access"];
+
+/// Whether one described Endpoint passes one filter; `value` is lowercase. A type, an
+/// attribute and a space match whole names, `q` any part of a title or description.
+fn matches(entry: &Value, name: &str, value: &str) -> bool {
+    let names = |pointer: &str| -> Vec<String> {
+        match entry.pointer(pointer) {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_lowercase)
+                .collect(),
+            Some(Value::Object(map)) => map
+                .values()
+                .flat_map(|value| match value {
+                    Value::Array(items) => items.iter().filter_map(Value::as_str).collect(),
+                    Value::String(text) => vec![text.as_str()],
+                    _ => Vec::new(),
+                })
+                .map(str::to_lowercase)
+                .collect(),
+            Some(Value::String(text)) => vec![text.to_lowercase()],
+            _ => Vec::new(),
+        }
+    };
+    match name {
+        "q" => ["/title", "/description", "/slug"]
+            .iter()
+            .flat_map(|pointer| names(pointer))
+            .any(|text| text.contains(value)),
+        "type" => names("/types").iter().any(|t| t == value),
+        "attribute" => names("/attributes").iter().any(|a| a == value),
+        "space" => names("/space").iter().any(|s| s == value),
+        "access" => names("/access").iter().any(|a| a == value),
+        _ => false,
+    }
 }
 
 /// One request's view of the hub, or of a named server: who may be reached, with what.
@@ -286,6 +377,8 @@ pub(crate) struct Hub {
     pub(crate) caller: String,
     /// The named server this request came in by, `None` on the hub (ADR-N-043).
     pub(crate) server: Option<McpServer>,
+    /// No token on this request: an Endpoint outside `reach` is `401`, not unknown (T-4114).
+    pub(crate) anonymous: bool,
 }
 
 pub(crate) enum Answer {
@@ -403,6 +496,11 @@ impl Hub {
             .iter()
             .find(|(endpoint, _)| endpoint.slug == slug)
         else {
+            // Without a token every slug outside the public ones is the login prompt, an
+            // internal one and one that does not exist alike (SP-20).
+            if self.anonymous {
+                return Answer::Refused(unauthorized(&self.gateway));
+            }
             return Answer::Json(error(id, -32602, "unknown endpoint"));
         };
         match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
@@ -516,8 +614,10 @@ pub(crate) fn misrouted(id: &Value, arguments: &Map<String, Value>) -> Option<Va
     ))
 }
 
-/// One Endpoint as `list_endpoints` names it: only what this caller may see of it.
-fn described(base: &str, endpoint: &Endpoint, subject: &Subject) -> Value {
+/// One Endpoint as `list_endpoints` names it: only what this caller may see of it, enough for
+/// an agent to pick it from one call (EP-105, EP-111).
+fn described(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Value {
+    let base = gateway.base_url();
     let visible = schema::visible(subject, endpoint, crate::pdp::now());
     let types = schema::visible_types(endpoint, &visible);
     let representations: Vec<&str> = endpoint
@@ -537,17 +637,29 @@ fn described(base: &str, endpoint: &Endpoint, subject: &Subject) -> Value {
             )
         })
         .collect();
+    let newest = endpoint.models.iter().map(|model| model.major).max();
     let mut entry = json!({
         "slug": endpoint.slug,
         "title": endpoint.title,
+        "description": endpoint.description,
         "space": endpoint.space,
+        "access": if endpoint.audience == Audience::Public { "public" } else { "internal" },
         "types": types,
+        "attributes": attributes_of(endpoint, newest, &visible, &types),
+        "temporal": tools::granted(
+            gateway,
+            endpoint,
+            subject,
+            &[Operation::QueryTemporal, Operation::RetrieveTemporal],
+        ),
         "representations": representations,
         "surfaces": surfaces,
         "mcp": format!("{base}{}/mcp", endpoint.base_path),
+        // The Endpoint's root answers its DCAT-AP record (EP-27).
+        "dcat": format!("{base}{}/", endpoint.base_path),
     });
     // The recommended formalism of the newest major, the one describe_schema recommends.
-    if let Some(major) = endpoint.models.iter().map(|model| model.major).max() {
+    if let Some(major) = newest {
         entry["schema"] = json!(format!(
             "{base}{}/schema/v{major}/{}",
             endpoint.base_path,
@@ -557,18 +669,65 @@ fn described(base: &str, endpoint: &Endpoint, subject: &Subject) -> Value {
     entry
 }
 
+/// Per type the caller may read, the attribute names the newest model major describes to
+/// this caller: the same narrowing `describe_schema` applies (EP-47, MP-02).
+fn attributes_of(
+    endpoint: &Endpoint,
+    newest: Option<u32>,
+    visible: &schema::Visible,
+    types: &[String],
+) -> Map<String, Value> {
+    let Some(newest) = newest else {
+        return Map::new();
+    };
+    let models: Vec<&crate::resolver::Model> = endpoint
+        .models
+        .iter()
+        .filter(|model| model.major == newest)
+        .collect();
+    let document = schema::json_schema(&models, visible, &mut Vec::new());
+    types
+        .iter()
+        .map(|entity_type| {
+            let mut names: Vec<&str> = document
+                .pointer(&format!("/$defs/{entity_type}/properties"))
+                .and_then(Value::as_object)
+                .map(|properties| {
+                    properties
+                        .keys()
+                        .map(String::as_str)
+                        .filter(|name| !matches!(*name, "id" | "type" | "@context"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort_unstable();
+            (entity_type.clone(), json!(names))
+        })
+        .collect()
+}
+
 /// The tool that answers the caller's list (ADR-N-025 2.1).
 fn list_endpoints_tool() -> Value {
     json!({
         "name": "list_endpoints",
-        "description": "The Endpoints this connector reaches, with their context space, the \
-                        entity types you may read and the link to their data model. Name one in \
-                        the `endpoint` argument of every other tool.",
+        "description": "The Endpoints this connector reaches: open ones without a login, and \
+                        the ones you may read once signed in. Each row names its context space, \
+                        whether it is public or internal, the entity types and per type the \
+                        attributes you may read, whether history (temporal) reads answer, its \
+                        DCAT record and its data model. Filter with q, type, attribute, space \
+                        and access; name one in the `endpoint` argument of every other tool, \
+                        then describe_schema for its LinkML model and @context, describe_access \
+                        for what you may do.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "q": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Words in the title or description, any language" },
+                "type": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An entity type you may read there" },
+                "attribute": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An attribute name of such a type" },
+                "space": { "type": "string", "minLength": 1, "maxLength": 200, "description": "The context space" },
+                "access": { "type": "string", "enum": ["public", "internal"] },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
-                "cursor": { "type": "integer", "minimum": 0, "description": "The previous page's nextCursor" },
+                "cursor": { "type": "string", "maxLength": 20, "description": "The previous page's nextCursor, passed back as given" },
             },
             "additionalProperties": false,
         },
@@ -577,7 +736,7 @@ fn list_endpoints_tool() -> Value {
             "properties": {
                 "endpoints": { "type": "array" },
                 "total": { "type": "integer" },
-                "nextCursor": { "type": "integer" },
+                "nextCursor": { "type": "string" },
             },
             "required": ["endpoints", "total"],
         },
@@ -615,7 +774,8 @@ pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response
             "resource": format!("{}{HUB_PATH}", gateway.base_url()),
             "authorization_servers": [issuer],
             "bearer_methods_supported": ["header"],
-            "scopes_supported": ["endpoint:{slug}"],
+            // The one-login scope (ADR-N-025 4b); `endpoint:{slug}` stays a narrower choice.
+            "scopes_supported": ["endpoint:*"],
         }),
     )
 }

@@ -236,13 +236,16 @@ async fn an_endpoint_whose_grant_is_gone_is_not_listed() {
     assert_eq!(slugs_of(&rest), SLUGS[1..5]);
 }
 
-/// No token lists nothing (401), and the paging arguments are those of `list_endpoints`.
+/// No token lists the public Endpoints only, none of these (T-4114, EP-105), and the paging
+/// arguments are those of `list_endpoints`.
 #[tokio::test]
 async fn the_list_needs_a_token_and_pages() {
     let realm = common::Realm::new();
     let app = app("http://127.0.0.1:1", &realm, &SLUGS);
-    let (status, _) = send(app.clone(), get("/api/endpoints", None)).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = send(app.clone(), get("/api/endpoints", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let anonymous: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(anonymous["total"], json!(0), "{body}");
 
     let token = machine(&realm, json!(SLUGS[..5]));
     let (_, body) = send(
@@ -252,14 +255,15 @@ async fn the_list_needs_a_token_and_pages() {
     .await;
     let page: Value = serde_json::from_str(&body).expect("JSON");
     assert_eq!(slugs_of(&page), SLUGS[2..4]);
-    assert_eq!(page["nextCursor"], json!(4));
+    assert_eq!(page["nextCursor"], json!("4"));
 
     for query in [
         "limit=0",
         "limit=101",
         "limit=x",
         "cursor=-1",
-        "space=ovzdusie",
+        "spaces=ovzdusie",
+        "access=secret",
     ] {
         let (status, body) = send(
             app.clone(),

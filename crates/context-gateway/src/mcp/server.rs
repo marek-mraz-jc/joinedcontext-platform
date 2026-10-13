@@ -181,6 +181,7 @@ pub async fn message(
         reach,
         caller,
         server: Some(server),
+        anonymous: false,
     };
     let mut response = match hub.answer(message).await {
         Answer::Json(answer) => jsonrpc::json_response(StatusCode::OK, &answer),

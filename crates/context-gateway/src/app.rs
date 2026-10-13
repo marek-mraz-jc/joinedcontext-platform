@@ -365,11 +365,14 @@ impl Gateway {
 
     /// Whether a verified token reaches `endpoint` through the hub (EP-88, PF-45, PF-46): its
     /// audience names the Endpoint itself (its slug, its URL or the edge), or it names the hub
-    /// and an `endpoint:{slug}` scope picks this Endpoint. The Endpoint's Policy still decides.
+    /// and an `endpoint:{slug}` scope picks this Endpoint, or `endpoint:*` picks every one the
+    /// person consented to hand over (ADR-N-025 4b). The Endpoint's Policy still decides.
     pub(crate) fn reaches(&self, claims: &Claims, endpoint: &Endpoint) -> bool {
         claims.names_audience(&self.audiences_for(endpoint))
             || (claims.names_audience(&self.hub_audiences())
-                && claims.endpoint_scopes().any(|slug| slug == endpoint.slug))
+                && claims
+                    .endpoint_scopes()
+                    .any(|slug| slug == "*" || slug == endpoint.slug))
     }
 
     /// Replaces the federation table, the same way the accounts are replaced (EP-70).

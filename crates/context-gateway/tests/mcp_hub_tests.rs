@@ -708,13 +708,15 @@ async fn a_tool_another_endpoint_grants_is_refused_by_name_on_this_one() {
     assert!(broker.hops().is_empty());
 }
 
-/// AG-32, RFC 9728: without a token the hub says where to get one, and its metadata names the
-/// hub as the resource.
+/// AG-32, RFC 9728: without a token the hub lists the public Endpoints (none here, T-4114) and
+/// a call to any other says where to get a token; its metadata names the hub as the resource.
 #[tokio::test]
 async fn a_client_without_a_token_is_told_where_to_get_one() {
     let realm = common::Realm::new();
     let app = app("http://127.0.0.1:1", &realm);
-    let (status, headers, _) = raw(app.clone(), hub(None, list())).await;
+    let (status, _) = send(app.clone(), hub(None, list())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, headers, _) = raw(app.clone(), hub(None, query(AIR))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         headers["www-authenticate"],
@@ -745,7 +747,7 @@ async fn list_endpoints_pages_and_describes_each_endpoint() {
     .await;
     let page = &first["result"]["structuredContent"];
     assert_eq!(page["total"], json!(2), "{first}");
-    assert_eq!(page["nextCursor"], json!(1));
+    assert_eq!(page["nextCursor"], json!("1"));
     let entry = &page["endpoints"][0];
     assert_eq!(entry["slug"], json!(AIR));
     assert_eq!(entry["space"], json!("ovzdusie"));
@@ -780,7 +782,7 @@ async fn list_endpoints_pages_and_describes_each_endpoint() {
     for arguments in [
         json!({ "limit": 0 }),
         json!({ "limit": "5" }),
-        json!({ "space": "x" }),
+        json!({ "spaces": "x" }),
     ] {
         let (_, refused) = send(
             app.clone(),
