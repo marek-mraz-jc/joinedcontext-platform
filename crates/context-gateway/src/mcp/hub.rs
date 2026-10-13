@@ -4,15 +4,17 @@
 //! The hub holds no data path of its own. It answers who the caller may reach, and every tool
 //! call it takes goes to the named Endpoint's view on the broker, `/x/views/{slug}/mcp`, in the
 //! broker's form and under the verified caller, as a call to `/api/endpoint/{slug}/mcp` does
-//! (T-3808); `describe_schema`, `describe_access` and an Endpoint no view serves yet stay on the
-//! Endpoint's own façade (SP-16). Nothing is remembered between calls (SP-19):
+//! (T-3808); the gateway answers `describe_schema` and `describe_access` itself, from the same
+//! documents its access and schema surfaces serve (SP-16). Nothing is remembered between calls (SP-19):
 //! the agent names the Endpoint on every call, and the list is rebuilt from the token each time.
 
-use crate::app::{self, principal_of, subject_from, Credential, Door, Gateway, HUB_PATH, MAX_BODY};
+use crate::app::{self, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
-use crate::mcp::endpoint_facade::{self, answered, error, refused, result, HubTool};
+use crate::mcp::describe;
+use crate::mcp::jsonrpc::{self, answered, error, refused, result};
 use crate::mcp::server::{self, McpServer};
+use crate::mcp::tools::{self, HubTool};
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -78,26 +80,24 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         Ok(reached) => reached,
         Err(refusal) => return *refusal,
     };
-    let authorization = request.headers().get(AUTHORIZATION).cloned();
 
     let caller = rate_limit::caller_key(request.headers());
     let (_, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
-        return endpoint_facade::parse_error();
+        return jsonrpc::parse_error();
     };
     let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
-        return endpoint_facade::parse_error();
+        return jsonrpc::parse_error();
     };
 
     let hub = Hub {
         gateway,
         reach,
-        authorization,
         caller,
         server: None,
     };
     let mut response = match hub.answer(message).await {
-        Answer::Json(answer) => endpoint_facade::json_response(StatusCode::OK, &answer),
+        Answer::Json(answer) => jsonrpc::json_response(StatusCode::OK, &answer),
         Answer::Notification => StatusCode::ACCEPTED.into_response(),
         Answer::Refused(response) => response,
     };
@@ -179,8 +179,7 @@ pub(crate) fn reached(
         .filter(|endpoint| gateway.reaches(&claims, endpoint))
         .filter_map(|endpoint| {
             let subject = subject_from(gateway, &endpoint, &claims).ok()?;
-            endpoint_facade::reads_anything(gateway, &endpoint, &subject)
-                .then_some((endpoint, subject))
+            tools::reads_anything(gateway, &endpoint, &subject).then_some((endpoint, subject))
         })
         .collect();
     reach.sort_by(|(a, _), (b, _)| a.slug.cmp(&b.slug));
@@ -221,7 +220,7 @@ pub async fn endpoints(
     let mut response = match page(&gateway, &reach, &arguments) {
         Ok(page) => {
             tracing::info!(principal = %principal, total = reach.len(), "endpoint list");
-            endpoint_facade::json_response(StatusCode::OK, &page)
+            jsonrpc::json_response(StatusCode::OK, &page)
         }
         Err(why) => ProblemDetails::bad_request()
             .with_detail(why)
@@ -283,8 +282,6 @@ pub(crate) struct Hub {
     /// The caller's Endpoints and who the caller is on each: in slug order on the hub, in the
     /// order of `spec.members` on a named server.
     pub(crate) reach: Vec<(Arc<Endpoint>, Subject)>,
-    /// The caller's own header, handed to the Endpoint's façade and nothing else (EP-26).
-    pub(crate) authorization: Option<HeaderValue>,
     /// The key the Endpoint's own `(slug, caller)` bucket is spent under, the middleware's own.
     pub(crate) caller: String,
     /// The named server this request came in by, `None` on the hub (ADR-N-043).
@@ -322,7 +319,7 @@ impl Hub {
             "initialize" => result(
                 id,
                 json!({
-                    "protocolVersion": endpoint_facade::PROTOCOL_VERSION,
+                    "protocolVersion": jsonrpc::PROTOCOL_VERSION,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": {
                         "name": "joinedcontext-hub",
@@ -338,7 +335,7 @@ impl Hub {
             "ping" => result(id, json!({})),
             "tools/list" => {
                 let mut tools = vec![list_endpoints_tool()];
-                tools.extend(endpoint_facade::hub_tools(&self.gateway, &self.reach));
+                tools.extend(tools::hub_tools(&self.gateway, &self.reach));
                 // A member's view answers its own cursor, opaque; a member no view serves yet
                 // still answers an offset (T-3808).
                 for cursor in tools
@@ -408,7 +405,7 @@ impl Hub {
         else {
             return Answer::Json(error(id, -32602, "unknown endpoint"));
         };
-        match endpoint_facade::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
+        match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
             HubTool::Unknown => return Answer::Json(error(id, -32602, "unknown tool")),
             HubTool::Ungranted(refusal) => return Answer::Json(result(id, refusal)),
             HubTool::Granted => {}
@@ -420,13 +417,10 @@ impl Hub {
                 "the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names",
             ));
         }
-        match self
-            .forward(endpoint, subject, name, id, &params, arguments)
-            .await
-        {
-            Some(answer) => Answer::Json(answer),
-            None => Answer::Notification,
-        }
+        Answer::Json(
+            self.forward(endpoint, subject, name, id, &params, arguments)
+                .await,
+        )
     }
 
     /// Spends the Endpoint's own bucket, as a call to its URL spends it (EP-20).
@@ -445,8 +439,7 @@ impl Hub {
         Err(decision)
     }
 
-    /// Hands one tool call to the Endpoint's own façade, which admits the caller again from
-    /// their token (EP-26). `None` is a notification.
+    /// Hands one tool call to the Endpoint's view at the broker, or answers a describe tool.
     pub(crate) async fn forward(
         &self,
         endpoint: &Arc<Endpoint>,
@@ -455,7 +448,7 @@ impl Hub {
         id: Value,
         params: &Value,
         arguments: Map<String, Value>,
-    ) -> Option<Value> {
+    ) -> Value {
         // What a call to the Endpoint's URL logs, and which Endpoint and tool it was (ADR-N-025
         // section 3, ADR-N-043 §2.8). The Endpoint's own decision line follows from the re-entry.
         let server = self.server.as_ref().map(McpServer::path);
@@ -469,19 +462,15 @@ impl Hub {
             "hub call"
         );
 
-        let mut forwarded = params.as_object().cloned().unwrap_or_default();
-        if app::member_viewed(endpoint, name) {
-            let (tool, arguments) = broker_call(name, arguments);
-            forwarded.insert("name".to_owned(), json!(tool));
-            forwarded.insert("arguments".to_owned(), Value::Object(arguments));
-            let message = json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": "tools/call",
-                "params": forwarded,
-            });
-            return Some(app::member_call(&self.gateway, endpoint, subject, message).await);
+        if describe::DESCRIBE_TOOLS.contains(&name) {
+            let mut asked = params.as_object().cloned().unwrap_or_default();
+            asked.insert("arguments".to_owned(), Value::Object(arguments));
+            return describe::call(&self.gateway, endpoint, subject, id, &Value::Object(asked))
+                .await;
         }
+        let mut forwarded = params.as_object().cloned().unwrap_or_default();
+        let (tool, arguments) = broker_call(name, arguments);
+        forwarded.insert("name".to_owned(), json!(tool));
         forwarded.insert("arguments".to_owned(), Value::Object(arguments));
         let message = json!({
             "jsonrpc": "2.0",
@@ -489,22 +478,7 @@ impl Hub {
             "method": "tools/call",
             "params": forwarded,
         });
-        let credential = Credential {
-            authorization: self.authorization.clone(),
-            door: if self.server.is_some() {
-                Door::Server
-            } else {
-                Door::Hub
-            },
-        };
-        endpoint_facade::handle(
-            Arc::clone(&self.gateway),
-            Arc::clone(endpoint),
-            subject.clone(),
-            credential,
-            message,
-        )
-        .await
+        app::member_call(&self.gateway, endpoint, subject, message).await
     }
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).
@@ -513,7 +487,7 @@ impl Hub {
             Ok(page) => page,
             Err(why) => return result(id, refused(&why, &Value::Null)),
         };
-        let mut answer = answered(&page["endpoints"], "endpoints", false, &[]);
+        let mut answer = answered(&page["endpoints"], "endpoints");
         if let Some(structured) = answer
             .get_mut("structuredContent")
             .and_then(Value::as_object_mut)
@@ -635,7 +609,7 @@ pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response
     let Some(issuer) = gateway.verifier.as_ref().map(|verifier| verifier.issuer()) else {
         return ProblemDetails::not_found().into_response();
     };
-    endpoint_facade::json_response(
+    jsonrpc::json_response(
         StatusCode::OK,
         &json!({
             "resource": format!("{}{HUB_PATH}", gateway.base_url()),

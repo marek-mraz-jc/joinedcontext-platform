@@ -334,7 +334,7 @@ async fn a_forged_tenant_header_never_reaches_the_broker() {
 
 /// OPS-17: the W3C Trace Context a caller (or APISIX in front of it) sends reaches the broker
 /// as it was, so one trace spans the edge, the gateway and the broker. The gateway relays it and
-/// starts no trace of its own. Both surfaces forward through `ngsi_ld_request`, so one proves
+/// starts no trace of its own. Both surfaces forward through `serve_ngsi_ld_view`, so one proves
 /// the path for both.
 #[tokio::test]
 async fn the_trace_context_reaches_the_broker_unchanged() {
