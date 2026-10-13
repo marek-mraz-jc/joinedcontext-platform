@@ -433,7 +433,7 @@ pub async fn session(
     conn: u64,
     queue: Arc<Queue>,
     principal: String,
-    lifetime: Option<Duration>,
+    lifetime: Duration,
 ) -> Ended {
     let (mut to_client, mut from_client) = client.split();
     let name = hub::random_name();
@@ -456,12 +456,7 @@ pub async fn session(
     let mut last_pong = Instant::now();
     let mut last_message = Instant::now();
     let mut first = true;
-    let expired = async {
-        match lifetime {
-            Some(lifetime) => tokio::time::sleep(lifetime).await,
-            None => std::future::pending().await,
-        }
-    };
+    let expired = tokio::time::sleep(lifetime);
     tokio::pin!(expired);
     while ended.is_none() {
         let mut outgoing: Vec<String> = Vec::new();

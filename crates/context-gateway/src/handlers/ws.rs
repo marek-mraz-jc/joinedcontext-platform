@@ -38,6 +38,8 @@ const MAX_FRAME: usize = 16 * 1024;
 /// A token caller's socket ends when its access token would (Keycloak's default 300 s), since
 /// nothing re-checks the token on an open socket (API/07 §3).
 pub const TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
+/// An anonymous socket's lifetime (API/07 §3).
+const ANONYMOUS_LIFETIME: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// The WebSocket connections each caller holds open (EP-107).
 #[derive(Debug, Default)]
@@ -122,8 +124,12 @@ pub(crate) async fn endpoint_ws(
     // A person or an account is one caller however many tokens it holds; an anonymous caller
     // is its address.
     let principal = principal_of(&subject);
-    // An anonymous socket has no token to expire (T-4132): the broker's lifetime bounds it.
-    let lifetime = (principal != "anonymous").then_some(gateway.ws_token_lifetime);
+    // An anonymous socket has no token to expire (T-4132), so only a day bounds it.
+    let lifetime = if principal == "anonymous" {
+        ANONYMOUS_LIFETIME
+    } else {
+        gateway.ws_token_lifetime
+    };
     let caller = match principal {
         anonymous if anonymous == "anonymous" => caller_key(request.headers()),
         principal => principal,
