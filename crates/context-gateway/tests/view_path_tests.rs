@@ -309,11 +309,8 @@ async fn an_endpoint_no_view_can_hold_is_refused_and_nothing_reaches_the_broker(
             get(&format!("/api/endpoint/{long}/ngsi-ld/v1/{path}")),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
-        assert!(
-            body.to_string().contains("endpoint-without-view"),
-            "{path}: {body}"
-        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
+        assert!(body.to_string().contains("no-view"), "{path}: {body}");
     }
     assert!(
         hops.lock().expect("the hop log").is_empty(),
@@ -321,8 +318,8 @@ async fn an_endpoint_no_view_can_hold_is_refused_and_nothing_reaches_the_broker(
     );
 }
 
-/// T-3644 with T-3789: a conditional write is the view's like any other; the broker compares
-/// the entity tag, so `If-Match` reaches it as the caller sent it.
+/// T-3644 with T-3789 (R45, GW19): a conditional write is the view's like any other; the broker
+/// compares the entity tag, so `If-Match` reaches it as the caller sent it.
 #[tokio::test]
 async fn a_conditional_write_goes_to_the_view_with_its_if_match() {
     let (upstream, hops) = broker(StatusCode::NO_CONTENT, &[], json!({})).await;

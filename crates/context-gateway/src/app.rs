@@ -922,17 +922,6 @@ pub(crate) fn reserve_create(
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
 const MAX_VIEW_ID: usize = 63;
 
-/// The answer on the NGSI-LD surface of an Endpoint the broker holds no view of (T-3644): the
-/// view decides every NGSI-LD request, and the gateway decides none of its own.
-fn endpoint_without_view() -> Response<Body> {
-    ProblemDetails::new(501, "endpoint-without-view", "Not Implemented")
-        .with_detail(
-            "this endpoint's NGSI-LD surface is served by the broker's view of it, and its slug \
-             is longer than a view id (63 characters) can be",
-        )
-        .into_response()
-}
-
 /// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
 /// one, unless its slug is longer than a view id can be (the writer refuses it).
 pub(crate) fn has_view(view: &str) -> bool {
@@ -954,7 +943,7 @@ pub(crate) fn view_of(endpoint: &Endpoint) -> String {
 /// and the broker's engine decides and narrows it under the `x-jc-*` subject the gateway
 /// verified. The gateway keeps what is not a decision: the identifier check, the domain gate,
 /// the media type, the core context, a form's minted ids and daily creates, the model's units
-/// and relationships. An Endpoint without a view answers [`endpoint_without_view`].
+/// and relationships. An Endpoint without a view answers `503 no-view`, as its other surfaces do.
 pub(crate) async fn serve_ngsi_ld_view(
     gateway: &Gateway,
     admitted: Result<(Arc<Endpoint>, Subject), Box<Response<Body>>>,
@@ -981,8 +970,7 @@ pub(crate) async fn serve_ngsi_ld_view(
     };
     let view = view(&endpoint);
     if !has_view(&view) {
-        tracing::info!(slug = %endpoint.slug, %view, "refused: an endpoint no view serves");
-        return endpoint_without_view();
+        return crate::handlers::view_access::no_view(&endpoint);
     }
     if operation == Operation::QueryEntity {
         if let Some(refusal) = query_shape_refusal(&params) {

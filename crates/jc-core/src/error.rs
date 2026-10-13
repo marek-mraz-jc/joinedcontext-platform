@@ -167,7 +167,6 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "upstream-redirect", status: 502, title: "Upstream Redirect", hint: "The service behind the platform answered with a redirect it may not follow; ask its owner for the final address." },
     ProblemType { slug: "service-unavailable", status: 503, title: "Service Unavailable", hint: "The platform is not ready for this yet; try again in a minute." },
     ProblemType { slug: "space-moving", status: 503, title: "Space Moving", hint: "The space is moving to another broker and takes no writes; send the write again after the seconds Retry-After names." },
-    ProblemType { slug: "endpoint-without-view", status: 501, title: "Not Implemented", hint: "The broker's view of the endpoint serves its NGSI-LD surface; give the endpoint a slug of at most 63 characters so it has one." },
     ProblemType { slug: "space-full", status: 503, title: "Service Unavailable", hint: "The space has as many WebSocket connections open as it holds; close one or connect again in a minute." },
     ProblemType { slug: "no-view", status: 503, title: "The access surface of this endpoint is not served", hint: "The endpoint has no context broker view (its slug is longer than a view id can be); its status in the Portal says so. Give it a shorter slug." },
     ProblemType { slug: "delivery-timeout", status: 504, title: "Delivery Timeout", hint: "The receiver did not answer in time; check that it is reachable and try again." },

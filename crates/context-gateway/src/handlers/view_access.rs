@@ -213,7 +213,7 @@ async fn from_view(
 /// The answer for an Endpoint the broker holds no view of: its slug is longer than a view id can
 /// be, so the Portal's writer refused the view and the Endpoint's status says so. Nobody decides
 /// for it, so nothing is answered (fail closed).
-fn no_view(endpoint: &Endpoint) -> Response<Body> {
+pub(crate) fn no_view(endpoint: &Endpoint) -> Response<Body> {
     tracing::error!(slug = %endpoint.slug, "no broker view serves this endpoint's access surface");
     ProblemDetails::new(
         503,
