@@ -172,5 +172,35 @@ fn language_text(texts: &Map<String, Value>, lang: Option<&str>) -> Option<Value
     if by_locale.is_empty() {
         return None;
     }
-    Some(json!(super::ogc::localized(&by_locale, lang, None)))
+    Some(json!(localized(&by_locale, lang, None)))
+}
+
+/// The text of a language map for the caller's `Accept-Language`, or the best thing there is.
+///
+/// Not a full RFC 4647 match: the first tag is compared whole and then by its primary subtag,
+/// which is what a two-locale municipal deployment needs. A caller who asks for nothing, or for
+/// a language nobody wrote, gets the declared default and then whatever exists, because an
+/// empty title is worse than a title in the wrong language.
+pub fn localized<'a>(
+    texts: &'a BTreeMap<String, String>,
+    accept_language: Option<&str>,
+    default_locale: Option<&str>,
+) -> &'a str {
+    let wanted = accept_language
+        .and_then(|header| header.split(',').next())
+        .map(|tag| tag.split(';').next().unwrap_or(tag).trim().to_owned());
+    let candidates = [wanted.as_deref(), default_locale];
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(text) = texts.get(candidate) {
+            return text;
+        }
+        let primary = candidate.split('-').next().unwrap_or(candidate);
+        if let Some((_, text)) = texts
+            .iter()
+            .find(|(locale, _)| locale.split('-').next() == Some(primary))
+        {
+            return text;
+        }
+    }
+    texts.values().next().map_or("", String::as_str)
 }

@@ -130,6 +130,12 @@ pub struct Gateway {
     pub creates: crate::creates::DailyCreates,
     /// The WebSocket connections each caller holds open (EP-107).
     pub ws_open: crate::handlers::ws::Open,
+    /// Each Endpoint's WebSocket fan-out: one broker subscription, its entities, its clients'
+    /// filters (ADR-N-049, EP-114).
+    pub hubs: crate::fanout::socket::Hubs,
+    /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
+    /// bounded only by the broker's own lifetime.
+    pub ws_token_lifetime: std::time::Duration,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -223,6 +229,8 @@ impl Gateway {
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
+            hubs: Default::default(),
+            ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
@@ -632,8 +640,9 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
         .route("/api/endpoint/{slug}/file.zip", get(file_zip))
-        // The OGC surface is one handler over its own resource tree: three spellings of the
-        // landing page, because a GIS client stores whichever one it was given (EP-29).
+        // The OGC surface is the broker's view (T-3752), one forward over its resource tree:
+        // three spellings of the landing page, because a GIS client stores whichever one it was
+        // given (EP-29).
         .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
         .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
         // The SensorThings surface, the same shape: one handler over its own resource tree.
@@ -1629,12 +1638,11 @@ fn reserve_create(
     Err(Box::new(refusal))
 }
 
-/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, until its gap closes: a slug no view id
-/// can hold (the writer refuses it), and a write with `If-Match`: the broker publishes no entity
-/// tags, and the gateway's read, compare and conditional write is the only lost-update guard
-/// there is (R45, GW16). A subscription is the view's: stored under the verified subscriber and
-/// delivered by the broker itself (plan 5.5, T-3653).
+/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
+/// broker can hold the view ([`has_view`]), and the request is no write with `If-Match`: the
+/// broker publishes no entity tags, and the gateway's read, compare and conditional write is the
+/// only lost-update guard there is (R45, GW16). A subscription is the view's: stored under the
+/// verified subscriber and delivered by the broker itself (plan 5.5, T-3653).
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
     has_view(view) && !conditional
@@ -1830,7 +1838,7 @@ pub(crate) async fn serve_ngsi_ld_view(
 /// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
 /// `code` with its hint, the members the NGSI-LD surface carries them in (API/00 §4, T-3243), so
 /// a client keyed on the slug still says who can give access.
-async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
+pub(crate) async fn with_platform_slug(answer: Response<Body>) -> Response<Body> {
     let (parts, body) = answer.into_parts();
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
@@ -1860,7 +1868,7 @@ pub(crate) const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// The broker names its view root in `Location`, `Content-Location` and `Link` (views.md 2);
 /// the caller reaches the same resource under their own prefix, and the mount is internal.
-fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
+pub(crate) fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
     for name in [LOCATION, CONTENT_LOCATION, LINK] {
         let rewritten: Vec<HeaderValue> = headers
             .get_all(&name)
