@@ -356,12 +356,28 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
             let mut got: Vec<usize> = Vec::new();
             let mut latencies: Vec<Duration> = Vec::new();
             let mut gaps = 0;
+            // How the server ended the socket, when it did before the rig stopped it.
+            let mut ended: Option<String> = None;
             // A client reads until the rig says every socket has drained (see below).
             loop {
                 let message = tokio::select! {
                     read = socket.next() => match read {
+                        Some(Ok(Message::Close(frame))) => {
+                            ended = Some(frame.map_or_else(
+                                || "close".to_owned(),
+                                |f| format!("close {} {}", u16::from(f.code), f.reason),
+                            ));
+                            break;
+                        }
                         Some(Ok(message)) => message,
-                        _ => break,
+                        Some(Err(error)) => {
+                            ended = Some(format!("error {error}"));
+                            break;
+                        }
+                        None => {
+                            ended = Some("eof".to_owned());
+                            break;
+                        }
                     },
                     _ = stop.changed() => break,
                 };
@@ -390,10 +406,13 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
                         got.push(n);
                     }
                     Some("x-gap") => gaps += 1,
+                    Some("x-closing") => {
+                        ended = Some(format!("x-closing {}", message["metadata"]["x-reason"]));
+                    }
                     _ => {}
                 }
             }
-            (got, latencies, gaps)
+            (got, latencies, gaps, ended)
         }));
     }
     drop(ready_tx);
@@ -448,9 +467,13 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     let mut delivered = 0;
     let mut coalesced = 0;
     let mut gaps = 0;
+    let mut ends: BTreeMap<String, usize> = BTreeMap::new();
     for (i, client) in clients.into_iter().enumerate() {
-        let (got, mut seen, gapped) = client.await.expect("the client ran");
+        let (got, mut seen, gapped, ended) = client.await.expect("the client ran");
         gaps += gapped;
+        if let Some(ended) = ended {
+            *ends.entry(ended).or_default() += 1;
+        }
         delivered += got.len();
         if got != expected[i] {
             if holds_coalesced(&got, &expected[i], &stream) {
@@ -471,6 +494,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         "wrong_sockets": wrong.len(),
         "coalesced": coalesced,
         "gaps": gaps,
+        "ended_by_server": ends,
         "latency_p50_ms": percentile(&latencies, 0.50).as_secs_f64() * 1000.0,
         "latency_p99_ms": percentile(&latencies, 0.99).as_secs_f64() * 1000.0,
         "rss_kib_before": before_rss,
@@ -488,6 +512,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         .take(5)
         .map(|(i, f, want, got)| (*i, format!("{f} wanted {want} got {got}")))
         .collect();
+    assert!(ends.is_empty(), "the server ended sockets: {ends:?}");
     assert!(
         wrong.is_empty(),
         "{} sockets differ from the ground truth: {shown:?}",
