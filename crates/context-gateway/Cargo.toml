@@ -9,7 +9,7 @@ repository.workspace = true
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum", "logs"] }
 jcctl = { path = "../jcctl", version = "0.1.0" }
 arc-swap = "1"
-# base64url for the opaque OGC page cursor (EP-36); already in the tree via jsonwebtoken
+# base64url for the egress subject; already in the tree via jsonwebtoken
 base64 = "0.22"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
@@ -26,6 +26,9 @@ regex = "1"
 # broker judges it (T-3530, EP-16); pinned to a commit of the Antares main branch.
 antares-ql = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker", rev = "7185e1a1007b8853c5e4373c56e63be93aa365e9", version = "0.1.3" }
 antares-jsonld = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker", rev = "7185e1a1007b8853c5e4373c56e63be93aa365e9", version = "0.1.3" }
+# The broker's own subscription predicates against one in-memory entity, so the WebSocket fan-out
+# (ADR-N-049) decides a client filter exactly as the broker would.
+antares-matcher = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker", rev = "7185e1a1007b8853c5e4373c56e63be93aa365e9", version = "0.1.3" }
 # The preview list from the Portal (Architecture/06 §7.2); already in the tree through jcctl.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }

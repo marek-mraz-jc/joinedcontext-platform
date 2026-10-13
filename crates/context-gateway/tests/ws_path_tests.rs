@@ -1,14 +1,14 @@
-//! `{endpoint}/ws` is the broker view's WebSocket, relayed under the verified caller (EP-106,
-//! EP-107, T-3885). The gateway serves on a real socket, because an upgrade needs one, in front
-//! of a stub broker that records each upgrade it is asked for and echoes every frame; what the
-//! broker does with a subscription is Antares' (ADR-0026) and tested there.
+//! `{endpoint}/ws` is served by the Endpoint's fan-out (EP-106, EP-107, EP-114, ADR-N-049): one
+//! broker subscription per Endpoint, its changes cut to each caller's grant and matched to each
+//! client's filters in the gateway. The gateway serves on a real socket, because an upgrade needs
+//! one, in front of a stub broker that records each upgrade it is asked for, welcomes the
+//! gateway, accepts its one subscription and sends whatever notification a test pushes.
 
 mod common;
 
 use axum::extract::ws::{Message as AxumMessage, WebSocketUpgrade};
 use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
@@ -32,8 +32,6 @@ const PUBLIC: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
 const INTERNAL: &str = "cccccccccccccccccccccccccc";
 /// A public Endpoint that turned the WebSocket off.
 const DISABLED: &str = "dddddddddddddddddddddddddd";
-/// A public Endpoint whose view the stub broker refuses to upgrade (its connection cap).
-const BUSY: &str = "eeeeeeeeeeeeeeeeeeeeeeeeee";
 
 const SPACE: &str = "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  \
                      name: helsinki\n  namespace: helsinki\nspec:\n  isSandbox: false\n  \
@@ -87,7 +85,6 @@ fn repo(test: &str) -> PathBuf {
             "  disabledRepresentations: [websocket]\n",
         ),
     );
-    write("busy.yaml", &endpoint("helsinki-busy", BUSY, "public", ""));
     write("public-policy.yaml", &policy("public-bikes", "public"));
     write("staff.yaml", &policy("staff-bikes", "data-steward"));
     dir
@@ -95,44 +92,144 @@ fn repo(test: &str) -> PathBuf {
 
 type Upgrades = Arc<Mutex<Vec<HeaderMap>>>;
 
-/// A broker whose view WebSocket echoes every text frame, answers `big:{n}` with n bytes and
-/// `drop` by going away, and answers `503` for [`BUSY`].
-async fn broker() -> (String, Upgrades) {
-    let upgrades: Upgrades = Arc::default();
-    let seen = Arc::clone(&upgrades);
-    let app = Router::new().route(
-        "/x/views/{view}/ws",
-        get(
-            move |Path(view): Path<String>, headers: HeaderMap, upgrade: WebSocketUpgrade| {
-                let seen = Arc::clone(&seen);
-                async move {
-                    seen.lock().expect("the upgrade log").push(headers);
-                    if view == BUSY {
-                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                    }
-                    upgrade.on_upgrade(|mut socket| async move {
-                        while let Some(Ok(message)) = socket.recv().await {
-                            if let AxumMessage::Text(text) = message {
-                                // `drop`: the broker goes away without a close frame.
-                                if text.as_str() == "drop" {
-                                    return;
-                                }
-                                // `big:{n}`: one frame of n bytes, as a notification is.
-                                let echo = match text.as_str().strip_prefix("big:") {
-                                    Some(n) => "n".repeat(n.parse().expect("a size")),
-                                    None => format!("echo:{}", text.as_str()),
-                                };
-                                if socket.send(AxumMessage::Text(echo.into())).await.is_err() {
-                                    break;
+/// The stub broker: the view upgrades it was asked for, and the notifications a test pushes to
+/// every upstream it holds.
+#[derive(Clone)]
+struct Stub {
+    upgrades: Upgrades,
+    push: tokio::sync::broadcast::Sender<String>,
+}
+
+impl Stub {
+    /// Sends `entities` to every open upstream as one `x-notification`.
+    fn notify(&self, entities: serde_json::Value) {
+        let message = json!({"metadata": {"x-op": "x-notification", "x-seq": 1},
+            "body": {"type": "Notification", "data": entities}});
+        let _ = self.push.send(message.to_string());
+    }
+
+    /// Every upstream goes away without a close frame.
+    fn drop_upstreams(&self) {
+        let _ = self.push.send("drop".to_owned());
+    }
+
+    /// The view upgrades so far.
+    fn upgrades(&self) -> Vec<HeaderMap> {
+        self.upgrades.lock().expect("the upgrade log").clone()
+    }
+}
+
+/// A broker whose view WebSocket welcomes, answers `x-subscribe` with `201` and forwards what
+/// [`Stub::notify`] pushes; its entity query answers an empty page.
+async fn broker() -> (String, Stub) {
+    broker_answering(201).await
+}
+
+/// [`broker`] answering the gateway's `x-subscribe` with `status`.
+async fn broker_answering(status: u16) -> (String, Stub) {
+    let (push, _) = tokio::sync::broadcast::channel(16);
+    let stub = Stub {
+        upgrades: Arc::default(),
+        push,
+    };
+    let held = stub.clone();
+    let app = Router::new()
+        .route(
+            "/x/views/{view}/ws",
+            get(
+                move |Path(_view): Path<String>, headers: HeaderMap, upgrade: WebSocketUpgrade| {
+                    let stub = held.clone();
+                    async move {
+                        stub.upgrades.lock().expect("the upgrade log").push(headers);
+                        let mut pushed = stub.push.subscribe();
+                        upgrade.on_upgrade(move |mut socket| async move {
+                            let welcome = json!({"metadata": {"x-op": "x-welcome",
+                                "x-connection": "c1", "x-resume-token": "t1"}});
+                            if socket.send(AxumMessage::Text(welcome.to_string().into())).await.is_err() {
+                                return;
+                            }
+                            loop {
+                                tokio::select! {
+                                    read = socket.recv() => {
+                                        let Some(Ok(AxumMessage::Text(text))) = read else { return };
+                                        // It holds no place for a resume: subscribe again.
+                                        if text.as_str().contains("x-resume") {
+                                            let gone = json!({"metadata": {"x-op": "x-result",
+                                                "x-id": "resume", "x-status": 404}});
+                                            if socket.send(AxumMessage::Text(gone.to_string().into())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        if text.as_str().contains("x-subscribe") {
+                                            let created = if status == 201 {
+                                                json!({"metadata": {"x-op": "x-result", "x-id": "up", "x-status": 201},
+                                                    "body": {"id": "urn:ngsi-ld:Subscription:up", "type": "Subscription"}})
+                                            } else {
+                                                json!({"metadata": {"x-op": "x-result", "x-id": "up", "x-status": status},
+                                                    "body": {"title": "Forbidden", "status": status,
+                                                             "detail": "no policy grants this operation"}})
+                                            };
+                                            if socket.send(AxumMessage::Text(created.to_string().into())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Ok(text) = pushed.recv() => {
+                                        // `drop`: the broker goes away without a close frame.
+                                        if text == "drop" {
+                                            return;
+                                        }
+                                        if socket.send(AxumMessage::Text(text.into())).await.is_err() {
+                                            return;
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    })
-                }
-            },
-        ),
-    );
-    (serve(app).await, upgrades)
+                        })
+                    }
+                },
+            ),
+        )
+        .route(
+            "/x/views/{view}/ngsi-ld/v1/entities",
+            get(|| async { axum::Json(json!([])) }),
+        );
+    (serve(app).await, stub)
+}
+
+/// The next text message of `socket` whose `x-op` is `op`, skipping the others; `None` when the
+/// socket ends or nothing arrives within two seconds.
+async fn next_op(socket: &mut Socket, op: &str) -> Option<serde_json::Value> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let read = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .ok()??;
+        if let Ok(Message::Text(text)) = read {
+            let message: serde_json::Value = serde_json::from_str(text.as_str()).ok()?;
+            if message["metadata"]["x-op"] == op {
+                return Some(message);
+            }
+        }
+    }
+}
+
+/// Waits until the stub broker was asked for `n` upstreams and holds one open.
+async fn upstreams(stub: &Stub, n: usize) {
+    for _ in 0..250 {
+        if stub.upgrades().len() >= n && stub.push.receiver_count() >= 1 {
+            // The subscription's `x-result` is on its way; give the gateway a moment to read it.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the gateway opened no upstream");
+}
+
+fn dock(id: &str, bikes: u32) -> serde_json::Value {
+    json!({"id": id, "type": "BikeHireDockingStation",
+           "availableBikeNumber": {"type": "Property", "value": bikes}})
 }
 
 async fn serve(app: Router) -> String {
@@ -214,20 +311,20 @@ async fn open(
 #[tokio::test]
 async fn no_token_is_401_before_any_upgrade() {
     let realm = common::Realm::new();
-    let (upstream, upgrades) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("anonymous", &upstream, &realm).await;
     assert_eq!(
         open(&at, INTERNAL, "", &[]).await.err(),
         Some(StatusCode::UNAUTHORIZED)
     );
-    assert!(upgrades.lock().expect("log").is_empty());
+    assert!(stub.upgrades().is_empty());
 }
 
 /// A stranger's token gets on the WebSocket what it gets on REST.
 #[tokio::test]
 async fn a_strangers_token_is_refused_as_on_rest() {
     let realm = common::Realm::new();
-    let (upstream, upgrades) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("stranger", &upstream, &realm).await;
     let stranger = person(&realm, "doprava", INTERNAL);
     let refused = open(
@@ -248,14 +345,14 @@ async fn a_strangers_token_is_refused_as_on_rest() {
         .expect("REST answers");
     assert_eq!(refused.as_u16(), rest.status().as_u16());
     assert!(refused.is_client_error());
-    assert!(upgrades.lock().expect("log").is_empty());
+    assert!(stub.upgrades().is_empty());
 }
 
 /// EP-107: a token in the URL is refused and never read, even a valid one.
 #[tokio::test]
 async fn a_token_in_the_query_is_refused() {
     let realm = common::Realm::new();
-    let (upstream, upgrades) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("query", &upstream, &realm).await;
     let token = person(&realm, "hel-mobility", INTERNAL);
     assert_eq!(
@@ -264,7 +361,7 @@ async fn a_token_in_the_query_is_refused() {
             .err(),
         Some(StatusCode::BAD_REQUEST)
     );
-    assert!(upgrades.lock().expect("log").is_empty());
+    assert!(stub.upgrades().is_empty());
 }
 
 /// EP-104: an Endpoint that turned the WebSocket off answers like any surface it does not serve.
@@ -279,13 +376,14 @@ async fn a_disabled_websocket_is_404() {
     );
 }
 
-/// EP-106: a browser's token rides as a subprotocol entry; the answer names only `ngsi-ld-ws`,
-/// the broker gets the pinned caller and never the token, and frames cross both ways.
+/// EP-106, EP-114: a browser's token rides as a subprotocol entry and the answer names only
+/// `ngsi-ld-ws`. The broker sees one upstream on the gateway's own account, never the caller or
+/// the token, and the caller receives exactly the change its grant and its filter allow.
 #[tokio::test]
-async fn frames_are_relayed_under_the_pinned_caller() {
+async fn a_subscriber_receives_what_its_grant_and_filter_allow() {
     let realm = common::Realm::new();
-    let (upstream, upgrades) = broker().await;
-    let at = gateway("relay", &upstream, &realm).await;
+    let (upstream, stub) = broker().await;
+    let at = gateway("fanout", &upstream, &realm).await;
     let token = person(&realm, "hel-mobility", INTERNAL);
     let (mut socket, answer) = open(
         &at,
@@ -302,28 +400,65 @@ async fn frames_are_relayed_under_the_pinned_caller() {
     .await
     .expect("upgraded");
     assert_eq!(answer["sec-websocket-protocol"], "ngsi-ld-ws");
+    let welcome = next_op(&mut socket, "x-welcome").await.expect("welcomed");
+    assert!(welcome["metadata"]["x-resume-token"].is_string());
+    let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
+        "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}],
+                 "q": "availableBikeNumber>3"}});
     socket
-        .send(Message::text(r#"{"metadata":{"x-op":"x-subscribe"}}"#))
+        .send(Message::text(subscribe.to_string()))
         .await
         .expect("sent");
-    let echoed = socket.next().await.expect("a frame").expect("readable");
+    let created = next_op(&mut socket, "x-result").await.expect("answered");
+    assert_eq!(created["metadata"]["x-id"], "s1");
+    assert_eq!(created["metadata"]["x-status"], 201);
+    upstreams(&stub, 1).await;
+
+    stub.notify(json!([
+        dock("urn:ngsi-ld:BikeHireDockingStation:few", 1),
+        dock("urn:ngsi-ld:BikeHireDockingStation:many", 9),
+        {"id": "urn:ngsi-ld:Vehicle:v1", "type": "Vehicle", "speed": {"type": "Property", "value": 9}},
+    ]));
+    let note = next_op(&mut socket, "x-notification")
+        .await
+        .expect("notified");
+    assert_eq!(note["metadata"]["x-seq"], 1);
     assert_eq!(
-        echoed,
-        Message::text(r#"echo:{"metadata":{"x-op":"x-subscribe"}}"#)
+        note["body"]["data"][0]["id"],
+        "urn:ngsi-ld:BikeHireDockingStation:many"
     );
-    let upgrade = upgrades.lock().expect("log")[0].clone();
+    assert!(
+        next_op(&mut socket, "x-notification").await.is_none(),
+        "nothing outside the filter or the grant"
+    );
+
+    let upgrade = stub.upgrades()[0].clone();
     assert_eq!(upgrade["ngsild-tenant"], "helsinki");
-    assert_eq!(upgrade["x-jc-subject"], "someone-of-hel-mobility");
+    assert_eq!(upgrade["x-jc-client"], "context-gateway");
+    assert!(!upgrade.contains_key("x-jc-subject"));
     assert!(!upgrade.contains_key("authorization"));
     assert!(!upgrade.contains_key("origin"));
-    let protocols = upgrade
-        .get("sec-websocket-protocol")
-        .map(|value| value.to_str().unwrap_or_default().to_owned())
-        .unwrap_or_default();
     assert!(
-        !protocols.contains(&token),
+        !format!("{upgrade:?}").contains(&token),
         "the token never reaches the broker"
     );
+}
+
+/// ADR-N-049: however many clients an Endpoint has, the broker holds one upstream for it.
+#[tokio::test]
+async fn every_client_of_an_endpoint_shares_one_upstream() {
+    let realm = common::Realm::new();
+    let (upstream, stub) = broker().await;
+    let at = gateway("shared", &upstream, &realm).await;
+    let mut sockets = Vec::new();
+    for n in 0..3 {
+        let address = [("x-forwarded-for", format!("203.0.113.{n}"))];
+        let (mut socket, _) = open(&at, PUBLIC, "", &address).await.expect("upgraded");
+        next_op(&mut socket, "x-welcome").await.expect("welcomed");
+        sockets.push(socket);
+    }
+    upstreams(&stub, 1).await;
+    assert_eq!(stub.upgrades().len(), 1, "one upstream for three clients");
 }
 
 /// The broker's own `Origin` rule refuses every browser, so the gateway judges it: a page on
@@ -331,7 +466,7 @@ async fn frames_are_relayed_under_the_pinned_caller() {
 #[tokio::test]
 async fn a_foreign_origin_is_refused() {
     let realm = common::Realm::new();
-    let (upstream, upgrades) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("origin", &upstream, &realm).await;
     assert_eq!(
         open(
@@ -344,7 +479,7 @@ async fn a_foreign_origin_is_refused() {
         .err(),
         Some(StatusCode::FORBIDDEN)
     );
-    assert!(upgrades.lock().expect("log").is_empty());
+    assert!(stub.upgrades().is_empty());
 }
 
 /// EP-107: a caller holds at most its cap; one more is `429` before an upgrade, and a closed
@@ -404,24 +539,14 @@ async fn an_oversized_message_closes_with_1009() {
             code = frame.map(|frame| u16::from(frame.code));
             break;
         }
-        assert!(
-            !matches!(message, Message::Text(_)),
-            "nothing came back from the broker"
-        );
+        if let Message::Text(text) = &message {
+            assert!(
+                text.as_str().contains("x-welcome"),
+                "only the welcome: {text}"
+            );
+        }
     }
     assert_eq!(code, Some(1009));
-}
-
-/// The broker's refusal of the view's upgrade is the gateway's HTTP answer, before any `101`.
-#[tokio::test]
-async fn a_broker_refusal_is_answered_before_the_upgrade() {
-    let realm = common::Realm::new();
-    let (upstream, _) = broker().await;
-    let at = gateway("busy", &upstream, &realm).await;
-    assert_eq!(
-        open(&at, BUSY, "", &[]).await.err(),
-        Some(StatusCode::SERVICE_UNAVAILABLE)
-    );
 }
 
 /// T-4064: a plain GET (a browser tab, curl) is no upgrade. It is told how to use the address,
@@ -430,7 +555,7 @@ async fn a_broker_refusal_is_answered_before_the_upgrade() {
 #[tokio::test]
 async fn a_plain_get_is_told_how_to_use_the_websocket() {
     let realm = common::Realm::new();
-    let (upstream, upgrades) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("guide", &upstream, &realm).await;
     let client = reqwest::Client::new();
     let url = format!("http://{at}/api/endpoint/{PUBLIC}/ws");
@@ -480,10 +605,7 @@ async fn a_plain_get_is_told_how_to_use_the_websocket() {
     assert!(html.contains("<code>ngsi-ld-ws</code>"), "{html}");
     assert!(html.contains("x-subscribe") && html.contains(&format!("href=\"{guide}\"")));
 
-    assert!(
-        upgrades.lock().expect("log").is_empty(),
-        "no upgrade reached the broker"
-    );
+    assert!(stub.upgrades().is_empty(), "no upgrade reached the broker");
 }
 
 /// T-4064: on an Endpoint that is not public, the plain GET is still admitted first (no token
@@ -517,49 +639,79 @@ async fn a_plain_get_of_a_restricted_websocket_names_the_token() {
     );
 }
 
+/// Subscribes `socket` to every BikeHireDockingStation and waits for the `201`.
+async fn subscribe_docks(socket: &mut Socket) {
+    let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
+        "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}});
+    socket
+        .send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    let created = next_op(socket, "x-result").await.expect("answered");
+    assert_eq!(created["metadata"]["x-status"], 201, "{created}");
+}
+
 /// T-4131: the broker writes notifications of up to 1 MiB in one frame; one over the 16 KiB a
 /// client may send reaches the client whole, and the connection stays up.
 #[tokio::test]
 async fn a_notification_over_the_client_bound_reaches_the_client() {
     let realm = common::Realm::new();
-    let (upstream, _) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("big-notification", &upstream, &realm).await;
     let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    subscribe_docks(&mut socket).await;
+    upstreams(&stub, 1).await;
 
-    socket
-        .send(Message::text("big:200000"))
+    let mut big = dock("urn:ngsi-ld:BikeHireDockingStation:big", 1);
+    big["note"] = json!({"type": "Property", "value": "n".repeat(200_000)});
+    stub.notify(json!([big]));
+    let note = next_op(&mut socket, "x-notification")
         .await
-        .expect("sent");
-    let big = socket.next().await.expect("a frame").expect("readable");
-    assert_eq!(big.len(), 200_000);
+        .expect("the big one");
+    assert_eq!(
+        note["body"]["data"][0]["note"]["value"]
+            .as_str()
+            .map(str::len),
+        Some(200_000)
+    );
 
-    socket.send(Message::text("after")).await.expect("sent");
-    let echoed = socket.next().await.expect("a frame").expect("readable");
-    assert_eq!(echoed, Message::text("echo:after"));
+    stub.notify(json!([dock("urn:ngsi-ld:BikeHireDockingStation:big", 2)]));
+    let after = next_op(&mut socket, "x-notification")
+        .await
+        .expect("still up");
+    assert_eq!(after["metadata"]["x-seq"], 2);
 }
 
-/// T-4131: when the broker's side ends without a close frame, the client gets 1011 rather than
-/// a bare end of the stream.
+/// T-4131, ADR-N-049: when the broker's side ends without a close frame, the client stays: the
+/// upstream comes back, tells the client with `x-gap` that it may have missed something, and
+/// changes reach it again.
 #[tokio::test]
-async fn a_broker_gone_mid_stream_closes_the_client_with_1011() {
+async fn a_broker_gone_mid_stream_leaves_the_client_up() {
     let realm = common::Realm::new();
-    let (upstream, _) = broker().await;
+    let (upstream, stub) = broker().await;
     let at = gateway("broker-gone", &upstream, &realm).await;
     let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    subscribe_docks(&mut socket).await;
+    upstreams(&stub, 1).await;
 
-    socket.send(Message::text("drop")).await.expect("sent");
-    let mut code = None;
-    while let Some(Ok(message)) = socket.next().await {
-        if let Message::Close(frame) = message {
-            code = frame.map(|frame| u16::from(frame.code));
-            break;
-        }
-    }
-    assert_eq!(code, Some(1011));
+    stub.drop_upstreams();
+    let gap = next_op(&mut socket, "x-gap")
+        .await
+        .expect("told of the gap");
+    assert!(gap["metadata"]["x-from"].is_u64());
+    upstreams(&stub, 2).await;
+    stub.notify(json!([dock("urn:ngsi-ld:BikeHireDockingStation:back", 4)]));
+    let note = next_op(&mut socket, "x-notification")
+        .await
+        .expect("changes flow again");
+    assert_eq!(
+        note["body"]["data"][0]["id"],
+        "urn:ngsi-ld:BikeHireDockingStation:back"
+    );
 }
 
-/// T-4132: a token caller's socket ends at its lifetime with the broker's `x-closing: lifetime`
-/// and a normal close; an anonymous socket on a public Endpoint outlives it.
+/// T-4132: a token caller's socket ends at its lifetime with `x-closing: lifetime` and a normal
+/// close; an anonymous socket on a public Endpoint outlives it.
 #[tokio::test]
 async fn a_token_socket_ends_at_its_lifetime_and_an_anonymous_one_does_not() {
     let realm = common::Realm::new();
@@ -576,21 +728,53 @@ async fn a_token_socket_ends_at_its_lifetime_and_an_anonymous_one_does_not() {
     .expect("upgraded");
     let (mut anonymous, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
 
-    let closing = held.next().await.expect("a frame").expect("readable");
-    assert_eq!(
-        closing,
-        Message::text(r#"{"metadata":{"x-op":"x-closing","x-reason":"lifetime"}}"#)
-    );
+    let closing = next_op(&mut held, "x-closing").await.expect("told why");
+    assert_eq!(closing["metadata"]["x-reason"], "lifetime");
     match held.next().await.expect("a frame").expect("readable") {
         Message::Close(Some(frame)) => assert_eq!(u16::from(frame.code), 1000),
         other => panic!("a close frame, not {other:?}"),
     }
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    anonymous
-        .send(Message::text("still here"))
+    subscribe_docks(&mut anonymous).await;
+}
+
+/// T-4133: when the broker refuses the Endpoint's upstream subscription, no client is left
+/// with a silent `201`: a connection that subscribed ends with 1011, and a later `x-subscribe`
+/// is answered 503 naming the broker's refusal.
+#[tokio::test]
+async fn a_refused_upstream_is_an_error_for_every_client() {
+    let realm = common::Realm::new();
+    let (upstream, stub) = broker_answering(403).await;
+    let at = gateway("refused", &upstream, &realm).await;
+    let (mut first, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
+        "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}});
+    first
+        .send(Message::text(subscribe.to_string()))
         .await
         .expect("sent");
-    let echoed = anonymous.next().await.expect("a frame").expect("readable");
-    assert_eq!(echoed, Message::text("echo:still here"));
+    upstreams(&stub, 1).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(frame)) = first.next().await {
+            if let Message::Close(frame) = frame {
+                return frame;
+            }
+        }
+        None
+    })
+    .await
+    .expect("closed in time")
+    .expect("a close frame");
+    assert_eq!(u16::from(closed.code), 1011, "{closed:?}");
+
+    let (mut later, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    later
+        .send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    let refused = next_op(&mut later, "x-result").await.expect("answered");
+    assert_eq!(refused["metadata"]["x-status"], 503, "{refused}");
+    let detail = refused["body"]["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("403"), "{detail}");
 }
