@@ -1,13 +1,16 @@
 //! The MCP façade and the REST schema route describe the same model (MP-02, EP-47, SP-16).
 //!
-//! Two doors onto one artifact. The façade holds no rendering path of its own, so whatever the
-//! REST route serves for a caller is byte for byte what `describe_schema` answers — and neither
-//! may name a slot the projection gives to another type, which would tell an agent an attribute
-//! exists on a type whose data door hides it.
+//! Two doors onto one artifact. Since T-3645 both read the broker's LinkML surface of the
+//! Endpoint's view, so whatever the REST route serves for a caller is byte for byte what
+//! `describe_schema` answers; the stub broker here is that surface. A call narrowed with
+//! `entityType` has no REST counterpart and is still rendered by the gateway, and may not name a
+//! slot the projection gives to another type, which would tell an agent an attribute exists on
+//! a type whose data door hides it.
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
@@ -58,10 +61,69 @@ const FORMALISMS: [&str; 7] = [
     "markdown",
 ];
 
+/// The documents of the stub's LinkML surface, by file name: compact JSON for the two JSON
+/// formalisms, so the bytes the façade re-serializes are the bytes the broker digested.
+fn document(file: &str) -> Option<String> {
+    Some(match file {
+        "model.linkml.yaml" => {
+            "id: https://hel.fi/fleet\nname: fleet\nclasses:\n  User: {}\n".to_owned()
+        }
+        "model.schema.json" => r#"{"$defs":{"User":{"type":"object"}}}"#.to_owned(),
+        "context.jsonld" => r#"{"@context":{"@vocab":"https://hel.fi/schema/"}}"#.to_owned(),
+        "model.shacl.ttl" | "model.owl.ttl" | "model.rdf.ttl" => {
+            format!("@prefix ex: <https://hel.fi/schema/> .\n\nex:User ex:from \"{file}\" .\n")
+        }
+        "model.md" => "# fleet\n\n## User\n".to_owned(),
+        _ => return None,
+    })
+}
+
+const FILES: [(&str, &str); 7] = [
+    ("model.linkml.yaml", "application/yaml"),
+    ("model.schema.json", "application/schema+json"),
+    ("context.jsonld", "application/ld+json"),
+    ("model.shacl.ttl", "text/turtle"),
+    ("model.owl.ttl", "text/turtle"),
+    ("model.rdf.ttl", "text/turtle"),
+    ("model.md", "text/markdown"),
+];
+
+/// The broker's LinkML surface of each view, as Antares answers it: the index with each
+/// document's size and digest, and the documents. The big Endpoint's LinkML is larger than one
+/// MCP answer carries. Anything else (the MCP surface of the view) lists no tool and no
+/// resource of its own (T-3647).
 async fn broker() -> String {
-    // The MCP surface of the view lists no tool and no resource of its own (T-3647).
-    let app = Router::new().fallback(any(|| async {
-        axum::Json(json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [], "resources": [] } }))
+    let app = Router::new().fallback(any(|request: Request| async move {
+        let path = request.uri().path().to_owned();
+        let surface = [SLUG, BIG_SLUG]
+            .into_iter()
+            .find_map(|slug| Some((slug, path.strip_prefix(&format!("/x/views/{slug}/linkml/schema/"))?)));
+        let Some((slug, rest)) = surface else {
+            return axum::Json(json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [], "resources": [] } }))
+                .into_response();
+        };
+        let body = |file: &str| match (slug, file) {
+            (BIG_SLUG, "model.linkml.yaml") => Some(format!("classes:\n{}", "  Class3: {}\n".repeat(200_000))),
+            _ => document(file),
+        };
+        if rest == "index.json" {
+            let artifacts: serde_json::Map<String, Value> = FILES
+                .iter()
+                .filter_map(|(file, media)| {
+                    let bytes = body(file)?;
+                    let described = json!({ "type": media, "bytes": bytes.len(), "sha256": sha256_of(bytes.as_bytes()) });
+                    Some(((*file).to_owned(), described))
+                })
+                .collect();
+            return axum::Json(json!({ "endpoint": slug, "models": [
+                { "name": "fleet", "version": 1, "semver": "1.0.0", "artifacts": artifacts }
+            ] }))
+            .into_response();
+        }
+        match rest.strip_prefix("v1/").and_then(body) {
+            Some(bytes) => bytes.into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -271,7 +333,7 @@ fn sha256_of(bytes: &[u8]) -> String {
 #[tokio::test]
 async fn a_slot_of_another_type_is_in_no_mcp_formalism() {
     for format in ["linkml", "shacl", "owl", "rdf", "markdown", "json-schema"] {
-        let document = mcp(format, None).await;
+        let document = mcp_list(format, &["User", "Vehicle"]).await;
         assert!(
             !document.contains("DESC-Vehicle-age"),
             "`age` is a slot of User alone, and {format} describes it under Vehicle:\n{document}"
@@ -283,7 +345,7 @@ async fn a_slot_of_another_type_is_in_no_mcp_formalism() {
     }
 }
 
-/// SP-16: the façade renders nothing of its own, so the two doors answer the same bytes.
+/// SP-16: both doors read the broker's LinkML surface (T-3645), so they answer the same bytes.
 #[tokio::test]
 async fn the_mcp_and_the_rest_artifact_are_byte_equal() {
     for (format, path) in [
@@ -390,7 +452,7 @@ async fn the_summary_recommends_linkml_and_lists_every_artifact_with_its_digest(
 #[tokio::test]
 async fn a_hidden_attribute_is_in_no_formalism() {
     for format in FORMALISMS {
-        let document = mcp(format, None).await;
+        let document = mcp_list(format, &["User", "Vehicle"]).await;
         assert!(
             !document.contains(HIDDEN),
             "`{HIDDEN}` is hidden by the endpoint and {format} describes it:\n{document}"
@@ -428,7 +490,7 @@ async fn a_type_outside_the_grant_is_refused_like_an_unknown_type() {
 /// Turtle documents are checked structurally; the LinkML is parsed as the YAML it is.
 #[tokio::test]
 async fn linkml_parses_as_yaml_and_shacl_rdf_owl_parse_as_turtle() {
-    let linkml: Value = serde_norway::from_str(&mcp("linkml", None).await)
+    let linkml: Value = serde_norway::from_str(&mcp_list("linkml", &["User", "Vehicle"]).await)
         .unwrap_or_else(|error| panic!("the LinkML is not YAML: {error}"));
     assert!(
         linkml.get("classes").is_some(),
@@ -436,7 +498,7 @@ async fn linkml_parses_as_yaml_and_shacl_rdf_owl_parse_as_turtle() {
     );
 
     for format in ["shacl", "owl", "rdf"] {
-        let document = mcp(format, None).await;
+        let document = mcp_list(format, &["User", "Vehicle"]).await;
         assert!(
             document.contains("@prefix"),
             "{format} declares its prefixes:\n{document}"

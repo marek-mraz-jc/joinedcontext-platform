@@ -23,7 +23,7 @@ use crate::handlers::schema_routes::{
 use crate::handlers::space_routes::{space_catalog, space_record};
 use crate::handlers::sta::sensorthings;
 use crate::handlers::view_access::{access, access_check, access_simulate};
-use crate::handlers::{endpoint_surface, schema, space_surface};
+use crate::handlers::{endpoint_surface, schema, schema_routes, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{self, Constraints, Subject, Verdict};
 use crate::pdp::{conditional, write_guard};
@@ -4797,11 +4797,10 @@ fn unauthorized(gateway: &Gateway, slug: &str) -> Response<Body> {
 /// The DCAT-AP record of one endpoint, in the representation the caller asked for
 /// (T-0337, T-0338, EP-27, EP-68, EP-69).
 ///
-/// The record is built on the schema catalogue the endpoint already serves, so the digests
-/// it names are the ones `schema/index.json` names and the artifacts' own `ETag`s, computed
-/// once. Everything is the granted projection: `admit` has already refused a caller the
-/// endpoint does not serve, and `schema::visible` narrows the artifacts to what this one
-/// may read.
+/// The record is built on the schema catalogue the endpoint serves (the broker's, T-3645), so
+/// the digests it names are the ones `schema/index.json` names and the artifacts' own `ETag`s.
+/// Everything is the granted projection: `admit` has already refused a caller the endpoint
+/// does not serve, and the catalogue is read as this caller reads it.
 async fn endpoint_record(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
@@ -4813,8 +4812,8 @@ async fn endpoint_record(
         Err(problem) => return *problem,
     };
 
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    let index = schema::index(&endpoint, &visible, sha256_hex);
+    // The catalogue the caller's `schema/` routes serve, so the digests are their ETags (EP-68).
+    let index = schema_routes::index_for(&gateway, &endpoint, &subject).await;
     let space = gateway.resolver.resolve_space(&endpoint.space);
     let space = space.as_deref();
 
@@ -4844,26 +4843,30 @@ async fn endpoint_record(
 
 /// The records of every public Endpoint as the anonymous caller reads each one, which is all
 /// the feed may carry (EP-84, EP-69): no token is read, so no grant widens what it lists.
-fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
+// ponytail: one broker hop per public Endpoint, in turn; join them if the feed's latency
+// ever shows on an organization with many Endpoints.
+async fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
     let anonymous = Subject::anonymous();
-    let now = crate::pdp::now();
-    gateway
-        .resolver
-        .endpoints()
-        .into_iter()
-        .filter(|endpoint| endpoint.audience == Audience::Public)
-        .map(|endpoint| {
-            let visible = schema::visible(&anonymous, &endpoint, now);
-            let index = schema::index(&endpoint, &visible, sha256_hex);
-            let space = gateway.resolver.resolve_space(&endpoint.space);
-            endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url())
-        })
-        .collect()
+    let mut records = Vec::new();
+    for endpoint in gateway.resolver.endpoints() {
+        if endpoint.audience != Audience::Public {
+            continue;
+        }
+        let index = schema_routes::index_for(gateway, &endpoint, &anonymous).await;
+        let space = gateway.resolver.resolve_space(&endpoint.space);
+        records.push(endpoint_surface::dataset(
+            &endpoint,
+            space.as_deref(),
+            &index,
+            gateway.base_url(),
+        ));
+    }
+    records
 }
 
-fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
+async fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
     endpoint_surface::feed(
-        public_records(gateway),
+        public_records(gateway).await,
         gateway.base_url(),
         &gateway.org_domain,
     )
@@ -4871,7 +4874,7 @@ fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
 
 /// `GET /catalog.jsonld`: the organization's DCAT-AP catalogue as JSON-LD (EP-84).
 async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let body = serde_json::to_string(&catalog_feed(&gateway)).unwrap_or_default();
+    let body = serde_json::to_string(&catalog_feed(&gateway).await).unwrap_or_default();
     (
         [(axum::http::header::CONTENT_TYPE, "application/ld+json")],
         body,
@@ -4881,7 +4884,7 @@ async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> Response<Bo
 
 /// `GET /catalog.ttl`: the same catalogue as Turtle (EP-84).
 async fn catalog_feed_turtle(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway));
+    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway).await);
     ([(axum::http::header::CONTENT_TYPE, "text/turtle")], body).into_response()
 }
 
