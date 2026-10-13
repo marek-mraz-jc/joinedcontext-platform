@@ -26,9 +26,6 @@ use std::sync::{Arc, LazyLock};
 /// reads `[]`: as "the parameter went through and there was nothing there".
 const TYPE_NAME: &str = "^[A-Za-z][A-Za-z0-9_-]*$";
 
-/// A CIM 009 type selection expression: type names joined by `,` (or), `;` (and) and parentheses.
-const TYPE_SELECTION: &str = "^[A-Za-z][A-Za-z0-9_\\-,;|()]*$";
-
 /// An NGSI-LD entity id, which on this platform is always the URN of ADR 001.
 const ENTITY_URN: &str = "^urn:ngsi-ld:[^\\s]+$";
 
@@ -47,11 +44,18 @@ pub(crate) struct Tool {
     /// that every caller the endpoint admits may call (EP-55).
     pub(crate) operations: &'static [Operation],
     pub(crate) description: &'static str,
-    pub(crate) schema: fn() -> Value,
+    pub(crate) shape: Shape,
     /// What the broker's answer is called in the structured half of the result. MCP's
     /// `structuredContent` is an object matching the tool's output schema, so a bare list
     /// is read as nothing by every client that reads it by name (T-0946, AG-13).
     pub(crate) result_key: &'static str,
+}
+
+/// How a tool's arguments are published: a broker tool's from its argument table, the
+/// gateway's own describe tools from their schema.
+pub(crate) enum Shape {
+    Broker(&'static [Arg]),
+    Own(fn() -> Value),
 }
 
 impl Tool {
@@ -65,159 +69,588 @@ impl Tool {
     fn read_only(&self) -> bool {
         !self.operations.iter().any(Operation::is_write)
     }
+
+    /// Whether a call can remove or overwrite what is there, as the broker annotates it: the
+    /// three writes that only add are not (Antares `docs/src/mcp.md` section 2).
+    fn destructive(&self) -> bool {
+        !self.read_only()
+            && !matches!(
+                self.name,
+                "create_entity" | "create_subscription" | "batch_create"
+            )
+    }
+
+    /// The tool's published JSON Schema.
+    pub(crate) fn input_schema(&self) -> Value {
+        match self.shape {
+            Shape::Broker(args) => Value::Object(input_schema(args)),
+            Shape::Own(schema) => schema(),
+        }
+    }
 }
 
 /// The words `describe_access` and the `access://` resource answer in (EP-56, EP-57, EP-58).
 pub(crate) const ACCESS_FORMATS: [&str; 3] = ["permissions", "odrl", "grant-ast"];
 
+/// One argument of a broker tool, as Antares `crates/antares-mcp/src/schema.rs` declares it.
+pub(crate) struct Arg {
+    name: &'static str,
+    kind: Kind,
+    required: bool,
+}
+
+const fn req(name: &'static str, kind: Kind) -> Arg {
+    Arg {
+        name,
+        kind,
+        required: true,
+    }
+}
+
+const fn opt(name: &'static str, kind: Kind) -> Arg {
+    Arg {
+        name,
+        kind,
+        required: false,
+    }
+}
+
+/// The broker's argument kinds (Antares `schema.rs` `Kind`). The hub spans many views, so a type
+/// or an attribute is published by its pattern, as the broker publishes one of a view with more
+/// names than an enum holds.
+#[derive(Clone, Copy)]
+enum Kind {
+    Id,
+    Ids,
+    Type,
+    Types,
+    Attr,
+    Attrs,
+    Text(usize),
+    Word(&'static [&'static str]),
+    Int(u64, u64),
+    Flag,
+    Coordinates,
+    Entity,
+    Entities,
+    Fragment,
+    Attribute,
+    Object(&'static [Arg]),
+    ListOf(&'static [Arg], usize),
+    Endpoint,
+}
+
+/// The broker's bounds on a list (Antares `schema.rs`).
+const MAX_ITEMS: usize = 100;
+const MAX_TYPES: usize = 50;
+/// The broker's longest cursor (Antares `cursor.rs`).
+const CURSOR_LEN: usize = 2048;
+
+fn schema_of(kind: Kind) -> Value {
+    let name = |pattern: &str| json!({"type": "string", "pattern": pattern, "maxLength": 256});
+    let members = |core: &[&str]| -> Value {
+        let mut properties = Map::new();
+        for member in core {
+            let kind = if *member == "id" {
+                Kind::Id
+            } else {
+                Kind::Type
+            };
+            properties.insert((*member).to_owned(), schema_of(kind));
+        }
+        Value::Object(properties)
+    };
+    match kind {
+        Kind::Id => json!({"type": "string", "pattern": ENTITY_URN, "maxLength": 512}),
+        Kind::Ids => json!({"type": "array", "maxItems": MAX_ITEMS, "items": schema_of(Kind::Id)}),
+        Kind::Type => name(TYPE_NAME),
+        Kind::Types => {
+            json!({"type": "array", "minItems": 1, "maxItems": MAX_TYPES, "items": schema_of(Kind::Type)})
+        }
+        Kind::Attr => name(ATTR_NAME),
+        Kind::Attrs => {
+            json!({"type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": schema_of(Kind::Attr)})
+        }
+        Kind::Text(max) => json!({"type": "string", "maxLength": max}),
+        Kind::Word(words) => json!({"type": "string", "enum": words}),
+        Kind::Int(min, max) => json!({"type": "integer", "minimum": min, "maximum": max}),
+        Kind::Flag => json!({"type": "boolean"}),
+        Kind::Coordinates => json!({"type": "array", "maxItems": 1000}),
+        Kind::Entity => json!({
+            "type": "object",
+            "required": ["id", "type"],
+            "properties": members(&["id", "type"]),
+            "propertyNames": {"pattern": ATTR_NAME, "maxLength": 256},
+        }),
+        Kind::Entities => {
+            json!({"type": "array", "minItems": 1, "maxItems": MAX_ITEMS, "items": schema_of(Kind::Entity)})
+        }
+        Kind::Fragment => json!({
+            "type": "object",
+            "minProperties": 1,
+            "properties": members(&["type"]),
+            "propertyNames": {"pattern": ATTR_NAME, "maxLength": 256},
+        }),
+        Kind::Attribute => json!({"type": "object"}),
+        Kind::Object(args) => Value::Object(input_schema(args)),
+        Kind::ListOf(args, max) => {
+            json!({"type": "array", "maxItems": max, "items": input_schema(args)})
+        }
+        Kind::Endpoint => json!({"type": "string", "maxLength": 2048}),
+    }
+}
+
+/// The input schema of a broker tool with `args`, as the broker publishes it.
+fn input_schema(args: &[Arg]) -> Map<String, Value> {
+    let properties: Map<String, Value> = args
+        .iter()
+        .map(|arg| (arg.name.to_owned(), schema_of(arg.kind)))
+        .collect();
+    let required: Vec<&str> = args
+        .iter()
+        .filter(|arg| arg.required)
+        .map(|arg| arg.name)
+        .collect();
+    let mut schema = Map::new();
+    schema.insert("type".into(), json!("object"));
+    schema.insert("properties".into(), Value::Object(properties));
+    if !required.is_empty() {
+        schema.insert("required".into(), json!(required));
+    }
+    schema.insert("additionalProperties".into(), json!(false));
+    schema
+}
+
+// The argument tables of Antares `crates/antares-mcp/src/tools.rs`, one to one (EP-112).
+const GEOMETRIES: &[&str] = &[
+    "Point",
+    "MultiPoint",
+    "LineString",
+    "MultiLineString",
+    "Polygon",
+    "MultiPolygon",
+];
+const JOINS: &[&str] = &["flat", "inline"];
+const TIMERELS: &[&str] = &["before", "after", "between"];
+const TIMEPROPERTIES: &[&str] = &["observedAt", "createdAt", "modifiedAt", "deletedAt"];
+
+const GET_ENTITY: &[Arg] = &[
+    req("id", Kind::Id),
+    opt("attrs", Kind::Attrs),
+    opt("pick", Kind::Attrs),
+    opt("omit", Kind::Attrs),
+    opt("lang", Kind::Text(64)),
+    opt("join", Kind::Word(JOINS)),
+    opt("joinLevel", Kind::Int(1, 3)),
+];
+const QUERY: &[Arg] = &[
+    opt("type", Kind::Types),
+    opt("id", Kind::Ids),
+    opt("idPattern", Kind::Text(256)),
+    opt("attrs", Kind::Attrs),
+    opt("pick", Kind::Attrs),
+    opt("omit", Kind::Attrs),
+    opt("q", Kind::Text(4096)),
+    opt("scopeQ", Kind::Text(1024)),
+    opt("georel", Kind::Text(256)),
+    opt("geometry", Kind::Word(GEOMETRIES)),
+    opt("coordinates", Kind::Coordinates),
+    opt("geoproperty", Kind::Attr),
+    opt("local", Kind::Flag),
+    opt("lang", Kind::Text(64)),
+    opt("join", Kind::Word(JOINS)),
+    opt("joinLevel", Kind::Int(1, 3)),
+    opt("count", Kind::Flag),
+    opt("limit", Kind::Int(1, 1000)),
+    opt("cursor", Kind::Text(CURSOR_LEN)),
+];
+const BATCH_QUERY: &[Arg] = &[
+    req("type", Kind::Types),
+    opt("id", Kind::Ids),
+    opt("attrs", Kind::Attrs),
+    opt("pick", Kind::Attrs),
+    opt("omit", Kind::Attrs),
+    opt("q", Kind::Text(4096)),
+    opt("scopeQ", Kind::Text(1024)),
+    opt("georel", Kind::Text(256)),
+    opt("geometry", Kind::Word(GEOMETRIES)),
+    opt("coordinates", Kind::Coordinates),
+    opt("geoproperty", Kind::Attr),
+    opt("local", Kind::Flag),
+    opt("lang", Kind::Text(64)),
+    opt("count", Kind::Flag),
+    opt("limit", Kind::Int(1, 1000)),
+    opt("cursor", Kind::Text(CURSOR_LEN)),
+];
+const TEMPORAL_ONE: &[Arg] = &[
+    req("id", Kind::Id),
+    opt("attrs", Kind::Attrs),
+    req("timerel", Kind::Word(TIMERELS)),
+    req("timeAt", Kind::Text(64)),
+    opt("endTimeAt", Kind::Text(64)),
+    opt("timeproperty", Kind::Word(TIMEPROPERTIES)),
+    opt("lastN", Kind::Int(1, 100)),
+    opt("aggrMethods", Kind::Text(256)),
+    opt("aggrPeriodDuration", Kind::Text(64)),
+];
+const TEMPORAL_QUERY: &[Arg] = &[
+    opt("type", Kind::Types),
+    opt("id", Kind::Ids),
+    opt("attrs", Kind::Attrs),
+    opt("q", Kind::Text(4096)),
+    opt("scopeQ", Kind::Text(1024)),
+    opt("georel", Kind::Text(256)),
+    opt("geometry", Kind::Word(GEOMETRIES)),
+    opt("coordinates", Kind::Coordinates),
+    opt("geoproperty", Kind::Attr),
+    req("timerel", Kind::Word(TIMERELS)),
+    req("timeAt", Kind::Text(64)),
+    opt("endTimeAt", Kind::Text(64)),
+    opt("timeproperty", Kind::Word(TIMEPROPERTIES)),
+    opt("lastN", Kind::Int(1, 100)),
+    opt("aggrMethods", Kind::Text(256)),
+    opt("aggrPeriodDuration", Kind::Text(64)),
+    opt("count", Kind::Flag),
+    opt("limit", Kind::Int(1, 1000)),
+    opt("cursor", Kind::Text(CURSOR_LEN)),
+];
+const ID_ONLY: &[Arg] = &[req("id", Kind::Text(512))];
+const PAGE_ONLY: &[Arg] = &[
+    opt("count", Kind::Flag),
+    opt("limit", Kind::Int(1, 1000)),
+    opt("cursor", Kind::Text(CURSOR_LEN)),
+];
+const NONE: &[Arg] = &[];
+const ATTR_VALUE: &[Arg] = &[req("id", Kind::Id), req("attrId", Kind::Attr)];
+const TYPE_ONLY: &[Arg] = &[req("type", Kind::Type)];
+const ATTR_ONLY: &[Arg] = &[req("attrId", Kind::Attr)];
+const ENTITY_ID: &[Arg] = &[req("id", Kind::Id)];
+const ENTITY: &[Arg] = &[req("entity", Kind::Entity)];
+const REPLACE: &[Arg] = &[req("id", Kind::Id), req("entity", Kind::Entity)];
+const ATTRIBUTES: &[Arg] = &[req("id", Kind::Id), req("attributes", Kind::Fragment)];
+const APPEND: &[Arg] = &[
+    req("id", Kind::Id),
+    req("attributes", Kind::Fragment),
+    opt("noOverwrite", Kind::Flag),
+];
+const MERGE: &[Arg] = &[req("id", Kind::Id), req("fragment", Kind::Fragment)];
+const ONE_ATTRIBUTE: &[Arg] = &[
+    req("id", Kind::Id),
+    req("attrId", Kind::Attr),
+    req("attribute", Kind::Attribute),
+];
+const DELETE_ATTRIBUTE: &[Arg] = &[
+    req("id", Kind::Id),
+    req("attrId", Kind::Attr),
+    opt("datasetId", Kind::Text(512)),
+    opt("deleteAll", Kind::Flag),
+];
+const BATCH: &[Arg] = &[req("entities", Kind::Entities)];
+const BATCH_UPSERT: &[Arg] = &[
+    req("entities", Kind::Entities),
+    opt("options", Kind::Word(&["update", "replace"])),
+];
+const BATCH_UPDATE: &[Arg] = &[
+    req("entities", Kind::Entities),
+    opt("noOverwrite", Kind::Flag),
+];
+const BATCH_DELETE: &[Arg] = &[req("ids", Kind::Ids)];
+const ENDPOINT: &[Arg] = &[
+    req("uri", Kind::Endpoint),
+    opt(
+        "accept",
+        Kind::Word(&["application/json", "application/ld+json"]),
+    ),
+];
+const NOTIFICATION: &[Arg] = &[
+    opt("attributes", Kind::Attrs),
+    opt(
+        "format",
+        Kind::Word(&["normalized", "concise", "keyValues"]),
+    ),
+    req("endpoint", Kind::Object(ENDPOINT)),
+];
+const SELECTOR: &[Arg] = &[
+    req("type", Kind::Type),
+    opt("id", Kind::Id),
+    opt("idPattern", Kind::Text(256)),
+];
+const SUBSCRIPTION: &[Arg] = &[
+    req("type", Kind::Word(&["Subscription"])),
+    opt("subscriptionName", Kind::Text(256)),
+    opt("description", Kind::Text(1024)),
+    opt("entities", Kind::ListOf(SELECTOR, 50)),
+    opt("watchedAttributes", Kind::Attrs),
+    opt("q", Kind::Text(4096)),
+    req("notification", Kind::Object(NOTIFICATION)),
+    opt("expiresAt", Kind::Text(64)),
+    opt("throttling", Kind::Int(0, 86_400)),
+    opt("isActive", Kind::Flag),
+];
+const SUBSCRIPTION_FRAGMENT: &[Arg] = &[
+    opt("subscriptionName", Kind::Text(256)),
+    opt("description", Kind::Text(1024)),
+    opt("entities", Kind::ListOf(SELECTOR, 50)),
+    opt("watchedAttributes", Kind::Attrs),
+    opt("q", Kind::Text(4096)),
+    opt("notification", Kind::Object(NOTIFICATION)),
+    opt("expiresAt", Kind::Text(64)),
+    opt("throttling", Kind::Int(0, 86_400)),
+    opt("isActive", Kind::Flag),
+];
+const CREATE_SUBSCRIPTION: &[Arg] = &[req("subscription", Kind::Object(SUBSCRIPTION))];
+const UPDATE_SUBSCRIPTION: &[Arg] = &[
+    req("id", Kind::Text(512)),
+    req("fragment", Kind::Object(SUBSCRIPTION_FRAGMENT)),
+];
+
+/// A broker tool: its name, the operation of the gateway's Policy that grants it, its
+/// description, its arguments and its result key, as the broker's view lists it (EP-112).
+const fn broker(
+    name: &'static str,
+    operations: &'static [Operation],
+    description: &'static str,
+    args: &'static [Arg],
+    result_key: &'static str,
+) -> Tool {
+    Tool {
+        name,
+        operations,
+        description,
+        shape: Shape::Broker(args),
+        result_key,
+    }
+}
+
+/// Every tool of the broker's view (Antares `crates/antares-mcp/src/tools.rs`, sorted by name),
+/// then the gateway's two describe tools. The hub and the named servers list these names with
+/// these arguments, so a call that works on an Endpoint's own MCP works on the hub with
+/// `endpoint` beside it, and the hub hands the arguments on as they came (EP-112).
 pub(crate) const TOOLS: &[Tool] = &[
-    Tool {
-        name: "query_entities",
-        operations: &[Operation::QueryEntity],
-        description: "Query the entities of this context space by type and NGSI-LD filter.",
-        schema: || {
-            // Every selector and representation argument of the shared read parameter table
-            // (AG-84): the same names the REST surface takes, from the table the query string is
-            // built from, so the two cannot drift.
-            json!({
-                "type": "object",
-                "properties": properties_of(&[SELECTOR_ARGS, REPRESENTATION_ARGS]),
-                // CIM 009 5.7.2.4: a query names at least one selector, and `idPattern` is never
-                // one on its own. Which of them is present is the caller's business, so the schema
-                // asks for one of the five rather than for `type` alone (AG-84).
-                "anyOf": [
-                    { "required": ["type"] },
-                    { "required": ["id"] },
-                    { "required": ["attrs"] },
-                    { "required": ["q"] },
-                    { "required": ["georel"] },
-                ],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entities",
-    },
-    Tool {
-        name: "get_entity",
-        operations: &[Operation::RetrieveEntity],
-        description: "Retrieve one entity of this context space by its exact URN.",
-        schema: || {
-            // One entity by URN, and every way of narrowing and writing it that the REST path
-            // takes (AG-84).
-            let mut properties = properties_of(&[PROJECTION_ARGS, REPRESENTATION_ARGS]);
-            properties.insert("id".to_owned(), id_schema());
-            json!({
-                "type": "object",
-                "properties": properties,
-                "required": ["id"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entity",
-    },
-    Tool {
-        name: "list_types",
-        operations: &[
-            Operation::RetrieveEntityTypes,
-            Operation::RetrieveEntityTypeDetails,
-        ],
-        description: "The entity types this context space holds, as the caller may see them.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "details": { "type": "boolean", "description": "Include each type's attribute names" },
-                },
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entityTypes",
-    },
-    Tool {
-        name: "list_attributes",
-        operations: &[
-            Operation::RetrieveAttrTypes,
-            Operation::RetrieveAttrTypeDetails,
-        ],
-        description: "The attributes this context space holds, as the caller may see them.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "details": { "type": "boolean", "description": "Include each attribute's types and value kinds" },
-                },
-                "additionalProperties": false,
-            })
-        },
-        result_key: "attributes",
-    },
-    Tool {
-        name: "query_temporal",
-        operations: &[Operation::QueryTemporal],
-        description: "Query the history of this context space's entities in a time window.",
-        schema: temporal_schema,
-        result_key: "entities",
-    },
-    Tool {
-        name: "retrieve_temporal",
-        operations: &[Operation::RetrieveTemporal],
-        description: "The history of one entity of this context space in a time window.",
-        schema: || {
-            let mut schema = temporal_schema();
-            let object = schema
-                .as_object_mut()
-                .expect("the temporal schema is an object");
-            object["properties"]["id"] = id_schema();
-            object["required"] = json!(["id", "timerel", "timeAt"]);
-            schema
-        },
-        result_key: "entity",
-    },
-    Tool {
-        name: "batch_query",
-        operations: &[Operation::QueryBatch],
-        description: "Query many entities of this context space by id or type in one call.",
-        schema: || {
-            // The same selectors as `query_entities` — CIM 009 makes the POST form a way to send a
-            // long selector, not a narrower one (AG-84). `ids` is kept beside `id` because clients
-            // written against the older catalogue send it.
-            let mut properties = properties_of(&[SELECTOR_ARGS, REPRESENTATION_ARGS]);
-            properties.insert("ids".to_owned(), id_list_schema());
-            json!({
-                "type": "object",
-                "properties": properties,
-                "anyOf": [
-                    { "required": ["ids"] },
-                    { "required": ["id"] },
-                    { "required": ["type"] },
-                    { "required": ["attrs"] },
-                    { "required": ["q"] },
-                    { "required": ["georel"] },
-                ],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entities",
-    },
-    Tool {
-        name: "list_subscriptions",
-        operations: &[Operation::QuerySubscription],
-        description: "The context subscriptions of this space the caller may see.",
-        schema: || {
-            // Paged like every other listing (AG-84): a caller who may see many subscriptions
-            // needs the next page and the total as much as a caller who queries entities does.
-            json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
-                    "cursor": { "type": "integer", "minimum": 0, "description": "Rows to skip; the previous page's nextCursor" },
-                    "count": { "type": "boolean", "description": "Also report the total the grant lets this caller see" },
-                },
-                "additionalProperties": false,
-            })
-        },
-        result_key: "subscriptions",
-    },
+    broker(
+        "append_attributes",
+        &[Operation::AppendAttrs],
+        "Append Attributes to one Entity (TS 104 175 10.2.4); noOverwrite keeps those it has. The tool asks the person to confirm before it writes.",
+        APPEND,
+        "result",
+    ),
+    broker(
+        "batch_create",
+        &[Operation::CreateBatch],
+        "Create several Entities (TS 104 175 10.3.2). The tool asks the person to confirm before it writes.",
+        BATCH,
+        "result",
+    ),
+    broker(
+        "batch_delete",
+        &[Operation::DeleteBatch],
+        "Delete several Entities by id (TS 104 175 10.3.6). The tool asks the person to confirm before it writes.",
+        BATCH_DELETE,
+        "result",
+    ),
+    broker(
+        "batch_merge",
+        &[Operation::MergeBatch],
+        "Merge into several Entities (TS 104 175 10.3.5). The tool asks the person to confirm before it writes.",
+        BATCH,
+        "result",
+    ),
+    broker(
+        "batch_query",
+        &[Operation::QueryBatch],
+        "Query Entities with a Query document (TS 104 175 10.4.3, POST form): the Entities of the given types that match the conditions, a page at a time.",
+        BATCH_QUERY,
+        "entities",
+    ),
+    broker(
+        "batch_query_temporal",
+        &[Operation::QueryTemporal],
+        "Query the history of Entities with a Query document (TS 104 175 11.3.3, POST form), a page of Entities at a time.",
+        TEMPORAL_QUERY,
+        "entities",
+    ),
+    broker(
+        "batch_update",
+        &[Operation::UpdateBatch],
+        "Update Attributes of several Entities (TS 104 175 10.3.4). The tool asks the person to confirm before it writes.",
+        BATCH_UPDATE,
+        "result",
+    ),
+    broker(
+        "batch_upsert",
+        &[Operation::UpsertBatch],
+        "Create several Entities or update those that exist (TS 104 175 10.3.3). The tool asks the person to confirm before it writes.",
+        BATCH_UPSERT,
+        "result",
+    ),
+    broker(
+        "create_entity",
+        &[Operation::CreateEntity],
+        "Create one Entity (TS 104 175 10.2.2). The tool asks the person to confirm before it writes.",
+        ENTITY,
+        "created",
+    ),
+    broker(
+        "create_subscription",
+        &[Operation::CreateSubscription],
+        "Subscribe an endpoint the deployment allows to changes of Entities (TS 104 175 10.5.2). The tool asks the person to confirm before it writes.",
+        CREATE_SUBSCRIPTION,
+        "created",
+    ),
+    broker(
+        "delete_attribute",
+        &[Operation::DeleteAttrs],
+        "Delete one Attribute of one Entity (TS 104 175 10.2.7). The tool asks the person to confirm before it writes.",
+        DELETE_ATTRIBUTE,
+        "result",
+    ),
+    broker(
+        "delete_entity",
+        &[Operation::DeleteEntity],
+        "Delete one Entity (TS 104 175 10.2.8). The tool asks the person to confirm before it writes.",
+        ENTITY_ID,
+        "result",
+    ),
+    broker(
+        "delete_subscription",
+        &[Operation::DeleteSubscription],
+        "Delete one Subscription (TS 104 175 10.5.6). The tool asks the person to confirm before it writes.",
+        ID_ONLY,
+        "result",
+    ),
+    broker(
+        "get_attribute",
+        &[Operation::RetrieveAttrTypeInfo],
+        "Describe one Attribute: the types that carry it and how many instances exist (TS 104 175 10.6.8).",
+        ATTR_ONLY,
+        "attribute",
+    ),
+    broker(
+        "get_attribute_value",
+        &[Operation::RetrieveEntity],
+        "Read one Attribute of one Entity (TS 104 175 10.4.4).",
+        ATTR_VALUE,
+        "attribute",
+    ),
+    broker(
+        "get_entity",
+        &[Operation::RetrieveEntity],
+        "Read one Entity by its id (TS 104 175 10.4.2); attrs, pick and omit narrow what it returns.",
+        GET_ENTITY,
+        "entity",
+    ),
+    broker(
+        "get_subscription",
+        &[Operation::RetrieveSubscription],
+        "Read one Subscription made through this endpoint (TS 104 175 10.5.4).",
+        ID_ONLY,
+        "subscription",
+    ),
+    broker(
+        "get_type",
+        &[Operation::RetrieveEntityTypeInfo],
+        "Describe one Entity type: its Attributes and how many Entities it has (TS 104 175 10.6.5).",
+        TYPE_ONLY,
+        "entityType",
+    ),
+    broker(
+        "list_attribute_details",
+        &[Operation::RetrieveAttrTypeDetails],
+        "List the Attributes with the types that carry each (TS 104 175 10.6.7).",
+        NONE,
+        "attributes",
+    ),
+    broker(
+        "list_attributes",
+        &[Operation::RetrieveAttrTypes],
+        "List the names of the Attributes this endpoint serves (TS 104 175 10.6.6).",
+        NONE,
+        "attributes",
+    ),
+    broker(
+        "list_subscriptions",
+        &[Operation::QuerySubscription],
+        "List the Subscriptions made through this endpoint (TS 104 175 10.5.5), a page at a time.",
+        PAGE_ONLY,
+        "subscriptions",
+    ),
+    broker(
+        "list_type_details",
+        &[Operation::RetrieveEntityTypeDetails],
+        "List the Entity types with the Attributes of each (TS 104 175 10.6.4).",
+        NONE,
+        "entityTypes",
+    ),
+    broker(
+        "list_types",
+        &[Operation::RetrieveEntityTypes],
+        "List the names of the Entity types this endpoint serves (TS 104 175 10.6.3).",
+        NONE,
+        "entityTypes",
+    ),
+    broker(
+        "merge_entity",
+        &[Operation::MergeEntity],
+        "Merge a fragment into one Entity (TS 104 175 10.2.9). The tool asks the person to confirm before it writes.",
+        MERGE,
+        "result",
+    ),
+    broker(
+        "query_entities",
+        &[Operation::QueryEntity],
+        "Query Entities (TS 104 175 10.4.3): by type, id, q, scopeQ or area, a page at a time. Give at least one of type, attrs, q, georel or local.",
+        QUERY,
+        "entities",
+    ),
+    broker(
+        "query_temporal",
+        &[Operation::QueryTemporal],
+        "Query the history of Entities (TS 104 175 11.3.3) between timeAt and endTimeAt, a page of Entities at a time; lastN bounds each Attribute's instances.",
+        TEMPORAL_QUERY,
+        "entities",
+    ),
+    broker(
+        "replace_attribute",
+        &[Operation::ReplaceAttrs],
+        "Replace one Attribute of one Entity (TS 104 175 10.2.11). The tool asks the person to confirm before it writes.",
+        ONE_ATTRIBUTE,
+        "result",
+    ),
+    broker(
+        "replace_entity",
+        &[Operation::ReplaceEntity],
+        "Replace one Entity whole (TS 104 175 10.2.10). The tool asks the person to confirm before it writes.",
+        REPLACE,
+        "result",
+    ),
+    broker(
+        "retrieve_temporal",
+        &[Operation::RetrieveTemporal],
+        "Read the history of one Entity (TS 104 175 11.3.2) between timeAt and endTimeAt; lastN bounds each Attribute's instances.",
+        TEMPORAL_ONE,
+        "entity",
+    ),
+    broker(
+        "update_attribute",
+        &[Operation::UpdateAttrs],
+        "Update part of one Attribute of one Entity (TS 104 175 10.2.5). The tool asks the person to confirm before it writes.",
+        ONE_ATTRIBUTE,
+        "result",
+    ),
+    broker(
+        "update_attributes",
+        &[Operation::UpdateAttrs],
+        "Update Attributes one Entity has (TS 104 175 10.2.3). The tool asks the person to confirm before it writes.",
+        ATTRIBUTES,
+        "result",
+    ),
+    broker(
+        "update_subscription",
+        &[Operation::UpdateSubscription],
+        "Update one Subscription (TS 104 175 10.5.3). The tool asks the person to confirm before it writes.",
+        UPDATE_SUBSCRIPTION,
+        "result",
+    ),
     Tool {
         name: "describe_access",
         operations: &[],
@@ -225,7 +658,7 @@ pub(crate) const TOOLS: &[Tool] = &[
             "The caller's effective grants here: operations, attributes, residual constraints. \
              `format` picks the language: `permissions` (AuthZEN, the default), `odrl` (ODRL 2.2) \
              or `grant-ast` (UCAST); the grants are the same in all three (EP-60).",
-        schema: || {
+        shape: Shape::Own(|| {
             json!({
                 "type": "object",
                 "properties": {
@@ -233,7 +666,7 @@ pub(crate) const TOOLS: &[Tool] = &[
                 },
                 "additionalProperties": false,
             })
-        },
+        }),
         result_key: "access",
     },
     Tool {
@@ -250,7 +683,7 @@ pub(crate) const TOOLS: &[Tool] = &[
              Read linkml first: it carries the classes, their slots and their descriptions in \
              one small document. The default `summary` lists every artifact with its size and \
              digest and says which to read.",
-        schema: || {
+        shape: Shape::Own(|| {
             json!({
                 "type": "object",
                 "properties": {
@@ -264,10 +697,10 @@ pub(crate) const TOOLS: &[Tool] = &[
                     },
                     "entityType": {
                         "oneOf": [
-                            type_schema(),
+                            schema_of(Kind::Type),
                             {
                                 "type": "array",
-                                "items": type_schema(),
+                                "items": schema_of(Kind::Type),
                                 "minItems": 1,
                                 "maxItems": 64,
                             },
@@ -278,580 +711,8 @@ pub(crate) const TOOLS: &[Tool] = &[
                 },
                 "additionalProperties": false,
             })
-        },
+        }),
         result_key: "schema",
-    },
-    Tool {
-        name: "upsert_entity",
-        operations: &[Operation::UpsertBatch],
-        description: "Create or update one entity of this context space.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "entity": { "type": "object", "description": "The NGSI-LD entity, id and type included" },
-                },
-                "required": ["entity"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entity",
-    },
-    Tool {
-        name: "batch_query_temporal",
-        operations: &[Operation::QueryTemporal],
-        description: "The history of many entities of this context space in one call.",
-        schema: || {
-            // The POST form of Query Temporal Evolution: the same selectors and the same temporal
-            // grammar as `query_temporal`, sent as a body (CIM 009 5.6.12, AG-84).
-            let mut properties = properties_of(&[SELECTOR_ARGS, REPRESENTATION_ARGS, TEMPORAL_ARGS]);
-            properties.remove("entityMap");
-            json!({
-                "type": "object",
-                "properties": properties,
-                "required": ["timerel", "timeAt"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entities",
-    },
-    Tool {
-        name: "get_type",
-        // `GET /types/{type}` is Entity Type Information (CIM 009 5.7.11); the details of the
-        // *list* are `GET /types?details=true`, which `list_types` takes. A grant holding the
-        // one does not open the other (`operations.rs`).
-        operations: &[Operation::RetrieveEntityTypeInfo],
-        description: "What one entity type of this context space holds: its attributes and their kinds.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": { "type": type_schema() },
-                "required": ["type"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "entityType",
-    },
-    Tool {
-        name: "get_attribute",
-        operations: &[Operation::RetrieveAttrTypeInfo],
-        description: "What one attribute of this context space is: its value kinds and the types that carry it.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "attrId": {
-                        "type": "string",
-                        "maxLength": 256,
-                        "description": "The attribute name, as list_attributes spells it",
-                    },
-                },
-                "required": ["attrId"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "attribute",
-    },
-    Tool {
-        name: "get_subscription",
-        operations: &[Operation::RetrieveSubscription],
-        description: "One context subscription of this space, by its id.",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "maxLength": 512,
-                        "description": "The subscription's id, as list_subscriptions gives it",
-                    },
-                },
-                "required": ["id"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "subscription",
-    },
-    Tool {
-        name: "create_subscription",
-        operations: &[Operation::CreateSubscription],
-        description: "Create a context subscription",
-        schema: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "subscription": { "type": "object", "description": "The NGSI-LD Subscription, entities and notification included" },
-                },
-                "required": ["subscription"],
-                "additionalProperties": false,
-            })
-        },
-        result_key: "subscription",
-    },
-];
-
-/// One argument of the shared read table: its name and the JSON Schema fragment the tool
-/// publishes for it (AG-84, AG-31).
-struct ReadArg {
-    name: &'static str,
-    schema: fn() -> Value,
-}
-
-/// The entity selectors of the shared table (Architecture/07 §2, "The shared read parameter table").
-///
-/// Two CIM 009 parameters of this table are not arguments here, because neither surface serves
-/// them yet: `accept`, which changes the shape the answer narrowing reads, and `context`, which
-/// needs the `@context` allow-list no Endpoint manifest carries today (T-2299). Both are refused
-/// as unknown arguments until they arrive on the two surfaces together, with their rules.
-const SELECTOR_ARGS: &[ReadArg] = &[
-    ReadArg {
-        name: "type",
-        schema: type_selection_schema,
-    },
-    ReadArg {
-        name: "id",
-        schema: id_list_schema,
-    },
-    ReadArg {
-        name: "idPattern",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 256,
-                "description": "Regular expression over entity ids; valid only beside type, attrs, q or georel",
-            })
-        },
-    },
-    ReadArg {
-        name: "attrs",
-        schema: attrs_schema,
-    },
-    ReadArg {
-        name: "pick",
-        schema: || member_list_schema("Members to keep, id, type and scope included"),
-    },
-    ReadArg {
-        name: "omit",
-        schema: || member_list_schema("Members to leave out"),
-    },
-    ReadArg {
-        name: "q",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 4096,
-                "description": "NGSI-LD query filter, e.g. pm25>35",
-            })
-        },
-    },
-    ReadArg {
-        name: "csf",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 1024,
-                "description": "Context source filter; only where this endpoint federates",
-            })
-        },
-    },
-    ReadArg {
-        name: "georel",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 256,
-                "description": "NGSI-LD geo relation, e.g. near;maxDistance==2000",
-            })
-        },
-    },
-    ReadArg {
-        name: "geometry",
-        schema: || {
-            json!({
-                "type": "string",
-                "enum": ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"],
-            })
-        },
-    },
-    ReadArg {
-        name: "coordinates",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 8192,
-                "description": "GeoJSON coordinates of the reference geometry",
-            })
-        },
-    },
-    ReadArg {
-        // Judged against the grants, never forwarded on its own: an area a grant draws is
-        // drawn on `location`, so a geo query moved to another GeoProperty is refused by name
-        // rather than answered inside that area (T-2299, AG-85).
-        name: "geoproperty",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 256, "pattern": ATTR_NAME,
-                "description": "The GeoProperty the geo query applies to; location when absent, and only where the grant draws no area of its own",
-            })
-        },
-    },
-    ReadArg {
-        name: "scopeQ",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 1024,
-                "description": "NGSI-LD scope query, e.g. /geo/SK/BB",
-            })
-        },
-    },
-    ReadArg {
-        name: "lang",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 64,
-                "description": "Language filter for a LanguageProperty",
-            })
-        },
-    },
-    ReadArg {
-        name: "datasetId",
-        schema: || {
-            json!({
-                "type": "array", "maxItems": 50,
-                "items": { "type": "string", "maxLength": 512 },
-                "description": "Dataset instances; @none selects the default instance",
-            })
-        },
-    },
-    ReadArg {
-        name: "join",
-        schema: || {
-            json!({
-                "type": "string", "enum": ["inline", "flat", "@none"],
-                "description": "Retrieve linked entities",
-            })
-        },
-    },
-    ReadArg {
-        name: "joinLevel",
-        schema: || {
-            json!({
-                "type": "integer", "minimum": 1, "maximum": 3,
-                "description": "How many relationship hops a join follows",
-            })
-        },
-    },
-    ReadArg {
-        name: "containedBy",
-        schema: || {
-            json!({
-                "type": "array", "maxItems": 50,
-                "items": { "type": "string", "maxLength": 512, "pattern": ENTITY_URN },
-                "description": "Loop protection for a hierarchical join",
-            })
-        },
-    },
-    ReadArg {
-        name: "entityMap",
-        schema: || {
-            json!({
-                "type": "boolean",
-                "description": "Keep a federated entity map for paging; only where this endpoint federates",
-            })
-        },
-    },
-    ReadArg {
-        name: "local",
-        schema: || {
-            json!({
-                "type": "boolean", "description": "Answer from this broker only, without its federated sources",
-            })
-        },
-    },
-    ReadArg {
-        name: "count",
-        schema: || {
-            json!({
-                "type": "boolean", "description": "Also report the total the grant lets this caller see",
-            })
-        },
-    },
-    ReadArg {
-        name: "limit",
-        schema: || {
-            json!({
-                "type": "integer", "minimum": 1, "maximum": 1000,
-            })
-        },
-    },
-    ReadArg {
-        name: "cursor",
-        schema: || {
-            json!({
-                "type": "integer", "minimum": 0,
-                "description": "Rows to skip; the previous page's nextCursor",
-            })
-        },
-    },
-];
-
-/// The projection arguments a read of one named entity takes: it selects nothing, so `type`, `q` and
-/// the geo query have no meaning, but every way of narrowing and writing the answer does (AG-84).
-const PROJECTION_ARGS: &[ReadArg] = &[
-    ReadArg {
-        name: "attrs",
-        schema: attrs_schema,
-    },
-    ReadArg {
-        name: "pick",
-        schema: || member_list_schema("Members to keep, id, type and scope included"),
-    },
-    ReadArg {
-        name: "omit",
-        schema: || member_list_schema("Members to leave out"),
-    },
-    ReadArg {
-        name: "lang",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 64,
-                "description": "Language filter for a LanguageProperty",
-            })
-        },
-    },
-    ReadArg {
-        name: "datasetId",
-        schema: || {
-            json!({
-                "type": "array", "maxItems": 50,
-                "items": { "type": "string", "maxLength": 512 },
-                "description": "Dataset instances; @none selects the default instance",
-            })
-        },
-    },
-    ReadArg {
-        name: "join",
-        schema: || {
-            json!({
-                "type": "string", "enum": ["inline", "flat", "@none"],
-                "description": "Retrieve linked entities",
-            })
-        },
-    },
-    ReadArg {
-        name: "joinLevel",
-        schema: || {
-            json!({
-                "type": "integer", "minimum": 1, "maximum": 3,
-                "description": "How many relationship hops a join follows",
-            })
-        },
-    },
-    ReadArg {
-        name: "containedBy",
-        schema: || {
-            json!({
-                "type": "array", "maxItems": 50,
-                "items": { "type": "string", "maxLength": 512, "pattern": ENTITY_URN },
-                "description": "Loop protection for a hierarchical join",
-            })
-        },
-    },
-    ReadArg {
-        name: "local",
-        schema: || {
-            json!({
-                "type": "boolean", "description": "Answer from this broker only, without its federated sources",
-            })
-        },
-    },
-];
-
-/// How the answer is written, on every tool that returns entities (Architecture/07 §2).
-const REPRESENTATION_ARGS: &[ReadArg] = &[
-    ReadArg {
-        name: "format",
-        schema: || {
-            json!({
-                "type": "string",
-                "enum": ["normalized", "simplified", "keyValues", "concise", "temporalValues", "aggregatedValues"],
-                "description": "How each entity is written; normalized when absent",
-            })
-        },
-    },
-    ReadArg {
-        name: "options",
-        schema: || {
-            json!({
-                "type": "array", "maxItems": 8,
-                "items": { "type": "string", "enum": ["keyValues", "concise", "sysAttrs", "normalized", "temporalValues", "aggregatedValues"] },
-                "description": "NGSI-LD options; sysAttrs adds the system members REST adds",
-            })
-        },
-    },
-    ReadArg {
-        // The value the broker copies into a GeoJSON `geometry` is no longer that attribute,
-        // so the answer narrowing cannot cut it: the attribute has to be one the grant covers
-        // before the request is sent (T-2299, AG-85).
-        name: "geometryProperty",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 256, "pattern": ATTR_NAME,
-                "description": "The GeoProperty that becomes the geometry of a GeoJSON answer; only an attribute this endpoint serves you",
-            })
-        },
-    },
-];
-
-/// The `type` argument of the shared table: one name, a list of names, or a selection expression.
-fn type_selection_schema() -> Value {
-    json!({
-        "description": "NGSI-LD entity type: one name, several, or a selection expression (A,B for or; A;B for and)",
-        "oneOf": [
-            // A selection expression is type names and the operators that join them, and nothing
-            // else: the same reason `TYPE_NAME` is a pattern rather than a length (AG-21). A value
-            // carrying a slash, a dot, a percent or a space cannot denote a type, so it is refused
-            // by name instead of being answered `[]` — which a probe reads as "it went through".
-            { "type": "string", "maxLength": 1024, "pattern": TYPE_SELECTION },
-            { "type": "array", "maxItems": 50, "items": type_schema() },
-        ],
-    })
-}
-
-/// The `id` argument where CIM 009 takes a list of entity ids.
-fn id_list_schema() -> Value {
-    json!({
-        "type": "array",
-        "maxItems": 100,
-        "items": { "type": "string", "maxLength": 512, "pattern": ENTITY_URN },
-        "description": "Entity URNs to select",
-    })
-}
-
-fn member_list_schema(description: &str) -> Value {
-    json!({
-        "type": "array",
-        "maxItems": 256,
-        "items": { "type": "string", "maxLength": 256 },
-        "description": description,
-    })
-}
-
-/// The properties of a tool that takes these arguments, as its published JSON Schema holds them.
-fn properties_of(groups: &[&[ReadArg]]) -> Map<String, Value> {
-    let mut properties = Map::new();
-    for group in groups {
-        for arg in *group {
-            properties.insert(arg.name.to_owned(), (arg.schema)());
-        }
-    }
-    properties
-}
-
-/// The `type` argument, which every tool that takes one spells the same way (AG-21).
-fn type_schema() -> Value {
-    json!({
-        "type": "string",
-        "maxLength": 256,
-        "pattern": TYPE_NAME,
-        "description": "NGSI-LD entity type, e.g. AirQualityObserved",
-    })
-}
-
-/// The `id` argument: one entity, named by the URN of ADR 001 (AG-21).
-fn id_schema() -> Value {
-    json!({
-        "type": "string",
-        "maxLength": 512,
-        "pattern": ENTITY_URN,
-        "description": "Entity URN, urn:ngsi-ld:{Type}:{domain}:{space}:{localId}",
-    })
-}
-
-/// The `attrs` argument, which every read tool spells the same way.
-fn attrs_schema() -> Value {
-    json!({
-        "type": "array",
-        // Bounded like every other argument (T-0972): the broker parses what arrives, so an
-        // unbounded list is a way to spend its memory through a tool the grant allows.
-        "maxItems": 256,
-        "items": { "type": "string", "maxLength": 256 },
-        "description": "The attributes to return; all the grant covers when absent",
-    })
-}
-
-/// The temporal query grammar, forwarded to the broker unchanged (AG-30).
-///
-/// One schema for both temporal tools: `retrieve_temporal` is this plus a required `id`,
-/// which is the only difference CIM 009 makes between them.
-fn temporal_schema() -> Value {
-    let mut properties = properties_of(&[SELECTOR_ARGS, REPRESENTATION_ARGS, TEMPORAL_ARGS]);
-    properties.remove("entityMap");
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": ["timerel", "timeAt"],
-        "additionalProperties": false,
-    })
-}
-
-/// The temporal grammar of the shared table, forwarded to the broker as written (AG-30, AG-84).
-const TEMPORAL_ARGS: &[ReadArg] = &[
-    ReadArg {
-        name: "timerel",
-        schema: || {
-            json!({
-                "type": "string", "enum": ["before", "after", "between"],
-            })
-        },
-    },
-    ReadArg {
-        name: "timeAt",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 64, "description": "ISO 8601 instant",
-            })
-        },
-    },
-    ReadArg {
-        name: "endTimeAt",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 64, "description": "ISO 8601 instant, with timerel=between",
-            })
-        },
-    },
-    ReadArg {
-        name: "timeproperty",
-        schema: || {
-            json!({
-                "type": "string", "enum": ["observedAt", "createdAt", "modifiedAt", "deletedAt"],
-                "description": "The temporal property; observedAt when absent",
-            })
-        },
-    },
-    ReadArg {
-        name: "lastN",
-        schema: || {
-            json!({
-                "type": "integer", "minimum": 1,
-                "description": "Keep only the N most recent instances per attribute",
-            })
-        },
-    },
-    ReadArg {
-        name: "aggrMethods",
-        schema: || {
-            json!({
-                "type": "array", "maxItems": 8,
-                "items": { "type": "string", "enum": ["totalCount", "distinctCount", "sum", "avg", "min", "max", "stddev", "sumsq"] },
-                "description": "Aggregate instead of returning every instance",
-            })
-        },
-    },
-    ReadArg {
-        name: "aggrPeriodDuration",
-        schema: || {
-            json!({
-                "type": "string", "maxLength": 64,
-                "description": "ISO 8601 duration of one aggregation bucket, e.g. PT1H",
-            })
-        },
     },
 ];
 
@@ -864,7 +725,7 @@ const TEMPORAL_ARGS: &[ReadArg] = &[
 static VALIDATORS: LazyLock<Vec<Option<jsonschema::Validator>>> = LazyLock::new(|| {
     TOOLS
         .iter()
-        .map(|tool| jsonschema::draft7::new(&(tool.schema)()).ok())
+        .map(|tool| jsonschema::draft7::new(&tool.input_schema()).ok())
         .collect()
 });
 
@@ -998,7 +859,7 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                 .any(|(endpoint, subject)| granted(gateway, endpoint, subject, tool.operations))
         })
         .map(|tool| {
-            let mut schema = (tool.schema)();
+            let mut schema = tool.input_schema();
             if let Value::Object(object) = &mut schema {
                 if let Some(Value::Object(properties)) = object.get_mut("properties") {
                     properties.insert(
@@ -1028,7 +889,7 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                 "outputSchema": output_schema(tool),
                 "annotations": {
                     "readOnlyHint": tool.read_only(),
-                    "destructiveHint": !tool.read_only(),
+                    "destructiveHint": tool.destructive(),
                 },
             })
         })
@@ -1105,22 +966,14 @@ pub(crate) fn output_schema(tool: &Tool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tool, TOOLS};
+    use super::{Shape, Tool, TOOLS};
     use jc_core::kinds::Operation;
 
     /// T-1066, AG-07: `read_only` is the `readOnlyHint` an agent runtime reads before it asks a
-    /// person, so it is derived from the operations rather than set beside them. The two writing
-    /// tools are named here, because a tool added on the wrong side of this line is a write that
-    /// is announced as a read.
+    /// person, so it is derived from the operations rather than set beside them; and it says what
+    /// the broker's view says of the same tool (EP-112).
     #[test]
     fn a_tool_that_writes_at_all_is_not_read_only() {
-        let writing: Vec<&str> = TOOLS
-            .iter()
-            .filter(|tool| !tool.read_only())
-            .map(|tool| tool.name)
-            .collect();
-        assert_eq!(writing, vec!["upsert_entity", "create_subscription"]);
-
         for tool in TOOLS {
             let writes = tool.operations.iter().any(Operation::is_write);
             assert_eq!(
@@ -1129,24 +982,246 @@ mod tests {
                 "{} announces the wrong side of readOnlyHint",
                 tool.name
             );
+            assert_eq!(
+                tool.read_only(),
+                READS.contains(&tool.name) || tool.name.starts_with("describe_"),
+                "{} reads on one surface and writes on the other",
+                tool.name
+            );
         }
+        let adding: Vec<&str> = TOOLS
+            .iter()
+            .filter(|tool| !tool.read_only() && !tool.destructive())
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(
+            adding,
+            ["batch_create", "create_entity", "create_subscription"]
+        );
     }
 
-    /// T-3044: a query that names no selector is told which ones it may name. "breaks the
-    /// schema's anyOf" cost the assistant a call on dev to find out.
+    /// The broker's read tools (Antares `docs/src/mcp.md` section 2).
+    const READS: &[&str] = &[
+        "batch_query",
+        "batch_query_temporal",
+        "get_attribute",
+        "get_attribute_value",
+        "get_entity",
+        "get_subscription",
+        "get_type",
+        "list_attribute_details",
+        "list_attributes",
+        "list_subscriptions",
+        "list_type_details",
+        "list_types",
+        "query_entities",
+        "query_temporal",
+        "retrieve_temporal",
+    ];
+
+    /// EP-112: the hub lists the broker's tools by the broker's names and argument names, so the
+    /// call it hands on is the caller's as sent. The pin is Antares `crates/antares-mcp/src/
+    /// tools.rs` at dev 2026-10-12; a broker tool renamed or an argument added there fails here
+    /// first, and the conformance diff of the four surfaces catches what this copy misses.
     #[test]
-    fn a_query_without_a_selector_is_told_the_selectors_it_may_name() {
-        let index = TOOLS
+    fn every_tool_is_the_broker_s_with_the_broker_s_arguments() {
+        let pinned: &[(&str, &[&str])] = &[
+            ("append_attributes", &["id", "attributes", "noOverwrite"]),
+            ("batch_create", &["entities"]),
+            ("batch_delete", &["ids"]),
+            ("batch_merge", &["entities"]),
+            (
+                "batch_query",
+                &[
+                    "type",
+                    "id",
+                    "attrs",
+                    "pick",
+                    "omit",
+                    "q",
+                    "scopeQ",
+                    "georel",
+                    "geometry",
+                    "coordinates",
+                    "geoproperty",
+                    "local",
+                    "lang",
+                    "count",
+                    "limit",
+                    "cursor",
+                ],
+            ),
+            (
+                "batch_query_temporal",
+                &[
+                    "type",
+                    "id",
+                    "attrs",
+                    "q",
+                    "scopeQ",
+                    "georel",
+                    "geometry",
+                    "coordinates",
+                    "geoproperty",
+                    "timerel",
+                    "timeAt",
+                    "endTimeAt",
+                    "timeproperty",
+                    "lastN",
+                    "aggrMethods",
+                    "aggrPeriodDuration",
+                    "count",
+                    "limit",
+                    "cursor",
+                ],
+            ),
+            ("batch_update", &["entities", "noOverwrite"]),
+            ("batch_upsert", &["entities", "options"]),
+            ("create_entity", &["entity"]),
+            ("create_subscription", &["subscription"]),
+            (
+                "delete_attribute",
+                &["id", "attrId", "datasetId", "deleteAll"],
+            ),
+            ("delete_entity", &["id"]),
+            ("delete_subscription", &["id"]),
+            ("get_attribute", &["attrId"]),
+            ("get_attribute_value", &["id", "attrId"]),
+            (
+                "get_entity",
+                &["id", "attrs", "pick", "omit", "lang", "join", "joinLevel"],
+            ),
+            ("get_subscription", &["id"]),
+            ("get_type", &["type"]),
+            ("list_attribute_details", &[]),
+            ("list_attributes", &[]),
+            ("list_subscriptions", &["count", "limit", "cursor"]),
+            ("list_type_details", &[]),
+            ("list_types", &[]),
+            ("merge_entity", &["id", "fragment"]),
+            (
+                "query_entities",
+                &[
+                    "type",
+                    "id",
+                    "idPattern",
+                    "attrs",
+                    "pick",
+                    "omit",
+                    "q",
+                    "scopeQ",
+                    "georel",
+                    "geometry",
+                    "coordinates",
+                    "geoproperty",
+                    "local",
+                    "lang",
+                    "join",
+                    "joinLevel",
+                    "count",
+                    "limit",
+                    "cursor",
+                ],
+            ),
+            (
+                "query_temporal",
+                &[
+                    "type",
+                    "id",
+                    "attrs",
+                    "q",
+                    "scopeQ",
+                    "georel",
+                    "geometry",
+                    "coordinates",
+                    "geoproperty",
+                    "timerel",
+                    "timeAt",
+                    "endTimeAt",
+                    "timeproperty",
+                    "lastN",
+                    "aggrMethods",
+                    "aggrPeriodDuration",
+                    "count",
+                    "limit",
+                    "cursor",
+                ],
+            ),
+            ("replace_attribute", &["id", "attrId", "attribute"]),
+            ("replace_entity", &["id", "entity"]),
+            (
+                "retrieve_temporal",
+                &[
+                    "id",
+                    "attrs",
+                    "timerel",
+                    "timeAt",
+                    "endTimeAt",
+                    "timeproperty",
+                    "lastN",
+                    "aggrMethods",
+                    "aggrPeriodDuration",
+                ],
+            ),
+            ("update_attribute", &["id", "attrId", "attribute"]),
+            ("update_attributes", &["id", "attributes"]),
+            ("update_subscription", &["id", "fragment"]),
+        ];
+        let ours: Vec<(&str, Vec<&str>)> = TOOLS
             .iter()
-            .position(|tool| tool.name == "query_entities")
-            .expect("query_entities");
-        let arguments = serde_json::json!({ "count": true, "limit": 2 });
-        let problem = super::validate(index, arguments.as_object().expect("an object"))
-            .expect_err("no selector");
+            .filter_map(|tool| match tool.shape {
+                Shape::Broker(args) => Some((tool.name, args.iter().map(|arg| arg.name).collect())),
+                Shape::Own(_) => None,
+            })
+            .collect();
+        let pinned: Vec<(&str, Vec<&str>)> = pinned
+            .iter()
+            .map(|(name, args)| (*name, args.to_vec()))
+            .collect();
+        assert_eq!(ours, pinned);
+        let own: Vec<&str> = TOOLS
+            .iter()
+            .filter(|tool| matches!(tool.shape, Shape::Own(_)))
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(own, crate::mcp::describe::DESCRIBE_TOOLS);
+    }
+
+    /// The broker's types: `type` of a query is a list, a cursor is text, a single entity's id
+    /// is the URN (Antares `schema.rs`), so the published schema says what the view takes.
+    #[test]
+    fn a_published_schema_has_the_broker_s_types() {
+        let schema = |name: &str| {
+            TOOLS
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("the tool")
+                .input_schema()
+        };
+        let query = schema("query_entities");
+        assert_eq!(query["properties"]["type"]["type"], "array");
+        assert_eq!(query["properties"]["cursor"]["type"], "string");
+        assert_eq!(query["additionalProperties"], false);
+        assert!(query.get("required").is_none());
+        let batch = schema("batch_query");
+        assert_eq!(batch["required"], serde_json::json!(["type"]));
+        let upsert = schema("batch_upsert");
         assert_eq!(
-            problem,
-            "names none of type, id, attrs, q, georel: one of them is required"
+            upsert["properties"]["entities"]["items"]["required"],
+            serde_json::json!(["id", "type"])
         );
+        let subscribe = schema("create_subscription");
+        assert_eq!(
+            subscribe["properties"]["subscription"]["required"],
+            serde_json::json!(["type", "notification"])
+        );
+        for tool in TOOLS {
+            assert!(
+                jsonschema::draft7::new(&tool.input_schema()).is_ok(),
+                "{} publishes a schema that does not compile",
+                tool.name
+            );
+        }
     }
 
     /// A tool that stands for no operation describes the endpoint rather than its data, and
@@ -1166,7 +1241,7 @@ mod tests {
             name: "read_and_write",
             operations: &[Operation::QueryEntity, Operation::UpsertBatch],
             description: "",
-            schema: || serde_json::json!({}),
+            shape: Shape::Own(|| serde_json::json!({})),
             result_key: "entities",
         };
         assert!(!mixed.read_only());
