@@ -1,12 +1,11 @@
-//! The WebSocket surface of an endpoint (EP-106, EP-107, T-3885): `{endpoint}/ws` is relayed to
-//! the broker view's `/x/views/{view}/ws` (Antares ADR-0026) under the verified caller.
+//! The WebSocket surface of an endpoint (EP-106, EP-107, EP-114, T-3885, T-4133): `{endpoint}/ws`
+//! is served by the Endpoint's fan-out (ADR-N-049), one broker subscription for every client.
 //!
 //! Everything is decided before the client gets its `101`: the slug, the token (the
 //! `Authorization` header, or the `bearer.<token>` subprotocol entry a browser can send), the
-//! `Origin`, the caller's connection cap and the broker's own upgrade of the view, so a refusal is
-//! an HTTP answer a client can read. Then frames are relayed both ways, one at a time, so a slow
-//! side holds the other back instead of filling a buffer. Subscriptions, their delivery and their
-//! narrowing are the broker's (ADR-0026 rules 4 and 8).
+//! `Origin`, the caller's connection cap and the space's, so a refusal is an HTTP answer a
+//! client can read. The connection's filters, their matching and the cut to the caller's grant
+//! are the fan-out's (`crate::fanout`).
 
 use crate::app::{admit, principal_of, Gateway};
 use crate::handlers::space_surface::escape;
@@ -14,23 +13,18 @@ use crate::middleware::rate_limit::caller_key;
 use crate::middleware::tenancy;
 use crate::resolver::Endpoint;
 use axum::body::Body;
-use axum::extract::ws::{self, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{FromRequestParts, Path, Request, State};
 use axum::http::header::{
     ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_TYPE, LINK, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE,
 };
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
-use futures_util::{SinkExt, StreamExt};
 use jc_core::kinds::{Audience, Representation};
 use jc_core::ProblemDetails;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
-use tokio_tungstenite::tungstenite::{self as tungstenite, Message};
 
 /// The subprotocol a client names, and the only one the gateway answers with (API/07 §1).
 const PROTOCOL: &str = "ngsi-ld-ws";
@@ -38,18 +32,12 @@ const PROTOCOL: &str = "ngsi-ld-ws";
 const BEARER: &str = "bearer.";
 /// EP-107: the WebSocket connections one caller holds open at once.
 pub const PER_CALLER: usize = 10;
-/// The broker's bounds (ADR-0026 rule 10), held here too, so an oversized message never
-/// crosses the hop.
+/// The client's bounds (API/07 §3): a message over them closes the connection with 1009.
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_FRAME: usize = 16 * 1024;
-/// What the broker writes: a notification of up to 1 MiB, in one frame (Antares
-/// `MAX_NOTIFICATION_BYTES`). Its 64 KiB bound is on what it reads; held against what it writes,
-/// the first notification over 16 KiB ended the relay without a close frame (T-4131).
-const FROM_BROKER: usize = 1024 * 1024;
-/// RFC 6455 7.4.1: the server met a condition that prevented it from fulfilling the request.
-const BROKER_FAILED: u16 = 1011;
-/// RFC 6455 7.4.1: the message was too big to process.
-const TOO_BIG: u16 = 1009;
+/// A token caller's socket ends when its access token would (Keycloak's default 300 s), since
+/// nothing re-checks the token on an open socket (API/07 §3).
+pub const TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The WebSocket connections each caller holds open (EP-107).
 #[derive(Debug, Default)]
@@ -152,54 +140,36 @@ pub(crate) async fn endpoint_ws(
         gateway: Arc::clone(&gateway),
         caller,
     };
-    let view = endpoint.slug.clone();
-    if let Err(problem) = tenancy::pin_caller(&mut request, &endpoint.space, &subject) {
-        tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
-        return ProblemDetails::internal().into_response();
-    }
     let (mut parts, _) = request.into_parts();
     let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
         Ok(upgrade) => upgrade,
         Err(rejection) => return rejection.into_response(),
     };
-    let base = match gateway
-        .broker
-        .base_for(&format!("/x/views/{view}/ws"), &parts.headers)
-    {
-        Ok(base) => base,
-        Err(error) => return ProblemDetails::from(error).into_response(),
+    let principal = principal_of(&subject);
+    // A token caller's socket ends when its token would; an anonymous one has none to expire.
+    let lifetime = (principal != "anonymous").then_some(TOKEN_LIFETIME);
+    let joined = gateway
+        .hubs
+        .join(&gateway, Arc::clone(&endpoint), subject, principal.clone());
+    let Ok((hub, conn, queue)) = joined else {
+        return ProblemDetails::new(503, "space-full", "Service Unavailable")
+            .with_detail(format!(
+                "a space holds at most {} WebSocket connections at once",
+                crate::fanout::socket::PER_SPACE
+            ))
+            .into_response();
     };
-    let upstream = match upstream_request(&base, &view, &parts.headers) {
-        Ok(upstream) => upstream,
-        Err(refused) => return *refused,
-    };
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(FROM_BROKER))
-        .max_frame_size(Some(FROM_BROKER));
-    let broker = match tokio_tungstenite::connect_async_with_config(upstream, Some(config), false)
-        .await
-    {
-        Ok((broker, _)) => broker,
-        Err(tungstenite::Error::Http(answer)) => return refused_by_broker(answer.status()),
-        Err(error) => {
-            tracing::warn!(slug = %endpoint.slug, %view, %error, "the broker's WebSocket did not open");
-            return ProblemDetails::new(502, "broker-unavailable", "Bad Gateway")
-                .with_detail("the broker did not open the view's WebSocket")
-                .into_response();
-        }
-    };
-    tracing::info!(
-        slug = %endpoint.slug,
-        space = %endpoint.space,
-        %view,
-        principal = %principal_of(&subject),
-        "WebSocket relayed to the broker's view"
-    );
+    tracing::info!(slug = %endpoint.slug, space = %endpoint.space, %principal, "WebSocket opened on the fan-out");
     upgrade
         .protocols([PROTOCOL])
         .max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |client| relay(client, broker, held, endpoint.slug.clone()))
+        .on_upgrade(move |client| async move {
+            let ended =
+                crate::fanout::socket::session(client, hub, conn, queue, principal, lifetime).await;
+            tracing::info!(slug = %endpoint.slug, closed = ?ended, "WebSocket closed");
+            drop(held);
+        })
 }
 
 /// Whether the request asks for a WebSocket at all (RFC 6455 §4.1: `Upgrade: websocket`).
@@ -380,175 +350,6 @@ fn origin_allowed(headers: &HeaderMap, public_url: &str) -> bool {
     own.is_some_and(|own| origin.as_bytes().eq_ignore_ascii_case(own.as_bytes()))
 }
 
-/// The broker's upgrade of the view, carrying the pinned tenant and caller and nothing the
-/// client sent of its own.
-fn upstream_request(
-    base: &str,
-    view: &str,
-    pinned: &HeaderMap,
-) -> Result<tungstenite::handshake::client::Request, Box<Response<Body>>> {
-    // ponytail: the broker is a plain in-cluster address (Linkerd's mTLS under it); an
-    // https broker base needs tungstenite's TLS feature and is refused until a deployment
-    // has one.
-    let Some(authority) = base.strip_prefix("http://") else {
-        tracing::error!(%base, "the WebSocket relay reaches only an http:// broker");
-        return Err(Box::new(
-            ProblemDetails::new(502, "broker-unavailable", "Bad Gateway").into_response(),
-        ));
-    };
-    let authority = authority.trim_end_matches('/');
-    let mut upstream = format!("ws://{authority}/x/views/{view}/ws")
-        .into_client_request()
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    for (name, value) in pinned {
-        if name == tenancy::TENANT || name.as_str().starts_with("x-jc-") {
-            upstream.headers_mut().append(name.clone(), value.clone());
-        }
-    }
-    Ok(upstream)
-}
-
-/// The broker refused the upgrade: its status, in the gateway's own words.
-fn refused_by_broker(status: StatusCode) -> Response<Body> {
-    match status {
-        StatusCode::FORBIDDEN => ProblemDetails::new(403, "forbidden", "Forbidden")
-            .with_detail("the Endpoint's Policy grants this caller no notification")
-            .into_response(),
-        StatusCode::NOT_FOUND => ProblemDetails::not_found().into_response(),
-        StatusCode::SERVICE_UNAVAILABLE => {
-            ProblemDetails::new(503, "too-many-connections", "Service Unavailable")
-                .with_detail("the broker holds as many WebSocket connections as it takes")
-                .into_response()
-        }
-        other => {
-            tracing::warn!(status = %other, "the broker refused the WebSocket upgrade");
-            ProblemDetails::new(502, "broker-unavailable", "Bad Gateway").into_response()
-        }
-    }
-}
-
-type Upstream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// How the relay ended.
-#[derive(Debug, PartialEq, Eq)]
-enum Ended {
-    /// The client closed, went away, or broke no bound.
-    Closed,
-    /// The client sent a message over the bound.
-    TooBig,
-    /// The broker sent its close frame, which the client already has.
-    BrokerClosed,
-    /// The broker's side failed or ended without a close frame.
-    BrokerFailed,
-}
-
-/// Frames both ways until either side ends; the connection is counted until then. However it
-/// ends, a client that is still there gets a close frame, never a bare end of the stream.
-async fn relay(client: WebSocket, broker: Upstream, held: Held, slug: String) {
-    let (mut to_client, mut from_client) = client.split();
-    let (mut to_broker, mut from_broker) = broker.split();
-    let ended = {
-        let up = async {
-            while let Some(read) = from_client.next().await {
-                let message = match read {
-                    Ok(message) => message,
-                    Err(error) if too_big(&error) => return Ended::TooBig,
-                    Err(_) => return Ended::Closed,
-                };
-                let closing = matches!(message, ws::Message::Close(_));
-                let Some(message) = upstream_message(message) else {
-                    continue;
-                };
-                if closing {
-                    let _ = to_broker.send(message).await;
-                    return Ended::Closed;
-                }
-                if let Err(error) = to_broker.send(message).await {
-                    tracing::warn!(%slug, %error, "the broker's side of a WebSocket failed");
-                    return Ended::BrokerFailed;
-                }
-            }
-            Ended::Closed
-        };
-        let down = async {
-            loop {
-                let message = match from_broker.next().await {
-                    Some(Ok(message)) => message,
-                    Some(Err(error)) => {
-                        tracing::warn!(%slug, %error, "the broker's side of a WebSocket failed");
-                        return Ended::BrokerFailed;
-                    }
-                    None => return Ended::BrokerFailed,
-                };
-                let closing = matches!(message, Message::Close(_));
-                let Some(message) = client_message(message) else {
-                    continue;
-                };
-                if to_client.send(message).await.is_err() {
-                    return Ended::Closed;
-                }
-                if closing {
-                    return Ended::BrokerClosed;
-                }
-            }
-        };
-        tokio::select! {
-            ended = up => ended,
-            ended = down => ended,
-        }
-    };
-    let close = match ended {
-        Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
-        Ended::BrokerFailed => Some((BROKER_FAILED, "the broker ended the connection")),
-        Ended::Closed | Ended::BrokerClosed => None,
-    };
-    if let Some((code, reason)) = close {
-        let frame = ws::CloseFrame {
-            code,
-            reason: reason.into(),
-        };
-        let _ = to_client.send(ws::Message::Close(Some(frame))).await;
-    }
-    let _ = to_broker.close().await;
-    tracing::info!(%slug, closed = ?ended, "WebSocket closed");
-    drop(held);
-}
-
-/// Whether a read failed because the client broke the message or frame bound.
-fn too_big(error: &axum::Error) -> bool {
-    std::error::Error::source(error)
-        .and_then(|source| source.downcast_ref::<tungstenite::Error>())
-        .is_some_and(|error| matches!(error, tungstenite::Error::Capacity(_)))
-}
-
-/// A client frame as the broker receives it. Ping and pong are each side's own (ADR-0026
-/// rule 5), so they are not relayed.
-fn upstream_message(message: ws::Message) -> Option<Message> {
-    match message {
-        ws::Message::Text(text) => Some(Message::text(text.as_str())),
-        ws::Message::Binary(bytes) => Some(Message::Binary(bytes)),
-        ws::Message::Close(frame) => Some(Message::Close(frame.map(|frame| CloseFrame {
-            code: CloseCode::from(frame.code),
-            reason: frame.reason.as_str().into(),
-        }))),
-        ws::Message::Ping(_) | ws::Message::Pong(_) => None,
-    }
-}
-
-/// A broker frame as the client receives it.
-fn client_message(message: Message) -> Option<ws::Message> {
-    match message {
-        Message::Text(text) => Some(ws::Message::Text(text.as_str().into())),
-        Message::Binary(bytes) => Some(ws::Message::Binary(bytes)),
-        Message::Close(frame) => Some(ws::Message::Close(frame.map(|frame| ws::CloseFrame {
-            code: u16::from(frame.code),
-            reason: frame.reason.as_str().into(),
-        }))),
-        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,44 +424,5 @@ mod tests {
         open.give_back("a");
         assert!(open.take("a"));
         open.give_back("nobody");
-    }
-
-    #[test]
-    fn upstream_carries_only_the_pinned_caller() {
-        let mut pinned = HeaderMap::new();
-        pinned.insert(tenancy::TENANT, HeaderValue::from_static("ovzdusie"));
-        pinned.insert("x-jc-subject", HeaderValue::from_static("someone"));
-        pinned.insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
-        pinned.insert(AUTHORIZATION, HeaderValue::from_static("Bearer t"));
-        let upstream = upstream_request("http://antares:1026/", "air", &pinned).expect("built");
-        assert_eq!(upstream.uri(), "ws://antares:1026/x/views/air/ws");
-        assert_eq!(upstream.headers()["ngsild-tenant"], "ovzdusie");
-        assert_eq!(upstream.headers()["x-jc-subject"], "someone");
-        assert!(!upstream.headers().contains_key(ORIGIN));
-        assert!(!upstream.headers().contains_key(AUTHORIZATION));
-        assert!(upstream_request("https://antares", "air", &pinned).is_err());
-    }
-
-    #[test]
-    fn frames_cross_unchanged_and_pings_stay() {
-        assert_eq!(
-            upstream_message(ws::Message::Text("{}".into())),
-            Some(Message::text("{}"))
-        );
-        assert_eq!(
-            upstream_message(ws::Message::Ping(Default::default())),
-            None
-        );
-        assert_eq!(
-            client_message(Message::Close(Some(CloseFrame {
-                code: CloseCode::from(1013),
-                reason: "overflow".into()
-            }))),
-            Some(ws::Message::Close(Some(ws::CloseFrame {
-                code: 1013,
-                reason: "overflow".into()
-            })))
-        );
-        assert_eq!(client_message(Message::Pong(Default::default())), None);
     }
 }

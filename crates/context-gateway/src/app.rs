@@ -130,6 +130,9 @@ pub struct Gateway {
     pub creates: crate::creates::DailyCreates,
     /// The WebSocket connections each caller holds open (EP-107).
     pub ws_open: crate::handlers::ws::Open,
+    /// Each Endpoint's WebSocket fan-out: one broker subscription, its entities, its clients'
+    /// filters (ADR-N-049, EP-114).
+    pub hubs: crate::fanout::socket::Hubs,
     /// The questions a destructive MCP tool is waiting on an answer to (AG-08, T-0849).
     pub elicitations: crate::mcp::elicitation::Elicitations,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
@@ -223,6 +226,7 @@ impl Gateway {
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
             ws_open: Default::default(),
+            hubs: Default::default(),
             elicitations: crate::mcp::elicitation::Elicitations::new(),
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,

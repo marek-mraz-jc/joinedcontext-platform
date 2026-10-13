@@ -12,6 +12,9 @@
 //! Entities and filters here are in the broker's stored (expanded) form. The caller cuts a change
 //! to the receiving caller's grant before it gets here (ADR-N-049 §2.7).
 
+pub mod hub;
+pub mod socket;
+
 use antares_jsonld::{expand_attr_name, expand_types, Context};
 use antares_ql::{geo::GeoQuery, CmpOp, QNode, QValue};
 use serde_json::{Map, Value};
@@ -567,7 +570,8 @@ impl Index {
             .collect()
     }
 
-    fn decides(
+    /// Whether filter `id` notifies a change of `changed` to `doc`, by `antares-matcher`.
+    pub fn decides(
         &self,
         id: FilterId,
         doc: &Value,
