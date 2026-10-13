@@ -512,8 +512,11 @@ impl Hub {
         for filter in state.index.candidates(&full, core()) {
             by_conn.entry(filter >> SUB_BITS).or_default().push(filter);
         }
-        // ponytail: the cut and two expansions run once per connection with a candidate; group
-        // the connections by an identical grant when a profile shows many callers per change.
+        // The cut and its two expansions run once per distinct grant, not per connection: the
+        // rig's 1,000 callers of one public Endpoint share one (T-4133).
+        // ponytail: a linear scan of the grants seen in this change; a map when callers with
+        // distinct grants per Endpoint reach the hundreds.
+        let mut views: Vec<(&Constraints, Option<View>)> = Vec::new();
         for (conn_id, filters) in by_conn {
             let Some(conn) = state.conns.get(&conn_id) else {
                 continue;
@@ -521,19 +524,18 @@ impl Hub {
             let Some(constraints) = &conn.constraints else {
                 continue;
             };
-            let Some(seen) = cut(&entity, constraints) else {
+            let at_view = match views.iter().position(|(c, _)| *c == constraints) {
+                Some(at) => at,
+                None => {
+                    views.push((constraints, view(&entity, previous.as_ref(), constraints)));
+                    views.len() - 1
+                }
+            };
+            let Some((seen, now, delta)) = &views[at_view].1 else {
                 continue;
             };
-            let Some(now) = expanded(&seen) else {
-                continue;
-            };
-            let before = previous
-                .as_ref()
-                .and_then(|p| cut(p, constraints))
-                .and_then(|p| expanded(&p));
-            let delta = changed(before.as_ref(), &now);
             for filter in filters {
-                if !state.index.decides(filter, &now, &delta, core()) {
+                if !state.index.decides(filter, now, delta, core()) {
                     continue;
                 }
                 let Some(sub) = conn.subs.values().find(|s| s.filter == filter) else {
@@ -554,6 +556,21 @@ impl Hub {
             }
         }
     }
+}
+
+/// A change as one grant shows it: the cut entity, its expansion, the names that changed.
+type View = (Value, Value, BTreeSet<String>);
+
+/// What a grant shows of a change: the cut entity, its expansion and the names that changed
+/// against the cut of the previous state; `None` when the grant shows nothing of it.
+fn view(entity: &Value, previous: Option<&Value>, constraints: &Constraints) -> Option<View> {
+    let seen = cut(entity, constraints)?;
+    let now = expanded(&seen)?;
+    let before = previous
+        .and_then(|p| cut(p, constraints))
+        .and_then(|p| expanded(&p));
+    let delta = changed(before.as_ref(), &now);
+    Some((seen, now, delta))
 }
 
 impl State {

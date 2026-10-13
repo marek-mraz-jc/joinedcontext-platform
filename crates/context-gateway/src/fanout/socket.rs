@@ -19,8 +19,21 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-/// Connections one space may hold (API/07 §3).
+/// Connections one space may hold when `JC_GATEWAY_WS_PER_SPACE` names no other number
+/// (API/07 §3).
 pub const PER_SPACE: usize = 1000;
+
+/// `JC_GATEWAY_WS_PER_SPACE`: the space cap, raised for a measurement (the `ws-fanout` rig).
+pub fn per_space() -> usize {
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("JC_GATEWAY_WS_PER_SPACE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(PER_SPACE)
+    })
+}
 /// How long a hub keeps its upstream after its last client left (ADR-N-049 §2.1).
 const LINGER: Duration = Duration::from_secs(60);
 /// The upstream's reconnect delay grows to this.
@@ -60,7 +73,7 @@ pub struct Hubs(Mutex<HashMap<String, (String, Arc<Hub>)>>);
 /// Why a connection could not join.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// The space holds [`PER_SPACE`] connections.
+    /// The space holds [`per_space`] connections.
     SpaceFull,
 }
 
@@ -81,7 +94,7 @@ impl Hubs {
             .filter(|(space, _)| *space == endpoint.space)
             .map(|(_, hub)| hub.connections())
             .sum();
-        if in_space >= PER_SPACE {
+        if in_space >= per_space() {
             return Err(Refused::SpaceFull);
         }
         let hub = match hubs.get(&endpoint.slug) {

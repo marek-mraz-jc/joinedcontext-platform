@@ -155,7 +155,7 @@ pub(crate) async fn endpoint_ws(
         return ProblemDetails::new(503, "space-full", "Service Unavailable")
             .with_detail(format!(
                 "a space holds at most {} WebSocket connections at once",
-                crate::fanout::socket::PER_SPACE
+                crate::fanout::socket::per_space()
             ))
             .into_response();
     };
