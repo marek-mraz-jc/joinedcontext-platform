@@ -168,7 +168,7 @@ fn member<'a>(members: &'a [(String, Vec<u8>)], suffix: &str) -> &'a [u8] {
 #[tokio::test]
 async fn no_schema_document_in_the_bundle_describes_a_hidden_attribute() {
     // The data members are the view's answer, which the Portal's rules narrow to the published
-    // names (T-3651); the schema members are the gateway's own projection.
+    // names (T-3651); the schema members are the broker's documents of the view (T-3646).
     let broker = BrokerStub::narrowing(
         vec![json!([station("station-01", 34.2)])],
         View::of(
@@ -199,11 +199,22 @@ async fn no_schema_document_in_the_bundle_describes_a_hidden_attribute() {
         );
         checked += 1;
     }
-    assert!(checked >= 10, "every other member was read: {checked}");
-    // What is served is still described, so the case is not green by describing nothing.
+    assert!(checked >= 4, "every other member was read: {checked}");
+    // What is served is still described, and by the broker's own bytes: the gateway renders no
+    // schema of its own that could describe more than the view does (T-3646).
     let members = stored(&answer.body);
-    let schema = String::from_utf8_lossy(member(&members, "schema/v1/model.schema.json"));
-    assert!(schema.contains("pm10"), "{schema}");
+    assert_eq!(
+        member(&members, "schema/v1/model.shacl.ttl"),
+        common::LINKML_SHAPES.as_bytes()
+    );
+    assert!(
+        members
+            .iter()
+            .filter(|(path, _)| path.contains("schema/"))
+            .all(|(path, _)| path.ends_with("schema/v1/model.shacl.ttl")),
+        "only what the broker's index lists: {:?}",
+        members.iter().map(|(path, _)| path).collect::<Vec<_>>()
+    );
 }
 
 /// An entity of a type the view does not show is in none of the three shapes: a bundle is a
@@ -386,11 +397,12 @@ async fn an_empty_answer_is_still_a_bundle() {
     assert_eq!(entities, json!([]));
 }
 
-/// An endpoint that publishes no model has no schema directory, and the bundle is still a bundle:
-/// the data and the record are what it was asked for.
+/// A view whose Tenant holds no schema (the broker's LinkML surface answers `404`) has no schema
+/// directory, and the bundle is still a bundle: the data and the record are what it was asked
+/// for (T-3646).
 #[tokio::test]
 async fn an_endpoint_without_a_model_bundles_without_a_schema_directory() {
-    let broker = BrokerStub::start(vec![json!([station("station-01", 34.2)])]).await;
+    let broker = BrokerStub::schemaless(vec![json!([station("station-01", 34.2)])]).await;
     let mut modelless = endpoint(None, &[]);
     modelless.models = Vec::new();
 
@@ -478,6 +490,7 @@ async fn the_answer_is_a_zip_whatever_the_caller_accepts() {
             broker
                 .hops()
                 .iter()
+                .filter(|hop| hop.path.starts_with("/ngsi-ld/"))
                 .all(|hop| hop.accept == "application/json"),
             "{accept:?}: {:?}",
             broker.hops()
