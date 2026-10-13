@@ -5,7 +5,7 @@ use crate::app::Gateway;
 use crate::app::MAX_BODY;
 use crate::app::MAX_COLLECTED;
 use crate::app::PAGE;
-use crate::app::{names_no_tenant, served_by_view, ANTARES_RESTRICTED};
+use crate::app::{has_view, names_no_tenant, ANTARES_RESTRICTED};
 use crate::pdp::evaluator::{Subject, Verdict};
 use crate::pdp::{geo, projection, temporal};
 use crate::resolver::Endpoint;
@@ -166,7 +166,7 @@ pub(crate) async fn read_entities(
     request: &mut Request,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    if !served_by_view((slug, Operation::QueryEntity, request.headers())) {
+    if !has_view(slug) {
         return query_entities(gateway, endpoint, subject, params, request).await;
     }
     view_hop(endpoint, subject, request)?;
@@ -257,7 +257,7 @@ pub(crate) async fn query_temporal(
     request: &mut Request,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    if served_by_view((slug, Operation::RetrieveTemporal, request.headers())) {
+    if has_view(slug) {
         view_hop(endpoint, subject, request)?;
         let target = format!(
             "/x/views/{slug}/ngsi-ld/v1/temporal/entities/{}?{}",
@@ -416,7 +416,7 @@ const PARALLEL_PAGES: usize = 4;
 /// one, and a caller who cannot tell will act on half the data.
 ///
 /// `view` is the broker's view the surface reads through: the endpoint's slug, or `cs-{space}`
-/// for the space's dump (plan 5.1). What [`served_by_view`] keeps off the view goes through the
+/// for the space's dump (plan 5.1). What [`has_view`] keeps off the view goes through the
 /// gateway's own decision and projection, as before.
 pub(crate) async fn paged_entities(
     gateway: &Gateway,
@@ -427,7 +427,7 @@ pub(crate) async fn paged_entities(
     limits: &tabular::Limits,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    if served_by_view((view, Operation::QueryEntity, request.headers())) {
+    if has_view(view) {
         return paged_view(gateway, endpoint, subject, (params, view), request, limits).await;
     }
     let verdict = gateway.pdp.decide(
