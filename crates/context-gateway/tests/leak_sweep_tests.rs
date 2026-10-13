@@ -568,8 +568,11 @@ async fn every_representation_and_tool_has_a_probe() {
 
     for representation in endpoint().representations {
         let path = match representation {
-            // The broker's view serves them since T-3643 and T-3752, and Antares sweeps them there.
-            Representation::NgsiLd | Representation::OgcFeatures => continue,
+            // The broker's view serves them since T-3643, T-3752 and T-3830, and Antares sweeps
+            // them there.
+            Representation::NgsiLd | Representation::OgcFeatures | Representation::Odata => {
+                continue
+            }
             Representation::Mcp => "/mcp",
             Representation::GeoJson => "/file.geojson",
             Representation::Csv => "/file.csv",
@@ -577,7 +580,6 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::Json => "/file.json",
             Representation::Zip => "/file.zip",
             Representation::Sta => "/sta/v1.1",
-            Representation::Odata => "/odata/v4",
             Representation::WebSocket => "/ws",
         };
         assert!(

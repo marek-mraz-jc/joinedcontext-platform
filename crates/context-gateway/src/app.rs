@@ -16,7 +16,7 @@ use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
-use crate::handlers::ogc::ogc_features;
+use crate::handlers::ogc::{odata, ogc_features};
 use crate::handlers::schema_routes::{
     schema_artifact, schema_index, space_schema_artifact, space_schema_index,
 };
@@ -658,6 +658,10 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
+        // The OData v4 service of the view (EP-104, T-3830), read-only until T-3939.
+        .route("/api/endpoint/{slug}/odata/v4", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))
@@ -1639,22 +1643,13 @@ fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
-/// broker can hold the view ([`has_view`]), and the request is none of the kinds the view does
-/// not serve yet: a subscription, whose delivery the gateway still seals and routes back (plan
-/// 5.5, T-3653). So does a write with `If-Match`: the broker publishes no entity tags, and the
-/// gateway's read, compare and conditional write is the only lost-update guard there is (R45,
-/// GW16).
+/// broker can hold the view ([`has_view`]), and the request is no write with `If-Match`: the
+/// broker publishes no entity tags, and the gateway's read, compare and conditional write is the
+/// only lost-update guard there is (R45, GW16). A subscription is the view's: stored under the
+/// verified subscriber and delivered by the broker itself (plan 5.5, T-3653).
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
-    let subscription = matches!(
-        operation,
-        Operation::CreateSubscription
-            | Operation::UpdateSubscription
-            | Operation::RetrieveSubscription
-            | Operation::QuerySubscription
-            | Operation::DeleteSubscription
-    );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    has_view(view) && !conditional && !subscription
+    has_view(view) && !conditional
 }
 
 /// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
@@ -1991,6 +1986,20 @@ async fn view_request(
     Ok(())
 }
 
+/// Why a subscription's notification endpoint may not be stored, read off its body: the target
+/// [`crate::notification_target::refusal`] judges. A body that is no JSON, or a fragment that
+/// names no endpoint, is the broker's to answer.
+fn subscription_target_refusal(sent: &[u8], private_hosts: &[String]) -> Option<ProblemDetails> {
+    let payload: Value = serde_json::from_slice(sent).ok()?;
+    match payload.get("notification")?.get("endpoint")?.get("uri")? {
+        Value::String(uri) => crate::notification_target::refusal(uri, private_hosts),
+        _ => Some(
+            ProblemDetails::bad_request()
+                .with_detail("the notification endpoint's uri is a string"),
+        ),
+    }
+}
+
 /// The payload of a view request as the gateway keeps it: the media type (CIM 009 6.3.2), the
 /// core context (T-3287), a form's minted id and one entity per create (EP-97), the model's
 /// units (DM-06) and relationships (DM-70, DM-71). Returns the units it filled; a batch the
@@ -2012,6 +2021,21 @@ async fn view_payload(
     {
         tracing::info!(slug = %endpoint.slug, "refused: a context other than the core one");
         return Err(answer(ProblemDetails::bad_request().with_detail(why)));
+    }
+    // A subscription is a standing query, not an entity: the view intersects it with the grant
+    // at match time and `pre_notify` decides each notification under the subscriber (T-3499).
+    // What is the gateway's is where it delivers to (G11, T-3653).
+    if matches!(
+        operation,
+        Operation::CreateSubscription | Operation::UpdateSubscription
+    ) {
+        return match subscription_target_refusal(sent, &gateway.private_hosts) {
+            Some(problem) => {
+                tracing::info!(slug = %endpoint.slug, "subscription refused: its notification endpoint");
+                Err(answer(problem))
+            }
+            None => Ok(Vec::new()),
+        };
     }
     let before = sent.len();
     if let Some(creates) = &endpoint.creates {

@@ -122,6 +122,11 @@ impl Stub {
 /// A broker whose view WebSocket welcomes, answers `x-subscribe` with `201` and forwards what
 /// [`Stub::notify`] pushes; its entity query answers an empty page.
 async fn broker() -> (String, Stub) {
+    broker_answering(201).await
+}
+
+/// [`broker`] answering the gateway's `x-subscribe` with `status`.
+async fn broker_answering(status: u16) -> (String, Stub) {
     let (push, _) = tokio::sync::broadcast::channel(16);
     let stub = Stub {
         upgrades: Arc::default(),
@@ -137,7 +142,7 @@ async fn broker() -> (String, Stub) {
                     async move {
                         stub.upgrades.lock().expect("the upgrade log").push(headers);
                         let mut pushed = stub.push.subscribe();
-                        upgrade.on_upgrade(|mut socket| async move {
+                        upgrade.on_upgrade(move |mut socket| async move {
                             let welcome = json!({"metadata": {"x-op": "x-welcome",
                                 "x-connection": "c1", "x-resume-token": "t1"}});
                             if socket.send(AxumMessage::Text(welcome.to_string().into())).await.is_err() {
@@ -156,9 +161,14 @@ async fn broker() -> (String, Stub) {
                                             }
                                         }
                                         if text.as_str().contains("x-subscribe") {
-                                            let created = json!({"metadata": {"x-op": "x-result",
-                                                "x-id": "up", "x-status": 201},
-                                                "body": {"id": "urn:ngsi-ld:Subscription:up", "type": "Subscription"}});
+                                            let created = if status == 201 {
+                                                json!({"metadata": {"x-op": "x-result", "x-id": "up", "x-status": 201},
+                                                    "body": {"id": "urn:ngsi-ld:Subscription:up", "type": "Subscription"}})
+                                            } else {
+                                                json!({"metadata": {"x-op": "x-result", "x-id": "up", "x-status": status},
+                                                    "body": {"title": "Forbidden", "status": status,
+                                                             "detail": "no policy grants this operation"}})
+                                            };
                                             if socket.send(AxumMessage::Text(created.to_string().into())).await.is_err() {
                                                 return;
                                             }
@@ -727,4 +737,44 @@ async fn a_token_socket_ends_at_its_lifetime_and_an_anonymous_one_does_not() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     subscribe_docks(&mut anonymous).await;
+}
+
+/// T-4133: when the broker refuses the Endpoint's upstream subscription, no client is left
+/// with a silent `201`: a connection that subscribed ends with 1011, and a later `x-subscribe`
+/// is answered 503 naming the broker's refusal.
+#[tokio::test]
+async fn a_refused_upstream_is_an_error_for_every_client() {
+    let realm = common::Realm::new();
+    let (upstream, stub) = broker_answering(403).await;
+    let at = gateway("refused", &upstream, &realm).await;
+    let (mut first, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
+        "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}});
+    first
+        .send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    upstreams(&stub, 1).await;
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(frame)) = first.next().await {
+            if let Message::Close(frame) = frame {
+                return frame;
+            }
+        }
+        None
+    })
+    .await
+    .expect("closed in time")
+    .expect("a close frame");
+    assert_eq!(u16::from(closed.code), 1011, "{closed:?}");
+
+    let (mut later, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    later
+        .send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    let refused = next_op(&mut later, "x-result").await.expect("answered");
+    assert_eq!(refused["metadata"]["x-status"], 503, "{refused}");
+    let detail = refused["body"]["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("403"), "{detail}");
 }

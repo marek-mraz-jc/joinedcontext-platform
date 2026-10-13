@@ -94,10 +94,13 @@ async fn through_view(
     if !has_view(view) {
         return ProblemDetails::not_found().into_response();
     }
-    let path = request.uri().path();
-    let Some(rest) = path
-        .find("/schema/")
-        .and_then(|at| path.get(at + "/schema".len()..))
+    // The known prefix, not the first `/schema/`: a space or slug named `schema` holds one too.
+    let prefix = format!("{}/schema", endpoint.base_path);
+    let Some(rest) = request
+        .uri()
+        .path()
+        .strip_prefix(&prefix)
+        .filter(|rest| rest.starts_with('/'))
     else {
         return ProblemDetails::not_found().into_response();
     };
