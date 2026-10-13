@@ -205,7 +205,6 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
         (BUS_SLUG, vehicle(), ["location", "serviceLine", "speed"]),
     ] {
         let broker = viewed(slug, &entity).await;
-        let entity_type = entity["type"].as_str().expect("a type").to_owned();
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
 
         // 2. GeoJSON: `location` becomes the geometry, so it is a property no more.
@@ -245,26 +244,9 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
             "the CSV header describes the same attributes: {csv}"
         );
 
-        // 4. OGC API Features: the same flattening as GeoJSON, reached through the resource
-        // tree a GIS client walks rather than through a file download.
-        let (status, body) = get(
-            app(&broker.url),
-            &format!("/api/endpoint/{slug}/ogc/features/collections/{entity_type}/items"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let page: Value = serde_json::from_slice(&body).expect("JSON");
-        let mut ogc: BTreeSet<String> = page["features"][0]["properties"]
-            .as_object()
-            .expect("a properties object")
-            .keys()
-            .filter(|name| name.as_str() != "type")
-            .cloned()
-            .collect();
-        ogc.insert("location".to_owned());
-        assert_eq!(ogc, expected, "OGC Features shows what GeoJSON shows");
+        // OGC API Features is the broker's view since T-3752; Antares holds its parity.
 
-        // 5. SensorThings: the same attributes, split across the sets the profile has for
+        // 4. SensorThings: the same attributes, split across the sets the profile has for
         // them. A numeric attribute is a Datastream, a label stays a property, the geometry
         // is the Location; together they are the whole projected entity and nothing else.
         let (status, body) = get(
@@ -301,12 +283,10 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
         (BUS_SLUG, vehicle(), "fleetInternalId"),
     ] {
         let broker = viewed(slug, &entity).await;
-        let entity_type = entity["type"].as_str().expect("a type").to_owned();
 
         for uri in [
             format!("/api/endpoint/{slug}/file.geojson"),
             format!("/api/endpoint/{slug}/file.csv"),
-            format!("/api/endpoint/{slug}/ogc/features/collections/{entity_type}/items"),
             format!("/api/endpoint/{slug}/sta/v1.1/Things?$expand=Datastreams,Locations"),
             format!("/api/endpoint/{slug}/sta/v1.1/Observations"),
         ] {

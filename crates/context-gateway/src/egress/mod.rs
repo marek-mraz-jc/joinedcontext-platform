@@ -4,5 +4,6 @@
 //! platform sends without being asked, so it is the one place where the enforcement point
 //! has to run on the way out rather than on the way in.
 
+pub mod migrate;
 pub mod notifications;
 pub mod subject;

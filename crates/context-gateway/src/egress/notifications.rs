@@ -32,7 +32,6 @@ use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -136,7 +135,7 @@ pub fn narrow_subscription(
             false => Ok(()),
         };
     };
-    if let Some(problem) = refused_at_creation(uri, private_hosts) {
+    if let Some(problem) = crate::notification_target::refusal(uri, private_hosts) {
         return Err(Box::new(problem));
     }
     let routed = route(
@@ -353,96 +352,17 @@ pub async fn deliver(
     dispatch(&gateway.broker, &target, &parts.headers, &notification).await
 }
 
-/// Whether an address is inside the platform's own networks (T-1302): loopback, private
-/// (RFC 1918, IPv6 unique local), link-local (the cloud metadata address), unspecified,
-/// broadcast, `0.0.0.0/8` and shared address space (RFC 6598), an IPv4 one mapped into IPv6 too.
-fn is_internal(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let [first, second, ..] = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || first == 0
-                || (first == 100 && (second & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_internal(IpAddr::V4(v4)))
-        }
-    }
-}
-
-/// The host and port of an HTTP or HTTPS URL: no user info, no brackets, lower case.
-fn host_of(url: &str) -> Option<(String, u16)> {
-    let (origin, _) = split(url)?;
-    let (scheme, authority) = origin.split_once("://")?;
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let (host, port) = match authority.strip_prefix('[') {
-        Some(rest) => {
-            let (host, after) = rest.split_once(']')?;
-            // An IPv6 zone identifier (`fe80::1%25eth0`, RFC 6874) names an interface of the
-            // host that dials, not a different address: without cutting it the address parses
-            // as nothing and a link-local target is read as a name (T-1698).
-            let host = host.split_once('%').map_or(host, |(address, _)| address);
-            (host, after.strip_prefix(':'))
-        }
-        None => match authority.rsplit_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (authority, None),
-        },
-    };
-    let port = match port {
-        Some(port) => port.parse().ok()?,
-        None if scheme == "https" => 443,
-        None => 80,
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    (!host.is_empty()).then_some((host, port))
-}
-
-/// Why a notification endpoint may not be stored, read off the URI alone: a name for this
-/// machine or an address inside the platform's networks, unless the installation named it.
-/// A name is resolved at delivery, where `refused_at_delivery` checks where it points then.
-fn refused_at_creation(uri: &str, private_hosts: &[String]) -> Option<ProblemDetails> {
-    if !(uri.starts_with("http://") || uri.starts_with("https://")) {
-        // `route` says why, with its own wording.
-        return None;
-    }
-    let Some((host, _)) = host_of(uri) else {
-        return Some(
-            ProblemDetails::bad_request().with_detail("the notification endpoint names no host"),
-        );
-    };
-    if private_hosts.contains(&host) {
-        return None;
-    }
-    let internal = host == "localhost"
-        || host.ends_with(".localhost")
-        || host.parse::<IpAddr>().is_ok_and(is_internal);
-    internal.then(|| {
-        ProblemDetails::bad_request()
-            .with_detail("a notification endpoint may not point inside the platform's own networks")
-    })
-}
-
 /// Whether the host a delivery goes to resolves inside the platform's networks now: a public
 /// name can be pointed inward after the subscription was stored (T-1302). A name that does not
 /// resolve is left to the delivery, which fails on it anyway.
 // ponytail: checks the resolution, then the client resolves again; a name that flips between
 // the two lookups gets through. Pin the checked address into the connector if that matters.
 async fn refused_at_delivery(target: &str, private_hosts: &[String]) -> bool {
-    let Some((host, port)) = host_of(target) else {
+    let Some((host, port)) = reqwest::Url::parse(target)
+        .ok()
+        .as_ref()
+        .and_then(crate::notification_target::host_of)
+    else {
         return true;
     };
     if private_hosts.contains(&host) {
@@ -453,7 +373,9 @@ async fn refused_at_delivery(target: &str, private_hosts: &[String]) -> bool {
         false => format!("{host}:{port}"),
     };
     match tokio::net::lookup_host(address).await {
-        Ok(mut addresses) => addresses.any(|address| is_internal(address.ip())),
+        Ok(mut addresses) => {
+            addresses.any(|address| crate::notification_target::is_internal(address.ip()))
+        }
         Err(_) => false,
     }
 }
@@ -521,7 +443,7 @@ fn delivery_of(stored: &Value) -> Option<(String, Vec<String>, Option<String>)> 
 }
 
 /// The target, the areas and the sealed subscriber of a routed notification endpoint.
-fn routed_parts(uri: &str) -> Option<(String, Vec<String>, Option<String>)> {
+pub(crate) fn routed_parts(uri: &str) -> Option<(String, Vec<String>, Option<String>)> {
     let (path, query) = uri.split_once('?')?;
     if !path.ends_with(EGRESS_PATH) {
         return None;
