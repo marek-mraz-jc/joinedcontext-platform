@@ -134,21 +134,6 @@ impl Broker {
         }
     }
 
-    /// The same client aimed at another origin (the egress dispatcher's target, R46).
-    ///
-    /// The connection pool and the trust anchors are shared: a delivery reuses the
-    /// connection to a subscriber it already spoke to, and cannot trust more than the
-    /// gateway was configured to.
-    pub fn aimed_at(&self, origin: impl Into<String>) -> Self {
-        // A subscriber's webhook is no broker: nothing a header says re-routes a delivery.
-        Self {
-            client: self.client.clone(),
-            base: origin.into(),
-            template: None,
-            routes: Default::default(),
-        }
-    }
-
     /// Addresses every broker but `main` by `template`, `{broker}` replaced by its name.
     pub fn with_template(mut self, template: Option<String>) -> Self {
         self.template = template;

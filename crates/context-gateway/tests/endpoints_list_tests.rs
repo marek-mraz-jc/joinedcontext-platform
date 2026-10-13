@@ -110,7 +110,6 @@ fn app(broker: &str, realm: &common::Realm, slugs: &[&str]) -> Router {
         "banskabystrica.sk",
     )
     .serve(slugs.iter().map(|slug| endpoint(slug)))
-    .seal_subscribers_with(common::delivery_key())
     .authenticate(
         Arc::new(realm.verifier()),
         accounts(),
@@ -283,7 +282,6 @@ async fn each_listed_endpoint_names_the_broker_its_space_lives_on() {
     });
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), "banskabystrica.sk")
         .serve(SLUGS.iter().map(|slug| endpoint(slug)))
-        .seal_subscribers_with(common::delivery_key())
         .authenticate(
             Arc::new(realm.verifier()),
             accounts(),
