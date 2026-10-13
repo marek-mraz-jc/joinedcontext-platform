@@ -8,7 +8,6 @@ on:
   workflow_dispatch:
     inputs:
       changes: { description: "Changes in the stream", default: "2000" }
-      rate: { description: "Changes a second", default: "200" }
   push:
     branches: ["agent/**"]
     paths:
@@ -32,6 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         sockets: [100, 1000, 5000]
+        # dev's Helsinki transit stream writes about 20 changes a second; 200 is the stress run.
+        rate: [20, 200]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -41,12 +42,12 @@ jobs:
         env:
           RIG_SOCKETS: ${{ matrix.sockets }}
           RIG_CHANGES: ${{ inputs.changes || '2000' }}
-          RIG_RATE: ${{ inputs.rate || '200' }}
-          RIG_REPORT: ${{ runner.temp }}/ws-fanout-${{ matrix.sockets }}.json
+          RIG_RATE: ${{ matrix.rate }}
+          RIG_REPORT: ${{ runner.temp }}/ws-fanout-${{ matrix.sockets }}-${{ matrix.rate }}.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: ws-fanout-${{ matrix.sockets }}
-          path: ${{ runner.temp }}/ws-fanout-${{ matrix.sockets }}.json
+          name: ws-fanout-${{ matrix.sockets }}-${{ matrix.rate }}
+          path: ${{ runner.temp }}/ws-fanout-${{ matrix.sockets }}-${{ matrix.rate }}.json
           if-no-files-found: ignore
           retention-days: 30

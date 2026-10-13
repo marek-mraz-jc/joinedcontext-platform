@@ -5,8 +5,8 @@
 //! client the gateway coalesced for (it fell behind) still gets every entity's last state.
 //!
 //! `RIG_SOCKETS` (default 100), `RIG_CHANGES` (default 1000) and `RIG_RATE` (changes per second,
-//! default 200) size a run; `RIG_REPORT` names a file the numbers are written to as JSON. The
-//! gateway runs in this process, so the CPU and memory reported are the gateway's and the
+//! default 20, the rate of dev's Helsinki transit stream) size a run; `RIG_REPORT` names a file
+//! the numbers are written to as JSON. The gateway runs in this process, so the CPU and memory reported are the gateway's and the
 //! clients' together. Run it on a GitHub runner (`ws-fanout-rig.yml`), never on the shared host.
 
 mod common;
@@ -24,6 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -300,7 +301,7 @@ fn usage() -> (u64, Duration) {
 async fn every_socket_receives_exactly_what_its_filter_admits() {
     let sockets = env("RIG_SOCKETS", 100);
     let changes = env("RIG_CHANGES", 1000);
-    let rate = env("RIG_RATE", 200).max(1);
+    let rate = env("RIG_RATE", 20).max(1);
     // SAFETY of the measurement: the cap is read once, before the first connection.
     std::env::set_var("JC_GATEWAY_WS_PER_SPACE", (sockets + 1).to_string());
 
@@ -322,6 +323,8 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     let expected = ground_truth(&filters, &stream);
 
     let (before_rss, before_cpu) = usage();
+    let received = Arc::new(AtomicUsize::new(0));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
     let sent_at: Arc<std::sync::Mutex<Vec<Option<Instant>>>> =
         Arc::new(std::sync::Mutex::new(vec![None; changes]));
     let mut clients = Vec::new();
@@ -347,22 +350,25 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
             .expect("sent");
         let ready = ready_tx.clone();
         let sent_at = Arc::clone(&sent_at);
+        let received = Arc::clone(&received);
+        let mut stop = stop_rx.clone();
         clients.push(tokio::spawn(async move {
             let mut got: Vec<usize> = Vec::new();
             let mut latencies: Vec<Duration> = Vec::new();
             let mut gaps = 0;
-            // A client is done once no text arrived for 20 s; the server's pings do not count.
-            let mut last = Instant::now();
-            while let Ok(Some(Ok(message))) = tokio::time::timeout(
-                Duration::from_secs(20).saturating_sub(last.elapsed()),
-                socket.next(),
-            )
-            .await
-            {
+            // A client reads until the rig says every socket has drained (see below).
+            loop {
+                let message = tokio::select! {
+                    read = socket.next() => match read {
+                        Some(Ok(message)) => message,
+                        _ => break,
+                    },
+                    _ = stop.changed() => break,
+                };
                 let Message::Text(text) = message else {
                     continue;
                 };
-                last = Instant::now();
+                received.fetch_add(1, Ordering::Relaxed);
                 let message: Value = serde_json::from_str(text.as_str()).expect("JSON");
                 match message["metadata"]["x-op"].as_str() {
                     Some("x-result") => {
@@ -422,6 +428,18 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         .await;
     }
     let streamed = started.elapsed();
+    // Drained: no client received anything for 10 s. A backlog the gateway is still working
+    // off keeps the count growing however long it takes, so a slow run is measured, not cut.
+    let mut seen = received.load(Ordering::Relaxed);
+    let mut still = 0;
+    while still < 10 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let now = received.load(Ordering::Relaxed);
+        still = if now == seen { still + 1 } else { 0 };
+        seen = now;
+    }
+    let drained = started.elapsed() - Duration::from_secs(10);
+    let _ = stop_tx.send(());
     // One broker subscription for every client of the Endpoint (EP-114).
     assert_eq!(push.receiver_count(), 1, "one upstream per Endpoint");
 
@@ -459,6 +477,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         "rss_kib_after": after_rss,
         "cpu_s": (after_cpu.saturating_sub(before_cpu)).as_secs_f64(),
         "stream_s": streamed.as_secs_f64(),
+        "drained_s": drained.as_secs_f64(),
     });
     println!("ws-fanout rig: {report}");
     if let Ok(path) = std::env::var("RIG_REPORT") {
