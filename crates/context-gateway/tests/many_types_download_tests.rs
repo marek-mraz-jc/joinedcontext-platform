@@ -4,7 +4,8 @@
 //! broker's view refuses a query whose types compose past its rule bound: on dev the 21 types
 //! of the Helsinki space were a `403` for file.csv, .geojson, .xlsx and .zip of
 //! helsinki-transport and helsinki-all, while every NGSI-LD read answered. The stub here is that
-//! view: 21 types, and a refusal of any query naming 16 or more of them.
+//! view: 21 types, and a refusal of any query naming 16 or more of them. The view, not the
+//! gateway, decides which types a caller reads (T-3652): a type it refuses is left out.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -58,7 +59,8 @@ fn param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value)
 }
 
-async fn view_broker() -> (String, Asked) {
+/// The view: `shown` lists the types it answers this caller, every one when `None`.
+async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked) {
     let asked: Asked = Arc::default();
     let recorder = Arc::clone(&asked);
     let app = Router::new().fallback(move |request: Request| {
@@ -86,7 +88,9 @@ async fn view_broker() -> (String, Asked) {
                 .expect("no poisoned lock")
                 .push(types.clone());
             let distinct: BTreeSet<&String> = types.iter().collect();
-            if distinct.len() >= BOUND {
+            let hidden =
+                shown.is_some_and(|shown| types.iter().any(|name| !shown.contains(&name.as_str())));
+            if distinct.len() >= BOUND || hidden {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(json!({
@@ -199,7 +203,7 @@ async fn get(app: Router, path: &str) -> (StatusCode, Vec<u8>) {
 #[tokio::test]
 async fn a_download_of_a_space_of_many_types_holds_every_type() {
     for file in ["file.geojson", "file.csv", "file.xlsx", "file.zip"] {
-        let (broker, asked) = view_broker().await;
+        let (broker, asked) = view_broker(None).await;
         let (status, body) = get(
             gateway(&broker, endpoint(&[])),
             &format!("/api/endpoint/{SLUG}/{file}"),
@@ -237,30 +241,75 @@ async fn a_download_of_a_space_of_many_types_holds_every_type() {
     }
 }
 
-/// An Endpoint whose Policy grants 2 of the 21 types asks the view for those 2 and no other.
+/// A view that shows 2 of the 21 types is asked for each, and the download holds the 2 it shows:
+/// a type it refuses is left out, not a refusal of the whole file (T-3652).
 #[tokio::test]
-async fn a_policy_granting_two_types_asks_the_view_for_those_two() {
-    let (broker, asked) = view_broker().await;
+async fn a_type_the_view_refuses_is_left_out_of_the_download() {
+    let (broker, asked) = view_broker(Some(&["Type03", "Type17"])).await;
     let (status, body) = get(
-        gateway(&broker, endpoint(&["Type03", "Type17"])),
+        gateway(&broker, endpoint(&[])),
         &format!("/api/endpoint/{SLUG}/file.geojson"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let asked = asked.lock().expect("no poisoned lock").clone();
-    assert_eq!(
-        asked,
-        vec![vec!["Type03".to_owned()], vec!["Type17".to_owned()]]
-    );
+    assert_eq!(asked.len(), TYPES, "{asked:?}");
     let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
     assert_eq!(collection["features"].as_array().map(Vec::len), Some(6));
+}
+
+/// A view that refuses the caller every type refuses the download and the page, as it refuses
+/// the caller's own query.
+#[tokio::test]
+async fn a_view_refusing_every_type_refuses_the_read() {
+    for path in ["file.csv", "sta/v1.1/Things?$top=5"] {
+        let (broker, _) = view_broker(Some(&[])).await;
+        let (status, body) = get(
+            gateway(&broker, endpoint(&[])),
+            &format!("/api/endpoint/{SLUG}/{path}"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{path}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+/// An Endpoint whose slug no view id can hold has no view, and nothing decides for it: its
+/// downloads and pages answer `503 no-view` and the broker is not asked (T-3652).
+#[tokio::test]
+async fn an_endpoint_without_a_view_answers_no_view() {
+    let long = "a".repeat(64);
+    for path in ["file.csv", "sta/v1.1/Things"] {
+        let (broker, asked) = view_broker(None).await;
+        let mut endpoint = endpoint(&[]);
+        endpoint.slug = long.clone();
+        endpoint.base_path = format!("/api/endpoint/{long}");
+        let (status, body) = get(
+            gateway(&broker, endpoint),
+            &format!("/api/endpoint/{long}/{path}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        let problem: Value = serde_json::from_slice(&body).expect("a problem");
+        assert!(
+            problem["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("no-view")),
+            "{path}: {problem}"
+        );
+        assert!(asked.lock().expect("no poisoned lock").is_empty(), "{path}");
+    }
 }
 
 /// A Policy that names no type the space holds narrows nothing: the view is still asked, type by
 /// type, and decides.
 #[tokio::test]
 async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
-    let (broker, asked) = view_broker().await;
+    let (broker, asked) = view_broker(None).await;
     let (status, _) = get(
         gateway(&broker, endpoint(&["Elsewhere"])),
         &format!("/api/endpoint/{SLUG}/file.csv"),
@@ -275,7 +324,7 @@ async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
 /// types read in turn: rows 59 to 63 of 63 span two types and stop at the last one.
 #[tokio::test]
 async fn a_page_of_a_space_of_many_types_spans_the_types_in_order() {
-    let (broker, asked) = view_broker().await;
+    let (broker, asked) = view_broker(None).await;
     let (status, body) = get(
         gateway(&broker, endpoint(&[])),
         &format!("/api/endpoint/{SLUG}/sta/v1.1/Things?$top=5&$skip=59"),

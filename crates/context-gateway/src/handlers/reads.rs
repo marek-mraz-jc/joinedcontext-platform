@@ -1,13 +1,13 @@
 //! The reads every export surface shares: the types a dataset holds, one query through the
-//! PDP, a temporal query, and the capped page walk the downloads are made of.
+//! broker's view, a temporal query, and the capped page walk the downloads are made of.
 
 use crate::app::Gateway;
 use crate::app::MAX_BODY;
 use crate::app::MAX_COLLECTED;
 use crate::app::PAGE;
 use crate::app::{has_view, names_no_tenant, ANTARES_RESTRICTED};
-use crate::pdp::evaluator::{Subject, Verdict};
-use crate::pdp::{geo, projection, temporal};
+use crate::handlers::view_access::no_view;
+use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
@@ -17,14 +17,13 @@ use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::stream::{self, StreamExt};
-use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
 use serde_json::Value;
 
 /// Every entity type the pinned tenant holds, as the broker's own `EntityTypeList` reports it.
 ///
-/// Used only as the selector of last resort for a file download. It can only narrow: the PDP,
-/// or the broker's view since T-3651, decides what this caller may see of it. An empty list
+/// Used only as the selector of last resort for a file download. It can only narrow: the
+/// broker's view decides what this caller may see of it (T-3651). An empty list
 /// means an empty space, a space with no tenant at the broker included, which is an empty file
 /// rather than an error.
 ///
@@ -74,90 +73,10 @@ async fn dataset_types(
         .unwrap_or_default())
 }
 
-/// Queries the entities behind an endpoint through the PDP, projected (GW11, R9).
-///
-/// This is the read half of the `file.*` downloads, shared by every representation that is a
-/// different rendering of the same dataset. The NGSI-LD surface does not come through here:
-/// it forwards the caller's own query, and an unselected one stays the `400` the
-/// specification asks for.
-pub(crate) async fn query_entities(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    params: &[(String, String)],
-    request: &mut Request,
-) -> Result<(Value, bool), Box<Response<Body>>> {
-    let slug = endpoint.slug.as_str();
-    let verdict = gateway.pdp.decide(
-        subject,
-        Operation::QueryEntity,
-        &query::requested(params),
-        endpoint,
-    );
-    let Verdict::Rewrite(constraints) = verdict else {
-        return Err(Box::new(ProblemDetails::forbidden().into_response()));
-    };
-    if constraints.empty {
-        return Ok((Value::Array(Vec::new()), true));
-    }
-    tenancy::pin_caller(request, &endpoint.space, subject)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-
-    // Nothing the caller sent and nothing the grants added selects anything, and a query that
-    // selects nothing is a `400` upstream (CIM 009 5.7.2). A download is not a query though:
-    // asking for `file.geojson` is asking for the dataset, so the selector is every type the
-    // space holds (EP-09, EP-07). It can only narrow, never widen: the PDP has already spoken.
-    let fallback = if query::selects(&constraints) {
-        Vec::new()
-    } else {
-        let types = dataset_types(gateway, slug, request.headers()).await?;
-        // A space holding nothing is an empty file, not a `400` and not a second broker call.
-        if types.is_empty() {
-            return Ok((Value::Array(Vec::new()), constraints.restricted));
-        }
-        types
-    };
-
-    let target = format!(
-        "/ngsi-ld/v1/entities?{}",
-        query::upstream(params, &constraints, &fallback)
-    );
-    // The entity array is read here and rendered by the caller's handler: asked with the
-    // caller's `application/geo+json`, the broker answers a FeatureCollection, which reads as
-    // no entity (T-4106).
-    let mut headers = request.headers().clone();
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    let answer = gateway
-        .broker
-        .send(axum::http::Method::GET, &target, headers, Body::empty())
-        .await
-        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
-
-    let (parts, body) = answer.into_parts();
-    if !parts.status.is_success() {
-        return Err(broker_failed(slug, parts.status, body).await);
-    }
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    let mut entities: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-
-    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
-    if let Value::Array(list) = &mut entities {
-        list.retain(|entity| {
-            projection::permitted(entity, &constraints)
-                && areas.as_ref().is_none_or(|areas| areas.admits(entity))
-        });
-    }
-    projection::project_by_type(&mut entities, &constraints);
-    Ok((entities, constraints.restricted))
-}
-
-/// One page of the entities behind an endpoint through the broker's view when it serves the
-/// endpoint (plan 5.7, T-3651), else [`query_entities`]. Through the view, the engine decides
-/// and narrows; the gateway adds no grant and projects nothing, so the representation holds
-/// what the view answers the caller and no more.
+/// One page of the entities behind an endpoint through the broker's view (plan 5.7, T-3651).
+/// The engine decides and narrows; the gateway adds no grant and projects nothing, so the
+/// representation holds what the view answers the caller and no more. An endpoint without a
+/// view answers `503 no-view` (T-3652).
 pub(crate) async fn read_entities(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -167,17 +86,10 @@ pub(crate) async fn read_entities(
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
     if !has_view(slug) {
-        return query_entities(gateway, endpoint, subject, params, request).await;
+        return Err(Box::new(no_view(endpoint)));
     }
     view_hop(endpoint, subject, request)?;
-    let Some(fallback) = view_fallback(
-        gateway,
-        (endpoint, subject, slug),
-        params,
-        request.headers(),
-    )
-    .await?
-    else {
+    let Some(fallback) = view_fallback(gateway, slug, params, request.headers()).await? else {
         return Ok((Value::Array(Vec::new()), false));
     };
     if fallback.len() < 2 {
@@ -203,13 +115,22 @@ pub(crate) async fn read_entities(
     let mut collected: Vec<Value> = Vec::new();
     let mut restricted = false;
     let mut held = 0u64;
+    let mut refused = 0;
     'types: for selector in &fallback {
         let narrowed = query::view_read(&windowless, std::slice::from_ref(selector));
         let mut from = 0usize;
         loop {
             let target = format!("entities?{narrowed}&limit={PAGE}&offset={from}");
             let (page, narrowed_page, bytes, _) =
-                view_page(gateway, slug, slug, &target, request.headers()).await?;
+                match view_page(gateway, slug, slug, &target, request.headers()).await {
+                    Ok(page) => page,
+                    // A type the view refuses this caller is a type it does not show.
+                    Err(answer) if answer.status() == StatusCode::FORBIDDEN => {
+                        refused += 1;
+                        continue 'types;
+                    }
+                    Err(failed) => return Err(failed),
+                };
             restricted |= narrowed_page;
             let fetched = page.len();
             // A deep offset reads the rows before it: the download's memory ceiling holds (T-0810).
@@ -227,6 +148,9 @@ pub(crate) async fn read_entities(
             from += PAGE;
         }
     }
+    if refused == fallback.len() {
+        return Err(Box::new(ProblemDetails::forbidden().into_response()));
+    }
     let page: Vec<Value> = collected.into_iter().skip(offset).take(limit).collect();
     Ok((Value::Array(page), restricted))
 }
@@ -234,20 +158,9 @@ pub(crate) async fn read_entities(
 /// The page size CIM 009 6.3.10 gives a query that names none.
 const DEFAULT_LIMIT: usize = 20;
 
-/// The history of one entity, decided and projected exactly as its current state is (T-0438).
-///
-/// The temporal tree is a second upstream path, so it goes through the same four steps the
-/// entity path goes through and in the same order: the PDP decides, the tenant is pinned, the
-/// grants' own window and attribute set are what is forwarded, and what comes back is filtered
-/// by the id patterns and the geo grants and then projected. Skipping any of them would make
-/// the history a way around the projection the instant answer applies (EP-07, R9).
-///
-/// Two differences from [`query_entities`], both of them the temporal representation's own.
-/// The answer is one entity whose attributes are arrays of instances rather than a list of
-/// entities, so a caller who may not read it gets `404` rather than an empty page. And the
-/// grants' windows are applied to the instances after the projection, because the window the
-/// broker was given is the hull of several grants and what falls in the gaps between them was
-/// never granted (GW26).
+/// The history of one entity through the broker's view, decided and narrowed by its engine as
+/// the current state is (T-0438, plan 5.7). An entity outside the view and one with no history
+/// both answer `Null`; an endpoint without a view answers `503 no-view` (T-3652).
 pub(crate) async fn query_temporal(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -257,68 +170,14 @@ pub(crate) async fn query_temporal(
     request: &mut Request,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    if has_view(slug) {
-        view_hop(endpoint, subject, request)?;
-        let target = format!(
-            "/x/views/{slug}/ngsi-ld/v1/temporal/entities/{}?{}",
-            query::encode(urn),
-            query::view_read_by_id(params)
-        );
-        let answer = gateway
-            .broker
-            .send(
-                axum::http::Method::GET,
-                &target,
-                request.headers().clone(),
-                Body::empty(),
-            )
-            .await
-            .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
-        // The engine refusing the operation itself is the refusal the gateway's own decision
-        // gave (EP-07): this representation is no softer than the NGSI-LD surface.
-        if answer.status() == StatusCode::FORBIDDEN {
-            return Err(Box::new(ProblemDetails::forbidden().into_response()));
-        }
-        let restricted = restricted_by(answer.headers());
-        let (parts, body) = answer.into_parts();
-        // No history and an entity outside the view both mean "no observations here", and the
-        // caller learns nothing from the difference (R20).
-        if !parts.status.is_success() {
-            return Ok((Value::Null, restricted));
-        }
-        let bytes = axum::body::to_bytes(body, MAX_BODY)
-            .await
-            .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-        let mut entity: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-        if let Some(first) = entity.as_array().and_then(|list| list.first()).cloned() {
-            entity = first;
-        }
-        return Ok((entity, restricted));
+    if !has_view(slug) {
+        return Err(Box::new(no_view(endpoint)));
     }
-    let verdict = gateway.pdp.decide(
-        subject,
-        Operation::RetrieveTemporal,
-        &query::requested(params),
-        endpoint,
-    );
-    let Verdict::Rewrite(constraints) = verdict else {
-        return Err(Box::new(ProblemDetails::forbidden().into_response()));
-    };
-    // A window no grant reaches is genuinely no history, and it is answered here rather than
-    // asked of the broker without one (GW26).
-    if constraints.empty {
-        return Ok((Value::Null, true));
-    }
-    tenancy::pin_caller(request, &endpoint.space, subject)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-
-    // By id, so without the grants' `type` (CIM 009 6.19.3.1): `projection::permitted` below
-    // judges the type of what comes back (T-2987).
+    view_hop(endpoint, subject, request)?;
     let target = format!(
-        "/ngsi-ld/v1/temporal/entities/{}?{}",
+        "/x/views/{slug}/ngsi-ld/v1/temporal/entities/{}?{}",
         query::encode(urn),
-        query::upstream_by_id(params, &constraints, urn)
+        query::view_read_by_id(params)
     );
     let answer = gateway
         .broker
@@ -330,32 +189,27 @@ pub(crate) async fn query_temporal(
         )
         .await
         .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
-
+    // The engine refusing the operation itself is a refusal here too (EP-07): this
+    // representation is no softer than the NGSI-LD surface.
+    if answer.status() == StatusCode::FORBIDDEN {
+        return Err(Box::new(ProblemDetails::forbidden().into_response()));
+    }
+    let restricted = restricted_by(answer.headers());
     let (parts, body) = answer.into_parts();
-    // An entity with no history and one the broker refuses both mean "no observations here",
-    // and the caller learns nothing from the difference (R20).
+    // No history and an entity outside the view both mean "no observations here", and the
+    // caller learns nothing from the difference (R20).
     if !parts.status.is_success() {
-        return Ok((Value::Null, constraints.restricted));
+        return Ok((Value::Null, restricted));
     }
     let bytes = axum::body::to_bytes(body, MAX_BODY)
         .await
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
     let mut entity: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    // The temporal query form answers a list even when it holds one entity.
     if let Some(first) = entity.as_array().and_then(|list| list.first()).cloned() {
         entity = first;
     }
-
-    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
-    if !projection::permitted(&entity, &constraints)
-        || !areas.as_ref().is_none_or(|areas| areas.admits(&entity))
-    {
-        return Ok((Value::Null, constraints.restricted));
-    }
-    projection::project_by_type(&mut entity, &constraints);
-    temporal::keep_windows(&mut entity, &constraints.temporal_windows);
-    Ok((entity, constraints.restricted))
+    Ok((entity, restricted))
 }
 
 /// The gateway's own answer to a broker that failed a read behind one of its representations
@@ -416,8 +270,8 @@ const PARALLEL_PAGES: usize = 4;
 /// one, and a caller who cannot tell will act on half the data.
 ///
 /// `view` is the broker's view the surface reads through: the endpoint's slug, or `cs-{space}`
-/// for the space's dump (plan 5.1). What [`has_view`] keeps off the view goes through the
-/// gateway's own decision and projection, as before.
+/// for the space's dump (plan 5.1). A view id the broker cannot hold answers `503 no-view`
+/// (T-3652).
 pub(crate) async fn paged_entities(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -426,103 +280,10 @@ pub(crate) async fn paged_entities(
     request: &mut Request,
     limits: &tabular::Limits,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
-    let slug = endpoint.slug.as_str();
-    if has_view(view) {
-        return paged_view(gateway, endpoint, subject, (params, view), request, limits).await;
+    if !has_view(view) {
+        return Err(Box::new(no_view(endpoint)));
     }
-    let verdict = gateway.pdp.decide(
-        subject,
-        Operation::QueryEntity,
-        &query::requested(params),
-        endpoint,
-    );
-    let Verdict::Rewrite(constraints) = verdict else {
-        return Err(Box::new(ProblemDetails::forbidden().into_response()));
-    };
-    if constraints.empty {
-        return Ok((Value::Array(Vec::new()), true));
-    }
-    tenancy::pin_caller(request, &endpoint.space, subject)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-
-    // The caller's own window is a ceiling on the download, not the page size: paging is
-    // the gateway's business and the caller asked for a file, not for a page of one.
-    let wanted = query::first(params, "limit")
-        .and_then(|limit| limit.parse::<u64>().ok())
-        .unwrap_or(u64::from(limits.max_rows))
-        .min(u64::from(limits.max_rows));
-    let windowless: Vec<(String, String)> = params
-        .iter()
-        .filter(|(name, _)| name != "limit" && name != "offset")
-        .cloned()
-        .collect();
-    // The same selector of last resort as `query_entities`: a download names a dataset.
-    let fallback = if query::selects(&constraints) {
-        Vec::new()
-    } else {
-        let types = dataset_types(gateway, slug, request.headers()).await?;
-        if types.is_empty() {
-            return Ok((Value::Array(Vec::new()), constraints.restricted));
-        }
-        types
-    };
-    let narrowed = query::upstream(&windowless, &constraints, &fallback);
-    let areas = geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
-
-    let mut collected: Vec<Value> = Vec::new();
-    let mut held = 0u64;
-    let mut offset = 0usize;
-    loop {
-        let target = format!("/ngsi-ld/v1/entities?{narrowed}&limit={PAGE}&offset={offset}");
-        let answer = gateway
-            .broker
-            .send(
-                axum::http::Method::GET,
-                &target,
-                request.headers().clone(),
-                Body::empty(),
-            )
-            .await
-            .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
-
-        let (parts, body) = answer.into_parts();
-        if !parts.status.is_success() {
-            return Err(broker_failed(slug, parts.status, body).await);
-        }
-        let bytes = axum::body::to_bytes(body, MAX_BODY)
-            .await
-            .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-        let page: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-        let page = match page {
-            Value::Array(entities) => entities,
-            entity if entity.is_object() => vec![entity],
-            _ => Vec::new(),
-        };
-
-        let fetched = page.len();
-        // What the broker sent, whether or not the entity survives the grants: it was read,
-        // parsed and held either way, and this is a ceiling on the gateway's memory rather
-        // than a statement about the file (T-0810). A download past it is refused, because a
-        // 413 is a better answer than the 500 an out-of-memory gateway gives everyone.
-        held += bytes.len() as u64;
-        collected.extend(page.into_iter().filter(|entity| {
-            projection::permitted(entity, &constraints)
-                && areas.as_ref().is_none_or(|areas| areas.admits(entity))
-        }));
-        if collected.len() as u64 > wanted || held > MAX_COLLECTED {
-            return Err(Box::new(too_large()));
-        }
-        // A short page is the last page; a full one may not be.
-        if fetched < PAGE {
-            break;
-        }
-        offset += PAGE;
-    }
-
-    let mut entities = Value::Array(collected);
-    projection::project_by_type(&mut entities, &constraints);
-    Ok((entities, constraints.restricted))
+    paged_view(gateway, endpoint, subject, (params, view), request, limits).await
 }
 
 /// [`paged_entities`] through the broker's view (plan 5.7, T-3651): the caller's own query, paged
@@ -548,14 +309,7 @@ async fn paged_view(
         .filter(|(name, _)| name != "limit" && name != "offset")
         .cloned()
         .collect();
-    let Some(fallback) = view_fallback(
-        gateway,
-        (endpoint, subject, view),
-        &windowless,
-        request.headers(),
-    )
-    .await?
-    else {
+    let Some(fallback) = view_fallback(gateway, view, &windowless, request.headers()).await? else {
         return Ok((Value::Array(Vec::new()), false));
     };
     // The caller's own selector as one query; the selector of last resort one type at a time
@@ -593,8 +347,19 @@ async fn paged_view(
     let mut restricted = false;
     let mut held = 0u64;
     let mut rows = 0u64;
+    let mut refused = 0;
     for (index, (narrowed, first)) in selectors.iter().zip(firsts).enumerate() {
-        let (page, narrowed_page, bytes, total) = first?;
+        let (page, narrowed_page, bytes, total) = match first {
+            Ok(first) => first,
+            // A type of the selector of last resort the view refuses this caller is a type the
+            // download does not hold; the caller's own selector refused is the refusal.
+            Err(answer) if !fallback.is_empty() && answer.status() == StatusCode::FORBIDDEN => {
+                refused += 1;
+                chunks.push(Vec::new());
+                continue;
+            }
+            Err(failed) => return Err(failed),
+        };
         restricted |= narrowed_page;
         // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
         held += bytes as u64;
@@ -642,6 +407,9 @@ async fn paged_view(
         chunks.push(chunk);
     }
 
+    if refused > 0 && refused == selectors.len() {
+        return Err(Box::new(ProblemDetails::forbidden().into_response()));
+    }
     let (owners, targets): (Vec<usize>, Vec<String>) = further.into_iter().unzip();
     let mut pages = stream::iter(targets).map(read).buffered(PARALLEL_PAGES);
     let mut owners = owners.into_iter();
@@ -664,7 +432,8 @@ async fn paged_view(
 /// type the space holds that the Endpoint's view answers at least one entity of to this caller.
 /// A read grant is enough to be shown it, as it is for the schema (EP-47), and each type is the
 /// view's decision, so no type name outside what the caller may read is listed. `None` when the
-/// caller holds no read through the Endpoint: the view then answers the operation itself.
+/// view refuses the caller every type the space holds: the view then answers the operation
+/// itself.
 pub(crate) async fn listed_types(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -672,32 +441,27 @@ pub(crate) async fn listed_types(
     request: &mut Request,
 ) -> Result<Option<Value>, Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    let reads = gateway.pdp.decide(
-        subject,
-        Operation::QueryEntity,
-        &query::requested(&[]),
-        endpoint,
-    );
-    if !matches!(reads, Verdict::Rewrite(_)) {
-        return Ok(None);
-    }
     view_hop(endpoint, subject, request)?;
-    let held = view_fallback(gateway, (endpoint, subject, slug), &[], request.headers())
+    let held = view_fallback(gateway, slug, &[], request.headers())
         .await?
         .unwrap_or_default();
     let mut shown = Vec::new();
-    for name in held {
+    let mut refused = 0;
+    for name in &held {
         let target = format!(
             "entities?{}&limit=1",
-            query::view_read(&[], std::slice::from_ref(&name))
+            query::view_read(&[], std::slice::from_ref(name))
         );
         match view_page(gateway, slug, slug, &target, request.headers()).await {
-            Ok((page, _, _, _)) if !page.is_empty() => shown.push(name),
+            Ok((page, _, _, _)) if !page.is_empty() => shown.push(name.clone()),
             Ok(_) => {}
             // A type the view refuses this caller is a type they are not shown.
-            Err(refused) if refused.status() == StatusCode::FORBIDDEN => {}
+            Err(answer) if answer.status() == StatusCode::FORBIDDEN => refused += 1,
             Err(failed) => return Err(failed),
         }
+    }
+    if !held.is_empty() && refused == held.len() {
+        return Ok(None);
     }
     Ok(Some(serde_json::json!({
         "id": format!("urn:ngsi-ld:EntityTypeList:{slug}"),
@@ -721,39 +485,19 @@ fn view_hop(
 /// every type the space holds when not, and `None` for a space holding nothing, which is an
 /// empty answer rather than a `400` (EP-09).
 ///
-/// Through the Endpoint's own view, the list keeps the types its Policy grants the caller: the
-/// view refuses a query whose types compose past its rule bound, and the 21 types of the
-/// Helsinki space did, as a `403` (T-4078). That only narrows what the view is asked; the view
-/// still decides each type. A grant naming none of the listed types keeps the whole list.
+/// The view refuses a query whose types compose past its rule bound, and the 21 types of the
+/// Helsinki space did, as a `403` (T-4078), so the callers read these types one at a time and
+/// skip a type the view refuses the caller; the view decides each type (T-3652).
 async fn view_fallback(
     gateway: &Gateway,
-    (endpoint, subject, view): (&Endpoint, &Subject, &str),
+    slug: &str,
     params: &[(String, String)],
     headers: &HeaderMap,
 ) -> Result<Option<Vec<String>>, Box<Response<Body>>> {
     if !query::unselected(params) {
         return Ok(Some(Vec::new()));
     }
-    let mut types = dataset_types(gateway, &endpoint.slug, headers).await?;
-    if view == endpoint.slug {
-        if let Verdict::Rewrite(constraints) = gateway.pdp.decide(
-            subject,
-            Operation::QueryEntity,
-            &query::requested(params),
-            endpoint,
-        ) {
-            let granted: Vec<String> = types
-                .iter()
-                .filter(|name| {
-                    constraints.types.contains(*name) || constraints.type_iris.contains(*name)
-                })
-                .cloned()
-                .collect();
-            if !granted.is_empty() {
-                types = granted;
-            }
-        }
-    }
+    let types = dataset_types(gateway, slug, headers).await?;
     Ok((!types.is_empty()).then_some(types))
 }
 
@@ -768,7 +512,7 @@ async fn view_page(
     headers: &HeaderMap,
 ) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
     // An entity array is read here, whatever the caller accepts: asked with its geo+json, the
-    // view answers a FeatureCollection that reads as no entity (T-4111, as T-4106 for the PDP path).
+    // view answers a FeatureCollection that reads as no entity (T-4111, T-4106).
     let mut headers = headers.clone();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     let answer = gateway

@@ -3,7 +3,8 @@
 //! On dev every public Endpoint answered it 404 or 403: the grants name `retrieveOps`, which does
 //! not hold the type list, so a client had to read CKAN or the schema files to learn what to ask
 //! for. A read grant now shows the types the Endpoint's reads show: the stub here is the view,
-//! answering entities of the types it lets the caller read and nothing of the others.
+//! answering entities of the types it lets the caller read and nothing of the others. The view
+//! decides each type; the gateway asks it about every type the space holds (T-3652).
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -27,8 +28,9 @@ const HELD: [&str; 5] = ["Alert", "GtfsStop", "Secret", "TransitRoute", "Vehicle
 type Asked = Arc<Mutex<Vec<String>>>;
 
 /// The space holds the five types; the view answers an entity of each type in `readable` and
-/// nothing of the others, as the engine narrows a caller's read.
-async fn view_broker(readable: &'static [&'static str]) -> (String, Asked) {
+/// nothing of the others, as the engine narrows a caller's read. `None` is an engine refusing
+/// the caller the read itself: every view read is a `403`.
+async fn view_broker(readable: Option<&'static [&'static str]>) -> (String, Asked) {
     let asked: Asked = Arc::default();
     let recorder = Arc::clone(&asked);
     let app = Router::new().fallback(move |request: Request| {
@@ -44,7 +46,7 @@ async fn view_broker(readable: &'static [&'static str]) -> (String, Asked) {
                 return axum::Json(json!({ "type": "EntityTypeList", "typeList": HELD }))
                     .into_response();
             }
-            if path == format!("/x/views/{SLUG}/ngsi-ld/v1/types") {
+            if path == format!("/x/views/{SLUG}/ngsi-ld/v1/types") || readable.is_none() {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(json!({ "title": "AccessDenied", "status": 403 })),
@@ -58,6 +60,7 @@ async fn view_broker(readable: &'static [&'static str]) -> (String, Asked) {
                 .map(|(_, value)| value.to_owned())
                 .unwrap_or_default();
             let rows: Vec<Value> = readable
+                .unwrap_or_default()
                 .iter()
                 .filter(|name| **name == asked_type)
                 .map(|name| json!({ "id": format!("urn:ngsi-ld:{name}:1"), "type": name }))
@@ -150,17 +153,18 @@ fn listed(answer: &Value) -> Vec<&str> {
 /// A public Endpoint whose Policy grants 2 of the 5 types lists those 2, to anyone.
 #[tokio::test]
 async fn a_read_grant_of_two_types_lists_those_two_to_anyone() {
-    let (broker, asked) = view_broker(&["GtfsStop", "Vehicle"]).await;
+    let (broker, asked) = view_broker(Some(&["GtfsStop", "Vehicle"])).await;
     let (status, answer) =
         types(&broker, endpoint("[retrieveOps]", &["GtfsStop", "Vehicle"])).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["type"], json!("EntityTypeList"));
     assert_eq!(listed(&answer), ["GtfsStop", "Vehicle"]);
-    // Only the granted types were asked of the view, and the view's own type list never.
+    // The view decided each type; its own type list was never asked.
     let asked = asked.lock().expect("no poisoned lock").clone();
     assert!(
-        asked.iter().all(|hop| !hop.contains("Secret")
-            && !hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/types"))),
+        asked
+            .iter()
+            .all(|hop| !hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/types"))),
         "{asked:?}"
     );
 }
@@ -169,21 +173,24 @@ async fn a_read_grant_of_two_types_lists_those_two_to_anyone() {
 /// would tell what the space holds.
 #[tokio::test]
 async fn a_type_the_view_shows_nothing_of_is_not_listed() {
-    let (broker, _) = view_broker(&["Alert"]).await;
+    let (broker, _) = view_broker(Some(&["Alert"])).await;
     let (status, answer) = types(&broker, endpoint("[retrieveOps]", &[])).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(listed(&answer), ["Alert"]);
 }
 
-/// A caller holding no read through the Endpoint is answered by the view, as before.
+/// A caller the view refuses every read is answered by the view's own type list, as before:
+/// no list is made up for them.
 #[tokio::test]
 async fn without_a_read_grant_the_view_answers() {
-    let (broker, asked) = view_broker(&HELD).await;
-    let (status, _) = types(&broker, endpoint("[createEntity]", &[])).await;
-    assert_ne!(status, StatusCode::OK);
+    let (broker, asked) = view_broker(None).await;
+    let (status, answer) = types(&broker, endpoint("[createEntity]", &[])).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
     let asked = asked.lock().expect("no poisoned lock").clone();
     assert!(
-        asked.iter().all(|hop| !hop.contains("entities")),
-        "no read was made on the caller's behalf: {asked:?}"
+        asked
+            .iter()
+            .any(|hop| hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/types"))),
+        "{asked:?}"
     );
 }
