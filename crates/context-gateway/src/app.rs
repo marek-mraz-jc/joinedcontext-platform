@@ -1645,12 +1645,12 @@ pub(crate) fn reserve_create(
     Err(Box::new(refusal))
 }
 
-/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643). What no
-/// view can serve yet keeps the gateway's own pipeline, each until its gap closes: a slug no view
-/// id can hold (the writer refuses it), and a subscription, whose delivery the gateway still seals
-/// and routes back (plan 5.5, T-3653). So does a write with `If-Match`: the broker publishes no
-/// entity tags, and the gateway's read,
-/// compare and conditional write is the only lost-update guard there is (R45, GW16).
+/// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
+/// broker can hold the view ([`has_view`]), and the request is none of the kinds the view does
+/// not serve yet: a subscription, whose delivery the gateway still seals and routes back (plan
+/// 5.5, T-3653). So does a write with `If-Match`: the broker publishes no entity tags, and the
+/// gateway's read, compare and conditional write is the only lost-update guard there is (R45,
+/// GW16).
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
     let subscription = matches!(
         operation,
