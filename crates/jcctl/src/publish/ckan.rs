@@ -205,6 +205,11 @@ pub fn package(
         &served,
         &Usage {
             dataset: name,
+            entity_type: record
+                .get(EXAMPLE_TYPE)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty()),
             url: &url,
             licence: licence.as_deref(),
             public: spec.audience == Audience::Public,
@@ -228,9 +233,16 @@ fn public_base(record: &Value, slug: &str) -> Option<String> {
     plain.then(|| id.to_owned())
 }
 
+/// The member [`record`](crate::commands::publish_ckan::record) adds to the DCAT record: the
+/// entity type the gateway's WebSocket guide subscribes its example to (T-4132), which the
+/// usage texts name instead of a placeholder. It is no DCAT term and is never published.
+pub const EXAMPLE_TYPE: &str = "jc:exampleType";
+
 /// What a usage text says about the dataset it sits in (EP-108, API/02 §10).
 struct Usage<'a> {
     dataset: &'a str,
+    /// A type the Endpoint serves, `None` when the gateway's guide named none.
+    entity_type: Option<&'a str>,
     url: &'a str,
     licence: Option<&'a str>,
     public: bool,
@@ -274,16 +286,32 @@ impl Usage<'_> {
                  curl{auth} -o {name} '{address}'\n\n{access}"
             )
         };
+        // A command a reader copies names a real type, never a placeholder (T-4132).
+        let (first, kind) = match self.entity_type {
+            Some(kind) => (format!("The first ten {kind} entities"), kind),
+            None => ("The entity types it serves".to_owned(), ""),
+        };
+        let query = if kind.is_empty() {
+            "types".to_owned()
+        } else {
+            format!("entities?type={kind}&limit=10")
+        };
         match representation {
             Representation::Mcp => self.mcp(address),
             Representation::NgsiLd => format!(
                 "The NGSI-LD API (ETSI GS CIM 009) of this dataset: query, filter and page its \
-                 entities. The first ten of a type:\n\n    \
-                 curl{auth} -H 'Accept: application/ld+json' '{address}entities?type=<Type>&limit=10'\
+                 entities. {first}:\n\n    \
+                 curl{auth} -H 'Accept: application/ld+json' '{address}{query}'\
                  \n\n{live} {access}"
             ),
             Representation::WebSocket => {
                 let socket = address.replacen("https://", "wss://", 1);
+                // Without a known type the subscription watches every entity's location.
+                let entities = if kind.is_empty() {
+                    "\"watchedAttributes\":[\"location\"]".to_owned()
+                } else {
+                    format!("\"entities\":[{{\"type\":{}}}]", json!(kind))
+                };
                 let browser = if self.public {
                     ""
                 } else {
@@ -300,8 +328,8 @@ impl Usage<'_> {
                     "Live updates: open one WebSocket, subscribe to the entities you want, and \
                      each change arrives as a message, with no server of your own. With \
                      websocat, then type the subscription:\n\n    \
-                     websocat{auth} '{socket}'\n    \
-                     {{\"metadata\":{{\"x-op\":\"x-subscribe\",\"x-id\":\"s1\"}},\"body\":{{\"type\":\"Subscription\",\"entities\":[{{\"type\":\"<Type>\"}}]}}}}\
+                     websocat --protocol ngsi-ld-ws{auth} '{socket}'\n    \
+                     {{\"metadata\":{{\"x-op\":\"x-subscribe\",\"x-id\":\"s1\"}},\"body\":{{\"type\":\"Subscription\",{entities}}}}}\
                      \n\n{live} {access}{browser}{guide}"
                 )
             }
