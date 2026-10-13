@@ -23,7 +23,7 @@ use crate::handlers::schema_routes::{
 use crate::handlers::space_routes::{space_catalog, space_record};
 use crate::handlers::sta::sensorthings;
 use crate::handlers::view_access::{access, access_check, access_simulate};
-use crate::handlers::{endpoint_surface, schema, space_surface};
+use crate::handlers::{endpoint_surface, schema, schema_routes, space_surface};
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::evaluator::{self, Constraints, Subject, Verdict};
 use crate::pdp::{conditional, write_guard};
@@ -1646,22 +1646,13 @@ pub(crate) fn reserve_create(
 }
 
 /// Whether the broker's view serves this Endpoint's `operation` (plan 5.1, T-3643): the
-/// broker can hold the view ([`has_view`]), and the request is none of the kinds the view does
-/// not serve yet: a subscription, whose delivery the gateway still seals and routes back (plan
-/// 5.5, T-3653). So does a write with `If-Match`: the broker publishes no entity tags, and the
-/// gateway's read, compare and conditional write is the only lost-update guard there is (R45,
-/// GW16).
+/// broker can hold the view ([`has_view`]), and the request is no write with `If-Match`: the
+/// broker publishes no entity tags, and the gateway's read, compare and conditional write is the
+/// only lost-update guard there is (R45, GW16). A subscription is the view's: stored under the
+/// verified subscriber and delivered by the broker itself (plan 5.5, T-3653).
 pub(crate) fn served_by_view((view, operation, headers): (&str, Operation, &HeaderMap)) -> bool {
-    let subscription = matches!(
-        operation,
-        Operation::CreateSubscription
-            | Operation::UpdateSubscription
-            | Operation::RetrieveSubscription
-            | Operation::QuerySubscription
-            | Operation::DeleteSubscription
-    );
     let conditional = operation.is_write() && headers.contains_key(IF_MATCH);
-    has_view(view) && !conditional && !subscription
+    has_view(view) && !conditional
 }
 
 /// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
@@ -1998,6 +1989,20 @@ pub(crate) async fn view_request(
     Ok(())
 }
 
+/// Why a subscription's notification endpoint may not be stored, read off its body: the target
+/// [`crate::notification_target::refusal`] judges. A body that is no JSON, or a fragment that
+/// names no endpoint, is the broker's to answer.
+fn subscription_target_refusal(sent: &[u8], private_hosts: &[String]) -> Option<ProblemDetails> {
+    let payload: Value = serde_json::from_slice(sent).ok()?;
+    match payload.get("notification")?.get("endpoint")?.get("uri")? {
+        Value::String(uri) => crate::notification_target::refusal(uri, private_hosts),
+        _ => Some(
+            ProblemDetails::bad_request()
+                .with_detail("the notification endpoint's uri is a string"),
+        ),
+    }
+}
+
 /// The payload of a view request as the gateway keeps it: the media type (CIM 009 6.3.2), the
 /// core context (T-3287), a form's minted id and one entity per create (EP-97), the model's
 /// units (DM-06) and relationships (DM-70, DM-71). Returns the units it filled; a batch the
@@ -2019,6 +2024,21 @@ async fn view_payload(
     {
         tracing::info!(slug = %endpoint.slug, "refused: a context other than the core one");
         return Err(answer(ProblemDetails::bad_request().with_detail(why)));
+    }
+    // A subscription is a standing query, not an entity: the view intersects it with the grant
+    // at match time and `pre_notify` decides each notification under the subscriber (T-3499).
+    // What is the gateway's is where it delivers to (G11, T-3653).
+    if matches!(
+        operation,
+        Operation::CreateSubscription | Operation::UpdateSubscription
+    ) {
+        return match subscription_target_refusal(sent, &gateway.private_hosts) {
+            Some(problem) => {
+                tracing::info!(slug = %endpoint.slug, "subscription refused: its notification endpoint");
+                Err(answer(problem))
+            }
+            None => Ok(Vec::new()),
+        };
     }
     let before = sent.len();
     if let Some(creates) = &endpoint.creates {
@@ -4800,11 +4820,10 @@ fn unauthorized(gateway: &Gateway, slug: &str) -> Response<Body> {
 /// The DCAT-AP record of one endpoint, in the representation the caller asked for
 /// (T-0337, T-0338, EP-27, EP-68, EP-69).
 ///
-/// The record is built on the schema catalogue the endpoint already serves, so the digests
-/// it names are the ones `schema/index.json` names and the artifacts' own `ETag`s, computed
-/// once. Everything is the granted projection: `admit` has already refused a caller the
-/// endpoint does not serve, and `schema::visible` narrows the artifacts to what this one
-/// may read.
+/// The record is built on the schema catalogue the endpoint serves (the broker's, T-3645), so
+/// the digests it names are the ones `schema/index.json` names and the artifacts' own `ETag`s.
+/// Everything is the granted projection: `admit` has already refused a caller the endpoint
+/// does not serve, and the catalogue is read as this caller reads it.
 async fn endpoint_record(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
@@ -4816,8 +4835,8 @@ async fn endpoint_record(
         Err(problem) => return *problem,
     };
 
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    let index = schema::index(&endpoint, &visible, sha256_hex);
+    // The catalogue the caller's `schema/` routes serve, so the digests are their ETags (EP-68).
+    let index = schema_routes::index_for(&gateway, &endpoint, &subject).await;
     let space = gateway.resolver.resolve_space(&endpoint.space);
     let space = space.as_deref();
 
@@ -4847,26 +4866,30 @@ async fn endpoint_record(
 
 /// The records of every public Endpoint as the anonymous caller reads each one, which is all
 /// the feed may carry (EP-84, EP-69): no token is read, so no grant widens what it lists.
-fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
+// ponytail: one broker hop per public Endpoint, in turn; join them if the feed's latency
+// ever shows on an organization with many Endpoints.
+async fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
     let anonymous = Subject::anonymous();
-    let now = crate::pdp::now();
-    gateway
-        .resolver
-        .endpoints()
-        .into_iter()
-        .filter(|endpoint| endpoint.audience == Audience::Public)
-        .map(|endpoint| {
-            let visible = schema::visible(&anonymous, &endpoint, now);
-            let index = schema::index(&endpoint, &visible, sha256_hex);
-            let space = gateway.resolver.resolve_space(&endpoint.space);
-            endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url())
-        })
-        .collect()
+    let mut records = Vec::new();
+    for endpoint in gateway.resolver.endpoints() {
+        if endpoint.audience != Audience::Public {
+            continue;
+        }
+        let index = schema_routes::index_for(gateway, &endpoint, &anonymous).await;
+        let space = gateway.resolver.resolve_space(&endpoint.space);
+        records.push(endpoint_surface::dataset(
+            &endpoint,
+            space.as_deref(),
+            &index,
+            gateway.base_url(),
+        ));
+    }
+    records
 }
 
-fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
+async fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
     endpoint_surface::feed(
-        public_records(gateway),
+        public_records(gateway).await,
         gateway.base_url(),
         &gateway.org_domain,
     )
@@ -4874,7 +4897,7 @@ fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
 
 /// `GET /catalog.jsonld`: the organization's DCAT-AP catalogue as JSON-LD (EP-84).
 async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let body = serde_json::to_string(&catalog_feed(&gateway)).unwrap_or_default();
+    let body = serde_json::to_string(&catalog_feed(&gateway).await).unwrap_or_default();
     (
         [(axum::http::header::CONTENT_TYPE, "application/ld+json")],
         body,
@@ -4884,7 +4907,7 @@ async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> Response<Bo
 
 /// `GET /catalog.ttl`: the same catalogue as Turtle (EP-84).
 async fn catalog_feed_turtle(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway));
+    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway).await);
     ([(axum::http::header::CONTENT_TYPE, "text/turtle")], body).into_response()
 }
 

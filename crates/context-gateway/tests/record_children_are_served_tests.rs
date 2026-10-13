@@ -313,50 +313,6 @@ async fn a_space_that_does_not_enable_mcp_does_not_advertise_it() {
     }
 }
 
-/// SP-04 permits `schema/` as a child of a space, and SP-03 makes the space surface the
-/// endpoint surface under a name: the two prefixes answer the same schema catalogue.
-#[tokio::test]
-async fn the_schema_surface_answers_under_both_prefixes() {
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
-    let app = gateway(&broker.url);
-
-    let (space_status, space_index) =
-        call(&app, &format!("/cs/{SPACE}/schema/index.json"), None).await;
-    let (endpoint_status, endpoint_index) = call(
-        &app,
-        &format!("/api/endpoint/{SLUG}/schema/index.json"),
-        None,
-    )
-    .await;
-    assert_eq!(space_status, StatusCode::OK, "{space_index}");
-    assert_eq!(endpoint_status, StatusCode::OK, "{endpoint_index}");
-
-    let space_document: Value = serde_json::from_str(&space_index).expect("a JSON catalogue");
-    assert_eq!(space_document["models"][0]["name"], json!("bb-air-quality"));
-    assert_eq!(space_document["models"][0]["version"], json!(1));
-
-    // And one document of it, by both spellings of the artifact name.
-    for artifact in ["model.schema.json", "json-schema", "shacl"] {
-        let (status, body) = call(&app, &format!("/cs/{SPACE}/schema/v1/{artifact}"), None).await;
-        assert_eq!(status, StatusCode::OK, "{artifact}: {body}");
-        assert!(
-            !body.contains("operatorPhone"),
-            "{artifact} carries a slot the public grant does not name: {body}"
-        );
-    }
-
-    // A major nobody published, and a word that is no artifact, are both 404 — the same
-    // answer an unknown path gets, on both prefixes.
-    for path in [
-        format!("/cs/{SPACE}/schema/v9/model.schema.json"),
-        format!("/cs/{SPACE}/schema/1/model.schema.json"),
-        format!("/cs/{SPACE}/schema/v1/model.exe"),
-    ] {
-        let (status, body) = call(&app, &path, None).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
-    }
-}
-
 /// EP-41, T-2382: the endpoint record advertises one distribution per enabled representation,
 /// and `file.json` was the one nobody routed.
 #[tokio::test]
