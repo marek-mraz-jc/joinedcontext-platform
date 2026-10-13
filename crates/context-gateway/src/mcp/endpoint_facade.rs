@@ -40,8 +40,8 @@
 //! surface of the view (T-3645, T-3646).
 
 use crate::app::{ngsi_ld_request, Credential, Gateway};
-use crate::handlers::view_access::{self, AccessFormat};
 use crate::handlers::schema_routes;
+use crate::handlers::view_access::{self, AccessFormat};
 use crate::mcp::elicitation;
 use crate::middleware::response::{self, Artifact};
 use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
