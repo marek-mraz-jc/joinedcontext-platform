@@ -6,6 +6,10 @@
 //! surface (T-3643). The broker answers every document, filter (CQL2) and decision; the gateway
 //! admits the caller, keeps the representation read-only (EP-39) and moves the broker's links
 //! under the caller's URL.
+//!
+//! The OData v4 surface (`odata/v4`, EP-104, T-3830) is the same read-only forward to the
+//! broker's `antares-odata` surface of the view; its writes wait for the Endpoint's write guards
+//! (T-3939).
 
 use crate::app::{
     admit, broker_failure, caller_links, has_view, principal_of, read_only, with_platform_slug,
@@ -26,19 +30,61 @@ use std::sync::Arc;
 /// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
 const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
+/// A read-only surface of the broker's view, forwarded as sent.
+struct Surface {
+    representation: Representation,
+    /// The child path under the Endpoint and under `/x/views/{view}`.
+    path: &'static str,
+    /// The problem slug of an Endpoint or caller without a view.
+    no_view: &'static str,
+    name: &'static str,
+}
+
+const OGC: Surface = Surface {
+    representation: Representation::OgcFeatures,
+    path: "ogc/features",
+    no_view: "ogc-view-unavailable",
+    name: "OGC API Features",
+};
+
+const ODATA: Surface = Surface {
+    representation: Representation::Odata,
+    path: "odata/v4",
+    no_view: "odata-view-unavailable",
+    name: "OData",
+};
+
 /// Every OGC API - Features request of one endpoint (EP-29, EP-39, EP-40).
 pub(crate) async fn ogc_features(
     State(gateway): State<Arc<Gateway>>,
     Path(params): Path<HashMap<String, String>>,
+    request: Request,
+) -> Response<Body> {
+    read_surface(&gateway, &params, request, &OGC).await
+}
+
+/// Every OData v4 request of one endpoint (EP-104), read-only until T-3939.
+pub(crate) async fn odata(
+    State(gateway): State<Arc<Gateway>>,
+    Path(params): Path<HashMap<String, String>>,
+    request: Request,
+) -> Response<Body> {
+    read_surface(&gateway, &params, request, &ODATA).await
+}
+
+async fn read_surface(
+    gateway: &Gateway,
+    params: &HashMap<String, String>,
     mut request: Request,
+    surface: &Surface,
 ) -> Response<Body> {
     // Before routing, before authentication, before anything reads a header (EP-21).
     tenancy::strip_client_headers(&mut request);
     let slug = params.get("slug").cloned().unwrap_or_default();
     let (endpoint, subject) = match admit(
-        &gateway,
+        gateway,
         &slug,
-        Some(Representation::OgcFeatures),
+        Some(surface.representation),
         request.headers(),
     ) {
         Ok(admitted) => admitted,
@@ -57,18 +103,18 @@ pub(crate) async fn ogc_features(
     // A view of another model (G18) is the view root's alone: the broker hides it from every
     // other surface, OGC included.
     if endpoint.view_mapping.is_some() || !has_view(&view) {
-        return no_view();
+        return no_view(surface);
     }
     // The raw path, still percent-encoded: a decoded `/` or `?` in an item id would be a
     // different resource at the broker.
-    let prefix = format!("{}/ogc/features", endpoint.base_path);
+    let prefix = format!("{}/{}", endpoint.base_path, surface.path);
     let rest = request
         .uri()
         .path()
         .strip_prefix(&prefix)
         .filter(|rest| *rest != "/")
         .unwrap_or_default();
-    let root = format!("/x/views/{view}/ogc/features");
+    let root = format!("/x/views/{view}/{}", surface.path);
     let target = match request.uri().query() {
         Some(query) if !query.is_empty() => format!("{root}{rest}?{query}"),
         _ => format!("{root}{rest}"),
@@ -82,7 +128,8 @@ pub(crate) async fn ogc_features(
         space = %endpoint.space,
         %view,
         principal = %principal_of(&subject),
-        "OGC request forwarded to the broker's view"
+        surface = surface.name,
+        "request forwarded to the broker's view"
     );
     let (parts, _) = request.into_parts();
     let answer = match gateway
@@ -108,7 +155,7 @@ pub(crate) async fn ogc_features(
     // ponytail: the page is held whole to move its links, so one past MAX_BODY (8 MiB) is a
     // broker failure; stream the rewrite if a `limit` ever reaches that.
     let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
-        tracing::error!(slug = %endpoint.slug, "the broker's OGC answer is larger than the gateway holds");
+        tracing::error!(slug = %endpoint.slug, surface = surface.name, "the broker's answer is larger than the gateway holds");
         return broker_failure(StatusCode::BAD_GATEWAY, Body::empty()).await;
     };
     caller_links(&mut parts.headers, &from, &to);
@@ -126,14 +173,15 @@ fn authority(base: &str) -> &str {
 }
 
 /// An Endpoint no broker view can serve yet (a view of another model, a projection with
-/// `temporalQ`, a caller under a data-space agreement, a slug no view id holds): the OGC
-/// surface is the broker's alone, so there is no other answer (ADR-0029 decision 3).
-fn no_view() -> Response<Body> {
-    ProblemDetails::new(501, "ogc-view-unavailable", "Not Implemented")
-        .with_detail(
-            "the OGC API Features surface is served from the broker's view of this endpoint, \
-             and this endpoint or caller has none yet; read it through the NGSI-LD surface",
-        )
+/// `temporalQ`, a caller under a data-space agreement, a slug no view id holds): the surface
+/// is the broker's alone, so there is no other answer (ADR-0029 decision 3).
+fn no_view(surface: &Surface) -> Response<Body> {
+    ProblemDetails::new(501, surface.no_view, "Not Implemented")
+        .with_detail(format!(
+            "the {} surface is served from the broker's view of this endpoint, and this \
+             endpoint or caller has none yet; read it through the NGSI-LD surface",
+            surface.name
+        ))
         .into_response()
 }
 

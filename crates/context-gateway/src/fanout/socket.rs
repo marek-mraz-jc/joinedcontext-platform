@@ -53,6 +53,7 @@ const FROM_BROKER: usize = 1024 * 1024;
 const NORMAL: u16 = 1000;
 const UNSUPPORTED: u16 = 1003;
 const TOO_BIG: u16 = 1009;
+const INTERNAL: u16 = 1011;
 
 /// `JC_GATEWAY_WS_ENTITIES`, the entity table's bound per Endpoint (ADR-N-049 §2.2).
 fn bound() -> usize {
@@ -299,6 +300,7 @@ async fn run(
                     ("resume", 200..=299) | ("up", 200..=299) if *started => {}
                     ("up", 200..=299) => {
                         *started = true;
+                        hub.live();
                         tokio::spawn(snapshot(
                             Arc::clone(gateway),
                             Arc::clone(hub),
@@ -322,6 +324,14 @@ async fn run(
                     }
                     (id, status) => {
                         tracing::warn!(slug = %hub.slug, id, status, ?body, "the broker refused the fan-out subscription");
+                        // Never a silent 201: the clients learn it (ADR-N-049 §2 item 10).
+                        let detail = body
+                            .as_ref()
+                            .and_then(|b| b.get("detail"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("no detail");
+                        hub.refuse(u16::try_from(status).unwrap_or(0), detail.to_owned());
+                        *started = false;
                         tokio::time::sleep(MAX_BACKOFF).await;
                         return None;
                     }
@@ -423,6 +433,8 @@ pub enum Ended {
     Closing(&'static str),
     /// The client answered no ping.
     NoPong,
+    /// The broker refused the hub's upstream subscription.
+    Refused,
 }
 
 /// One client connection: welcome, then its messages answered and its queue written, until it
@@ -499,6 +511,7 @@ pub async fn session(
                             outgoing.push(gap(seq, seq));
                         }
                         Out::Closing(reason) => ended = Some(Ended::Closing(reason)),
+                        Out::Refused => ended = Some(Ended::Refused),
                     }
                 }
                 if overflowed {
@@ -534,6 +547,10 @@ pub async fn session(
         Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
         Ended::Binary => Some((UNSUPPORTED, "text frames only")),
         Ended::NoPong => Some((NORMAL, "no pong")),
+        Ended::Refused => Some((
+            INTERNAL,
+            "the context broker refuses this Endpoint's fan-out",
+        )),
         Ended::Closed => None,
     };
     if let Some((code, reason)) = close {

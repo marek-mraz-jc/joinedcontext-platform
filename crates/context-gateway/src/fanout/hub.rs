@@ -89,6 +89,8 @@ pub enum Out {
     Gap,
     /// The connection ends with this `x-closing` reason.
     Closing(&'static str),
+    /// The broker refused the hub's upstream subscription: the connection ends with 1011.
+    Refused,
 }
 
 /// A connection's queue: bounded, coalesced per subscription and entity (ADR-N-049 §2.6).
@@ -253,6 +255,8 @@ struct State {
     next_conn: u64,
     closed: HashMap<String, Closed>,
     idle_since: Option<Instant>,
+    /// The broker's status and detail while it refuses the upstream subscription.
+    refused: Option<(u16, String)>,
 }
 
 impl Hub {
@@ -269,6 +273,7 @@ impl Hub {
                 next_conn: 1,
                 closed: HashMap::new(),
                 idle_since: Some(Instant::now()),
+                refused: None,
             }),
         }
     }
@@ -370,6 +375,15 @@ impl Hub {
     pub fn subscribe(&self, conn: u64, id: Option<&str>, body: &Value, update: bool) -> Answer {
         let mut state = self.state();
         let state = &mut *state;
+        if let Some((status, detail)) = &state.refused {
+            let problem = jc_core::ProblemDetails::for_status(503).with_detail(format!(
+                "the context broker refuses this Endpoint's fan-out ({status}: {detail})"
+            ));
+            return Answer {
+                status: 503,
+                body: serde_json::to_value(problem).ok(),
+            };
+        }
         let Some(c) = state.conns.get_mut(&conn) else {
             return Answer::problem(410, "Gone", "the connection is closed");
         };
@@ -516,6 +530,21 @@ impl Hub {
         if !state.table.contains_key(&id) {
             state.keep(id, entity);
         }
+    }
+
+    /// The broker refused the upstream subscription with `status`: every connection ends, and
+    /// every `x-subscribe` is answered 503 until [`Hub::live`].
+    pub fn refuse(&self, status: u16, detail: String) {
+        let mut state = self.state();
+        state.refused = Some((status, detail));
+        for conn in state.conns.values() {
+            conn.queue.push(Out::Refused);
+        }
+    }
+
+    /// The broker accepted the upstream subscription.
+    pub fn live(&self) {
+        self.state().refused = None;
     }
 
     /// The upstream lost its place: every connection is told to read again.
@@ -801,7 +830,7 @@ mod tests {
             .into_iter()
             .filter_map(|out| match out {
                 Out::Notification { body, .. } => Some(body["data"][0].clone()),
-                Out::Gap | Out::Closing(_) => None,
+                Out::Gap | Out::Closing(_) | Out::Refused => None,
             })
             .collect()
     }

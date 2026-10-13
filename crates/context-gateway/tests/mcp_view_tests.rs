@@ -215,7 +215,8 @@ async fn the_space_surface_is_the_spaces_view() {
 }
 
 /// The broker lists its tools; the gateway adds the two that describe the Endpoint, as the
-/// caller's grant shows them, and answers those itself without a hop.
+/// caller's grant shows them, and answers those itself: the access without a hop, the schema
+/// from the view's LinkML surface (T-3645), never the view's MCP surface.
 #[tokio::test]
 async fn the_listing_is_the_brokers_plus_the_two_describe_tools_the_gateway_answers() {
     let listed = json!({ "jsonrpc": "2.0", "id": 1, "result": { "tools": [
@@ -248,7 +249,7 @@ async fn the_listing_is_the_brokers_plus_the_two_describe_tools_the_gateway_answ
         assert!(answer["result"].is_object(), "{tool}: {answer}");
     }
     // `describe_access` reads the view's access surface, the document `GET …/access` serves
-    // (EP-60, T-3649); `describe_schema` asks the broker nothing.
+    // (EP-60, T-3649); `describe_schema` reads the view's LinkML schema index (T-3645).
     let paths: Vec<String> = hops
         .lock()
         .expect("the hop log")
@@ -256,8 +257,13 @@ async fn the_listing_is_the_brokers_plus_the_two_describe_tools_the_gateway_answ
         .skip(1)
         .map(|hop| hop.path.clone())
         .collect();
-    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert_eq!(paths.len(), 2, "{paths:?}");
     assert!(paths[0].ends_with("/access"), "{paths:?}");
+    assert_eq!(
+        paths[1],
+        format!("/x/views/{SLUG}/linkml/schema/index.json"),
+        "the describe tools never reach the view's MCP surface"
+    );
 }
 
 /// The two costs one call may put on the shared broker are capped as on the NGSI-LD surface:
