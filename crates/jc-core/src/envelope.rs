@@ -358,7 +358,7 @@ pub mod annotations {
     /// Digest of the prompt that created the resource (MF-08).
     pub const PROMPT_DIGEST: &str = "joinedcontext.com/prompt-digest";
     /// On a `ContextSpace`: the broker a move job is taking it to; the gateway holds the space
-    /// read-only while it is set (PF-115, ADR-N-046 §2.6).
+    /// read-only while it is set (PF-115, ADR-N-047 §2.6).
     pub const MOVING_TO: &str = "joinedcontext.com/moving-to";
 }
 
