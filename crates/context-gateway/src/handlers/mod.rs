@@ -2,7 +2,6 @@
 
 pub mod endpoint_surface;
 pub mod files;
-pub mod formalisms;
 pub mod ogc;
 pub mod openapi_doc;
 pub mod preview;
