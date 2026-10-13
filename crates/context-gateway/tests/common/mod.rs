@@ -443,8 +443,12 @@ async fn narrowed(
             .into_response();
     }
     let answer = next.run(request).await;
-    // The LinkML surface is narrowed by the broker itself (LK1); its documents are no entities.
-    if !answer.status().is_success() || plain.starts_with("/linkml/") {
+    // The LinkML surface is narrowed by the broker itself (LK1), and so are the engine's access
+    // documents and the view's MCP tools: their answers are no entities.
+    if !answer.status().is_success()
+        || plain.starts_with("/linkml/")
+        || matches!(plain.as_str(), "/access" | "/access/check" | "/mcp")
+    {
         return answer;
     }
     let (mut parts, body) = answer.into_parts();
