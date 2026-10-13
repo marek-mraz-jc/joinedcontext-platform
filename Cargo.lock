@@ -241,6 +241,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "antares-matcher"
+version = "0.1.3"
+source = "git+https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker?rev=7185e1a1007b8853c5e4373c56e63be93aa365e9#7185e1a1007b8853c5e4373c56e63be93aa365e9"
+dependencies = [
+ "antares-jsonld",
+ "antares-model",
+ "antares-ql",
+ "chrono",
+ "serde_json",
+]
+
+[[package]]
 name = "antares-model"
 version = "0.1.3"
 source = "git+https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker?rev=7185e1a1007b8853c5e4373c56e63be93aa365e9#7185e1a1007b8853c5e4373c56e63be93aa365e9"
@@ -1189,6 +1201,7 @@ name = "context-gateway"
 version = "0.1.0"
 dependencies = [
  "antares-jsonld",
+ "antares-matcher",
  "antares-ql",
  "arc-swap",
  "argon2",
