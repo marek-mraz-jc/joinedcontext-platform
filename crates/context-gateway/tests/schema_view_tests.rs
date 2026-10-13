@@ -353,3 +353,46 @@ async fn the_records_digest_is_the_brokers() {
         .unwrap_or_else(|| panic!("the record lists the broker's artifact: {body}"));
     assert_eq!(shacl["spdx:checksum"]["spdx:checksumValue"], DIGEST);
 }
+
+/// A space and a slug named `schema` hold `/schema/` twice: the path after the surface's own
+/// prefix is the one forwarded, not the path after the first `/schema/`.
+#[tokio::test]
+async fn a_space_or_slug_named_schema_keeps_its_path() {
+    let (upstream, hops) = broker(StatusCode::OK).await;
+    let named = Endpoint {
+        slug: "schema".to_owned(),
+        base_path: "/api/endpoint/schema".to_owned(),
+        ..endpoint()
+    };
+    let named_space = Space {
+        endpoint: Arc::new(Endpoint {
+            slug: "schema".to_owned(),
+            space: "schema".to_owned(),
+            base_path: "/cs/schema".to_owned(),
+            ..endpoint()
+        }),
+        ..space()
+    };
+    let gateway = Gateway::new(Broker::new(&upstream), Box::new(PolicyPdp), DOMAIN)
+        .serve([named])
+        .serve_spaces([named_space]);
+    let app = router(Arc::new(gateway));
+    for uri in [
+        "/api/endpoint/schema/schema/index.json",
+        "/cs/schema/schema/index.json",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(get(uri))
+            .await
+            .expect("the gateway answers");
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+    assert_eq!(
+        paths(&hops),
+        [
+            "/x/views/schema/linkml/schema/index.json",
+            "/x/views/cs-schema/linkml/schema/index.json"
+        ]
+    );
+}
