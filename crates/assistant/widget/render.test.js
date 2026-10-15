@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, linkHost } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -48,8 +48,10 @@ test("a snake_case name and a lone star stay text", () => {
   ]);
 });
 
+const anyHost = () => true;
+
 test("an http(s) link is a link; any other scheme stays text", () => {
-  assert.deepEqual(markdown("[the city](https://hel.fi/x) [bad](javascript:alert(1)) [ftp](ftp://x)"), [
+  assert.deepEqual(markdown("[the city](https://hel.fi/x) [bad](javascript:alert(1)) [ftp](ftp://x)", undefined, anyHost), [
     { tag: "p", children: [
       { tag: "a", href: "https://hel.fi/x", children: ["the city"] },
       " [bad](javascript:alert(1)) [ftp](ftp://x)",
@@ -166,4 +168,48 @@ test("only an http(s) address is a link", () => {
   for (const bad of ["javascript:alert(1)", "/relative", "data:text/html,x", "https://a b", 42, undefined]) {
     assert.equal(safeUrl(bad), null, String(bad));
   }
+});
+
+// T-4149: a link is rendered only to an allowlisted host; anything else is its words alone.
+const city = (url) => linkHost(url, ["banskabystrica.sk", "data.dev.joinedcontext.com", "data.gov.sk"]);
+
+test("a link off the allowlist is its words alone, never a link", () => {
+  assert.deepEqual(
+    markdown("[radnica](https://www.banskabystrica.sk/kontakt) [výhra](https://evil.example/claim)", undefined, city),
+    [{ tag: "p", children: [
+      { tag: "a", href: "https://www.banskabystrica.sk/kontakt", children: ["radnica"] },
+      " ",
+      "výhra",
+    ] }],
+  );
+});
+
+test("a markdown image is never an image, and off the list not even a link", () => {
+  const blocks = markdown("![logo](https://evil.example/pixel.png?u=1)", undefined, city);
+  assert.deepEqual(blocks, [{ tag: "p", children: ["!", "logo"] }]);
+  assert.ok(!JSON.stringify(blocks).includes("img"));
+});
+
+test("without an allowlist no link is rendered", () => {
+  assert.deepEqual(markdown("[mesto](https://banskabystrica.sk)"), [{ tag: "p", children: ["mesto"] }]);
+});
+
+test("a host matches itself and its subdomains, never a look-alike", () => {
+  assert.ok(city("https://banskabystrica.sk"));
+  assert.ok(city("https://www.banskabystrica.sk/a?b#c"));
+  assert.ok(city("http://mapy.banskabystrica.sk/"));
+  assert.ok(city("https://DATA.GOV.SK/dataset/x"));
+  for (const bad of [
+    "https://banskabystrica.sk.evil.example/",
+    "https://evilbanskabystrica.sk/",
+    "https://banskabystrica.sk@evil.example/",
+    "https://evil.example\\@banskabystrica.sk/",
+    "https://evil.example/?u=https://banskabystrica.sk",
+    "javascript:alert(1)//banskabystrica.sk",
+    "",
+  ]) {
+    assert.ok(!city(bad), bad);
+  }
+  assert.ok(!linkHost("https://banskabystrica.sk", []));
+  assert.ok(!linkHost("https://banskabystrica.sk", [""]));
 });

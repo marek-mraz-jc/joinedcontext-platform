@@ -21,6 +21,15 @@ pub struct Completion {
     pub tokens: u64,
     pub input: u64,
     pub output: u64,
+    /// What the provider says the call cost, in millionths of a US dollar (OpenRouter's
+    /// `usage.cost`, T-4149); 0 when it says nothing.
+    pub cost_micros: u64,
+}
+
+/// `usage.cost` in millionths of a US dollar; 0 when absent, negative or not a number.
+fn cost_micros(usage: &Value) -> Option<u64> {
+    let cost = usage.get("cost")?.as_f64()?;
+    (cost.is_finite() && cost >= 0.0).then(|| (cost * 1_000_000.0).round() as u64)
 }
 
 /// Why a call gave no completion, in words a person reads (AG-104).
@@ -333,6 +342,7 @@ pub struct StreamReader {
     input: u64,
     output: u64,
     total: Option<u64>,
+    cost_micros: u64,
     chunks: usize,
 }
 
@@ -369,6 +379,7 @@ impl StreamReader {
             self.input = count("prompt_tokens").unwrap_or(self.input);
             self.output = count("completion_tokens").unwrap_or(self.output);
             self.total = count("total_tokens").or(self.total);
+            self.cost_micros = cost_micros(usage).unwrap_or(self.cost_micros);
         }
         let piece = chunk.pointer("/choices/0/delta/content")?.as_str()?;
         if piece.is_empty() {
@@ -390,6 +401,7 @@ impl StreamReader {
             calls: Vec::new(),
             input: self.input,
             output: self.output,
+            cost_micros: self.cost_micros,
         })
     }
 }
@@ -431,6 +443,7 @@ pub fn parse(body: &Value) -> Option<Completion> {
         tokens: count("total_tokens").unwrap_or(input + output),
         input,
         output,
+        cost_micros: usage.and_then(cost_micros).unwrap_or(0),
     })
 }
 
@@ -466,6 +479,32 @@ mod tests {
             (100, 90, 10)
         );
         assert_eq!(parse(&json!({"error": "x"})), None);
+    }
+
+    /// T-4149: the provider's `usage.cost` is read in millionths of a dollar, from a whole
+    /// completion and from a stream's last chunk; a cost that is absent, negative or not a number
+    /// counts nothing.
+    #[test]
+    fn a_call_s_cost_is_read_from_its_usage() {
+        let with = |cost: Value| {
+            parse(&json!({
+                "choices": [{"message": {"role": "assistant", "content": "a"}}],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 1, "cost": cost}
+            }))
+            .expect("a completion")
+            .cost_micros
+        };
+        assert_eq!(with(json!(0.0042)), 4_200);
+        assert_eq!(with(json!(3)), 3_000_000);
+        assert_eq!(with(json!(-1.0)), 0);
+        assert_eq!(with(json!("lots")), 0);
+        assert_eq!(with(Value::Null), 0);
+        let mut reader = StreamReader::default();
+        reader.feed(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"cost\":0.000125}}\n\n",
+        ).as_bytes());
+        assert_eq!(reader.finish().expect("a completion").cost_micros, 125);
     }
 
     /// T-4139: the pieces come out as they complete, wherever the bytes were cut, and the usage

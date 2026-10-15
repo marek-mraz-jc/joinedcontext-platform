@@ -7,7 +7,7 @@ var JCRender = (function () {
   // Bold, italic, inline code, an http(s) link, and a citation marker `[1]` or `[1, 2]`.
   var INLINE = /\*\*(.+?)\*\*|__(.+?)__|`([^`]+)`|\[([^\]\n]+)\]\((https?:\/\/[^\s()]+)\)|\[(\d+(?:\s*,\s*\d+)*)\]|\*(?=\S)(.+?)\*|(^|[^\w])_(?=\S)(.+?)_(?!\w)/g;
 
-  function inline(text, known) {
+  function inline(text, known, linkable) {
     var out = [];
     var last = 0;
     var match;
@@ -16,18 +16,22 @@ var JCRender = (function () {
       // `_em_` takes the character before it, so a snake_case name stays one word.
       out.push(text.slice(last, match.index) + (match[8] || ""));
       if (match[1] !== undefined || match[2] !== undefined) {
-        out.push({ tag: "strong", children: inline(match[1] !== undefined ? match[1] : match[2], known) });
+        out.push({ tag: "strong", children: inline(match[1] !== undefined ? match[1] : match[2], known, linkable) });
       } else if (match[3] !== undefined) {
         out.push({ tag: "code", children: [match[3]] });
       } else if (match[4] !== undefined) {
-        out.push({ tag: "a", href: match[5], children: inline(match[4], known) });
+        var words = inline(match[4], known, linkable);
+        // A link off the allowlist is its words alone (T-4149): an address a passage planted is
+        // never one click away. `![alt](url)` is a "!" and the same link or words: never an image.
+        if (linkable(match[5])) out.push({ tag: "a", href: match[5], children: words });
+        else out = out.concat(words);
       } else if (match[6] !== undefined) {
         var numbers = match[6].split(",").map(function (n) { return Number(n.trim()); })
           .filter(function (n) { return known(n); });
         // A marker no citation stands behind is dropped, never shown as typed.
         if (numbers.length > 0) out.push({ tag: "cite", numbers: numbers });
       } else {
-        out.push({ tag: "em", children: inline(match[7] !== undefined ? match[7] : match[9], known) });
+        out.push({ tag: "em", children: inline(match[7] !== undefined ? match[7] : match[9], known, linkable) });
       }
       last = re.lastIndex;
     }
@@ -41,10 +45,12 @@ var JCRender = (function () {
 
   /**
    * The answer as blocks: paragraphs (lines joined by line breaks), bullet and numbered lists,
-   * headings read as bold paragraphs. `known(n)` says whether citation n exists.
+   * headings read as bold paragraphs. `known(n)` says whether citation n exists, `linkable(url)`
+   * whether a link to `url` stays a link (none does without it).
    */
-  function markdown(text, known) {
+  function markdown(text, known, linkable) {
     known = known || function () { return false; };
+    linkable = linkable || function () { return false; };
     var blocks = [];
     var paragraph = null;
     var list = null;
@@ -58,19 +64,19 @@ var JCRender = (function () {
           list = { tag: tag, children: [] };
           blocks.push(list);
         }
-        list.children.push({ tag: "li", children: inline((item || number)[1], known) });
+        list.children.push({ tag: "li", children: inline((item || number)[1], known, linkable) });
         paragraph = null;
       } else if (line.trim() === "") {
         paragraph = null;
         list = null;
       } else if (heading) {
-        blocks.push({ tag: "p", children: [{ tag: "strong", children: inline(heading[1], known) }] });
+        blocks.push({ tag: "p", children: [{ tag: "strong", children: inline(heading[1], known, linkable) }] });
         paragraph = null;
         list = null;
       } else if (list && /^\s{2,}\S/.test(line)) {
         // An indented line goes on with the list item above it.
         var last = list.children[list.children.length - 1];
-        last.children = last.children.concat([{ tag: "br" }], inline(line.trim(), known));
+        last.children = last.children.concat([{ tag: "br" }], inline(line.trim(), known, linkable));
       } else {
         list = null;
         if (!paragraph) {
@@ -79,7 +85,7 @@ var JCRender = (function () {
         } else {
           paragraph.children.push({ tag: "br" });
         }
-        paragraph.children = paragraph.children.concat(inline(line.trim(), known));
+        paragraph.children = paragraph.children.concat(inline(line.trim(), known, linkable));
       }
     });
     return blocks;
@@ -88,6 +94,22 @@ var JCRender = (function () {
   function domain(url) {
     var match = /^https?:\/\/([^/?#:]+)/i.exec(url);
     return match ? match[1].replace(/^www\./, "") : "";
+  }
+
+  /**
+   * Whether `url` goes to one of `hosts` or a host under one, `www.` aside (T-4149). A host with
+   * anything but letters, digits, dots and dashes (a `user@host`, a backslash) never matches.
+   */
+  function linkHost(url, hosts) {
+    var match = /^https?:\/\/([^/?#]+)(?:[/?#]|$)/i.exec(String(url || ""));
+    if (!match) return false;
+    var host = match[1].toLowerCase();
+    if (!/^[a-z0-9.-]+$/.test(host)) return false;
+    host = host.replace(/^www\./, "");
+    return (hosts || []).some(function (h) {
+      h = String(h || "").toLowerCase().replace(/^www\./, "");
+      return h !== "" && (host === h || host.slice(-(h.length + 1)) === "." + h);
+    });
   }
 
   /**
@@ -204,7 +226,7 @@ var JCRender = (function () {
   }
 
   return {
-    markdown: markdown, sources: sources, label: label,
+    markdown: markdown, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table
   };
 })();

@@ -244,7 +244,10 @@
     var ids = "jc-src-" + turns;
     var grouped = JCRender.sources(citations);
     var body = el("div", "jc-answer");
-    JCRender.markdown(text, function (n) { return Boolean(grouped.position[n]); }).forEach(function (block) {
+    // Links stay links only to the deployment's own hosts and the sources this answer cites (T-4149).
+    var hosts = (config.linkHosts || []).concat(grouped.list.map(function (source) { return source.domain; }));
+    var linkable = function (url) { return JCRender.linkHost(url, hosts); };
+    JCRender.markdown(text, function (n) { return Boolean(grouped.position[n]); }, linkable).forEach(function (block) {
       body.appendChild(build(block, ids, grouped.position));
     });
     if (item.streaming) {

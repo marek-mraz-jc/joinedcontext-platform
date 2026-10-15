@@ -723,8 +723,13 @@ async fn arguments_that_break_the_tools_schema_are_never_sent() {
 /// an error event with a sentence, and the stream still ends with `done`.
 #[tokio::test]
 async fn budgets_and_failures_reach_the_person_as_sentences() {
-    // Room for a short question beside the answer's 3,000 tokens (T-3203), not for a long one.
-    let w = world("chatbudget", deployment(Channel::Public, 3_600, 10)).await;
+    // Room for a short question beside the answer's 3,000 tokens (T-3203), not for a long one;
+    // `questionChars` at its largest, so the conversation's budget is what refuses it (T-4149).
+    let mut long = deployment(Channel::Public, 3_600, 10);
+    if let Some(budget) = long.spec.budget.as_mut() {
+        budget.question_chars = 4_000;
+    }
+    let w = world("chatbudget", long).await;
     // The estimate of the first call alone is over a 3,600-token conversation.
     let (_, events, _) = answer_of(&w.app, ask(json!({"message": "x".repeat(4000)}), None)).await;
     let error = events
@@ -1862,6 +1867,165 @@ async fn a_router_that_fails_searches_the_question_and_a_refusal_is_not_cached()
     assert!(
         again.iter().all(|(_, d)| d["cached"] != true),
         "a refusal was cached"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4149: the owner's limits hold before any model call: a question past `questionChars`, the
+/// 11th question of a minute from one visitor (`429`, `Retry-After`, in Slovak), a conversation
+/// past `messagesPerConversation`, and a deployment switched off.
+#[tokio::test]
+async fn the_owner_s_limits_hold_before_any_model_call() {
+    let mut limited = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(budget) = limited.spec.budget.as_mut() {
+        budget.question_chars = 100;
+        budget.messages_per_conversation = 2;
+    }
+    let w = world("chatlimits", limited).await;
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "x".repeat(101)}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A conversation asks twice; the third question in it is refused, a new one is not.
+    script(
+        &w.proxy,
+        vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 3],
+    )
+    .await;
+    let (_, first, _) = answer_of(&w.app, ask(json!({"message": "a"}), Some(ORIGIN))).await;
+    let id = first[0].1["id"].as_str().expect("an id").to_owned();
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "b", "conversation": id}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body, headers) = answer_of(
+        &w.app,
+        ask(json!({"message": "c", "conversation": id}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body:?}");
+    assert!(headers.contains_key("retry-after"));
+    let detail = body[0].1["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("nový rozhovor"), "{detail}");
+    assert_eq!(
+        model_calls(&w.proxy).await.len(),
+        2,
+        "the third cost nothing"
+    );
+
+    // Ten a minute from one visitor; the eleventh waits, in Slovak, whatever it writes in front.
+    let visitor = "198.51.100.77";
+    for n in 0..10 {
+        let (status, _, _) = answer_of(
+            &w.app,
+            ask_from(json!({"message": "a"}), Some(ORIGIN), visitor),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "question {}", n + 1);
+    }
+    let calls = model_calls(&w.proxy).await.len();
+    let (status, body, headers) = answer_of(
+        &w.app,
+        ask_from(
+            json!({"message": "a"}),
+            Some(ORIGIN),
+            &format!("192.0.2.1, {visitor}"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("a Retry-After in seconds");
+    assert!((1..=60).contains(&retry), "{retry}");
+    let detail = body[0].1["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("Počkajte chvíľu"), "{detail}");
+    assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
+    // Another visitor still asks.
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask_from(json!({"message": "a"}), Some(ORIGIN), "198.51.100.78"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+
+    let mut off = deployment(Channel::Public, 1_000_000, 10);
+    off.spec.enabled = false;
+    let w = world("chatoff", off).await;
+    let (status, _, _) = answer_of(&w.app, ask(json!({"message": "a"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(model_calls(&w.proxy).await.is_empty());
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4149: the provider's cost of each answer adds up per day; once it reaches
+/// `budget.costPerDayUsd` the chat answers as search, the matching pages as citations under a
+/// Slovak sentence, and asks the model nothing more that day.
+#[tokio::test]
+async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
+    let mut capped = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(budget) = capped.spec.budget.as_mut() {
+        budget.cost_per_day_usd = 0.01;
+    }
+    let w = world("chatcostcap", capped).await;
+    script(
+        &w.proxy,
+        vec![ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Áno."}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50, "cost": 0.012}
+        }))],
+    )
+    .await;
+    let (status, _, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let cost: i64 = sqlx::query_scalar("SELECT cost_micros FROM usage")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the day's row");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(cost, 12_000);
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Dokedy je otvorená knižnica?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        ["conversation", "answer", "citations", "done"],
+        "{events:?}"
+    );
+    let answer = events[1].1["text"].as_str().expect("an answer");
+    assert!(answer.contains("denný rozpočet"), "{answer}");
+    let citations = events[2].1.as_array().expect("citations");
+    assert!(!citations.is_empty(), "the search found the library's page");
+    for (at, citation) in citations.iter().enumerate() {
+        assert!(citation["url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("http")));
+        assert!(answer.contains(&format!("[{}]", at + 1)), "{answer}");
+    }
+    assert_eq!(events[3].1["modelCalls"], 0);
+    assert_eq!(
+        model_calls(&w.proxy).await.len(),
+        1,
+        "no model call past the cap"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
