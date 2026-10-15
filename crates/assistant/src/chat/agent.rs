@@ -99,8 +99,10 @@ pub enum Event {
         code: String,
         output: Result<String, String>,
     },
-    /// The last event: the tokens the question cost.
-    Done(u64),
+    /// The next characters of the answer as the answering model streams them (T-4139).
+    Delta(String),
+    /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
+    Done(Spent, u64),
 }
 
 /// Everything one question is answered with.
@@ -123,10 +125,17 @@ pub struct Ask<'a> {
     /// `jc-functions`, when the deployment has `sandbox: true` and the service knows where it is:
     /// `run_script` is offered then and only then (AG-112).
     pub functions: Option<&'a str>,
+    /// The deployment's router and answer models; the service's model when `None` (MF-52).
+    pub router_model: Option<&'a str>,
+    pub answer_model: Option<&'a str>,
+    /// The most tokens the answer call may write (`budget.outputTokensPerAnswer`).
+    pub output_tokens: u64,
+    /// Answers to first questions asked before (T-4139).
+    pub cache: &'a super::routed::AnswerCache,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
-fn quoted(text: &str) -> String {
+pub(super) fn quoted(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -235,7 +244,7 @@ fn estimate(messages: &[Value]) -> u64 {
 
 /// The bracketed numbers an answer uses: `[1]`, and each of a list, `[1, 2]`. A bracket holding
 /// anything but numbers and commas is no marker.
-fn markers(answer: &str) -> HashSet<usize> {
+pub(super) fn markers(answer: &str) -> HashSet<usize> {
     let mut found = HashSet::new();
     let mut rest = answer;
     while let Some(open) = rest.find('[') {
@@ -251,27 +260,42 @@ fn markers(answer: &str) -> HashSet<usize> {
     found
 }
 
-async fn send(events: &Sender<Event>, event: Event) {
+pub(super) async fn send(events: &Sender<Event>, event: Event) {
     // A channel that went away stops reading; the loop stops at its next call.
     let _ = events.send(event).await;
 }
 
-/// What one question spent, read and written, as the provider counted it.
+/// What one question spent, read and written, as the provider counted it, and what the final
+/// `done` event reports beside it (API/05 §1.3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Spent {
     pub total: u64,
     pub input: u64,
     pub output: u64,
+    /// Model calls made.
+    pub calls: u64,
+    /// Milliseconds until the first character of the answer was ready.
+    pub first_token_ms: Option<u64>,
+    /// Whether the answer came from the cache.
+    pub cached: bool,
 }
 
 /// Answers one question; returns what it spent. Every outcome reaches `events`: an answer with
 /// its citations, or an error a person can act on.
+///
+/// A deployment that answers from its sources alone takes the routed loop (T-4139): one router
+/// call, server-run searches, one streamed answer call. One with connectors or the sandbox keeps
+/// the model-driven loop below until its data rounds move into the router (T-4140).
 pub async fn answer(
     ask: &Ask<'_>,
     history: &[Turn],
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
+    if ask.connectors.is_empty() && ask.functions.is_none() && !ask.sources.is_empty() {
+        return super::routed::answer(ask, history, question, events).await;
+    }
+    let started = std::time::Instant::now();
     let tools = tool_specs(
         !ask.sources.is_empty(),
         ask.functions.is_some(),
@@ -337,6 +361,7 @@ pub async fn answer(
         spent.total += completion.tokens;
         spent.input += completion.input;
         spent.output += completion.output;
+        spent.calls += 1;
         if completion.calls.is_empty() || !allow_tools {
             let text = completion.text.trim().to_owned();
             if text.is_empty() {
@@ -351,6 +376,7 @@ pub async fn answer(
             let used = markers(&text);
             citations.retain(|c| used.contains(&c.n));
             name_sources(ask, &mut citations).await;
+            spent.first_token_ms = Some(started.elapsed().as_millis() as u64);
             send(events, Event::Answer(text)).await;
             send(events, Event::Citations(citations)).await;
             return spent;
@@ -662,7 +688,7 @@ async fn run_script(
 /// Names each cited source for a visitor (T-3325): a page by its title, live data by the page
 /// the sources hold about its Endpoint, which it then links. A lookup that fails leaves the
 /// citations as they were: the answer still goes out.
-async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
+pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
     if citations.is_empty() || ask.sources.is_empty() {
         return;
     }

@@ -5,7 +5,10 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
+
+use super::agent::Event;
 
 /// What a model call came back with.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,7 +185,6 @@ impl Model {
         tools: &[Value],
         allow_tools: bool,
     ) -> Result<Completion, CallError> {
-        let token = self.token().await?;
         let mut body = json!({
             "model": self.config.model,
             "messages": messages,
@@ -195,24 +197,97 @@ impl Model {
                 body["tool_choice"] = json!("none");
             }
         }
-        let unavailable = |why: String| {
-            tracing::warn!(%deployment, %why, "a model call failed");
-            CallError::Unavailable(
-                "The assistant's model did not answer. Try again in a minute.".into(),
-            )
-        };
+        let answer = self.send(deployment, tokens_per_day, &body).await?;
+        let body: Value = answer.json().await.unwrap_or(Value::Null);
+        parse(&body).ok_or_else(|| {
+            unavailable(deployment, "the provider's answer is not a chat completion")
+        })
+    }
+
+    /// One call without tools on `call.model` (the service's model when `None`), its output held
+    /// to `call.max_tokens`; a router call asks for a JSON object (T-4139, AG-107).
+    pub async fn ask(
+        &self,
+        deployment: &str,
+        tokens_per_day: u64,
+        call: &Call<'_>,
+        messages: &[Value],
+    ) -> Result<Completion, CallError> {
+        let body = self.body(call, messages, false);
+        let answer = self.send(deployment, tokens_per_day, &body).await?;
+        let body: Value = answer.json().await.unwrap_or(Value::Null);
+        parse(&body).ok_or_else(|| {
+            unavailable(deployment, "the provider's answer is not a chat completion")
+        })
+    }
+
+    /// The same call streamed: each piece of the answer goes to `deltas` as a `delta` event the
+    /// moment the model writes it, and the whole completion, with the stream's `usage`, comes back
+    /// at the end with the instant its first piece arrived (API/05 §1.3).
+    pub async fn stream(
+        &self,
+        deployment: &str,
+        tokens_per_day: u64,
+        call: &Call<'_>,
+        messages: &[Value],
+        deltas: &Sender<Event>,
+    ) -> Result<(Completion, Option<Instant>), CallError> {
+        let body = self.body(call, messages, true);
+        let answer = self.send(deployment, tokens_per_day, &body).await?;
+        let mut reader = StreamReader::default();
+        let mut first = None;
+        let mut bytes = answer.bytes_stream();
+        while let Some(chunk) = futures_util::StreamExt::next(&mut bytes).await {
+            let chunk =
+                chunk.map_err(|err| unavailable(deployment, &err.without_url().to_string()))?;
+            for piece in reader.feed(&chunk) {
+                first.get_or_insert_with(Instant::now);
+                // A reader who left stops reading; the call is let finish so it is counted.
+                let _ = deltas.send(Event::Delta(piece)).await;
+            }
+        }
+        let completion = reader.finish().ok_or_else(|| {
+            unavailable(deployment, "the provider's stream ended without an answer")
+        })?;
+        Ok((completion, first))
+    }
+
+    fn body(&self, call: &Call<'_>, messages: &[Value], stream: bool) -> Value {
+        let mut body = json!({
+            "model": call.model.unwrap_or(&self.config.model),
+            "messages": messages,
+            "max_tokens": call.max_tokens,
+            "reasoning": {"effort": REASONING_EFFORT},
+        });
+        if call.json {
+            body["response_format"] = json!({"type": "json_object"});
+        }
+        if stream {
+            // The proxy adds `stream_options.include_usage`, so the last chunk carries `usage`.
+            body["stream"] = json!(true);
+        }
+        body
+    }
+
+    /// Sends one chat completion through the proxy; a refusal becomes the sentence a person reads.
+    async fn send(
+        &self,
+        deployment: &str,
+        tokens_per_day: u64,
+        body: &Value,
+    ) -> Result<reqwest::Response, CallError> {
+        let token = self.token().await?;
         let answer = self
             .http
             .post(format!("{}/v1/llm/chat/completions", self.config.proxy))
             .bearer_auth(token)
             .header("x-jc-assistant-deployment", deployment)
             .header("x-jc-assistant-tokens-per-day", tokens_per_day.to_string())
-            .json(&body)
+            .json(body)
             .send()
             .await
-            .map_err(|err| unavailable(err.without_url().to_string()))?;
+            .map_err(|err| unavailable(deployment, &err.without_url().to_string()))?;
         let status = answer.status();
-        let body: Value = answer.json().await.unwrap_or(Value::Null);
         if status.as_u16() == 429 {
             return Err(CallError::DaySpent(
                 "Today's answers for this assistant are used up. It answers again after midnight UTC."
@@ -224,10 +299,98 @@ impl Model {
             *self.token.lock().await = None;
         }
         if !status.is_success() {
-            return Err(unavailable(format!("the proxy answered {status}")));
+            return Err(unavailable(
+                deployment,
+                &format!("the proxy answered {status}"),
+            ));
         }
-        parse(&body)
-            .ok_or_else(|| unavailable("the provider's answer is not a chat completion".into()))
+        Ok(answer)
+    }
+}
+
+fn unavailable(deployment: &str, why: &str) -> CallError {
+    tracing::warn!(%deployment, %why, "a model call failed");
+    CallError::Unavailable("The assistant's model did not answer. Try again in a minute.".into())
+}
+
+/// What one call of [`Model::ask`] or [`Model::stream`] asks for.
+#[derive(Debug, Clone, Copy)]
+pub struct Call<'a> {
+    /// `vendor/name`; the service's configured model when `None`.
+    pub model: Option<&'a str>,
+    /// The most tokens the call may write, its thinking included.
+    pub max_tokens: u64,
+    /// Whether the answer must be one JSON object.
+    pub json: bool,
+}
+
+/// Reads an OpenAI-compatible completion stream (`data: {chunk}` lines, `data: [DONE]` last) as
+/// its bytes arrive, in pieces that may cut a line, or a character, anywhere.
+#[derive(Debug, Default)]
+pub struct StreamReader {
+    pending: Vec<u8>,
+    text: String,
+    input: u64,
+    output: u64,
+    total: Option<u64>,
+    chunks: usize,
+}
+
+/// The longest line the reader keeps; a longer one is dropped unread.
+const STREAM_LINE_MAX: usize = 1 << 20;
+
+impl StreamReader {
+    /// Takes the next bytes; returns the answer's pieces they complete, in order.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(bytes);
+        let mut pieces = Vec::new();
+        while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            if let Some(piece) = self.line(&line) {
+                pieces.push(piece);
+            }
+        }
+        if self.pending.len() > STREAM_LINE_MAX {
+            self.pending.clear();
+        }
+        pieces
+    }
+
+    fn line(&mut self, line: &[u8]) -> Option<String> {
+        let line = std::str::from_utf8(line).ok()?.trim();
+        let data = line.strip_prefix("data:")?.trim();
+        if data == "[DONE]" {
+            return None;
+        }
+        let chunk: Value = serde_json::from_str(data).ok()?;
+        self.chunks += 1;
+        if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
+            let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+            self.input = count("prompt_tokens").unwrap_or(self.input);
+            self.output = count("completion_tokens").unwrap_or(self.output);
+            self.total = count("total_tokens").or(self.total);
+        }
+        let piece = chunk.pointer("/choices/0/delta/content")?.as_str()?;
+        if piece.is_empty() {
+            return None;
+        }
+        self.text.push_str(piece);
+        Some(piece.to_owned())
+    }
+
+    /// The whole completion, or `None` when the stream carried no chunk at all.
+    pub fn finish(mut self) -> Option<Completion> {
+        if !self.pending.is_empty() {
+            let rest = std::mem::take(&mut self.pending);
+            self.line(&rest);
+        }
+        (self.chunks > 0).then(|| Completion {
+            tokens: self.total.unwrap_or(self.input + self.output),
+            text: self.text,
+            calls: Vec::new(),
+            input: self.input,
+            output: self.output,
+        })
     }
 }
 
@@ -303,5 +466,46 @@ mod tests {
             (100, 90, 10)
         );
         assert_eq!(parse(&json!({"error": "x"})), None);
+    }
+
+    /// T-4139: the pieces come out as they complete, wherever the bytes were cut, and the usage
+    /// of the last chunk is what the call cost.
+    #[test]
+    fn a_stream_is_read_in_pieces_cut_anywhere() {
+        let stream = concat!(
+            ": keep-alive\n\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Knižnica \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"je otvorená [1].\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":40,\"total_tokens\":1240}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .as_bytes();
+        for cut in [1, 7, 33, 100] {
+            let mut reader = StreamReader::default();
+            let mut pieces = Vec::new();
+            for bytes in stream.chunks(cut) {
+                pieces.extend(reader.feed(bytes));
+            }
+            assert_eq!(
+                pieces,
+                ["Knižnica ", "je otvorená [1]."],
+                "cut every {cut} bytes"
+            );
+            let completion = reader.finish().expect("a completion");
+            assert_eq!(completion.text, "Knižnica je otvorená [1].");
+            assert_eq!(
+                (completion.tokens, completion.input, completion.output),
+                (1240, 1200, 40)
+            );
+        }
+        // A stream with no chunk at all is no completion; one without usage counts nothing.
+        assert_eq!(StreamReader::default().finish(), None);
+        let mut reader = StreamReader::default();
+        reader.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}");
+        assert_eq!(
+            reader.finish().map(|c| (c.text, c.tokens)),
+            Some(("a".into(), 0))
+        );
     }
 }
