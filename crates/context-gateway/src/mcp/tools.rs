@@ -89,6 +89,46 @@ impl Tool {
     }
 }
 
+/// The tools a caller without a token may list and call, on every MCP surface: the hub, a named
+/// server, an Endpoint's and a Context Space's (T-4168). An allowlist rather than
+/// [`Tool::read_only`]: a tool the catalogue or the broker gains later is a write to an anonymous
+/// caller until it is named here, so an unknown name is refused, never taken for a read.
+pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
+    "list_endpoints",
+    "list_types",
+    "query_entities",
+    "get_entity",
+    "get_attribute_value",
+    "retrieve_temporal",
+    "describe_schema",
+    "describe_access",
+];
+
+/// Whether a caller without a token may list and call `name` (T-4168).
+pub(crate) fn anonymous_may(name: &str) -> bool {
+    ANONYMOUS_TOOLS.contains(&name)
+}
+
+/// The JSON-RPC error a caller without a token gets for any other tool: what it may call instead,
+/// and that a token opens the rest under the Endpoint's own Policy.
+pub(crate) fn anonymous_refusal(id: Value, name: &str) -> Value {
+    crate::mcp::jsonrpc::error(
+        id,
+        -32602,
+        &format!(
+            "`{name}` is not offered without a token; an anonymous caller may use {} only. \
+             Sign in for the tools the Endpoint's Policy grants you",
+            ANONYMOUS_TOOLS.join(", ")
+        ),
+    )
+}
+
+/// Keeps in a `tools/list` answer only what [`anonymous_may`] admits; an entry without a name
+/// is dropped too.
+pub(crate) fn keep_anonymous(tools: &mut Vec<Value>) {
+    tools.retain(|tool| tool["name"].as_str().is_some_and(anonymous_may));
+}
+
 /// The words `describe_access` and the `access://` resource answer in (EP-56, EP-57, EP-58).
 pub(crate) const ACCESS_FORMATS: [&str; 3] = ["permissions", "odrl", "grant-ast"];
 
@@ -966,8 +1006,70 @@ pub(crate) fn output_schema(tool: &Tool) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{Shape, Tool, TOOLS};
+    use super::{
+        anonymous_may, anonymous_refusal, keep_anonymous, Shape, Tool, ANONYMOUS_TOOLS, TOOLS,
+    };
     use jc_core::kinds::Operation;
+    use serde_json::json;
+
+    /// T-4168: every tool an anonymous caller may use reads, and every tool that writes, or that
+    /// nobody named, is kept from it.
+    #[test]
+    fn an_anonymous_caller_may_use_the_named_reads_alone() {
+        for name in ANONYMOUS_TOOLS
+            .iter()
+            .filter(|name| **name != "list_endpoints")
+        {
+            let tool = TOOLS.iter().find(|tool| tool.name == *name);
+            assert!(
+                tool.is_some_and(Tool::read_only),
+                "{name} is not a read of the catalogue"
+            );
+        }
+        for tool in TOOLS.iter().filter(|tool| !tool.read_only()) {
+            assert!(!anonymous_may(tool.name), "{} writes", tool.name);
+        }
+        for name in [
+            "create_subscription",
+            "delete_entity",
+            "a_tool_added_later",
+            "",
+        ] {
+            assert!(!anonymous_may(name), "{name} is admitted");
+        }
+    }
+
+    #[test]
+    fn an_anonymous_listing_keeps_the_reads_and_drops_writes_and_nameless_entries() {
+        let mut tools = vec![
+            json!({"name": "query_entities"}),
+            json!({"name": "create_subscription"}),
+            json!({"name": "update_subscription"}),
+            json!({"name": "a_tool_added_later"}),
+            json!({"title": "no name"}),
+            json!({"name": 7}),
+            json!({"name": "describe_access"}),
+        ];
+        keep_anonymous(&mut tools);
+        assert_eq!(
+            tools,
+            [
+                json!({"name": "query_entities"}),
+                json!({"name": "describe_access"})
+            ]
+        );
+    }
+
+    #[test]
+    fn an_anonymous_refusal_is_a_json_rpc_error_naming_what_it_may_call() {
+        let refusal = anonymous_refusal(json!(4), "delete_subscription");
+        assert_eq!(refusal["id"], 4);
+        assert_eq!(refusal["error"]["code"], -32602);
+        let message = refusal["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("`delete_subscription`"), "{message}");
+        assert!(message.contains("query_entities"), "{message}");
+        assert!(refusal.get("result").is_none());
+    }
 
     /// T-1066, AG-07: `read_only` is the `readOnlyHint` an agent runtime reads before it asks a
     /// person, so it is derived from the operations rather than set beside them; and it says what

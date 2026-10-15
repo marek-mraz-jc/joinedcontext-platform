@@ -51,6 +51,11 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         Ok(reached) => reached,
         Err(refusal) => return *refusal,
     };
+    if anonymous {
+        if let Err(refusal) = rate_limit::spend_anonymous_mcp(&gateway, request.headers()) {
+            return *refusal;
+        }
+    }
 
     let caller = rate_limit::caller_key(request.headers());
     let (_, body) = request.into_parts();
@@ -67,6 +72,7 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         caller,
         server: None,
         anonymous,
+        reads_only: anonymous,
     };
     let mut response = match hub.answer(message).await {
         Answer::Json(answer) => jsonrpc::json_response(StatusCode::OK, &answer),
@@ -347,6 +353,9 @@ pub(crate) struct Hub {
     pub(crate) server: Option<McpServer>,
     /// No token on this request: an Endpoint outside `reach` is `401`, not unknown (T-4114).
     pub(crate) anonymous: bool,
+    /// No token on this request, on the hub or a named server: only
+    /// [`tools::ANONYMOUS_TOOLS`] are listed and called (T-4168).
+    pub(crate) reads_only: bool,
 }
 
 pub(crate) enum Answer {
@@ -397,6 +406,9 @@ impl Hub {
             "tools/list" => {
                 let mut tools = vec![list_endpoints_tool()];
                 tools.extend(tools::hub_tools(&self.gateway, &self.reach));
+                if self.reads_only {
+                    tools::keep_anonymous(&mut tools);
+                }
                 // A member's view answers its own cursor, opaque; a member no view serves yet
                 // still answers an offset (T-3808).
                 for cursor in tools
@@ -422,6 +434,10 @@ impl Hub {
 
     async fn call(&self, id: Value, params: Value) -> Answer {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        // Before any routing, so a write is refused whichever Endpoint it names (T-4168).
+        if self.reads_only && !tools::anonymous_may(name) {
+            return Answer::Json(tools::anonymous_refusal(id, name));
+        }
         let mut arguments = match params.get("arguments") {
             None => Map::new(),
             Some(Value::Object(arguments)) => arguments.clone(),
