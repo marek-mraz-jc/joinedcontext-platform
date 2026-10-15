@@ -120,6 +120,7 @@ fn spec(start: &str, schedule: Option<&str>) -> KnowledgeSourceSpec {
         organizations: Vec::new(),
         upload: None,
         sitemap: false,
+        wordpress_types: vec![],
         include: Vec::new(),
         exclude: Vec::new(),
         max_depth: 2,

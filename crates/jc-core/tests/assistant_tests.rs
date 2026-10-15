@@ -145,6 +145,11 @@ fn a_source_is_refused_with_the_field_to_change() {
         "a ckan source names its instance"
     );
     let ckan = source_with("source: website               # website | ckan\n  startUrls: [https://www.banskabystrica.sk/]\n", "source: ckan\n  ckanInstanceRef: open-data\n");
+    // Only a website source lists WordPress types.
+    let ckan = ckan.replace(
+        "  wordpressTypes: [pages, newses, life_situations, regulations]\n",
+        "",
+    );
     assert!(source(&ckan).is_ok());
     // An unknown field is a parse error, so a typo never becomes a silent default.
     assert!(refused(source(&source_with("maxDepth: 3", "maxDepht: 3"))).contains("unknown field"));
@@ -684,4 +689,40 @@ fn a_ckan_source_narrows_to_organizations_and_an_upload_source_names_nothing_to_
         refused(source(&upload("  upload: { maxBytes: 1, types: [exe] }\n")))
             .contains("unknown field")
     );
+}
+
+/// MF-51, T-4154: a website source may list WordPress REST bases; nothing else may, and each is
+/// a bounded REST base.
+#[test]
+fn a_website_source_lists_wordpress_types_and_no_other_source_does() {
+    let read = source(SOURCE).expect("the documented source");
+    assert_eq!(
+        read.spec.wordpress_types,
+        ["pages", "newses", "life_situations", "regulations"]
+    );
+    let with = |types: &str| {
+        source_with(
+            "  wordpressTypes: [pages, newses, life_situations, regulations]\n",
+            &format!("  wordpressTypes: [{types}]\n"),
+        )
+    };
+    assert!(source(&with("office_announcements, emergency-contacts, v2")).is_ok());
+    let forty_one = (0..41)
+        .map(|i| format!("t{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for types in [
+        forty_one.as_str(),
+        "Pages",
+        "pages/../users",
+        "\"\"",
+        "pages?per_page=100",
+        &"a".repeat(65),
+    ] {
+        assert_eq!(refused(source(&with(types))), "wordpressTypes", "{types}");
+    }
+    let ckan = "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\n\
+                metadata: { name: data, namespace: banskabystrica }\n\
+                spec:\n  source: ckan\n  ckanInstanceRef: data\n  wordpressTypes: [pages]\n";
+    assert_eq!(refused(source(ckan)), "wordpressTypes");
 }

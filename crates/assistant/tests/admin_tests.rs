@@ -49,6 +49,7 @@ fn source_spec() -> KnowledgeSourceSpec {
         organizations: Vec::new(),
         upload: None,
         sitemap: true,
+        wordpress_types: vec![],
         include: vec![],
         exclude: vec![],
         max_depth: 3,
