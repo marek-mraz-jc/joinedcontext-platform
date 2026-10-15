@@ -528,7 +528,8 @@ impl Channel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Connector {
-    /// The Endpoint's `metadata.name` in this project.
+    /// The Endpoint's `metadata.name` in this project, or `{project}/{name}` for a public
+    /// Endpoint of a project in `scope.projects`.
     pub endpoint: String,
     /// The tools of its MCP surface the assistant may call; at least one.
     pub tools: Vec<String>,
@@ -705,6 +706,8 @@ impl AssistantDeploymentSpec {
     }
 
     /// The other projects its connectors may reach; empty when it names none.
+    ///
+    /// A connector names one of their Endpoints as `{project}/{endpoint}` ([`connector_target`]).
     pub fn scope_projects(&self) -> &[String] {
         self.scope
             .as_ref()
@@ -737,13 +740,21 @@ impl AssistantDeploymentSpec {
             })?;
         }
         for connector in &self.connectors {
-            names::validate_dns1123_label(&connector.endpoint).map_err(|_| {
+            let (project, endpoint) = connector_target(&connector.endpoint);
+            names::validate_dns1123_label(endpoint).map_err(|_| {
                 name(
                     "connectors[].endpoint",
                     connector.endpoint.clone(),
-                    "a connector names an Endpoint of this project",
+                    "a connector names an Endpoint of this project, or one of a project in scope.projects as {project}/{endpoint}",
                 )
             })?;
+            if project.is_some_and(|project| !self.scope_projects().iter().any(|p| p == project)) {
+                return Err(name(
+                    "connectors[].endpoint",
+                    connector.endpoint.clone(),
+                    "a connector names another project's Endpoint only when scope.projects lists that project",
+                ));
+            }
             if connector.tools.is_empty()
                 || connector.tools.iter().any(|tool| tool.trim().is_empty())
             {
@@ -1041,6 +1052,15 @@ impl AssistantDeploymentSpec {
 }
 
 /// `vendor/name`: at most 100 characters of `a-z0-9._:/-`, both parts present.
+/// The project and Endpoint a connector names: `{project}/{endpoint}` for an Endpoint of a
+/// project in `scope.projects`, the deployment's own project (`None`) otherwise (MF-52, T-4177).
+pub fn connector_target(endpoint: &str) -> (Option<&str>, &str) {
+    match endpoint.split_once('/') {
+        Some((project, name)) => (Some(project), name),
+        None => (None, endpoint),
+    }
+}
+
 fn is_model_id(id: &str) -> bool {
     id.len() <= MAX_MODEL_ID_LEN
         && id
