@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use tokio::sync::mpsc::Sender;
 
 use super::mcp::{cut, Surface, Tool, MAX_RESULT_CHARS};
-use super::model::{CallError, Model};
+use super::model::{CallError, Completion, Model};
 use crate::embed::Embedder;
 use crate::{hybrid_search, Search};
 
@@ -301,6 +301,28 @@ pub struct Spent {
     pub cached: bool,
     /// What its model calls cost, in millionths of a US dollar (T-4149).
     pub cost_micros: u64,
+    /// Model calls whose provider reported no cost, so `cost_micros` is a floor (T-4178).
+    pub uncosted: u64,
+}
+
+impl Spent {
+    /// Counts one model call: its tokens, and its cost when the provider reported one.
+    pub fn add(&mut self, completion: &Completion) {
+        self.total += completion.tokens;
+        self.input += completion.input;
+        self.output += completion.output;
+        match completion.cost_micros {
+            Some(cost) => self.cost_micros += cost,
+            None => self.uncosted += 1,
+        }
+        self.calls += 1;
+    }
+
+    /// The answer's cost in US dollars, only when every call reported one; a cached answer and
+    /// one that made no call cost 0 (T-4178, API/05 §1.3).
+    pub fn cost_usd(&self) -> Option<f64> {
+        (self.uncosted == 0).then(|| self.cost_micros as f64 / 1_000_000.0)
+    }
 }
 
 /// Answers one question; returns what it spent. Every outcome reaches `events`: an answer with
@@ -385,11 +407,7 @@ pub async fn answer(
                 return spent;
             }
         };
-        spent.total += completion.tokens;
-        spent.input += completion.input;
-        spent.output += completion.output;
-        spent.cost_micros += completion.cost_micros;
-        spent.calls += 1;
+        spent.add(&completion);
         if completion.calls.is_empty() || !allow_tools {
             let text = completion.text.trim().to_owned();
             if text.is_empty() {
