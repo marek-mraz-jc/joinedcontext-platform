@@ -208,10 +208,60 @@ pub struct Question {
     pub connectors: Option<Vec<String>>,
 }
 
+/// The longest note of a thumbs down (API/05 §1.8).
+pub const MAX_NOTE_CHARS: usize = 500;
+
+/// A visitor's verdict on one answer (API/05 §1.8, T-4174).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Feedback {
+    pub conversation: String,
+    pub turn: u32,
+    pub verdict: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// The checks a verdict passes before it is looked up; the note as it is stored, trimmed, `None`
+/// when empty. A note with a secret's shape is refused, never stored.
+pub fn check_feedback(feedback: &Feedback) -> Result<Option<String>, String> {
+    if feedback.verdict != "up" && feedback.verdict != "down" {
+        return Err("verdict is up or down".into());
+    }
+    if !(1..=200).contains(&feedback.turn) {
+        return Err("turn is the answer's place in the conversation, 1 to 200".into());
+    }
+    let note = feedback
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let Some(note) = note else {
+        return Ok(None);
+    };
+    if feedback.verdict != "down" {
+        return Err("only a thumbs down carries a note".into());
+    }
+    if note.chars().count() > MAX_NOTE_CHARS {
+        return Err(format!("note is at most {MAX_NOTE_CHARS} characters"));
+    }
+    if agent_proxy::routes::diagnostics::redact(note) != note {
+        return Err(
+            "Poznámka vyzerá ako heslo alebo kľúč, preto ju neukladáme. Napíšte ju bez neho."
+                .into(),
+        );
+    }
+    Ok(Some(note.to_owned()))
+}
+
 /// The chat route with its body limit, and the Portal's administration paths (admin.rs).
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
+        .route(
+            "/api/v1/d/{public_id}/feedback",
+            post(feedback).options(preflight),
+        )
         .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat",
             post(chat_in_portal),
@@ -425,6 +475,8 @@ async fn conversation(
 pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     // No WHERE: the `conversations_expired` policy (migration 0006) is the whole selection, and a
     // column named here would need a SELECT policy across projects.
+    // Verdicts are kept for 90 days, by their own policy (migration 0008).
+    sqlx::query("DELETE FROM feedback").execute(pool).await?;
     let gone = sqlx::query("DELETE FROM conversations")
         .execute(pool)
         .await?;
@@ -601,6 +653,7 @@ fn sse(event: &Event) -> SseEvent {
         Event::Data(table) => ("data", json!(table)),
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
+        Event::Followups(questions) => ("followups", json!({"questions": questions})),
         Event::Error {
             status,
             title,
@@ -661,6 +714,117 @@ async fn chat(
     )
     .await;
     with_cors(response, origin)
+}
+
+async fn feedback(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<Feedback>, JsonRejection>,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let response = verdict(&state, &deployment, &headers, origin.as_ref(), body).await;
+    with_cors(response, origin)
+}
+
+async fn verdict(
+    state: &ChatState,
+    deployment: &Deployment,
+    headers: &HeaderMap,
+    origin: Option<&HeaderValue>,
+    body: Result<Json<Feedback>, JsonRejection>,
+) -> Response {
+    let feedback = match body {
+        Ok(Json(feedback)) => feedback,
+        Err(rejection) => return body_refused(&rejection),
+    };
+    let note = match check_feedback(&feedback) {
+        Ok(note) => note,
+        Err(why) => return problem(400, why),
+    };
+    if !uuid_shaped(&feedback.conversation) {
+        return problem(
+            400,
+            "conversation: not a current conversation of this assistant",
+        );
+    }
+    if let Some(rate) = &deployment.spec.rate_limit {
+        let mut limits = state.limits.lock().await;
+        let key = format!(
+            "{}/{}\u{0}{}\u{0}f",
+            deployment.project,
+            deployment.name,
+            limits.visitor(&client_of(headers), today())
+        );
+        if let Err(retry) = limits.admit(
+            &[(&key, rate.per_client_per_minute, MINUTE)],
+            Instant::now(),
+        ) {
+            return too_many(
+                retry,
+                "Poslali ste veľa hodnotení za krátky čas. Počkajte chvíľu a skúste to znova.",
+            );
+        }
+    }
+    let started_at = origin.and_then(|o| o.to_str().ok());
+    match conversation(
+        &state.pool,
+        deployment,
+        Some(&feedback.conversation),
+        started_at,
+    )
+    .await
+    {
+        Ok(Some((_, _, asked))) if feedback.turn <= asked => {}
+        Ok(_) => return problem(
+            400,
+            "conversation: not a current conversation of this assistant, or no such answer in it",
+        ),
+        Err(err) => {
+            tracing::error!(%err, "the conversation of a verdict could not be read");
+            return problem(
+                503,
+                "The verdict could not be stored. Try again in a minute.",
+            );
+        }
+    }
+    let stored = async {
+        let mut tx = crate::project_scope(&state.pool, &deployment.project).await?;
+        sqlx::query(
+            "INSERT INTO feedback (project, deployment, conversation, turn, verdict, note) \
+             VALUES ($1, $2, $3::uuid, $4, $5, $6) \
+             ON CONFLICT (conversation, turn) DO UPDATE SET verdict = EXCLUDED.verdict, \
+             note = EXCLUDED.note, created_at = now()",
+        )
+        .bind(&deployment.project)
+        .bind(&deployment.name)
+        .bind(&feedback.conversation)
+        .bind(i32::try_from(feedback.turn).unwrap_or(i32::MAX))
+        .bind(&feedback.verdict)
+        .bind(&note)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, crate::Error>(())
+    }
+    .await;
+    match stored {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::error!(%err, "a verdict was not stored");
+            problem(
+                503,
+                "The verdict could not be stored. Try again in a minute.",
+            )
+        }
+    }
 }
 
 /// The Portal asking for a signed-in person (API/05 §1.7, AG-115): any channel by its name, the
@@ -1262,6 +1426,48 @@ mod tests {
             Limits::default().visitor("198.51.100.9", 20_000),
             "salted per process"
         );
+    }
+
+    /// T-4174: a verdict is up or down on a turn 1 to 200; only a thumbs down carries a note, of
+    /// at most 500 characters and never one with a secret's shape.
+    #[test]
+    fn a_verdict_and_its_note_are_checked_before_anything_is_looked_up() {
+        let verdict = |verdict: &str, turn: u32, note: Option<&str>| {
+            check_feedback(&Feedback {
+                conversation: "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11".into(),
+                turn,
+                verdict: verdict.into(),
+                note: note.map(str::to_owned),
+            })
+        };
+        assert_eq!(verdict("up", 1, None), Ok(None));
+        assert_eq!(verdict("up", 1, Some("  ")), Ok(None));
+        assert_eq!(
+            verdict("down", 200, Some("  Chýbali hodiny. ")),
+            Ok(Some("Chýbali hodiny.".into()))
+        );
+        assert_eq!(
+            verdict("down", 1, Some(&"č".repeat(MAX_NOTE_CHARS))),
+            Ok(Some("č".repeat(MAX_NOTE_CHARS)))
+        );
+        for (v, turn, note) in [
+            ("meh", 1, None),
+            ("UP", 1, None),
+            ("up", 0, None),
+            ("down", 201, None),
+            ("up", 1, Some("pekné")),
+        ] {
+            assert!(verdict(v, turn, note).is_err(), "{v} {turn} {note:?}");
+        }
+        assert!(verdict("down", 1, Some(&"č".repeat(MAX_NOTE_CHARS + 1))).is_err());
+        for secret in [
+            format!("môj token ghp_{}", "abc123def456ghi789jkl012"),
+            format!("kľúč AKIA{}", "IOSFODNN7EXAMPLE"),
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl".to_owned(),
+        ] {
+            let refused = verdict("down", 1, Some(&secret)).expect_err("a secret");
+            assert!(refused.contains("heslo"), "{refused}");
+        }
     }
 
     /// T-4149: the cap holds from the cent it is reached, and is reported once a day.

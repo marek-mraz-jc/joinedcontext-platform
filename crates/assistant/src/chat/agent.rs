@@ -104,6 +104,8 @@ pub enum Event {
     Delta(String),
     /// Rows a data round read from a connector, for the person to see as a table (T-4140).
     Data(Table),
+    /// Up to three questions to offer after the answer (T-4174).
+    Followups(Vec<String>),
     /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
     Done(Spent, u64),
 }

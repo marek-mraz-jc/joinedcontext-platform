@@ -586,10 +586,37 @@ async fn usage(
         Ok(rows) => rows,
         Err(err) => return failed(err),
     };
+    // The visitors' verdicts per day (API/05 §1.8, T-4174).
+    let verdicts: Vec<(String, i64, i64, i64)> = match sqlx::query_as(
+        "SELECT to_char(created_at::date, 'YYYY-MM-DD'), \
+         count(*) FILTER (WHERE verdict = 'up'), count(*) FILTER (WHERE verdict = 'down'), \
+         count(note) FROM feedback \
+         WHERE deployment = $1 AND created_at::date > current_date - 30 GROUP BY 1",
+    )
+    .bind(&deployment)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return failed(err),
+    };
     let _ = tx.rollback().await;
-    let items: Vec<Value> = rows
+    let mut days: std::collections::BTreeMap<String, Value> = rows
         .into_iter()
-        .map(|(day, requests, input, output)| json!({"day": day, "requests": requests, "tokensIn": input, "tokensOut": output}))
+        .map(|(day, requests, input, output)| {
+            let item = json!({"day": day, "requests": requests, "tokensIn": input, "tokensOut": output,
+                "thumbsUp": 0, "thumbsDown": 0, "notes": 0});
+            (day, item)
+        })
         .collect();
+    for (day, up, down, notes) in verdicts {
+        let item = days
+            .entry(day.clone())
+            .or_insert_with(|| json!({"day": day, "requests": 0, "tokensIn": 0, "tokensOut": 0}));
+        item["thumbsUp"] = json!(up);
+        item["thumbsDown"] = json!(down);
+        item["notes"] = json!(notes);
+    }
+    let items: Vec<Value> = days.into_values().collect();
     Json(json!({"items": items})).into_response()
 }

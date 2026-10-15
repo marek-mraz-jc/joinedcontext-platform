@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, linkHost } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, linkHost, followups, restore, remember } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -212,4 +212,36 @@ test("a host matches itself and its subdomains, never a look-alike", () => {
   }
   assert.ok(!linkHost("https://banskabystrica.sk", []));
   assert.ok(!linkHost("https://banskabystrica.sk", [""]));
+});
+
+// T-4174: the followups event and the turns the panel keeps in its sessionStorage.
+test("a followups event gives at most three short, distinct questions", () => {
+  assert.deepEqual(followups({ questions: ["  Kde je  zberný dvor? ", "Kde je zberný dvor?", 7, "", "x".repeat(121), "A b?", "C d?", "E f?"] }),
+    ["Kde je zberný dvor?", "A b?", "C d?"]);
+  for (const bad of [null, {}, { questions: "a" }, []]) assert.deepEqual(followups(bad), []);
+});
+
+test("a kept conversation is read back only in its own shape", () => {
+  const id = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
+  let kept = null;
+  for (let n = 1; n <= 22; n++) {
+    kept = remember(kept, id, n, { question: "q" + n, text: "a" + n, turn: n, citations: [] });
+  }
+  assert.equal(kept.turns.length, 20, "the oldest are dropped");
+  assert.equal(kept.turns[0].question, "q3");
+  const back = restore(JSON.stringify(kept));
+  assert.deepEqual(back, kept);
+  // Another conversation starts its own list.
+  assert.deepEqual(remember(kept, "00000000-0000-4000-8000-000000000000", 1,
+    { question: "n", text: "m", turn: 1, citations: [] }).turns.length, 1);
+  for (const raw of [null, "", "not json", "[]", '{"conversation":"x","turns":[]}',
+    JSON.stringify({ conversation: id, turns: "no" })]) {
+    assert.equal(restore(raw), null, String(raw));
+  }
+  // A turn not of its shape is left out; asked never trails a kept turn.
+  const mixed = restore(JSON.stringify({ conversation: id, asked: 1, turns: [
+    { question: "q", text: "a", turn: 3, citations: [] }, { question: 1, text: "a", turn: 1, citations: [] },
+    { question: "q", text: "a", turn: 0, citations: [] }, { question: "q", text: "<b>x</b>", turn: 4 }] }));
+  assert.equal(mixed.turns.length, 1);
+  assert.equal(mixed.asked, 3);
 });
