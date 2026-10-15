@@ -672,11 +672,7 @@ fn tokens_of(messages: &[Value]) -> u64 {
 }
 
 fn count(spent: &mut Spent, completion: &Completion) {
-    spent.total += completion.tokens;
-    spent.input += completion.input;
-    spent.output += completion.output;
-    spent.cost_micros += completion.cost_micros;
-    spent.calls += 1;
+    spent.add(completion);
 }
 
 fn refusal(err: &CallError) -> Event {

@@ -2082,8 +2082,11 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
         }))],
     )
     .await;
-    let (status, _, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
     assert_eq!(status, StatusCode::OK);
+    // T-4178: the answer reports what its calls cost, for the eval's cost per answer.
+    let done = &first.last().expect("a done event").1;
+    assert_eq!(done["costUsd"], json!(0.012), "{first:?}");
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
         .expect("scope");
@@ -2121,11 +2124,35 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
         assert!(answer.contains(&format!("[{}]", at + 1)), "{answer}");
     }
     assert_eq!(events[3].1["modelCalls"], 0);
+    assert_eq!(events[3].1["costUsd"], json!(0.0), "no call, no cost");
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         before,
         "no model call past the cap"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4178: a provider that reports no cost leaves `costUsd` out of `done`, so a sum that misses
+/// a call never reads as the answer's price.
+#[tokio::test]
+async fn an_answer_whose_cost_was_not_reported_has_no_cost_in_done() {
+    let w = world("chatnocost", deployment(Channel::Public, 1_000_000, 10)).await;
+    script(
+        &w.proxy,
+        vec![ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Áno."}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+        }))],
+    )
+    .await;
+    let (status, events, _) =
+        answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (name, done) = events.last().expect("a done event");
+    assert_eq!(name, "done");
+    assert_eq!(done["tokensIn"], 40, "{events:?}");
+    assert!(done.get("costUsd").is_none(), "{done}");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 

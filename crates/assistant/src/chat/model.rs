@@ -22,11 +22,11 @@ pub struct Completion {
     pub input: u64,
     pub output: u64,
     /// What the provider says the call cost, in millionths of a US dollar (OpenRouter's
-    /// `usage.cost`, T-4149); 0 when it says nothing.
-    pub cost_micros: u64,
+    /// `usage.cost`, T-4149); `None` when it says nothing, which is not the same as free (T-4178).
+    pub cost_micros: Option<u64>,
 }
 
-/// `usage.cost` in millionths of a US dollar; 0 when absent, negative or not a number.
+/// `usage.cost` in millionths of a US dollar; `None` when absent, negative or not a number.
 fn cost_micros(usage: &Value) -> Option<u64> {
     let cost = usage.get("cost")?.as_f64()?;
     (cost.is_finite() && cost >= 0.0).then(|| (cost * 1_000_000.0).round() as u64)
@@ -342,7 +342,7 @@ pub struct StreamReader {
     input: u64,
     output: u64,
     total: Option<u64>,
-    cost_micros: u64,
+    cost_micros: Option<u64>,
     chunks: usize,
 }
 
@@ -379,7 +379,7 @@ impl StreamReader {
             self.input = count("prompt_tokens").unwrap_or(self.input);
             self.output = count("completion_tokens").unwrap_or(self.output);
             self.total = count("total_tokens").or(self.total);
-            self.cost_micros = cost_micros(usage).unwrap_or(self.cost_micros);
+            self.cost_micros = cost_micros(usage).or(self.cost_micros);
         }
         let piece = chunk.pointer("/choices/0/delta/content")?.as_str()?;
         if piece.is_empty() {
@@ -443,7 +443,7 @@ pub fn parse(body: &Value) -> Option<Completion> {
         tokens: count("total_tokens").unwrap_or(input + output),
         input,
         output,
-        cost_micros: usage.and_then(cost_micros).unwrap_or(0),
+        cost_micros: usage.and_then(cost_micros),
     })
 }
 
@@ -481,9 +481,9 @@ mod tests {
         assert_eq!(parse(&json!({"error": "x"})), None);
     }
 
-    /// T-4149: the provider's `usage.cost` is read in millionths of a dollar, from a whole
-    /// completion and from a stream's last chunk; a cost that is absent, negative or not a number
-    /// counts nothing.
+    /// T-4149, T-4178: the provider's `usage.cost` is read in millionths of a dollar, from a
+    /// whole completion and from a stream's last chunk; a cost that is absent, negative or not a
+    /// number is `None`, never a free call.
     #[test]
     fn a_call_s_cost_is_read_from_its_usage() {
         let with = |cost: Value| {
@@ -494,17 +494,34 @@ mod tests {
             .expect("a completion")
             .cost_micros
         };
-        assert_eq!(with(json!(0.0042)), 4_200);
-        assert_eq!(with(json!(3)), 3_000_000);
-        assert_eq!(with(json!(-1.0)), 0);
-        assert_eq!(with(json!("lots")), 0);
-        assert_eq!(with(Value::Null), 0);
+        assert_eq!(with(json!(0.0042)), Some(4_200));
+        assert_eq!(with(json!(3)), Some(3_000_000));
+        assert_eq!(with(json!(-1.0)), None);
+        assert_eq!(with(json!("lots")), None);
+        assert_eq!(with(Value::Null), None);
+        let without = parse(&json!({
+            "choices": [{"message": {"role": "assistant", "content": "a"}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 1}
+        }));
+        assert_eq!(without.expect("a completion").cost_micros, None);
         let mut reader = StreamReader::default();
         reader.feed(concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"cost\":0.000125}}\n\n",
         ).as_bytes());
-        assert_eq!(reader.finish().expect("a completion").cost_micros, 125);
+        assert_eq!(
+            reader.finish().expect("a completion").cost_micros,
+            Some(125)
+        );
+        let mut silent = StreamReader::default();
+        silent.feed(
+            concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\n",
+        )
+            .as_bytes(),
+        );
+        assert_eq!(silent.finish().expect("a completion").cost_micros, None);
     }
 
     /// T-4139: the pieces come out as they complete, wherever the bytes were cut, and the usage

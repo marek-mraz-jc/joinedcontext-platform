@@ -671,9 +671,8 @@ fn sse(event: &Event) -> SseEvent {
                 Err(error) => json!({"code": code, "error": error}),
             },
         ),
-        Event::Done(spent, total_ms) => (
-            "done",
-            json!({
+        Event::Done(spent, total_ms) => {
+            let mut done = json!({
                 "tokens": spent.total,
                 "tokensIn": spent.input,
                 "tokensOut": spent.output,
@@ -681,8 +680,14 @@ fn sse(event: &Event) -> SseEvent {
                 "firstTokenMs": spent.first_token_ms,
                 "totalMs": total_ms,
                 "cached": spent.cached,
-            }),
-        ),
+            });
+            // Present only when every call reported its cost (T-4178): a missing one would make
+            // the sum look cheaper than the answer was.
+            if let Some(cost) = spent.cost_usd() {
+                done["costUsd"] = json!(cost);
+            }
+            ("done", done)
+        }
     };
     SseEvent::default().event(name).data(data.to_string())
 }
