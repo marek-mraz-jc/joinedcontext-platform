@@ -101,6 +101,11 @@ async fn world(test: &str) -> World {
     }
     sqlx::query("INSERT INTO usage (project, deployment, day, requests, tokens_in, tokens_out) VALUES ('hronov', 'obcania', current_date, 3, 900, 100)")
         .execute(&mut *tx).await.expect("usage");
+    // T-4174: two verdicts up, one down with a note, one down without.
+    sqlx::query("INSERT INTO feedback (project, deployment, conversation, turn, verdict, note) VALUES \
+        ('hronov', 'obcania', gen_random_uuid(), 1, 'up', NULL), ('hronov', 'obcania', gen_random_uuid(), 1, 'up', NULL), \
+        ('hronov', 'obcania', gen_random_uuid(), 2, 'down', 'Chýbali otváracie hodiny.'), ('hronov', 'obcania', gen_random_uuid(), 1, 'down', NULL)")
+        .execute(&mut *tx).await.expect("feedback");
     tx.commit().await.expect("commit");
 
     let realm = MockServer::start().await;
@@ -443,6 +448,15 @@ async fn the_inventory_reads_level_by_level() {
     )
     .await;
     assert_eq!(usage["items"][0]["requests"], 3);
+    assert_eq!(
+        (
+            &usage["items"][0]["thumbsUp"],
+            &usage["items"][0]["thumbsDown"],
+            &usage["items"][0]["notes"]
+        ),
+        (&json!(2), &json!(2), &json!(1)),
+        "{usage}"
+    );
 
     // Another project, an unknown source and a page of no source of this project are not found.
     for uri in [
