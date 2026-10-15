@@ -204,6 +204,13 @@
           ],
           "default": "internal",
           "description": "`public` (any channel) or `internal` (the internal channel only); default `internal`."
+        },
+        "wordpressTypes": {
+          "description": "WordPress REST bases (`pages`, `newses`, ...) whose items' links are read beside the sitemap, from the start host's `/wp-json/wp/v2/{type}`, newest change first (T-4154).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

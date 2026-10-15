@@ -322,7 +322,7 @@
       "description": "One Endpoint of the project whose MCP tools the assistant may call.",
       "properties": {
         "endpoint": {
-          "description": "The Endpoint's `metadata.name` in this project.",
+          "description": "The Endpoint's `metadata.name` in this project, or `{project}/{name}` for a public Endpoint of a project in `scope.projects`.",
           "type": "string"
         },
         "timeoutSeconds": {
