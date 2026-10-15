@@ -131,6 +131,81 @@ var JCRender = (function () {
     return source.endpoint || "";
   }
 
-  return { markdown: markdown, sources: sources, label: label };
+  /** An `http(s)` address as given, anything else (a `javascript:` link, a relative path) null. */
+  function safeUrl(url) {
+    return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) ? url : null;
+  }
+
+  /**
+   * The complete Server-Sent Events in `buffer` (T-4138): each `{name, data}` with its data parsed
+   * as JSON, a malformed one skipped, and the unfinished tail returned as `rest` for the next read.
+   */
+  function events(buffer) {
+    var out = [];
+    var text = String(buffer).replace(/\r\n?/g, "\n");
+    var at;
+    while ((at = text.indexOf("\n\n")) >= 0) {
+      var block = text.slice(0, at);
+      text = text.slice(at + 2);
+      var name = "";
+      var data = [];
+      block.split("\n").forEach(function (line) {
+        if (line.indexOf("event:") === 0) name = line.slice(6).trim();
+        else if (line.indexOf("data:") === 0) data.push(line.slice(5).replace(/^ /, ""));
+      });
+      if (!name) continue;
+      try {
+        out.push({ name: name, data: JSON.parse(data.join("\n")) });
+      } catch (e) {
+        // A malformed event is skipped and the stream goes on.
+      }
+    }
+    return { events: out, rest: text };
+  }
+
+  /**
+   * The language the chat speaks (T-4138): the one asked for (the host page's, or the visitor's
+   * switch) when the widget has words for it, else Slovak when the deployment offers it or names
+   * none, else the deployment's first language the widget knows, else English.
+   */
+  function language(requested, offered, known) {
+    var has = function (l) { return Object.prototype.hasOwnProperty.call(known, l); };
+    var asked = String(requested || "").slice(0, 2).toLowerCase();
+    if (asked && has(asked)) return asked;
+    offered = (offered || []).filter(has);
+    if (offered.length === 0 || offered.indexOf("sk") >= 0) return has("sk") ? "sk" : "en";
+    return offered[0];
+  }
+
+  /**
+   * A `data` event as a table to show (T-4138, T-4140): its columns and at most 50 rows of
+   * text, and its dataset and download links when they are http(s); null when nothing to show.
+   */
+  function table(data) {
+    if (!data || !Array.isArray(data.columns) || data.columns.length === 0) return null;
+    var cell = function (v) {
+      if (v === null || v === undefined) return "";
+      return typeof v === "object" ? JSON.stringify(v) : String(v);
+    };
+    var width = data.columns.length;
+    var rows = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, 50)
+      .map(function (row) {
+        var out = row.slice(0, width).map(cell);
+        while (out.length < width) out.push("");
+        return out;
+      });
+    return {
+      caption: typeof data.type === "string" ? data.type : "",
+      columns: data.columns.map(cell),
+      rows: rows,
+      dataset: safeUrl(data.dataset),
+      download: safeUrl(data.download)
+    };
+  }
+
+  return {
+    markdown: markdown, sources: sources, label: label,
+    safeUrl: safeUrl, events: events, language: language, table: table
+  };
 })();
 if (typeof module !== "undefined") module.exports = JCRender;

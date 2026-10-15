@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -111,5 +111,59 @@ test("neither script ever parses HTML: no innerHTML and no way around it", () =>
   for (const file of ["render.js", "widget.js"]) {
     const code = fs.readFileSync(path.join(__dirname, file), "utf8");
     assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|DOMParser|createContextualFragment/, file);
+  }
+});
+
+// T-4138: the public chat's stream, language and data table.
+
+test("events are read whole, a split one waits for the next chunk and a bad one is skipped", () => {
+  const first = events('event: conversation\ndata: {"id":"c1"}\n\nevent: delta\ndata: {"text":"Dob');
+  assert.deepEqual(first.events, [{ name: "conversation", data: { id: "c1" } }]);
+  const second = events(first.rest + 'rý"}\n\nevent: delta\ndata: {oops\n\n: comment\n\nevent: done\r\ndata: {}\r\n\r\n');
+  assert.deepEqual(second.events, [{ name: "delta", data: { text: "Dobrý" } }, { name: "done", data: {} }]);
+  assert.equal(second.rest, "");
+  assert.deepEqual(events("").events, []);
+});
+
+test("a delta keeps its leading space and multi-line data is joined", () => {
+  assert.deepEqual(events('event: delta\ndata: {"text":\ndata: " deň"}\n\n').events, [
+    { name: "delta", data: { text: " deň" } },
+  ]);
+});
+
+test("Slovak by default, the host page's language when the widget knows it", () => {
+  const known = { sk: {}, en: {}, cs: {} };
+  assert.equal(language("", ["sk", "en"], known), "sk");
+  assert.equal(language(undefined, [], known), "sk");
+  assert.equal(language("en-GB", ["sk", "en"], known), "en");
+  assert.equal(language("hu", ["sk", "en"], known), "sk");
+  assert.equal(language("", ["en", "cs"], known), "en");
+  assert.equal(language("", ["hu"], known), "sk");
+  assert.equal(language("", ["fi"], { en: {} }), "en");
+});
+
+test("a data table shows at most 50 rows of text and only http(s) links", () => {
+  const rows = Array.from({ length: 60 }, (_, i) => [`Stanica ${i}`, i, null]);
+  const shown = table({
+    type: "AirQualityObserved",
+    columns: ["name", "pm10", "observedAt"],
+    rows: [["Námestie SNP", { value: 21 }], ...rows, "not a row"],
+    dataset: "https://data.dev.joinedcontext.com/dataset/ovzdusie",
+    download: "javascript:alert(1)",
+  });
+  assert.equal(shown.rows.length, 50);
+  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', ""]);
+  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", ""]);
+  assert.equal(shown.caption, "AirQualityObserved");
+  assert.equal(shown.dataset, "https://data.dev.joinedcontext.com/dataset/ovzdusie");
+  assert.equal(shown.download, null);
+  assert.equal(table({ columns: [], rows: [[1]] }), null);
+  assert.equal(table(null), null);
+});
+
+test("only an http(s) address is a link", () => {
+  assert.equal(safeUrl("https://www.banskabystrica.sk/"), "https://www.banskabystrica.sk/");
+  for (const bad of ["javascript:alert(1)", "/relative", "data:text/html,x", "https://a b", 42, undefined]) {
+    assert.equal(safeUrl(bad), null, String(bad));
   }
 });
