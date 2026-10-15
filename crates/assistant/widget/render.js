@@ -234,6 +234,16 @@ var JCRender = (function () {
     };
   }
 
+  /**
+   * The greeting the empty chat shows (T-4199): the deployment's own, which its author writes in
+   * its first language, when the chat speaks that language or the deployment names none; else the
+   * widget's greeting in the visitor's language.
+   */
+  function greeting(own, languages, lang, fallback) {
+    if (!own) return "";
+    return !Array.isArray(languages) || languages.length === 0 || languages[0] === lang ? own : fallback;
+  }
+
   var TIME = /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/;
 
   /**
@@ -388,7 +398,7 @@ var JCRender = (function () {
     followups: followups, restore: restore, remember: remember,
     cards: cards, stage: stage, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart
+    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting
   };
 })();
 if (typeof module !== "undefined") module.exports = JCRender;
