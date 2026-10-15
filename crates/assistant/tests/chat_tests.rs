@@ -1444,6 +1444,11 @@ async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cooki
         .unwrap_or_default()
         .starts_with("text/javascript"));
     assert!(launcher.contains("attachShadow") && launcher.contains("/widget?embed=1"));
+    // T-4204: the launcher leaves the host page room at its end, and on a phone the open panel
+    // takes the whole screen with the page behind it inert.
+    assert!(launcher.contains("var(--jc-assistant-inset, 96px)"));
+    assert!(launcher.contains("(max-width:640px)") && launcher.contains("(max-width: 640px)"));
+    assert!(launcher.contains(".inert = true"));
     assert!(headers.get("set-cookie").is_none());
     for unknown in ["/d/nikto", "/d/nikto/embed.js"] {
         let (status, _, _) = get(&w.app, unknown).await;
