@@ -16,6 +16,7 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::federation::{federations_of, Federations, Member};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -39,10 +40,14 @@ const HIDDEN: &str = "occupancy";
 const SOURCE: &str = "urn:ngsi-ld:ContextSourceRegistration:transport";
 
 fn policy() -> PolicySpec {
+    policy_for("public")
+}
+
+fn policy_for(role: &str) -> PolicySpec {
     serde_norway::from_str(&format!(
         r#"contextSpaceRef: {HUB}
 assigner: did:web:helsinki.fi
-assignee: {{ kind: role, id: public }}
+assignee: {{ kind: role, id: {role} }}
 operations: [queryEntity, retrieveEntity]
 information:
   - entities:
@@ -337,6 +342,44 @@ async fn mcp(broker: &str, federations: Federations, body: Value) -> Value {
     .await
 }
 
+/// One JSON-RPC message to the hub Endpoint's MCP from a steward the Endpoint grants what it
+/// grants the public: a token holder sees the broker's write tools, which a caller without a
+/// token never does (T-4168).
+async fn mcp_as_steward(broker: &str, federations: Federations, body: Value) -> Value {
+    let realm = common::Realm::new();
+    let mut endpoint = hub_endpoint();
+    endpoint.policies.push(policy_for("steward"));
+    let gateway = Gateway::new(Broker::new(broker), Box::new(PolicyPdp), "helsinki.fi")
+        .serve([endpoint])
+        .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None);
+    gateway.replace_federation(federations);
+    let token = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": HUB_SLUG,
+        "preferred_username": "aino",
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    let response = router(Arc::new(gateway))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{HUB_SLUG}/mcp"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a body");
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
 /// One JSON-RPC message to the MCP instance at `path`.
 async fn mcp_at(path: &str, broker: &str, federations: Federations, body: Value) -> Value {
     let response = router(gateway(broker, federations))
@@ -384,7 +427,7 @@ async fn the_hub_s_mcp_server_says_what_it_federates() {
         "a member's address never leaves the platform: {instructions}"
     );
 
-    let answer = mcp(
+    let answer = mcp_as_steward(
         &broker,
         members,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),

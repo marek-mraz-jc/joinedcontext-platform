@@ -277,6 +277,11 @@ pub(crate) fn caller_key(headers: &axum::http::HeaderMap) -> String {
             .collect();
         return format!("credential:{hex}");
     }
+    address_key(headers)
+}
+
+/// The client address alone, whatever credential the request presents (see [`caller_key`]).
+fn address_key(headers: &axum::http::HeaderMap) -> String {
     let address = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
@@ -285,6 +290,46 @@ pub(crate) fn caller_key(headers: &axum::http::HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown");
     format!("address:{address}")
+}
+
+/// The bucket every MCP request without a token spends, on whichever MCP surface it arrives:
+/// the hub, a named server, an Endpoint's or a Context Space's (T-4168). One per client address,
+/// so four surfaces and fifty public Endpoints are one allowance, not two hundred. It holds a
+/// space, so no Endpoint slug and no server path is it.
+const ANONYMOUS_MCP_BUCKET: &str = "mcp anonymous";
+
+/// Spends the anonymous MCP bucket of the client address; the `Err` is the 429 to answer.
+///
+/// Keyed by the address alone: a credential the request carries cannot open a bucket of its
+/// own here, since a caller without a token is by definition not the credential's holder. Only
+/// a request that came through the edge is counted. APISIX appends the client's address to
+/// `X-Forwarded-For` on every request, and the gateway's NetworkPolicy admits nothing else from
+/// outside the cluster, so a request without the header is an in-cluster workload: the public
+/// assistant calls Endpoint MCP that way for every visitor, and would otherwise put all of
+/// them in one `address:unknown` bucket. The assistant limits its own visitors (T-4149).
+pub(crate) fn spend_anonymous_mcp(
+    gateway: &Gateway,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), Box<Response<Body>>> {
+    if !headers.contains_key("x-forwarded-for") {
+        return Ok(());
+    }
+    let caller = address_key(headers);
+    let decision = gateway.rate_limiter.check(
+        ANONYMOUS_MCP_BUCKET,
+        &caller,
+        &gateway.anonymous_mcp_rate_limit,
+        Instant::now(),
+    );
+    if decision.allowed {
+        return Ok(());
+    }
+    tracing::info!(%caller, "anonymous MCP rate limit reached");
+    Err(Box::new(too_many(
+        &decision,
+        "the MCP rate limit for callers without a token is spent; retry after the seconds the \
+         RateLimit-Reset header names, or sign in",
+    )))
 }
 
 /// The three standard fields of the answer (EP-20, MIM0-R7).
