@@ -149,6 +149,8 @@ var JCRender = (function () {
   /** What a source's link says: its title, else the address without its scheme. */
   function label(source) {
     if (source.title) return source.title;
+    // An uploaded file is named by its file name (T-4184).
+    if (source.url && /^upload:/.test(source.url)) return source.url.replace(/^upload:[^/]*\//, "").replace(/#page=\d+$/, "");
     if (source.url) return source.url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
     return source.endpoint || "";
   }

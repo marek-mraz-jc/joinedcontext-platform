@@ -99,6 +99,8 @@ test("the owner's sources: one per address, titled, and live data never by its t
   assert.equal(label(list[0]), "Helsinki events");
   assert.equal(label(list[1]), "helsinki-events");
   assert.equal(label({ url: "https://www.hel.fi/en/events/", title: null }), "www.hel.fi/en/events");
+  // T-4184: an uploaded file is its file name, never a link.
+  assert.equal(label({ url: "upload:subory/Návod.md#page=1", title: null }), "Návod.md");
   assert.doesNotMatch(JSON.stringify(list), /query_entities/);
 });
 
@@ -165,7 +167,7 @@ test("a data table shows at most 50 rows of text and only http(s) links", () => 
 
 test("only an http(s) address is a link", () => {
   assert.equal(safeUrl("https://www.banskabystrica.sk/"), "https://www.banskabystrica.sk/");
-  for (const bad of ["javascript:alert(1)", "/relative", "data:text/html,x", "https://a b", 42, undefined]) {
+  for (const bad of ["javascript:alert(1)", "upload:subory/a.md", "/relative", "data:text/html,x", "https://a b", 42, undefined]) {
     assert.equal(safeUrl(bad), null, String(bad));
   }
 });

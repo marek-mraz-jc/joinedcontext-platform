@@ -78,6 +78,8 @@ pub struct ChatState {
     /// The public origin `/api/endpoint/{slug}` is served under (`JC_ASSISTANT_ENDPOINT_URL`):
     /// a data table's download link; `None` offers none.
     pub endpoint_base: Option<url::Url>,
+    /// The organization the service answers for, the `sites` row an upload creates (T-4184).
+    pub organization: String,
 }
 
 /// The most keys [`Limits`] counts at once (T-3314).

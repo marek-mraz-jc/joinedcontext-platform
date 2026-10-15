@@ -208,6 +208,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         questions: Arc::clone(&questions),
         answers: Default::default(),
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
+        organization: "hronov".into(),
     });
     World {
         admin,

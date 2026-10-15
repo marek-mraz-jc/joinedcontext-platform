@@ -5,11 +5,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -72,6 +74,21 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/usage",
             get(usage),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/sources/{source}/files",
+            get(files),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/sources/{source}/files",
+            // The source's `upload.maxBytes` is the limit; this is the ceiling any may name.
+            post(upload).layer(DefaultBodyLimit::max(
+                usize::try_from(jc_core::kinds::assistant::MAX_UPLOAD_BYTES).unwrap_or(usize::MAX),
+            )),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/sources/{source}/files/{id}",
+            delete(remove),
         )
         .with_state(state)
 }
@@ -592,4 +609,182 @@ async fn usage(
         .map(|(day, requests, input, output)| json!({"day": day, "requests": requests, "tokensIn": input, "tokensOut": output}))
         .collect();
     Json(json!({"items": items})).into_response()
+}
+
+/// The declared `source: upload` of `project`, `404` when none is declared and `409` when the
+/// source is of another type (API/05 §3, T-4184).
+fn upload_source(
+    state: &ChatState,
+    project: &str,
+    source: &str,
+) -> Result<jc_core::kinds::assistant::KnowledgeSourceSpec, Refusal> {
+    let spec = state
+        .snapshot
+        .read()
+        .ok()
+        .and_then(|s| {
+            s.sources
+                .iter()
+                .find(|x| x.project == project && x.name == source)
+                .map(|x| x.spec.clone())
+        })
+        .ok_or_else(|| {
+            Box::new(problem(
+                404,
+                format!("project {project} declares no KnowledgeSource `{source}`"),
+            ))
+        })?;
+    if spec.source != jc_core::kinds::assistant::SourceType::Upload {
+        return Err(Box::new(problem(
+            409,
+            format!("`{source}` is not a `source: upload`; only an upload source takes files"),
+        )));
+    }
+    Ok(spec)
+}
+
+async fn files(
+    State(state): State<Arc<ChatState>>,
+    Path((project, source)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    if let Err(refused) = upload_source(&state, &project, &source) {
+        return *refused;
+    }
+    // A source no file was uploaded to yet holds none.
+    let site = match site(&state, &project, &source).await {
+        Ok(site) => site,
+        Err(_) => return Json(json!({"items": []})).into_response(),
+    };
+    match crate::upload::files(&state.pool, &project, site, &source).await {
+        Ok(items) => Json(json!({"items": items})).into_response(),
+        Err(err) => failed(err),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Named {
+    name: String,
+}
+
+async fn upload(
+    State(state): State<Arc<ChatState>>,
+    Path((project, source)): Path<(String, String)>,
+    named: Result<Query<Named>, QueryRejection>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let Some(name) = named
+        .ok()
+        .and_then(|Query(named)| crate::upload::file_name(&named.name).map(str::to_owned))
+    else {
+        return problem(
+            400,
+            "`name` is the file's name: 1 to 200 characters, no `/`, `\\` or control character",
+        );
+    };
+    let spec = match upload_source(&state, &project, &source) {
+        Ok(spec) => spec,
+        Err(refused) => return *refused,
+    };
+    let limits = spec.upload.clone().unwrap_or_default();
+    let too_large = || {
+        problem(
+            413,
+            format!(
+                "a file of this source is at most {} bytes",
+                limits.max_bytes
+            ),
+        )
+    };
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > limits.max_bytes) {
+        return too_large();
+    }
+    // Read no further than the limit: a body past it is refused, not buffered.
+    let bytes = match axum::body::to_bytes(
+        body,
+        usize::try_from(limits.max_bytes).unwrap_or(usize::MAX),
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(_) => return too_large(),
+    };
+    let site = match crate::crawl::upsert_site(
+        &state.pool,
+        &project,
+        &state.organization,
+        &source,
+        spec.visibility,
+    )
+    .await
+    {
+        Ok(site) => site,
+        Err(crate::Error::Project(_)) => return problem(404, "no such project"),
+        Err(err) => return failed(err),
+    };
+    let target = crate::upload::Target {
+        project: &project,
+        source: &source,
+        site_id: site,
+        visibility: match spec.visibility {
+            jc_core::kinds::assistant::Visibility::Public => "public",
+            jc_core::kinds::assistant::Visibility::Internal => "internal",
+        },
+        max_files: limits.max_files,
+        max_pdf_pages: spec.pdf.max_pages,
+        language: match spec.languages.as_slice() {
+            [one] => Some(one.as_str()),
+            _ => None,
+        },
+    };
+    match crate::upload::add(&state.pool, &target, &name, &bytes).await {
+        Ok(file) => (StatusCode::CREATED, Json(json!(file))).into_response(),
+        Err(crate::upload::Refused::Full(most)) => problem(
+            409,
+            format!("this source already holds its {most} files; remove one first"),
+        ),
+        // The generic 415 hint speaks of JSON bodies; this one names what an upload takes.
+        Err(crate::upload::Refused::Type(why)) => jc_core::ProblemDetails::for_status(415)
+            .with_detail(why)
+            .with_extension(
+                "hint",
+                json!("Upload a PDF, a DOCX, an XLSX or a UTF-8 text file (CSV, Markdown)."),
+            )
+            .into_response(),
+        Err(crate::upload::Refused::Store(err)) => failed(err),
+    }
+}
+
+async fn remove(
+    State(state): State<Arc<ChatState>>,
+    Path((project, source, id)): Path<(String, String, i64)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    if let Err(refused) = upload_source(&state, &project, &source) {
+        return *refused;
+    }
+    let site = match site(&state, &project, &source).await {
+        Ok(site) => site,
+        Err(refused) => return *refused,
+    };
+    match crate::upload::remove(&state.pool, &project, site, id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => problem(404, "no such file of this source"),
+        Err(err) => failed(err),
+    }
 }

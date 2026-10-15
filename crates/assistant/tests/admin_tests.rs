@@ -17,7 +17,9 @@ use assistant::extract::Indexer;
 use assistant::worker::{Snapshot, Source};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, PdfPolicy, SourceType, Visibility};
+use jc_core::kinds::assistant::{
+    KnowledgeSourceSpec, PdfPolicy, SourceType, UploadLimits, Visibility,
+};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -117,13 +119,31 @@ async fn world(test: &str) -> World {
 
     let http = reqwest::Client::new();
     let snapshot = Snapshot {
-        sources: vec![Source {
-            project: "hronov".into(),
-            name: "web".into(),
-            spec: source_spec(),
-            ckan_url: None,
-            catalogue: Vec::new(),
-        }],
+        sources: vec![
+            Source {
+                project: "hronov".into(),
+                name: "web".into(),
+                spec: source_spec(),
+                ckan_url: None,
+                catalogue: Vec::new(),
+            },
+            // T-4184: the files an administrator uploads, at most two of 64 KiB.
+            Source {
+                project: "hronov".into(),
+                name: "subory".into(),
+                spec: KnowledgeSourceSpec {
+                    source: SourceType::Upload,
+                    start_urls: Vec::new(),
+                    upload: Some(UploadLimits {
+                        max_bytes: 64 * 1024,
+                        max_files: 2,
+                    }),
+                    ..source_spec()
+                },
+                ckan_url: None,
+                catalogue: Vec::new(),
+            },
+        ],
         ..Snapshot::default()
     };
     let state = Arc::new(ChatState {
@@ -149,6 +169,7 @@ async fn world(test: &str) -> World {
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
         endpoint_base: None,
+        organization: "hronov".into(),
     });
     World {
         admin,
@@ -289,6 +310,24 @@ async fn only_the_portals_service_account_is_answered() {
             "POST",
             format!("{k}/sources/{{source}}/recrawl"),
             format!("{BASE}/sources/web/recrawl"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/sources/{{source}}/files"),
+            format!("{BASE}/sources/subory/files"),
+            None,
+        ),
+        (
+            "POST",
+            format!("{k}/sources/{{source}}/files"),
+            format!("{BASE}/sources/subory/files?name=a.md"),
+            Some(json!("# A")),
+        ),
+        (
+            "DELETE",
+            format!("{k}/sources/{{source}}/files/{{id}}"),
+            format!("{BASE}/sources/subory/files/1"),
             None,
         ),
         (
@@ -627,5 +666,222 @@ async fn an_inclusion_touches_this_sources_items_alone() {
     tx.rollback().await.expect("rollback");
     assert!(!excluded);
     assert_eq!(passages_left(&w.pool).await, 4);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// One stored (uncompressed) ZIP entry per file, with its CRC-32, as an Office file can be.
+fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let (mut out, mut directory) = (Vec::new(), Vec::new());
+    for (name, data) in entries {
+        let offset = u32::try_from(out.len()).expect("small");
+        let (crc, size) = (crc32(data), u32::try_from(data.len()).expect("small"));
+        let name_len = u16::try_from(name.len()).expect("short");
+        let common = |out: &mut Vec<u8>| {
+            out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&name_len.to_le_bytes());
+            out.extend_from_slice(&[0, 0]);
+        };
+        out.extend_from_slice(b"PK\x03\x04");
+        common(&mut out);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        directory.extend_from_slice(b"PK\x01\x02\x14\x00");
+        common(&mut directory);
+        // Comment length, disk, internal and external attributes.
+        directory.extend_from_slice(&[0; 10]);
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let (start, count) = (
+        u32::try_from(out.len()).expect("small"),
+        u16::try_from(entries.len()).expect("few"),
+    );
+    out.extend_from_slice(&directory);
+    out.extend_from_slice(b"PK\x05\x06\x00\x00\x00\x00");
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&u32::try_from(directory.len()).expect("small").to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+async fn send_file(
+    app: &axum::Router,
+    source: &str,
+    name: &str,
+    bytes: Vec<u8>,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("{BASE}/sources/{source}/files?name={name}"))
+        .header("authorization", format!("Bearer {PORTAL_TOKEN}"))
+        // The type is read from the content; what the caller says is not.
+        .header("content-type", "application/pdf")
+        .body(Body::from(bytes))
+        .expect("a request");
+    let response = app.clone().oneshot(request).await.expect("an answer");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("a body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn passages_of(pool: &PgPool, url: &str) -> Vec<(String, String)> {
+    let mut tx = assistant::project_scope(pool, "hronov")
+        .await
+        .expect("scope");
+    let rows =
+        sqlx::query_as("SELECT text, visibility FROM chunks WHERE url = $1 OR url LIKE $1 || '#%' ORDER BY ordinal")
+            .bind(url)
+            .fetch_all(&mut *tx)
+            .await
+            .expect("chunks");
+    tx.rollback().await.expect("rollback");
+    rows
+}
+
+/// T-4184, MF-51, API/05 §3: a Markdown file and a DOCX are typed by their content (whatever
+/// the caller names), indexed with the source's visibility, listed, replaced by name and
+/// removed with their passages; a binary file, a body past `maxBytes`, a file past `maxFiles`,
+/// a name that is a path, and a source that takes no files are each refused.
+#[tokio::test]
+async fn uploaded_files_are_typed_indexed_listed_replaced_and_removed() {
+    let w = world("adminupload").await;
+    let guide = "# Parkovacia karta\n\nParkovaciu kartu vybavíte na Námestí SNP 1 v pondelok.\n";
+    let (status, md) =
+        send_file(&w.app, "subory", "N%C3%A1vod.md", guide.as_bytes().to_vec()).await;
+    assert_eq!(status, StatusCode::CREATED, "{md}");
+    assert_eq!(
+        (md["name"].clone(), md["mime"].clone()),
+        (json!("Návod.md"), json!("text/markdown"))
+    );
+    assert!(md["passages"].as_i64().unwrap_or(0) >= 1, "{md}");
+    let passages = passages_of(&w.pool, "upload:subory/Návod.md").await;
+    assert!(
+        passages
+            .iter()
+            .any(|(t, v)| t.contains("Námestí SNP 1") && v == "public"),
+        "{passages:?}"
+    );
+
+    let document = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Zber odpadu je v utorok.</w:t></w:r></w:p></w:body></w:document>"#;
+    let types = br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let docx = stored_zip(&[
+        ("[Content_Types].xml", types),
+        ("word/document.xml", document),
+    ]);
+    let (status, word) = send_file(&w.app, "subory", "zber.txt", docx).await;
+    assert_eq!(status, StatusCode::CREATED, "{word}");
+    assert_eq!(word["mime"], assistant::upload::DOCX);
+    let passages = passages_of(&w.pool, "upload:subory/zber.txt").await;
+    assert!(
+        passages.iter().any(|(t, _)| t.contains("Zber odpadu")),
+        "{word} {passages:?}"
+    );
+
+    let (status, listed) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/subory/files"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = listed["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert_eq!(names, ["Návod.md", "zber.txt"]);
+
+    // Full: a third file is refused, the same name again replaces its file.
+    let (status, _) = send_file(&w.app, "subory", "tretí.md", b"# Tri".to_vec()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, again) = send_file(
+        &w.app,
+        "subory",
+        "N%C3%A1vod.md",
+        b"# Parkovanie\n\nKarta sa vybavuje online.\n".to_vec(),
+    )
+    .await;
+    assert_eq!(
+        (status, again["id"].clone()),
+        (StatusCode::CREATED, md["id"].clone())
+    );
+    let passages = passages_of(&w.pool, "upload:subory/Návod.md").await;
+    assert!(
+        passages.iter().all(|(t, _)| !t.contains("Námestí SNP 1")),
+        "{passages:?}"
+    );
+
+    for (source, name, bytes, expected) in [
+        (
+            "subory",
+            "obrazok.png",
+            b"\x89PNG\r\n\x1a\n\x00\x00".to_vec(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "subory",
+            "velky.md",
+            vec![b'a'; 64 * 1024 + 1],
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            "subory",
+            "..%2Fetc%2Fpasswd",
+            b"# x".to_vec(),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("subory", "", b"# x".to_vec(), StatusCode::BAD_REQUEST),
+        ("web", "a.md", b"# x".to_vec(), StatusCode::CONFLICT),
+        ("nikde", "a.md", b"# x".to_vec(), StatusCode::NOT_FOUND),
+    ] {
+        let (status, body) = send_file(&w.app, source, name, bytes).await;
+        assert_eq!(status, expected, "{source} {name}: {body}");
+    }
+
+    let id = md["id"].as_i64().expect("an id");
+    let gone = format!("{BASE}/sources/subory/files/{id}");
+    assert_eq!(
+        call(&w.app, "DELETE", &gone, Some(PORTAL_TOKEN), None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(passages_of(&w.pool, "upload:subory/Návod.md")
+        .await
+        .is_empty());
+    assert_eq!(
+        call(&w.app, "DELETE", &gone, Some(PORTAL_TOKEN), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
