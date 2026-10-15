@@ -216,6 +216,7 @@ async fn main() -> ExitCode {
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
         endpoint_base: reader.endpoint_base.clone(),
+        organization: organization.clone(),
     });
 
     // Ready once the first look at the manifests went through; alive as long as the loop turns.

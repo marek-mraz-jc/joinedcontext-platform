@@ -31,6 +31,8 @@ pub mod extract;
 pub mod guide;
 /// When a source is read again: its cron, matched against the minute.
 pub mod schedule;
+/// The files an administrator uploads to a `source: upload` (T-4184).
+pub mod upload;
 /// The crawl worker: queueing due sources and working the queue.
 pub mod worker;
 

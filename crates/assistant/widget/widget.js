@@ -287,7 +287,9 @@
         var li = el("li", "jc-card");
         li.id = ids + "-" + (i + 1);
         var name = (source.live ? w.live + ": " : "") + JCRender.label(source);
-        var heading = source.url ? link(source.url, name) : el("span", "", name);
+        // Only an http(s) address is a link: an uploaded file cites `upload:{source}/{name}` (T-4184).
+        var href = JCRender.safeUrl(source.url);
+        var heading = href ? link(href, name) : el("span", "", name);
         li.appendChild(el("span", "jc-card-n", String(i + 1)));
         li.appendChild(heading);
         if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
