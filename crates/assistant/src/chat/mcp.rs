@@ -15,6 +15,18 @@ pub const MAX_RESULT_CHARS: usize = 20_000;
 /// request body of 256 KiB.
 pub const MAX_KEPT_CHARS: usize = 250_000;
 
+/// The tools jc-assistant ever calls on a connector, whatever a manifest lists: reads only
+/// (T-4140, Architecture/23 §5). Any other name is dropped before a request leaves.
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "list_types",
+    "query_entities",
+    "get_entity",
+    "get_attribute_value",
+    "retrieve_temporal",
+    "describe_schema",
+    "describe_access",
+];
+
 /// One tool of a connector, as the model is offered it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tool {
@@ -82,12 +94,20 @@ impl Surface {
             .ok_or_else(|| "the Endpoint's answer has no result".to_owned())
     }
 
-    /// The tools the surface offers that `allowed` names, in the order `allowed` names them.
+    /// The tools the surface offers that `allowed` names and [`READ_ONLY_TOOLS`] holds, in the
+    /// order `allowed` names them.
     pub async fn tools(
         &self,
         http: &reqwest::Client,
         allowed: &[String],
     ) -> Result<Vec<Tool>, String> {
+        let allowed: Vec<&String> = allowed
+            .iter()
+            .filter(|name| READ_ONLY_TOOLS.contains(&name.as_str()))
+            .collect();
+        if allowed.is_empty() {
+            return Ok(Vec::new());
+        }
         let result = self.rpc(http, "tools/list", json!({})).await?;
         let listed = result
             .get("tools")
@@ -99,9 +119,9 @@ impl Surface {
             .filter_map(|name| {
                 let tool = listed
                     .iter()
-                    .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))?;
+                    .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name.as_str()))?;
                 Some(Tool {
-                    name: name.clone(),
+                    name: (*name).clone(),
                     description: tool
                         .get("description")
                         .and_then(Value::as_str)

@@ -175,7 +175,12 @@ fn base_of(url: &str) -> Result<Url, Error> {
     Ok(base)
 }
 
-async fn search_page(crawler: &Crawler, base: &Url, start: u64) -> Result<SearchPage, Error> {
+async fn search_page(
+    crawler: &Crawler,
+    base: &Url,
+    organizations: &[String],
+    start: u64,
+) -> Result<SearchPage, Error> {
     let mut url = base
         .join("api/3/action/package_search")
         .map_err(|err| Error::Crawl(format!("the CKAN search URL: {err}")))?;
@@ -187,6 +192,13 @@ async fn search_page(crawler: &Crawler, base: &Url, start: u64) -> Result<Search
         // skipped by the others moving.
         .append_pair("sort", "name asc")
         .append_pair("include_private", "false");
+    if !organizations.is_empty() {
+        // The names are CKAN names (jc-core checks them), so they need no Solr escaping.
+        url.query_pairs_mut().append_pair(
+            "fq",
+            &format!("organization:({})", organizations.join(" OR ")),
+        );
+    }
     let host = base.host_str().unwrap_or_default().to_owned();
     let body = match fetch_url(
         &crawler.client,
@@ -247,6 +259,8 @@ pub struct Catalogue<'a> {
     pub max_datasets: u32,
     /// The source's language when it declares exactly one; detected otherwise.
     pub language: Option<&'a str>,
+    /// The source's `organizations`: only their datasets are read; empty reads every one.
+    pub organizations: &'a [String],
 }
 
 /// Reads the public datasets of `catalogue` into its site, handing each new or changed dataset
@@ -263,6 +277,7 @@ pub async fn sync_ckan(
         url: ckan_url,
         max_datasets,
         language,
+        organizations,
     } = catalogue;
     let base = base_of(ckan_url)?;
     let known: HashMap<String, Option<String>> = {
@@ -280,7 +295,7 @@ pub async fn sync_ckan(
     let mut listed: HashSet<String> = HashSet::new();
     let mut start = 0;
     'listing: loop {
-        let page = search_page(crawler, &base, start).await?;
+        let page = search_page(crawler, &base, organizations, start).await?;
         let returned = page.results.len() as u64;
         for dataset in page.results {
             if listed.len() >= max_datasets as usize {

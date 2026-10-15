@@ -101,8 +101,24 @@ pub enum Event {
     },
     /// The next characters of the answer as the answering model streams them (T-4139).
     Delta(String),
+    /// Rows a data round read from a connector, for the person to see as a table (T-4140).
+    Data(Table),
     /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
     Done(Spent, u64),
+}
+
+/// What a data round read, as API/05 §1.3's `data` event carries it (T-4140).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Table {
+    pub endpoint: String,
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download: Option<String>,
 }
 
 /// Everything one question is answered with.
@@ -132,6 +148,8 @@ pub struct Ask<'a> {
     pub output_tokens: u64,
     /// Answers to first questions asked before (T-4139).
     pub cache: &'a super::routed::AnswerCache,
+    /// The public origin `/api/endpoint/{slug}` is served under: a data table's download link.
+    pub endpoint_base: Option<&'a url::Url>,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
@@ -283,16 +301,17 @@ pub struct Spent {
 /// Answers one question; returns what it spent. Every outcome reaches `events`: an answer with
 /// its citations, or an error a person can act on.
 ///
-/// A deployment that answers from its sources alone takes the routed loop (T-4139): one router
-/// call, server-run searches, one streamed answer call. One with connectors or the sandbox keeps
-/// the model-driven loop below until its data rounds move into the router (T-4140).
+/// A deployment on an anonymous channel takes the routed loop (T-4139, T-4140): one router call,
+/// server-run searches and data reads, one streamed answer call, with no tool the model can call.
+/// The Portal's internal assistant, which reads as the asking person, and a deployment with the
+/// sandbox keep the model-driven loop below.
 pub async fn answer(
     ask: &Ask<'_>,
     history: &[Turn],
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
-    if ask.connectors.is_empty() && ask.functions.is_none() && !ask.sources.is_empty() {
+    if ask.public_only && ask.functions.is_none() {
         return super::routed::answer(ask, history, question, events).await;
     }
     let started = std::time::Instant::now();
@@ -411,7 +430,7 @@ pub async fn answer(
 
 /// Whether `arguments` satisfy `schema`; else where and which rule they break, never the value,
 /// which goes back to the model. A schema that does not compile admits nothing.
-fn fits(schema: &Value, arguments: &Value) -> Result<(), String> {
+pub(super) fn fits(schema: &Value, arguments: &Value) -> Result<(), String> {
     let validator = jsonschema::validator_for(schema)
         .map_err(|_| "the tool's schema cannot be read, so no call is made to it".to_owned())?;
     let problems: Vec<String> = validator

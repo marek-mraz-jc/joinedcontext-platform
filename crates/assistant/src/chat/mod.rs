@@ -75,6 +75,9 @@ pub struct ChatState {
     pub questions: Arc<tokio::sync::Semaphore>,
     /// Answers to first questions asked before (T-4139).
     pub answers: routed::AnswerCache,
+    /// The public origin `/api/endpoint/{slug}` is served under (`JC_ASSISTANT_ENDPOINT_URL`):
+    /// a data table's download link; `None` offers none.
+    pub endpoint_base: Option<url::Url>,
 }
 
 /// The most keys [`Limits`] counts at once (T-3314).
@@ -467,6 +470,7 @@ fn sse(event: &Event) -> SseEvent {
             ("tool", data)
         }
         Event::Delta(text) => ("delta", json!({"text": text})),
+        Event::Data(table) => ("data", json!(table)),
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Error {
@@ -760,6 +764,7 @@ async fn ask(
                 .and_then(|m| m.answer.as_deref()),
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
+            endpoint_base: state.endpoint_base.as_ref(),
         };
         let started = Instant::now();
         let spent = agent::answer(&ask, &question.history, &question.message, &tx).await;
