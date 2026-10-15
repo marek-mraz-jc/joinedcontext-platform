@@ -69,8 +69,12 @@ async fn broker(status: StatusCode, body: Value) -> (String, Hops) {
 }
 
 fn grant() -> PolicySpec {
+    grant_to("public")
+}
+
+fn grant_to(role: &str) -> PolicySpec {
     serde_norway::from_str(&format!(
-        "contextSpaceRef: {SPACE}\nassigner: did:web:{DOMAIN}\nassignee: {{ kind: role, id: public }}\n\
+        "contextSpaceRef: {SPACE}\nassigner: did:web:{DOMAIN}\nassignee: {{ kind: role, id: {role} }}\n\
          operations: [queryEntity, retrieveEntity, retrieveEntityTypes, upsertBatch]\n\
          information:\n  - entities: [{{ type: AirQualityObserved }}]\n"
     ))
@@ -120,11 +124,48 @@ fn gateway(upstream: String, endpoint: Endpoint) -> Gateway {
         .serve_spaces([space])
 }
 
+/// The gateway with a realm, an Endpoint that grants a steward what it grants the public, and that
+/// steward's token: the caller of the tests about forwarding, since a caller without a token
+/// lists and calls the read tools alone (T-4168).
+fn as_steward(upstream: String) -> (Gateway, String) {
+    let realm = common::Realm::new();
+    let mut granted = endpoint();
+    granted.policies.push(grant_to("steward"));
+    let gateway = gateway(upstream, granted).authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        None,
+    );
+    let token = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": SLUG,
+        "preferred_username": "jana",
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    (gateway, token)
+}
+
 async fn post(gateway: Gateway, path: &str, message: &Value) -> (StatusCode, Value) {
-    let request = Request::post(path)
+    post_as(gateway, path, message, None).await
+}
+
+async fn post_as(
+    gateway: Gateway,
+    path: &str,
+    message: &Value,
+    token: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut request = Request::post(path)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
-        .header("cookie", "session=s3cret")
+        .header("cookie", "session=s3cret");
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let request = request
         .body(Body::from(message.to_string()))
         .expect("a request");
     let response = router(Arc::new(gateway))
@@ -286,12 +327,8 @@ async fn join_level_and_last_n_are_capped_in_the_arguments() {
             json!({ "id": "urn:ngsi-ld:A:1", "joinLevel": 2 }),
         ),
     ] {
-        post(
-            gateway(upstream.clone(), endpoint()),
-            &endpoint_mcp(),
-            &message,
-        )
-        .await;
+        let (gateway, token) = as_steward(upstream.clone());
+        post_as(gateway, &endpoint_mcp(), &message, Some(&token)).await;
     }
     let hops = hops.lock().expect("the hop log").clone();
     assert_eq!(hops[0].body["params"]["arguments"]["joinLevel"], json!(3));
@@ -323,16 +360,21 @@ async fn a_write_tool_meets_the_domain_gate_before_the_broker() {
     )
     .await;
     let enforced = || {
-        gateway(upstream.clone(), endpoint())
-            .gate_writes_on(Arc::new(DomainGate::new(Mode::Enforce)))
+        let (gateway, token) = as_steward(upstream.clone());
+        (
+            gateway.gate_writes_on(Arc::new(DomainGate::new(Mode::Enforce))),
+            token,
+        )
     };
     let write = call("batch_upsert", json!({ "entities": [] }));
-    let (status, _) = post(enforced(), &endpoint_mcp(), &write).await;
+    let (gateway, token) = enforced();
+    let (status, _) = post_as(gateway, &endpoint_mcp(), &write, Some(&token)).await;
     assert!(status.is_client_error(), "{status}");
     assert!(hops.lock().expect("the hop log").is_empty());
 
     let read = call("query_entities", json!({ "type": ["AirQualityObserved"] }));
-    let (status, _) = post(enforced(), &endpoint_mcp(), &read).await;
+    let (gateway, token) = enforced();
+    let (status, _) = post_as(gateway, &endpoint_mcp(), &read, Some(&token)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hops.lock().expect("the hop log").len(), 1);
 }
@@ -609,14 +651,17 @@ async fn a_notification_and_a_batch_make_no_hop() {
     assert!(hops.lock().expect("the hop log").is_empty());
 }
 
-/// A listing the broker answers as an event stream is passed on as it came: the gateway adds
-/// its own entries only to a JSON answer it can read whole.
-#[tokio::test]
-async fn an_event_stream_listing_is_passed_on_untouched() {
-    let stream =
-        "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+const EVENT_STREAM_LISTING: &str =
+    "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+
+/// A broker that answers every message with [`EVENT_STREAM_LISTING`]. Returns its URL.
+async fn event_stream_broker() -> String {
     let app = Router::new().fallback(move || async move {
-        ([("content-type", "text/event-stream")], stream).into_response()
+        (
+            [("content-type", "text/event-stream")],
+            EVENT_STREAM_LISTING,
+        )
+            .into_response()
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -625,20 +670,50 @@ async fn an_event_stream_listing_is_passed_on_untouched() {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    upstream
+}
+
+async fn list_tools(gateway: Gateway, token: Option<&str>) -> (StatusCode, String) {
     let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
-    let request = Request::post(endpoint_mcp())
-        .header("content-type", "application/json")
-        .body(Body::from(list.to_string()))
-        .expect("a request");
-    let response = router(Arc::new(gateway(upstream, endpoint())))
-        .oneshot(request)
+    let mut request = Request::post(endpoint_mcp()).header("content-type", "application/json");
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let response = router(Arc::new(gateway))
+        .oneshot(
+            request
+                .body(Body::from(list.to_string()))
+                .expect("a request"),
+        )
         .await
         .expect("the gateway answers");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("a body");
-    assert_eq!(String::from_utf8_lossy(&bytes), stream);
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A listing the broker answers as an event stream is passed on as it came to a token holder:
+/// the gateway adds its own entries only to a JSON answer it can read whole.
+#[tokio::test]
+async fn an_event_stream_listing_is_passed_on_untouched() {
+    let (gateway, token) = as_steward(event_stream_broker().await);
+    let (status, body) = list_tools(gateway, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, EVENT_STREAM_LISTING);
+}
+
+/// T-4168: to a caller without a token the gateway narrows the list to the read tools, and a list
+/// it cannot read whole it cannot narrow: refused with a JSON-RPC error, never passed on.
+#[tokio::test]
+async fn an_event_stream_listing_is_refused_to_a_caller_without_a_token() {
+    let upstream = event_stream_broker().await;
+    let (status, body) = list_tools(gateway(upstream, endpoint()), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let answer: Value = serde_json::from_str(&body).expect("a JSON-RPC answer");
+    assert_eq!(answer["error"]["code"], json!(-32603), "{answer}");
+    assert!(answer.get("result").is_none(), "{answer}");
 }
 
 /// T-3648: a space whose name leaves no room for `cs-` in a view id has no broker view; its MCP
@@ -696,12 +771,8 @@ async fn params_that_are_no_object_reach_the_broker_unchanged() {
     ] {
         let message =
             json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": params });
-        let (status, answer) = post(
-            gateway(upstream.clone(), endpoint()),
-            &endpoint_mcp(),
-            &message,
-        )
-        .await;
+        let (gateway, token) = as_steward(upstream.clone());
+        let (status, answer) = post_as(gateway, &endpoint_mcp(), &message, Some(&token)).await;
         assert_eq!(status, StatusCode::OK, "{params}: {answer}");
         assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
     }

@@ -131,6 +131,9 @@ pub struct Gateway {
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
     /// spread over many Endpoints is still one subject's burst (ADR-N-025 section 3, EP-87).
     pub hub_rate_limit: RateLimits,
+    /// What one client address without a token may spend a minute over every MCP surface
+    /// together (T-4168).
+    pub anonymous_mcp_rate_limit: RateLimits,
     /// The largest request body read, from the Organization's `spec.limits.gateway`
     /// (ADR-N-035); swapped with the tables when the repository changes.
     max_request_body: AtomicUsize,
@@ -166,6 +169,16 @@ pub const HUB_RATE_LIMIT: RateLimits = RateLimits {
     burst: Some(60),
 };
 
+/// The MCP quota of one client address without a token, over the hub, the named servers and
+/// every Endpoint's and Context Space's MCP together (T-4168): two calls a second, sustained,
+/// with room for an agent's opening burst of `initialize`, `tools/list` and a few reads.
+// ponytail: a constant, set per gateway with `limit_anonymous_mcp_to`; an env var when an
+// operator measures a reason to tune it.
+pub const ANONYMOUS_MCP_RATE_LIMIT: RateLimits = RateLimits {
+    requests_per_minute: 120,
+    burst: Some(30),
+};
+
 impl Gateway {
     /// A gateway with an empty endpoint table.
     pub fn new(broker: Broker, pdp: Box<dyn Pdp>, org_domain: impl Into<String>) -> Self {
@@ -192,6 +205,7 @@ impl Gateway {
                 crate::domain_gate::Mode::Report,
             )),
             hub_rate_limit: HUB_RATE_LIMIT,
+            anonymous_mcp_rate_limit: ANONYMOUS_MCP_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
             writes: Arc::new(tokio::sync::Semaphore::new(WRITE_BUDGET_MIB * 1024)),
             write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
@@ -246,6 +260,13 @@ impl Gateway {
     /// Spends at most `limits` a minute per subject on the MCP hub (ADR-N-025 section 3).
     pub fn limit_hub_to(mut self, limits: RateLimits) -> Self {
         self.hub_rate_limit = limits;
+        self
+    }
+
+    /// Spends at most `limits` a minute per client address without a token over every MCP
+    /// surface together (T-4168).
+    pub fn limit_anonymous_mcp_to(mut self, limits: RateLimits) -> Self {
+        self.anonymous_mcp_rate_limit = limits;
         self
     }
 
@@ -3070,8 +3091,14 @@ async fn mcp_message(
         .resolver
         .resolve(&slug)
         .is_some_and(|endpoint| endpoint.audience == Audience::Public);
-    if !public && request.headers().get(AUTHORIZATION).is_none() {
+    let anonymous = request.headers().get(AUTHORIZATION).is_none();
+    if !public && anonymous {
         return unauthorized(&gateway, &slug);
+    }
+    if anonymous {
+        if let Err(refusal) = rate_limit::spend_anonymous_mcp(&gateway, request.headers()) {
+            return *refusal;
+        }
     }
 
     let (endpoint, subject) = match admit(
@@ -3085,7 +3112,7 @@ async fn mcp_message(
     };
 
     let view = endpoint.slug.clone();
-    mcp_answer(gateway, endpoint, subject, view, request).await
+    mcp_answer(gateway, endpoint, subject, view, request, anonymous).await
 }
 
 /// One JSON-RPC message, whichever surface it arrived on: the broker's MCP surface of the
@@ -3095,13 +3122,15 @@ async fn mcp_message(
 /// documents the access and schema surfaces serve, and what no view serves yet (a view
 /// mapping) stays on its own façade. A caller under a data space agreement is the view's too:
 /// the hop names its DID alone (map K38, T-3818). A federating space's registrations are named
-/// in the answer, see [`federated`].
+/// in the answer, see [`federated`]. Without a token (`reads_only`) the caller lists and calls
+/// [`mcp::tools::ANONYMOUS_TOOLS`] alone, whatever the broker's view offers (T-4168).
 async fn mcp_answer(
     gateway: Arc<Gateway>,
     endpoint: Arc<Endpoint>,
     subject: Subject,
     view: String,
     request: Request,
+    reads_only: bool,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
@@ -3118,6 +3147,13 @@ async fn mcp_answer(
     let tool = message["params"]["name"].as_str().map(str::to_owned);
     let calls = message["method"] == "tools/call";
     let id = message["id"].clone();
+    if reads_only && calls {
+        let name = tool.as_deref().unwrap_or_default();
+        if !mcp::tools::anonymous_may(name) {
+            let refusal = mcp::tools::anonymous_refusal(id, name);
+            return mcp::jsonrpc::json_response(StatusCode::OK, &refusal);
+        }
+    }
     if calls
         && tool
             .as_deref()
@@ -3208,6 +3244,11 @@ async fn mcp_answer(
         .find(|(listing, _)| *listing == method)
         .map(|(_, key)| *key);
     let decorated = !federates.is_empty() && FEDERATED_METHODS.contains(&method.as_str());
+    // A tool list the gateway cannot read is one it cannot narrow: refused, never passed on.
+    let narrowed = reads_only && method == "tools/list" && answer.status().is_success();
+    if narrowed && !json {
+        return unreadable_tool_list(id, &endpoint);
+    }
     if key.is_none() && !decorated || !answer.status().is_success() || !json {
         return answer;
     }
@@ -3216,6 +3257,9 @@ async fn mcp_answer(
         .await
         .unwrap_or_default();
     let Ok(mut listed) = serde_json::from_slice::<Value>(&held) else {
+        if narrowed {
+            return unreadable_tool_list(id, &endpoint);
+        }
         return proxy::with_body(parts, held.to_vec());
     };
     if decorated {
@@ -3232,9 +3276,24 @@ async fn mcp_answer(
             .and_then(Value::as_array_mut);
         if let Some(items) = items {
             items.extend(kept);
+            if narrowed {
+                mcp::tools::keep_anonymous(items);
+            }
         }
     }
     proxy::with_body(parts, listed.to_string().into_bytes())
+}
+
+/// The answer to an anonymous `tools/list` whose broker answer the gateway could not read, and so
+/// could not narrow to the reads (T-4168).
+fn unreadable_tool_list(id: Value, endpoint: &Endpoint) -> Response<Body> {
+    tracing::warn!(slug = %endpoint.slug, "the broker's tool list was not JSON; refused to an anonymous caller");
+    let refusal = mcp::jsonrpc::error(
+        id,
+        -32603,
+        "this Endpoint's tool list could not be read; try again later",
+    );
+    mcp::jsonrpc::json_response(StatusCode::OK, &refusal)
 }
 
 /// The registrations of the endpoint's space, by name and never by address (EP-71).
@@ -3472,6 +3531,12 @@ async fn space_mcp_message(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
+    let anonymous = request.headers().get(AUTHORIZATION).is_none();
+    if anonymous {
+        if let Err(refusal) = rate_limit::spend_anonymous_mcp(&gateway, request.headers()) {
+            return *refusal;
+        }
+    }
     let (space, subject) = match admit_space(
         &gateway,
         &space,
@@ -3483,7 +3548,15 @@ async fn space_mcp_message(
     };
     // The space surface's view is the one the Portal writes per Context Space (plan 5.1).
     let view = format!("cs-{}", space.endpoint.space);
-    mcp_answer(gateway, Arc::clone(&space.endpoint), subject, view, request).await
+    mcp_answer(
+        gateway,
+        Arc::clone(&space.endpoint),
+        subject,
+        view,
+        request,
+        anonymous,
+    )
+    .await
 }
 
 /// The protected-resource metadata of one MCP route (RFC 9728, AG-32).
