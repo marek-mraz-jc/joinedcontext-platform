@@ -27,6 +27,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use jc_core::kinds::assistant::connector_target;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -514,15 +515,39 @@ async fn connected(
         if chosen.is_some_and(|chosen| !chosen.contains(&connector.endpoint)) {
             continue;
         }
+        // `{project}/{endpoint}` reaches a project of `scope.projects` (T-4177); the manifest was
+        // validated, and the scope is checked again so no Endpoint outside it is ever reached.
+        let (project, name) = match connector_target(&connector.endpoint) {
+            (Some(project), name)
+                if deployment
+                    .spec
+                    .scope_projects()
+                    .iter()
+                    .any(|p| p == project) =>
+            {
+                (project, name)
+            }
+            (Some(_), _) => {
+                tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names a project outside the deployment's scope; not offered");
+                continue;
+            }
+            (None, name) => (deployment.project.as_str(), name),
+        };
         let Some(endpoint) = snapshot
             .endpoints
-            .get(&(deployment.project.clone(), connector.endpoint.clone()))
+            .get(&(project.to_owned(), name.to_owned()))
         else {
-            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names no Endpoint of the project; not offered");
+            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names no Endpoint; not offered");
             continue;
         };
+        let foreign = project != deployment.project;
         let token = if endpoint.audience == "public" {
             None
+        } else if foreign {
+            // Another project's Endpoint is read only when it is public, on every channel, and
+            // the person's token never goes to another project.
+            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "another project's Endpoint is not public; not offered");
+            continue;
         } else if deployment.spec.channel.is_anonymous() {
             tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a public deployment's connector names a non-public Endpoint; not offered");
             continue;
