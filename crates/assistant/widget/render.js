@@ -234,6 +234,44 @@ var JCRender = (function () {
     };
   }
 
+  var TIME = /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+  /**
+   * A `data` event as a small chart (T-4198): when exactly one column holds numbers and another
+   * names them, its points: a line over time when every name is a date, else bars, at most 50,
+   * a value that is no finite number skipped. Null in any other case, and under two points.
+   */
+  function chart(data) {
+    if (!data || !Array.isArray(data.columns) || !Array.isArray(data.rows)) return null;
+    var rows = data.rows.filter(Array.isArray);
+    var finite = function (v) { return typeof v === "number" && isFinite(v); };
+    var numeric = data.columns.map(function (_, i) {
+      var numbers = 0, words = 0;
+      rows.forEach(function (row) {
+        if (finite(row[i])) numbers += 1;
+        else if (typeof row[i] === "string" && row[i].trim()) words += 1;
+      });
+      return numbers > 0 && numbers > words;
+    });
+    var values = numeric.reduce(function (found, yes, i) { return yes ? found.concat([i]) : found; }, []);
+    if (values.length !== 1) return null;
+    var named = data.columns.map(function (_, i) { return i; }).filter(function (i) { return !numeric[i]; });
+    var isTime = function (i) {
+      return rows.every(function (row) { return typeof row[i] === "string" && TIME.test(row[i]) && isFinite(Date.parse(row[i])); });
+    };
+    var time = named.filter(isTime)[0];
+    var by = time !== undefined ? time : named[0];
+    if (by === undefined) return null;
+    var v = values[0];
+    var points = rows.filter(function (row) { return finite(row[v]); }).slice(0, 50).map(function (row) {
+      var name = row[by] === null || row[by] === undefined ? "" : String(row[by]);
+      return { label: name.slice(0, 40), value: row[v] };
+    });
+    if (time !== undefined) points.sort(function (a, b) { return Date.parse(a.label) - Date.parse(b.label); });
+    if (points.length < 2) return null;
+    return { kind: time !== undefined ? "line" : "bar", value: String(data.columns[v]), by: String(data.columns[by]), points: points };
+  }
+
   var EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
 
   /** A phone as a `tel:` link: 9 to 15 digits, a leading `+` and spaces, `/`, `-` aside; else null. */
@@ -350,7 +388,7 @@ var JCRender = (function () {
     followups: followups, restore: restore, remember: remember,
     cards: cards, stage: stage, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, events: events, language: language, table: table
+    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart
   };
 })();
 if (typeof module !== "undefined") module.exports = JCRender;

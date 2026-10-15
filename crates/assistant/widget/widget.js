@@ -421,6 +421,43 @@
     item.appendChild(list);
   }
 
+  var SVG = "http://www.w3.org/2000/svg";
+
+  function svg(tag, attrs, text) {
+    var node = document.createElementNS(SVG, tag);
+    Object.keys(attrs).forEach(function (k) { node.setAttribute(k, String(attrs[k])); });
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  // A data round's one numeric column as a small line or bar chart under its table (T-4198). The
+  // table beside it is the text alternative, so the drawing is hidden from screen readers; every
+  // label goes in as text, never as markup.
+  function plot(shown) {
+    if (!shown) return null;
+    var W = 300, H = 90, top = 14, base = top + H;
+    var values = shown.points.map(function (p) { return p.value; });
+    var low = Math.min(0, Math.min.apply(null, values)), high = Math.max(0, Math.max.apply(null, values));
+    var span = high - low || 1;
+    var y = function (v) { return top + H - ((v - low) / span) * H; };
+    var step = W / shown.points.length;
+    var drawing = svg("svg", { viewBox: "0 0 " + W + " " + (base + 14), class: "jc-data-chart", "aria-hidden": "true", focusable: "false" });
+    drawing.appendChild(svg("line", { x1: 0, x2: W, y1: y(0), y2: y(0), class: "jc-chart-axis" }));
+    if (shown.kind === "line") {
+      var at = shown.points.map(function (p, i) { return (i * step + step / 2).toFixed(1) + "," + y(p.value).toFixed(1); });
+      drawing.appendChild(svg("polyline", { points: at.join(" "), class: "jc-chart-line" }));
+    } else {
+      shown.points.forEach(function (p, i) {
+        var a = y(Math.max(p.value, 0)), b = y(Math.min(p.value, 0));
+        drawing.appendChild(svg("rect", { x: (i * step + step * 0.1).toFixed(1), width: (step * 0.8).toFixed(1), y: a.toFixed(1), height: Math.max(b - a, 1).toFixed(1), class: "jc-chart-bar" }));
+      });
+    }
+    drawing.appendChild(svg("text", { x: 0, y: 10, class: "jc-chart-text" }, shown.value + " " + Number(high.toPrecision(4))));
+    drawing.appendChild(svg("text", { x: 0, y: base + 12, class: "jc-chart-text" }, shown.points[0].label));
+    drawing.appendChild(svg("text", { x: W, y: base + 12, "text-anchor": "end", class: "jc-chart-text" }, shown.points[shown.points.length - 1].label));
+    return drawing;
+  }
+
   // A data round's rows as a table with the dataset and download links (T-4140).
   function showData(item, data) {
     var shown = JCRender.table(data);
@@ -446,6 +483,8 @@
     });
     scroll.appendChild(table);
     figure.appendChild(scroll);
+    var drawn = plot(JCRender.chart(data));
+    if (drawn) figure.appendChild(drawn);
     if (shown.dataset || shown.download) {
       var links = el("p", "jc-data-links");
       if (shown.dataset) links.appendChild(link(shown.dataset, w.dataset));
