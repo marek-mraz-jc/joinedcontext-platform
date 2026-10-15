@@ -1036,11 +1036,30 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                     .into_iter()
                     .flatten()
                 {
-                    if let Some(endpoint) = connector.get("endpoint").and_then(|v| v.as_str()) {
-                        if !endpoints.contains(&here(endpoint)) {
-                            found.push((at.clone(), format!(
-                                "{id}: spec.connectors names Endpoint `{endpoint}`, which no manifest of this project declares (MF-52)"
-                            )));
+                    let Some(endpoint) = connector.get("endpoint").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    match jc_core::kinds::assistant::connector_target(endpoint) {
+                        // Another project's Endpoint: declared there and public (T-4177); the kind
+                        // already refused a project its scope does not list.
+                        (Some(project), name) => {
+                            match endpoint_specs.get(&(Some(project.to_owned()), name.to_owned())) {
+                                None => found.push((at.clone(), format!(
+                                    "{id}: spec.connectors names Endpoint `{endpoint}`, which no manifest of project `{project}` declares (MF-52)"
+                                ))),
+                                Some(spec) if spec.audience != jc_core::kinds::Audience::Public => found.push((at.clone(), format!(
+                                    "{id}: spec.connectors names Endpoint `{endpoint}`, which is `{}`; another project's Endpoint is reached only when it is `audience: public` (MF-52)",
+                                    spec.audience
+                                ))),
+                                Some(_) => {}
+                            }
+                        }
+                        (None, name) => {
+                            if !endpoints.contains(&here(name)) {
+                                found.push((at.clone(), format!(
+                                    "{id}: spec.connectors names Endpoint `{endpoint}`, which no manifest of this project declares (MF-52)"
+                                )));
+                            }
                         }
                     }
                 }
