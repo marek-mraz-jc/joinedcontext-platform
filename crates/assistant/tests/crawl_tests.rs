@@ -17,6 +17,7 @@ use assistant::crawl::fetch;
 use assistant::crawl::patterns;
 use assistant::crawl::queue;
 use assistant::crawl::robots;
+use assistant::crawl::wordpress;
 use assistant::crawl::{crawl_site, CrawlPolicy, Crawler, Sink};
 use assistant::{project_scope, MIGRATOR};
 use jc_core::kinds::assistant::{
@@ -25,7 +26,7 @@ use jc_core::kinds::assistant::{
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool, Row};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// DNS resolver that maps specific hostnames to local wiremock ports.
@@ -171,6 +172,7 @@ fn test_spec(start_url: &str) -> KnowledgeSourceSpec {
         organizations: Vec::new(),
         upload: None,
         sitemap: true,
+        wordpress_types: vec![],
         include: Vec::new(),
         exclude: Vec::new(),
         max_depth: 3,
@@ -1169,4 +1171,88 @@ async fn spec_validation_refuses_ckan_source() {
     assert!(matches!(outcome, Err(assistant::Error::Crawl(_))));
 
     drop_database(admin, pool, &db_name).await;
+}
+
+/// T-4154: a WordPress source's pager reads each type newest first until a short page, skips a
+/// type the site does not have, keeps the site's own host only, and stops at `maxPages`.
+#[tokio::test]
+async fn wordpress_types_are_paged_newest_first_on_the_site_host_only() {
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let resolver = FixtureResolver::new(&[("www.city.test", port)]);
+    let client = fetch::client(Arc::new(resolver)).expect("the client builds");
+    let policy = CrawlPolicy {
+        allow_plain_http: true,
+        max_page_bytes: 1024 * 1024,
+    };
+    let site = format!("http://www.city.test:{port}");
+    let links = |from: usize, to: usize| {
+        serde_json::Value::Array(
+            (from..to)
+                .map(|i| serde_json::json!({ "link": format!("{site}/stranka-{i}/") }))
+                .collect(),
+        )
+    };
+    let mut first = links(0, wordpress::PER_PAGE);
+    // Another host and a repeat of an earlier item never become crawl addresses.
+    first.as_array_mut().unwrap()[1] = serde_json::json!({ "link": "https://evil.test/x/" });
+    first.as_array_mut().unwrap()[2] = serde_json::json!({ "link": format!("{site}/stranka-0/") });
+    Mock::given(method("GET"))
+        .and(path("/wp-json/wp/v2/pages"))
+        .and(query_param("page", "1"))
+        .and(query_param("orderby", "modified"))
+        .and(query_param("order", "desc"))
+        .and(query_param("_fields", "link"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(first))
+        // Once for the full read, once for the capped one, which stops inside it.
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wp-json/wp/v2/pages"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(links(500, 503)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wp-json/wp/v2/missing"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(
+            serde_json::json!({ "code": "rest_no_route", "data": { "status": 404 } }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wp-json/wp/v2/newses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(links(900, 902)))
+        .mount(&server)
+        .await;
+
+    let start = url::Url::parse(&format!("{site}/")).unwrap();
+    let types = ["pages", "missing", "newses"].map(String::from);
+    let found =
+        wordpress::fetch_wordpress_urls(&client, &policy, "www.city.test", &start, &types, 1000)
+            .await;
+    let paths: Vec<&str> = found.iter().map(|u| u.path()).collect();
+    assert_eq!(found.len(), wordpress::PER_PAGE - 2 + 3 + 2);
+    assert_eq!(paths[0], "/stranka-0/");
+    assert!(!paths.contains(&"/x/"), "a link on another host was kept");
+    assert_eq!(
+        &paths[paths.len() - 5..],
+        [
+            "/stranka-500/",
+            "/stranka-501/",
+            "/stranka-502/",
+            "/stranka-900/",
+            "/stranka-901/"
+        ]
+    );
+
+    let capped =
+        wordpress::fetch_wordpress_urls(&client, &policy, "www.city.test", &start, &types, 10)
+            .await;
+    assert_eq!(capped.len(), 10);
+    let none =
+        wordpress::fetch_wordpress_urls(&client, &policy, "www.city.test", &start, &[], 10).await;
+    assert!(none.is_empty());
 }

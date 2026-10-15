@@ -33,6 +33,9 @@ pub const MAX_PROMPT_LEN: usize = 8_000;
 pub const MAX_GREETING_LEN: usize = 500;
 /// The longest a connector's tool call may take.
 pub const MAX_TIMEOUT_SECONDS: u16 = 120;
+/// The most WordPress post types one `website` source may list (T-4154).
+pub const MAX_WORDPRESS_TYPES: usize = 40;
+
 /// The most CKAN organizations one `ckan` source may narrow to.
 pub const MAX_ORGANIZATIONS: usize = 10;
 /// The largest file an `upload` source may hold: 50 MiB.
@@ -210,6 +213,10 @@ pub struct KnowledgeSourceSpec {
     /// Whether the site's `sitemap.xml` is read before links are followed; default true.
     #[serde(default = "default_true")]
     pub sitemap: bool,
+    /// WordPress REST bases (`pages`, `newses`, ...) whose items' links are read beside the
+    /// sitemap, from the start host's `/wp-json/wp/v2/{type}`, newest change first (T-4154).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wordpress_types: Vec<String>,
     /// Path patterns a page must match to be read, each starting with `/`; empty reads all.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
@@ -396,6 +403,34 @@ impl KnowledgeSourceSpec {
                     "upload.maxFiles",
                     upload.max_files.to_string(),
                     "upload.maxFiles is 1 to 500",
+                ));
+            }
+        }
+        if self.source != SourceType::Website && !self.wordpress_types.is_empty() {
+            return Err(name(
+                "wordpressTypes",
+                self.wordpress_types.join(", "),
+                "only a website source lists WordPress types",
+            ));
+        }
+        if self.wordpress_types.len() > MAX_WORDPRESS_TYPES {
+            return Err(name(
+                "wordpressTypes",
+                self.wordpress_types.len().to_string(),
+                "at most 40 WordPress types",
+            ));
+        }
+        for base in &self.wordpress_types {
+            if base.is_empty()
+                || base.len() > 64
+                || !base
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            {
+                return Err(name(
+                    "wordpressTypes",
+                    base.clone(),
+                    "a WordPress REST base such as pages or newses: 1 to 64 of a-z, 0-9, _ and -",
                 ));
             }
         }

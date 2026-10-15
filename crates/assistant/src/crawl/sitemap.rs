@@ -152,7 +152,7 @@ pub async fn fetch_sitemap_urls(
     collected
 }
 
-fn add_filtered_urls(
+pub(super) fn add_filtered_urls(
     target: &mut Vec<Url>,
     raw_urls: &[String],
     site_host: &str,

@@ -21,6 +21,7 @@ pub mod patterns;
 pub mod queue;
 pub mod robots;
 pub mod sitemap;
+pub mod wordpress;
 
 /// Maximum permitted HTML page size: 10 MiB (T-3052).
 pub const MAX_PAGE_BYTES: u64 = 10 * 1024 * 1024;
@@ -228,6 +229,18 @@ pub async fn crawl_site(
         Vec::new()
     };
 
+    // A WordPress site's own content list (T-4154): read before the sitemap, so with `maxPages`
+    // reached it is the site's content that is kept, newest change first.
+    let wordpress_urls = wordpress::fetch_wordpress_urls(
+        &crawler.client,
+        &crawler.policy,
+        &site_host,
+        &start_url,
+        &spec.wordpress_types,
+        spec.max_pages,
+    )
+    .await;
+
     let mut frontier = VecDeque::new();
     let mut visited_urls = HashSet::new();
     let mut seen_documents = HashSet::new();
@@ -272,7 +285,7 @@ pub async fn crawl_site(
         }
     }
 
-    for u in sitemap_urls {
+    for u in wordpress_urls.into_iter().chain(sitemap_urls) {
         let canon = canonicalise_url(u);
         let key = canon.to_string();
         if !visited_urls.contains(&key) {

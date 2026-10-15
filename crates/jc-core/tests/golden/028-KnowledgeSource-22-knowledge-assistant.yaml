@@ -5,6 +5,9 @@ spec:
   source: website               # website | ckan
   startUrls: [https://www.banskabystrica.sk/]
   sitemap: true
+  # A WordPress site's own content list: each type's /wp-json/wp/v2/{type} links, newest first,
+  # read beside the sitemap (T-4154). The pages themselves are crawled like any other.
+  wordpressTypes: [pages, newses, life_situations, regulations]
   include: ["/zivot-v-meste/**", "/samosprava/**"]
   exclude: ["/**/tlac/**"]
   maxDepth: 3
