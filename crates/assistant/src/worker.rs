@@ -388,6 +388,7 @@ pub async fn work_one(
                         url,
                         max_datasets: source.spec.max_pages,
                         language,
+                        organizations: &source.spec.organizations,
                     },
                     &mut indexer,
                 )

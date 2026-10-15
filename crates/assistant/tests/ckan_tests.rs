@@ -71,6 +71,7 @@ async fn run(
     site: i64,
     url: &str,
     max: u32,
+    organizations: &[String],
 ) -> (Result<CkanReport, assistant::Error>, Pages) {
     let mut pages = Pages::default();
     let report = sync_ckan(
@@ -82,6 +83,7 @@ async fn run(
             url,
             max_datasets: max,
             language: Some("sk"),
+            organizations,
         },
         &mut pages,
     )
@@ -143,7 +145,7 @@ async fn public_datasets_are_read_whole_then_by_change_and_removed_when_the_cata
         ],
     )
     .await;
-    let (report, pages) = run(&pool, &crawler, site, &base, 1_000).await;
+    let (report, pages) = run(&pool, &crawler, site, &base, 1_000, &[]).await;
     assert_eq!(
         report.expect("first run"),
         CkanReport {
@@ -178,7 +180,7 @@ async fn public_datasets_are_read_whole_then_by_change_and_removed_when_the_cata
         .collect();
     second.push(dataset("set-100", "2026-10-01T10:00:00"));
     listing(&server, 0, 100, second).await;
-    let (report, pages) = run(&pool, &crawler, site, &base, 1_000).await;
+    let (report, pages) = run(&pool, &crawler, site, &base, 1_000, &[]).await;
     assert_eq!(
         report.expect("second run"),
         CkanReport {
@@ -202,7 +204,7 @@ async fn public_datasets_are_read_whole_then_by_change_and_removed_when_the_cata
         .respond_with(ResponseTemplate::new(500))
         .mount(&server)
         .await;
-    let (report, _) = run(&pool, &crawler, site, &base, 1_000).await;
+    let (report, _) = run(&pool, &crawler, site, &base, 1_000, &[]).await;
     assert!(report
         .expect_err("a failed listing")
         .to_string()
@@ -219,7 +221,10 @@ async fn public_datasets_are_read_whole_then_by_change_and_removed_when_the_cata
         )
         .mount(&server)
         .await;
-    assert!(run(&pool, &crawler, site, &base, 1_000).await.0.is_err());
+    assert!(run(&pool, &crawler, site, &base, 1_000, &[])
+        .await
+        .0
+        .is_err());
     assert_eq!(stored(&pool).await.len(), 100);
 
     // maxPages caps what the source holds; the rest is removed.
@@ -234,7 +239,7 @@ async fn public_datasets_are_read_whole_then_by_change_and_removed_when_the_cata
         ],
     )
     .await;
-    let (report, _) = run(&pool, &crawler, site, &base, 1).await;
+    let (report, _) = run(&pool, &crawler, site, &base, 1, &[]).await;
     assert_eq!(
         report.expect("capped"),
         CkanReport {
@@ -243,6 +248,21 @@ async fn public_datasets_are_read_whole_then_by_change_and_removed_when_the_cata
             removed: 99
         }
     );
+
+    // A source that names organizations lists their datasets alone (T-4140).
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/3/action/package_search"))
+        .and(query_param("fq", "organization:(banskabystrica OR bbsk)"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "result": {"count": 1, "results": [dataset("set-000", "2026-10-01T10:00:00")]}
+        })))
+        .mount(&server)
+        .await;
+    let organizations = ["banskabystrica".to_owned(), "bbsk".to_owned()];
+    let (report, _) = run(&pool, &crawler, site, &base, 1_000, &organizations).await;
+    assert_eq!(report.expect("narrowed").datasets, 1);
     db::drop_database(admin, pool, &name).await;
 }
 
@@ -264,7 +284,7 @@ async fn a_catalogue_on_a_private_address_is_not_read() {
         "https://[::1]/",
         "http://data.example/",
     ] {
-        let (report, pages) = run(&pool, &crawler, site, url, 10).await;
+        let (report, pages) = run(&pool, &crawler, site, url, 10, &[]).await;
         assert!(report.is_err(), "{url}");
         assert!(pages.0.is_empty());
     }

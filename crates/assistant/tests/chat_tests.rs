@@ -207,6 +207,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         limits: tokio::sync::Mutex::default(),
         questions: Arc::clone(&questions),
         answers: Default::default(),
+        endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
     });
     World {
         admin,
@@ -326,31 +327,75 @@ async fn model_calls(proxy: &MockServer) -> Vec<(axum::http::HeaderMap, Value)> 
         .collect()
 }
 
-/// AG-102, AG-105, AG-106, AG-108: the model searches, calls the public connector, and answers
-/// with both cited; the internal Endpoint and the unlisted tool are never offered.
+/// The recorded answers of the public Endpoint's `list_types` and `query_entities` (T-4140).
+async fn recorded_air(gateway: &MockServer) {
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}, "limit": {"type": "integer", "maximum": 1000}}}},
+            {"name": "delete_entity", "description": "Writes.", "inputSchema": {"type": "object"}}
+        ]}})))
+        .with_priority(1).mount(gateway).await;
+    let types = json!({"entityTypes": {"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList", "typeList": ["AirQualityObserved"]}});
+    mcp()
+        .and(body_string_contains("\"list_types\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": types.to_string()}]
+            }}),
+        ))
+        .with_priority(1)
+        .mount(gateway)
+        .await;
+    let entities = json!({"entities": [
+        {"id": "urn:ngsi-ld:AirQualityObserved:snp", "type": "AirQualityObserved",
+         "name": {"type": "Property", "value": "Námestie SNP"},
+         "no2": {"type": "Property", "value": 21, "observedAt": "2026-10-15T18:00:00Z"},
+         "location": {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [19.15, 48.74]}}},
+        {"id": "urn:ngsi-ld:AirQualityObserved:stanica", "type": "AirQualityObserved",
+         "name": {"type": "Property", "value": "Železničná stanica"},
+         "no2": {"type": "Property", "value": 34, "observedAt": "2026-10-15T18:00:00Z"}}
+    ]});
+    mcp()
+        .and(body_string_contains("\"query_entities\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": entities.to_string()}]
+            }}),
+        ))
+        .with_priority(1)
+        .mount(gateway)
+        .await;
+}
+
+/// T-4140, AG-102, AG-105, AG-106, AG-108: a data question is routed to the public Endpoint's
+/// live values: the router sees the types `list_types` gives, the service reads them with
+/// `query_entities` alone (a write tool the manifest names is never offered or called), the
+/// person gets the table with its download link, and the answer cites it without a search.
 #[tokio::test]
-async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
-    let w = world("chatok", deployment(Channel::Public, 50_000, 10)).await;
+async fn a_data_question_is_answered_from_the_endpoints_live_values() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "delete_entity".into(),
+    ];
+    let w = world("chatok", d).await;
+    recorded_air(&w.gateway).await;
     script(&w.proxy, vec![
-        completion(tool_call("c1", "search", json!({"query": "meracie stanice ovzdušia"})), 400),
-        completion(tool_call("c2", "ovzdusie__query_entities", json!({"type": "AirQualityObserved"})), 600),
-        completion(json!({"role": "assistant", "content": "Stanice sú na Námestí SNP [1], NO2 je 21 [3]."}), 700),
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [\"NO2\"], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"interne\", \"type\": \"Record\"}]}"}), 400),
+        streamed(&["NO2 na Námestí SNP je 21 [1]."], 900, 30),
     ]).await;
     let (status, events, headers) = answer_of(
         &w.app,
         ask(
-            json!({"message": "Kde sú meracie stanice ovzdušia?"}),
+            json!({"message": "Aké je NO2 na Námestí SNP?"}),
             Some(ORIGIN),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        headers
-            .get("x-accel-buffering")
-            .map(|v| v.to_str().unwrap_or_default()),
-        Some("no")
-    );
     assert_eq!(
         headers
             .get("access-control-allow-origin")
@@ -364,57 +409,63 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
             "conversation",
             "tool",
             "tool",
-            "tool",
-            "tool",
+            "data",
+            "delta",
             "answer",
             "citations",
             "done"
-        ]
+        ],
+        "{events:?}"
     );
-    assert_eq!(events[1].1, json!({"name": "search", "status": "started"}));
     assert_eq!(
-        events[4].1,
+        events[2].1,
         json!({"name": "query_entities", "endpoint": "ovzdusie", "status": "done"})
     );
     assert_eq!(
-        events[5].1["text"],
-        "Stanice sú na Námestí SNP [1], NO2 je 21 [3]."
+        events[3].1,
+        json!({
+            "endpoint": "ovzdusie",
+            "type": "AirQualityObserved",
+            "columns": ["name", "no2", "observedAt"],
+            "rows": [
+                ["Námestie SNP", 21, "2026-10-15T18:00:00Z"],
+                ["Železničná stanica", 34, "2026-10-15T18:00:00Z"]
+            ],
+            "download": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
+        })
     );
-    let citations = events[6].1.as_array().expect("citations");
-    assert_eq!(
-        citations.len(),
-        2,
-        "only the numbers the answer uses: {citations:?}"
-    );
-    assert_eq!(citations[0]["url"], "https://hronov.example/ovzdusie");
-    // Named by its page's title for the visitor (T-3325).
-    assert_eq!(citations[0]["title"], "Ovzdušie v Hronove");
     // No page of the sources gives this Endpoint's address: the live data stays unlinked.
     assert_eq!(
-        citations[1],
-        json!({"n": 3, "tool": "query_entities", "endpoint": "ovzdusie"})
+        events[6].1,
+        json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    // The sums of every call's usage (T-4139, API/05 §1.3).
     let done = &events[7].1;
     assert_eq!(
-        (
-            &done["tokens"],
-            &done["tokensIn"],
-            &done["tokensOut"],
-            &done["modelCalls"],
-            &done["cached"]
-        ),
-        (
-            &json!(1700),
-            &json!(1670),
-            &json!(30),
-            &json!(3),
-            &json!(false)
-        )
+        (&done["tokens"], &done["modelCalls"], &done["cached"]),
+        (&json!(1330), &json!(2), &json!(false))
     );
 
     let calls = model_calls(&w.proxy).await;
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 2, "no search round, no follow-up");
+    let router = calls[0].1["messages"][1]["content"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        router.contains("- ovzdusie: AirQualityObserved"),
+        "{router}"
+    );
+    assert!(!router.contains("interne"), "{router}");
+    let answering = calls[1].1["messages"][2]["content"]
+        .as_str()
+        .unwrap_or_default();
+    let given: Value = serde_json::from_str(answering.split('\n').next().unwrap_or_default())
+        .expect("the data as JSON");
+    assert_eq!(given["passages"], json!([]));
+    assert_eq!(given["data"][0]["n"], 1);
+    assert_eq!(
+        given["data"][0]["rows"][1],
+        json!(["Železničná stanica", 34, "2026-10-15T18:00:00Z"])
+    );
     for (headers, body) in &calls {
         assert_eq!(
             headers
@@ -429,51 +480,29 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
             Some("hronov/obcania")
         );
         assert_eq!(
-            headers
-                .get("x-jc-assistant-tokens-per-day")
-                .map(|v| v.to_str().unwrap_or_default()),
-            Some("1000000")
-        );
-        assert_eq!(
-            body["messages"][0], calls[0].1["messages"][0],
-            "one stable prefix (AG-108)"
-        );
-        assert_eq!(
             body["messages"][0]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
-        // T-3203: a reasoning model thinks briefly, so the answer keeps its room.
-        assert_eq!(body["reasoning"]["effort"], "low");
-        assert_eq!(body["max_tokens"], 3000);
+        assert!(body.get("tools").is_none());
     }
-    let offered: Vec<&str> = calls[0].1["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
-        .collect();
-    assert_eq!(offered, ["search", "ovzdusie__query_entities"]);
-    let passages = calls[1].1["messages"][3]["content"]
-        .as_str()
-        .expect("the search result");
-    // T-3204: the passages are a JSON object, never tagged text the model may set aside.
-    let parsed: Value = serde_json::from_str(passages).expect("the passages are JSON");
-    assert_eq!(parsed["passages"][0]["n"], 1);
-    assert_eq!(
-        parsed["passages"][0]["url"],
-        "https://hronov.example/ovzdusie"
-    );
-    assert!(
-        !passages.contains("intranet"),
-        "another source is never searched"
-    );
-    assert!(w
+    let sent: Vec<String> = w
         .gateway
         .received_requests()
         .await
         .unwrap_or_default()
         .iter()
-        .all(|r| !r.url.path().contains(HIDDEN_SLUG)));
+        .inspect(|r| {
+            assert!(
+                !r.url.path().contains(HIDDEN_SLUG),
+                "the internal Endpoint was read"
+            )
+        })
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .filter(|b| b.contains("tools/call"))
+        .collect();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(sent[1].contains("\"limit\":50") && sent[1].contains("AirQualityObserved"));
+    assert!(sent.iter().all(|b| !b.contains("delete_entity")));
 
     // The conversation and the day were counted; no text was kept (AG-99).
     let mut tx = assistant::project_scope(&w.pool, "hronov")
@@ -483,13 +512,36 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
         .fetch_one(&mut *tx)
         .await
         .expect("one");
-    let (requests, input, output): (i64, i64, i64) =
-        sqlx::query_as("SELECT requests, tokens_in, tokens_out FROM usage")
-            .fetch_one(&mut *tx)
-            .await
-            .expect("usage");
     tx.rollback().await.expect("rollback");
-    assert_eq!((tokens, requests, input, output), (1700, 1, 1670, 30));
+    assert_eq!(tokens, 1330);
+
+    // Live values are read again, never answered from the cache; the types are.
+    script(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+        streamed(&["21 [1]."], 900, 30),
+    ]).await;
+    let (_, again, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Aké je NO2 na Námestí SNP?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        again.last().map(|(_, d)| d["cached"].clone()),
+        Some(json!(false))
+    );
+    assert_eq!(model_calls(&w.proxy).await.len(), 4);
+    let types_listed = w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains("\"list_types\""))
+        .count();
+    assert_eq!(types_listed, 1, "the types are kept for ten minutes");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -497,7 +549,10 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
 /// call twice ends the loop, and the last call offers no tools.
 #[tokio::test]
 async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
-    let w = world("chatloop", deployment(Channel::Public, 50_000, 10)).await;
+    // A write tool the manifest names is still never offered (T-4140, read-only allowlist).
+    let mut d = looped(50_000);
+    d.spec.connectors[0].tools.push("delete_everything".into());
+    let w = world("chatloop", d).await;
     script(
         &w.proxy,
         vec![
@@ -516,11 +571,7 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     .await;
     let (_, events, _) = answer_of(
         &w.app,
-        ask(
-            // The connectors stay on: with none, the question takes the routed loop (T-4139).
-            json!({"message": "Dokedy je otvorená knižnica?"}),
-            None,
-        ),
+        ask_looped(json!({"message": "Dokedy je otvorená knižnica?"})),
     )
     .await;
     assert_eq!(
@@ -679,7 +730,7 @@ async fn expired_conversations_are_deleted_and_current_ones_kept() {
 /// the rule, and nothing reaches the Endpoint.
 #[tokio::test]
 async fn arguments_that_break_the_tools_schema_are_never_sent() {
-    let w = world("chatschema", deployment(Channel::Public, 50_000, 10)).await;
+    let w = world("chatschema", looped(50_000)).await;
     script(
         &w.proxy,
         vec![
@@ -691,7 +742,8 @@ async fn arguments_that_break_the_tools_schema_are_never_sent() {
         ],
     )
     .await;
-    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Aké je ovzdušie?"}), None)).await;
+    let (_, events, _) =
+        answer_of(&w.app, ask_looped(json!({"message": "Aké je ovzdušie?"}))).await;
     assert!(
         events
             .iter()
@@ -724,9 +776,9 @@ async fn arguments_that_break_the_tools_schema_are_never_sent() {
 #[tokio::test]
 async fn budgets_and_failures_reach_the_person_as_sentences() {
     // Room for a short question beside the answer's 3,000 tokens (T-3203), not for a long one.
-    let w = world("chatbudget", deployment(Channel::Public, 3_600, 10)).await;
+    let w = world("chatbudget", looped(3_600)).await;
     // The estimate of the first call alone is over a 3,600-token conversation.
-    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "x".repeat(4000)}), None)).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "x".repeat(4000)}))).await;
     let error = events
         .iter()
         .find(|(n, _)| n == "error")
@@ -750,7 +802,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .up_to_n_times(1)
         .mount(&w.proxy)
         .await;
-    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), None)).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
     let error = events
         .iter()
         .find(|(n, _)| n == "error")
@@ -770,7 +822,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .respond_with(ResponseTemplate::new(502))
         .mount(&w.proxy)
         .await;
-    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), None)).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
     let error = events
         .iter()
         .find(|(n, _)| n == "error")
@@ -808,7 +860,7 @@ async fn questions_past_the_service_s_limit_are_refused_before_anything_is_spent
 async fn one_reply_may_carry_four_calls_and_none_with_overlong_arguments() {
     // T-3059: past four calls in one reply, or with arguments past 4,096 characters, the call is
     // answered with a refusal instead of being run.
-    let w = world("chatcalls", deployment(Channel::Public, 50_000, 10)).await;
+    let w = world("chatcalls", looped(50_000)).await;
     let many = json!({"role": "assistant", "content": null, "tool_calls": (1..=6)
         .map(|n| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "search", "arguments": json!({"query": format!("trh {n}")}).to_string()}}))
         .collect::<Vec<_>>()});
@@ -827,7 +879,7 @@ async fn one_reply_may_carry_four_calls_and_none_with_overlong_arguments() {
         ],
     )
     .await;
-    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Kedy je trh?"}), None)).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Kedy je trh?"}))).await;
     assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
     let calls = model_calls(&w.proxy).await;
     let tools = |at: usize| -> Vec<String> {
@@ -980,8 +1032,12 @@ async fn a_conversation_continues_with_its_id() {
     script(
         &w.proxy,
         vec![
-            completion(json!({"role": "assistant", "content": "Prvá."}), 100),
-            completion(json!({"role": "assistant", "content": "Druhá."}), 150),
+            completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"prvá\"]}"}), 60),
+            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20),
+            streamed(&["Prvá."], 15, 5),
+            completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"druhá\"]}"}), 60),
+            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20),
+            streamed(&["Druhá."], 60, 10),
         ],
     )
     .await;
@@ -1000,7 +1056,8 @@ async fn a_conversation_continues_with_its_id() {
         .expect("rows");
     tx.rollback().await.expect("rollback");
     assert_eq!(tokens, [250]);
-    let history = model_calls(&w.proxy).await[1].1["messages"][1]["content"]
+    // The second question's router reads the first turn.
+    let history = model_calls(&w.proxy).await[3].1["messages"][1]["content"]
         .as_str()
         .expect("text")
         .to_owned();
@@ -1012,7 +1069,7 @@ async fn a_conversation_continues_with_its_id() {
 /// asked for anyway it is refused like any made-up name (AG-105).
 #[tokio::test]
 async fn a_deployment_without_sources_offers_no_search() {
-    let mut connectors_only = deployment(Channel::Public, 50_000, 10);
+    let mut connectors_only = looped(50_000);
     connectors_only.spec.sources.clear();
     let w = world("chatnosources", connectors_only).await;
     script(
@@ -1025,7 +1082,7 @@ async fn a_deployment_without_sources_offers_no_search() {
     .await;
     let (_, events, _) = answer_of(
         &w.app,
-        ask(json!({"message": "Dokedy je otvorená knižnica?"}), None),
+        ask_looped(json!({"message": "Dokedy je otvorená knižnica?"})),
     )
     .await;
     assert!(events
@@ -1147,7 +1204,7 @@ async fn a_long_result_is_filtered_by_a_script_in_the_sandbox() {
 /// refused and never sent to jc-functions.
 #[tokio::test]
 async fn no_script_runs_without_the_sandbox() {
-    let w = world("chatnoscript", deployment(Channel::Public, 50_000, 10)).await;
+    let w = world("chatnoscript", looped(50_000)).await;
     let long = "x".repeat(30_000);
     Mock::given(method("POST"))
         .and(path(format!("/api/endpoint/{SLUG}/mcp")))
@@ -1174,7 +1231,7 @@ async fn no_script_runs_without_the_sandbox() {
         ],
     )
     .await;
-    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), None)).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
     assert!(events.iter().all(|(n, _)| n != "script"));
     let calls = model_calls(&w.proxy).await;
     assert!(calls[0].1["tools"]
@@ -1455,6 +1512,22 @@ fn internal_deployment(budget: bool) -> Deployment {
         d.spec.budget = None;
     }
     d
+}
+
+/// A deployment that takes the tool loop: anonymous ones are routed (T-4140), so the loop's
+/// mechanics are asked of an internal one with the public source alone, by the Portal without
+/// a person's token (the organization's Endpoint is then never offered).
+fn looped(per_conversation: u64) -> Deployment {
+    let mut d = internal_deployment(true);
+    d.spec.sources = vec!["web".into()];
+    if let Some(budget) = d.spec.budget.as_mut() {
+        budget.tokens_per_conversation = per_conversation;
+    }
+    d
+}
+
+fn ask_looped(body: Value) -> Request<Body> {
+    ask_in_portal(body, Some(PORTAL_TOKEN), Some("jana"), None)
 }
 
 async fn make_intranet_internal(pool: &PgPool) {
