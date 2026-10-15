@@ -135,10 +135,17 @@ var JCRender = (function () {
           live: live,
           endpoint: typeof c.endpoint === "string" ? c.endpoint : null,
           domain: url ? domain(url) : "",
-          numbers: []
+          numbers: [],
+          cards: []
         });
       }
       var entry = list[byKey[key]];
+      cards(c.cards).forEach(function (card) {
+        var same = JSON.stringify(card);
+        if (entry.cards.length < 3 && !entry.cards.some(function (k) { return JSON.stringify(k) === same; })) {
+          entry.cards.push(card);
+        }
+      });
       if (!entry.title && typeof c.title === "string" && c.title.trim()) entry.title = c.title.trim();
       entry.numbers.push(c.n);
       position[c.n] = byKey[key] + 1;
@@ -227,6 +234,79 @@ var JCRender = (function () {
     };
   }
 
+  var EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+
+  /** A phone as a `tel:` link: 9 to 15 digits, a leading `+` and spaces, `/`, `-` aside; else null. */
+  function tel(phone) {
+    var compact = String(phone || "").replace(/[\s\/-]/g, "");
+    return /^\+?\d{9,15}$/.test(compact) ? "tel:" + compact : null;
+  }
+
+  /** An e-mail address as a `mailto:` link, null unless it is one address and nothing else. */
+  function mailto(address) {
+    return EMAIL.test(String(address || "")) ? "mailto:" + address : null;
+  }
+
+  function text(value, max) {
+    return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
+  }
+
+  /**
+   * A citation's cards (T-4155) as the chat shows them: each field text, each link checked
+   * (`tel:`, `mailto:`, an OpenStreetMap search), an empty field left out and an empty card dropped.
+   */
+  function cards(raw) {
+    return (Array.isArray(raw) ? raw : []).map(function (card) {
+      if (!card || typeof card !== "object") return null;
+      var list = function (values, link) {
+        return (Array.isArray(values) ? values : []).map(function (v) { return text(v, 300); })
+          .filter(Boolean).slice(0, 5).map(function (v) { return { text: v, href: link(v) }; });
+      };
+      if (card.kind === "contact") {
+        var phones = list(card.phones, tel);
+        var emails = list(card.emails, mailto);
+        if (phones.length + emails.length === 0) return null;
+        return { kind: "contact", name: text(card.name, 300), phones: phones, emails: emails };
+      }
+      if (card.kind === "place") {
+        var address = text(card.address, 300);
+        return address ? { kind: "place", address: address,
+          href: "https://www.openstreetmap.org/search?query=" + encodeURIComponent(address) } : null;
+      }
+      if (card.kind === "procedure") {
+        var steps = (Array.isArray(card.steps) ? card.steps : []).map(function (v) { return text(v, 300); })
+          .filter(Boolean).slice(0, 10);
+        return steps.length > 0 ? { kind: "procedure", steps: steps } : null;
+      }
+      return null;
+    }).filter(Boolean);
+  }
+
+  var STAGES = {
+    sk: { understanding: "Rozmýšľam nad otázkou…", searching: "Hľadám v zdrojoch", reading: "Čítam živé údaje",
+      answering: "Pripravujem odpoveď…" },
+    en: { understanding: "Reading your question…", searching: "Searching the sources", reading: "Reading live data",
+      answering: "Preparing the answer…" },
+    cs: { understanding: "Přemýšlím nad otázkou…", searching: "Hledám ve zdrojích", reading: "Čtu živá data",
+      answering: "Připravuji odpověď…" }
+  };
+
+  /**
+   * The progress line of a `stage` event (T-4155): fixed words per step, a search or a read
+   * naming its topic (`Hľadám v zdrojoch: „…“…`); null for a step the chat does not know.
+   */
+  function stage(data, lang) {
+    var words = STAGES[lang] || STAGES.en;
+    var name = data && data.stage;
+    if (!Object.prototype.hasOwnProperty.call(words, name)) return null;
+    var topic = text(data.topic, 60);
+    if (name === "searching" || name === "reading") {
+      return words[name] + (topic ? ": „" + topic + "“…" : "…");
+    }
+    return words[name];
+  }
+
+
   /** A `followups` event's questions (T-4174): strings, trimmed, 1 to 120 characters, at most 3. */
   function followups(data) {
     var out = [];
@@ -268,6 +348,7 @@ var JCRender = (function () {
 
   return {
     followups: followups, restore: restore, remember: remember,
+    cards: cards, stage: stage, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table
   };

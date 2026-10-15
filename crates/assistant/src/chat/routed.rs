@@ -722,6 +722,7 @@ pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) 
         {
             citations.push(Citation {
                 n: citations.len() + 1,
+                cards: super::cards::of(&hit.text),
                 url: Some(hit.url),
                 tool: None,
                 endpoint: None,
@@ -743,6 +744,10 @@ pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) 
     send(events, Event::Answer(text)).await;
     send(events, Event::Citations(citations)).await;
     spent
+}
+
+fn stage(stage: &'static str, topic: Option<String>) -> Event {
+    Event::Stage { stage, topic }
 }
 
 /// Answers one question by the routed loop; returns what it spent. Every outcome reaches
@@ -790,6 +795,7 @@ pub async fn answer(
         send(events, conversation_spent()).await;
         return spent;
     }
+    send(events, stage("understanding", None)).await;
     let routing = match ask
         .model
         .ask(ask.deployment, ask.tokens_per_day, &router, &messages)
@@ -818,6 +824,7 @@ pub async fn answer(
             endpoint: Some(endpoint.clone()),
             status,
         };
+        send(events, stage("reading", Some(kind.to_string()))).await;
         send(events, tool("started")).await;
         match read(ask, connector, kind).await {
             Ok(table) => {
@@ -849,6 +856,7 @@ pub async fn answer(
             if events.is_closed() {
                 return spent;
             }
+            send(events, stage("searching", Some(query.clone()))).await;
             send(
                 events,
                 Event::Tool {
@@ -916,6 +924,7 @@ pub async fn answer(
             tool: None,
             endpoint: None,
             title: None,
+            cards: super::cards::of(&hit.text),
         });
         passages.push(json!({"n": n, "url": hit.url, "text": hit.text}));
     }
@@ -928,6 +937,7 @@ pub async fn answer(
             tool: Some("query_entities".into()),
             endpoint: Some(table.endpoint.clone()),
             title: None,
+            cards: Vec::new(),
         });
         data.push(json!({
             "n": n,
@@ -953,6 +963,7 @@ pub async fn answer(
     if events.is_closed() {
         return spent;
     }
+    send(events, stage("answering", None)).await;
     let call = Call {
         model: ask.answer_model,
         max_tokens: ask.output_tokens,

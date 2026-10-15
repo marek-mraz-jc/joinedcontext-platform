@@ -78,11 +78,21 @@ pub struct Citation {
     /// What a visitor reads it as: its page's title (T-3325).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// What the cited passage publishes: a contact, a place, a procedure (T-4155).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<super::cards::Card>,
 }
 
 /// One event of the answer's stream (API/05 §1.3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    /// The step the answer is at, for the one progress line the chat shows (T-4155): one of
+    /// `understanding`, `searching` (with the query), `reading` (with the entity type) or
+    /// `answering`. Fixed names, never a model call.
+    Stage {
+        stage: &'static str,
+        topic: Option<String>,
+    },
     Tool {
         name: String,
         endpoint: Option<String>,
@@ -565,6 +575,7 @@ async fn run_tool(
                         tool: None,
                         endpoint: None,
                         title: None,
+                        cards: super::cards::of(&text),
                     });
                     passages.push(json!({"n": n, "url": url, "text": text}));
                 }
@@ -633,6 +644,7 @@ async fn run_tool(
                     tool: Some(tool.name.clone()),
                     endpoint,
                     title: None,
+                    cards: Vec::new(),
                 });
                 // The model reads at most MAX_RESULT_CHARS of it; on a deployment with the sandbox
                 // the whole result is kept for run_script (AG-112).
