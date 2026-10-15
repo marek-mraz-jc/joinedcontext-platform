@@ -389,7 +389,7 @@ pub async fn crawl_site(
                 )
                 .await?;
             }
-            fetch::FetchOutcome::Failed(_) | fetch::FetchOutcome::Status(_) => {
+            fetch::FetchOutcome::Failed(ref why) => {
                 report.failed += 1;
                 record_failed_page(
                     pool,
@@ -399,6 +399,21 @@ pub async fn crawl_site(
                     item.parent_id,
                     item.depth as i16,
                     is_page_included,
+                    why,
+                )
+                .await?;
+            }
+            fetch::FetchOutcome::Status(status) => {
+                report.failed += 1;
+                record_failed_page(
+                    pool,
+                    project,
+                    site_id,
+                    item.url.as_str(),
+                    item.parent_id,
+                    item.depth as i16,
+                    is_page_included,
+                    &format!("HTTP {}", status.as_u16()),
                 )
                 .await?;
             }
@@ -720,13 +735,37 @@ async fn handle_document(
             report.too_large += 1;
             record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
         }
-        fetch::FetchOutcome::Failed(_) | fetch::FetchOutcome::Status(_) => {
+        fetch::FetchOutcome::Failed(ref why) => {
             report.failed += 1;
-            record_failed_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
+            let failed = Failed {
+                page_id,
+                url: url_str,
+                off_domain,
+                reason: why,
+            };
+            record_failed_doc(pool, project, site_id, &failed).await?;
+        }
+        fetch::FetchOutcome::Status(status) => {
+            report.failed += 1;
+            let reason = format!("HTTP {}", status.as_u16());
+            let failed = Failed {
+                page_id,
+                url: url_str,
+                off_domain,
+                reason: &reason,
+            };
+            record_failed_doc(pool, project, site_id, &failed).await?;
         }
         fetch::FetchOutcome::RedirectExternal { .. } => {
             report.failed += 1;
-            record_failed_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
+            let reason = "a redirect left the site";
+            let failed = Failed {
+                page_id,
+                url: url_str,
+                off_domain,
+                reason,
+            };
+            record_failed_doc(pool, project, site_id, &failed).await?;
         }
         fetch::FetchOutcome::NotModified { .. } => {
             report.documents_unchanged += 1;
@@ -917,6 +956,13 @@ async fn record_skipped_page(
     Ok(id)
 }
 
+/// Why a read failed, as the index status shows it (T-4197): an HTTP status or the network
+/// error, cut to the column's 300 characters; never what the page held.
+fn reason(why: &str) -> String {
+    why.chars().take(300).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn record_failed_page(
     pool: &PgPool,
     project: &str,
@@ -925,14 +971,16 @@ async fn record_failed_page(
     parent_id: Option<i64>,
     depth: i16,
     included: bool,
+    why: &str,
 ) -> Result<i64, Error> {
     let mut tx = crate::project_scope(pool, project).await?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO pages (site_id, project, url, parent_id, depth, status, included) \
-         VALUES ($1, $2, $3, $4, $5, 'failed', $6) \
+        "INSERT INTO pages (site_id, project, url, parent_id, depth, status, included, error) \
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              parent_id = COALESCE(pages.parent_id, EXCLUDED.parent_id), \
-             status = 'failed' \
+             status = 'failed', \
+             error = EXCLUDED.error \
          RETURNING id",
     )
     .bind(site_id)
@@ -941,6 +989,7 @@ async fn record_failed_page(
     .bind(parent_id)
     .bind(depth)
     .bind(included)
+    .bind(reason(why))
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1103,32 +1152,39 @@ async fn record_skipped_doc(
     Ok(id)
 }
 
+/// A document whose read failed, and why.
+struct Failed<'a> {
+    page_id: Option<i64>,
+    url: &'a str,
+    off_domain: bool,
+    reason: &'a str,
+}
+
 async fn record_failed_doc(
     pool: &PgPool,
     project: &str,
     site_id: i64,
-    page_id: Option<i64>,
-    url: &str,
-    off_domain: bool,
-    included: bool,
+    failed: &Failed<'_>,
 ) -> Result<i64, Error> {
     let mut tx = crate::project_scope(pool, project).await?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included) \
-         VALUES ($1, $2, $3, $4, $5, 'failed', $6) \
+        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included, error) \
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
              off_domain = EXCLUDED.off_domain, \
              status = 'failed', \
-             included = EXCLUDED.included \
+             included = EXCLUDED.included, \
+             error = EXCLUDED.error \
          RETURNING id",
     )
     .bind(site_id)
     .bind(project)
-    .bind(page_id)
-    .bind(url)
-    .bind(off_domain)
-    .bind(included)
+    .bind(failed.page_id)
+    .bind(failed.url)
+    .bind(failed.off_domain)
+    .bind(true)
+    .bind(reason(failed.reason))
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

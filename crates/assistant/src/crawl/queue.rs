@@ -50,7 +50,7 @@ pub async fn pending(pool: &PgPool, project: &str, source: &str) -> Result<bool,
 pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
     let row = sqlx::query(
         "UPDATE crawl_jobs \
-         SET state = 'running', claimed_by = $1, claimed_at = now() \
+         SET state = 'running', claimed_by = $1, claimed_at = now(), finished_at = NULL \
          WHERE id = ( \
              SELECT id FROM crawl_jobs \
              WHERE state = 'queued' AND run_after <= now() \
@@ -77,7 +77,7 @@ pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
 
 /// Marks a job as completed.
 pub async fn finish(pool: &PgPool, id: i64) -> Result<(), Error> {
-    sqlx::query("UPDATE crawl_jobs SET state = 'done' WHERE id = $1")
+    sqlx::query("UPDATE crawl_jobs SET state = 'done', finished_at = now() WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await?;
@@ -95,7 +95,8 @@ pub async fn fail(pool: &PgPool, id: i64, error: &str) -> Result<(), Error> {
                  WHEN attempts + 1 >= 5 THEN run_after \
                  ELSE now() + LEAST((power(2, attempts + 1) || ' minutes')::interval, interval '6 hours') \
              END, \
-             error = $2 \
+             error = $2, \
+             finished_at = now() \
          WHERE id = $1",
     )
     .bind(id)

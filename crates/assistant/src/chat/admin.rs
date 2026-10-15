@@ -72,6 +72,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             post(recrawl),
         )
         .route(
+            "/internal/v1/projects/{project}/knowledge/sources/{source}/errors",
+            get(errors),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/usage",
             get(usage),
         )
@@ -171,7 +175,10 @@ async fn sources(
            (SELECT count(*) FROM pages p WHERE p.site_id = s.id AND p.included AND NOT p.excluded_by_admin) AS pages_included, \
            (SELECT count(*) FROM documents d WHERE d.site_id = s.id) AS documents, \
            (SELECT count(*) FROM chunks c WHERE c.site_id = s.id) AS passages, \
-           (SELECT count(*) FROM chunks c WHERE c.site_id = s.id AND c.embedding IS NOT NULL) AS embedded \
+           (SELECT count(*) FROM chunks c WHERE c.site_id = s.id AND c.embedding IS NOT NULL) AS embedded, \
+           (SELECT count(*) FROM chunks c WHERE c.site_id = s.id AND c.embedding IS NULL) AS pending, \
+           (SELECT count(*) FROM pages p WHERE p.site_id = s.id AND p.status = 'failed') \
+             + (SELECT count(*) FROM documents d WHERE d.site_id = s.id AND d.status = 'failed') AS failed \
          FROM sites s ORDER BY s.source"
     );
     let rows = match sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -185,9 +192,11 @@ async fn sources(
     let mut listed = Vec::new();
     for row in rows {
         let source: String = row.try_get("source").unwrap_or_default();
-        let job: Option<(String, i32, Option<String>)> = sqlx::query_as(
-            "SELECT state, attempts, error FROM crawl_jobs WHERE project = $1 AND source = $2 ORDER BY id DESC LIMIT 1",
-        )
+        let job: Option<JobRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT state, attempts, error, \
+               to_char(claimed_at AT TIME ZONE 'UTC', {UTC}), to_char(finished_at AT TIME ZONE 'UTC', {UTC}) \
+             FROM crawl_jobs WHERE project = $1 AND source = $2 ORDER BY id DESC LIMIT 1"
+        )))
         .bind(&project)
         .bind(&source)
         .fetch_optional(&state.pool)
@@ -203,10 +212,68 @@ async fn sources(
             "documents": row.try_get::<i64, _>("documents").unwrap_or(0),
             "passages": row.try_get::<i64, _>("passages").unwrap_or(0),
             "embedded": row.try_get::<i64, _>("embedded").unwrap_or(0),
-            "job": job.map(|(state, attempts, error)| json!({"state": state, "attempts": attempts, "error": error})),
+            "pending": row.try_get::<i64, _>("pending").unwrap_or(0),
+            "failed": row.try_get::<i64, _>("failed").unwrap_or(0),
+            "job": job.map(|(state, attempts, error, started, finished)| json!({
+                "state": state, "attempts": attempts, "error": error,
+                "startedAt": started, "finishedAt": finished,
+            })),
         }));
     }
     Json(json!({"items": listed})).into_response()
+}
+
+/// The last crawl job of a source: state, attempts, error, started and finished (UTC text).
+type JobRow = (String, i32, Option<String>, Option<String>, Option<String>);
+
+/// The most crawl errors one answer lists (API/05 §3).
+const MAX_ERRORS: i64 = 50;
+
+/// The pages and documents of a source whose last read failed, newest first: the URL and why,
+/// never what they held (T-4197).
+async fn errors(
+    State(state): State<Arc<ChatState>>,
+    Path((project, source)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let site = match site(&state, &project, &source).await {
+        Ok(site) => site,
+        Err(refused) => return *refused,
+    };
+    let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
+        return problem(404, "no such project");
+    };
+    let rows: Result<Vec<(String, String, Option<String>)>, _> = sqlx::query_as(
+        "SELECT url, kind, error FROM ( \
+             SELECT p.url, 'page' AS kind, p.error, p.id AS at FROM pages p \
+               WHERE p.site_id = $1 AND p.status = 'failed' \
+             UNION ALL \
+             SELECT d.url, 'document', d.error, d.id FROM documents d \
+               WHERE d.site_id = $1 AND d.status = 'failed' \
+         ) failed ORDER BY at DESC LIMIT $2",
+    )
+    .bind(site)
+    .bind(MAX_ERRORS)
+    .fetch_all(&mut *tx)
+    .await;
+    let _ = tx.rollback().await;
+    match rows {
+        Ok(rows) => {
+            let items: Vec<Value> = rows
+                .into_iter()
+                .map(|(url, kind, error)| {
+                    // A failure recorded before reasons were kept says so rather than nothing.
+                    let reason = error.unwrap_or_else(|| "not recorded".to_owned());
+                    json!({"url": url, "kind": kind, "reason": reason})
+                })
+                .collect();
+            Json(json!({"items": items})).into_response()
+        }
+        Err(err) => failed(err),
+    }
 }
 
 #[derive(Deserialize)]
