@@ -393,3 +393,51 @@ async fn without_a_token_a_tool_list_the_gateway_cannot_read_is_refused_not_pass
         }
     }
 }
+
+/// T-4191: every tool a named server lists to a caller without a token answers a call, never
+/// `unknown tool`: a client offered a tool that never answers loses a turn on it.
+#[tokio::test]
+async fn without_a_token_every_tool_a_named_server_lists_answers_a_call() {
+    let realm = common::Realm::new();
+    let (url, _) = broker().await;
+    let app = router(Arc::new(gateway(&url, &realm)));
+    let path = "/api/mcp/mesto/open";
+    let (_, listed) = send(&app, rpc(path, None, None, &list())).await;
+    let listed = names(&listed);
+    assert!(
+        listed.iter().any(|name| name == "get_attribute_value"),
+        "{listed:?}"
+    );
+    let arguments = json!({
+        "endpoint": OPEN,
+        "id": "urn:ngsi-ld:AirQualityObserved:sk001",
+        "attrId": "pm10",
+        "type": ["AirQualityObserved"],
+    });
+    for name in &listed {
+        let (status, answer) = send(&app, rpc(path, None, None, &call(name, &arguments))).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {answer}");
+        assert!(
+            answer.get("error").is_none() && answer.get("result").is_some(),
+            "{name} is listed but not answered: {answer}"
+        );
+    }
+}
+
+/// T-4191: an Endpoint's own MCP answers a caller without a token's tool list at once, as the
+/// named server in front of it does.
+#[tokio::test]
+async fn without_a_token_an_endpoints_own_tool_list_answers_at_once() {
+    let realm = common::Realm::new();
+    let (url, _) = broker().await;
+    let app = router(Arc::new(gateway(&url, &realm)));
+    let path = format!("/api/endpoint/{OPEN}/mcp");
+    let (status, answer) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        send(&app, rpc(&path, None, None, &list())),
+    )
+    .await
+    .expect("the tool list answers within 5 s");
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(names(&answer).iter().any(|name| name == "query_entities"));
+}
