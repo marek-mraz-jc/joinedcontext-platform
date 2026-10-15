@@ -376,11 +376,14 @@ pub async fn answer(
             return spent;
         }
         if ask.spent_before + spent.total + estimate(&messages) > ask.tokens_per_conversation {
-            send(events, Event::Error {
-                status: 429,
-                title: "Conversation Budget Spent",
-                detail: "This conversation has used its share of the assistant. Start a new conversation to ask more.".into(),
-            })
+            send(
+                events,
+                Event::Error {
+                    status: 429,
+                    title: "Conversation Budget Spent",
+                    detail: super::model::CONVERSATION_SPENT.into(),
+                },
+            )
             .await;
             return spent;
         }

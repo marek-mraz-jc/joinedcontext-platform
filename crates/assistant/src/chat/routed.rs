@@ -691,7 +691,7 @@ fn conversation_spent() -> Event {
     Event::Error {
         status: 429,
         title: "Conversation Budget Spent",
-        detail: "This conversation has used its share of the assistant. Start a new conversation to ask more.".into(),
+        detail: super::model::CONVERSATION_SPENT.into(),
     }
 }
 
