@@ -69,14 +69,26 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             rate_limit: Some(RateLimit {
                 requests_per_minute: 100,
                 per_client_per_minute: per_client,
+                per_client_per_hour: 600,
+                per_client_per_day: 6_000,
+                streams_per_client: 2,
             }),
             budget: Some(Budget {
                 tokens_per_day: 1_000_000,
                 tokens_per_conversation: per_conversation,
+                cost_per_day_usd: 3.0,
+                output_tokens_per_answer: 700,
+                messages_per_conversation: 30,
+                question_chars: 1_000,
             }),
             theme: None,
             languages: vec!["sk".into()],
             sandbox: false,
+            model: None,
+            suggestions: Default::default(),
+            disclaimer: Default::default(),
+            enabled: true,
+            scope: None,
         },
     }
 }

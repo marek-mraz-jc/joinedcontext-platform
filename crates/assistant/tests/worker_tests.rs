@@ -117,6 +117,8 @@ fn spec(start: &str, schedule: Option<&str>) -> KnowledgeSourceSpec {
         start_urls: vec![start.to_owned()],
         ckan_instance_ref: None,
         context_spaces: Vec::new(),
+        organizations: Vec::new(),
+        upload: None,
         sitemap: false,
         include: Vec::new(),
         exclude: Vec::new(),
