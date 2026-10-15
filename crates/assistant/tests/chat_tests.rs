@@ -1395,6 +1395,31 @@ async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cooki
     let (status, _, _) = get(&w.app, "/d/nikto/widget").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    // T-4138: the same chat as a page of its own, and the launcher a site includes, both for a
+    // published deployment alone.
+    let (status, headers, page) = get(&w.app, "/d/hronov-obcania").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("<body class=\"jc-page\">"), "{page}");
+    assert!(headers
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .ends_with(&format!("frame-ancestors {ORIGIN}")));
+    assert!(headers.get("set-cookie").is_none());
+    let (status, headers, launcher) = get(&w.app, "/d/hronov-obcania/embed.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .starts_with("text/javascript"));
+    assert!(launcher.contains("attachShadow") && launcher.contains("/widget?embed=1"));
+    assert!(headers.get("set-cookie").is_none());
+    for unknown in ["/d/nikto", "/d/nikto/embed.js"] {
+        let (status, _, _) = get(&w.app, unknown).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{unknown}");
+    }
+
     // The widget's own origin may ask; another is refused before anything is spent.
     script_answer(&w.proxy).await;
     let (status, _, _) = answer_of(

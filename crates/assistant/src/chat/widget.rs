@@ -1,7 +1,8 @@
-//! The widget a site places in an iframe (API/05 §1.6, T-3058, AG-114): one HTML page per public
-//! deployment, its script and its style from this host, framed only by the deployment's
-//! `allowedOrigins`. The page sets no cookie and holds the conversation itself; every limit is
-//! the chat route's.
+//! The public chat (API/05 §1.6, T-3058, AG-114, T-4138): one HTML page per public deployment,
+//! served full page at `/d/{publicId}` and as the panel `/d/{publicId}/widget` that a site frames
+//! or the launcher `/d/{publicId}/embed.js` opens. Script and style come from this host, the
+//! pages are framed only by the deployment's `allowedOrigins`, no page sets a cookie and the
+//! conversation lives in the page; every limit is the chat route's.
 
 use std::sync::Arc;
 
@@ -21,12 +22,16 @@ const SCRIPT: &str = concat!(
     include_str!("../../widget/widget.js")
 );
 const STYLE: &str = include_str!("../../widget/widget.css");
+/// The launcher a site includes; it reads its deployment from its own address.
+const LAUNCHER: &str = include_str!("../../widget/embed.js");
 
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/d/widget.js", get(script))
         .route("/d/widget.css", get(style))
+        .route("/d/{public_id}", get(full_page))
         .route("/d/{public_id}/widget", get(page))
+        .route("/d/{public_id}/embed.js", get(launcher))
         .with_state(state)
 }
 
@@ -73,44 +78,84 @@ pub fn policy(deployment: &Deployment) -> String {
     )
 }
 
-/// The page of one public deployment.
-pub fn html(deployment: &Deployment) -> String {
+/// What the page needs to know of its deployment; nothing in it is secret.
+fn config(deployment: &Deployment) -> serde_json::Value {
     let spec = &deployment.spec;
-    let config = json!({
+    json!({
         "publicId": spec.public_id,
-        "title": spec.public_id,
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
         "color": spec.theme.as_ref().and_then(|t| t.primary_color.clone()),
         "connectors": spec.connectors.iter().map(|c| c.endpoint.clone()).collect::<Vec<_>>(),
-    });
+        "languages": spec.languages,
+        "suggestions": spec.suggestions,
+        "disclaimer": spec.disclaimer,
+        "enabled": spec.enabled,
+        "questionChars": spec.budget.as_ref().map(|b| b.question_chars),
+    })
+}
+
+/// The page of one public deployment: the panel, or with `full` the page of its own.
+pub fn html(deployment: &Deployment, full: bool) -> String {
+    let spec = &deployment.spec;
+    let lang = if spec.languages.is_empty() || spec.languages.iter().any(|l| l == "sk") {
+        "sk"
+    } else {
+        spec.languages[0].as_str()
+    };
     format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+        "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, interactive-widget=resizes-content\">\n\
          <meta name=\"referrer\" content=\"no-referrer\">\n<title>{title}</title>\n\
-         <link rel=\"stylesheet\" href=\"/d/widget.css\">\n</head>\n<body>\n\
+         <link rel=\"stylesheet\" href=\"/d/widget.css\">\n</head>\n<body{class}>\n\
          <main id=\"jc-chat\" class=\"jc-chat\" data-config=\"{config}\"></main>\n\
          <script src=\"/d/widget.js\" defer></script>\n</body>\n</html>\n",
+        lang = escaped(lang),
         title = escaped(&spec.public_id),
-        config = escaped(&config.to_string()),
+        class = if full { " class=\"jc-page\"" } else { "" },
+        config = escaped(&config(deployment).to_string()),
     )
 }
 
-async fn page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>) -> Response {
-    let deployment = state
+fn published(state: &ChatState, public_id: &str) -> Option<Deployment> {
+    state
         .snapshot
         .read()
         .ok()
-        .and_then(|snapshot| snapshot.public(&public_id).cloned());
-    let Some(deployment) = deployment else {
-        return (
-            StatusCode::NOT_FOUND,
-            [
-                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            "No assistant is published under this id.",
-        )
-            .into_response();
+        .and_then(|snapshot| snapshot.public(public_id).cloned())
+}
+
+fn not_published() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        "No assistant is published under this id.",
+    )
+        .into_response()
+}
+
+/// The launcher of a published deployment; an unknown id gets a 404, so a typo shows in the
+/// site's console instead of a button that opens an error.
+async fn launcher(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>) -> Response {
+    match published(&state, &public_id) {
+        Some(_) => asset(LAUNCHER, "text/javascript; charset=utf-8"),
+        None => not_published(),
+    }
+}
+
+async fn page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>) -> Response {
+    serve(&state, &public_id, false)
+}
+
+async fn full_page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>) -> Response {
+    serve(&state, &public_id, true)
+}
+
+fn serve(state: &ChatState, public_id: &str, full: bool) -> Response {
+    let Some(deployment) = published(state, public_id) else {
+        return not_published();
     };
     let mut response = (
         [
@@ -118,7 +163,7 @@ async fn page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>
             (header::CACHE_CONTROL, "no-store"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        html(&deployment),
+        html(&deployment, full),
     )
         .into_response();
     if let Ok(value) = HeaderValue::from_str(&policy(&deployment)) {
@@ -132,6 +177,69 @@ async fn page(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn deployment(spec: serde_json::Value) -> Deployment {
+        Deployment {
+            project: "banskabystrica".into(),
+            name: "verejny".into(),
+            spec: serde_json::from_value(spec).expect("a spec"),
+        }
+    }
+
+    /// T-4138: the page carries what the visitor sees before asking, per language, and nothing
+    /// a visitor should not read; the full page and the panel differ only in their layout.
+    #[test]
+    fn the_page_carries_the_suggestions_disclaimer_and_switch_and_no_secret() {
+        let public = deployment(json!({
+            "publicId": "bb",
+            "channel": "public",
+            "sources": ["web"],
+            "allowedOrigins": ["https://www.banskabystrica.sk"],
+            "systemPrompt": "Interné pokyny pre model.",
+            "languages": ["sk", "en"],
+            "suggestions": {"sk": ["Kedy je zber odpadu?"], "en": ["When is waste collected?"]},
+            "disclaimer": {"sk": "Odpovede píše umelá inteligencia."},
+            "rateLimit": {"requestsPerMinute": 60, "perClientPerMinute": 10},
+            "budget": {"tokensPerDay": 100000, "tokensPerConversation": 10000, "questionChars": 500},
+        }));
+        let config = config(&public);
+        assert_eq!(config["languages"], json!(["sk", "en"]));
+        assert_eq!(
+            config["suggestions"]["en"],
+            json!(["When is waste collected?"])
+        );
+        assert_eq!(
+            config["disclaimer"]["sk"],
+            json!("Odpovede píše umelá inteligencia.")
+        );
+        assert_eq!(config["enabled"], json!(true));
+        assert_eq!(config["questionChars"], json!(500));
+        let panel = html(&public, false);
+        let page = html(&public, true);
+        assert!(panel.contains("<html lang=\"sk\">") && panel.contains("<body>"));
+        assert!(page.contains("<body class=\"jc-page\">"));
+        for html in [&panel, &page] {
+            assert!(
+                !html.contains("Interné pokyny"),
+                "the prompt never reaches the page"
+            );
+            assert!(html.contains("Kedy je zber odpadu?"));
+        }
+    }
+
+    #[test]
+    fn a_paused_deployment_says_so_and_an_english_one_opens_in_english() {
+        let paused = deployment(json!({
+            "publicId": "bb",
+            "channel": "public",
+            "sources": ["web"],
+            "languages": ["en", "fi"],
+            "enabled": false,
+        }));
+        assert_eq!(config(&paused)["enabled"], json!(false));
+        assert_eq!(config(&paused)["questionChars"], json!(null));
+        assert!(html(&paused, true).contains("<html lang=\"en\">"));
+    }
 
     #[test]
     fn the_configuration_cannot_break_out_of_its_attribute() {
