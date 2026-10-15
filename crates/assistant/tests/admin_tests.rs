@@ -301,6 +301,12 @@ async fn only_the_portals_service_account_is_answered() {
         ),
         (
             "GET",
+            format!("{k}/sources/{{source}}/errors"),
+            format!("{BASE}/sources/web/errors"),
+            None,
+        ),
+        (
+            "GET",
             format!("{k}/sources/{{source}}/passages"),
             format!("{BASE}/sources/web/passages?page={}", w.child),
             None,
@@ -897,5 +903,144 @@ async fn uploaded_files_are_typed_indexed_listed_replaced_and_removed() {
             .0,
         StatusCode::NOT_FOUND
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4197: the sources row counts passages embedded and pending (before and after one embed
+/// round) and failed reads, names the last run's start and end, and the errors route lists
+/// each failed page and file with why, newest first, never another source's.
+#[tokio::test]
+async fn the_index_status_counts_pending_and_failed_and_lists_why() {
+    let w = world("adminstatus").await;
+    let row = |listed: &Value| {
+        listed["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|s| s["source"] == "web")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let (status, listed) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let web = row(&listed);
+    assert_eq!(
+        (
+            web["embedded"].clone(),
+            web["pending"].clone(),
+            web["failed"].clone()
+        ),
+        (json!(0), json!(4), json!(0)),
+        "{web}"
+    );
+    let (status, errors) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/web/errors"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!((status, errors), (StatusCode::OK, json!({"items": []})));
+
+    // One page and one file fail; one with a reason, one recorded before reasons were kept.
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query("UPDATE pages SET status = 'failed', error = 'HTTP 404' WHERE id = $1")
+        .bind(w.grandchild)
+        .execute(&mut *tx)
+        .await
+        .expect("page");
+    sqlx::query("UPDATE documents SET status = 'failed' WHERE id = $1")
+        .bind(w.document)
+        .execute(&mut *tx)
+        .await
+        .expect("document");
+    tx.commit().await.expect("commit");
+    assistant::crawl::queue::enqueue(&w.pool, "hronov", "web")
+        .await
+        .expect("enqueue");
+    let job = assistant::crawl::queue::claim(&w.pool, "test")
+        .await
+        .expect("claim")
+        .expect("a job");
+    assistant::crawl::queue::finish(&w.pool, job.id)
+        .await
+        .expect("finish");
+    let embedder = Embedder::load(&model::model_dir(), 1).expect("the pinned model loads");
+    let embedded = assistant::embed::embed_missing(&w.pool, &embedder, "hronov", 2)
+        .await
+        .expect("embed");
+    assert_eq!(embedded, 2);
+
+    let (_, listed) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    let web = row(&listed);
+    assert_eq!(
+        (
+            web["embedded"].clone(),
+            web["pending"].clone(),
+            web["failed"].clone()
+        ),
+        (json!(2), json!(2), json!(2)),
+        "{web}"
+    );
+    assert_eq!(web["job"]["state"], "done", "{web}");
+    for at in ["startedAt", "finishedAt"] {
+        assert!(
+            web["job"][at].as_str().is_some_and(|t| t.ends_with('Z')),
+            "{at}: {web}"
+        );
+    }
+    let (status, errors) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/web/errors"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = errors["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(items.len(), 2, "{errors}");
+    assert!(items.contains(&json!({"url": "https://hronov.example/odpad/zber", "kind": "page", "reason": "HTTP 404"})), "{errors}");
+    assert!(items.contains(&json!({"url": "https://hronov.example/vzn.pdf", "kind": "document", "reason": "not recorded"})), "{errors}");
+
+    // The upload source has no failures, a source never crawled is not found.
+    let (status, none) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/subory/errors"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    assert!(
+        status == StatusCode::NOT_FOUND || none == json!({"items": []}),
+        "{status} {none}"
+    );
+    let (status, _) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/nikde/errors"),
+        Some(PORTAL_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
