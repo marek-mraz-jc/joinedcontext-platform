@@ -58,6 +58,9 @@ RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace --excl
 # for the gateway (CC-86, T-2646), runs git, which the distroless image does not carry. Its
 # own image, built as `--target checkouts`, so git never enters the gateway's.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS checkouts
+# APT_REFRESH: the UTC day, set by image.yml, so the apt layer below leaves the build cache once a
+# day and picks up the Debian security fixes released since (vulnerabilities lane, T-3834).
+ARG APT_REFRESH
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/* && useradd --uid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
