@@ -105,10 +105,13 @@ pub async fn message(
     let authorization = request.headers().get(AUTHORIZATION).cloned();
     let presented = authorization.as_ref().and_then(|value| value.to_str().ok());
     let caller = rate_limit::caller_key(request.headers());
-    let (subject_key, reach) = match token::bearer(presented) {
+    let (subject_key, reach, reads_only) = match token::bearer(presented) {
         // A public server answers an anonymous caller with each member's public grants
         // (ADR-N-043 §2.2); the members' own audience decides, as on their URLs.
         Err(token::Rejected::NoToken) if server.admits(None) => {
+            if let Err(refusal) = rate_limit::spend_anonymous_mcp(&gateway, request.headers()) {
+                return *refusal;
+            }
             let reach = members
                 .into_iter()
                 .filter_map(|endpoint| {
@@ -116,7 +119,7 @@ pub async fn message(
                     readable(&gateway, endpoint, subject)
                 })
                 .collect();
-            (format!("anonymous:{caller}"), reach)
+            (format!("anonymous:{caller}"), reach, true)
         }
         Err(token::Rejected::NoToken) => return unauthorized(&gateway, &server),
         Err(rejected) => return ProblemDetails::from(rejected).into_response(),
@@ -150,7 +153,7 @@ pub async fn message(
                     readable(&gateway, endpoint, subject)
                 })
                 .collect();
-            (format!("subject:{}", claims.sub), reach)
+            (format!("subject:{}", claims.sub), reach, false)
         }
     };
 
@@ -182,6 +185,7 @@ pub async fn message(
         caller,
         server: Some(server),
         anonymous: false,
+        reads_only,
     };
     let mut response = match hub.answer(message).await {
         Answer::Json(answer) => jsonrpc::json_response(StatusCode::OK, &answer),
