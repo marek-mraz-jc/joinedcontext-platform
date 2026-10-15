@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, linkHost, followups, restore, remember, cards, stage, tel, mailto } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, chart, linkHost, followups, restore, remember, cards, stage, tel, mailto } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -311,4 +311,32 @@ test("a kept conversation is read back only in its own shape", () => {
     { question: "q", text: "a", turn: 0, citations: [] }, { question: "q", text: "<b>x</b>", turn: 4 }] }));
   assert.equal(mixed.turns.length, 1);
   assert.equal(mixed.asked, 3);
+});
+
+// T-4198: one numeric column beside a time or a name is drawn as a small chart, nothing else is.
+test("a number over time is a line in time order, a number per name is bars", () => {
+  const line = chart({ columns: ["dateObserved", "pm10"], rows: [["2026-10-15T10:00:00Z", 21], ["2026-10-15T09:00:00Z", 18.5]] });
+  assert.equal(line.kind, "line");
+  assert.deepEqual(line.points, [{ label: "2026-10-15T09:00:00Z", value: 18.5 }, { label: "2026-10-15T10:00:00Z", value: 21 }]);
+  assert.equal(line.value, "pm10");
+  const bars = chart({ columns: ["name", "pm10", "address"], rows: [["Námestie SNP", 21, "x"], ["Zvolenská", 12, "y"]] });
+  assert.equal(bars.kind, "bar");
+  assert.equal(bars.by, "name");
+  assert.deepEqual(bars.points.map((p) => p.value), [21, 12]);
+});
+
+test("two numeric columns, text only, one point or no columns draw no chart", () => {
+  assert.equal(chart({ columns: ["name", "pm10", "pm25"], rows: [["a", 1, 2], ["b", 3, 4]] }), null);
+  assert.equal(chart({ columns: ["name", "street"], rows: [["a", "x"], ["b", "y"]] }), null);
+  assert.equal(chart({ columns: ["pm10"], rows: [[1], [2]] }), null);
+  assert.equal(chart({ columns: ["name", "pm10"], rows: [["a", 1]] }), null);
+  assert.equal(chart({ columns: [], rows: [] }), null);
+  assert.equal(chart(null), null);
+});
+
+test("at most 50 points, and a value of NaN, a string or nothing is skipped", () => {
+  const rows = Array.from({ length: 51 }, (_, i) => [`s${i}`, i]);
+  assert.equal(chart({ columns: ["name", "v"], rows }).points.length, 50);
+  const skipped = chart({ columns: ["name", "v"], rows: [["a", 1], ["b", NaN], ["c", "7"], ["d", null], ["e", 2], "not a row"] });
+  assert.deepEqual(skipped.points.map((p) => p.label), ["a", "e"]);
 });

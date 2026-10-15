@@ -63,6 +63,11 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-data table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .jc-data caption { text-align: left; padding: 6px 8px; color: var(--muted); }
 .jc-data th, .jc-data td { padding: 4px 8px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.jc-data-chart { display: block; width: 100%; height: auto; margin: 6px 0 0; }
+.jc-chart-axis { stroke: var(--line); }
+.jc-chart-line { fill: none; stroke: var(--accent); stroke-width: 2; }
+.jc-chart-bar { fill: var(--accent); }
+.jc-chart-text { fill: var(--muted); font-size: 10px; }
 .jc-data-links { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0 0; font-size: 13px; }
 .jc-data-links a { color: var(--accent); }
 .jc-status { font-size: 13px; color: var(--muted); }
