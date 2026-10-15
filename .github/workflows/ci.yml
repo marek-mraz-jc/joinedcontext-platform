@@ -11,7 +11,10 @@ concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: "${{ github.re
 jobs:
   rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # A warm cache runs this in 2-3 min. A cold one (the repo's 10 GB cache evicts the job's key)
+    # needs ~12; a run cut off at the timeout never saves its cache, so 8 min turned one eviction
+    # into a red on every push (36193fa, d1b8f7f; T-4146).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: every action is a commit, and only a publishing job may publish (T-0851)
