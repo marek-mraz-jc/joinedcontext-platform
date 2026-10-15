@@ -28,6 +28,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const ORIGIN: &str = "https://www.hronov.example";
 const SLUG: &str = "abcdefghijklmnopqrstuvwxyz234567";
 const HIDDEN_SLUG: &str = "zyxwvutsrqponmlkjihgfedcba765432";
+/// The region's public Endpoint, `bbsk/kraj` (T-4177).
+const REGION_SLUG: &str = "regionabcdefghijklmnopqrstuvwxy";
+/// An Endpoint of a project no deployment's scope names.
+const ELSEWHERE_SLUG: &str = "elsewhereabcdefghijklmnopqrstuv";
 const PORTAL_TOKEN: &str = "the-portals-token";
 const PERSON_TOKEN: &str = "the-persons-own-token";
 
@@ -166,7 +170,20 @@ async fn world(test: &str, deployment: Deployment) -> World {
         deployments: vec![deployment],
         ..Snapshot::default()
     };
+    let public = |slug: &str| EndpointRef {
+        slug: slug.into(),
+        audience: "public".into(),
+    };
     snapshot.endpoints = BTreeMap::from([
+        (("bbsk".into(), "kraj".into()), public(REGION_SLUG)),
+        (
+            ("bbsk".into(), "spisy".into()),
+            EndpointRef {
+                slug: HIDDEN_SLUG.into(),
+                audience: "organization".into(),
+            },
+        ),
+        (("helsinki".into(), "kraj".into()), public(ELSEWHERE_SLUG)),
         (
             ("hronov".into(), "ovzdusie".into()),
             EndpointRef {
@@ -328,8 +345,8 @@ async fn model_calls(proxy: &MockServer) -> Vec<(axum::http::HeaderMap, Value)> 
 }
 
 /// The recorded answers of the public Endpoint's `list_types` and `query_entities` (T-4140).
-async fn recorded_air(gateway: &MockServer) {
-    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+async fn recorded_air(gateway: &MockServer, slug: &str) {
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{slug}/mcp")));
     mcp().and(body_string_contains("tools/list"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
             {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
@@ -382,7 +399,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         "delete_entity".into(),
     ];
     let w = world("chatok", d).await;
-    recorded_air(&w.gateway).await;
+    recorded_air(&w.gateway, SLUG).await;
     script(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [\"NO2\"], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"interne\", \"type\": \"Record\"}]}"}), 400),
         streamed(&["NO2 na Námestí SNP je 21 [1]."], 900, 30),
@@ -2289,5 +2306,78 @@ async fn a_verdict_on_an_answer_is_stored_without_who_sent_it() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4177, MF-52: a public deployment reads another project's public Endpoint named
+/// `{project}/{endpoint}` when its scope lists the project; that project's organization Endpoint
+/// and a project outside the scope are never asked, whatever the router names.
+#[tokio::test]
+async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.scope = Some(jc_core::kinds::AssistantScope {
+        projects: vec!["bbsk".into()],
+    });
+    let tools = vec!["list_types".to_owned(), "query_entities".to_owned()];
+    d.spec.connectors = ["bbsk/kraj", "bbsk/spisy", "helsinki/kraj"]
+        .into_iter()
+        .map(|endpoint| Connector {
+            endpoint: endpoint.into(),
+            tools: tools.clone(),
+            timeout_seconds: 5,
+        })
+        .collect();
+    let w = world("chatscope", d).await;
+    for slug in [REGION_SLUG, HIDDEN_SLUG, ELSEWHERE_SLUG] {
+        recorded_air(&w.gateway, slug).await;
+    }
+    script(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"helsinki/kraj\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"bbsk/spisy\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"bbsk/kraj\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+        streamed(&["NO2 je 21 [1]."], 900, 30),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Aké je NO2 v kraji?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "data")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(data.len(), 1, "{events:?}");
+    assert_eq!(data[0]["endpoint"], "bbsk/kraj");
+    assert_eq!(
+        data[0]["download"],
+        format!("https://data.hronov.example/api/endpoint/{REGION_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
+    );
+    let router = model_calls(&w.proxy).await[0].1["messages"][1]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        router.contains("- bbsk/kraj: AirQualityObserved"),
+        "{router}"
+    );
+    assert!(
+        !router.contains("helsinki") && !router.contains("spisy"),
+        "{router}"
+    );
+    let asked: Vec<String> = w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
+    assert!(asked.iter().any(|p| p.contains(REGION_SLUG)), "{asked:?}");
+    assert!(
+        asked
+            .iter()
+            .all(|p| !p.contains(HIDDEN_SLUG) && !p.contains(ELSEWHERE_SLUG)),
+        "{asked:?}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

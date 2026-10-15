@@ -726,3 +726,43 @@ fn a_website_source_lists_wordpress_types_and_no_other_source_does() {
                 spec:\n  source: ckan\n  ckanInstanceRef: data\n  wordpressTypes: [pages]\n";
     assert_eq!(refused(source(ckan)), "wordpressTypes");
 }
+
+/// T-4177, MF-52: a connector names another project's Endpoint as `{project}/{endpoint}`, and
+/// only of a project its `scope.projects` lists.
+#[test]
+fn a_connector_reaches_another_project_only_through_its_scope() {
+    let scoped = |connector: &str, scope: &str| {
+        deployment(
+            &deployment_with(
+                "  sandbox: false\n",
+                &format!("  sandbox: false\n  scope: {{ projects: [{scope}] }}\n"),
+            )
+            .replace(
+                "endpoint: mesto-verejne",
+                &format!("endpoint: \"{connector}\""),
+            ),
+        )
+    };
+    let parsed = scoped("bbsk/bbsk-kraj", "bbsk").expect("in scope");
+    assert_eq!(
+        jc_core::kinds::assistant::connector_target(&parsed.spec.connectors[0].endpoint),
+        (Some("bbsk"), "bbsk-kraj")
+    );
+    assert_eq!(
+        jc_core::kinds::assistant::connector_target("mesto-verejne"),
+        (None, "mesto-verejne")
+    );
+    for (connector, scope) in [
+        ("helsinki/events", "bbsk"),
+        ("bbsk/", "bbsk"),
+        ("/bbsk-kraj", "bbsk"),
+        ("bbsk/kraj/x", "bbsk"),
+        ("bbsk/Bad_Name", "bbsk"),
+    ] {
+        assert_eq!(
+            refused(scoped(connector, scope)),
+            "connectors[].endpoint",
+            "{connector}"
+        );
+    }
+}
