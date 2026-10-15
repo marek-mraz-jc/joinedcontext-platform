@@ -14,7 +14,7 @@ use axum::Router;
 use serde_json::json;
 
 use super::ChatState;
-use crate::worker::Deployment;
+use crate::worker::{Deployment, Source};
 
 /// The answer's renderer first (T-3325), then the widget that uses it, as one script.
 const SCRIPT: &str = concat!(
@@ -78,10 +78,38 @@ pub fn policy(deployment: &Deployment) -> String {
     )
 }
 
+/// Hosts every deployment's answers may link to, beside its own (T-4149): the national open
+/// data portal the city's and the region's datasets are listed on.
+const LINK_HOSTS: &[&str] = &["data.gov.sk"];
+
+/// The hosts an answer's links may go to (T-4149): the pages it is placed on, its sources' sites
+/// and CKAN, and [`LINK_HOSTS`]. The widget adds the hosts of each answer's citations.
+pub fn link_hosts(deployment: &Deployment, sources: &[Source]) -> Vec<String> {
+    let spec = &deployment.spec;
+    let mut urls: Vec<&str> = spec.allowed_origins.iter().map(String::as_str).collect();
+    for source in sources
+        .iter()
+        .filter(|s| s.project == deployment.project && spec.sources.contains(&s.name))
+    {
+        urls.extend(source.spec.start_urls.iter().map(String::as_str));
+        urls.extend(source.ckan_url.as_deref());
+    }
+    let mut hosts: Vec<String> = urls
+        .into_iter()
+        .filter_map(|u| url::Url::parse(u).ok()?.host_str().map(str::to_owned))
+        .map(|h| h.trim_start_matches("www.").to_owned())
+        .chain(LINK_HOSTS.iter().map(|h| (*h).to_owned()))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
 /// What the page needs to know of its deployment; nothing in it is secret.
-fn config(deployment: &Deployment) -> serde_json::Value {
+fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
     let spec = &deployment.spec;
     json!({
+        "linkHosts": link_hosts,
         "publicId": spec.public_id,
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
         "color": spec.theme.as_ref().and_then(|t| t.primary_color.clone()),
@@ -95,7 +123,7 @@ fn config(deployment: &Deployment) -> serde_json::Value {
 }
 
 /// The page of one public deployment: the panel, or with `full` the page of its own.
-pub fn html(deployment: &Deployment, full: bool) -> String {
+pub fn html(deployment: &Deployment, link_hosts: &[String], full: bool) -> String {
     let spec = &deployment.spec;
     let lang = if spec.languages.is_empty() || spec.languages.iter().any(|l| l == "sk") {
         "sk"
@@ -112,7 +140,7 @@ pub fn html(deployment: &Deployment, full: bool) -> String {
         lang = escaped(lang),
         title = escaped(&spec.public_id),
         class = if full { " class=\"jc-page\"" } else { "" },
-        config = escaped(&config(deployment).to_string()),
+        config = escaped(&config(deployment, link_hosts).to_string()),
     )
 }
 
@@ -157,13 +185,18 @@ fn serve(state: &ChatState, public_id: &str, full: bool) -> Response {
     let Some(deployment) = published(state, public_id) else {
         return not_published();
     };
+    let hosts = state
+        .snapshot
+        .read()
+        .map(|snapshot| link_hosts(&deployment, &snapshot.sources))
+        .unwrap_or_default();
     let mut response = (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        html(&deployment, full),
+        html(&deployment, &hosts, full),
     )
         .into_response();
     if let Ok(value) = HeaderValue::from_str(&policy(&deployment)) {
@@ -202,7 +235,7 @@ mod tests {
             "rateLimit": {"requestsPerMinute": 60, "perClientPerMinute": 10},
             "budget": {"tokensPerDay": 100000, "tokensPerConversation": 10000, "questionChars": 500},
         }));
-        let config = config(&public);
+        let config = config(&public, &[]);
         assert_eq!(config["languages"], json!(["sk", "en"]));
         assert_eq!(
             config["suggestions"]["en"],
@@ -214,8 +247,8 @@ mod tests {
         );
         assert_eq!(config["enabled"], json!(true));
         assert_eq!(config["questionChars"], json!(500));
-        let panel = html(&public, false);
-        let page = html(&public, true);
+        let panel = html(&public, &[], false);
+        let page = html(&public, &[], true);
         assert!(panel.contains("<html lang=\"sk\">") && panel.contains("<body>"));
         assert!(page.contains("<body class=\"jc-page\">"));
         for html in [&panel, &page] {
@@ -236,9 +269,66 @@ mod tests {
             "languages": ["en", "fi"],
             "enabled": false,
         }));
-        assert_eq!(config(&paused)["enabled"], json!(false));
-        assert_eq!(config(&paused)["questionChars"], json!(null));
-        assert!(html(&paused, true).contains("<html lang=\"en\">"));
+        assert_eq!(config(&paused, &[])["enabled"], json!(false));
+        assert_eq!(config(&paused, &[])["questionChars"], json!(null));
+        assert!(html(&paused, &[], true).contains("<html lang=\"en\">"));
+    }
+
+    /// T-4149: links go to the deployment's own sites, its sources and the national portal; a
+    /// source of another project or not named by the deployment adds nothing.
+    #[test]
+    fn the_link_hosts_are_the_deployment_s_own() {
+        let public = deployment(json!({
+            "publicId": "bb",
+            "channel": "public",
+            "sources": ["web", "data"],
+            "allowedOrigins": ["https://www.banskabystrica.sk"],
+        }));
+        let source =
+            |project: &str, name: &str, spec: serde_json::Value, ckan: Option<&str>| Source {
+                project: project.into(),
+                name: name.into(),
+                spec: serde_json::from_value(spec).expect("a source spec"),
+                ckan_url: ckan.map(str::to_owned),
+                catalogue: Vec::new(),
+            };
+        let web = json!({"source": "website", "startUrls": ["https://www.bbsk.sk/", "https://mapy.banskabystrica.sk/x"]});
+        let ckan = json!({"source": "ckan", "ckanInstanceRef": "otvorene"});
+        let hosts = link_hosts(
+            &public,
+            &[
+                source("banskabystrica", "web", web.clone(), None),
+                source(
+                    "banskabystrica",
+                    "data",
+                    ckan,
+                    Some("https://data.dev.joinedcontext.com"),
+                ),
+                source(
+                    "banskabystrica",
+                    "unnamed",
+                    json!({"source": "website", "startUrls": ["https://evil.example/"]}),
+                    None,
+                ),
+                source(
+                    "helsinki",
+                    "web",
+                    json!({"source": "website", "startUrls": ["https://hel.fi/"]}),
+                    None,
+                ),
+            ],
+        );
+        assert_eq!(
+            hosts,
+            [
+                "banskabystrica.sk",
+                "bbsk.sk",
+                "data.dev.joinedcontext.com",
+                "data.gov.sk",
+                "mapy.banskabystrica.sk",
+            ]
+        );
+        assert_eq!(config(&public, &hosts)["linkHosts"], json!(hosts));
     }
 
     #[test]

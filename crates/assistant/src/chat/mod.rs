@@ -82,41 +82,116 @@ pub struct ChatState {
 
 /// The most keys [`Limits`] counts at once (T-3314).
 pub const MAX_KEYS: usize = 50_000;
+/// How long one answer may take, model calls and searches together (T-4149).
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+const MINUTE: Duration = Duration::from_secs(60);
+const HOUR: Duration = Duration::from_secs(3_600);
+const DAY: Duration = Duration::from_secs(86_400);
 
-/// Requests per minute, per key, in fixed one-minute windows (AG-101).
+/// Requests per key in fixed windows (AG-101, T-4149), and the answers each visitor has streaming.
+/// A visitor is known by a keyed hash of their address and the UTC day, never the address itself:
+/// the key is random per process, so a hash says nothing after a restart or past its day.
 // ponytail: in memory, one replica; a second replica doubles every limit. Move to the database
 // when the assistant runs on more than one.
 #[derive(Default)]
 pub struct Limits {
-    windows: HashMap<String, (Instant, u32)>,
+    windows: HashMap<String, (Instant, u32, Duration)>,
+    streams: HashMap<String, u32>,
+    salt: std::hash::RandomState,
+    /// The deployments whose cost cap was reached, and on which day it was first.
+    capped: HashMap<String, u64>,
 }
 
 impl Limits {
-    /// Counts one request under `key`; `Err(seconds)` until the window frees a place.
-    pub fn admit(&mut self, key: &str, limit: u32, now: Instant) -> Result<(), u64> {
-        if self.windows.len() >= MAX_KEYS && !self.windows.contains_key(key) {
+    /// Counts one request under every `(key, limit, window)`, or under none: `Err(seconds)` is the
+    /// longest wait among the windows that are full, so a refused request spends no place.
+    pub fn admit(&mut self, windows: &[(&str, u32, Duration)], now: Instant) -> Result<(), u64> {
+        let new_keys = windows
+            .iter()
+            .filter(|(key, ..)| !self.windows.contains_key(*key))
+            .count();
+        if self.windows.len() + new_keys > MAX_KEYS {
             self.windows
-                .retain(|_, (started, _)| now.duration_since(*started) < Duration::from_secs(60));
-            if self.windows.len() >= MAX_KEYS {
+                .retain(|_, (started, _, window)| now.duration_since(*started) < *window);
+            if self.windows.len() + new_keys > MAX_KEYS {
                 // A full table refuses a new key rather than grow or forget a counted one: a
-                // reset would hand every key already at its limit a fresh minute.
+                // reset would hand every key already at its limit a fresh window.
                 return Err(60);
             }
         }
-        let (started, count) = self.windows.entry(key.to_owned()).or_insert((now, 0));
-        if now.duration_since(*started) >= Duration::from_secs(60) {
-            *started = now;
-            *count = 0;
+        let wait = windows
+            .iter()
+            .filter_map(|(key, limit, _)| {
+                let (started, count, window) = self.windows.get(*key)?;
+                let elapsed = now.duration_since(*started);
+                (elapsed < *window && count >= limit)
+                    .then(|| window.saturating_sub(elapsed).as_secs().max(1))
+            })
+            .max();
+        if let Some(wait) = wait {
+            return Err(wait);
         }
-        if *count >= limit {
-            let left = 60u64
-                .saturating_sub(now.duration_since(*started).as_secs())
-                .max(1);
-            return Err(left);
+        for (key, _, window) in windows {
+            let (started, count, kept) = self
+                .windows
+                .entry((*key).to_owned())
+                .or_insert((now, 0, *window));
+            if now.duration_since(*started) >= *kept {
+                *started = now;
+                *count = 0;
+            }
+            *count += 1;
         }
-        *count += 1;
         Ok(())
     }
+
+    /// The visitor `client` as the limits know them on `day` (days since 1970, UTC).
+    pub fn visitor(&self, client: &str, day: u64) -> String {
+        use std::hash::BuildHasher;
+        format!("{:016x}", self.salt.hash_one((day, client)))
+    }
+
+    /// Takes one of `visitor`'s `limit` streams; `false` when all are taken.
+    pub fn open_stream(&mut self, visitor: &str, limit: u32) -> bool {
+        let open = self.streams.entry(visitor.to_owned()).or_insert(0);
+        if *open >= limit {
+            return false;
+        }
+        *open += 1;
+        true
+    }
+
+    /// `true` the first time `deployment` is found at its cost cap on `day`, so it is reported
+    /// once a day.
+    pub fn first_cap_today(&mut self, deployment: &str, day: u64) -> bool {
+        self.capped.insert(deployment.to_owned(), day) != Some(day)
+    }
+
+    /// Gives back a stream [`Limits::open_stream`] took.
+    pub fn close_stream(&mut self, visitor: &str) {
+        if let Some(open) = self.streams.get_mut(visitor) {
+            *open = open.saturating_sub(1);
+            if *open == 0 {
+                self.streams.remove(visitor);
+            }
+        }
+    }
+}
+
+/// Today, as days since 1970 in UTC.
+fn today() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() / DAY.as_secs())
+}
+
+/// `429` with `Retry-After`, in the words the chat shows (T-4149).
+fn too_many(retry: u64, detail: &str) -> Response {
+    let mut response = problem(429, detail);
+    if let Ok(value) = HeaderValue::from_str(&retry.to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 /// The request body (API/05 §1.1).
@@ -298,20 +373,20 @@ pub fn validate(question: &Question, deployment: &Deployment) -> Result<(), Stri
 }
 
 /// A conversation of this deployment younger than a day and started from `origin`, created when
-/// the request names none; its id and what it spent so far. `Ok(None)` when the named one is not
+/// the request names none; its id, the tokens it spent and the questions it asked so far. `Ok(None)` when the named one is not
 /// this assistant's or was started from another origin (AG-100).
 async fn conversation(
     pool: &PgPool,
     deployment: &Deployment,
     named: Option<&str>,
     origin: Option<&str>,
-) -> Result<Option<(String, u64)>, crate::Error> {
+) -> Result<Option<(String, u64, u32)>, crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
-    let found: Option<(String, i64)> = match named {
+    let found: Option<(String, i64, i32)> = match named {
         Some(id) => {
             if uuid_shaped(id) {
                 sqlx::query_as(
-                    "SELECT id::text, tokens FROM conversations WHERE id = $1::uuid AND deployment = $2 \
+                    "SELECT id::text, tokens, questions FROM conversations WHERE id = $1::uuid AND deployment = $2 \
                      AND created_at > now() - make_interval(hours => $3) \
                      AND origin IS NOT DISTINCT FROM $4",
                 )
@@ -326,7 +401,7 @@ async fn conversation(
             }
         }
         None => Some(
-            sqlx::query_as("INSERT INTO conversations (project, deployment, origin) VALUES ($1, $2, $3) RETURNING id::text, tokens")
+            sqlx::query_as("INSERT INTO conversations (project, deployment, origin) VALUES ($1, $2, $3) RETURNING id::text, tokens, questions")
                 .bind(&deployment.project)
                 .bind(&deployment.name)
                 .bind(origin)
@@ -335,7 +410,13 @@ async fn conversation(
         ),
     };
     tx.commit().await?;
-    Ok(found.map(|(id, tokens)| (id, u64::try_from(tokens).unwrap_or(0))))
+    Ok(found.map(|(id, tokens, questions)| {
+        (
+            id,
+            u64::try_from(tokens).unwrap_or(0),
+            u32::try_from(questions).unwrap_or(0),
+        )
+    }))
 }
 
 /// Deletes every conversation past `CONVERSATION_HOURS`, of every project (T-3314, AG-99);
@@ -369,26 +450,48 @@ async fn record(
 ) -> Result<(), crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
     sqlx::query(
-        "UPDATE conversations SET tokens = tokens + $2, last_at = now() WHERE id = $1::uuid",
+        "UPDATE conversations SET tokens = tokens + $2, questions = questions + 1, last_at = now() \
+         WHERE id = $1::uuid",
     )
     .bind(conversation)
     .bind(i64::try_from(spent.total).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO usage (project, deployment, day, requests, tokens_in, tokens_out) \
-         VALUES ($1, $2, current_date, 1, $3, $4) \
+        "INSERT INTO usage (project, deployment, day, requests, tokens_in, tokens_out, cost_micros) \
+         VALUES ($1, $2, current_date, 1, $3, $4, $5) \
          ON CONFLICT (project, deployment, day) DO UPDATE SET requests = usage.requests + 1, \
-         tokens_in = usage.tokens_in + EXCLUDED.tokens_in, tokens_out = usage.tokens_out + EXCLUDED.tokens_out",
+         tokens_in = usage.tokens_in + EXCLUDED.tokens_in, tokens_out = usage.tokens_out + EXCLUDED.tokens_out, \
+         cost_micros = usage.cost_micros + EXCLUDED.cost_micros",
     )
     .bind(&deployment.project)
     .bind(&deployment.name)
     .bind(i64::try_from(spent.input).unwrap_or(i64::MAX))
     .bind(i64::try_from(spent.output).unwrap_or(i64::MAX))
+    .bind(i64::try_from(spent.cost_micros).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// What the deployment's model calls cost today (UTC), in millionths of a US dollar (T-4149).
+async fn spent_today(pool: &PgPool, deployment: &Deployment) -> Result<u64, crate::Error> {
+    let mut tx = crate::project_scope(pool, &deployment.project).await?;
+    let cost: Option<i64> = sqlx::query_scalar(
+        "SELECT cost_micros FROM usage WHERE project = $1 AND deployment = $2 AND day = current_date",
+    )
+    .bind(&deployment.project)
+    .bind(&deployment.name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    Ok(cost.map_or(0, |c| u64::try_from(c).unwrap_or(0)))
+}
+
+/// Whether today's spend has reached the deployment's `budget.costPerDayUsd`.
+pub fn over_cost_cap(spent_micros: u64, cap_usd: f64) -> bool {
+    spent_micros as f64 >= cap_usd * 1_000_000.0
 }
 
 /// The connectors switched on for this question whose Endpoint the asker may reach, with their
@@ -637,6 +740,12 @@ async fn ask(
         Ok(Json(question)) => question,
         Err(rejection) => return body_refused(&rejection),
     };
+    if !deployment.spec.enabled {
+        return problem(
+            503,
+            "Asistent je teraz vypnutý. Skúste to neskôr alebo navštívte webovú stránku mesta.",
+        );
+    }
     if let Err(why) = validate(&question, &deployment) {
         return problem(400, why);
     }
@@ -650,32 +759,42 @@ async fn ask(
             "This assistant has no budget yet: an administrator sets budget.tokensPerDay on it before anyone can ask.",
         );
     };
+    let chars = question.message.trim().chars().count();
+    if chars > budget.question_chars as usize {
+        return problem(
+            400,
+            format!("message is 1 to {} characters", budget.question_chars),
+        );
+    }
     let rate = deployment.spec.rate_limit.clone();
     if rate.is_none() && deployment.spec.channel.is_anonymous() {
         return problem(404, "No assistant is published under this id.");
     }
-    if let Some(rate) = rate {
-        let now = Instant::now();
-        let mut limits = state.limits.lock().await;
-        let key = format!("{}/{}", deployment.project, deployment.name);
-        let admitted = limits
-            .admit(&key, rate.requests_per_minute, now)
-            .and_then(|()| {
-                limits.admit(
-                    &format!("{key}\u{0}{client}"),
-                    rate.per_client_per_minute,
-                    now,
-                )
-            });
+    let key = format!("{}/{}", deployment.project, deployment.name);
+    let visitor = format!(
+        "{key}\u{0}{}",
+        state.limits.lock().await.visitor(client, today())
+    );
+    if let Some(rate) = &rate {
+        let (minute, hour, day) = (
+            format!("{visitor}\u{0}m"),
+            format!("{visitor}\u{0}h"),
+            format!("{visitor}\u{0}d"),
+        );
+        let admitted = state.limits.lock().await.admit(
+            &[
+                (&key, rate.requests_per_minute, MINUTE),
+                (&minute, rate.per_client_per_minute, MINUTE),
+                (&hour, rate.per_client_per_hour, HOUR),
+                (&day, rate.per_client_per_day, DAY),
+            ],
+            Instant::now(),
+        );
         if let Err(retry) = admitted {
-            let mut response = problem(
-                429,
-                "The assistant is answering many questions. Ask again in a moment.",
+            return too_many(
+                retry,
+                "Položili ste veľa otázok za krátky čas. Počkajte chvíľu a skúste to znova.",
             );
-            if let Ok(value) = HeaderValue::from_str(&retry.to_string()) {
-                response.headers_mut().insert(header::RETRY_AFTER, value);
-            }
-            return response;
         }
     }
     let Ok(permit) = Arc::clone(&state.questions).try_acquire_owned() else {
@@ -688,7 +807,7 @@ async fn ask(
             .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         return response;
     };
-    let (conversation, spent_before) = match conversation(
+    let (conversation, spent_before, asked_before) = match conversation(
         &state.pool,
         &deployment,
         question.conversation.as_deref(),
@@ -710,6 +829,36 @@ async fn ask(
         }
     };
 
+    if asked_before >= budget.messages_per_conversation {
+        return too_many(
+            1,
+            "Tento rozhovor dosiahol najväčší počet otázok. Začnite nový rozhovor.",
+        );
+    }
+    let streams = rate.as_ref().map(|rate| rate.streams_per_client);
+    if let Some(limit) = streams {
+        if !state.limits.lock().await.open_stream(&visitor, limit) {
+            return too_many(
+                5,
+                "Ešte odpovedám na vaše predchádzajúce otázky. Počkajte, kým dopíšem, a skúste to znova.",
+            );
+        }
+    }
+    let search_only = match spent_today(&state.pool, &deployment).await {
+        Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
+        Err(err) => {
+            // Unknown spend is spend: the chat goes on as search rather than past the cap.
+            tracing::error!(%err, "today's cost could not be read; answering as search");
+            true
+        }
+    };
+    if search_only && state.limits.lock().await.first_cap_today(&key, today()) {
+        tracing::warn!(
+            deployment = %key,
+            cap_usd = budget.cost_per_day_usd,
+            "@user the assistant reached its daily cost cap; it answers as search until midnight UTC"
+        );
+    }
     let (tokens_per_day, tokens_per_conversation) =
         (budget.tokens_per_day, budget.tokens_per_conversation);
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -765,9 +914,31 @@ async fn ask(
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),
+            search_only,
         };
         let started = Instant::now();
-        let spent = agent::answer(&ask, &question.history, &question.message, &tx).await;
+        let spent = match tokio::time::timeout(
+            ANSWER_TIMEOUT,
+            agent::answer(&ask, &question.history, &question.message, &tx),
+        )
+        .await
+        {
+            Ok(spent) => spent,
+            Err(_) => {
+                let _ = tx
+                    .send(Event::Error {
+                        status: 504,
+                        title: "Answer Took Too Long",
+                        detail:
+                            "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak."
+                                .into(),
+                    })
+                    .await;
+                // ponytail: the calls of a cut answer count no tokens; a usage counter shared
+                // with the loop when the cap must hold to the last cent.
+                Spent::default()
+            }
+        };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             deployment = %name,
@@ -781,6 +952,9 @@ async fn ask(
         );
         if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent).await {
             tracing::error!(%err, "a question's tokens were not recorded");
+        }
+        if streams.is_some() {
+            state.limits.lock().await.close_stream(&visitor);
         }
         let _ = tx.send(Event::Done(spent, total_ms)).await;
     });
@@ -904,23 +1078,93 @@ mod tests {
         }
     }
 
+    fn one(key: &str, limit: u32) -> [(&str, u32, Duration); 1] {
+        [(key, limit, MINUTE)]
+    }
+
     #[test]
     fn a_window_admits_its_limit_then_says_when_to_come_back() {
         let mut limits = Limits::default();
         let start = Instant::now();
-        assert!(limits.admit("a", 2, start).is_ok());
-        assert!(limits.admit("a", 2, start).is_ok());
+        assert!(limits.admit(&one("a", 2), start).is_ok());
+        assert!(limits.admit(&one("a", 2), start).is_ok());
         let retry = limits
-            .admit("a", 2, start + Duration::from_secs(20))
+            .admit(&one("a", 2), start + Duration::from_secs(20))
             .expect_err("full");
         assert_eq!(retry, 40);
         assert!(
-            limits.admit("b", 2, start).is_ok(),
+            limits.admit(&one("b", 2), start).is_ok(),
             "another key has its own window"
         );
+        // The window's last second still refuses; its end admits again.
+        assert_eq!(
+            limits.admit(&one("a", 2), start + Duration::from_millis(59_999)),
+            Err(1)
+        );
         assert!(limits
-            .admit("a", 2, start + Duration::from_secs(61))
+            .admit(&one("a", 2), start + Duration::from_secs(60))
             .is_ok());
+    }
+
+    /// T-4149: the owner's defaults, 10 a minute, 60 an hour, 200 a day: the 11th question of a
+    /// minute waits for the minute, the 61st of an hour for the hour, the 201st of a day for the day.
+    #[test]
+    fn a_visitor_is_held_to_the_minute_the_hour_and_the_day() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        let windows = [
+            ("v\u{0}m", 10, MINUTE),
+            ("v\u{0}h", 60, HOUR),
+            ("v\u{0}d", 200, DAY),
+        ];
+        for _ in 0..10 {
+            assert!(limits.admit(&windows, start).is_ok());
+        }
+        assert_eq!(limits.admit(&windows, start), Err(60));
+        // Six minutes of ten fill the hour.
+        let mut at = start;
+        for _ in 0..5 {
+            at += MINUTE;
+            for _ in 0..10 {
+                assert!(limits.admit(&windows, at).is_ok());
+            }
+        }
+        at += MINUTE;
+        let wait = limits.admit(&windows, at).expect_err("the hour is full");
+        assert_eq!(wait, HOUR.as_secs() - 6 * 60);
+        // The next hours fill the day: 200 in all.
+        let mut admitted = 60;
+        while admitted < 200 {
+            at += HOUR;
+            for _ in 0..10 {
+                if admitted < 200 {
+                    assert!(limits.admit(&windows, at).is_ok(), "{admitted}");
+                    admitted += 1;
+                }
+            }
+        }
+        at += HOUR;
+        let wait = limits.admit(&windows, at).expect_err("the day is full");
+        assert!(wait > HOUR.as_secs(), "waits for the day, {wait}");
+        assert!(limits.admit(&windows, start + DAY).is_ok());
+    }
+
+    /// T-4149: a request one window refuses counts in none, so a visitor at the deployment-wide
+    /// limit does not spend their own minute.
+    #[test]
+    fn a_refused_request_spends_no_place_in_any_window() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        assert!(limits.admit(&[("all", 1, MINUTE)], start).is_ok());
+        for _ in 0..3 {
+            assert!(limits
+                .admit(&[("all", 1, MINUTE), ("me", 1, MINUTE)], start)
+                .is_err());
+        }
+        assert!(
+            limits.admit(&[("me", 1, MINUTE)], start).is_ok(),
+            "my own minute is untouched"
+        );
     }
 
     /// T-3314: within one minute, a flood of new keys stops at [`MAX_KEYS`]; the keys already
@@ -930,19 +1174,90 @@ mod tests {
         let mut limits = Limits::default();
         let start = Instant::now();
         for n in 0..MAX_KEYS {
-            assert!(limits.admit(&n.to_string(), 2, start).is_ok());
+            assert!(limits.admit(&one(&n.to_string(), 2), start).is_ok());
         }
-        assert_eq!(limits.admit("one more", 2, start), Err(60));
+        assert_eq!(limits.admit(&one("one more", 2), start), Err(60));
         assert_eq!(limits.windows.len(), MAX_KEYS);
         assert!(
-            limits.admit("7", 2, start).is_ok(),
+            limits.admit(&one("7", 2), start).is_ok(),
             "a counted key still counts"
         );
-        assert!(limits.admit("7", 2, start).is_err(), "and keeps its limit");
+        assert!(
+            limits.admit(&one("7", 2), start).is_err(),
+            "and keeps its limit"
+        );
         assert!(limits
-            .admit("one more", 2, start + Duration::from_secs(60))
+            .admit(&one("one more", 2), start + Duration::from_secs(60))
             .is_ok());
         assert_eq!(limits.windows.len(), 1);
+    }
+
+    /// T-4149: at most two answers stream to one visitor at once; one that ends frees its place,
+    /// and an empty count leaves the table.
+    #[test]
+    fn a_visitor_streams_at_most_their_limit_at_once() {
+        let mut limits = Limits::default();
+        assert!(limits.open_stream("v", 2));
+        assert!(limits.open_stream("v", 2));
+        assert!(!limits.open_stream("v", 2), "a third waits");
+        assert!(limits.open_stream("w", 2), "another visitor has their own");
+        limits.close_stream("v");
+        assert!(limits.open_stream("v", 2));
+        for _ in 0..3 {
+            limits.close_stream("v");
+        }
+        limits.close_stream("w");
+        assert!(limits.streams.is_empty());
+    }
+
+    /// T-4149: the limits know a visitor by a hash that changes with the day and holds no part of
+    /// the address; a caller's own `X-Forwarded-For` entry changes neither (T-3059).
+    #[test]
+    fn a_visitor_is_a_daily_hash_of_the_edge_s_address() {
+        let limits = Limits::default();
+        let key = |chain: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", HeaderValue::from_static(chain));
+            limits.visitor(&client_of(&headers), 20_000)
+        };
+        let visitor = key("198.51.100.9, 10.0.0.1");
+        assert_eq!(visitor, key("6.6.6.6, 198.51.100.9, 10.0.0.1"));
+        assert_ne!(visitor, key("198.51.100.10, 10.0.0.1"));
+        assert!(
+            !visitor.contains("198") && !visitor.contains('.'),
+            "{visitor}"
+        );
+        assert_ne!(
+            visitor,
+            limits.visitor("198.51.100.9", 20_001),
+            "rotated daily"
+        );
+        assert_ne!(
+            visitor,
+            Limits::default().visitor("198.51.100.9", 20_000),
+            "salted per process"
+        );
+    }
+
+    /// T-4149: the cap holds from the cent it is reached, and is reported once a day.
+    #[test]
+    fn the_cost_cap_holds_from_the_cent_it_is_reached_and_is_reported_once_a_day() {
+        assert!(!over_cost_cap(0, 3.0));
+        assert!(!over_cost_cap(2_999_999, 3.0));
+        assert!(over_cost_cap(3_000_000, 3.0));
+        assert!(over_cost_cap(9_000_000, 3.0));
+        assert!(over_cost_cap(10_000, 0.01));
+        let mut limits = Limits::default();
+        assert!(limits.first_cap_today("bb/verejny", 20_000));
+        assert!(!limits.first_cap_today("bb/verejny", 20_000));
+        assert!(
+            limits.first_cap_today("bbsk/verejny", 20_000),
+            "per deployment"
+        );
+        assert!(
+            limits.first_cap_today("bb/verejny", 20_001),
+            "again the next day"
+        );
     }
 
     #[test]
