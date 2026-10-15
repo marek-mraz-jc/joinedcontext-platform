@@ -46,12 +46,17 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-suggest button:hover { background: var(--soft); }
 .jc-streaming { white-space: pre-wrap; }
 .jc-cards { list-style: none; margin: 10px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
-.jc-log .jc-cards li { margin: 0; padding: 8px 10px 8px 36px; position: relative; border: 1px solid var(--line);
+.jc-log .jc-cards > li { margin: 0; padding: 8px 10px 8px 36px; position: relative; border: 1px solid var(--line);
   border-radius: 8px; background: var(--soft); font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
 .jc-card-n { position: absolute; left: 10px; top: 8px; width: 18px; height: 18px; border-radius: 50%;
   background: var(--accent); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
 .jc-cards a { color: var(--accent); font-weight: 600; }
 .jc-domain { color: var(--muted); font-size: 12px; }
+.jc-cards > li:has(.jc-part) { grid-column: 1 / -1; }
+.jc-part { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--bg); overflow-wrap: anywhere; }
+.jc-part p { margin: 2px 0; }
+.jc-part ol { margin: 4px 0 0; padding-left: 20px; }
+.jc-part a { font-weight: 400; }
 .jc-answer-tools { margin-top: 8px; display: flex; gap: 6px; }
 .jc-data { margin: 0 0 10px; }
 .jc-data-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }

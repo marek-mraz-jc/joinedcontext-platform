@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, linkHost } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, linkHost, cards, stage, tel, mailto } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -92,8 +92,8 @@ test("the owner's sources: one per address, titled, and live data never by its t
   ]);
   assert.deepEqual(list, [
     { url: "https://data.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events", live: false,
-      endpoint: null, domain: "data.dev.joinedcontext.com", numbers: [1, 2, 3] },
-    { url: null, title: null, live: true, endpoint: "helsinki-events", domain: "", numbers: [4] },
+      endpoint: null, domain: "data.dev.joinedcontext.com", numbers: [1, 2, 3], cards: [] },
+    { url: null, title: null, live: true, endpoint: "helsinki-events", domain: "", numbers: [4], cards: [] },
   ]);
   assert.deepEqual(position, { 1: 1, 2: 1, 3: 1, 4: 2 });
   assert.equal(label(list[0]), "Helsinki events");
@@ -212,4 +212,69 @@ test("a host matches itself and its subdomains, never a look-alike", () => {
   }
   assert.ok(!linkHost("https://banskabystrica.sk", []));
   assert.ok(!linkHost("https://banskabystrica.sk", [""]));
+});
+
+test("a stage is one fixed line, a search and a read name their topic, an unknown one is nothing (T-4155)", () => {
+  assert.equal(stage({ stage: "understanding" }, "sk"), "Rozmýšľam nad otázkou…");
+  assert.equal(stage({ stage: "searching", topic: "otváracie hodiny knižnice" }, "sk"),
+    "Hľadám v zdrojoch: „otváracie hodiny knižnice“…");
+  assert.equal(stage({ stage: "searching" }, "en"), "Searching the sources…");
+  assert.equal(stage({ stage: "reading", topic: "AirQualityObserved" }, "cs"), "Čtu živá data: „AirQualityObserved“…");
+  assert.equal(stage({ stage: "answering", topic: "ignored" }, "xx"), "Preparing the answer…");
+  assert.equal(stage({ stage: "searching", topic: "x".repeat(100) }, "en").length, "Searching the sources: „“…".length + 60);
+  assert.equal(stage({ stage: "__proto__" }, "en"), null);
+  assert.equal(stage({ stage: "thinking" }, "en"), null);
+  assert.equal(stage(null, "en"), null);
+});
+
+test("a contact card links a well-formed phone and e-mail and shows a malformed one as text (T-4155)", () => {
+  assert.deepEqual(cards([{ kind: "contact", name: "Klientske centrum",
+    phones: ["+421 48 4330 111", "048/4330-111", "javascript:alert(1)", "12 34", ""],
+    emails: ["podatelna@example.org", "a@b", "x@example.org?subject=hi"] }]), [{
+    kind: "contact", name: "Klientske centrum",
+    phones: [
+      { text: "+421 48 4330 111", href: "tel:+421484330111" },
+      { text: "048/4330-111", href: "tel:0484330111" },
+      { text: "javascript:alert(1)", href: null },
+      { text: "12 34", href: null },
+    ],
+    emails: [
+      { text: "podatelna@example.org", href: "mailto:podatelna@example.org" },
+      { text: "a@b", href: null },
+      { text: "x@example.org?subject=hi", href: null },
+    ],
+  }]);
+  assert.equal(tel("<b>0905123456</b>"), null);
+  assert.equal(mailto("a@example.org\nb@example.org"), null);
+});
+
+test("a place links an OpenStreetMap search and a procedure keeps its steps (T-4155)", () => {
+  assert.deepEqual(cards([
+    { kind: "place", address: "Československej armády 26, 974 01 Banská Bystrica" },
+    { kind: "procedure", steps: ["Vyplňte žiadosť.", " ", "Zaplaťte poplatok."] },
+  ]), [
+    { kind: "place", address: "Československej armády 26, 974 01 Banská Bystrica",
+      href: "https://www.openstreetmap.org/search?query=%C4%8Ceskoslovenskej%20arm%C3%A1dy%2026%2C%20974%2001%20Bansk%C3%A1%20Bystrica" },
+    { kind: "procedure", steps: ["Vyplňte žiadosť.", "Zaplaťte poplatok."] },
+  ]);
+});
+
+test("an empty or unknown card is dropped and a contact without a name keeps it empty (T-4155)", () => {
+  assert.deepEqual(cards(undefined), []);
+  assert.deepEqual(cards([null, "x", { kind: "contact" }, { kind: "contact", phones: [" "] },
+    { kind: "place", address: "" }, { kind: "procedure", steps: [] }, { kind: "html", html: "<b>" }]), []);
+  assert.deepEqual(cards([{ kind: "contact", emails: ["a@example.org"] }]),
+    [{ kind: "contact", name: "", phones: [], emails: [{ text: "a@example.org", href: "mailto:a@example.org" }] }]);
+});
+
+test("a source carries its citations' cards once each, at most three (T-4155)", () => {
+  const place = { kind: "place", address: "Námestie SNP 1, 974 01 Banská Bystrica" };
+  const steps = (n) => ({ kind: "procedure", steps: [String(n)] });
+  const { list } = sources([
+    { n: 1, url: "https://example.org/a", cards: [place] },
+    { n: 2, url: "https://example.org/a", cards: [place, steps(1), steps(2), steps(3)] },
+    { n: 3, url: "https://example.org/b" },
+  ]);
+  assert.deepEqual(list[0].cards.map((c) => c.kind), ["place", "procedure", "procedure"]);
+  assert.deepEqual(list[1].cards, []);
 });

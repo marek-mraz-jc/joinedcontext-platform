@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod agent;
+pub mod cards;
 pub mod mcp;
 pub mod model;
 pub mod routed;
@@ -571,6 +572,13 @@ fn sse(event: &Event) -> SseEvent {
                 data["endpoint"] = json!(endpoint);
             }
             ("tool", data)
+        }
+        Event::Stage { stage, topic } => {
+            let mut data = json!({"stage": stage});
+            if let Some(topic) = topic {
+                data["topic"] = json!(topic);
+            }
+            ("stage", data)
         }
         Event::Delta(text) => ("delta", json!({"text": text})),
         Event::Data(table) => ("data", json!(table)),

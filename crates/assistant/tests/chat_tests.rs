@@ -407,9 +407,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         names,
         [
             "conversation",
+            "stage",
+            "stage",
             "tool",
             "tool",
             "data",
+            "stage",
             "delta",
             "answer",
             "citations",
@@ -418,11 +421,11 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         "{events:?}"
     );
     assert_eq!(
-        events[2].1,
+        events[4].1,
         json!({"name": "query_entities", "endpoint": "ovzdusie", "status": "done"})
     );
     assert_eq!(
-        events[3].1,
+        events[5].1,
         json!({
             "endpoint": "ovzdusie",
             "type": "AirQualityObserved",
@@ -436,10 +439,10 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     );
     // No page of the sources gives this Endpoint's address: the live data stays unlinked.
     assert_eq!(
-        events[6].1,
+        events[9].1,
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    let done = &events[7].1;
+    let done = &events[10].1;
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
         (&json!(1330), &json!(2), &json!(false))
@@ -1813,8 +1816,11 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         names,
         [
             "conversation",
+            "stage",
+            "stage",
             "tool",
             "tool",
+            "stage",
             "delta",
             "delta",
             "delta",
@@ -1824,12 +1830,22 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         ],
         "{events:?}"
     );
+    // The progress line's steps, the search with its query (T-4155).
+    let stages: Vec<(&str, Option<&str>)> = events
+        .iter()
+        .filter(|(n, _)| n == "stage")
+        .map(|(_, d)| (d["stage"].as_str().unwrap_or_default(), d["topic"].as_str()))
+        .collect();
+    assert_eq!(stages[0], ("understanding", None));
+    assert_eq!(stages[1].0, "searching");
+    assert!(stages[1].1.is_some_and(|q| !q.is_empty()), "{stages:?}");
+    assert_eq!(stages[2], ("answering", None));
     let deltas: String = events
         .iter()
         .filter(|(n, _)| n == "delta")
         .filter_map(|(_, d)| d["text"].as_str())
         .collect();
-    let answer = events[6].1["text"].as_str().expect("an answer");
+    let answer = events[9].1["text"].as_str().expect("an answer");
     assert_eq!(answer, deltas.trim());
 
     let calls = model_calls(&w.proxy).await;
@@ -1861,12 +1877,12 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         "another source's passage reached the model"
     );
     // Only the retrieved passage it cites is a citation; [7] was never given.
-    let citations = events[7].1.as_array().expect("citations");
+    let citations = events[10].1.as_array().expect("citations");
     assert_eq!(citations.len(), 1, "{citations:?}");
     assert_eq!(citations[0]["n"], 1);
     assert_eq!(citations[0]["url"], first);
 
-    let done = &events[8].1;
+    let done = &events[11].1;
     assert_eq!(done["tokensIn"], 120 + 80 + 900);
     assert_eq!(done["tokensOut"], 10 + 10 + 40);
     assert_eq!(done["tokens"], 130 + 90 + 940);
@@ -1888,7 +1904,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["conversation", "answer", "citations", "done"]);
     assert_eq!(again[1].1["text"], answer);
-    assert_eq!(again[2].1, events[7].1);
+    assert_eq!(again[2].1, events[10].1);
     assert_eq!(again[3].1["cached"], true);
     assert_eq!(again[3].1["tokensIn"], 0);
     assert_eq!(again[3].1["modelCalls"], 0);

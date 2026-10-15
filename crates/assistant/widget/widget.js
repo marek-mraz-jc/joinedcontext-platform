@@ -17,7 +17,7 @@
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
-      table: "Údaje, z ktorých asistent odpovedá" },
+      table: "Údaje, z ktorých asistent odpovedá", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…", sources: "Sources",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -27,7 +27,7 @@
       reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", language: "Language",
-      table: "The data the assistant answers from" },
+      table: "The data the assistant answers from", contact: "Contact", map: "Show on the map", steps: "Steps" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…", sources: "Zdroje",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -37,7 +37,7 @@
       reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
-      table: "Data, ze kterých asistent odpovídá" }
+      table: "Data, ze kterých asistent odpovídá", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup" }
   };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
@@ -268,6 +268,7 @@
         li.appendChild(el("span", "jc-card-n", String(i + 1)));
         li.appendChild(heading);
         if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
+        source.cards.forEach(function (card) { li.appendChild(showCard(card)); });
         list.appendChild(li);
       });
       item.appendChild(list);
@@ -281,6 +282,28 @@
     });
     tools.appendChild(copy);
     item.appendChild(tools);
+  }
+
+  // What the cited page publishes (T-4155): text, and a link only where render.js checked one.
+  function showCard(card) {
+    var box = el("div", "jc-part jc-part-" + card.kind);
+    var item = function (entry) {
+      return entry.href ? link(entry.href, entry.text) : el("span", "", entry.text);
+    };
+    if (card.kind === "contact") {
+      box.appendChild(el("strong", "", card.name || w.contact));
+      card.phones.concat(card.emails).forEach(function (entry) {
+        box.appendChild(el("p")).appendChild(item(entry));
+      });
+    } else if (card.kind === "place") {
+      box.appendChild(el("p", "", card.address));
+      box.appendChild(el("p")).appendChild(link(card.href, w.map));
+    } else {
+      box.appendChild(el("strong", "", w.steps));
+      var steps = box.appendChild(el("ol"));
+      card.steps.forEach(function (step) { steps.appendChild(el("li", "", step)); });
+    }
+    return box;
   }
 
   // A data round's rows as a table with the dataset and download links (T-4140).
@@ -333,7 +356,13 @@
   function handle(item, name, data) {
     if (name === "conversation") {
       conversation = data.id;
-    } else if (name === "tool" && data.status === "started" && item.status) {
+    } else if (name === "stage" && item.status) {
+      var line = JCRender.stage(data, lang);
+      if (line) {
+        item.status.textContent = line;
+        item.staged = true;
+      }
+    } else if (name === "tool" && data.status === "started" && item.status && !item.staged) {
       item.status.textContent = w.reading + " " + (data.endpoint || data.name) + "…";
     } else if (name === "script") {
       var details = el("details", "jc-script");
@@ -435,6 +464,7 @@
     input.value = "";
     var item = turn("jc-bot", w.assistant);
     item.status = el("p", "jc-status", w.thinking);
+    item.status.setAttribute("role", "status");
     item.appendChild(item.status);
     busy = new AbortController();
     send.hidden = true;

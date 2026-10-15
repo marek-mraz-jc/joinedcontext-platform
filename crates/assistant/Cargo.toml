@@ -25,6 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 rustls-pki-types = "1"
 rustls-native-certs = "0.8"
+regex = "1"
 url = "2.5"
 sha2 = "0.10"
 hex = "0.4"
