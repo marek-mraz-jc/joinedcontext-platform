@@ -35,7 +35,7 @@
     "border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);background:#fff}" +
     ".jc-panel[hidden]{display:none}" +
     ".jc-panel iframe{width:100%;height:100%;border:0;display:block}" +
-    "@media (max-width:600px){.jc-panel{inset:0;width:100%;height:100%;border-radius:0}" +
+    "@media (max-width:640px){.jc-panel{inset:0;width:100%;height:100%;border-radius:0}" +
     ".jc-open .jc-launch{display:none}}" +
     "@media (prefers-reduced-motion:no-preference){.jc-launch{transition:transform .15s}.jc-launch:hover{transform:scale(1.05)}}";
 
@@ -76,6 +76,18 @@
   panel.id = "jc-assistant-panel";
   launch.setAttribute("aria-controls", panel.id);
   var frame = null;
+  // Below 640 px the open panel takes the whole screen; the page behind is made inert, so focus
+  // and a screen reader stay inside the chat until it closes.
+  var phone = window.matchMedia("(max-width: 640px)");
+  var silenced = [];
+  function silence(on) {
+    silenced.forEach(function (el) { el.inert = false; });
+    silenced = [];
+    if (!on || !phone.matches) return;
+    Array.prototype.forEach.call(document.body.children, function (el) {
+      if (el !== host && el !== spacer && !el.inert) { el.inert = true; silenced.push(el); }
+    });
+  }
 
   function open() {
     if (!frame) {
@@ -91,6 +103,7 @@
     wrap.classList.add("jc-open");
     launch.setAttribute("aria-expanded", "true");
     launch.setAttribute("aria-label", words.close);
+    silence(true);
     frame.focus();
   }
 
@@ -98,6 +111,7 @@
     if (panel.hidden) return;
     panel.hidden = true;
     wrap.classList.remove("jc-open");
+    silence(false);
     launch.setAttribute("aria-expanded", "false");
     launch.setAttribute("aria-label", words.open);
     launch.focus();
@@ -120,7 +134,17 @@
 
   wrap.appendChild(panel);
   wrap.appendChild(launch);
-  function mount() { document.body.appendChild(host); }
+  // The launcher sits over the page's last 96 px; this spacer at the end of the body lets the
+  // host page scroll its last content clear of it. A site that lays out its own room sets
+  // `--jc-assistant-inset: 0px`.
+  var spacer = document.createElement("div");
+  spacer.setAttribute("data-jc-assistant-inset", "");
+  spacer.setAttribute("aria-hidden", "true");
+  spacer.style.height = "var(--jc-assistant-inset, 96px)";
+  function mount() {
+    document.body.appendChild(spacer);
+    document.body.appendChild(host);
+  }
   if (document.body) mount();
   else document.addEventListener("DOMContentLoaded", mount);
 })();
