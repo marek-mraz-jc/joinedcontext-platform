@@ -10,6 +10,7 @@ pub mod admin;
 pub mod agent;
 pub mod mcp;
 pub mod model;
+pub mod routed;
 pub mod script;
 pub mod widget;
 
@@ -72,6 +73,8 @@ pub struct ChatState {
     pub limits: Mutex<Limits>,
     /// One permit per question being answered, [`MAX_QUESTIONS`] in all.
     pub questions: Arc<tokio::sync::Semaphore>,
+    /// Answers to first questions asked before (T-4139).
+    pub answers: routed::AnswerCache,
 }
 
 /// The most keys [`Limits`] counts at once (T-3314).
@@ -463,6 +466,7 @@ fn sse(event: &Event) -> SseEvent {
             }
             ("tool", data)
         }
+        Event::Delta(text) => ("delta", json!({"text": text})),
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Error {
@@ -480,7 +484,18 @@ fn sse(event: &Event) -> SseEvent {
                 Err(error) => json!({"code": code, "error": error}),
             },
         ),
-        Event::Done(tokens) => ("done", json!({"tokens": tokens})),
+        Event::Done(spent, total_ms) => (
+            "done",
+            json!({
+                "tokens": spent.total,
+                "tokensIn": spent.input,
+                "tokensOut": spent.output,
+                "modelCalls": spent.calls,
+                "firstTokenMs": spent.first_token_ms,
+                "totalMs": total_ms,
+                "cached": spent.cached,
+            }),
+        ),
     };
     SseEvent::default().event(name).data(data.to_string())
 }
@@ -733,12 +748,36 @@ async fn ask(
                 .functions
                 .as_deref()
                 .filter(|_| deployment.spec.sandbox),
+            router_model: deployment
+                .spec
+                .model
+                .as_ref()
+                .and_then(|m| m.router.as_deref()),
+            answer_model: deployment
+                .spec
+                .model
+                .as_ref()
+                .and_then(|m| m.answer.as_deref()),
+            output_tokens: u64::from(budget.output_tokens_per_answer),
+            cache: &state.answers,
         };
+        let started = Instant::now();
         let spent = agent::answer(&ask, &question.history, &question.message, &tx).await;
+        let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::info!(
+            deployment = %name,
+            tokens_in = spent.input,
+            tokens_out = spent.output,
+            model_calls = spent.calls,
+            first_token_ms = spent.first_token_ms,
+            total_ms,
+            cached = spent.cached,
+            "question answered"
+        );
         if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent).await {
             tracing::error!(%err, "a question's tokens were not recorded");
         }
-        let _ = tx.send(Event::Done(spent.total)).await;
+        let _ = tx.send(Event::Done(spent, total_ms)).await;
     });
 
     let first = futures_util::stream::once(async move {

@@ -146,6 +146,7 @@ async fn world(test: &str) -> World {
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
+        answers: Default::default(),
     });
     World {
         admin,

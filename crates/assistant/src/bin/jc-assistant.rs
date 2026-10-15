@@ -214,6 +214,7 @@ async fn main() -> ExitCode {
         snapshot: RwLock::new(Arc::default()),
         limits: tokio::sync::Mutex::default(),
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
+        answers: Default::default(),
     });
 
     // Ready once the first look at the manifests went through; alive as long as the loop turns.

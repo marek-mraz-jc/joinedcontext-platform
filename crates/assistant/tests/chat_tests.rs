@@ -206,6 +206,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         snapshot: RwLock::new(Arc::new(snapshot)),
         limits: tokio::sync::Mutex::default(),
         questions: Arc::clone(&questions),
+        answers: Default::default(),
     });
     World {
         admin,
@@ -393,7 +394,24 @@ async fn a_question_is_answered_from_a_passage_and_a_tool_with_both_cited() {
         citations[1],
         json!({"n": 3, "tool": "query_entities", "endpoint": "ovzdusie"})
     );
-    assert_eq!(events[7].1, json!({"tokens": 1700}));
+    // The sums of every call's usage (T-4139, API/05 §1.3).
+    let done = &events[7].1;
+    assert_eq!(
+        (
+            &done["tokens"],
+            &done["tokensIn"],
+            &done["tokensOut"],
+            &done["modelCalls"],
+            &done["cached"]
+        ),
+        (
+            &json!(1700),
+            &json!(1670),
+            &json!(30),
+            &json!(3),
+            &json!(false)
+        )
+    );
 
     let calls = model_calls(&w.proxy).await;
     assert_eq!(calls.len(), 3);
@@ -499,7 +517,8 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     let (_, events, _) = answer_of(
         &w.app,
         ask(
-            json!({"message": "Dokedy je otvorená knižnica?", "connectors": []}),
+            // The connectors stay on: with none, the question takes the routed loop (T-4139).
+            json!({"message": "Dokedy je otvorená knižnica?"}),
             None,
         ),
     )
@@ -513,8 +532,11 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     );
     let calls = model_calls(&w.proxy).await;
     assert_eq!(calls.len(), 4);
-    let offered = calls[0].1["tools"].as_array().expect("tools").len();
-    assert_eq!(offered, 1, "connectors: [] leaves search alone");
+    assert_eq!(
+        offered_tools(&calls[0].1),
+        ["search", "ovzdusie__query_entities"],
+        "the made-up tool is never offered"
+    );
     assert_eq!(
         calls[3].1["tool_choice"], "none",
         "after a repeat the model answers"
@@ -805,11 +827,7 @@ async fn one_reply_may_carry_four_calls_and_none_with_overlong_arguments() {
         ],
     )
     .await;
-    let (_, events, _) = answer_of(
-        &w.app,
-        ask(json!({"message": "Kedy je trh?", "connectors": []}), None),
-    )
-    .await;
+    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "Kedy je trh?"}), None)).await;
     assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
     let calls = model_calls(&w.proxy).await;
     let tools = |at: usize| -> Vec<String> {
@@ -1659,5 +1677,191 @@ async fn the_portals_path_refuses_before_it_spends() {
         .expect("a request");
     assert_eq!(answer_of(&w.app, unknown).await.0, StatusCode::NOT_FOUND);
     assert!(model_calls(&w.proxy).await.is_empty(), "nothing was spent");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// An OpenAI-compatible stream of `pieces`, ending with the usage chunk the proxy asks for.
+fn streamed(pieces: &[&str], input: u64, output: u64) -> ResponseTemplate {
+    let mut body = String::new();
+    for piece in pieces {
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"choices": [{"delta": {"content": piece}}]})
+        ));
+    }
+    body.push_str(&format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({"choices": [], "usage": {"prompt_tokens": input, "completion_tokens": output, "total_tokens": input + output}})
+    ));
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(body)
+}
+
+/// T-4139, AG-107: a deployment that answers from its sources alone is routed: one router call on
+/// its router model (JSON), searches the service runs, a follow-up router call that sees titles
+/// only, and one streamed answer call on its answer model with no tools, its output held to
+/// `outputTokensPerAnswer`. Only retrieved passages are cited, the `done` event sums every call's
+/// usage, and the same first question again comes from the cache without a model call.
+#[tokio::test]
+async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
+    let mut sources_only = deployment(Channel::Public, 50_000, 10);
+    sources_only.spec.connectors.clear();
+    sources_only.spec.model = Some(jc_core::kinds::ModelChoice {
+        router: Some("test/router".into()),
+        answer: Some("test/answer".into()),
+    });
+    let w = world("chatrouted", sources_only).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"]}"}),
+                130,
+            ),
+            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 90),
+            streamed(&["Knižnica je otvorená ", "v pondelok až piatok od 9:00 do 18:00 [1]", " [7]."], 900, 40),
+        ],
+    )
+    .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Dokedy je otvorená knižnica?"}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "conversation",
+            "tool",
+            "tool",
+            "delta",
+            "delta",
+            "delta",
+            "answer",
+            "citations",
+            "done"
+        ],
+        "{events:?}"
+    );
+    let deltas: String = events
+        .iter()
+        .filter(|(n, _)| n == "delta")
+        .filter_map(|(_, d)| d["text"].as_str())
+        .collect();
+    let answer = events[6].1["text"].as_str().expect("an answer");
+    assert_eq!(answer, deltas.trim());
+
+    let calls = model_calls(&w.proxy).await;
+    assert_eq!(calls.len(), 3);
+    let (router, follow, answering) = (&calls[0].1, &calls[1].1, &calls[2].1);
+    assert_eq!(router["model"], "test/router");
+    assert_eq!(router["response_format"]["type"], "json_object");
+    assert!(router.get("tools").is_none() && router.get("stream").is_none());
+    // The follow-up reads the titles of what was found, never the passages' text.
+    let titles = follow["messages"][1]["content"].as_str().expect("titles");
+    assert!(titles.contains("Ovzdušie v Hronove"), "{titles}");
+    assert!(!titles.contains("Meracie stanice"), "{titles}");
+    assert_eq!(answering["model"], "test/answer");
+    assert_eq!(answering["stream"], true);
+    assert_eq!(answering["max_tokens"], 700);
+    assert!(answering.get("tools").is_none());
+    let passages: Value = serde_json::from_str(
+        answering["messages"][2]["content"]
+            .as_str()
+            .expect("passages")
+            .split('\n')
+            .next()
+            .expect("json"),
+    )
+    .expect("passages as JSON");
+    let first = passages["passages"][0]["url"].as_str().expect("a passage");
+    assert!(
+        !answering.to_string().contains("intranet.hronov.example"),
+        "another source's passage reached the model"
+    );
+    // Only the retrieved passage it cites is a citation; [7] was never given.
+    let citations = events[7].1.as_array().expect("citations");
+    assert_eq!(citations.len(), 1, "{citations:?}");
+    assert_eq!(citations[0]["n"], 1);
+    assert_eq!(citations[0]["url"], first);
+
+    let done = &events[8].1;
+    assert_eq!(done["tokensIn"], 120 + 80 + 900);
+    assert_eq!(done["tokensOut"], 10 + 10 + 40);
+    assert_eq!(done["tokens"], 130 + 90 + 940);
+    assert_eq!(done["modelCalls"], 3);
+    assert_eq!(done["cached"], false);
+    assert!(done["firstTokenMs"].as_u64().is_some() && done["totalMs"].as_u64().is_some());
+
+    // The same first question, written otherwise, is answered from the cache.
+    let (_, again, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "  dokedy je OTVORENÁ knižnica "}), None),
+    )
+    .await;
+    assert_eq!(
+        model_calls(&w.proxy).await.len(),
+        3,
+        "the cache made a model call"
+    );
+    let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["conversation", "answer", "citations", "done"]);
+    assert_eq!(again[1].1["text"], answer);
+    assert_eq!(again[2].1, events[7].1);
+    assert_eq!(again[3].1["cached"], true);
+    assert_eq!(again[3].1["tokensIn"], 0);
+    assert_eq!(again[3].1["modelCalls"], 0);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4139: a router that answers no JSON still searches, for the question itself; a model that
+/// refuses is a sentence, and nothing is cached.
+#[tokio::test]
+async fn a_router_that_fails_searches_the_question_and_a_refusal_is_not_cached() {
+    let mut sources_only = deployment(Channel::Public, 50_000, 10);
+    sources_only.spec.connectors.clear();
+    let w = world("chatroutedbad", sources_only).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                json!({"role": "assistant", "content": "Sure! Here are some searches."}),
+                60,
+            ),
+            completion(json!({"role": "assistant", "content": "no json"}), 60),
+            ResponseTemplate::new(503),
+        ],
+    )
+    .await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde merajú ovzdušie?"}), None),
+    )
+    .await;
+    assert!(events
+        .iter()
+        .any(|(n, d)| n == "tool" && d["status"] == "done"));
+    let error = events.iter().find(|(n, _)| n == "error").expect("an error");
+    assert_eq!(error.1["status"], 503);
+    assert_eq!(
+        events
+            .last()
+            .map(|(n, d)| (n.as_str(), d["cached"].clone())),
+        Some(("done", json!(false)))
+    );
+    // Two router calls (the second a follow-up), then the answer call that failed.
+    assert_eq!(model_calls(&w.proxy).await.len(), 3);
+    let (_, again, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde merajú ovzdušie?"}), None),
+    )
+    .await;
+    assert!(
+        again.iter().all(|(_, d)| d["cached"] != true),
+        "a refusal was cached"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
