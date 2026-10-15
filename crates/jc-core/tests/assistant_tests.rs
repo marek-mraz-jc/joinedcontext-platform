@@ -4,7 +4,7 @@
 //! signed in never runs without explicit origins, a rate limit and a budget.
 
 use jc_core::error::Error;
-use jc_core::kinds::assistant::SourceType;
+use jc_core::kinds::assistant::{SourceType, UploadLimits, DEFAULT_MODEL};
 use jc_core::kinds::{AssistantDeployment, Channel, KnowledgeSource, PdfPolicyKind, Visibility};
 use jc_core::registry;
 
@@ -336,4 +336,352 @@ fn a_guide_source_names_nothing_to_fetch() {
     ] {
         assert_eq!(refused(source(&guide(extra))), field, "{extra}");
     }
+}
+
+/// T-4166 (MF-52): the public assistant's fields take safe defaults when a deployment names none.
+#[test]
+fn a_deployment_without_the_new_fields_takes_the_safe_defaults() {
+    let spec = deployment(DEPLOYMENT)
+        .expect("the documented deployment")
+        .spec;
+    assert!(spec.enabled);
+    assert_eq!(spec.router_model(), DEFAULT_MODEL);
+    assert_eq!(spec.answer_model(), DEFAULT_MODEL);
+    assert!(spec.scope_projects().is_empty());
+    assert!(spec.suggestions.is_empty() && spec.disclaimer.is_empty());
+    let limit = spec.rate_limit.expect("rate limit");
+    assert_eq!(
+        (
+            limit.per_client_per_hour,
+            limit.per_client_per_day,
+            limit.streams_per_client
+        ),
+        (60, 200, 2)
+    );
+    let budget = spec.budget.expect("budget");
+    assert_eq!(budget.cost_per_day_usd, 3.0);
+    assert_eq!(
+        (
+            budget.output_tokens_per_answer,
+            budget.messages_per_conversation,
+            budget.question_chars
+        ),
+        (700, 30, 1_000)
+    );
+}
+
+/// The Banská Bystrica deployment as the rebuild declares it: every new field set, read back whole.
+#[test]
+fn a_deployment_with_every_new_field_validates_and_round_trips() {
+    let yaml = deployment_with(
+        "  sandbox: false\n",
+        "  sandbox: false\n  enabled: false\n\
+         \x20 model: { router: google/gemini-3.8-flash, answer: deepseek/deepseek-v4.1-flash }\n\
+         \x20 suggestions:\n    sk: [\"Kedy je zber odpadu?\", \"Ako si vybavím parkovaciu kartu?\"]\n    en: [\"When is waste collected?\"]\n\
+         \x20 disclaimer: { sk: \"Odpovede píše umelá inteligencia, overte si ich v zdroji.\" }\n\
+         \x20 scope: { projects: [bbsk, mobilita] }\n",
+    )
+    .replace(
+        "perClientPerMinute: 10 }",
+        "perClientPerMinute: 10, perClientPerHour: 100, perClientPerDay: 300, streamsPerClient: 3 }",
+    )
+    .replace(
+        "tokensPerConversation: 40000 }",
+        "tokensPerConversation: 40000, costPerDayUsd: 2.5, outputTokensPerAnswer: 800, messagesPerConversation: 20, questionChars: 1500 }",
+    );
+    let parsed = deployment(&yaml).expect("every new field");
+    assert!(!parsed.spec.enabled);
+    assert_eq!(parsed.spec.answer_model(), "deepseek/deepseek-v4.1-flash");
+    assert_eq!(parsed.spec.scope_projects(), ["bbsk", "mobilita"]);
+    assert_eq!(parsed.spec.suggestions["sk"].len(), 2);
+    assert_eq!(
+        parsed.spec.budget.as_ref().map(|b| b.cost_per_day_usd),
+        Some(2.5)
+    );
+    let again: AssistantDeployment =
+        serde_norway::from_str(&serde_norway::to_string(&parsed).expect("yaml")).expect("parse");
+    assert_eq!(again, parsed);
+}
+
+#[test]
+fn a_new_deployment_field_out_of_bounds_is_refused_with_the_field_to_change() {
+    let six = (0..6)
+        .map(|i| format!("\"q{i}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let seven = (0..7)
+        .map(|i| format!("\"q{i}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let long = "x".repeat(121);
+    let disclaimer = "x".repeat(401);
+    let ok =
+        |extra: &str| deployment_with("  sandbox: false\n", &format!("  sandbox: false\n{extra}"));
+    assert!(deployment(&ok(&format!("  suggestions: {{ sk: [{six}] }}\n"))).is_ok());
+    assert!(deployment(&ok(&format!(
+        "  disclaimer: {{ en: \"{}\" }}\n",
+        "x".repeat(400)
+    )))
+    .is_ok());
+    let cases = [
+        ("  model: { router: Gemini }\n".to_owned(), "model.router"),
+        (
+            "  model: { answer: no-vendor }\n".to_owned(),
+            "model.answer",
+        ),
+        (
+            format!("  model: {{ answer: google/{} }}\n", "m".repeat(100)),
+            "model.answer",
+        ),
+        ("  model: { answer: /flash }\n".to_owned(), "model.answer"),
+        (
+            format!("  suggestions: {{ sk: [{seven}] }}\n"),
+            "suggestions",
+        ),
+        (
+            format!("  suggestions: {{ sk: [\"{long}\"] }}\n"),
+            "suggestions",
+        ),
+        (
+            "  suggestions: { sk: [\"  \"] }\n".to_owned(),
+            "suggestions",
+        ),
+        (
+            "  suggestions: { de: [\"Wann?\"] }\n".to_owned(),
+            "suggestions",
+        ),
+        (
+            format!("  disclaimer: {{ sk: \"{disclaimer}\" }}\n"),
+            "disclaimer",
+        ),
+        ("  disclaimer: { sk: \"\" }\n".to_owned(), "disclaimer"),
+        (
+            "  disclaimer: { cs: \"Odpovědi píše AI.\" }\n".to_owned(),
+            "disclaimer",
+        ),
+        (
+            "  scope: { projects: [\"*\"] }\n".to_owned(),
+            "scope.projects",
+        ),
+        (
+            "  scope: { projects: [Bad_Name] }\n".to_owned(),
+            "scope.projects",
+        ),
+        (
+            "  scope: { projects: [bbsk, bbsk] }\n".to_owned(),
+            "scope.projects",
+        ),
+        (
+            "  scope: { projects: [banskabystrica] }\n".to_owned(),
+            "scope.projects",
+        ),
+        (
+            format!(
+                "  scope: {{ projects: [{}] }}\n",
+                (0..11)
+                    .map(|i| format!("p{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "scope.projects",
+        ),
+        ("  enabled: maybe\n".to_owned(), "parse"),
+        ("  model: { router: a/b, apiKey: x }\n".to_owned(), "parse"),
+        (
+            "  scope: { projects: [a], organizations: [b] }\n".to_owned(),
+            "parse",
+        ),
+    ];
+    for (extra, field) in &cases {
+        let got = refused(deployment(&ok(extra)));
+        if *field == "parse" {
+            assert!(
+                got.contains("unknown field") || got.contains("invalid"),
+                "{extra}: {got}"
+            );
+        } else {
+            assert_eq!(got, *field, "{extra}");
+        }
+    }
+    for (from, to, field) in [
+        (
+            "perClientPerMinute: 10 }",
+            "perClientPerMinute: 10, perClientPerHour: 0 }",
+            "rateLimit.perClientPerHour",
+        ),
+        (
+            "perClientPerMinute: 10 }",
+            "perClientPerMinute: 10, perClientPerDay: 100001 }",
+            "rateLimit.perClientPerDay",
+        ),
+        (
+            "perClientPerMinute: 10 }",
+            "perClientPerMinute: 10, streamsPerClient: 0 }",
+            "rateLimit.streamsPerClient",
+        ),
+        (
+            "perClientPerMinute: 10 }",
+            "perClientPerMinute: 10, streamsPerClient: 11 }",
+            "rateLimit.streamsPerClient",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, costPerDayUsd: 0 }",
+            "budget.costPerDayUsd",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, costPerDayUsd: 1000.5 }",
+            "budget.costPerDayUsd",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, costPerDayUsd: .nan }",
+            "budget.costPerDayUsd",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, outputTokensPerAnswer: 99 }",
+            "budget.outputTokensPerAnswer",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, outputTokensPerAnswer: 4001 }",
+            "budget.outputTokensPerAnswer",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, messagesPerConversation: 0 }",
+            "budget.messagesPerConversation",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, messagesPerConversation: 201 }",
+            "budget.messagesPerConversation",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, questionChars: 99 }",
+            "budget.questionChars",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, questionChars: 4001 }",
+            "budget.questionChars",
+        ),
+    ] {
+        assert_eq!(
+            refused(deployment(&deployment_with(from, to))),
+            field,
+            "{to}"
+        );
+    }
+}
+
+/// A key pasted into the prompt, a suggestion or the disclaimer would reach every model call or
+/// every visitor; the refusal names the field and never repeats the value.
+#[test]
+fn a_credential_in_the_texts_is_refused_without_repeating_it() {
+    let token = "sk-or-v1-0123456789abcdef0123456789abcdef";
+    for (from, to, field) in [
+        (
+            "systemPrompt: Odpovedaj stručne a vždy uveď zdroj.",
+            format!("systemPrompt: Odpovedaj stručne, kľúč {token}"),
+            "systemPrompt",
+        ),
+        (
+            "  sandbox: false\n",
+            format!("  sandbox: false\n  suggestions: {{ sk: [\"{token}\"] }}\n"),
+            "suggestions",
+        ),
+        (
+            "  sandbox: false\n",
+            format!("  sandbox: false\n  disclaimer: {{ en: \"use {token} here\" }}\n"),
+            "disclaimer",
+        ),
+    ] {
+        let err = deployment(&deployment_with(from, &to)).expect_err("refused");
+        assert!(
+            !format!("{err:?} {err}").contains(token),
+            "{field} repeated the value"
+        );
+        assert_eq!(refused(Err::<(), _>(err)), field);
+    }
+}
+
+/// MF-51: a ckan source may narrow to its organizations; an upload source holds uploaded files.
+#[test]
+fn a_ckan_source_narrows_to_organizations_and_an_upload_source_names_nothing_to_fetch() {
+    let ckan = |extra: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\n\
+             metadata: {{ name: data, namespace: banskabystrica }}\n\
+             spec:\n  source: ckan\n  ckanInstanceRef: data\n  visibility: public\n{extra}"
+        )
+    };
+    let read = source(&ckan("  organizations: [banskabystrica, bbsk_kraj]\n")).expect("ckan");
+    assert_eq!(read.spec.organizations, ["banskabystrica", "bbsk_kraj"]);
+    assert!(source(&ckan(""))
+        .expect("every organization")
+        .spec
+        .organizations
+        .is_empty());
+    let eleven = (0..11)
+        .map(|i| format!("org{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (extra, field) in [
+        (format!("  organizations: [{eleven}]\n"), "organizations"),
+        (
+            "  organizations: [Banska Bystrica]\n".to_owned(),
+            "organizations",
+        ),
+        ("  organizations: [b]\n".to_owned(), "organizations"),
+        ("  upload: { maxFiles: 5 }\n".to_owned(), "upload"),
+    ] {
+        assert_eq!(refused(source(&ckan(&extra))), field, "{extra}");
+    }
+    assert_eq!(
+        refused(source(&source_with(
+            "  visibility: public",
+            "  visibility: public\n  organizations: [bb]"
+        ))),
+        "organizations"
+    );
+
+    let upload = |extra: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\n\
+             metadata: {{ name: files, namespace: banskabystrica }}\n\
+             spec:\n  source: upload\n  visibility: public\n  languages: [sk]\n{extra}"
+        )
+    };
+    let read = source(&upload("")).expect("upload");
+    assert_eq!(read.spec.source, SourceType::Upload);
+    assert_eq!(
+        read.spec.upload_limits(),
+        UploadLimits {
+            max_bytes: 20 * 1024 * 1024,
+            max_files: 100
+        }
+    );
+    let read =
+        source(&upload("  upload: { maxBytes: 52428800, maxFiles: 500 }\n")).expect("the ceilings");
+    assert_eq!(read.spec.upload_limits().max_files, 500);
+    for (extra, field) in [
+        ("  startUrls: [https://www.banskabystrica.sk/]\n", "source"),
+        ("  ckanInstanceRef: data\n", "source"),
+        ("  contextSpaces: [mesto]\n", "source"),
+        ("  schedule: \"0 3 * * *\"\n", "schedule"),
+        ("  upload: { maxBytes: 52428801 }\n", "upload.maxBytes"),
+        ("  upload: { maxBytes: 0 }\n", "upload.maxBytes"),
+        ("  upload: { maxFiles: 0 }\n", "upload.maxFiles"),
+        ("  upload: { maxFiles: 501 }\n", "upload.maxFiles"),
+    ] {
+        assert_eq!(refused(source(&upload(extra))), field, "{extra}");
+    }
+    assert!(
+        refused(source(&upload("  upload: { maxBytes: 1, types: [exe] }\n")))
+            .contains("unknown field")
+    );
 }

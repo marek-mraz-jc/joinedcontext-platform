@@ -138,6 +138,13 @@
           "description": "Whether a document linked from another host is read; default false, so a source never grows into somebody else's site.",
           "type": "boolean"
         },
+        "organizations": {
+          "description": "The CKAN organizations a `ckan` source indexes, by name; empty indexes every one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "pdf": {
           "allOf": [
             {
@@ -169,7 +176,7 @@
               "$ref": "#/definitions/SourceType"
             }
           ],
-          "description": "`website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the project's own Endpoints and the models of their spaces) or `guide` (the platform's User Guide, AG-118)."
+          "description": "`website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the project's own Endpoints and the models of their spaces), `guide` (the platform's User Guide, AG-118) or `upload` (files an administrator uploads)."
         },
         "startUrls": {
           "description": "Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.",
@@ -177,6 +184,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "upload": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UploadLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How large and how many an `upload` source's files may be; the defaults when absent."
         },
         "visibility": {
           "allOf": [
@@ -387,6 +405,13 @@
             "guide"
           ],
           "type": "string"
+        },
+        {
+          "description": "Files an administrator uploads: PDF, DOCX, XLSX, CSV, Markdown or plain text (MF-51).",
+          "enum": [
+            "upload"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -458,6 +483,27 @@
         }
       ],
       "description": "A human label or description (UI-50): one plain string in the author's language. The legacy language map is still read, through release `v0.9`, and resolves to one string."
+    },
+    "UploadLimits": {
+      "additionalProperties": false,
+      "description": "How large and how many the files of an `upload` source may be.",
+      "properties": {
+        "maxBytes": {
+          "default": 20971520,
+          "description": "The largest file, in bytes; at most 50 MiB, default 20 MiB.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxFiles": {
+          "default": 100,
+          "description": "The most files; 1 to 500, default 100.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     },
     "Visibility": {
       "description": "Who may read what a source holds.",

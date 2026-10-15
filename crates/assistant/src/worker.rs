@@ -422,6 +422,10 @@ pub async fn work_one(
             .await
             .map(|report| format!("{} endpoints, {} removed", report.endpoints, report.removed))
         }
+        // Its files are read as they are uploaded (MF-51); a job finds nothing to fetch.
+        SourceType::Upload => Ok(
+            "nothing to fetch: an upload source reads its files as they are uploaded".to_owned(),
+        ),
         SourceType::Guide => crate::guide::sync_guide(
             pool,
             &source.project,

@@ -45,8 +45,8 @@ pub use app::{
     GeoConstraint, GeoWithin, GitSource, TemporalConstraint, DEFAULT_ORGANIZATION_SERVICES,
 };
 pub use assistant::{
-    AssistantDeploymentSpec, Budget, Channel, Connector, KnowledgeSourceSpec, PdfPolicy,
-    PdfPolicyKind, RateLimit, SourceType, Theme, Visibility,
+    AssistantDeploymentSpec, AssistantScope, Budget, Channel, Connector, KnowledgeSourceSpec,
+    ModelChoice, PdfPolicy, PdfPolicyKind, RateLimit, SourceType, Theme, UploadLimits, Visibility,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use catalog::{
