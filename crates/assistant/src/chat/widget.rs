@@ -83,7 +83,7 @@ pub fn policy(deployment: &Deployment) -> String {
 const LINK_HOSTS: &[&str] = &["data.gov.sk"];
 
 /// The hosts an answer's links may go to (T-4149): the pages it is placed on, its sources' sites
-/// and CKAN, and [`LINK_HOSTS`]. The widget adds the hosts of each answer's citations.
+/// and CKAN, and `LINK_HOSTS` (the national open data portal). The widget adds the hosts of each answer's citations.
 pub fn link_hosts(deployment: &Deployment, sources: &[Source]) -> Vec<String> {
     let spec = &deployment.spec;
     let mut urls: Vec<&str> = spec.allowed_origins.iter().map(String::as_str).collect();
