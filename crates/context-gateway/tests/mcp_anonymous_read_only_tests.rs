@@ -349,3 +349,47 @@ async fn an_in_cluster_caller_without_the_edge_header_spends_no_anonymous_allowa
         assert_eq!(status, StatusCode::OK, "{answer}");
     }
 }
+
+/// A broker whose view MCP answers `tools/list` with a body the gateway cannot parse.
+async fn unreadable_broker(content_type: &'static str) -> String {
+    let stub = axum::Router::new().fallback(move || async move {
+        (
+            [("content-type", content_type)],
+            "<html>not a tool list</html>",
+        )
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    url
+}
+
+#[tokio::test]
+async fn without_a_token_a_tool_list_the_gateway_cannot_read_is_refused_not_passed_on() {
+    let realm = common::Realm::new();
+    // Not JSON by content type, and JSON by content type but not by body: both fail closed.
+    for content_type in ["text/html", "application/json"] {
+        let url = unreadable_broker(content_type).await;
+        let app = router(Arc::new(gateway(&url, &realm)));
+        for path in [
+            format!("/api/endpoint/{OPEN}/mcp"),
+            format!("/cs/{SPACE}/mcp"),
+        ] {
+            let (status, answer) = send(&app, rpc(&path, None, None, &list())).await;
+            assert_eq!(status, StatusCode::OK, "{content_type} {path}: {answer}");
+            assert_eq!(
+                answer["error"]["code"],
+                json!(-32603),
+                "{content_type} {path}: {answer}"
+            );
+            assert!(
+                answer.get("result").is_none(),
+                "{content_type} {path}: {answer}"
+            );
+        }
+    }
+}
