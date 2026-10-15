@@ -39,12 +39,35 @@
           },
           "type": "array"
         },
+        "disclaimer": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The line under the chat that says answers are machine-written, per language.",
+          "type": "object"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Whether it answers at all; `false` makes every chat request answer `503`. Default true.",
+          "type": "boolean"
+        },
         "languages": {
           "description": "The languages it answers in, as ISO 639-1 codes.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ModelChoice"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The router and answer models; the service's default when absent."
         },
         "publicId": {
           "description": "The id in the widget's address, `/w/{publicId}`; a DNS label.",
@@ -66,12 +89,33 @@
           "description": "Whether it may filter a large tool result with a script in `jc-functions`; default false.",
           "type": "boolean"
         },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AssistantScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What it reaches beyond its own project."
+        },
         "sources": {
           "description": "The `KnowledgeSource`s of this project it answers from.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "suggestions": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Questions the chat offers before the first one, per language of `languages`.",
+          "type": "object"
         },
         "systemPrompt": {
           "description": "What the assistant is told before every conversation; at most 8,000 characters.",
@@ -98,10 +142,51 @@
       ],
       "type": "object"
     },
+    "AssistantScope": {
+      "additionalProperties": false,
+      "description": "What a deployment reaches beyond its own project.",
+      "properties": {
+        "projects": {
+          "description": "Other projects whose `audience: public` Endpoints its connectors may name; at most 10, never its own and never `*`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "Budget": {
       "additionalProperties": false,
       "description": "How many model tokens the deployment may spend; `jc-agent-proxy` holds it to this.",
       "properties": {
+        "costPerDayUsd": {
+          "default": 3.0,
+          "description": "What the deployment's model calls may cost per day, in US dollars; 0.01 to 1,000, default 3. Past it an answer lists the matching sources' links only (AG-107).",
+          "format": "double",
+          "type": "number"
+        },
+        "messagesPerConversation": {
+          "default": 30,
+          "description": "The most questions one conversation may ask; 1 to 200, default 30.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outputTokensPerAnswer": {
+          "default": 700,
+          "description": "The most tokens one answer may have; 100 to 4,000, default 700.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "questionChars": {
+          "default": 1000,
+          "description": "The longest question, in characters; 100 to 4,000, default 1,000.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "tokensPerConversation": {
           "description": "Tokens one conversation may spend; at least 1 and no more than a day's.",
           "format": "uint64",
@@ -261,6 +346,27 @@
       ],
       "type": "object"
     },
+    "ModelChoice": {
+      "additionalProperties": false,
+      "description": "The models a deployment asks `jc-agent-proxy` for; each [`DEFAULT_MODEL`] when absent.",
+      "properties": {
+        "answer": {
+          "description": "The model that writes the answer, `vendor/name`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "router": {
+          "description": "The model that picks the tools and sources of a question, `vendor/name`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "MultiLanguageMap": {
       "additionalProperties": {
         "type": "string"
@@ -380,6 +486,20 @@
       "additionalProperties": false,
       "description": "How often the deployment answers.",
       "properties": {
+        "perClientPerDay": {
+          "default": 200,
+          "description": "Questions per day from one client; 1 to 100,000, default 200.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "perClientPerHour": {
+          "default": 60,
+          "description": "Questions per hour from one client; 1 to 7,200, default 60.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "perClientPerMinute": {
           "description": "Questions per minute from one client; 1 to 120.",
           "format": "uint32",
@@ -388,6 +508,13 @@
         },
         "requestsPerMinute": {
           "description": "Questions per minute across everyone; 1 to 600.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "streamsPerClient": {
+          "default": 2,
+          "description": "Answers one client may have streaming at once; 1 to 10, default 2.",
           "format": "uint32",
           "minimum": 0.0,
           "type": "integer"

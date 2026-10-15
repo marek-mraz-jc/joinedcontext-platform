@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The most start URLs one source may name.
 pub const MAX_START_URLS: usize = 20;
@@ -32,6 +33,24 @@ pub const MAX_PROMPT_LEN: usize = 8_000;
 pub const MAX_GREETING_LEN: usize = 500;
 /// The longest a connector's tool call may take.
 pub const MAX_TIMEOUT_SECONDS: u16 = 120;
+/// The most CKAN organizations one `ckan` source may narrow to.
+pub const MAX_ORGANIZATIONS: usize = 10;
+/// The largest file an `upload` source may hold: 50 MiB.
+pub const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// The most files an `upload` source may hold.
+pub const MAX_UPLOAD_FILES: u32 = 500;
+/// The model a deployment's router and answer calls use when it names none (MF-52).
+pub const DEFAULT_MODEL: &str = "google/gemini-3.8-flash";
+/// The longest model id.
+pub const MAX_MODEL_ID_LEN: usize = 100;
+/// The most suggested questions per language.
+pub const MAX_SUGGESTIONS: usize = 6;
+/// The longest suggested question.
+pub const MAX_SUGGESTION_LEN: usize = 120;
+/// The longest disclaimer.
+pub const MAX_DISCLAIMER_LEN: usize = 400;
+/// The most other projects a deployment's connectors may reach.
+pub const MAX_SCOPE_PROJECTS: usize = 10;
 
 /// Where a source's knowledge comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -47,6 +66,8 @@ pub enum SourceType {
     /// The platform's User Guide as jc-assistant ships it: one passage per section, its Portal
     /// paths pointing into the source's own project (AG-118).
     Guide,
+    /// Files an administrator uploads: PDF, DOCX, XLSX, CSV, Markdown or plain text (MF-51).
+    Upload,
 }
 
 /// Who may read what a source holds.
@@ -114,14 +135,62 @@ fn default_pages() -> u32 {
 fn default_timeout() -> u16 {
     20
 }
+fn default_upload_bytes() -> u64 {
+    20 * 1024 * 1024
+}
+fn default_upload_files() -> u32 {
+    100
+}
+fn default_per_hour() -> u32 {
+    60
+}
+fn default_per_day() -> u32 {
+    200
+}
+fn default_streams() -> u32 {
+    2
+}
+fn default_cost_per_day() -> f64 {
+    3.0
+}
+fn default_output_tokens() -> u32 {
+    700
+}
+fn default_messages() -> u32 {
+    30
+}
+fn default_question_chars() -> u32 {
+    1_000
+}
+
+/// How large and how many the files of an `upload` source may be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UploadLimits {
+    /// The largest file, in bytes; at most 50 MiB, default 20 MiB.
+    #[serde(default = "default_upload_bytes")]
+    pub max_bytes: u64,
+    /// The most files; 1 to 500, default 100.
+    #[serde(default = "default_upload_files")]
+    pub max_files: u32,
+}
+
+impl Default for UploadLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_upload_bytes(),
+            max_files: default_upload_files(),
+        }
+    }
+}
 
 /// Desired specification of a [`KnowledgeSource`][crate::kinds::KnowledgeSource] (MF-51).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct KnowledgeSourceSpec {
     /// `website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the
-    /// project's own Endpoints and the models of their spaces) or `guide` (the platform's User
-    /// Guide, AG-118).
+    /// project's own Endpoints and the models of their spaces), `guide` (the platform's User
+    /// Guide, AG-118) or `upload` (files an administrator uploads).
     pub source: SourceType,
     /// Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -132,6 +201,12 @@ pub struct KnowledgeSourceSpec {
     /// The context spaces of this project a `catalogue` source reads; empty reads every one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_spaces: Vec<String>,
+    /// The CKAN organizations a `ckan` source indexes, by name; empty indexes every one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub organizations: Vec<String>,
+    /// How large and how many an `upload` source's files may be; the defaults when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<UploadLimits>,
     /// Whether the site's `sitemap.xml` is read before links are followed; default true.
     #[serde(default = "default_true")]
     pub sitemap: bool,
@@ -178,6 +253,11 @@ impl Kind for KnowledgeSourceSpec {
 }
 
 impl KnowledgeSourceSpec {
+    /// The upload limits in force: the manifest's, or the defaults.
+    pub fn upload_limits(&self) -> UploadLimits {
+        self.upload.clone().unwrap_or_default()
+    }
+
     /// Every rule of MF-51 that one manifest can be judged by.
     pub fn validate(&self) -> Result<()> {
         match self.source {
@@ -252,6 +332,71 @@ impl KnowledgeSourceSpec {
                         "a guide source reads the User Guide jc-assistant ships and names no start URLs, no CkanInstance and no context spaces",
                     ));
                 }
+            }
+            SourceType::Upload => {
+                if !self.start_urls.is_empty()
+                    || self.ckan_instance_ref.is_some()
+                    || !self.context_spaces.is_empty()
+                {
+                    return Err(name(
+                        "source",
+                        "upload".to_owned(),
+                        "an upload source holds the files an administrator uploads and names no start URLs, no CkanInstance and no context spaces",
+                    ));
+                }
+                if self.schedule.is_some() {
+                    return Err(name(
+                        "schedule",
+                        String::new(),
+                        "an upload source has nothing to fetch on a schedule; its files are read as they are uploaded",
+                    ));
+                }
+            }
+        }
+        if self.source != SourceType::Ckan && !self.organizations.is_empty() {
+            return Err(name(
+                "organizations",
+                self.organizations.join(", "),
+                "only a ckan source names CKAN organizations",
+            ));
+        }
+        if self.organizations.len() > MAX_ORGANIZATIONS {
+            return Err(name(
+                "organizations",
+                self.organizations.len().to_string(),
+                "a ckan source names at most 10 organizations",
+            ));
+        }
+        for organization in &self.organizations {
+            if !is_ckan_name(organization) {
+                return Err(name(
+                    "organizations",
+                    organization.clone(),
+                    "a CKAN organization name: 2 to 100 lowercase letters, digits, - and _",
+                ));
+            }
+        }
+        if let Some(upload) = &self.upload {
+            if self.source != SourceType::Upload {
+                return Err(name(
+                    "upload",
+                    String::new(),
+                    "only an upload source sets upload limits",
+                ));
+            }
+            if !(1..=MAX_UPLOAD_BYTES).contains(&upload.max_bytes) {
+                return Err(name(
+                    "upload.maxBytes",
+                    upload.max_bytes.to_string(),
+                    "upload.maxBytes is 1 byte to 50 MiB (52428800)",
+                ));
+            }
+            if !(1..=MAX_UPLOAD_FILES).contains(&upload.max_files) {
+                return Err(name(
+                    "upload.maxFiles",
+                    upload.max_files.to_string(),
+                    "upload.maxFiles is 1 to 500",
+                ));
             }
         }
         if self.source != SourceType::Catalogue && !self.context_spaces.is_empty() {
@@ -365,16 +510,60 @@ pub struct RateLimit {
     pub requests_per_minute: u32,
     /// Questions per minute from one client; 1 to 120.
     pub per_client_per_minute: u32,
+    /// Questions per hour from one client; 1 to 7,200, default 60.
+    #[serde(default = "default_per_hour")]
+    pub per_client_per_hour: u32,
+    /// Questions per day from one client; 1 to 100,000, default 200.
+    #[serde(default = "default_per_day")]
+    pub per_client_per_day: u32,
+    /// Answers one client may have streaming at once; 1 to 10, default 2.
+    #[serde(default = "default_streams")]
+    pub streams_per_client: u32,
 }
 
 /// How many model tokens the deployment may spend; `jc-agent-proxy` holds it to this.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Budget {
     /// Tokens per day across all conversations; 1 to 100,000,000.
     pub tokens_per_day: u64,
     /// Tokens one conversation may spend; at least 1 and no more than a day's.
     pub tokens_per_conversation: u64,
+    /// What the deployment's model calls may cost per day, in US dollars; 0.01 to 1,000,
+    /// default 3. Past it an answer lists the matching sources' links only (AG-107).
+    #[serde(default = "default_cost_per_day")]
+    pub cost_per_day_usd: f64,
+    /// The most tokens one answer may have; 100 to 4,000, default 700.
+    #[serde(default = "default_output_tokens")]
+    pub output_tokens_per_answer: u32,
+    /// The most questions one conversation may ask; 1 to 200, default 30.
+    #[serde(default = "default_messages")]
+    pub messages_per_conversation: u32,
+    /// The longest question, in characters; 100 to 4,000, default 1,000.
+    #[serde(default = "default_question_chars")]
+    pub question_chars: u32,
+}
+
+/// The models a deployment asks `jc-agent-proxy` for; each [`DEFAULT_MODEL`] when absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ModelChoice {
+    /// The model that picks the tools and sources of a question, `vendor/name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<String>,
+    /// The model that writes the answer, `vendor/name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+}
+
+/// What a deployment reaches beyond its own project.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AssistantScope {
+    /// Other projects whose `audience: public` Endpoints its connectors may name; at most 10,
+    /// never its own and never `*`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
 }
 
 /// How the chat looks where it is placed.
@@ -390,7 +579,7 @@ pub struct Theme {
 }
 
 /// Desired specification of an [`AssistantDeployment`][crate::kinds::AssistantDeployment] (MF-52).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AssistantDeploymentSpec {
     /// The id in the widget's address, `/w/{publicId}`; a DNS label.
@@ -424,6 +613,21 @@ pub struct AssistantDeploymentSpec {
     /// Whether it may filter a large tool result with a script in `jc-functions`; default false.
     #[serde(default)]
     pub sandbox: bool,
+    /// The router and answer models; the service's default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelChoice>,
+    /// Questions the chat offers before the first one, per language of `languages`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub suggestions: BTreeMap<String, Vec<String>>,
+    /// The line under the chat that says answers are machine-written, per language.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disclaimer: BTreeMap<String, String>,
+    /// Whether it answers at all; `false` makes every chat request answer `503`. Default true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// What it reaches beyond its own project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<AssistantScope>,
 }
 
 impl Kind for AssistantDeploymentSpec {
@@ -434,11 +638,44 @@ impl Kind for AssistantDeploymentSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
-        self.validate()
+        self.validate()?;
+        // A deployment's own project is reached without being named; naming it is a mistake.
+        let own = meta.namespace.as_deref().unwrap_or_default();
+        match self.scope_projects().iter().find(|project| *project == own) {
+            Some(project) => Err(name(
+                "scope.projects",
+                project.clone(),
+                "scope.projects names other projects; the deployment's own is reached already",
+            )),
+            None => Ok(()),
+        }
     }
 }
 
 impl AssistantDeploymentSpec {
+    /// The model id the router calls use.
+    pub fn router_model(&self) -> &str {
+        self.model
+            .as_ref()
+            .and_then(|model| model.router.as_deref())
+            .unwrap_or(DEFAULT_MODEL)
+    }
+
+    /// The model id the answer call uses.
+    pub fn answer_model(&self) -> &str {
+        self.model
+            .as_ref()
+            .and_then(|model| model.answer.as_deref())
+            .unwrap_or(DEFAULT_MODEL)
+    }
+
+    /// The other projects its connectors may reach; empty when it names none.
+    pub fn scope_projects(&self) -> &[String] {
+        self.scope
+            .as_ref()
+            .map_or(&[], |scope| scope.projects.as_slice())
+    }
+
     /// Every rule of MF-52 that one manifest can be judged by.
     pub fn validate(&self) -> Result<()> {
         names::validate_dns1123_label(&self.public_id).map_err(|_| {
@@ -538,6 +775,30 @@ impl AssistantDeploymentSpec {
                     "perClientPerMinute is 1 to 120 and no more than requestsPerMinute",
                 ));
             }
+            for (field, value, max, reason) in [
+                (
+                    "rateLimit.perClientPerHour",
+                    limit.per_client_per_hour,
+                    7_200,
+                    "perClientPerHour is 1 to 7200",
+                ),
+                (
+                    "rateLimit.perClientPerDay",
+                    limit.per_client_per_day,
+                    100_000,
+                    "perClientPerDay is 1 to 100000",
+                ),
+                (
+                    "rateLimit.streamsPerClient",
+                    limit.streams_per_client,
+                    10,
+                    "streamsPerClient is 1 to 10",
+                ),
+            ] {
+                if !(1..=max).contains(&value) {
+                    return Err(name(field, value.to_string(), reason));
+                }
+            }
         }
         if let Some(budget) = &self.budget {
             if !(1..=100_000_000).contains(&budget.tokens_per_day) {
@@ -556,6 +817,37 @@ impl AssistantDeploymentSpec {
                     "tokensPerConversation is at least 1 and no more than tokensPerDay",
                 ));
             }
+            if !(0.01..=1_000.0).contains(&budget.cost_per_day_usd) {
+                return Err(name(
+                    "budget.costPerDayUsd",
+                    budget.cost_per_day_usd.to_string(),
+                    "costPerDayUsd is 0.01 to 1000",
+                ));
+            }
+            for (field, value, range, reason) in [
+                (
+                    "budget.outputTokensPerAnswer",
+                    budget.output_tokens_per_answer,
+                    100..=4_000,
+                    "outputTokensPerAnswer is 100 to 4000",
+                ),
+                (
+                    "budget.messagesPerConversation",
+                    budget.messages_per_conversation,
+                    1..=200,
+                    "messagesPerConversation is 1 to 200",
+                ),
+                (
+                    "budget.questionChars",
+                    budget.question_chars,
+                    100..=4_000,
+                    "questionChars is 100 to 4000",
+                ),
+            ] {
+                if !range.contains(&value) {
+                    return Err(name(field, value.to_string(), reason));
+                }
+            }
         }
         if self
             .system_prompt
@@ -567,6 +859,109 @@ impl AssistantDeploymentSpec {
                 String::new(),
                 "systemPrompt is at most 8000 characters",
             ));
+        }
+        if let Some(model) = &self.model {
+            for (field, id) in [
+                ("model.router", &model.router),
+                ("model.answer", &model.answer),
+            ] {
+                if let Some(id) = id {
+                    if !is_model_id(id) {
+                        return Err(name(
+                            field,
+                            id.clone(),
+                            "a model id is vendor/name, at most 100 characters of a-z 0-9 . _ : / -",
+                        ));
+                    }
+                }
+            }
+        }
+        for (language, questions) in &self.suggestions {
+            self.known_language("suggestions", language)?;
+            if questions.len() > MAX_SUGGESTIONS {
+                return Err(name(
+                    "suggestions",
+                    language.clone(),
+                    "at most 6 suggested questions per language",
+                ));
+            }
+            for question in questions {
+                let length = question.chars().count();
+                if question.trim().is_empty() || length > MAX_SUGGESTION_LEN {
+                    return Err(name(
+                        "suggestions",
+                        language.clone(),
+                        "a suggested question is 1 to 120 characters",
+                    ));
+                }
+            }
+        }
+        for (language, text) in &self.disclaimer {
+            self.known_language("disclaimer", language)?;
+            if text.trim().is_empty() || text.chars().count() > MAX_DISCLAIMER_LEN {
+                return Err(name(
+                    "disclaimer",
+                    language.clone(),
+                    "a disclaimer is 1 to 400 characters",
+                ));
+            }
+        }
+        // A credential pasted into text every visitor reads, or every model call carries, would
+        // leak it; the refusal names the field and never repeats the value.
+        let texts = self
+            .system_prompt
+            .iter()
+            .map(|prompt| ("systemPrompt", prompt.as_str()))
+            .chain(
+                self.suggestions
+                    .values()
+                    .flatten()
+                    .map(|q| ("suggestions", q.as_str())),
+            )
+            .chain(
+                self.disclaimer
+                    .values()
+                    .map(|text| ("disclaimer", text.as_str())),
+            );
+        for (field, text) in texts {
+            if text.split_whitespace().any(names::looks_like_a_credential) {
+                return Err(name(
+                    field,
+                    String::new(),
+                    "carries the shape of a credential; a key or token never goes into the text",
+                ));
+            }
+        }
+        let projects = self.scope_projects();
+        if projects.len() > MAX_SCOPE_PROJECTS {
+            return Err(name(
+                "scope.projects",
+                projects.len().to_string(),
+                "scope.projects names at most 10 projects",
+            ));
+        }
+        for (i, project) in projects.iter().enumerate() {
+            if project == "*" {
+                return Err(name(
+                    "scope.projects",
+                    project.clone(),
+                    "scope.projects names each project; `*` is never allowed",
+                ));
+            }
+            names::validate_dns1123_label(project).map_err(|_| {
+                name(
+                    "scope.projects",
+                    project.clone(),
+                    "a project is named by its DNS label",
+                )
+            })?;
+            if projects[..i].contains(project) {
+                return Err(name(
+                    "scope.projects",
+                    project.clone(),
+                    "each project is named once",
+                ));
+            }
         }
         if let Some(theme) = &self.theme {
             if let Some(colour) = &theme.primary_color {
@@ -593,6 +988,40 @@ impl AssistantDeploymentSpec {
         }
         languages(&self.languages)
     }
+}
+
+impl AssistantDeploymentSpec {
+    /// A per-language map's key must be one of `languages`.
+    fn known_language(&self, field: &'static str, language: &str) -> Result<()> {
+        if self.languages.iter().any(|known| known == language) {
+            Ok(())
+        } else {
+            Err(name(
+                field,
+                language.to_owned(),
+                "each language here is one the deployment lists in languages",
+            ))
+        }
+    }
+}
+
+/// `vendor/name`: at most 100 characters of `a-z0-9._:/-`, both parts present.
+fn is_model_id(id: &str) -> bool {
+    id.len() <= MAX_MODEL_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._:/-".contains(c))
+        && id
+            .split_once('/')
+            .is_some_and(|(vendor, model)| !vendor.is_empty() && !model.is_empty())
+}
+
+/// A CKAN organization name: 2 to 100 characters of `a-z0-9-_`.
+fn is_ckan_name(value: &str) -> bool {
+    (2..=100).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 fn name(field: &'static str, value: String, reason: &'static str) -> Error {

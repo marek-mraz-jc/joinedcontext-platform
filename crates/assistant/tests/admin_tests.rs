@@ -46,6 +46,8 @@ fn source_spec() -> KnowledgeSourceSpec {
         start_urls: vec!["https://hronov.example/".into()],
         ckan_instance_ref: None,
         context_spaces: Vec::new(),
+        organizations: Vec::new(),
+        upload: None,
         sitemap: true,
         include: vec![],
         exclude: vec![],
