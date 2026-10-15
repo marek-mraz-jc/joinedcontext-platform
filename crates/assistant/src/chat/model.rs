@@ -101,9 +101,7 @@ impl Model {
         }
         let unavailable = |why: String| {
             tracing::error!(%why, "no service token for the model");
-            CallError::Unavailable(
-                "The assistant cannot reach its model right now. Try again in a minute.".into(),
-            )
+            CallError::Unavailable(MODEL_UNREACHABLE.into())
         };
         let mut form = self
             .config
@@ -298,10 +296,7 @@ impl Model {
             .map_err(|err| unavailable(deployment, &err.without_url().to_string()))?;
         let status = answer.status();
         if status.as_u16() == 429 {
-            return Err(CallError::DaySpent(
-                "Today's answers for this assistant are used up. It answers again after midnight UTC."
-                    .into(),
-            ));
+            return Err(CallError::DaySpent(DAY_SPENT.into()));
         }
         if status.as_u16() == 401 {
             // The held token was refused: the next question asks the realm again.
@@ -317,9 +312,19 @@ impl Model {
     }
 }
 
+// What a visitor reads when the model fails (T-4192): in Slovak, like every sentence the public
+// chat says itself (the 504, the switched-off assistant); the status and title stay English.
+pub const MODEL_UNREACHABLE: &str =
+    "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.";
+pub const MODEL_DID_NOT_ANSWER: &str = "Model asistenta neodpovedal. Skúste to o minútu znova.";
+pub const DAY_SPENT: &str =
+    "Dnešné odpovede tohto asistenta sú vyčerpané. Znova odpovedá po polnoci UTC.";
+pub const CONVERSATION_SPENT: &str =
+    "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor.";
+
 fn unavailable(deployment: &str, why: &str) -> CallError {
     tracing::warn!(%deployment, %why, "a model call failed");
-    CallError::Unavailable("The assistant's model did not answer. Try again in a minute.".into())
+    CallError::Unavailable(MODEL_DID_NOT_ANSWER.into())
 }
 
 /// What one call of [`Model::ask`] or [`Model::stream`] asks for.

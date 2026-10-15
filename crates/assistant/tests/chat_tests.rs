@@ -812,10 +812,11 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .1
         .clone();
     assert_eq!(error["status"], 429);
-    assert!(error["detail"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("new conversation"));
+    // T-4192: the visitor reads it in Slovak, like the chat's other sentences.
+    assert_eq!(
+        error["detail"],
+        "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor."
+    );
     assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
     assert!(model_calls(&w.proxy).await.is_empty(), "nothing was spent");
 
@@ -835,11 +836,9 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .expect("an error")
         .1
         .clone();
-    assert!(
-        error["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("used up"),
+    assert_eq!(
+        error["detail"],
+        "Dnešné odpovede tohto asistenta sú vyčerpané. Znova odpovedá po polnoci UTC.",
         "{error}"
     );
 
@@ -856,6 +855,11 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .1
         .clone();
     assert_eq!(error["status"], 503);
+    assert_eq!(error["title"], "Model Unavailable");
+    assert_eq!(
+        error["detail"],
+        "Model asistenta neodpovedal. Skúste to o minútu znova."
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
