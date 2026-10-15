@@ -15,6 +15,7 @@
       offline: "Nepodarilo sa spojiť so službou. Skontrolujte pripojenie a skúste to znova.",
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
       paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent",
+      hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
@@ -27,6 +28,7 @@
       offline: "The service could not be reached. Check your connection and try again.",
       busy: "You asked many questions at once. Wait a moment and try again.",
       paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant",
+      hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", language: "Language",
@@ -39,6 +41,7 @@
       offline: "Službu se nepodařilo zastihnout. Zkontrolujte připojení a zkuste to znovu.",
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
       paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent",
+      hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
@@ -186,7 +189,8 @@
   // The empty chat: the greeting and the suggested questions, nothing else above the fold.
   function welcome() {
     intro = el("li", "jc-intro");
-    if (config.greeting) intro.appendChild(el("p", "jc-greeting", config.greeting));
+    var hello = JCRender.greeting(config.greeting, config.languages, lang, w.hello);
+    if (hello) intro.appendChild(el("p", "jc-greeting", hello));
     var asks = (perLanguage(config.suggestions) || []).slice(0, 6);
     if (asks.length > 0) {
       var list = el("ul", "jc-suggest");

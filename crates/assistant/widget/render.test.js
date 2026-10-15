@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, chart, linkHost, followups, restore, remember, cards, stage, tel, mailto } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, tel, mailto } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -339,4 +339,12 @@ test("at most 50 points, and a value of NaN, a string or nothing is skipped", ()
   assert.equal(chart({ columns: ["name", "v"], rows }).points.length, 50);
   const skipped = chart({ columns: ["name", "v"], rows: [["a", 1], ["b", NaN], ["c", "7"], ["d", null], ["e", 2], "not a row"] });
   assert.deepEqual(skipped.points.map((p) => p.label), ["a", "e"]);
+});
+
+// T-4199: the deployment's greeting is in its first language; another language gets the widget's.
+test("the deployment's greeting in its first language, the widget's own in any other", () => {
+  assert.equal(greeting("Dobrý deň!", ["sk", "en"], "sk", "Hello!"), "Dobrý deň!");
+  assert.equal(greeting("Dobrý deň!", ["sk", "en"], "en", "Hello!"), "Hello!");
+  assert.equal(greeting("Hi", undefined, "sk", "Dobrý deň!"), "Hi");
+  assert.equal(greeting("", ["sk"], "en", "Hello!"), "");
 });
