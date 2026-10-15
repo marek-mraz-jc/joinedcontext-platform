@@ -1,7 +1,8 @@
 // The knowledge assistant's public chat (API/05 §1.6, T-3058, AG-114, T-4138): the full page at
 // /d/{publicId} and the panel the launcher (embed.js) opens. One question at a time to the chat
 // route of this host, the answer streamed as Server-Sent Events, the conversation and its last
-// turns kept in this page alone. No cookie, no storage, no third party, no HTML from the model.
+// turns kept in this panel's own sessionStorage, so they survive a page change on the host site
+// (T-4174). No cookie, no third party, no HTML from the model.
 "use strict";
 (function () {
   var root = document.getElementById("jc-chat");
@@ -17,7 +18,9 @@
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
-      table: "Údaje, z ktorých asistent odpovedá" },
+      table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
+      missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
+      thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…", sources: "Sources",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -27,7 +30,9 @@
       reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", language: "Language",
-      table: "The data the assistant answers from" },
+      table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
+      missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
+      thanks: "Thank you for the feedback.", more: "More questions" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…", sources: "Zdroje",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -37,7 +42,9 @@
       reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
-      table: "Data, ze kterých asistent odpovídá" }
+      table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
+      missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
+      thanks: "Děkujeme za hodnocení.", more: "Další otázky" }
   };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
@@ -154,6 +161,22 @@
   var turns = 0;
   var busy = null;
   var intro = null;
+  // Questions the server counted in this conversation: an answer's `turn` for its feedback.
+  var asked = 0;
+  var kept = null;
+  var KEY = "jc-chat:" + config.publicId;
+
+  // sessionStorage may be off (a blocked third-party frame, a private window): the chat works
+  // without it, it only forgets on a page change then.
+  function keep() {
+    try {
+      if (kept) sessionStorage.setItem(KEY, JSON.stringify(kept));
+      else sessionStorage.removeItem(KEY);
+    } catch (e) { /* not kept */ }
+  }
+  function kept0() {
+    try { return JCRender.restore(sessionStorage.getItem(KEY)); } catch (e) { return null; }
+  }
 
   function perLanguage(map) {
     if (!map) return null;
@@ -239,7 +262,7 @@
   }
 
   // The answer, formatted, its markers linked to the source cards under it, and its copy button.
-  function show(item, text, citations) {
+  function show(item, text, citations, turn) {
     turns += 1;
     var ids = "jc-src-" + turns;
     var grouped = JCRender.sources(citations);
@@ -264,7 +287,9 @@
         var li = el("li", "jc-card");
         li.id = ids + "-" + (i + 1);
         var name = (source.live ? w.live + ": " : "") + JCRender.label(source);
-        var heading = source.url ? link(source.url, name) : el("span", "", name);
+        // Only an http(s) address is a link: an uploaded file cites `upload:{source}/{name}` (T-4184).
+        var href = JCRender.safeUrl(source.url);
+        var heading = href ? link(href, name) : el("span", "", name);
         li.appendChild(el("span", "jc-card-n", String(i + 1)));
         li.appendChild(heading);
         if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
@@ -280,7 +305,97 @@
       navigator.clipboard.writeText(text).then(function () { announce.textContent = w.copied; }, function () {});
     });
     tools.appendChild(copy);
+    if (turn) thumbs(tools, turn);
     item.appendChild(tools);
+  }
+
+  // Thumbs up or down on one answer, a thumbs down asking one optional note (API/05 §1.8).
+  function thumbs(tools, turn) {
+    var of = conversation;
+    var up = button("jc-thumb", "up");
+    var down = button("jc-thumb", "down");
+    up.textContent = "👍";
+    down.textContent = "👎";
+    up.setAttribute("aria-label", w.up);
+    down.setAttribute("aria-label", w.down);
+    function said(sentence) {
+      var p = el("p", "jc-thanks", sentence);
+      p.setAttribute("role", "status");
+      tools.parentNode.insertBefore(p, tools.nextSibling);
+    }
+    async function vote(verdict, note) {
+      up.disabled = true;
+      down.disabled = true;
+      var body = { conversation: of, turn: turn, verdict: verdict };
+      if (note) body.note = note;
+      try {
+        var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "omit",
+          body: JSON.stringify(body)
+        });
+        if (response.ok) return said(w.thanks);
+        var problem = await response.json().catch(function () { return {}; });
+        said(refusal(response.status, problem.detail));
+        // A refused note may be sent again without it.
+        up.disabled = false;
+        down.disabled = false;
+      } catch (e) {
+        said(w.offline);
+        up.disabled = false;
+        down.disabled = false;
+      }
+    }
+    up.addEventListener("click", function () { vote("up"); });
+    var asking = null;
+    down.addEventListener("click", function () {
+      if (asking) return asking.querySelector("textarea").focus();
+      var box = asking = el("form", "jc-note");
+      var area = el("textarea");
+      area.maxLength = 500;
+      area.rows = 2;
+      area.setAttribute("aria-label", w.missing);
+      area.placeholder = w.missing;
+      var go = el("button", "", w.sendNote);
+      go.type = "submit";
+      var skip = el("button", "", w.skip);
+      skip.type = "button";
+      box.appendChild(area);
+      box.appendChild(go);
+      box.appendChild(skip);
+      box.addEventListener("submit", function (event) {
+        event.preventDefault();
+        box.remove();
+        asking = null;
+        vote("down", area.value.trim());
+      });
+      skip.addEventListener("click", function () {
+        box.remove();
+        asking = null;
+        vote("down");
+      });
+      tools.parentNode.insertBefore(box, tools.nextSibling);
+      area.focus();
+    });
+    tools.appendChild(up);
+    tools.appendChild(down);
+  }
+
+  // Up to three follow-up questions as chips under the answer; one click asks it (T-4174).
+  function chips(item, questions) {
+    if (questions.length === 0) return;
+    var list = el("ul", "jc-suggest jc-followups");
+    list.setAttribute("aria-label", w.more);
+    questions.forEach(function (question) {
+      var li = el("li");
+      var b = el("button", "", question);
+      b.type = "button";
+      b.addEventListener("click", function () { submit(question); });
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+    item.appendChild(list);
   }
 
   // A data round's rows as a table with the dataset and download links (T-4140).
@@ -332,7 +447,10 @@
 
   function handle(item, name, data) {
     if (name === "conversation") {
+      if (data.id !== conversation) asked = 0;
       conversation = data.id;
+      asked += 1;
+      item.turn = asked;
     } else if (name === "tool" && data.status === "started" && item.status) {
       item.status.textContent = w.reading + " " + (data.endpoint || data.name) + "…";
     } else if (name === "script") {
@@ -363,11 +481,23 @@
       item.pending = String(data.text);
       history.push({ role: "assistant", text: item.pending.slice(0, 4000) });
     } else if (name === "citations") {
-      show(item, item.pending || "", Array.isArray(data) ? data : []);
+      var cited = Array.isArray(data) ? data : [];
+      show(item, item.pending || "", cited, item.turn);
+      saved(item, item.pending || "", cited);
       item.pending = null;
+    } else if (name === "followups") {
+      chips(item, JCRender.followups(data));
     } else if (name === "error") {
       fail(item, data.detail || w.failed);
     }
+  }
+
+  // The answered turn into the panel's sessionStorage, with the question it answered.
+  function saved(item, text, citations) {
+    if (!conversation || !item.turn) return;
+    kept = JCRender.remember(kept, conversation, asked,
+      { question: item.question || "", text: text, turn: item.turn, citations: citations });
+    keep();
   }
 
   function refusal(status, detail) {
@@ -407,10 +537,11 @@
       read.events.forEach(function (event) { handle(item, event.name, event.data); });
     }
     if (item.pending !== null && item.pending !== undefined) {
-      show(item, item.pending, []);
+      show(item, item.pending, [], item.turn);
+      saved(item, item.pending, []);
       item.pending = null;
     } else if (item.streaming) {
-      show(item, item.streaming.textContent, []);
+      show(item, item.streaming.textContent, [], item.turn);
     }
     log.scrollTop = log.scrollHeight;
   }
@@ -431,9 +562,11 @@
       if (intro.children.length === 0) intro.remove();
       intro = null;
     }
+    Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
     turn("jc-you", w.you).appendChild(el("p", "", question));
     input.value = "";
     var item = turn("jc-bot", w.assistant);
+    item.question = question;
     item.status = el("p", "jc-status", w.thinking);
     item.appendChild(item.status);
     busy = new AbortController();
@@ -472,6 +605,9 @@
     conversation = null;
     history = [];
     turns = 0;
+    asked = 0;
+    kept = null;
+    keep();
     log.textContent = "";
     announce.textContent = "";
     busy = null;
@@ -489,6 +625,21 @@
   });
 
   relabel(lang);
+  // The conversation open before a page change on the host site, shown again as it was.
+  kept = config.enabled === false ? null : kept0();
+  if (kept && kept.turns.length > 0) {
+    conversation = kept.conversation;
+    asked = kept.asked;
+    log.textContent = "";
+    intro = null;
+    kept.turns.forEach(function (t) {
+      turn("jc-you", w.you).appendChild(el("p", "", t.question));
+      show(turn("jc-bot", w.assistant), t.text, t.citations, t.turn);
+      history.push({ role: "user", text: t.question });
+      history.push({ role: "assistant", text: t.text });
+    });
+    announce.textContent = "";
+  }
   if (config.enabled === false) {
     // A paused deployment says so instead of offering a box that would only refuse.
     log.textContent = "";

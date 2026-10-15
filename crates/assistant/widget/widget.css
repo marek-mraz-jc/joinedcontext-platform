@@ -80,3 +80,12 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
+
+/* T-4174: thumbs, the optional note, follow-up chips. */
+.jc-thumb { min-width: 36px; }
+.jc-thumb:disabled { opacity: .5; }
+.jc-note { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.jc-note textarea { flex: 1 1 100%; min-height: 48px; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.jc-note button { min-height: 36px; padding: 0 10px; }
+.jc-thanks { margin: 6px 0 0; font-size: .9em; }
+.jc-followups { margin-top: 10px; }

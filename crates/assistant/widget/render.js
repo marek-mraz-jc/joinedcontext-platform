@@ -149,6 +149,8 @@ var JCRender = (function () {
   /** What a source's link says: its title, else the address without its scheme. */
   function label(source) {
     if (source.title) return source.title;
+    // An uploaded file is named by its file name (T-4184).
+    if (source.url && /^upload:/.test(source.url)) return source.url.replace(/^upload:[^/]*\//, "").replace(/#page=\d+$/, "");
     if (source.url) return source.url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
     return source.endpoint || "";
   }
@@ -225,7 +227,47 @@ var JCRender = (function () {
     };
   }
 
+  /** A `followups` event's questions (T-4174): strings, trimmed, 1 to 120 characters, at most 3. */
+  function followups(data) {
+    var out = [];
+    ((data && Array.isArray(data.questions)) ? data.questions : []).forEach(function (q) {
+      if (typeof q !== "string") return;
+      q = q.replace(/\s+/g, " ").trim();
+      if (q && q.length <= 120 && out.indexOf(q) < 0 && out.length < 3) out.push(q);
+    });
+    return out;
+  }
+
+  // What the panel keeps in its sessionStorage (T-4174): the conversation's id, how many questions
+  // it asked, and the visible turns, at most MAX_KEPT, each question and answer with its citations.
+  var MAX_KEPT = 20;
+  var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  /** The kept conversation read back from `raw`, or null when it is missing or not of its shape. */
+  function restore(raw) {
+    var kept;
+    try { kept = JSON.parse(raw); } catch (e) { return null; }
+    if (!kept || typeof kept !== "object" || typeof kept.conversation !== "string" ||
+        !UUID.test(kept.conversation) || !Array.isArray(kept.turns)) return null;
+    var turns = kept.turns.filter(function (t) {
+      return t && typeof t.question === "string" && typeof t.text === "string" &&
+        Number.isInteger(t.turn) && t.turn >= 1 && Array.isArray(t.citations);
+    }).slice(-MAX_KEPT).map(function (t) {
+      return { question: t.question.slice(0, 4000), text: t.text.slice(0, 4000), turn: t.turn, citations: t.citations };
+    });
+    var asked = Number.isInteger(kept.asked) && kept.asked >= 0 ? kept.asked : 0;
+    turns.forEach(function (t) { if (t.turn > asked) asked = t.turn; });
+    return { conversation: kept.conversation, asked: asked, turns: turns };
+  }
+
+  /** `kept` with one more answered turn, the oldest dropped past MAX_KEPT. */
+  function remember(kept, conversation, asked, entry) {
+    var turns = (kept && kept.conversation === conversation ? kept.turns : []).concat([entry]);
+    return { conversation: conversation, asked: asked, turns: turns.slice(-MAX_KEPT) };
+  }
+
   return {
+    followups: followups, restore: restore, remember: remember,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table
   };

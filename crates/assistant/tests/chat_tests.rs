@@ -28,6 +28,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const ORIGIN: &str = "https://www.hronov.example";
 const SLUG: &str = "abcdefghijklmnopqrstuvwxyz234567";
 const HIDDEN_SLUG: &str = "zyxwvutsrqponmlkjihgfedcba765432";
+/// The region's public Endpoint, `bbsk/kraj` (T-4177).
+const REGION_SLUG: &str = "regionabcdefghijklmnopqrstuvwxy";
+/// An Endpoint of a project no deployment's scope names.
+const ELSEWHERE_SLUG: &str = "elsewhereabcdefghijklmnopqrstuv";
 const PORTAL_TOKEN: &str = "the-portals-token";
 const PERSON_TOKEN: &str = "the-persons-own-token";
 
@@ -166,7 +170,20 @@ async fn world(test: &str, deployment: Deployment) -> World {
         deployments: vec![deployment],
         ..Snapshot::default()
     };
+    let public = |slug: &str| EndpointRef {
+        slug: slug.into(),
+        audience: "public".into(),
+    };
     snapshot.endpoints = BTreeMap::from([
+        (("bbsk".into(), "kraj".into()), public(REGION_SLUG)),
+        (
+            ("bbsk".into(), "spisy".into()),
+            EndpointRef {
+                slug: HIDDEN_SLUG.into(),
+                audience: "organization".into(),
+            },
+        ),
+        (("helsinki".into(), "kraj".into()), public(ELSEWHERE_SLUG)),
         (
             ("hronov".into(), "ovzdusie".into()),
             EndpointRef {
@@ -208,6 +225,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         questions: Arc::clone(&questions),
         answers: Default::default(),
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
+        organization: "hronov".into(),
     });
     World {
         admin,
@@ -328,8 +346,8 @@ async fn model_calls(proxy: &MockServer) -> Vec<(axum::http::HeaderMap, Value)> 
 }
 
 /// The recorded answers of the public Endpoint's `list_types` and `query_entities` (T-4140).
-async fn recorded_air(gateway: &MockServer) {
-    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+async fn recorded_air(gateway: &MockServer, slug: &str) {
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{slug}/mcp")));
     mcp().and(body_string_contains("tools/list"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
             {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
@@ -382,7 +400,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         "delete_entity".into(),
     ];
     let w = world("chatok", d).await;
-    recorded_air(&w.gateway).await;
+    recorded_air(&w.gateway, SLUG).await;
     script(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [\"NO2\"], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"interne\", \"type\": \"Record\"}]}"}), 400),
         streamed(&["NO2 na Námestí SNP je 21 [1]."], 900, 30),
@@ -1794,7 +1812,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         &w.proxy,
         vec![
             completion(
-                json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"]}"}),
+                json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"], \"followups\": [\"Kde je knižnica?\", \"Koľko stojí preukaz?\"]}"}),
                 130,
             ),
             completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 90),
@@ -1820,9 +1838,15 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
             "delta",
             "answer",
             "citations",
+            "followups",
             "done"
         ],
         "{events:?}"
+    );
+    // T-4174: the router's follow-up questions, from the call it made anyway.
+    assert_eq!(
+        events[8].1["questions"],
+        json!(["Kde je knižnica?", "Koľko stojí preukaz?"])
     );
     let deltas: String = events
         .iter()
@@ -1866,7 +1890,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(citations[0]["n"], 1);
     assert_eq!(citations[0]["url"], first);
 
-    let done = &events[8].1;
+    let done = &events[9].1;
     assert_eq!(done["tokensIn"], 120 + 80 + 900);
     assert_eq!(done["tokensOut"], 10 + 10 + 40);
     assert_eq!(done["tokens"], 130 + 90 + 940);
@@ -2129,5 +2153,259 @@ async fn an_answer_whose_cost_was_not_reported_has_no_cost_in_done() {
     assert_eq!(name, "done");
     assert_eq!(done["tokensIn"], 40, "{events:?}");
     assert!(done.get("costUsd").is_none(), "{done}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+fn verdict(body: Value, origin: Option<&str>, client: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/d/hronov-obcania/feedback")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", format!("{client}, 10.0.0.1"));
+    if let Some(origin) = origin {
+        request = request.header("origin", origin);
+    }
+    request
+        .body(Body::from(body.to_string()))
+        .expect("a request")
+}
+
+/// T-4174, API/05 §1.8: a verdict on an answer of a current conversation is stored with its turn
+/// and note alone and a second one replaces it; an unknown conversation, a turn not asked, a
+/// foreign origin and a secret in the note are refused, and the route has the chat's per-client
+/// limit in a window of its own.
+#[tokio::test]
+async fn a_verdict_on_an_answer_is_stored_without_who_sent_it() {
+    let w = world("chatfeedback", deployment(Channel::Public, 1_000_000, 3)).await;
+    script(
+        &w.proxy,
+        vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 2],
+    )
+    .await;
+    let (_, events, _) = answer_of(&w.app, ask(json!({"message": "a"}), Some(ORIGIN))).await;
+    let id = events[0].1["id"].as_str().expect("an id").to_owned();
+    let send = |body: Value, origin: Option<&'static str>, client: &'static str| {
+        let app = w.app.clone();
+        async move {
+            let response = app
+                .oneshot(verdict(body, origin, client))
+                .await
+                .expect("an answer");
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .expect("a body");
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                headers,
+            )
+        }
+    };
+    let (status, _, headers) = send(
+        json!({"conversation": id, "turn": 1, "verdict": "up"}),
+        Some(ORIGIN),
+        "198.51.100.20",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        headers
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some(ORIGIN)
+    );
+    let (status, _, _) = send(
+        json!({"conversation": id, "turn": 1, "verdict": "down", "note": "Chýbali otváracie hodiny."}),
+        Some(ORIGIN),
+        "198.51.100.20",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a second verdict replaces the first"
+    );
+
+    for (body, origin, status) in [
+        (
+            json!({"conversation": id, "turn": 2, "verdict": "up"}),
+            Some(ORIGIN),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"conversation": "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11", "turn": 1, "verdict": "up"}),
+            Some(ORIGIN),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"conversation": "nie", "turn": 1, "verdict": "up"}),
+            Some(ORIGIN),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"conversation": id, "turn": 1, "verdict": "up", "who": "me"}),
+            Some(ORIGIN),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"conversation": id, "turn": 1, "verdict": "down", "note": "ghp_abc123def456ghi789jkl012mno345"}),
+            Some(ORIGIN),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"conversation": id, "turn": 1, "verdict": "up"}),
+            Some("https://evil.example"),
+            StatusCode::FORBIDDEN,
+        ),
+        // Started from the allowed origin, so not this caller's without it.
+        (
+            json!({"conversation": id, "turn": 1, "verdict": "up"}),
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            send(body.clone(), origin, "198.51.100.21").await.0,
+            status,
+            "{body}"
+        );
+    }
+
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let rows: Vec<(String, i32, String, Option<String>)> =
+        sqlx::query_as("SELECT deployment, turn, verdict, note FROM feedback")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("rows");
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'feedback' ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("columns");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(
+        rows,
+        [(
+            "obcania".to_owned(),
+            1,
+            "down".to_owned(),
+            Some("Chýbali otváracie hodiny.".to_owned())
+        )]
+    );
+    assert_eq!(
+        columns,
+        [
+            "conversation",
+            "created_at",
+            "deployment",
+            "note",
+            "project",
+            "turn",
+            "verdict"
+        ],
+        "no address, cookie or other personal data"
+    );
+
+    // Three a minute from one client, in a window of its own: the chat is still open to them.
+    for _ in 0..3 {
+        let _ = send(
+            json!({"conversation": id, "turn": 1, "verdict": "up"}),
+            Some(ORIGIN),
+            "198.51.100.22",
+        )
+        .await;
+    }
+    let (status, _, headers) = send(
+        json!({"conversation": id, "turn": 1, "verdict": "up"}),
+        Some(ORIGIN),
+        "198.51.100.22",
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(headers.contains_key("retry-after"));
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask_from(json!({"message": "b"}), Some(ORIGIN), "198.51.100.22"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4177, MF-52: a public deployment reads another project's public Endpoint named
+/// `{project}/{endpoint}` when its scope lists the project; that project's organization Endpoint
+/// and a project outside the scope are never asked, whatever the router names.
+#[tokio::test]
+async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.scope = Some(jc_core::kinds::AssistantScope {
+        projects: vec!["bbsk".into()],
+    });
+    let tools = vec!["list_types".to_owned(), "query_entities".to_owned()];
+    d.spec.connectors = ["bbsk/kraj", "bbsk/spisy", "helsinki/kraj"]
+        .into_iter()
+        .map(|endpoint| Connector {
+            endpoint: endpoint.into(),
+            tools: tools.clone(),
+            timeout_seconds: 5,
+        })
+        .collect();
+    let w = world("chatscope", d).await;
+    for slug in [REGION_SLUG, HIDDEN_SLUG, ELSEWHERE_SLUG] {
+        recorded_air(&w.gateway, slug).await;
+    }
+    script(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"helsinki/kraj\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"bbsk/spisy\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"bbsk/kraj\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+        streamed(&["NO2 je 21 [1]."], 900, 30),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Aké je NO2 v kraji?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "data")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(data.len(), 1, "{events:?}");
+    assert_eq!(data[0]["endpoint"], "bbsk/kraj");
+    assert_eq!(
+        data[0]["download"],
+        format!("https://data.hronov.example/api/endpoint/{REGION_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
+    );
+    let router = model_calls(&w.proxy).await[0].1["messages"][1]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        router.contains("- bbsk/kraj: AirQualityObserved"),
+        "{router}"
+    );
+    assert!(
+        !router.contains("helsinki") && !router.contains("spisy"),
+        "{router}"
+    );
+    let asked: Vec<String> = w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
+    assert!(asked.iter().any(|p| p.contains(REGION_SLUG)), "{asked:?}");
+    assert!(
+        asked
+            .iter()
+            .all(|p| !p.contains(HIDDEN_SLUG) && !p.contains(ELSEWHERE_SLUG)),
+        "{asked:?}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

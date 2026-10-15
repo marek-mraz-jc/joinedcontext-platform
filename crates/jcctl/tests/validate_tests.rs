@@ -1431,3 +1431,60 @@ fn an_unknown_account_a_taken_port_and_a_missing_broker_are_named() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T-4177, MF-52: a connector reaches another project's Endpoint as `{project}/{endpoint}` when
+/// the project declares it `audience: public`; an unknown one, or one that is not public, is
+/// named with the field to change.
+#[test]
+fn an_assistant_reaches_another_projects_public_endpoint_only() {
+    let dir = valid_repo("assistant-scope");
+    // A second project, `bbsk`, with its own space and a public Endpoint of the same name.
+    for file in [
+        "projects/ovzdusie/project.yaml",
+        "projects/ovzdusie/spaces/ovzdusie/space.yaml",
+        ENDPOINT_PATH,
+    ] {
+        let text = std::fs::read_to_string(dir.join(file)).expect("fixture");
+        write(
+            &dir,
+            &file.replace("ovzdusie", "bbsk"),
+            &text
+                .replace("ovzdusie", "bbsk")
+                .replace("zt4qm7ge2xdv6ksb3ncf5arw2y", "bbsk7ge2xdv6ksb3ncf5arw2yq"),
+        );
+    }
+    knowledge_source(&dir, "web", "public", None);
+    let scoped = |endpoint: &str| {
+        assistant_deployment(&dir, "public", "web", endpoint);
+        let path = dir.join("projects/ovzdusie/assistant/deployments/chat.yaml");
+        let text = std::fs::read_to_string(&path).expect("deployment");
+        std::fs::write(&path, format!("{text}  scope: {{ projects: [bbsk] }}\n")).expect("write");
+        validate::run(&dir)
+    };
+    let report = scoped("bbsk/public-air");
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+    let report = scoped("bbsk/no-such");
+    let found = with_assistant(&report);
+    assert!(
+        found.len() == 1
+            && found[0].contains("`bbsk/no-such`")
+            && found[0].contains("project `bbsk`"),
+        "{found:?}"
+    );
+
+    let endpoint = dir.join(ENDPOINT_PATH.replace("ovzdusie", "bbsk"));
+    let text = std::fs::read_to_string(&endpoint).expect("endpoint");
+    std::fs::write(
+        &endpoint,
+        text.replace("audience: public", "audience: organization"),
+    )
+    .expect("write");
+    let report = scoped("bbsk/public-air");
+    let found = with_assistant(&report);
+    assert!(
+        found.len() == 1 && found[0].contains("audience: public"),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
