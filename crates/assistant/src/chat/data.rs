@@ -139,6 +139,7 @@ pub async fn answer(
         model: ask.answer_model,
         max_tokens: ask.output_tokens,
         json: false,
+        provider: ask.provider,
     };
     // A call repeated with the same arguments is answered from the question's own results.
     let mut seen: HashMap<String, String> = HashMap::new();

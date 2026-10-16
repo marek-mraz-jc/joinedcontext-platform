@@ -302,6 +302,9 @@ impl Model {
         if call.json {
             body["response_format"] = json!({"type": "json_object"});
         }
+        if let Some(provider) = call.provider {
+            body["provider"] = provider.openrouter();
+        }
         if stream {
             // The proxy adds `stream_options.include_usage`, so the last chunk carries `usage`.
             body["stream"] = json!(true);
@@ -370,6 +373,8 @@ pub struct Call<'a> {
     pub max_tokens: u64,
     /// Whether the answer must be one JSON object.
     pub json: bool,
+    /// The OpenRouter providers to ask, sent as its `provider` field (T-4292).
+    pub provider: Option<&'a jc_core::kinds::ProviderRouting>,
 }
 
 /// Reads an OpenAI-compatible completion stream (`data: {chunk}` lines, `data: [DONE]` last) as

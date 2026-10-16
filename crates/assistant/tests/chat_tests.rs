@@ -1954,6 +1954,10 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     sources_only.spec.model = Some(jc_core::kinds::ModelChoice {
         router: Some("test/router".into()),
         answer: Some("test/answer".into()),
+        provider: Some(jc_core::kinds::ProviderRouting {
+            order: vec!["cerebras".into()],
+            allow_fallbacks: Some(false),
+        }),
     });
     let w = world("chatrouted", sources_only).await;
     script_routed(
@@ -2037,6 +2041,12 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         calls_of(&calls, None)[0],
     );
     assert_eq!(router["model"], "test/router");
+    // T-4292: the deployment's providers ride on every call, in OpenRouter's own field names.
+    let pinned = json!({"order": ["cerebras"], "allow_fallbacks": false});
+    assert!(
+        calls.iter().all(|(_, body)| body["provider"] == pinned),
+        "{calls:?}"
+    );
     assert_eq!(router["response_format"]["type"], "json_object");
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
     // The router hears the sources' language; the follow-up reads the passages' text as data.
