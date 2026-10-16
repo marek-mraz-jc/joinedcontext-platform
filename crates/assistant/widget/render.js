@@ -43,6 +43,37 @@ var JCRender = (function () {
   var NUMBERED = /^\s*\d{1,3}[.)]\s+(.*)$/;
   var HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
 
+  // The citation numbers an item carries at its own level, as one key; "" when it cites nothing.
+  function citeKey(item) {
+    var numbers = [];
+    item.children.forEach(function (node) {
+      if (node && node.tag === "cite") numbers = numbers.concat(node.numbers);
+    });
+    return numbers.filter(function (n, i) { return numbers.indexOf(n) === i; }).sort(function (a, b) { return a - b; }).join(",");
+  }
+
+  // An item without its markers, and without the commas and spaces that only joined them.
+  function uncited(item) {
+    var kept = item.children.filter(function (node) { return !(node && node.tag === "cite"); });
+    var at = kept.length - 1;
+    while (at >= 0 && typeof kept[at] === "string" && /^[\s,;]*$/.test(kept[at])) at -= 1;
+    kept = kept.slice(0, at + 1);
+    if (typeof kept[at] === "string") kept[at] = kept[at].replace(/[\s,;]+$/, "");
+    item.children = kept.filter(function (node) { return node !== ""; });
+  }
+
+  /**
+   * Consecutive items of a list that cite the same sources keep the markers on the last of them
+   * only (T-4278): "[1],[2]" after every weekday of the opening hours was noise on a phone.
+   */
+  function collapseCites(list) {
+    var items = list.children;
+    for (var i = 0; i < items.length - 1; i += 1) {
+      var key = citeKey(items[i]);
+      if (key !== "" && key === citeKey(items[i + 1])) uncited(items[i]);
+    }
+  }
+
   /**
    * The answer as blocks: paragraphs (lines joined by line breaks), bullet and numbered lists,
    * headings read as bold paragraphs. `known(n)` says whether citation n exists, `linkable(url)`
@@ -87,6 +118,9 @@ var JCRender = (function () {
         }
         paragraph.children = paragraph.children.concat(inline(line.trim(), known, linkable));
       }
+    });
+    blocks.forEach(function (block) {
+      if (block.tag === "ul" || block.tag === "ol") collapseCites(block);
     });
     return blocks;
   }

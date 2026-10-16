@@ -247,9 +247,14 @@
     }
   }
 
+  // `who` is the word's key, bound like every other word, so a language switch renames the
+  // speakers of the turns already shown (T-4278: "Vy" stayed on an English page).
   function turn(cls, who) {
     var item = el("li", cls);
-    item.appendChild(el("span", "jc-sr", who + ": "));
+    var speaker = el("span", "jc-sr");
+    speaker.appendChild(words(el("span"), who));
+    speaker.appendChild(document.createTextNode(": "));
+    item.appendChild(speaker);
     log.appendChild(item);
     log.scrollTop = log.scrollHeight;
     return item;
@@ -311,7 +316,7 @@
     announce.textContent = body.textContent;
     if (grouped.list.length > 0) {
       var list = el("ul", "jc-cards");
-      list.setAttribute("aria-label", w.sources);
+      words(list, "sources", "ariaLabel");
       grouped.list.forEach(function (source, i) {
         var li = el("li", "jc-card");
         li.id = ids + "-" + (i + 1);
@@ -328,7 +333,7 @@
       item.appendChild(list);
     }
     var tools = el("div", "jc-answer-tools");
-    var copy = el("button", "jc-copy", w.copy);
+    var copy = words(el("button", "jc-copy"), "copy");
     copy.type = "button";
     copy.addEventListener("click", function () {
       if (!navigator.clipboard) return;
@@ -364,12 +369,15 @@
   // Thumbs up or down on one answer, a thumbs down asking one optional note (API/05 §1.8).
   function thumbs(tools, turn) {
     var of = conversation;
-    var up = button("jc-thumb", "up");
-    var down = button("jc-thumb", "down");
-    up.textContent = "👍";
-    down.textContent = "👎";
-    up.setAttribute("aria-label", w.up);
-    down.setAttribute("aria-label", w.down);
+    // The thumb is the face, the word its name: bound as `ariaLabel`, so a language switch renames
+    // it and never writes the word over the thumb (T-4278).
+    function thumb(face, key) {
+      var b = el("button", "jc-thumb", face);
+      b.type = "button";
+      return words(b, key, "ariaLabel");
+    }
+    var up = thumb("👍", "up");
+    var down = thumb("👎", "down");
     function said(sentence) {
       var p = el("p", "jc-thanks", sentence);
       p.setAttribute("role", "status");
@@ -437,7 +445,7 @@
   function chips(item, questions) {
     if (questions.length === 0) return;
     var list = el("ul", "jc-suggest jc-followups");
-    list.setAttribute("aria-label", w.more);
+    words(list, "more", "ariaLabel");
     questions.forEach(function (question) {
       var li = el("li");
       var b = el("button", "", question);
@@ -671,9 +679,9 @@
       intro = null;
     }
     Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
-    turn("jc-you", w.you).appendChild(el("p", "", question));
+    turn("jc-you", "you").appendChild(el("p", "", question));
     input.value = "";
-    var item = turn("jc-bot", w.assistant);
+    var item = turn("jc-bot", "assistant");
     item.question = question;
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
@@ -742,8 +750,8 @@
     log.textContent = "";
     intro = null;
     kept.turns.forEach(function (t) {
-      turn("jc-you", w.you).appendChild(el("p", "", t.question));
-      show(turn("jc-bot", w.assistant), t.text, t.citations, t.turn);
+      turn("jc-you", "you").appendChild(el("p", "", t.question));
+      show(turn("jc-bot", "assistant"), t.text, t.citations, t.turn);
       history.push({ role: "user", text: t.question });
       history.push({ role: "assistant", text: t.text });
     });

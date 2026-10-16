@@ -416,3 +416,31 @@ test("Retry resends the last question with the history before it, and nothing el
   assert.equal(retry(undefined), null);
   assert.equal(retry([{ role: "user", text: "  " }]), null);
 });
+
+// T-4278: the owner's transcript repeated "[1],[2]" after every weekday of the Client Centre's hours.
+test("a list whose lines cite the same sources carries the markers once, on its last line", () => {
+  const known = (n) => n === 1 || n === 2 || n === 3;
+  const cites = (block) => block.children.map((li) => li.children.filter((node) => node.tag === "cite").map((c) => c.numbers));
+  const [hours] = markdown("- Monday: 8:00–17:00 [1],[2]\n- Tuesday: 8:00–15:00 [1], [2]\n- Friday: 8:00–13:00 [2][1]", known);
+  assert.deepEqual(cites(hours), [[], [], [[2], [1]]]);
+  assert.deepEqual(hours.children[0].children, ["Monday: 8:00–17:00"], "no comma or space left where the markers were");
+  // A line with other sources keeps its own, and so does the line before it.
+  const [mixed] = markdown("1. Roads [3]\n2. Schools [1]\n3. Health [1]", known);
+  assert.deepEqual(cites(mixed), [[[3]], [], [[1]]]);
+  // Lines that cite nothing, and a paragraph, are left as they are.
+  assert.deepEqual(markdown("- a\n- b", known)[0].children.map((li) => li.children), [["a"], ["b"]]);
+  assert.deepEqual(cites({ children: markdown("One [1].\nTwo [1].", known) }), [[[1], [1]]]);
+});
+
+// T-4278: on an English page the owner read "Vy" and "Užitočná odpoveď" (speakers and thumbs
+// named once, in the language of the moment), and a language switch wrote the word over the thumb.
+test("the speakers, the thumbs and every answer's tools are named by bound words", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
+  assert.doesNotMatch(widget, /turn\("jc-(you|bot)", w\./, "a speaker is a key, not the word of the moment");
+  assert.doesNotMatch(widget, /setAttribute\("aria-label", w\.(up|down|sources|more)\)/);
+  assert.doesNotMatch(widget, /button\("jc-thumb"/, "a thumb's word is its name, never its text");
+  assert.match(widget, /words\(b, key, "ariaLabel"\)/);
+  assert.match(widget, /words\(el\("button", "jc-copy"\), "copy"\)/);
+});
