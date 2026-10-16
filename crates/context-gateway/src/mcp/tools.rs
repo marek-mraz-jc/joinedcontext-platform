@@ -96,9 +96,15 @@ impl Tool {
 pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "list_endpoints",
     "list_types",
+    "get_type",
+    "list_type_details",
+    "list_attributes",
+    "list_attribute_details",
+    "get_attribute",
     "query_entities",
     "get_entity",
     "get_attribute_value",
+    "query_temporal",
     "retrieve_temporal",
     "describe_schema",
     "describe_access",
@@ -240,11 +246,47 @@ fn schema_of(kind: Kind) -> Value {
     }
 }
 
-/// The input schema of a broker tool with `args`, as the broker publishes it.
+/// One line of NGSI-LD grammar per argument, so a model reads how to fill it where it fills it
+/// (EP-116). A description changes no name and no type, which is all EP-112 compares.
+fn grammar(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "type" => "Entity types, e.g. [\"AirQualityObserved\"]",
+        "id" => "Entity ids, NGSI-LD URNs urn:ngsi-ld:{Type}:{id}",
+        "idPattern" => "A regular expression over entity ids, e.g. ^urn:ngsi-ld:Parking:.*",
+        "attrs" => "Attributes to return; with no q, also those an entity must have",
+        "pick" | "omit" => "Members to keep or drop, id and type included",
+        "q" => "NGSI-LD query: ; is AND, | is OR; == != > >= < <= ~= (regex) !~=; a..b ranges; a.b sub-attribute; a[b] member; !a absent. E.g. no2>40;status==\"ok\"",
+        "scopeQ" => "Scope query, e.g. /city/centre or /city/# ; is AND, , is OR",
+        "georel" => "near;maxDistance==<m>, near;minDistance==<m>, within, contains, intersects, equals, disjoint, overlaps",
+        "coordinates" => "GeoJSON coordinates of `geometry`, longitude first, e.g. [19.15, 48.74]",
+        "geoproperty" => "The GeoProperty the geo query tests; location when absent",
+        "orderBy" => "attr[;asc|desc], comma-separated (CIM 009 4.23); local queries only",
+        "format" => "Representation: normalized (default, values with metadata), concise, keyValues (plain values); on history temporalValues or aggregatedValues",
+        "sysAttrs" => "true adds createdAt and modifiedAt: when the entity or attribute last changed",
+        "timerel" => "before, after or between timeAt (and endTimeAt)",
+        "timeAt" | "endTimeAt" => "An ISO 8601 instant, e.g. 2026-10-12T00:00:00Z",
+        "timeproperty" => "The instant history is ordered by: observedAt (default), modifiedAt, createdAt, or deletedAt for removals",
+        "lastN" => "Keep the newest N instances of each attribute",
+        "aggrMethods" => "Comma-separated: avg, min, max, sum, totalCount, distinctCount, stddev, sumsq",
+        "aggrPeriodDuration" => "ISO 8601 duration of each aggregation period, e.g. PT1H or P1D",
+        "limit" => "Entities per page, 1 to 1000",
+        "count" => "true answers the total number of matches",
+        _ => return None,
+    })
+}
+
+/// The input schema of a broker tool with `args`, as the broker publishes it, each argument with
+/// its one line of grammar.
 fn input_schema(args: &[Arg]) -> Map<String, Value> {
     let properties: Map<String, Value> = args
         .iter()
-        .map(|arg| (arg.name.to_owned(), schema_of(arg.kind)))
+        .map(|arg| {
+            let mut schema = schema_of(arg.kind);
+            if let (Value::Object(object), Some(line)) = (&mut schema, grammar(arg.name)) {
+                object.insert("description".to_owned(), json!(line));
+            }
+            (arg.name.to_owned(), schema)
+        })
         .collect();
     let required: Vec<&str> = args
         .iter()
@@ -273,6 +315,10 @@ const GEOMETRIES: &[&str] = &[
 const JOINS: &[&str] = &["flat", "inline"];
 const TIMERELS: &[&str] = &["before", "after", "between"];
 const TIMEPROPERTIES: &[&str] = &["observedAt", "createdAt", "modifiedAt", "deletedAt"];
+/// The entity representations (CIM 009 6.3.7); `sysAttrs` is the broker's flag for
+/// `options=sysAttrs` (T-4258).
+const FORMATS: &[&str] = &["normalized", "concise", "keyValues"];
+const TEMPORAL_FORMATS: &[&str] = &["normalized", "temporalValues", "aggregatedValues"];
 
 const GET_ENTITY: &[Arg] = &[
     req("id", Kind::Id),
@@ -282,6 +328,8 @@ const GET_ENTITY: &[Arg] = &[
     opt("lang", Kind::Text(64)),
     opt("join", Kind::Word(JOINS)),
     opt("joinLevel", Kind::Int(1, 3)),
+    opt("format", Kind::Word(FORMATS)),
+    opt("sysAttrs", Kind::Flag),
 ];
 const QUERY: &[Arg] = &[
     opt("type", Kind::Types),
@@ -300,6 +348,9 @@ const QUERY: &[Arg] = &[
     opt("lang", Kind::Text(64)),
     opt("join", Kind::Word(JOINS)),
     opt("joinLevel", Kind::Int(1, 3)),
+    opt("format", Kind::Word(FORMATS)),
+    opt("sysAttrs", Kind::Flag),
+    opt("orderBy", Kind::Text(1024)),
     opt("count", Kind::Flag),
     opt("limit", Kind::Int(1, 1000)),
     opt("cursor", Kind::Text(CURSOR_LEN)),
@@ -332,8 +383,34 @@ const TEMPORAL_ONE: &[Arg] = &[
     opt("lastN", Kind::Int(1, 100)),
     opt("aggrMethods", Kind::Text(256)),
     opt("aggrPeriodDuration", Kind::Text(64)),
+    opt("format", Kind::Word(TEMPORAL_FORMATS)),
+    opt("sysAttrs", Kind::Flag),
 ];
 const TEMPORAL_QUERY: &[Arg] = &[
+    opt("type", Kind::Types),
+    opt("id", Kind::Ids),
+    opt("attrs", Kind::Attrs),
+    opt("q", Kind::Text(4096)),
+    opt("scopeQ", Kind::Text(1024)),
+    opt("georel", Kind::Text(256)),
+    opt("geometry", Kind::Word(GEOMETRIES)),
+    opt("coordinates", Kind::Coordinates),
+    opt("geoproperty", Kind::Attr),
+    req("timerel", Kind::Word(TIMERELS)),
+    req("timeAt", Kind::Text(64)),
+    opt("endTimeAt", Kind::Text(64)),
+    opt("timeproperty", Kind::Word(TIMEPROPERTIES)),
+    opt("lastN", Kind::Int(1, 100)),
+    opt("aggrMethods", Kind::Text(256)),
+    opt("aggrPeriodDuration", Kind::Text(64)),
+    opt("format", Kind::Word(TEMPORAL_FORMATS)),
+    opt("sysAttrs", Kind::Flag),
+    opt("count", Kind::Flag),
+    opt("limit", Kind::Int(1, 1000)),
+    opt("cursor", Kind::Text(CURSOR_LEN)),
+];
+/// The POST form: its conditions go into the Query document, which has no representation.
+const BATCH_TEMPORAL_QUERY: &[Arg] = &[
     opt("type", Kind::Types),
     opt("id", Kind::Ids),
     opt("attrs", Kind::Attrs),
@@ -506,7 +583,7 @@ pub(crate) const TOOLS: &[Tool] = &[
         "batch_query_temporal",
         &[Operation::QueryTemporal],
         "Query the history of Entities with a Query document (TS 104 175 11.3.3, POST form), a page of Entities at a time.",
-        TEMPORAL_QUERY,
+        BATCH_TEMPORAL_QUERY,
         "entities",
     ),
     broker(
@@ -1030,6 +1107,19 @@ mod tests {
             assert!(!anonymous_may(tool.name), "{} writes", tool.name);
         }
         for name in [
+            "get_type",
+            "list_type_details",
+            "list_attributes",
+            "list_attribute_details",
+            "get_attribute",
+            "query_temporal",
+        ] {
+            assert!(
+                anonymous_may(name),
+                "{name} is a read an anonymous caller is refused"
+            );
+        }
+        for name in [
             "create_subscription",
             "delete_entity",
             "a_tool_added_later",
@@ -1191,7 +1281,17 @@ mod tests {
             ("get_attribute_value", &["id", "attrId"]),
             (
                 "get_entity",
-                &["id", "attrs", "pick", "omit", "lang", "join", "joinLevel"],
+                &[
+                    "id",
+                    "attrs",
+                    "pick",
+                    "omit",
+                    "lang",
+                    "join",
+                    "joinLevel",
+                    "format",
+                    "sysAttrs",
+                ],
             ),
             ("get_subscription", &["id"]),
             ("get_type", &["type"]),
@@ -1220,6 +1320,9 @@ mod tests {
                     "lang",
                     "join",
                     "joinLevel",
+                    "format",
+                    "sysAttrs",
+                    "orderBy",
                     "count",
                     "limit",
                     "cursor",
@@ -1244,6 +1347,8 @@ mod tests {
                     "lastN",
                     "aggrMethods",
                     "aggrPeriodDuration",
+                    "format",
+                    "sysAttrs",
                     "count",
                     "limit",
                     "cursor",
@@ -1263,6 +1368,8 @@ mod tests {
                     "lastN",
                     "aggrMethods",
                     "aggrPeriodDuration",
+                    "format",
+                    "sysAttrs",
                 ],
             ),
             ("update_attribute", &["id", "attrId", "attribute"]),
@@ -1287,6 +1394,96 @@ mod tests {
             .map(|tool| tool.name)
             .collect();
         assert_eq!(own, crate::mcp::describe::DESCRIBE_TOOLS);
+    }
+
+    /// T-4258, EP-116: the reads take the standard's representation and ordering, with the
+    /// temporal formats on the history tools, and the POST history form takes none.
+    #[test]
+    fn the_reads_take_format_sys_attrs_and_order_by() {
+        let schema = |name: &str| {
+            TOOLS
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("the tool")
+                .input_schema()
+        };
+        for name in ["get_entity", "query_entities"] {
+            let properties = &schema(name)["properties"];
+            assert_eq!(
+                properties["format"]["enum"],
+                json!(["normalized", "concise", "keyValues"]),
+                "{name}"
+            );
+            assert_eq!(properties["sysAttrs"]["type"], "boolean", "{name}");
+        }
+        for name in ["query_temporal", "retrieve_temporal"] {
+            let properties = &schema(name)["properties"];
+            assert_eq!(
+                properties["format"]["enum"],
+                json!(["normalized", "temporalValues", "aggregatedValues"]),
+                "{name}"
+            );
+            assert_eq!(properties["sysAttrs"]["type"], "boolean", "{name}");
+        }
+        assert_eq!(
+            schema("query_entities")["properties"]["orderBy"]["type"],
+            "string"
+        );
+        assert!(schema("batch_query_temporal")["properties"]
+            .get("format")
+            .is_none());
+        let query = schema("query_entities");
+        for argument in ["q", "idPattern", "scopeQ", "georel", "orderBy", "format"] {
+            assert!(
+                query["properties"][argument]["description"].is_string(),
+                "{argument} carries no grammar"
+            );
+        }
+        assert!(
+            schema("query_temporal")["properties"]["timerel"]["description"]
+                .as_str()
+                .is_some_and(|line| line.contains("between"))
+        );
+    }
+
+    /// EP-116: the hub and every named server say they speak NGSI-LD and teach its language, and
+    /// the primer names nothing a caller could use to reach around the hub.
+    #[test]
+    fn the_primer_teaches_ngsi_ld_and_names_no_slug_token_or_host() {
+        let primer = crate::mcp::PRIMER;
+        for word in [
+            "NGSI-LD",
+            "@context",
+            "`q`",
+            "idPattern",
+            "timerel",
+            "scopeQ",
+            "orderBy",
+            "sysAttrs",
+            "lastN",
+            "aggrMethods",
+            "deletedAt",
+            "list_endpoints",
+            "describe_schema",
+            "DCAT-AP",
+        ] {
+            assert!(primer.contains(word), "the primer does not mention {word}");
+        }
+        assert!(primer.split_whitespace().count() < 600);
+        for leak in [
+            "http://",
+            "https://",
+            ".svc",
+            "Bearer",
+            "joinedcontext.com",
+            "/api/",
+        ] {
+            assert!(!primer.contains(leak), "the primer carries {leak}");
+        }
+        let named = crate::mcp::server::initialized(None);
+        assert!(named["instructions"]
+            .as_str()
+            .is_some_and(|text| text.ends_with(primer)));
     }
 
     /// The broker's types: `type` of a query is a list, a cursor is text, a single entity's id

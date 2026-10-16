@@ -377,3 +377,100 @@ async fn the_rest_twin_answers_the_same_list_without_a_token() {
     let metadata: Value = serde_json::from_str(&metadata).expect("JSON");
     assert_eq!(metadata["scopes_supported"], json!(["endpoint:*"]));
 }
+
+/// T-4258, EP-116: an agent given only the hub's address learns from it that it speaks NGSI-LD,
+/// finds the Endpoint in the catalogue, reads its schema, and queries current values and history
+/// with the standard's arguments, which reach the broker's view as the agent sent them.
+#[tokio::test]
+async fn an_agent_with_only_the_address_reads_ngsi_ld_from_catalogue_to_history() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([]), json!([])]).await;
+    let app = app(&broker.url, &realm);
+    let answer = |body: String| -> Value { serde_json::from_str(&body).expect("JSON") };
+
+    let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} });
+    let (status, _, body) = raw(app.clone(), rpc(None, initialize)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let instructions = answer(body)["result"]["instructions"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    for word in [
+        "NGSI-LD",
+        "@context",
+        "idPattern",
+        "timerel",
+        "list_endpoints",
+    ] {
+        assert!(
+            instructions.contains(word),
+            "{word} is not in {instructions}"
+        );
+    }
+
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (_, _, body) = raw(app.clone(), rpc(None, list)).await;
+    let tools = answer(body);
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .expect("a tool list")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(names.contains(&"query_temporal"), "{names:?}");
+    for tool in tools["result"]["tools"].as_array().into_iter().flatten() {
+        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+    }
+
+    let found = listed(app.clone(), None, json!({ "q": "air" })).await;
+    assert_eq!(slugs(&found), [OPEN], "{found}");
+
+    let schema = call(
+        "describe_schema",
+        json!({ "endpoint": OPEN, "format": "shacl" }),
+    );
+    let (status, _, body) = raw(app.clone(), rpc(None, schema)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(answer(body.clone())["result"]["isError"], true, "{body}");
+
+    let current = json!({
+        "type": ["AirQualityObserved"],
+        "idPattern": "^urn:ngsi-ld:AirQualityObserved:.*",
+        "q": "no2>40",
+        "format": "keyValues",
+        "sysAttrs": true,
+        "orderBy": "no2;desc",
+    });
+    let history = json!({
+        "type": ["AirQualityObserved"],
+        "attrs": ["no2"],
+        "timerel": "between",
+        "timeAt": "2026-10-12T00:00:00Z",
+        "endTimeAt": "2026-10-13T00:00:00Z",
+        "lastN": 5,
+        "format": "temporalValues",
+    });
+    for (name, arguments) in [("query_entities", &current), ("query_temporal", &history)] {
+        let mut sent = arguments.clone();
+        sent["endpoint"] = json!(OPEN);
+        let (status, _, body) = raw(app.clone(), rpc(None, call(name, sent))).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_ne!(
+            answer(body.clone())["result"]["isError"],
+            true,
+            "{name}: {body}"
+        );
+    }
+
+    let forwarded: Vec<Value> = broker
+        .hops()
+        .iter()
+        .filter(|hop| hop.path == "/mcp")
+        .map(|hop| serde_json::from_slice(&hop.body).expect("a JSON-RPC message"))
+        .collect();
+    assert_eq!(forwarded.len(), 2, "{forwarded:?}");
+    assert_eq!(forwarded[0]["params"]["name"], "query_entities");
+    assert_eq!(forwarded[0]["params"]["arguments"], current);
+    assert_eq!(forwarded[1]["params"]["name"], "query_temporal");
+    assert_eq!(forwarded[1]["params"]["arguments"], history);
+}

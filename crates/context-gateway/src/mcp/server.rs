@@ -239,8 +239,9 @@ pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
         "One server over several Endpoints. list_endpoints names the ones you may read. \
          query_entities, list_types and describe_schema without `endpoint` ask every one of \
          them and answer each apart in `results`, with `partial` and `failed` when one could \
-         not answer; every other tool names one Endpoint in `endpoint`.",
+         not answer; every other tool names one Endpoint in `endpoint`.\n\n",
     );
+    instructions.push_str(super::PRIMER);
     json!({
         "protocolVersion": jsonrpc::PROTOCOL_VERSION,
         "capabilities": { "tools": { "listChanged": false } },
