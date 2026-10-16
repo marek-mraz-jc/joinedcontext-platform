@@ -141,3 +141,31 @@ fn a_step_whose_host_comes_from_the_message_is_refused() {
         assert!(refused.contains("PL-07"), "{processor}: {refused}");
     }
 }
+
+/// T-4312: the token Services by their cluster names, in every form a resolver accepts.
+const TOKEN_SERVICES: &[&str] = &[
+    "http://pipeline-tokens:4180/token",
+    "http://pipeline-tokens.pipeline-runner/token",
+    "http://pipeline-tokens.pipeline-runner.svc:4180/token",
+    "http://Pipeline-Tokens.pipeline-runner.svc.cluster.local.:4180/token",
+    "http://pipeline-runner-tokens.any-namespace.svc.cluster.local:4180/",
+    "http://wasm-host-tokens.wasm-host.svc.cluster.local:4180/token",
+    "http://client:secret@pipeline-tokens.pipeline-runner.svc.cluster.local:4180/token",
+];
+
+#[test]
+fn a_pipeline_or_data_source_naming_a_token_service_is_refused() {
+    for url in TOKEN_SERVICES {
+        let refused = http_source(url).expect_err(url);
+        assert!(refused.contains("PL-07"), "{url}: {refused}");
+        let refused = step(json!({ "http": { "url": url, "verb": "POST" } })).expect_err(url);
+        assert!(refused.contains("PL-07"), "{url}: {refused}");
+    }
+    // A Service whose name only contains the word stays the NetworkPolicy's to decide.
+    for url in [
+        "http://my-pipeline-tokens-feed.demo.svc.cluster.local/x",
+        "http://feed.pipeline-tokens.example/x",
+    ] {
+        http_source(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+    }
+}
