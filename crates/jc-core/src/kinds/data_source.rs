@@ -1052,8 +1052,9 @@ pub fn refused_runner_read(url: &str) -> Option<&'static str> {
 /// One runner pod runs every project's streams, and its stream API and token sidecar answer on
 /// loopback, where neither the NetworkPolicy nor the mesh sees the call. So a host that is
 /// loopback, unspecified, link-local, private or carrier-grade NAT, `localhost`, a numeric form
-/// other than a dotted quad, or one taken from the message (`${! … }`) is refused. Cluster
-/// Services by name stay allowed: the NetworkPolicy and the mesh decide those.
+/// other than a dotted quad, or one taken from the message (`${! … }`) is refused, and so are the
+/// token Services by name (T-4312). Other cluster Services by name stay allowed: the NetworkPolicy
+/// and the mesh decide those.
 // ponytail: a public name that resolves to loopback (`127.0.0.1.nip.io`) is not caught here; one
 // runner per project (T-1508 option c) is the boundary that covers it.
 pub fn refused_target(text: &str) -> Option<&'static str> {
@@ -1075,6 +1076,14 @@ pub fn refused_target(text: &str) -> Option<&'static str> {
     None
 }
 
+/// The cluster Services of the token sidecars (deployment `components/pipeline-runner` and
+/// `components/wasm-host`, `values/tokens`: fullnameOverride and nameOverride).
+const TOKEN_SERVICES: &[&str] = &[
+    "pipeline-tokens",
+    "pipeline-runner-tokens",
+    "wasm-host-tokens",
+];
+
 fn refused_host(host_port: &str) -> Option<&'static str> {
     use std::net::{IpAddr, Ipv4Addr};
     const OWN: &str = "a pipeline does not connect to the runner's own pod or a private address: \
@@ -1093,6 +1102,15 @@ fn refused_host(host_port: &str) -> Option<&'static str> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.contains('%') {
         return Some("a host is written without percent-encoding (PL-07)");
+    }
+    // The token Services mint a token for whichever pipeline a caller names; the runner reaches
+    // them by design, so a step may not name them in any namespace or `.svc` form (T-4312).
+    let first_label = host.split('.').next().unwrap_or_default();
+    if TOKEN_SERVICES.contains(&first_label) {
+        return Some(
+            "a pipeline does not connect to a token Service: it mints tokens for every project's \
+             pipelines (PL-07)",
+        );
     }
     if host == "localhost"
         || host.ends_with(".localhost")
