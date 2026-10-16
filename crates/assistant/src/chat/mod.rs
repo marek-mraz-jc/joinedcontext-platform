@@ -9,6 +9,7 @@
 pub mod admin;
 pub mod agent;
 pub mod cards;
+pub mod data;
 pub mod mcp;
 pub mod model;
 pub mod routed;

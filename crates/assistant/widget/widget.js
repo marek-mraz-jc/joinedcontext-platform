@@ -564,6 +564,7 @@
       asked += 1;
       item.turn = asked;
     } else if (name === "stage" && item.status) {
+      (item.stages = item.stages || []).push(data);
       var line = JCRender.stage(data, lang);
       if (line) {
         item.status.textContent = line;
@@ -601,6 +602,15 @@
     } else if (name === "citations") {
       var cited = Array.isArray(data) ? data : [];
       show(item, item.pending || "", cited, item.turn);
+      var took = JCRender.steps(item.stages, lang);
+      if (took) {
+        var list = el("details", "jc-steps");
+        list.appendChild(el("summary", "", took.summary));
+        var ol = el("ol");
+        took.lines.forEach(function (line) { ol.appendChild(el("li", "", line)); });
+        list.appendChild(ol);
+        item.appendChild(list);
+      }
       saved(item, item.pending || "", cited);
       item.pending = null;
     } else if (name === "followups") {

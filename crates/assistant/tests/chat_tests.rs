@@ -403,7 +403,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     recorded_air(&w.gateway, SLUG).await;
     script(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [\"NO2\"], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"interne\", \"type\": \"Record\"}]}"}), 400),
-        streamed(&["NO2 na Námestí SNP je 21 [1]."], 900, 30),
+        completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 930),
     ]).await;
     let (status, events, headers) = answer_of(
         &w.app,
@@ -431,7 +431,6 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "tool",
             "data",
             "stage",
-            "delta",
             "answer",
             "citations",
             "done"
@@ -457,10 +456,10 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     );
     // No page of the sources gives this Endpoint's address: the live data stays unlinked.
     assert_eq!(
-        events[9].1,
+        events[8].1,
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    let done = &events[10].1;
+    let done = &events[9].1;
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
         (&json!(1330), &json!(2), &json!(false))
@@ -504,8 +503,14 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             body["messages"][0]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
-        assert!(body.get("tools").is_none());
     }
+    // The router is offered no tool; the answer call the read-only ones, never the write
+    // (T-4294).
+    assert!(calls[0].1.get("tools").is_none());
+    assert_eq!(
+        offered_tools(&calls[1].1),
+        ["ovzdusie__list_types", "ovzdusie__query_entities"]
+    );
     let sent: Vec<String> = w
         .gateway
         .received_requests()
@@ -539,7 +544,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     // Live values are read again, never answered from the cache; the types are.
     script(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
-        streamed(&["21 [1]."], 900, 30),
+        completion(json!({"role": "assistant", "content": "21 [1]."}), 930),
     ]).await;
     let (_, again, _) = answer_of(
         &w.app,
@@ -2517,5 +2522,178 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
             .all(|p| !p.contains(HIDDEN_SLUG) && !p.contains(ELSEWHERE_SLUG)),
         "{asked:?}"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// The gateway's `tools/call` bodies of `tool`, in order.
+async fn calls_of(gateway: &MockServer, tool: &str) -> Vec<Value> {
+    gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+        .filter(|b| b["method"] == "tools/call" && b["params"]["name"] == tool)
+        .collect()
+}
+
+/// T-4294: after the router's read the model filters once more and then answers on its own; a
+/// tool it makes up is refused to it and never sent, the write the manifest names is never
+/// offered, and both reads are tables the answer can cite.
+#[tokio::test]
+async fn a_data_question_reads_again_until_the_model_answers() {
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "delete_entity".into(),
+    ];
+    let w = world("chatloop", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    script(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":5}"}},
+            {"id": "c2", "type": "function", "function": {"name": "ovzdusie__delete_entity", "arguments": "{}"}}
+        ]}), 1_000),
+        completion(json!({"role": "assistant", "content": "Najvyššie NO2 má Železničná stanica, 34 [2]."}), 1_200),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 najvyššie?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let named = |name: &str| {
+        events
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, d)| d.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(named("data").len(), 2, "{events:?}");
+    assert_eq!(
+        named("stage")
+            .iter()
+            .map(|s| s["stage"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>(),
+        ["understanding", "reading", "answering", "reading"]
+    );
+    assert_eq!(
+        named("answer")[0]["text"],
+        "Najvyššie NO2 má Železničná stanica, 34 [2]."
+    );
+    assert_eq!(
+        named("citations")[0],
+        json!([{"n": 2, "tool": "query_entities", "endpoint": "ovzdusie"}])
+    );
+    assert_eq!(named("done")[0]["modelCalls"], 3);
+
+    let calls = model_calls(&w.proxy).await;
+    assert_eq!(
+        offered_tools(&calls[1].1),
+        ["ovzdusie__list_types", "ovzdusie__query_entities"]
+    );
+    let last = calls[2].1["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let tools: Vec<&Value> = last.iter().filter(|m| m["role"] == "tool").collect();
+    assert_eq!(tools.len(), 2);
+    let read: Value = serde_json::from_str(tools[0]["content"].as_str().unwrap_or_default())
+        .expect("a result as JSON");
+    assert_eq!(
+        (&read["n"], &read["endpoint"]),
+        (&json!(2), &json!("ovzdusie"))
+    );
+    assert_eq!(
+        tools[1]["content"],
+        "There is no tool of that name. Use only the tools you were given."
+    );
+    assert!(
+        calls[2].1.get("tool_choice").is_none(),
+        "the model was still free to read"
+    );
+    assert!(calls[1].1["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("At most 10 tool calls"));
+
+    let reads = calls_of(&w.gateway, "query_entities").await;
+    assert_eq!(reads.len(), 2);
+    assert_eq!(
+        reads[1]["params"]["arguments"],
+        json!({"type": ["AirQualityObserved"], "limit": 5})
+    );
+    assert!(calls_of(&w.gateway, "delete_entity").await.is_empty());
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4294: the router's read and nine of the model's make ten tool calls, the most a question
+/// makes; a call repeated with the same arguments is answered from the question's own result and
+/// still counts; past the tenth the calls are refused, and the last model call offers no tool
+/// and is told to answer from what was read.
+#[tokio::test]
+async fn the_tenth_tool_call_is_the_last_and_the_answer_comes_from_what_was_read() {
+    let mut d = deployment(Channel::Public, 200_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatten", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let reply = |limits: &[u32]| {
+        let calls: Vec<Value> = limits
+            .iter()
+            .map(|n| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": format!("{{\"type\":[\"AirQualityObserved\"],\"limit\":{n}}}")}}))
+            .collect();
+        completion(
+            json!({"role": "assistant", "content": null, "tool_calls": calls}),
+            1_000,
+        )
+    };
+    script(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+        reply(&[1, 2, 3, 4]),
+        reply(&[5, 6, 7, 1]),
+        reply(&[8, 9, 10, 11]),
+        completion(json!({"role": "assistant", "content": "Dve stanice merajú NO2 [1]."}), 1_000),
+    ]).await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Ako sa mení NO2?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "answer" && d["text"] == "Dve stanice merajú NO2 [1]."),
+        "{events:?}"
+    );
+    // 1 (the router's) + 4 + 3 new + 1: the repeat was not sent, the eleventh call not either.
+    assert_eq!(calls_of(&w.gateway, "query_entities").await.len(), 9);
+    let calls = model_calls(&w.proxy).await;
+    assert_eq!(calls.len(), 5);
+    let last = &calls[4].1;
+    assert_eq!(last["tool_choice"], "none");
+    let messages = last["messages"].as_array().cloned().unwrap_or_default();
+    assert!(messages
+        .last()
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or_default()
+        .starts_with("No more tool calls"));
+    let refused = messages
+        .iter()
+        .filter(|m| {
+            m["role"] == "tool"
+                && m["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("used up")
+        })
+        .count();
+    assert_eq!(refused, 3, "calls 11 to 13 were refused");
+    let repeated = messages
+        .iter()
+        .filter(|m| m["role"] == "tool" && m["tool_call_id"] == "c1")
+        .count();
+    assert_eq!(repeated, 2, "both calls of limit 1 were answered");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

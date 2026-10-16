@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -443,4 +443,15 @@ test("the speakers, the thumbs and every answer's tools are named by bound words
   assert.doesNotMatch(widget, /button\("jc-thumb"/, "a thumb's word is its name, never its text");
   assert.match(widget, /words\(b, key, "ariaLabel"\)/);
   assert.match(widget, /words\(el\("button", "jc-copy"\), "copy"\)/);
+});
+
+test("the data loop's stages name their topic, and two or more work steps are listed under the answer (T-4294)", () => {
+  assert.equal(stage({ stage: "history", topic: "AirQualityObserved" }, "sk"), "Čítam históriu údajov: „AirQualityObserved“…");
+  assert.equal(stage({ stage: "schema", topic: "bbsk-otvorene-data" }, "en"), "Reading the data's schema: „bbsk-otvorene-data“…");
+  assert.equal(stage({ stage: "steps" }, "en"), null, "the summary word is no stage");
+  const took = steps([{ stage: "understanding" }, { stage: "reading", topic: "School" }, { stage: "answering" },
+    { stage: "schema", topic: "od" }, { stage: "bogus" }], "sk");
+  assert.deepEqual(took, { summary: "Postup (2)", lines: ["Čítam živé údaje: „School“…", "Čítam schému údajov: „od“…"] });
+  assert.equal(steps([{ stage: "reading", topic: "School" }], "en"), null, "one step needs no list");
+  assert.equal(steps(undefined, "en"), null);
 });

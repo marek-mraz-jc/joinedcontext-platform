@@ -713,9 +713,22 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         }
         other => other?,
     };
-    let total = total_of(&text);
-    let (columns, rows) =
-        table_of(&text, READ_ROWS).ok_or("the Endpoint's answer is no list of entities")?;
+    table(ask, connector, kind, &text)
+        .await
+        .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
+}
+
+/// A `query_entities` answer of `kind` from `connector` as the table the person sees, with the
+/// page the sources hold about the Endpoint and the address its rows download from; `None` when
+/// the answer is no list of entities.
+pub(super) async fn table(
+    ask: &Ask<'_>,
+    connector: &Connected,
+    kind: &str,
+    text: &str,
+) -> Option<Table> {
+    let total = total_of(text);
+    let (columns, rows) = table_of(text, READ_ROWS)?;
     let slug = connector.surface.slug.as_str();
     let dataset = async {
         let mut tx = crate::project_scope(ask.pool, ask.project).await?;
@@ -735,7 +748,7 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         url.query_pairs_mut().append_pair("type", kind);
         Some(url.to_string())
     });
-    Ok(Table {
+    Some(Table {
         endpoint: connector.endpoint.clone(),
         entity_type: kind.to_owned(),
         columns,
@@ -848,7 +861,30 @@ pub fn answer_messages(
     passages: &[Value],
     tables: &[Value],
 ) -> Vec<Value> {
+    messages_with(
+        system_prompt,
+        "",
+        history,
+        question,
+        today,
+        passages,
+        tables,
+    )
+}
+
+/// [`answer_messages`] with `more` rules after the answer's own, before the deployment's prompt:
+/// the data loop's (T-4294).
+fn messages_with(
+    system_prompt: Option<&str>,
+    more: &str,
+    history: &[Turn],
+    question: &str,
+    today: &str,
+    passages: &[Value],
+    tables: &[Value],
+) -> Vec<Value> {
     let mut rules = ANSWER_RULES.to_owned();
+    rules.push_str(more);
     if let Some(prompt) = system_prompt.map(str::trim).filter(|p| !p.is_empty()) {
         rules.push_str("\n\nThe administrator of this assistant adds:\n");
         rules.push_str(prompt);
@@ -1172,8 +1208,13 @@ pub async fn answer(
         }));
     }
     let today = time::OffsetDateTime::now_utc().date().to_string();
-    let messages = answer_messages(
+    let messages = messages_with(
         ask.system_prompt,
+        if routing.data {
+            super::data::DATA_RULES
+        } else {
+            ""
+        },
         history,
         question,
         &today,
@@ -1185,6 +1226,23 @@ pub async fn answer(
         return spent;
     }
     if events.is_closed() {
+        return spent;
+    }
+    // A data question goes on in the loop, which may read more before it answers (T-4294).
+    if routing.data {
+        let start = super::data::Start {
+            messages,
+            citations,
+            steps: routing.reads.len(),
+            started,
+        };
+        if let Some((text, citations)) = super::data::answer(ask, start, &mut spent, events).await {
+            send(events, Event::Answer(text)).await;
+            send(events, Event::Citations(citations)).await;
+            if !routing.followups.is_empty() {
+                send(events, Event::Followups(routing.followups)).await;
+            }
+        }
         return spent;
     }
     send(events, stage("answering", None)).await;

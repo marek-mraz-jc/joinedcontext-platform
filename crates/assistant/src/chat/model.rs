@@ -228,6 +228,31 @@ impl Model {
         })
     }
 
+    /// One step of the data loop (T-4294): [`Model::ask`]'s call with `tools` offered, or shown
+    /// with `tool_choice: none` when `allow_tools` is false, so a history of tool calls stays valid.
+    pub async fn step(
+        &self,
+        deployment: &str,
+        tokens_per_day: u64,
+        call: &Call<'_>,
+        messages: &[Value],
+        tools: &[Value],
+        allow_tools: bool,
+    ) -> Result<Completion, CallError> {
+        let mut body = self.body(call, messages, false);
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools.to_vec());
+            if !allow_tools {
+                body["tool_choice"] = json!("none");
+            }
+        }
+        let answer = self.send(deployment, tokens_per_day, &body).await?;
+        let body: Value = answer.json().await.unwrap_or(Value::Null);
+        parse(&body).ok_or_else(|| {
+            unavailable(deployment, "the provider's answer is not a chat completion")
+        })
+    }
+
     /// The same call streamed: each piece of the answer goes to `deltas` as a `delta` event the
     /// moment the model writes it, and the whole completion, with the stream's `usage`, comes back
     /// at the end with the instant its first piece arrived (API/05 §1.3).
