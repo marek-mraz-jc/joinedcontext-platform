@@ -360,7 +360,8 @@ test("an empty chat offers the deployment's questions in its language, else the 
 });
 
 test("a failed answer is said in the widget's words, by the service's title, else its status (T-4253)", () => {
-  assert.equal(trouble(429, "Budget Spent"), "spent");
+  // T-4286: the service never sends a spent day as an error, so the widget has no word for it.
+  assert.equal(trouble(429, "Budget Spent"), "busy");
   assert.equal(trouble(429, "Conversation Budget Spent"), "full");
   assert.equal(trouble(503, "Model Unavailable"), "unreachable");
   assert.equal(trouble(502, "No Answer"), "unanswered");
@@ -371,7 +372,6 @@ test("a failed answer is said in the widget's words, by the service's title, els
   assert.equal(trouble(400, "constructor"), "failed", "a title is looked up as data, never as a property");
   assert.equal(trouble(undefined), "offline");
   assert.equal(trouble(0), "offline");
-  assert.equal(retryable("spent"), false);
   assert.equal(retryable("full"), false);
   for (const word of ["busy", "paused", "offline", "failed", "unreachable", "unanswered", "slow"]) {
     assert.equal(retryable(word), true, word);
@@ -382,7 +382,7 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   const fs = require("node:fs");
   const path = require("node:path");
   const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
-  const words = ["spent", "full", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
+  const words = ["full", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);

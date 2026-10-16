@@ -75,6 +75,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
                 per_client_per_minute: per_client,
                 per_client_per_hour: 600,
                 per_client_per_day: 6_000,
+                per_client_per_month: 6_000,
                 streams_per_client: 2,
             }),
             budget: Some(Budget {
@@ -829,18 +830,21 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .up_to_n_times(1)
         .mount(&w.proxy)
         .await;
+    // T-4286: a day the proxy refuses is answered as search, never as a refusal.
     let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
-    let error = events
-        .iter()
-        .find(|(n, _)| n == "error")
-        .expect("an error")
-        .1
-        .clone();
-    assert_eq!(
-        error["detail"],
-        "Dnešné odpovede tohto asistenta sú vyčerpané. Znova odpovedá po polnoci UTC.",
-        "{error}"
+    assert!(
+        events.iter().all(|(n, _)| n != "error"),
+        "no refusal: {events:?}"
     );
+    let answer = events
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .expect("a search answer")
+        .1["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(answer.contains("denný rozpočet"), "{answer}");
 
     Mock::given(method("POST"))
         .and(path("/v1/llm/chat/completions"))
@@ -2239,6 +2243,114 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
         model_calls(&w.proxy).await.len(),
         before,
         "no model call past the cap"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4286: at 08:25Z on 2026-10-16 every visitor of the public assistant read "used up today's
+/// answers": the proxy's `tokensPerDay` refused the router call. Such a day now answers as
+/// search with the pages as links, like the cost cap, and nobody reads a refusal.
+#[tokio::test]
+async fn a_day_the_proxy_refuses_answers_with_links_not_a_refusal() {
+    let w = world("chatproxyday", deployment(Channel::Public, 1_000_000, 10)).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/llm/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_json(json!({"title": "Daily Budget Spent"})),
+        )
+        .mount(&w.proxy)
+        .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Dokedy je otvorená knižnica?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.iter().all(|(n, _)| n != "error"), "{events:?}");
+    let answer = events
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .expect("an answer")
+        .1["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(answer.contains("Tu sú stránky"), "{answer}");
+    assert!(!answer.contains("vyčerpané"), "{answer}");
+    let citations = &events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations")
+        .1;
+    assert!(
+        citations.as_array().is_some_and(|c| !c.is_empty()),
+        "the library's page as a link: {events:?}"
+    );
+    assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4286: a visitor past `perClientPerMonth` gets links and the day it resets, without a model
+/// call, while another visitor is still answered by the model.
+#[tokio::test]
+async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
+    let mut monthly = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(rate) = monthly.spec.rate_limit.as_mut() {
+        rate.per_client_per_month = 1;
+    }
+    let w = world("chatmonth", monthly).await;
+    let answered = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Áno."}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+        }))
+    };
+    script(
+        &w.proxy,
+        vec![answered(), answered(), answered(), answered()],
+    )
+    .await;
+    let from =
+        |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
+    // Whatever the model makes of it, the first question of the month is the model's.
+    let month_said = |events: &[(String, Value)]| {
+        events.iter().any(|(n, d)| {
+            n == "answer"
+                && d["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Tento mesiac"))
+        })
+    };
+    let (status, first, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!month_said(&first), "{first:?}");
+    let calls = model_calls(&w.proxy).await.len();
+    assert!(calls > 0, "the first question asks the model");
+
+    let (status, second, _) =
+        answer_of(&w.app, from("203.0.113.7", "Dokedy je otvorená knižnica?")).await;
+    assert_eq!(status, StatusCode::OK, "never a refusal");
+    let answer = second
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .expect("an answer")
+        .1["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(answer.contains("Tento mesiac"), "{answer}");
+    assert!(answer.contains("znova tak odpovedá od 1. "), "{answer}");
+    assert_eq!(second.last().expect("done").1["modelCalls"], 0);
+    assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
+
+    let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
+    assert!(!month_said(&other), "{other:?}");
+    assert!(
+        model_calls(&w.proxy).await.len() > calls,
+        "another visitor is answered by the model"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

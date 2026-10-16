@@ -789,6 +789,12 @@ fn refusal(err: &CallError) -> Event {
     }
 }
 
+/// What a question spent before the day ran out, with the search-only answer's first token.
+fn with_search(mut spent: Spent, searched: Spent) -> Spent {
+    spent.first_token_ms = searched.first_token_ms;
+    spent
+}
+
 fn conversation_spent() -> Event {
     Event::Error {
         status: 429,
@@ -805,9 +811,51 @@ pub const SEARCH_ONLY_NOTHING: &str = "Dnes už asistent vyčerpal svoj denný r
     vyhľadávanie k vašej otázke nenašlo žiadnu stránku. Skúste to zajtra alebo navštívte \
     kontaktnú stránku mesta.";
 
+/// Why a question is answered as search, without a model (T-4149, T-4286). No cap ever refuses:
+/// the visitor gets the pages that answer, and a sentence saying why the assistant did not write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cap {
+    /// The deployment's day is spent: its `costPerDayUsd`, or the proxy's `tokensPerDay`.
+    Day,
+    /// This visitor asked their month's questions (`perClientPerMonth`); `resets` is the first day
+    /// of the next month as the visitor reads it, e.g. `1. 11. 2026`.
+    Month { resets: String },
+}
+
+impl Cap {
+    /// The sentence before the links.
+    pub fn lead(&self) -> String {
+        match self {
+            Cap::Day => SEARCH_ONLY.to_owned(),
+            Cap::Month { resets } => format!(
+                "Tento mesiac ste už položili všetky otázky, na ktoré asistent odpovedá vlastnými \
+                 slovami; znova tak odpovedá od {resets}. Tu sú stránky, ktoré k vašej otázke našiel \
+                 vyhľadávaním:"
+            ),
+        }
+    }
+
+    /// The sentence when the search found nothing either.
+    pub fn nothing(&self) -> String {
+        match self {
+            Cap::Day => SEARCH_ONLY_NOTHING.to_owned(),
+            Cap::Month { resets } => format!(
+                "Tento mesiac ste už položili všetky otázky, na ktoré asistent odpovedá vlastnými \
+                 slovami (znova od {resets}), a vyhľadávanie k vašej otázke nenašlo žiadnu stránku. \
+                 Navštívte kontaktnú stránku mesta alebo kraja."
+            ),
+        }
+    }
+}
+
 /// Answers as search when the day's cost cap is reached (T-4149): one hybrid search for the
 /// question, the best pages as citations under a sentence that says why, no model call.
-pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) -> Spent {
+pub async fn search_only(
+    ask: &Ask<'_>,
+    cap: &Cap,
+    question: &str,
+    events: &Sender<Event>,
+) -> Spent {
     let started = Instant::now();
     let found = match search(ask, question).await {
         Ok(found) => found,
@@ -833,10 +881,10 @@ pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) 
         }
     }
     let text = if citations.is_empty() {
-        SEARCH_ONLY_NOTHING.to_owned()
+        cap.nothing()
     } else {
         let marks: Vec<String> = citations.iter().map(|c| format!("[{}]", c.n)).collect();
-        format!("{SEARCH_ONLY} {}", marks.join(" "))
+        format!("{} {}", cap.lead(), marks.join(" "))
     };
     let spent = Spent {
         first_token_ms: Some(started.elapsed().as_millis() as u64),
@@ -907,6 +955,9 @@ pub async fn answer(
         Ok(reply) => {
             count(&mut spent, &reply);
             routing(&reply.text, question, &live)
+        }
+        Err(CallError::DaySpent(_)) => {
+            return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
         }
         Err(err) => {
             send(events, refusal(&err)).await;
@@ -1087,6 +1138,10 @@ pub async fn answer(
         .await
     {
         Ok(streamed) => streamed,
+        // The proxy refuses before the stream starts, so nothing of an answer was sent yet.
+        Err(CallError::DaySpent(_)) => {
+            return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
+        }
         Err(err) => {
             send(events, refusal(&err)).await;
             return spent;

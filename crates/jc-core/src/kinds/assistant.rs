@@ -150,6 +150,9 @@ fn default_per_hour() -> u32 {
 fn default_per_day() -> u32 {
     200
 }
+fn default_per_month() -> u32 {
+    300
+}
 fn default_streams() -> u32 {
     2
 }
@@ -552,6 +555,9 @@ pub struct RateLimit {
     /// Questions per day from one client; 1 to 100,000, default 200.
     #[serde(default = "default_per_day")]
     pub per_client_per_day: u32,
+    /// Questions per UTC calendar month from one client; 1 to 100,000, default 300 (T-4286).
+    #[serde(default = "default_per_month")]
+    pub per_client_per_month: u32,
     /// Answers one client may have streaming at once; 1 to 10, default 2.
     #[serde(default = "default_streams")]
     pub streams_per_client: u32,
@@ -833,6 +839,12 @@ impl AssistantDeploymentSpec {
                     limit.per_client_per_day,
                     100_000,
                     "perClientPerDay is 1 to 100000",
+                ),
+                (
+                    "rateLimit.perClientPerMonth",
+                    limit.per_client_per_month,
+                    100_000,
+                    "perClientPerMonth is 1 to 100000",
                 ),
                 (
                     "rateLimit.streamsPerClient",

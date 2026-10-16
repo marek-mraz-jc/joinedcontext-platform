@@ -506,6 +506,13 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "perClientPerMonth": {
+          "default": 300,
+          "description": "Questions per UTC calendar month from one client; 1 to 100,000, default 300 (T-4286).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "requestsPerMinute": {
           "description": "Questions per minute across everyone; 1 to 600.",
           "format": "uint32",

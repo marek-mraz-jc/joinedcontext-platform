@@ -164,7 +164,8 @@ pub struct Ask<'a> {
     /// The public origin `/api/endpoint/{slug}` is served under: a data table's download link.
     pub endpoint_base: Option<&'a url::Url>,
     /// The day's cost cap is reached: the sources' links, no model call (T-4149).
-    pub search_only: bool,
+    /// Set when the question is answered as search, without a model (T-4149, T-4286).
+    pub search_only: Option<super::routed::Cap>,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
@@ -350,8 +351,8 @@ pub async fn answer(
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
-    if ask.search_only {
-        return super::routed::search_only(ask, question, events).await;
+    if let Some(cap) = &ask.search_only {
+        return super::routed::search_only(ask, cap, question, events).await;
     }
     if ask.public_only && ask.functions.is_none() {
         return super::routed::answer(ask, history, question, events).await;
@@ -405,16 +406,20 @@ pub async fn answer(
             .await
         {
             Ok(completion) => completion,
+            // A spent day answers as search, never as a refusal (T-4286).
+            Err(CallError::DaySpent(_)) => {
+                let searched =
+                    super::routed::search_only(ask, &super::routed::Cap::Day, question, events)
+                        .await;
+                spent.first_token_ms = searched.first_token_ms;
+                return spent;
+            }
             Err(err) => {
-                let (status, title) = match err {
-                    CallError::DaySpent(_) => (429, "Budget Spent"),
-                    CallError::Unavailable(_) => (503, "Model Unavailable"),
-                };
                 send(
                     events,
                     Event::Error {
-                        status,
-                        title,
+                        status: 503,
+                        title: "Model Unavailable",
                         detail: err.to_string(),
                     },
                 )
