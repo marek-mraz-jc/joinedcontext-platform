@@ -70,7 +70,13 @@ pub struct Model {
     config: ModelConfig,
     http: reqwest::Client,
     token: Mutex<Option<(String, Instant)>>,
+    /// How long the realm may take to answer a token request, [`TOKEN_DEADLINE`].
+    token_deadline: Duration,
 }
+
+/// The token request's own deadline. The renewal holds the one token lock, and every question
+/// waits on it, so a stalled realm must fail it in seconds, not in the client's 120 s (T-4325).
+const TOKEN_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The longest answer one call may write. A reasoning model counts its thinking inside it, so
 /// `REASONING_EFFORT` keeps the thinking short and the room is the answer's (T-3203).
@@ -87,6 +93,7 @@ impl Model {
             config,
             http,
             token: Mutex::new(None),
+            token_deadline: TOKEN_DEADLINE,
         }
     }
 
@@ -112,6 +119,7 @@ impl Model {
         let answer = self
             .http
             .post(&self.config.token_url)
+            .timeout(self.token_deadline)
             .form(&form)
             .send()
             .await
@@ -481,6 +489,43 @@ pub fn parse(body: &Value) -> Option<Completion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4325: a realm that never answers holds the token lock for the token request's own
+    /// deadline, not for the model client's 120 s, and a question waiting on the lock meanwhile
+    /// is answered within that deadline too.
+    #[tokio::test]
+    async fn a_silent_realm_holds_the_token_lock_only_for_the_token_deadline() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let realm = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+            .mount(&realm)
+            .await;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("a client");
+        let mut model = Model::new(
+            ModelConfig {
+                proxy: "http://127.0.0.1:9".into(),
+                token_url: format!("{}/token", realm.uri()),
+                client_id: "jc-assistant".into(),
+                credential: jc_core::ClientCredential::Secret(jc_core::Secret::new("s3cret")),
+                model: "m".into(),
+            },
+            http,
+        );
+        model.token_deadline = Duration::from_millis(300);
+        let started = Instant::now();
+        let (first, second) = tokio::join!(model.token(), model.token());
+        assert!(matches!(first, Err(CallError::Unavailable(_))), "{first:?}");
+        assert!(matches!(second, Err(CallError::Unavailable(_))), "{second:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "both waited {:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn a_completion_reads_its_text_its_tool_calls_and_its_tokens() {
