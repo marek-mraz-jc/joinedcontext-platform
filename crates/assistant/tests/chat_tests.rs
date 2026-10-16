@@ -2316,6 +2316,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
             "judge_reasoning_tokens",
             "judge_skipped",
             "model_calls",
+            "no_answer",
             "project",
             "route_ms",
             "route_reasoning_tokens",
@@ -3256,5 +3257,98 @@ async fn a_deployments_max_data_steps_ends_its_loop() {
     let answers = calls_of(&all, None);
     assert_eq!(answers.len(), 2);
     assert_eq!(answers[1]["tool_choice"], "none");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// A streamed answer that ends with `reason` as its `finish_reason` (T-4370).
+fn stopped(pieces: &[&str], reason: &str) -> ResponseTemplate {
+    let mut body = String::new();
+    for piece in pieces {
+        body.push_str(&format!(
+            "data: {}\n\n",
+            json!({"choices": [{"delta": {"content": piece}}]})
+        ));
+    }
+    body.push_str(&format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"choices": [{"delta": {}, "finish_reason": reason}]}),
+        json!({"choices": [], "usage": {"prompt_tokens": 900, "completion_tokens": 2, "total_tokens": 902}})
+    ));
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(body)
+}
+
+/// T-4370: on a public deployment a connector whose tools cannot be listed shows no step; a
+/// provider's safety stop reaches the visitor as "Declined" and is not cached, so the same
+/// question asks the model again; an answer call with no text is "No Answer" and is counted.
+#[tokio::test]
+async fn a_cut_refusal_is_declined_not_cached_and_an_empty_answer_is_counted() {
+    let w = world("chatdeclined", deployment(Channel::Public, 50_000, 10)).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{SLUG}/mcp")))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&w.gateway)
+        .await;
+    let rag = || {
+        completion(
+            json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}"}),
+            130,
+        )
+    };
+    script_routed(
+        &w.proxy,
+        vec![rag(), rag()],
+        vec![],
+        vec![
+            stopped(&["I cannot"], "content_filter"),
+            stopped(&[], "stop"),
+        ],
+    )
+    .await;
+    let question = || ask(json!({"message": "Dokedy je otvorená knižnica?"}), None);
+    let (_, events, _) = answer_of(&w.app, question()).await;
+    assert!(
+        events
+            .iter()
+            .all(|(n, d)| n != "tool" || d["name"] != "tools/list"),
+        "no failed listing step: {events:?}"
+    );
+    let error = &events
+        .iter()
+        .find(|(n, _)| n == "error")
+        .expect("an error")
+        .1;
+    assert_eq!(
+        (error["status"].clone(), error["title"].clone()),
+        (json!(422), json!("Declined"))
+    );
+    assert!(
+        events.iter().all(|(n, _)| n != "answer"),
+        "the cut text is never the answer"
+    );
+
+    let (_, events, _) = answer_of(&w.app, question()).await;
+    let error = &events
+        .iter()
+        .find(|(n, _)| n == "error")
+        .expect("an error")
+        .1;
+    assert_eq!(
+        error["title"], "No Answer",
+        "asked again, not replayed: {events:?}"
+    );
+    assert_eq!(calls_of(&model_calls(&w.proxy).await, None).len(), 2);
+
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let mut unanswered: Vec<bool> = sqlx::query_scalar("SELECT no_answer FROM answer_timings")
+        .fetch_all(&mut *tx)
+        .await
+        .expect("timings");
+    tx.rollback().await.expect("rollback");
+    unanswered.sort();
+    assert_eq!(unanswered, [false, true]);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

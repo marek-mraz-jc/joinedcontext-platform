@@ -1450,19 +1450,13 @@ pub async fn answer(
     count(&mut spent, &completion);
     spent.served(Stage::Answer, &completion);
     spent.first_token_ms = first.map(|at| at.duration_since(started).as_millis() as u64);
+    if completion.declined() {
+        send(events, super::agent::declined()).await;
+        return spent;
+    }
     let text = completion.text.trim().to_owned();
     if text.is_empty() {
-        send(
-            events,
-            Event::Error {
-                status: 502,
-                title: "No Answer",
-                detail:
-                    "The assistant could not put an answer together. Try asking in other words."
-                        .into(),
-            },
-        )
-        .await;
+        send(events, super::agent::no_answer(&mut spent)).await;
         return spent;
     }
     let (text, dangling) = super::agent::without_dangling(&text, &citations);
@@ -1485,7 +1479,8 @@ pub async fn answer(
     let told_time = super::clock::readings(ask.now, ask.zone)
         .iter()
         .any(|at| text.contains(at.as_str()));
-    if let (Some(key), true) = (key, tables.is_empty() && !told_time) {
+    let keep = tables.is_empty() && !told_time && worth_keeping(&completion, &text);
+    if let (Some(key), true) = (key, keep) {
         ask.cache.put(key, text.clone(), citations.clone());
     }
     send(events, Event::Answer(text)).await;
@@ -1494,6 +1489,16 @@ pub async fn answer(
         send(events, Event::Followups(routing.followups)).await;
     }
     spent
+}
+
+/// Whether an answer may be kept for the next visitor (T-4370): only when its call ended on its
+/// own and it is at least a sentence, so a cut stream, a length stop or a bare "I cannot" is
+/// never replayed.
+pub fn worth_keeping(completion: &Completion, text: &str) -> bool {
+    let words = text.split_whitespace().count();
+    completion.whole()
+        && words >= 3
+        && (words >= 12 || text.trim_end().ends_with(['.', '!', '?', '…', ']', ')']))
 }
 
 #[cfg(test)]
@@ -1513,6 +1518,44 @@ mod tests {
 
     /// T-4360: a passage both rankings put in their first three skips the judgement; one only a
     /// single ranking found, or none at all, is still judged.
+    /// T-4370: a content-filter stop, a length stop and a one-word or cut refusal are never
+    /// cached; a whole answer of a sentence is.
+    #[test]
+    fn only_a_whole_answer_of_a_sentence_is_kept() {
+        let ended = |finish: Option<&str>| Completion {
+            text: String::new(),
+            calls: Vec::new(),
+            tokens: 0,
+            input: 0,
+            output: 0,
+            cost_micros: None,
+            provider: None,
+            reasoning: None,
+            finish: finish.map(str::to_owned),
+        };
+        let answer = "Knižnica je otvorená od 9:00 do 17:00 [1].";
+        assert!(worth_keeping(&ended(Some("stop")), answer));
+        assert!(worth_keeping(&ended(None), answer));
+        assert!(!worth_keeping(&ended(Some("content_filter")), answer));
+        assert!(!worth_keeping(&ended(Some("length")), answer));
+        assert!(!worth_keeping(&ended(Some("stop")), "I cannot"));
+        assert!(!worth_keeping(&ended(Some("stop")), "Nie."));
+        assert!(
+            !worth_keeping(&ended(Some("stop")), "I cannot help"),
+            "no sentence end"
+        );
+        assert!(worth_keeping(
+            &ended(Some("stop")),
+            "I cannot help with that."
+        ));
+        let list =
+            "Otvorené: pondelok 9 až 17, utorok 9 až 17, streda 9 až 17, štvrtok 9 až 17 [1]";
+        assert!(
+            worth_keeping(&ended(Some("stop")), list),
+            "a long answer needs no full stop"
+        );
+    }
+
     #[test]
     fn passages_both_rankings_put_on_top_cover_the_question() {
         assert!(covers(&[hit(1, 1.0 / 70.0), hit(2, 2.0 / 61.0)]));

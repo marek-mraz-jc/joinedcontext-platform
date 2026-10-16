@@ -395,6 +395,29 @@ pub struct Spent {
     pub providers: PerStage<String>,
     /// The reasoning tokens each stage's calls spent, as the providers reported them (T-4360).
     pub reasoning: PerStage<u64>,
+    /// Whether the answer call came back with no text to send (T-4370).
+    pub no_answer: bool,
+}
+
+/// The answer call came back with no text: the "No Answer" error, which the widget words in the
+/// chat's language with a retry, and the turn counted as unanswered (T-4370).
+pub fn no_answer(spent: &mut Spent) -> Event {
+    spent.no_answer = true;
+    Event::Error {
+        status: 502,
+        title: "No Answer",
+        detail: "The assistant could not put an answer together. Try asking in other words.".into(),
+    }
+}
+
+/// The provider stopped the answer for its content: never the cut text, the "Declined" error,
+/// which the widget words in the chat's language (T-4370).
+pub fn declined() -> Event {
+    Event::Error {
+        status: 422,
+        title: "Declined",
+        detail: "The assistant does not answer this question.".into(),
+    }
 }
 
 /// A stage that calls the model (T-4360).
@@ -601,14 +624,13 @@ pub async fn answer(
         };
         spent.add(&completion);
         if completion.calls.is_empty() || !allow_tools {
+            if completion.declined() {
+                send(events, declined()).await;
+                return spent;
+            }
             let text = completion.text.trim().to_owned();
             if text.is_empty() {
-                send(events, Event::Error {
-                    status: 502,
-                    title: "No Answer",
-                    detail: "The assistant could not put an answer together. Try asking in other words.".into(),
-                })
-                .await;
+                send(events, no_answer(&mut spent)).await;
                 return spent;
             }
             let (text, dangling) = without_dangling(&text, &citations);

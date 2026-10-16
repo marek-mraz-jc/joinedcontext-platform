@@ -26,6 +26,7 @@
       unreachable: "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.",
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
+      declined: "Na túto otázku asistent neodpovedá.",
       choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
@@ -44,6 +45,7 @@
       unreachable: "The assistant cannot reach its model right now. Try again in a minute.",
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
+      declined: "The assistant does not answer this question.",
       choose: "Choose your language", moreInfo: "More", lessInfo: "Less" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
@@ -62,6 +64,7 @@
       unreachable: "Asistent se teď nemůže spojit se svým modelem. Zkuste to za minutu znovu.",
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
+      declined: "Na tuto otázku asistent neodpovídá.",
       choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).

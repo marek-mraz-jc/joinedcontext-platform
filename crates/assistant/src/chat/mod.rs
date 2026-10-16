@@ -569,8 +569,8 @@ async fn record(
         "INSERT INTO answer_timings (project, deployment, cached, model_calls, first_token_ms, \
          total_ms, route_ms, search_ms, judge_ms, answer_ms, judge_skipped, dangling_markers, \
          router_provider, judge_provider, answer_provider, route_reasoning_tokens, \
-         judge_reasoning_tokens, answer_reasoning_tokens) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+         judge_reasoning_tokens, answer_reasoning_tokens, no_answer) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
     )
     .bind(&deployment.project)
     .bind(&deployment.name)
@@ -590,6 +590,7 @@ async fn record(
     .bind(tokens(spent.reasoning.route))
     .bind(tokens(spent.reasoning.judge))
     .bind(tokens(spent.reasoning.answer))
+    .bind(spent.no_answer)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -691,6 +692,17 @@ async fn connected(
             Ok(_) => {
                 tracing::warn!(endpoint = %connector.endpoint, "the Endpoint offers none of the connector's tools")
             }
+            // A visitor can do nothing about it, so a public deployment answers without it and
+            // says nothing; it is logged once an hour, not on every turn (AG-104, T-4370).
+            Err(why) if deployment.spec.channel.is_anonymous() => {
+                let key = format!(
+                    "{}/{}/{}",
+                    deployment.project, deployment.name, connector.endpoint
+                );
+                if first_this_hour(&FAILED_LISTINGS, &key, std::time::Instant::now()) {
+                    tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, %why, "a connector's tools could not be listed; left out, logged once an hour");
+                }
+            }
             Err(why) => {
                 tracing::warn!(endpoint = %connector.endpoint, %why, "a connector's tools could not be listed");
                 failed.push(Event::Tool {
@@ -702,6 +714,34 @@ async fn connected(
         }
     }
     connected
+}
+
+/// When each public deployment's failing connector was last logged (T-4370); one key per
+/// configured connector, so it stays as small as the deployments.
+static FAILED_LISTINGS: std::sync::Mutex<Vec<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Whether `key` was not seen in the hour before `now`; records `now` when so.
+fn first_this_hour(
+    seen: &std::sync::Mutex<Vec<(String, std::time::Instant)>>,
+    key: &str,
+    now: std::time::Instant,
+) -> bool {
+    let Ok(mut seen) = seen.lock() else {
+        return true;
+    };
+    let hour = Duration::from_secs(3600);
+    match seen.iter_mut().find(|(k, _)| k == key) {
+        Some((_, at)) if now.saturating_duration_since(*at) < hour => false,
+        Some((_, at)) => {
+            *at = now;
+            true
+        }
+        None => {
+            seen.push((key.to_owned(), now));
+            true
+        }
+    }
 }
 
 /// `at` as RFC 3339 UTC to the second, like `2026-10-16T12:17:05Z`.
@@ -1324,6 +1364,34 @@ mod tests {
 
     /// T-3059: the per-client key is the address the edge appended, past the cluster's own
     /// proxies, never one the caller wrote in front of it.
+    /// T-4370: a failing connector of a public deployment is logged once an hour per key.
+    #[test]
+    fn a_failing_listing_is_logged_once_an_hour() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let at = std::time::Instant::now();
+        assert!(first_this_hour(&seen, "bbsk/data/od", at));
+        assert!(!first_this_hour(
+            &seen,
+            "bbsk/data/od",
+            at + Duration::from_secs(3599)
+        ));
+        assert!(
+            first_this_hour(&seen, "bbsk/zilina/od", at),
+            "another key is its own"
+        );
+        assert!(first_this_hour(
+            &seen,
+            "bbsk/data/od",
+            at + Duration::from_secs(3600)
+        ));
+        assert!(!first_this_hour(
+            &seen,
+            "bbsk/data/od",
+            at + Duration::from_secs(3700)
+        ));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
     #[test]
     fn the_client_is_the_address_the_edge_appended() {
         let key = |chain: &'static str| {

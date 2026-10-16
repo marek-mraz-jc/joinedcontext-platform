@@ -522,7 +522,7 @@ var JCRender = (function () {
   // The service's error titles (API/05 §1.6), English and stable, to the widget's own words.
   var TROUBLE = {
     "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
-    "No Answer": "unanswered", "Answer Took Too Long": "slow"
+    "No Answer": "unanswered", "Answer Took Too Long": "slow", "Declined": "declined"
   };
 
   /**
@@ -543,7 +543,7 @@ var JCRender = (function () {
    * day is no error at all: the service answers it with links (T-4286).
    */
   function retryable(word) {
-    return word !== "full";
+    return word !== "full" && word !== "declined";
   }
 
   /**
