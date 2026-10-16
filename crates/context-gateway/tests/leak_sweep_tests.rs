@@ -235,11 +235,11 @@ fn endpoint() -> Endpoint {
             classes: vec!["Vehicle".to_owned(), "User".to_owned(), "Depot".to_owned()],
             json_schema: Some(
                 json!({ "$schema": "http://json-schema.org/draft-07/schema#", "$defs": {
-                "User": properties("User"), "Vehicle": properties("Vehicle"), "Depot": properties("Depot") } }),
+                "User": properties("User"), "Vehicle": properties("Vehicle"), "Depot": properties("Depot") } }).into(),
             ),
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/",
                 "odometer": "https://hel.fi/schema/odometer", "secretPin": "https://hel.fi/schema/secretPin",
-                "Depot": "https://hel.fi/schema/Depot" } })),
+                "Depot": "https://hel.fi/schema/Depot" } }).into()),
         }],
         policy_names: Vec::new(),
         policies: vec![policy],

@@ -281,14 +281,17 @@ fn policy(operations: &str, types: &[&str]) -> PolicySpec {
 /// The caller writes and deletes the `writable` classes and reads every class.
 fn endpoint(writable: &[&str]) -> Endpoint {
     Endpoint {
-        declared_types: Some(DeclaredTypes {
-            model: "bb-skoly".into(),
-            classes: CLASSES.iter().map(|class| (*class).to_owned()).collect(),
-            units: Default::default(),
-            relationships: rules(),
-            quality: Vec::new(),
-            schema: None,
-        }),
+        declared_types: Some(
+            DeclaredTypes {
+                model: "bb-skoly".into(),
+                classes: CLASSES.iter().map(|class| (*class).to_owned()).collect(),
+                units: Default::default(),
+                relationships: rules(),
+                quality: Vec::new(),
+                schema: None,
+            }
+            .into(),
+        ),
         catalog: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),

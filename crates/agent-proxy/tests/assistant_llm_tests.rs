@@ -273,3 +273,47 @@ async fn a_run_naming_a_deployment_is_not_the_assistant() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(reached(&provider).await, 0);
 }
+
+/// T-4292: a deployment's pinned OpenRouter providers reach the provider as written; a `provider`
+/// field the proxy does not know is refused with 400 before the provider is asked.
+#[tokio::test]
+async fn a_pinned_provider_reaches_openrouter_and_an_unknown_field_is_refused() {
+    let (realm, provider) = (realm().await, provider().await);
+    let proxy = proxy(&realm, &provider);
+    let send = |body: &'static str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/llm/v1/chat/completions")
+            .header("authorization", format!("Bearer {ASSISTANT_TOKEN}"))
+            .header("x-jc-assistant-deployment", "bb/eval-cerebras")
+            .header("x-jc-assistant-tokens-per-day", "100000")
+            .body(Body::from(body))
+            .expect("a request")
+    };
+    let pinned = proxy
+        .clone()
+        .oneshot(send(
+            r#"{"model":"openai/gpt-oss-120b","messages":[],"provider":{"order":["cerebras"],"allow_fallbacks":false}}"#,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(pinned.status(), StatusCode::OK);
+    let seen = provider.received_requests().await.unwrap_or_default();
+    let body: serde_json::Value = serde_json::from_slice(&seen[0].body).expect("json");
+    assert_eq!(
+        body["provider"],
+        json!({"order": ["cerebras"], "allow_fallbacks": false})
+    );
+
+    let unknown = proxy
+        .oneshot(send(
+            r#"{"model":"m","messages":[],"provider":{"order":["groq"],"data_collection":"allow"}}"#,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    assert!(body_of(unknown)
+        .await
+        .contains("only order and allow_fallbacks"));
+    assert_eq!(reached(&provider).await, 1, "the refused call never left");
+}

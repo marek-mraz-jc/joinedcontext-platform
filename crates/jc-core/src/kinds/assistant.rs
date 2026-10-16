@@ -48,6 +48,10 @@ pub const MAX_UPLOAD_FILES: u32 = 500;
 pub const DEFAULT_MODEL: &str = "google/gemini-3.8-flash";
 /// The longest model id.
 pub const MAX_MODEL_ID_LEN: usize = 100;
+/// The most providers `model.provider.order` names (T-4292).
+pub const MAX_PROVIDERS: usize = 8;
+/// The longest provider slug.
+pub const MAX_PROVIDER_LEN: usize = 64;
 /// The most suggested questions per language.
 pub const MAX_SUGGESTIONS: usize = 6;
 /// The longest suggested question.
@@ -598,6 +602,30 @@ pub struct ModelChoice {
     /// The model that writes the answer, `vendor/name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// The OpenRouter providers both calls are asked on (T-4292).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderRouting>,
+}
+
+/// OpenRouter provider routing, sent as its `provider` request field (T-4292, MF-52).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProviderRouting {
+    /// Provider slugs, tried in this order, e.g. `cerebras`, `groq`; 1 to 8.
+    pub order: Vec<String>,
+    /// Whether another provider may answer when these fail; default `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
+}
+
+impl ProviderRouting {
+    /// The field as OpenRouter reads it: `{order, allow_fallbacks}`.
+    pub fn openrouter(&self) -> serde_json::Value {
+        serde_json::json!({
+            "order": self.order,
+            "allow_fallbacks": self.allow_fallbacks.unwrap_or(true),
+        })
+    }
 }
 
 /// What one answer may use (T-4281).
@@ -1077,6 +1105,22 @@ impl AssistantDeploymentSpec {
                     }
                 }
             }
+            if let Some(provider) = &model.provider {
+                if provider.order.is_empty() || provider.order.len() > MAX_PROVIDERS {
+                    return Err(name(
+                        "model.provider.order",
+                        provider.order.len().to_string(),
+                        "model.provider.order names 1 to 8 providers",
+                    ));
+                }
+                if let Some(slug) = provider.order.iter().find(|s| !is_provider_slug(s)) {
+                    return Err(name(
+                        "model.provider.order",
+                        slug.clone(),
+                        "a provider is at most 64 characters of a-z 0-9 . _ / -",
+                    ));
+                }
+            }
         }
         for (language, questions) in &self.suggestions {
             self.known_language("suggestions", language)?;
@@ -1225,6 +1269,15 @@ pub fn connector_target(endpoint: &str) -> (Option<&str>, &str) {
         Some((project, name)) => (Some(project), name),
         None => (None, endpoint),
     }
+}
+
+/// An OpenRouter provider slug, `cerebras` or `deepinfra/fp8`.
+pub fn is_provider_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= MAX_PROVIDER_LEN
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._/-".contains(c))
 }
 
 fn is_model_id(id: &str) -> bool {

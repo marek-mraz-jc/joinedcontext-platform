@@ -170,7 +170,7 @@ fn endpoint(context: Option<Value>, whitelist: bool) -> Endpoint {
             major: 1,
             classes: vec!["Car".to_owned()],
             json_schema: None,
-            context,
+            context: context.map(Into::into),
         }],
         policy_names: Vec::new(),
         policies: vec![policy],

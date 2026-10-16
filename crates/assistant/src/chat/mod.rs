@@ -1218,6 +1218,11 @@ async fn ask(
                 .model
                 .as_ref()
                 .and_then(|m| m.answer.as_deref()),
+            provider: deployment
+                .spec
+                .model
+                .as_ref()
+                .and_then(|m| m.provider.as_ref()),
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),

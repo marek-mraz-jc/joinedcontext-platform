@@ -163,6 +163,8 @@ pub struct Ask<'a> {
     /// The deployment's router and answer models; the service's model when `None` (MF-52).
     pub router_model: Option<&'a str>,
     pub answer_model: Option<&'a str>,
+    /// The OpenRouter providers both are asked on (`model.provider`, T-4292).
+    pub provider: Option<&'a jc_core::kinds::ProviderRouting>,
     /// The most tokens the answer call may write (`budget.outputTokensPerAnswer`).
     pub output_tokens: u64,
     /// Answers to first questions asked before (T-4139).

@@ -105,16 +105,19 @@ fn policy() -> PolicySpec {
 
 fn endpoint(model: Option<&Value>) -> Endpoint {
     Endpoint {
-        declared_types: Some(DeclaredTypes {
-            model: "bb-air-quality".into(),
-            classes: ["AirQualityObserved".to_owned()].into(),
-            units: model
-                .map(|model| UnitRules::from_schema(model, MissingUnitCode::Fill))
-                .unwrap_or_default(),
-            relationships: Default::default(),
-            quality: Vec::new(),
-            schema: model.map(compiled),
-        }),
+        declared_types: Some(
+            DeclaredTypes {
+                model: "bb-air-quality".into(),
+                classes: ["AirQualityObserved".to_owned()].into(),
+                units: model
+                    .map(|model| UnitRules::from_schema(model, MissingUnitCode::Fill))
+                    .unwrap_or_default(),
+                relationships: Default::default(),
+                quality: Vec::new(),
+                schema: model.map(compiled),
+            }
+            .into(),
+        ),
         catalog: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),

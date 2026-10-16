@@ -439,6 +439,17 @@
             "null"
           ]
         },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderRouting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The OpenRouter providers both calls are asked on (T-4292)."
+        },
         "router": {
           "description": "The model that picks the tools and sources of a question, `vendor/name`.",
           "type": [
@@ -563,6 +574,30 @@
           "type": "string"
         }
       ]
+    },
+    "ProviderRouting": {
+      "additionalProperties": false,
+      "description": "OpenRouter provider routing, sent as its `provider` request field (T-4292, MF-52).",
+      "properties": {
+        "allowFallbacks": {
+          "description": "Whether another provider may answer when these fail; default `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "order": {
+          "description": "Provider slugs, tried in this order, e.g. `cerebras`, `groq`; 1 to 8.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "order"
+      ],
+      "type": "object"
     },
     "RateLimit": {
       "additionalProperties": false,
