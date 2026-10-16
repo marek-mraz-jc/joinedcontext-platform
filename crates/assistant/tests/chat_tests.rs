@@ -1818,8 +1818,8 @@ fn streamed(pieces: &[&str], input: u64, output: u64) -> ResponseTemplate {
 }
 
 /// T-4139, AG-107: a deployment that answers from its sources alone is routed: one router call on
-/// its router model (JSON), searches the service runs, a follow-up router call that sees titles
-/// only, and one streamed answer call on its answer model with no tools, its output held to
+/// its router model (JSON), searches the service runs, a follow-up call that reads the start of
+/// the passages found and says they answer (T-4259), and one streamed answer call on its answer model with no tools, its output held to
 /// `outputTokensPerAnswer`. Only retrieved passages are cited, the `done` event sums every call's
 /// usage, and the same first question again comes from the cache without a model call.
 #[tokio::test]
@@ -1838,7 +1838,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
                 json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"], \"followups\": [\"Kde je knižnica?\", \"Koľko stojí preukaz?\"]}"}),
                 130,
             ),
-            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 90),
+            completion(json!({"role": "assistant", "content": "{\"answers\": true, \"queries\": [\"pobočky\"]}"}), 90),
             streamed(&["Knižnica je otvorená ", "v pondelok až piatok od 9:00 do 18:00 [1]", " [7]."], 900, 40),
         ],
     )
@@ -1898,10 +1898,23 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(router["model"], "test/router");
     assert_eq!(router["response_format"]["type"], "json_object");
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
-    // The follow-up reads the titles of what was found, never the passages' text.
-    let titles = follow["messages"][1]["content"].as_str().expect("titles");
-    assert!(titles.contains("Ovzdušie v Hronove"), "{titles}");
-    assert!(!titles.contains("Meracie stanice"), "{titles}");
+    // The router hears the sources' language; the follow-up reads the passages' text as data.
+    let routed = router["messages"][1]["content"]
+        .as_str()
+        .expect("the router's question");
+    assert!(
+        routed.contains("The sources are written in: sk."),
+        "{routed}"
+    );
+    let judged = follow["messages"][1]["content"].as_str().expect("passages");
+    assert!(
+        judged.contains("Knižnica je otvorená v pondelok"),
+        "{judged}"
+    );
+    assert!(
+        !judged.contains("Platové tabuľky"),
+        "another source's passage reached the model"
+    );
     assert_eq!(answering["model"], "test/answer");
     assert_eq!(answering["stream"], true);
     assert_eq!(answering["max_tokens"], 700);
@@ -1955,6 +1968,66 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4259: an English question over Slovak pages searches in Slovak too; a follow-up that says
+/// the passages do not answer runs one more round with its own queries, and one that says they do
+/// ends the rounds before the answer call. Every search shows on the progress line.
+#[tokio::test]
+async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_one_more_round() {
+    let mut sources_only = deployment(Channel::Public, 50_000, 10);
+    sources_only.spec.connectors.clear();
+    let w = world("chatroutedlang", sources_only).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"library opening hours\", \"knižnica otváracie hodiny\"]}"}),
+                120,
+            ),
+            completion(
+                json!({"role": "assistant", "content": "{\"answers\": false, \"missing\": \"where the stations are\", \"queries\": [\"meracie stanice ovzdušia\"]}"}),
+                90,
+            ),
+            completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 60),
+            streamed(&["The library is open on weekdays from 9:00 to 18:00 [1]."], 900, 30),
+        ],
+    )
+    .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "When is the library open?"}), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let searched: Vec<&str> = events
+        .iter()
+        .filter(|(n, d)| n == "stage" && d["stage"] == "searching")
+        .filter_map(|(_, d)| d["topic"].as_str())
+        .collect();
+    assert_eq!(
+        searched,
+        [
+            "library opening hours",
+            "knižnica otváracie hodiny",
+            "meracie stanice ovzdušia"
+        ],
+        "{events:?}"
+    );
+    let calls = model_calls(&w.proxy).await;
+    // Router, two verdicts, the answer: the "yes" after round 2 ended the rounds.
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    let second = calls[2].1["messages"][1]["content"]
+        .as_str()
+        .expect("passages");
+    assert!(second.contains("meracie stanice ovzdušia"), "{second}");
+    assert!(
+        second.contains("Meracie stanice kvality ovzdušia"),
+        "{second}"
+    );
+    assert_eq!(calls[3].1["stream"], true);
+    assert!(events.iter().any(|(n, _)| n == "answer"));
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4139: a router that answers no JSON still searches, for the question itself; a model that
 /// refuses is a sentence, and nothing is cached.
 #[tokio::test]
@@ -1990,7 +2063,8 @@ async fn a_router_that_fails_searches_the_question_and_a_refusal_is_not_cached()
             .map(|(n, d)| (n.as_str(), d["cached"].clone())),
         Some(("done", json!(false)))
     );
-    // Two router calls (the second a follow-up), then the answer call that failed.
+    // Two router calls (the second a follow-up whose reply is no verdict, so the rounds end: T-4259),
+    // then the answer call that failed.
     assert_eq!(model_calls(&w.proxy).await.len(), 3);
     let (_, again, _) = answer_of(
         &w.app,
