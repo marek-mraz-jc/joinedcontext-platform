@@ -204,8 +204,9 @@ var JCRender = (function () {
     var asked = String(requested || "").slice(0, 2).toLowerCase();
     if (asked && has(asked)) return asked;
     offered = (offered || []).filter(has);
-    if (offered.length === 0 || offered.indexOf("sk") >= 0) return has("sk") ? "sk" : "en";
-    return offered[0];
+    // The deployment's first language is its default (MF-52, T-4281); Slovak when it lists none.
+    if (offered.length > 0) return offered[0];
+    return has("sk") ? "sk" : "en";
   }
 
   /**

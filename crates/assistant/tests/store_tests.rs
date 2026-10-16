@@ -13,7 +13,8 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    endpoint_page, hybrid_search, project_scope, titles, Search, DIMENSIONS, MIGRATOR,
+    endpoint_page, hybrid_search, project_scope, search_projects, sources_by_project, titles,
+    Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -505,5 +506,101 @@ async fn a_scope_refuses_a_name_that_is_not_a_project() {
     for bad in ["", "Praha", "x' OR '1'='1"] {
         assert!(project_scope(&pool, bad).await.is_err(), "{bad}");
     }
+    drop_database(admin, pool, &name).await;
+}
+
+/// T-4281: a deployment's `{project}/{source}` sources are searched in that project's own scope
+/// and merged; a project it names no source of is never read, even through a source of the same
+/// name. The search runs as a login role of the service's own, so row-level security holds.
+#[tokio::test]
+async fn sources_of_another_project_are_searched_in_its_own_scope() {
+    let (admin, pool, name) = database("crossproject").await;
+    let city = site(
+        &pool,
+        "banskabystrica",
+        "web",
+        &[("Zber odpadu v meste", "sk", "public", embedding(0, None))],
+    )
+    .await;
+    let region = site(
+        &pool,
+        "bbsk",
+        "web",
+        &[(
+            "Zber odpadu v kraji",
+            "sk",
+            "public",
+            embedding(0, Some((1, 0.2))),
+        )],
+    )
+    .await;
+    let other = site(
+        &pool,
+        "zilina",
+        "web",
+        &[(
+            "Zber odpadu v Žiline",
+            "sk",
+            "public",
+            embedding(0, Some((2, 0.1))),
+        )],
+    )
+    .await;
+    sqlx::query("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'assistant_login') THEN CREATE ROLE assistant_login LOGIN PASSWORD 'pw' IN ROLE assistant_app; END IF; END $$")
+        .execute(&pool).await.expect("login role");
+    let url = std::env::var("JC_ASSISTANT_TEST_DATABASE_URL").expect("url");
+    let options: PgConnectOptions = url.parse().expect("url parses");
+    let app = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            options
+                .database(&name)
+                .username("assistant_login")
+                .password("pw"),
+        )
+        .await
+        .expect("connect as the service");
+
+    let query = embedding(0, None);
+    let found = |sources: Vec<(String, Vec<String>)>| {
+        let app = app.clone();
+        let query = query.clone();
+        async move {
+            let hits = search_projects(
+                &app,
+                &sources,
+                &Search {
+                    text: "zber odpadu",
+                    embedding: &query,
+                    sources: &[],
+                    public_only: true,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("search");
+            hits.iter().map(|h| h.chunk).collect::<Vec<_>>()
+        }
+    };
+    let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let both = found(sources_by_project(
+        "banskabystrica",
+        &names(&["web", "bbsk/web"]),
+    ))
+    .await;
+    assert_eq!(both.len(), 2, "{both:?}");
+    assert!(
+        both.contains(&city[0]) && both.contains(&region[0]),
+        "{both:?}"
+    );
+    assert!(!both.contains(&other[0]));
+    // The closer vector ranks first across the two projects' rankings.
+    assert_eq!(both[0], city[0]);
+
+    let own = found(sources_by_project("banskabystrica", &names(&["web"]))).await;
+    assert_eq!(own, city);
+    let theirs = found(sources_by_project("banskabystrica", &names(&["bbsk/web"]))).await;
+    assert_eq!(theirs, region);
+    app.close().await;
     drop_database(admin, pool, &name).await;
 }

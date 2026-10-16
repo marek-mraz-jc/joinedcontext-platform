@@ -28,6 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use jc_core::kinds::assistant::connector_target;
+use jc_core::kinds::Routes;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -745,7 +746,12 @@ async fn feedback(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
-    let response = verdict(&state, &deployment, &headers, origin.as_ref(), body).await;
+    // A deployment with `feedback: false` takes no verdict (MF-52, T-4281).
+    let response = if deployment.spec.feedback {
+        verdict(&state, &deployment, &headers, origin.as_ref(), body).await
+    } else {
+        problem(404, "This assistant takes no feedback.")
+    };
     with_cors(response, origin)
 }
 
@@ -1073,14 +1079,26 @@ async fn ask(
         let _permit = permit;
         let state = task_state;
         let mut failed = Vec::new();
-        let connectors = connected(
-            &state,
-            &deployment,
-            question.connectors.as_deref(),
-            person.as_ref(),
-            &mut failed,
-        )
-        .await;
+        // `answer.routes` narrows what the answer may use (T-4281): `rag` connects nothing,
+        // `data` searches nothing.
+        let routes = deployment.spec.routes();
+        let connectors = if routes == Routes::Rag {
+            Vec::new()
+        } else {
+            connected(
+                &state,
+                &deployment,
+                question.connectors.as_deref(),
+                person.as_ref(),
+                &mut failed,
+            )
+            .await
+        };
+        let sources = if routes == Routes::Data {
+            Vec::new()
+        } else {
+            crate::sources_by_project(&deployment.project, &deployment.spec.sources)
+        };
         // The token reached the surfaces that need it; nothing else holds it past this point.
         drop(person);
         for event in failed {
@@ -1095,7 +1113,7 @@ async fn ask(
             project: &deployment.project,
             deployment: &name,
             system_prompt: deployment.spec.system_prompt.as_deref(),
-            sources: &deployment.spec.sources,
+            sources: &sources,
             public_only: deployment.spec.channel.is_anonymous(),
             connectors: &connectors,
             tokens_per_day,

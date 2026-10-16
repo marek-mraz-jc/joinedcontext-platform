@@ -1020,10 +1020,22 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                     .flatten()
                     .filter_map(|v| v.as_str())
                 {
-                    match sources.get(&here(name)) {
-                        None => found.push((at.clone(), format!(
-                            "{id}: spec.sources names KnowledgeSource `{name}`, which no manifest of this project declares (MF-52)"
-                        ))),
+                    // Another project's source, `{project}/{source}`, is looked up there; the kind
+                    // already refused a project its scope does not list (T-4281).
+                    let (project, source) = jc_core::kinds::assistant::connector_target(name);
+                    let key = match project {
+                        Some(project) => (Some(project.to_owned()), source.to_owned()),
+                        None => here(source),
+                    };
+                    match sources.get(&key) {
+                        None => found.push((at.clone(), match project {
+                            Some(project) => format!(
+                                "{id}: spec.sources names KnowledgeSource `{name}`, which no manifest of project `{project}` declares (MF-52)"
+                            ),
+                            None => format!(
+                                "{id}: spec.sources names KnowledgeSource `{name}`, which no manifest of this project declares (MF-52)"
+                            ),
+                        })),
                         Some(visibility) if visibility != "public" && channel != "internal" => found.push((at.clone(), format!(
                             "{id}: spec.sources names KnowledgeSource `{name}`, which is `{visibility}`; a `{channel}` channel answers people nobody signed in, so it reads public sources only. Make the source `visibility: public` or use channel `internal` (MF-52)"
                         ))),

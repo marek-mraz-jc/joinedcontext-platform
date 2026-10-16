@@ -328,7 +328,7 @@
       navigator.clipboard.writeText(text).then(function () { announce.textContent = w.copied; }, function () {});
     });
     tools.appendChild(copy);
-    if (turn) thumbs(tools, turn);
+    if (turn && config.feedback !== false) thumbs(tools, turn);
     item.appendChild(tools);
   }
 

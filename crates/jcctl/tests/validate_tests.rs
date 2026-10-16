@@ -1488,3 +1488,55 @@ fn an_assistant_reaches_another_projects_public_endpoint_only() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T-4281, MF-52: a source reaches another project's `KnowledgeSource` as `{project}/{source}`;
+/// one the project does not declare, or an internal one on a public channel, is named.
+#[test]
+fn an_assistant_reads_another_projects_declared_public_source_only() {
+    let dir = valid_repo("assistant-source-scope");
+    knowledge_source(&dir, "web", "public", None);
+    let bbsk = |visibility: &str| {
+        write(
+            &dir,
+            "projects/bbsk/assistant/sources/web.yaml",
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: KnowledgeSource\nmetadata:\n  name: web\n  namespace: bbsk\nspec:\n  source: website\n  startUrls: [https://www.bbsk.sk/]\n  visibility: {visibility}\n"),
+        );
+    };
+    let scoped = |sources: &str| {
+        assistant_deployment(&dir, "public", sources, "public-air");
+        let path = dir.join("projects/ovzdusie/assistant/deployments/chat.yaml");
+        let text = std::fs::read_to_string(&path).expect("deployment");
+        std::fs::write(&path, format!("{text}  scope: {{ projects: [bbsk] }}\n")).expect("write");
+        validate::run(&dir)
+    };
+    write(
+        &dir,
+        "projects/bbsk/project.yaml",
+        &std::fs::read_to_string(dir.join("projects/ovzdusie/project.yaml"))
+            .expect("project")
+            .replace("ovzdusie", "bbsk"),
+    );
+    bbsk("public");
+    let report = scoped("web, \"bbsk/web\"");
+    assert!(with_assistant(&report).is_empty(), "{:?}", report.findings);
+
+    let report = scoped("web, \"bbsk/nowhere\"");
+    let found = with_assistant(&report);
+    assert!(
+        found.len() == 1
+            && found[0].contains("`bbsk/nowhere`")
+            && found[0].contains("project `bbsk`"),
+        "{found:?}"
+    );
+
+    bbsk("internal");
+    let report = scoped("web, \"bbsk/web\"");
+    let found = with_assistant(&report);
+    assert!(
+        found.len() == 1
+            && found[0].contains("`bbsk/web`")
+            && found[0].contains("public sources only"),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

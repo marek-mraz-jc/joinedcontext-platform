@@ -93,6 +93,8 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             disclaimer: Default::default(),
             enabled: true,
             scope: None,
+            answer: None,
+            feedback: true,
         },
     }
 }
@@ -2518,4 +2520,49 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
         "{asked:?}"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4281, MF-52: `feedback: false` takes no verdict, and `answer.routes: rag` connects no
+/// Endpoint: the gateway is never asked, while the default `both` asks it.
+#[tokio::test]
+async fn feedback_off_takes_no_verdict_and_rag_never_reaches_the_gateway() {
+    let mut rag = deployment(Channel::Public, 1_000_000, 10);
+    rag.spec.feedback = false;
+    rag.spec.answer = Some(jc_core::kinds::AnswerSpec {
+        routes: jc_core::kinds::Routes::Rag,
+    });
+    for (test, deployment, reached) in [
+        ("chatrag", rag, false),
+        ("chatboth", deployment(Channel::Public, 1_000_000, 10), true),
+    ] {
+        let w = world(test, deployment).await;
+        script(
+            &w.proxy,
+            vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 4],
+        )
+        .await;
+        let (status, events, _) = answer_of(
+            &w.app,
+            ask(json!({"message": "Kedy je zber?"}), Some(ORIGIN)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        let asked = w.gateway.received_requests().await.unwrap_or_default();
+        assert_eq!(!asked.is_empty(), reached, "{test}: {asked:?}");
+        if !reached {
+            let id = events[0].1["id"].as_str().expect("an id").to_owned();
+            let response = w
+                .app
+                .clone()
+                .oneshot(verdict(
+                    json!({"conversation": id, "turn": 1, "verdict": "up"}),
+                    Some(ORIGIN),
+                    "198.51.100.30",
+                ))
+                .await
+                .expect("an answer");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        db::drop_database(w.admin, w.pool, &w.name).await;
+    }
 }

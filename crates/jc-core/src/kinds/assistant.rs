@@ -592,12 +592,34 @@ pub struct ModelChoice {
     pub answer: Option<String>,
 }
 
+/// What one answer may use (T-4281).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Routes {
+    /// The sources and the connectors, as the router picks.
+    #[default]
+    Both,
+    /// The sources alone: no connector is offered and no tool called.
+    Rag,
+    /// The connectors alone: no search round.
+    Data,
+}
+
+/// How the deployment answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AnswerSpec {
+    /// What one answer may use; default `both`.
+    #[serde(default)]
+    pub routes: Routes,
+}
+
 /// What a deployment reaches beyond its own project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AssistantScope {
-    /// Other projects whose `audience: public` Endpoints its connectors may name; at most 10,
-    /// never its own and never `*`.
+    /// Other projects whose `audience: public` Endpoints its connectors, and whose
+    /// `KnowledgeSource`s its sources, may name; at most 10, never its own and never `*`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
 }
@@ -625,7 +647,8 @@ pub struct AssistantDeploymentSpec {
     /// What the assistant is told before every conversation; at most 8,000 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// The `KnowledgeSource`s of this project it answers from.
+    /// The `KnowledgeSource`s it answers from: one of this project by its name, one of a project
+    /// in `scope.projects` as `{project}/{source}` (T-4281).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<String>,
     /// The Endpoints of this project whose MCP tools it may call.
@@ -664,6 +687,12 @@ pub struct AssistantDeploymentSpec {
     /// What it reaches beyond its own project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<AssistantScope>,
+    /// How it answers: what one answer may use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<AnswerSpec>,
+    /// Whether the chat shows the helpful/unhelpful buttons under an answer; default true.
+    #[serde(default = "default_true")]
+    pub feedback: bool,
 }
 
 impl Kind for AssistantDeploymentSpec {
@@ -714,6 +743,11 @@ impl AssistantDeploymentSpec {
             .map_or(&[], |scope| scope.projects.as_slice())
     }
 
+    /// What one answer may use; `both` when absent.
+    pub fn routes(&self) -> Routes {
+        self.answer.as_ref().map(|a| a.routes).unwrap_or_default()
+    }
+
     /// Every rule of MF-52 that one manifest can be judged by.
     pub fn validate(&self) -> Result<()> {
         names::validate_dns1123_label(&self.public_id).map_err(|_| {
@@ -731,13 +765,38 @@ impl AssistantDeploymentSpec {
             ));
         }
         for source in &self.sources {
-            names::validate_dns1123_label(source).map_err(|_| {
+            let (project, label) = connector_target(source);
+            names::validate_dns1123_label(label).map_err(|_| {
                 name(
                     "sources",
                     source.clone(),
-                    "a source is the name of a KnowledgeSource of this project",
+                    "a source names a KnowledgeSource of this project, or one of a project in scope.projects as {project}/{source}",
                 )
             })?;
+            if project.is_some_and(|project| !self.scope_projects().iter().any(|p| p == project)) {
+                return Err(name(
+                    "sources",
+                    source.clone(),
+                    "a source names another project's KnowledgeSource only when scope.projects lists that project",
+                ));
+            }
+        }
+        match self.routes() {
+            Routes::Rag if self.sources.is_empty() => {
+                return Err(name(
+                    "answer.routes",
+                    "rag".into(),
+                    "routes rag answers from the sources; name at least one",
+                ))
+            }
+            Routes::Data if self.connectors.is_empty() => {
+                return Err(name(
+                    "answer.routes",
+                    "data".into(),
+                    "routes data answers from the connectors; name at least one",
+                ))
+            }
+            _ => {}
         }
         for connector in &self.connectors {
             let (project, endpoint) = connector_target(&connector.endpoint);
@@ -1054,6 +1113,7 @@ impl AssistantDeploymentSpec {
 /// `vendor/name`: at most 100 characters of `a-z0-9._:/-`, both parts present.
 /// The project and Endpoint a connector names: `{project}/{endpoint}` for an Endpoint of a
 /// project in `scope.projects`, the deployment's own project (`None`) otherwise (MF-52, T-4177).
+/// Also how a source names another project's `KnowledgeSource`, `{project}/{source}` (T-4281).
 pub fn connector_target(endpoint: &str) -> (Option<&str>, &str) {
     match endpoint.split_once('/') {
         Some((project, name)) => (Some(project), name),
