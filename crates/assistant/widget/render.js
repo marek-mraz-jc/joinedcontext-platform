@@ -439,11 +439,33 @@ var JCRender = (function () {
       return t && typeof t.question === "string" && typeof t.text === "string" &&
         Number.isInteger(t.turn) && t.turn >= 1 && Array.isArray(t.citations);
     }).slice(-MAX_KEPT).map(function (t) {
-      return { question: t.question.slice(0, 4000), text: t.text.slice(0, 4000), turn: t.turn, citations: t.citations };
+      var turn = { question: t.question.slice(0, 4000), text: t.text.slice(0, 4000), turn: t.turn, citations: t.citations };
+      var askedAt = typeof t.askedAt === "string" && stamp(t.askedAt);
+      var at = typeof t.at === "string" && stamp(t.at);
+      if (askedAt) turn.askedAt = askedAt.datetime;
+      if (at) turn.at = at.datetime;
+      return turn;
     });
     var asked = Number.isInteger(kept.asked) && kept.asked >= 0 ? kept.asked : 0;
     turns.forEach(function (t) { if (t.turn > asked) asked = t.turn; });
     return { conversation: kept.conversation, asked: asked, turns: turns };
+  }
+
+  /**
+   * A message's time (T-4339): `text` HH:MM in the visitor's own time zone, `datetime` and `title`
+   * the UTC minute; null when `at` is no moment.
+   */
+  function stamp(at, locale) {
+    var d = new Date(at);
+    if (at === null || at === undefined || at === "" || isNaN(d.getTime())) return null;
+    var utc = d.toISOString().slice(0, 16);
+    var text;
+    try {
+      text = d.toLocaleTimeString(locale || undefined, { hour: "2-digit", minute: "2-digit" });
+    } catch (e) {
+      text = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+    }
+    return { datetime: utc + "Z", text: text, title: utc.replace("T", " ") + " UTC" };
   }
 
   /** `kept` with one more answered turn, the oldest dropped past MAX_KEPT. */
@@ -535,7 +557,7 @@ var JCRender = (function () {
 
   return {
     monogram: monogram, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
-    followups: followups, restore: restore, remember: remember,
+    followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting,
