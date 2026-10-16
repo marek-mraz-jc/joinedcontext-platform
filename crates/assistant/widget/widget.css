@@ -81,7 +81,8 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-followups { margin-top: 10px; }
 
 /* The first open: the language before anything else (T-4283 item 13). */
-.jc-choosing .jc-actions, .jc-choosing .jc-foot { display: none; }
+/* The close button stays, so a phone's full-screen chooser is never a dead end. */
+.jc-choosing .jc-langs, .jc-choosing .jc-fresh, .jc-choosing .jc-foot { display: none; }
 .jc-choose { padding: 16px 0; text-align: center; }
 .jc-log > .jc-choose:first-child { margin-block: auto; }
 .jc-choose-title { margin: 0 0 16px; font-size: 17px; font-weight: 600; }
@@ -91,7 +92,8 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-choose-list button:first-child { background: var(--accent); color: var(--on-accent); }
 
 /* Sources: a compact numbered list under the answer, two shown, the rest behind one button. */
-.jc-cards { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.jc-sources-title { margin: 10px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.jc-cards { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .jc-log .jc-cards > li { margin: 0; padding: 6px 10px 6px 34px; position: relative; border: 1px solid var(--line);
   border-radius: var(--radius-s); background: var(--bg); font-size: 13px; display: flex; flex-direction: column; }
 .jc-cards > li[hidden] { display: none; }
@@ -147,6 +149,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-form { display: flex; align-items: flex-end; gap: 4px; padding: 4px 4px 4px 14px; border: 1px solid var(--line);
   border-radius: 22px; background: var(--bg); box-shadow: var(--shadow); }
 .jc-form:focus-within { border-color: var(--accent); }
+.jc-form textarea::placeholder { color: var(--muted); opacity: 1; }
 .jc-form textarea { flex: 1; min-height: 36px; max-height: 160px; padding: 7px 0; resize: none; border: 0; outline: none;
   font: inherit; color: inherit; background: transparent; }
 .jc-form .jc-icon-button { flex: none; width: 36px; height: 36px; background: var(--accent); color: var(--on-accent); }
@@ -158,14 +161,21 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-notice.jc-open .jc-disclaimer { white-space: normal; }
 .jc-more { flex: none; padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; cursor: pointer; }
 
-/* A phone's full screen (the desktop panel is about 400 px wide and keeps the subtitle): a long
-   name wraps to two lines rather than losing its end. */
+/* A phone's full screen: the header keeps one line for the name and its subtitle, with a smaller
+   monogram and tighter gaps beside the 44 px controls; a name longer than that ends in an ellipsis
+   and is whole in its tooltip. */
 @media (max-width: 390px) {
-  .jc-name { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; font-size: 15px; }
-  .jc-role { display: none; }
+  .jc-brand { gap: 6px; }
+  .jc-avatar { width: 28px; height: 28px; font-size: 12px; }
+  .jc-actions { gap: 2px; }
+  .jc-name { font-size: 15px; }
+  .jc-role { font-size: 11px; }
 }
 @media (max-width: 480px) {
-  .jc-icon-button, .jc-langs button { min-height: 44px; min-width: 44px; }
+  .jc-icon-button, .jc-answer-tools .jc-icon-button, .jc-langs button { min-height: 44px; min-width: 44px; }
+  .jc-log .jc-cards > li { min-height: 44px; justify-content: center; }
+  .jc-cards a { display: block; padding-block: 4px; }
+  .jc-more-sources { min-height: 44px; }
   .jc-form .jc-icon-button { width: 44px; height: 44px; }
   .jc-suggest button { min-height: 44px; }
   .jc-more { min-height: 24px; }

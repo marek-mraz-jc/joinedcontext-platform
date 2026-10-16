@@ -153,7 +153,9 @@
   if (!named) avatar.appendChild(icon("chat"));
   var title = el("h1", "jc-title");
   if (named) {
-    title.appendChild(el("span", "jc-name", config.title.trim()));
+    var name = el("span", "jc-name", config.title.trim());
+    name.title = config.title.trim();
+    title.appendChild(name);
     title.appendChild(words(el("span", "jc-role"), "assistant"));
   } else {
     title.appendChild(words(el("span", "jc-name"), "assistant"));
@@ -409,8 +411,11 @@
     }
     announce.textContent = body.textContent;
     if (grouped.list.length > 0) {
+      var caption = words(el("p", "jc-sources-title"), "sources");
+      caption.id = ids + "-sources";
+      item.appendChild(caption);
       var list = el("ul", "jc-cards");
-      words(list, "sources", "ariaLabel");
+      list.setAttribute("aria-labelledby", caption.id);
       grouped.list.forEach(function (source, i) {
         var li = el("li", "jc-card");
         li.id = ids + "-" + (i + 1);
