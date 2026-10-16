@@ -128,6 +128,9 @@ pub struct Table {
     pub entity_type: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    /// How many entities match in all, when the Endpoint counted them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dataset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

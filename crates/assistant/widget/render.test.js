@@ -146,6 +146,19 @@ test("Slovak by default, the host page's language when the widget knows it", () 
   assert.equal(language("", ["fi"], { en: {} }), "en");
 });
 
+// T-4280: the visitor's choice in the widget wins; without one the chat opens in Slovak, and only
+// a site's deliberate data-lang (never the host page's lang, which no longer reaches the widget)
+// changes that.
+test("the visitor's stored choice first, else Slovak", () => {
+  const known = { sk: {}, en: {}, cs: {} };
+  assert.equal(language("", ["sk", "en"], known, null), "sk");
+  assert.equal(language("", ["sk", "en"], known, "en"), "en");
+  assert.equal(language("cs", ["sk", "en"], known, "en"), "en");
+  assert.equal(language("", ["sk", "en"], known, "hu"), "sk");
+  assert.equal(language("", ["sk", "en"], known, undefined), "sk");
+  assert.equal(language("en", ["sk", "en"], known, ""), "en");
+});
+
 test("a data table shows at most 50 rows of text and only http(s) links", () => {
   const rows = Array.from({ length: 60 }, (_, i) => [`Stanica ${i}`, i, null]);
   const shown = table({
