@@ -61,12 +61,22 @@ pub enum Rejected {
 }
 
 /// The two halves of a presented key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PresentedKey<'a> {
     /// Which stored key the caller claims to hold.
     pub key_id: &'a str,
     /// The secret to verify against that key's hash.
     pub secret: &'a str,
+}
+
+/// The key id alone: the secret never reaches a log line or an error (T-4320).
+impl std::fmt::Debug for PresentedKey<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PresentedKey")
+            .field("key_id", &self.key_id)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Splits `Authorization: Bearer jc_{keyId}_{secret}` into its parts.
@@ -152,5 +162,21 @@ fn matches_cidr(allowed: &str, caller: &str) -> bool {
             network.to_bits() & mask == caller.to_bits() & mask
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_presented_key_debug_never_shows_the_secret() {
+        let key = PresentedKey {
+            key_id: "k1",
+            secret: "s3cr3t-test",
+        };
+        let text = format!("{key:?}");
+        assert!(!text.contains("s3cr3t-test"), "{text}");
+        assert!(text.contains("k1") && text.contains("<redacted>"), "{text}");
     }
 }
