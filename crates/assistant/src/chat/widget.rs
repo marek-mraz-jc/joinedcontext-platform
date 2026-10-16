@@ -164,6 +164,32 @@ fn not_published() -> Response {
         .into_response()
 }
 
+/// What a person reads on an unknown id: the edge's words for an unknown path (T-4200), no
+/// script and no deployment named, so a draft and a never-created id answer the same bytes.
+const MISSING_PAGE: &str = "<!doctype html>\n<html lang=\"sk\">\n<head>\n<meta charset=\"utf-8\">\n\
+     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+     <title>Stránka neexistuje</title>\n</head>\n<body>\n<main>\n\
+     <h1>Táto stránka neexistuje.</h1>\n<p>Asistent odpovedá na stránke, ktorá ho ponúka.</p>\n\
+     <p lang=\"en\">This page does not exist. The assistant answers on the site that offers it.</p>\n\
+     </main>\n</body>\n</html>\n";
+
+fn missing_page() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; base-uri 'none'; form-action 'none'",
+            ),
+        ],
+        MISSING_PAGE,
+    )
+        .into_response()
+}
+
 /// The launcher of a published deployment; an unknown id gets a 404, so a typo shows in the
 /// site's console instead of a button that opens an error.
 async fn launcher(State(state): State<Arc<ChatState>>, Path(public_id): Path<String>) -> Response {
@@ -183,7 +209,7 @@ async fn full_page(State(state): State<Arc<ChatState>>, Path(public_id): Path<St
 
 fn serve(state: &ChatState, public_id: &str, full: bool) -> Response {
     let Some(deployment) = published(state, public_id) else {
-        return not_published();
+        return missing_page();
     };
     let hosts = state
         .snapshot
@@ -338,5 +364,26 @@ mod tests {
             "&quot;&gt;&lt;script&gt;x&lt;/script&gt;"
         );
         assert_eq!(escaped("a&b'"), "a&amp;b&#39;");
+    }
+
+    /// T-4241 (T-4162 #15): a person who opens an unknown id reads a page in their words, with
+    /// the edge's sentence (T-4200), and nothing that tells one hidden deployment from another.
+    #[test]
+    fn an_unknown_id_is_a_page_in_words_that_names_no_deployment() {
+        let response = missing_page();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let headers = response.headers();
+        assert!(headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        assert_eq!(
+            headers[header::CONTENT_SECURITY_POLICY],
+            "default-src 'none'; base-uri 'none'; form-action 'none'"
+        );
+        assert!(MISSING_PAGE.contains("<html lang=\"sk\">"));
+        assert!(MISSING_PAGE.contains("Táto stránka neexistuje."));
+        assert!(MISSING_PAGE.contains("<p lang=\"en\">This page does not exist."));
+        assert!(!MISSING_PAGE.contains("<script"));
     }
 }
