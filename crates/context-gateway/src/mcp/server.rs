@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 pub(crate) const FAN_OUT: &[&str] = &["query_entities", "list_types", "describe_schema"];
 
 /// How long one member call of a fan-out may take (ADR-N-043 §2.7).
-const MEMBER_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const MEMBER_DEADLINE: Duration = Duration::from_secs(10);
 
 /// How long a whole fan-out may take (ADR-N-043 §2.7).
 const CALL_DEADLINE: Duration = Duration::from_secs(15);

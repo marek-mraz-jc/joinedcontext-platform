@@ -441,6 +441,12 @@ impl Hub {
                 return Answer::Json(error(id, -32602, "`arguments` is an object"));
             }
         };
+        // What one anonymous call costs the broker, bounded before it is routed (T-4261).
+        if self.reads_only {
+            if let Err(why) = tools::anonymous_bounds(name, &mut arguments) {
+                return Answer::Json(result(id, refused(&why, &Value::Null)));
+            }
+        }
         if name == "list_endpoints" {
             return Answer::Json(self.list_endpoints(id, &arguments));
         }
@@ -495,9 +501,26 @@ impl Hub {
                 "the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names",
             ));
         }
+        let forwarded = self.forward(endpoint, subject, name, id.clone(), &params, arguments);
+        if !self.reads_only {
+            return Answer::Json(forwarded.await);
+        }
+        // An anonymous read is answered within the fan-out's member deadline, or as a tool
+        // error: never a stream held open on the broker's time (T-4261).
         Answer::Json(
-            self.forward(endpoint, subject, name, id, &params, arguments)
-                .await,
+            match tokio::time::timeout(server::MEMBER_DEADLINE, forwarded).await {
+                Ok(answer) => answer,
+                Err(_) => {
+                    tracing::warn!(slug = %endpoint.slug, tool = %name, "anonymous call timed out");
+                    result(
+                        id,
+                        refused(
+                            "the broker did not answer within ten seconds; narrow the window or the types and ask again",
+                            &Value::Null,
+                        ),
+                    )
+                }
+            },
         )
     }
 

@@ -129,6 +129,144 @@ pub(crate) fn anonymous_refusal(id: Value, name: &str) -> Value {
     )
 }
 
+/// The widest history window an anonymous temporal read may ask for (T-4261).
+const ANONYMOUS_WINDOW_DAYS: i64 = 31;
+/// The `lastN` an anonymous temporal read gets when it names none, and the most it may name.
+const ANONYMOUS_LAST_N: u64 = 100;
+/// The page cap every `limit` argument already publishes.
+const PAGE_CAP: u64 = 1000;
+/// The shortest aggregation period an anonymous read may ask for, in seconds (`PT1H`).
+const ANONYMOUS_AGGR_SECONDS: f64 = 3600.0;
+
+/// Bounds what one anonymous temporal read makes the broker read (T-4261, Architecture/07 §2):
+/// a window of at most 31 days, `type` or `id`, `lastN` at most 100 and 100 when absent,
+/// `limit` within the page cap, and aggregation periods of an hour or more. Any other tool
+/// passes untouched; the error names the bound it broke.
+pub(crate) fn anonymous_bounds(
+    name: &str,
+    arguments: &mut Map<String, Value>,
+) -> Result<(), String> {
+    if !matches!(name, "query_temporal" | "retrieve_temporal") {
+        return Ok(());
+    }
+    let named = |key: &str| {
+        arguments.get(key).is_some_and(|value| match value {
+            Value::Array(items) => !items.is_empty(),
+            Value::String(text) => !text.is_empty(),
+            Value::Null => false,
+            _ => true,
+        })
+    };
+    if !named("type") && !named("id") {
+        return Err(format!(
+            "`{name}` without a token names `type` or `id`: a history read over every Entity is not offered anonymously"
+        ));
+    }
+    let instant = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+    };
+    let window = match (
+        arguments.get("timerel").and_then(Value::as_str),
+        instant("timeAt"),
+        instant("endTimeAt"),
+    ) {
+        (Some("between"), Some(start), Some(end)) if end > start => end - start,
+        _ => {
+            return Err(format!(
+                "`{name}` without a token reads a window: timerel between, with timeAt before endTimeAt, \
+                 both ISO 8601 instants, at most {ANONYMOUS_WINDOW_DAYS} days apart"
+            ))
+        }
+    };
+    if window > chrono::Duration::days(ANONYMOUS_WINDOW_DAYS) {
+        return Err(format!(
+            "`{name}` without a token reads at most {ANONYMOUS_WINDOW_DAYS} days between timeAt and endTimeAt"
+        ));
+    }
+    match arguments.get("lastN") {
+        None => {
+            arguments.insert("lastN".to_owned(), Value::from(ANONYMOUS_LAST_N));
+        }
+        Some(n)
+            if n.as_u64()
+                .is_some_and(|n| (1..=ANONYMOUS_LAST_N).contains(&n)) => {}
+        Some(_) => {
+            return Err(format!(
+                "`lastN` without a token is 1 to {ANONYMOUS_LAST_N}"
+            ))
+        }
+    }
+    if let Some(limit) = arguments.get("limit") {
+        if !limit.as_u64().is_some_and(|n| (1..=PAGE_CAP).contains(&n)) {
+            return Err(format!("`limit` is 1 to {PAGE_CAP}"));
+        }
+    }
+    if arguments.contains_key("aggrMethods") {
+        let period = arguments
+            .get("aggrPeriodDuration")
+            .and_then(Value::as_str)
+            .and_then(duration_seconds);
+        if !period.is_some_and(|seconds| seconds >= ANONYMOUS_AGGR_SECONDS) {
+            return Err(
+                "`aggrMethods` without a token needs an aggrPeriodDuration of at least PT1H"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The seconds of an ISO 8601 duration (`P1DT2H`, `PT1.5H`, `P2W`), a year taken as 365 days
+/// and a month as 30; `None` when it is not one.
+fn duration_seconds(text: &str) -> Option<f64> {
+    let rest = text.strip_prefix('P')?;
+    let (date, time) = match rest.split_once('T') {
+        Some((date, time)) if !time.is_empty() => (date, Some(time)),
+        Some(_) => return None,
+        None => (rest, None),
+    };
+    let day = 86_400.0;
+    let mut total = 0.0;
+    let mut any = false;
+    for (part, units) in [
+        (
+            date,
+            &[
+                ('Y', 365.0 * day),
+                ('M', 30.0 * day),
+                ('W', 7.0 * day),
+                ('D', day),
+            ][..],
+        ),
+        (
+            time.unwrap_or(""),
+            &[('H', 3600.0), ('M', 60.0), ('S', 1.0)][..],
+        ),
+    ] {
+        let mut number = String::new();
+        let mut next = 0;
+        for c in part.chars() {
+            if c.is_ascii_digit() || c == '.' {
+                number.push(c);
+                continue;
+            }
+            // Each unit once, in its order.
+            let at = units[next..].iter().position(|(unit, _)| *unit == c)? + next;
+            total += number.parse::<f64>().ok()? * units[at].1;
+            number.clear();
+            next = at + 1;
+            any = true;
+        }
+        if !number.is_empty() {
+            return None;
+        }
+    }
+    any.then_some(total)
+}
+
 /// Keeps in a `tools/list` answer only what [`anonymous_may`] admits; an entry without a name
 /// is dropped too.
 pub(crate) fn keep_anonymous(tools: &mut Vec<Value>) {
@@ -1084,10 +1222,157 @@ pub(crate) fn output_schema(tool: &Tool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        anonymous_may, anonymous_refusal, keep_anonymous, Shape, Tool, ANONYMOUS_TOOLS, TOOLS,
+        anonymous_bounds, anonymous_may, anonymous_refusal, duration_seconds, keep_anonymous,
+        Shape, Tool, ANONYMOUS_TOOLS, TOOLS,
     };
     use jc_core::kinds::Operation;
-    use serde_json::json;
+    use serde_json::{json, Map, Value};
+
+    /// A day of AirQualityObserved history, the one shape an anonymous caller is let through.
+    fn day() -> Map<String, Value> {
+        json!({
+            "type": ["AirQualityObserved"],
+            "timerel": "between",
+            "timeAt": "2026-10-12T00:00:00Z",
+            "endTimeAt": "2026-10-13T00:00:00Z",
+        })
+        .as_object()
+        .cloned()
+        .expect("an object")
+    }
+
+    fn bounded(name: &str, change: Value) -> Result<Map<String, Value>, String> {
+        let mut arguments = day();
+        for (key, value) in change.as_object().expect("an object") {
+            if value.is_null() {
+                arguments.remove(key);
+            } else {
+                arguments.insert(key.clone(), value.clone());
+            }
+        }
+        anonymous_bounds(name, &mut arguments).map(|()| arguments)
+    }
+
+    /// T-4261: a window of 31 days passes, one second more is refused, by its bound.
+    #[test]
+    fn an_anonymous_window_over_31_days_is_refused() {
+        assert!(bounded(
+            "query_temporal",
+            json!({ "endTimeAt": "2026-11-12T00:00:00Z" })
+        )
+        .is_ok());
+        let refused = bounded(
+            "query_temporal",
+            json!({ "endTimeAt": "2026-11-12T00:00:01Z" }),
+        )
+        .expect_err("32 days are refused");
+        assert!(refused.contains("at most 31 days"), "{refused}");
+    }
+
+    /// T-4261: `before`, `after`, a missing end, an end before the start and an unparsable
+    /// instant are no window.
+    #[test]
+    fn an_anonymous_read_without_a_window_is_refused() {
+        for change in [
+            json!({ "timerel": "before", "endTimeAt": null }),
+            json!({ "timerel": "after", "endTimeAt": null }),
+            json!({ "endTimeAt": null }),
+            json!({ "endTimeAt": "2026-10-11T00:00:00Z" }),
+            json!({ "timeAt": "yesterday" }),
+            json!({ "timerel": null }),
+        ] {
+            let refused = bounded("retrieve_temporal", change.clone()).expect_err("no window");
+            assert!(refused.contains("timerel between"), "{change}: {refused}");
+        }
+    }
+
+    /// T-4261, decided: `lastN` above 100 is refused, not clamped, so the caller learns why its
+    /// answer is short; an absent one becomes 100.
+    #[test]
+    fn an_anonymous_last_n_is_100_when_absent_and_more_is_refused() {
+        assert_eq!(
+            bounded("query_temporal", json!({})).expect("ok")["lastN"],
+            json!(100)
+        );
+        assert_eq!(
+            bounded("query_temporal", json!({ "lastN": 7 })).expect("ok")["lastN"],
+            json!(7)
+        );
+        for n in [json!(1000), json!(101), json!(0), json!("5")] {
+            let refused = bounded("query_temporal", json!({ "lastN": n })).expect_err("refused");
+            assert!(
+                refused.contains("`lastN` without a token is 1 to 100"),
+                "{refused}"
+            );
+        }
+    }
+
+    /// T-4261: a history read over every Entity names neither `type` nor `id`.
+    #[test]
+    fn an_anonymous_read_without_type_or_id_is_refused() {
+        for change in [
+            json!({ "type": null }),
+            json!({ "type": [] }),
+            json!({ "type": null, "id": [] }),
+        ] {
+            let refused = bounded("query_temporal", change).expect_err("refused");
+            assert!(refused.contains("names `type` or `id`"), "{refused}");
+        }
+        assert!(bounded(
+            "query_temporal",
+            json!({ "type": null, "id": ["urn:ngsi-ld:AirQualityObserved:1"] })
+        )
+        .is_ok());
+        assert!(bounded("query_temporal", json!({ "limit": 1000 })).is_ok());
+        assert!(bounded("query_temporal", json!({ "limit": 1001 })).is_err());
+    }
+
+    /// T-4261: aggregation periods under an hour, and aggregation with no period, are refused.
+    #[test]
+    fn an_anonymous_aggregation_period_under_an_hour_is_refused() {
+        for period in [
+            json!("PT1M"),
+            json!("PT59M59S"),
+            json!("P"),
+            json!("1H"),
+            Value::Null,
+        ] {
+            let refused = bounded(
+                "query_temporal",
+                json!({ "aggrMethods": "avg", "aggrPeriodDuration": period }),
+            )
+            .expect_err("refused");
+            assert!(refused.contains("at least PT1H"), "{refused}");
+        }
+        for period in ["PT1H", "PT60M", "P1D", "P1W", "P1M", "PT0.5H30M"] {
+            assert!(
+                bounded(
+                    "query_temporal",
+                    json!({ "aggrMethods": "avg", "aggrPeriodDuration": period })
+                )
+                .is_ok(),
+                "{period}"
+            );
+        }
+    }
+
+    #[test]
+    fn durations_parse_as_iso_8601_and_nothing_else() {
+        assert_eq!(duration_seconds("PT1H"), Some(3600.0));
+        assert_eq!(duration_seconds("P1DT1M"), Some(86_460.0));
+        assert_eq!(duration_seconds("PT1.5S"), Some(1.5));
+        for bad in ["", "P", "PT", "P1H", "PT1D", "PT1M1H", "P1", "PTH", "P-1D"] {
+            assert_eq!(duration_seconds(bad), None, "{bad}");
+        }
+    }
+
+    /// T-4261: the bounds are the temporal tools' alone.
+    #[test]
+    fn the_bounds_leave_every_other_tool_untouched() {
+        let mut arguments = Map::new();
+        assert!(anonymous_bounds("query_entities", &mut arguments).is_ok());
+        assert!(arguments.is_empty());
+    }
 
     /// T-4168: every tool an anonymous caller may use reads, and every tool that writes, or that
     /// nobody named, is kept from it.
