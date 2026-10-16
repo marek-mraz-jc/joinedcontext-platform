@@ -186,7 +186,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   .jc-more-sources { min-height: 44px; }
   .jc-form .jc-icon-button { width: 44px; height: 44px; }
   .jc-suggest button { min-height: 44px; }
-  .jc-more { min-height: 44px; min-width: 44px; padding: 0 6px; }
+  .jc-more { min-height: 44px; min-width: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--pill); text-decoration: none; }
   .jc-notice { align-items: center; margin-top: 2px; }
 }
 @media (prefers-reduced-motion: reduce) {
