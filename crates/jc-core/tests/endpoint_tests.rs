@@ -197,6 +197,16 @@ fn endpoint_spec_invariants_and_rate_limits() {
             .expect("valid URN"),
     );
     assert!(bad_policy_type.validate().is_err());
+
+    // EP-117: a Policy URN outside the prefixed shape would bind no Policy, so it is refused
+    let mut unprefixed = ep.spec.clone();
+    unprefixed.policy_ref = Some(
+        "urn:ngsi-ld:Policy:public-air-quality"
+            .parse::<Urn>()
+            .expect("valid URN"),
+    );
+    let refused = unprefixed.validate().expect_err("an unprefixed policyRef");
+    assert!(refused.to_string().contains("policyRef"), "{refused}");
 }
 
 #[test]

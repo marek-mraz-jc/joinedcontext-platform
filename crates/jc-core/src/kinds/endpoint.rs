@@ -657,6 +657,15 @@ impl EndpointSpec {
                     got: policy.entity_type().to_string(),
                 });
             }
+            // EP-117: the gateway and the Portal bind the Policy named by the prefixed shape;
+            // any other shape would bind none and the Endpoint would grant nothing, silently.
+            if policy.prefixed().is_none() {
+                return Err(Error::Name {
+                    field: "policyRef",
+                    value: policy.to_string(),
+                    reason: "a policyRef is urn:ngsi-ld:Policy:{orgDomain}:{space}:{name} (EP-117)",
+                });
+            }
         }
 
         let mut seen = std::collections::BTreeSet::new();
