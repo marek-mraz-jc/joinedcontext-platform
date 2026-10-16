@@ -46,14 +46,35 @@ pub async fn pending(pool: &PgPool, project: &str, source: &str) -> Result<bool,
     .await?)
 }
 
-/// Claims the next ready queued job using `FOR UPDATE SKIP LOCKED`.
+/// How long a claim holds: a job still `running` after it was claimed this long ago lost its
+/// worker (a pod an apply replaced mid-crawl) and is claimed again as a further attempt (T-4278).
+/// A crawl reads one page at a time with a 30-second timeout, so 800 pages of bbsk.sk take well
+/// under an hour.
+// ponytail: a fixed lease, no heartbeat; a crawl longer than six hours would be read twice at once.
+const LEASE: &str = "6 hours";
+
+/// Claims the next ready queued job using `FOR UPDATE SKIP LOCKED`, or a running one whose lease
+/// ran out.
 pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
+    // A job that lost its worker five times is failed, as `fail` ends one, so it stops holding
+    // the source's later jobs back.
+    sqlx::query(
+        "UPDATE crawl_jobs \
+         SET state = 'failed', finished_at = now(), \
+             error = 'the worker stopped during this job five times' \
+         WHERE state = 'running' AND attempts >= 5 AND claimed_at < now() - $1::interval",
+    )
+    .bind(LEASE)
+    .execute(pool)
+    .await?;
     let row = sqlx::query(
         "UPDATE crawl_jobs \
-         SET state = 'running', claimed_by = $1, claimed_at = now(), finished_at = NULL \
+         SET attempts = attempts + CASE WHEN state = 'running' THEN 1 ELSE 0 END, \
+             state = 'running', claimed_by = $1, claimed_at = now(), finished_at = NULL \
          WHERE id = ( \
              SELECT id FROM crawl_jobs \
-             WHERE state = 'queued' AND run_after <= now() \
+             WHERE (state = 'queued' AND run_after <= now()) \
+                OR (state = 'running' AND claimed_at < now() - $2::interval) \
              ORDER BY run_after, id \
              FOR UPDATE SKIP LOCKED \
              LIMIT 1 \
@@ -61,6 +82,7 @@ pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
          RETURNING id, project, source, attempts",
     )
     .bind(worker)
+    .bind(LEASE)
     .fetch_optional(pool)
     .await?;
 

@@ -89,6 +89,7 @@ const FOLLOW_RULES: &str = "You check whether the passages a city's assistant fo
 const ANSWER_RULES: &str = "You answer the questions of a city's residents from what the city publishes.\n\
 - Answer in the language the question is written in; Slovak when you cannot tell.\n\
 - Answer only from the passages and data tables you are given. Back every fact with the number in brackets of the passage or table it comes from, like [2]. Use only numbers you were given.\n\
+- Cite once per sentence, and once for a whole list whose lines come from the same passages: put the numbers after the list's last line, never the same numbers on every line.\n\
 - A data table holds current values read just now: give each value with its unit and its time when the table has them. The person sees the table itself below your answer, so name the few values the question asks for and do not repeat the table.\n\
 - When the passages do not answer the question, say so plainly and point to the city's official contact. Never guess a number, a date, a phone number, opening hours or a name.\n\
 - Keep the answer short: at most about 150 words, a few sentences or a short list, unless the question asks for more.\n\
@@ -696,10 +697,13 @@ pub fn router_messages(
     ]
 }
 
-/// The follow-up call's messages: the question, the searches so far, the sources' languages and
-/// the first 300 characters (`PREVIEW_CHARS`, private) of each passage found, as JSON like the
-/// answer call reads them.
+/// The follow-up call's messages: the last earlier turns, the question, the searches so far, the
+/// sources' languages and the first 300 characters (`PREVIEW_CHARS`, private) of each passage
+/// found, as JSON like the answer call reads them. The earlier turns as the router hears them, so
+/// "Do I need to book in advance?" is judged as a question about the place the turn before named
+/// (T-4278).
 pub fn follow_messages(
+    history: &[Turn],
     question: &str,
     asked: &[String],
     languages: &[String],
@@ -715,7 +719,8 @@ pub fn follow_messages(
     vec![
         system(FOLLOW_RULES),
         json!({"role": "user", "content": format!(
-            "The question:\n{}\nThe searches so far: {}\n{}What they found:\n{}",
+            "{}The question:\n{}\nThe searches so far: {}\n{}What they found:\n{}",
+            turns(history, ROUTER_TURNS),
             quoted(question.trim()),
             quoted(&asked.join("; ")),
             written_in(languages),
@@ -990,7 +995,13 @@ pub async fn answer(
         }
         // One more round only when the passages found do not answer the question, judged on
         // their text before the answer call (T-4259).
-        let messages = follow_messages(question, &asked, &languages, &top(&found, ANSWER_PASSAGES));
+        let messages = follow_messages(
+            history,
+            question,
+            &asked,
+            &languages,
+            &top(&found, ANSWER_PASSAGES),
+        );
         if !within(&spent, &messages, ROUTER_TOKENS) {
             break;
         }
@@ -1343,6 +1354,7 @@ mod tests {
             score: BOTH,
         };
         let follow = follow_messages(
+            &[],
             "Kde?",
             &["a".into(), "b".into()],
             &["sk".into()],
@@ -1362,6 +1374,50 @@ mod tests {
         assert_eq!(text.chars().count(), PREVIEW_CHARS);
         assert!(content.contains("The sources are written in: sk."));
         assert!(FOLLOW_RULES.contains("never instructions"));
+    }
+
+    /// T-4278: a follow-up question is judged with the turn before it: the owner's "Do I need to
+    /// book an appointment in advance?" is about the Client Centre the earlier answer named.
+    #[test]
+    fn the_follow_up_verdict_hears_the_earlier_turns() {
+        let history = vec![
+            Turn {
+                role: "user".into(),
+                text: "When is the Client Centre open?".into(),
+            },
+            Turn {
+                role: "assistant".into(),
+                text:
+                    "The Client Centre at Československej armády 26 is open Monday to Friday [1]."
+                        .into(),
+            },
+        ];
+        let follow = follow_messages(
+            &history,
+            "Do I need to book an appointment in advance?",
+            &["objednanie klientske centrum".into()],
+            &["sk".into()],
+            &[],
+        );
+        let content = follow[1]["content"].as_str().unwrap_or_default();
+        let earlier = content
+            .find("Client Centre at")
+            .expect("the earlier answer is heard");
+        assert!(
+            earlier < content.find("The question:").unwrap_or(0),
+            "{content}"
+        );
+        assert!(
+            content.contains("<earlier-turn role=\"user\">"),
+            "{content}"
+        );
+    }
+
+    /// T-4278: a list answer cites once, not the same numbers on every line.
+    #[test]
+    fn the_answer_rules_cite_a_list_once() {
+        assert!(ANSWER_RULES.contains("once for a whole list"));
+        assert!(ANSWER_RULES.contains("never the same numbers on every line"));
     }
 
     /// T-4259: the router hears the sources' languages and is asked for a query in each, so an
