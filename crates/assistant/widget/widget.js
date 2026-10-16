@@ -67,7 +67,11 @@
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
   var offered = (config.languages || []).filter(function (l) { return WORDS[l]; });
-  var lang = JCRender.language(params.get("lang"), config.languages, WORDS);
+  // The visitor's own choice in the switch, kept per browser (T-4280); storage may be off.
+  var LANG_KEY = "jc-chat-lang";
+  var chosen = null;
+  try { chosen = localStorage.getItem(LANG_KEY); } catch (e) { /* not kept */ }
+  var lang = JCRender.language(params.get("lang"), config.languages, WORDS, chosen);
   var w = WORDS[lang];
   if (/^#[0-9a-fA-F]{6}$/.test(config.color || "")) {
     document.documentElement.style.setProperty("--accent", config.color);
@@ -107,7 +111,10 @@
       option.lang = code;
       picker.appendChild(option);
     });
-    picker.addEventListener("change", function () { relabel(picker.value); });
+    picker.addEventListener("change", function () {
+      try { localStorage.setItem(LANG_KEY, picker.value); } catch (e) { /* not kept */ }
+      relabel(picker.value);
+    });
     actions.appendChild(picker);
   }
   var fresh = button("jc-fresh", "fresh");
