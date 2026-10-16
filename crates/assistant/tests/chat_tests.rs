@@ -1953,8 +1953,14 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         router: Some("test/router".into()),
         answer: Some("test/answer".into()),
         provider: Some(jc_core::kinds::ProviderRouting {
-            order: vec!["cerebras".into()],
+            order: Some(vec!["cerebras".into()]),
+            sort: Some(jc_core::kinds::ProviderSort::Latency),
             allow_fallbacks: Some(false),
+        }),
+        reasoning: Some(jc_core::kinds::StageReasoning {
+            router: Some(jc_core::kinds::ReasoningEffort::None),
+            judge: None,
+            answer: Some(jc_core::kinds::ReasoningEffort::Medium),
         }),
     });
     let w = world("chatrouted", sources_only).await;
@@ -2034,12 +2040,16 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     );
     let (router, answering) = (calls_of(&calls, Some(ROUTER))[0], calls_of(&calls, None)[0]);
     assert_eq!(router["model"], "test/router");
-    // T-4292: the deployment's providers ride on every call, in OpenRouter's own field names.
-    let pinned = json!({"order": ["cerebras"], "allow_fallbacks": false});
+    // T-4292: the deployment's providers ride on every call, in OpenRouter's own field names;
+    // a sort beside the order too (T-4360).
+    let pinned = json!({"order": ["cerebras"], "sort": "latency", "allow_fallbacks": false});
     assert!(
         calls.iter().all(|(_, body)| body["provider"] == pinned),
         "{calls:?}"
     );
+    // T-4360: each stage asks with its own reasoning effort, `none` as OpenRouter turns it off.
+    assert_eq!(router["reasoning"], json!({"enabled": false}));
+    assert_eq!(answering["reasoning"], json!({"effort": "medium"}));
     assert_eq!(router["response_format"]["type"], "json_object");
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
     // The router hears the sources' language.
@@ -2115,8 +2125,8 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
 }
 
 /// A row of `answer_timings`: deployment, cached, model calls, then the first token, the total
-/// and the route, search, judge and answer stages in milliseconds, and whether the judgement
-/// was skipped.
+/// and the route, search, judge and answer stages in milliseconds, whether the judgement was
+/// skipped.
 type Timing = (
     String,
     bool,
@@ -2140,11 +2150,30 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
     sources_only.spec.connectors.clear();
     let w = world("chatparallel", sources_only).await;
     let slow = std::time::Duration::from_millis(700);
+    // Each reply names the provider OpenRouter served it on (T-4360).
+    let served = |content: &str, provider: &str| {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "provider": provider,
+            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+        }))
+    };
+    let answer = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({"provider": "DeepInfra", "choices": [{"delta": {"content": "Od 9:00 do 18:00 [1]."}}]}),
+        json!({"provider": "DeepInfra", "choices": [], "usage": {"prompt_tokens": 300, "completion_tokens": 10, "total_tokens": 310}})
+    );
     script_routed(
         &w.proxy,
-        vec![completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}"}), 100).set_delay(slow)],
-        vec![completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 50).set_delay(slow)],
-        vec![streamed(&["Od 9:00 do 18:00 [1]."], 300, 10)],
+        vec![served(
+            "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}",
+            "Google Vertex",
+        )
+        .set_delay(slow)],
+        vec![served("{\"answers\": true}", "Groq").set_delay(slow)],
+        vec![ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(answer)],
     )
     .await;
     let (_, events, _) = answer_of(
@@ -2171,6 +2200,14 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
     assert_eq!(done["modelCalls"], 3);
     // The judgement reads the passages' text as data, from this deployment's sources only.
     let calls = model_calls(&w.proxy).await;
+    // T-4360: a deployment without `model` asks for OpenRouter's fastest provider, with fallbacks,
+    // and every stage reasons at `low`.
+    assert!(
+        calls.iter().all(|(_, body)| body["provider"]
+            == json!({"sort": "latency", "allow_fallbacks": true})
+            && body["reasoning"] == json!({"effort": "low"})),
+        "{calls:?}"
+    );
     let judged = calls_of(&calls, Some(JUDGE))[0]["messages"][1]["content"]
         .as_str()
         .expect("passages");
@@ -2193,7 +2230,22 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
     .fetch_all(&mut *tx)
     .await
     .expect("timings");
+    // The provider OpenRouter served each stage on, as its reply named it (T-4360).
+    let providers: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT router_provider, judge_provider, answer_provider FROM answer_timings",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("providers");
     tx.rollback().await.expect("rollback");
+    assert_eq!(
+        providers,
+        (
+            Some("Google Vertex".into()),
+            Some("Groq".into()),
+            Some("DeepInfra".into())
+        )
+    );
     assert_eq!(rows.len(), 1, "one row per answer");
     let row = &rows[0];
     assert_eq!((row.0.as_str(), row.1, row.2), ("obcania", false, 3));
@@ -2204,7 +2256,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         row.3.is_some() && row.6.is_some() && row.8.is_some(),
         "{row:?}"
     );
-    // Times and counts only: no column a question or an answer could sit in.
+    // Times, counts and provider names only: no column a question or an answer could sit in.
     let mut columns: Vec<String> = sqlx::query_scalar(
         "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'answer_timings'",
     )
@@ -2216,15 +2268,18 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         columns,
         [
             "answer_ms",
+            "answer_provider",
             "at",
             "cached",
             "deployment",
             "first_token_ms",
             "judge_ms",
+            "judge_provider",
             "judge_skipped",
             "model_calls",
             "project",
             "route_ms",
+            "router_provider",
             "search_ms",
             "total_ms"
         ]

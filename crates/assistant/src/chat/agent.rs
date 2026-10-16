@@ -165,6 +165,8 @@ pub struct Ask<'a> {
     pub answer_model: Option<&'a str>,
     /// The OpenRouter providers both are asked on (`model.provider`, T-4292).
     pub provider: Option<&'a jc_core::kinds::ProviderRouting>,
+    /// Each call's reasoning effort (`model.reasoning`, T-4360).
+    pub reasoning: jc_core::kinds::StageReasoning,
     /// The most tokens the answer call may write (`budget.outputTokensPerAnswer`).
     pub output_tokens: u64,
     /// Answers to first questions asked before (T-4139).
@@ -314,7 +316,7 @@ pub(super) async fn send(events: &Sender<Event>, event: Event) {
 
 /// What one question spent, read and written, as the provider counted it, and what the final
 /// `done` event reports beside it (API/05 §1.3).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Spent {
     pub total: u64,
     pub input: u64,
@@ -331,6 +333,17 @@ pub struct Spent {
     pub uncosted: u64,
     /// How long each stage took (T-4293).
     pub stages: Stages,
+    /// The provider OpenRouter served each stage's last call on (T-4360).
+    pub providers: Providers,
+}
+
+/// The provider that served the router, judge and answer calls of one answer, as OpenRouter names
+/// it; `None` for a stage that made no call or a provider that went unnamed (T-4360).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Providers {
+    pub router: Option<String>,
+    pub judge: Option<String>,
+    pub answer: Option<String>,
 }
 
 /// The wall time of each stage of one answer, in milliseconds; `None` for a stage that did not

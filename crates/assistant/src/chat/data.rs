@@ -140,6 +140,7 @@ pub async fn answer(
         max_tokens: ask.output_tokens,
         json: false,
         provider: ask.provider,
+        reasoning: ask.reasoning.answer.unwrap_or_default(),
     };
     // A call repeated with the same arguments is answered from the question's own results.
     let mut seen: HashMap<String, String> = HashMap::new();
@@ -218,6 +219,7 @@ pub async fn answer(
             }
         };
         spent.add(&completion);
+        spent.providers.answer.clone_from(&completion.provider);
         if completion.calls.is_empty() || !allow {
             let text = completion.text.trim().to_owned();
             if text.is_empty() {

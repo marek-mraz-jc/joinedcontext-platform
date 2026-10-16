@@ -43,8 +43,9 @@ fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
 }
 
 /// Why the body's OpenRouter `provider` field is refused, or `None` when it is absent or holds
-/// only `order` (1 to 8 provider slugs) and `allow_fallbacks` (a boolean); it is sent as is
-/// otherwise (T-4292, MF-52). A body that is not a JSON object is left to the provider.
+/// only `order` (1 to 8 provider slugs), `sort` (`latency`, `throughput` or `price`; T-4360), at
+/// least one of the two, and `allow_fallbacks` (a boolean); it is sent as is otherwise (T-4292,
+/// MF-52). A body that is not a JSON object is left to the provider.
 fn provider_refusal(body: &Bytes) -> Option<&'static str> {
     use jc_core::kinds::assistant::{is_provider_slug, MAX_PROVIDERS};
     let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(body) else {
@@ -52,21 +53,32 @@ fn provider_refusal(body: &Bytes) -> Option<&'static str> {
     };
     let provider = map.get("provider")?;
     let Some(fields) = provider.as_object() else {
-        return Some("provider is an object of order and allow_fallbacks");
+        return Some("provider is an object of order, sort and allow_fallbacks");
     };
     if fields
         .keys()
-        .any(|k| k != "order" && k != "allow_fallbacks")
+        .any(|k| !["order", "sort", "allow_fallbacks"].contains(&k.as_str()))
     {
-        return Some("provider takes only order and allow_fallbacks");
+        return Some("provider takes only order, sort and allow_fallbacks");
     }
-    let order = fields.get("order").and_then(Value::as_array);
-    let slugs_ok = order.is_some_and(|o| {
-        (1..=MAX_PROVIDERS).contains(&o.len())
-            && o.iter().all(|s| s.as_str().is_some_and(is_provider_slug))
+    if !fields.contains_key("order") && !fields.contains_key("sort") {
+        return Some("provider names an order, a sort or both");
+    }
+    let slugs_ok = fields.get("order").is_none_or(|order| {
+        order.as_array().is_some_and(|o| {
+            (1..=MAX_PROVIDERS).contains(&o.len())
+                && o.iter().all(|s| s.as_str().is_some_and(is_provider_slug))
+        })
     });
     if !slugs_ok {
         return Some("provider.order names 1 to 8 provider slugs of a-z 0-9 . _ / -");
+    }
+    if fields.get("sort").is_some_and(|sort| {
+        !sort
+            .as_str()
+            .is_some_and(|s| ["latency", "throughput", "price"].contains(&s))
+    }) {
+        return Some("provider.sort is latency, throughput or price");
     }
     if fields
         .get("allow_fallbacks")
@@ -837,7 +849,8 @@ mod tests {
     }
 
     /// T-4292: OpenRouter's `provider` passes as written; a field or slug out of bounds is refused
-    /// before the provider is asked, and a body without one is not looked at.
+    /// before the provider is asked, and a body without one is not looked at. A sort ranks the
+    /// providers, with or without an order, and only OpenRouter's three are passed (T-4360).
     #[test]
     fn a_provider_field_passes_only_in_its_bounds() {
         let refusal = |body: &str| provider_refusal(&Bytes::from(body.to_owned()));
@@ -845,13 +858,16 @@ mod tests {
             r#"{"model":"a/b","messages":[]}"#,
             r#"{"provider":{"order":["cerebras"]}}"#,
             r#"{"provider":{"order":["groq","deepinfra/fp8"],"allow_fallbacks":false}}"#,
+            r#"{"provider":{"sort":"latency","allow_fallbacks":true}}"#,
+            r#"{"provider":{"order":["groq"],"sort":"price"}}"#,
             "not json",
         ] {
             assert_eq!(refusal(ok), None, "{ok}");
         }
         for bad in [
             r#"{"provider":"cerebras"}"#,
-            r#"{"provider":{"order":["groq"],"sort":"price"}}"#,
+            r#"{"provider":{"sort":"fastest"}}"#,
+            r#"{"provider":{"sort":["latency"]}}"#,
             r#"{"provider":{"order":["groq"],"data_collection":"allow"}}"#,
             r#"{"provider":{"order":[]}}"#,
             r#"{"provider":{"allow_fallbacks":true}}"#,
