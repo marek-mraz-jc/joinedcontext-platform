@@ -474,3 +474,70 @@ async fn an_agent_with_only_the_address_reads_ngsi_ld_from_catalogue_to_history(
     assert_eq!(forwarded[1]["params"]["name"], "query_temporal");
     assert_eq!(forwarded[1]["params"]["arguments"], history);
 }
+
+fn answer(body: String) -> Value {
+    serde_json::from_str(&body).expect("JSON")
+}
+
+/// The `tools/call` messages the broker's views received, in order.
+fn forwarded(broker: &common::BrokerStub) -> Vec<Value> {
+    broker
+        .hops()
+        .iter()
+        .filter(|hop| hop.path == "/mcp")
+        .map(|hop| serde_json::from_slice(&hop.body).expect("a JSON-RPC message"))
+        .collect()
+}
+
+/// Two years of every AirQualityObserved's history, with no lastN.
+fn years() -> Value {
+    json!({
+        "endpoint": OPEN,
+        "type": ["AirQualityObserved"],
+        "timerel": "between",
+        "timeAt": "2024-10-01T00:00:00Z",
+        "endTimeAt": "2026-10-01T00:00:00Z",
+    })
+}
+
+/// T-4261: without a token a history read is bounded before the broker sees it: two years are
+/// refused by name, a day goes on with lastN 100 filled in.
+#[tokio::test]
+async fn without_a_token_query_temporal_reads_a_bounded_window() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = app(&broker.url, &realm);
+
+    let (status, _, body) = raw(app.clone(), rpc(None, call("query_temporal", years()))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(answer(body.clone())["result"]["isError"], true, "{body}");
+    assert!(body.contains("at most 31 days"), "{body}");
+    assert!(forwarded(&broker).is_empty(), "nothing reached the broker");
+
+    let mut day = years();
+    day["timeAt"] = json!("2026-09-30T00:00:00Z");
+    let (status, _, body) = raw(app, rpc(None, call("query_temporal", day))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(answer(body.clone())["result"]["isError"], true, "{body}");
+    let sent = forwarded(&broker);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["params"]["arguments"]["lastN"], json!(100));
+}
+
+/// T-4261: a signed-in caller keeps the Endpoint Policy's own limits: the same two years go on
+/// as asked, nothing filled in.
+#[tokio::test]
+async fn a_signed_in_caller_is_not_held_to_the_anonymous_bounds() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = app(&broker.url, &realm);
+    let token = hub_token(&realm, "openid endpoint:*");
+    let (status, _, body) = raw(app, rpc(Some(&token), call("query_temporal", years()))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(answer(body.clone())["result"]["isError"], true, "{body}");
+    let sent = forwarded(&broker);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let mut asked = years();
+    asked.as_object_mut().expect("an object").remove("endpoint");
+    assert_eq!(sent[0]["params"]["arguments"], asked);
+}
