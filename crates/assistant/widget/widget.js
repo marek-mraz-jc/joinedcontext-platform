@@ -27,7 +27,7 @@
       unreachable: "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.",
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
-      choose: "Vyberte jazyk", moreSources: "Ďalšie zdroje", moreInfo: "Viac", lessInfo: "Menej" },
+      choose: "Vyberte jazyk", moreSources: "Ďalšie zdroje", fewerSources: "Menej zdrojov", moreInfo: "Viac", lessInfo: "Menej" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…", sources: "Sources",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -46,7 +46,7 @@
       unreachable: "The assistant cannot reach its model right now. Try again in a minute.",
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
-      choose: "Choose your language", moreSources: "More sources", moreInfo: "More", lessInfo: "Less" },
+      choose: "Choose your language", moreSources: "More sources", fewerSources: "Fewer sources", moreInfo: "More", lessInfo: "Less" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…", sources: "Zdroje",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -65,7 +65,7 @@
       unreachable: "Asistent se teď nemůže spojit se svým modelem. Zkuste to za minutu znovu.",
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
-      choose: "Vyberte jazyk", moreSources: "Další zdroje", moreInfo: "Více", lessInfo: "Méně" }
+      choose: "Vyberte jazyk", moreSources: "Další zdroje", fewerSources: "Méně zdrojů", moreInfo: "Více", lessInfo: "Méně" }
   };
   // Each language's name in itself, for the first-open chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -378,7 +378,7 @@
           // A marker of a source behind "More sources" opens the list first.
           to.addEventListener("click", function () {
             var card = document.getElementById(ids + "-" + p);
-            if (card && card.hidden) reveal(card.parentNode);
+            if (card && card.hidden) reveal(card.parentNode, true);
           });
           to.setAttribute("aria-label", w.source + " " + p);
           out.appendChild(to);
@@ -434,10 +434,13 @@
       item.appendChild(list);
       var rest = grouped.list.length - SHOWN_SOURCES;
       if (rest > 0) {
-        var open = el("button", "jc-more-sources", w.moreSources + " (" + rest + ")");
+        var open = el("button", "jc-more-sources");
         open.type = "button";
-        open.addEventListener("click", function () { reveal(list); });
+        open.setAttribute("aria-expanded", "false");
+        open.addEventListener("click", function () { reveal(list, open.getAttribute("aria-expanded") !== "true"); });
         list.more = open;
+        list.rest = rest;
+        reveal(list, false);
         item.appendChild(open);
       }
     }
@@ -454,12 +457,12 @@
 
   var SHOWN_SOURCES = 2;
 
-  function reveal(list) {
-    Array.prototype.forEach.call(list.children, function (li) { li.hidden = false; });
-    if (list.more) {
-      list.more.remove();
-      list.more = null;
-    }
+  // The sources after the first two open and close again behind one button (T-4283).
+  function reveal(list, open) {
+    Array.prototype.forEach.call(list.children, function (li, i) { li.hidden = !open && i >= SHOWN_SOURCES; });
+    if (!list.more) return;
+    list.more.setAttribute("aria-expanded", String(open));
+    list.more.textContent = open ? w.fewerSources : w.moreSources + " (" + list.rest + ")";
   }
 
   // What the cited page publishes (T-4155): text, and a link only where render.js checked one.

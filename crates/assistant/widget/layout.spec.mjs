@@ -127,8 +127,21 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     await expect(frame.locator(".jc-followups button")).toHaveCount(2);
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(2);
     await expect(frame.locator(".jc-sources-title")).toHaveText("Sources");
+    // The rest open and close again behind one button.
     await frame.locator(".jc-more-sources").click();
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(4);
+    await expect(frame.locator(".jc-more-sources")).toHaveAttribute("aria-expanded", "true");
+    await frame.locator(".jc-more-sources").click();
+    await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(2);
+    await expect(frame.locator(".jc-more-sources")).toHaveText("More sources (2)");
+    await frame.locator(".jc-more-sources").click();
+    await expect(frame.locator(".jc-more-sources")).toHaveText("Fewer sources");
+    // One line per source: the number, the title and the host share a row.
+    const row = await frame.locator(".jc-cards > li").first().evaluate((li) => {
+      const [a, host] = [li.querySelector("a"), li.querySelector(".jc-domain")];
+      return Math.abs(a.getBoundingClientRect().top - host.getBoundingClientRect().top) < 6;
+    });
+    expect(row, "a source is one row").toBe(true);
     const chat = page.frames().find((f) => f.url().includes("/d/bb/widget"));
     await chat.evaluate(() => { const log = document.querySelector(".jc-log"); log.scrollTop = log.scrollHeight; });
     const scroll = await scrollers(chat);
@@ -145,7 +158,7 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     expect(head.y, "the header stays at the top after a long answer").toBeLessThanOrEqual(frameBox.y + 1);
     if (width > 640) expect(inside(await panel.boundingBox(), width, height), "the grown panel still fits").toBe(true);
     if (width <= 480) {
-      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-more-sources", ".jc-cards > li", ".jc-followups button"].map((s) => s + ":visible").join(", ");
+      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-more-sources", ".jc-cards > li", ".jc-followups button", ".jc-notice .jc-more"].map((s) => s + ":visible").join(", ");
       for (const control of await frame.locator(controls).all()) {
         const box = await control.boundingBox();
         expect(Math.min(box.width, box.height), "a tap target of 44 px").toBeGreaterThanOrEqual(44);
