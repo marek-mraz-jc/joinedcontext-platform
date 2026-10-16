@@ -10,6 +10,7 @@
 //! tokenizer while it configures it, and the loaded service sat at 713 MB against 433 MB driven
 //! directly (T-3053), most of the 1 GB the whole service has (ADR-N-040 §3.8).
 
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +71,26 @@ fn read_checked(dir: &Path, file: &str, sha: &str) -> Result<Vec<u8>, Error> {
         )));
     }
     Ok(bytes)
+}
+
+/// The file `file` of `dir`, open, once its SHA-256 is `sha`: hashed as a stream, so the
+/// model is never held whole for the check, and handed back open, so what loads is the file that
+/// was hashed and not one put at the path since (T-4357).
+fn open_checked(dir: &Path, file: &str, sha: &str) -> Result<std::fs::File, Error> {
+    let path = dir.join(file);
+    let unreadable =
+        |err: std::io::Error| Error::Model(format!("{} could not be read: {err}", path.display()));
+    let mut opened = std::fs::File::open(&path).map_err(unreadable)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut opened, &mut hasher).map_err(unreadable)?;
+    let found = hex::encode(hasher.finalize());
+    if found != sha {
+        return Err(Error::Model(format!(
+            "{} is not the pinned file (SHA-256 {found}, expected {sha}); fetch it again with scripts/ci/e5-small.sh",
+            path.display()
+        )));
+    }
+    Ok(opened)
 }
 
 fn loading(what: &str) -> impl Fn(String) -> Error + '_ {
@@ -142,13 +163,16 @@ impl Embedder {
             }))
             .map_err(|err| loading("tokenizer")(err.to_string()))?;
         tokenizer.with_padding(None);
-        let onnx = read_checked(dir, onnx_file, onnx_sha)?;
+        let onnx = open_checked(dir, onnx_file, onnx_sha)?;
+        // ONNX Runtime opens the descriptor's own path: the inode that was hashed, read from
+        // the file rather than from a copy of it in memory.
         let session = Session::builder()
             .map_err(|err| loading("model")(err.to_string()))?
             .with_intra_threads(threads.max(1))
             .map_err(|err| loading("model")(err.to_string()))?
-            .commit_from_memory(&onnx)
+            .commit_from_file(format!("/proc/self/fd/{}", onnx.as_raw_fd()))
             .map_err(|err| loading("model")(err.to_string()))?;
+        drop(onnx);
         Ok(Self {
             model: Arc::new(Mutex::new(Model { tokenizer, session })),
             turn: Arc::new(Semaphore::new(1)),

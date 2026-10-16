@@ -493,18 +493,121 @@ def test_a_model_whose_schema_is_missing_leaves_the_subject_searchable(
     assert "attributes" not in models["WaterQualityObserved"]
 
 
-def test_an_oversized_catalogue_document_is_refused(monkeypatch):
-    """A mirror answering gigabytes must not fill the replica's 256 MiB."""
+class _Streamed:
+    """An upstream answer that never ends, read in chunks: what a broken mirror sends."""
 
-    class Huge:
-        content = b"x" * 16
-        status_code = 200
+    status_code = 200
 
-    monkeypatch.setattr(service, "MAX_CATALOGUE_BYTES", 8)
-    monkeypatch.setattr(service, "_get", lambda url: Huge())
+    def __init__(self, headers: dict[str, str] | None = None):
+        self.headers = headers or {}
+        self.chunks_read = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, chunk_size: int):
+        while True:
+            self.chunks_read += 1
+            yield b"x" * chunk_size
+
+
+def test_an_oversized_catalogue_document_is_refused_without_buffering_it(monkeypatch):
+    """A mirror answering gigabytes must not fill the replica's 256 MiB (T-4357): the read
+    stops one chunk past the cap, never after the whole body."""
+    answer = _Streamed()
+    monkeypatch.setattr(service, "MAX_CATALOGUE_BYTES", 200 * 1024)
+    monkeypatch.setattr("import_sdm.requests.get", lambda url, **kw: answer)
 
     with pytest.raises(service.ImportError_, match="past the cap"):
         service._document(service.CATALOGUE_URL)
+    assert answer.chunks_read == 4
+
+
+def test_a_catalogue_document_declaring_too_many_bytes_is_refused_unread(monkeypatch):
+    answer = _Streamed({"Content-Length": str(17 * 1024 * 1024)})
+    monkeypatch.setattr("import_sdm.requests.get", lambda url, **kw: answer)
+
+    with pytest.raises(service.ImportError_, match="past the cap"):
+        service._document(service.CATALOGUE_URL)
+    assert answer.chunks_read == 0
+
+
+def test_a_catalogue_document_under_the_cap_is_read_whole(monkeypatch):
+    class Small(_Streamed):
+        def iter_content(self, chunk_size: int):
+            yield b'{"officialList": '
+            yield b"[]}"
+
+    monkeypatch.setattr("import_sdm.requests.get", lambda url, **kw: Small())
+    assert service._document(service.CATALOGUE_URL) == {"officialList": []}
+
+
+# --- memory (T-4357) -------------------------------------------------------------------
+
+
+def test_generate_parses_the_model_once_and_renders_what_separate_parses_do(monkeypatch, senzor):
+    """Nine generators share one parse, and each renders exactly what it renders alone."""
+    import common
+    from rdflib import Graph
+    from rdflib.compare import isomorphic
+
+    source = Path(senzor).read_text()
+    with common.as_path(source) as path:
+        alone = {"generatorVersion": common.generator_version(), "errors": []}
+        for field, render in service.RENDERERS:
+            if (artifact := render(path)) is not None:
+                alone[field] = artifact
+    parses = []
+    real = common._view
+    monkeypatch.setattr(common, "_view", lambda path: parses.append(path) or real(path))
+
+    shared = service.artifacts(source)
+    assert len(parses) == 1
+    # OWL and SHACL list blank nodes in no fixed order, a parse or not: compared as graphs.
+    for field in ("owl", "shacl"):
+        assert isomorphic(
+            Graph().parse(data=shared.pop(field), format="turtle"),
+            Graph().parse(data=alone.pop(field), format="turtle"),
+        ), field
+    assert shared == alone
+    # Outside a /generate every load is its own parse, as before.
+    common.load(source)
+    common.load(source)
+    assert len(parses) == 3
+
+
+def test_healthz_answers_while_every_work_slot_is_taken():
+    """The kubelet's probe never queues behind generations; the work routes wait for a slot."""
+    taken = 0
+    try:
+        while service.WORK_SLOTS.acquire(blocking=False):
+            taken += 1
+        assert taken == 4
+        status, body = call("GET", "/healthz")
+        assert status == 200 and body["status"] == "ok"
+    finally:
+        for _ in range(taken):
+            service.WORK_SLOTS.release()
+
+
+def test_the_unit_list_is_read_on_first_use_and_once():
+    """An idle replica holds no parsed unit list; the first /infer-schema reads it."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import infer_schema; assert infer_schema.code_list.cache_info().currsize == 0; "
+        "import service; assert infer_schema.code_list.cache_info().currsize == 0; "
+        "infer_schema.code_list(); infer_schema.code_list(); "
+        "info = infer_schema.code_list.cache_info(); assert (info.misses, info.hits) == (1, 1), info"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], cwd=PACKAGE / "src", capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
 
 
 # --- the image (DM-19) -----------------------------------------------------------------

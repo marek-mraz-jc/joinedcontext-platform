@@ -158,13 +158,36 @@ def as_path(source: str | Path) -> Iterator[str]:
         Path(path).unlink(missing_ok=True)
 
 
+_ONE_PARSE: ContextVar[dict[str, SchemaView] | None] = ContextVar("one_parse", default=None)
+
+
+@contextmanager
+def one_parse() -> Iterator[None]:
+    """Inside the block, every `load` of one source returns one view (T-4357).
+
+    `/generate` hands one model to nine generators, and each of them loading it again was nine
+    parses of the same text. A source that does not load is not kept, so each generator still
+    reports it as before. The scope is per thread, like the request it serves.
+    """
+    token = _ONE_PARSE.set({})
+    try:
+        yield
+    finally:
+        _ONE_PARSE.reset(token)
+
+
 def load(source: str | Path) -> SchemaView:
     """Read a LinkML schema from a file path or from the YAML text itself."""
+    shared = _ONE_PARSE.get()
+    if shared is not None and str(source) in shared:
+        return shared[str(source)]
     with as_path(source) as path:
         view = _view(path)
     check_unit_prefixes(view)
     check_relationships(view)
     check_data_structures(view)
+    if shared is not None:
+        shared[str(source)] = view
     return view
 
 
