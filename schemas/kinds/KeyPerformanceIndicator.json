@@ -65,7 +65,7 @@
           "type": "array"
         }
       ],
-      "description": "One URI or a list of them, as NGSI-LD writes a relationship's object."
+      "description": "One URI or a list of them."
     },
     "Period": {
       "additionalProperties": false,
@@ -180,6 +180,47 @@
       ],
       "type": "object"
     },
+    "Property_for_Objects": {
+      "additionalProperties": false,
+      "description": "A Property in normalized NGSI-LD form.",
+      "properties": {
+        "observedAt": {
+          "description": "When the value was observed, RFC 3339.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PropertyKind"
+            }
+          ],
+          "description": "Always `Property`."
+        },
+        "unitCode": {
+          "description": "A UN/CEFACT common code, on the value that has a unit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Objects"
+            }
+          ],
+          "description": "The value itself."
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ],
+      "type": "object"
+    },
     "Property_for_Period": {
       "additionalProperties": false,
       "description": "A Property in normalized NGSI-LD form.",
@@ -257,45 +298,6 @@
         "value"
       ],
       "type": "object"
-    },
-    "Relationship": {
-      "additionalProperties": false,
-      "description": "A Relationship in normalized NGSI-LD form: one URI or several.",
-      "properties": {
-        "object": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/Objects"
-            }
-          ],
-          "description": "The URI or URIs the relationship points to."
-        },
-        "type": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/RelationshipKind"
-            }
-          ],
-          "description": "Always `Relationship`."
-        }
-      },
-      "required": [
-        "object",
-        "type"
-      ],
-      "type": "object"
-    },
-    "RelationshipKind": {
-      "description": "The one value `type` takes on a Relationship.",
-      "oneOf": [
-        {
-          "description": "`\"Relationship\"`.",
-          "enum": [
-            "Relationship"
-          ],
-          "type": "string"
-        }
-      ]
     }
   },
   "description": "One indicator, normalized NGSI-LD (PF-54, PF-55).",
@@ -322,7 +324,7 @@
     "computedBy": {
       "allOf": [
         {
-          "$ref": "#/definitions/Relationship"
+          "$ref": "#/definitions/Property_for_Objects"
         }
       ],
       "description": "The Pipeline URN or the agent run URN that computed the value."
@@ -338,7 +340,7 @@
     "derivedFrom": {
       "allOf": [
         {
-          "$ref": "#/definitions/Relationship"
+          "$ref": "#/definitions/Property_for_Objects"
         }
       ],
       "description": "The Endpoint URN the sources were read through, and the source entity URNs when few."

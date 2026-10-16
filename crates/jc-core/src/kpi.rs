@@ -64,25 +64,14 @@ pub enum PropertyKind {
     Property,
 }
 
-/// A Relationship in normalized NGSI-LD form: one URI or several.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Relationship {
-    /// Always `Relationship`.
-    #[serde(rename = "type")]
-    pub kind: RelationshipKind,
-    /// The URI or URIs the relationship points to.
-    pub object: Objects,
-}
+/// Provenance in normalized NGSI-LD form (PF-55): a Property whose value is one URN or several.
+///
+/// Not a Relationship: a broker view refuses a Relationship to an Entity it does not show
+/// (threat-model D7), and an Endpoint, a Pipeline or an agent run is never an Entity of the
+/// indicator space, so a Relationship made every indicator write fail (T-4230).
+pub type Provenance = Property<Objects>;
 
-/// The one value `type` takes on a Relationship.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub enum RelationshipKind {
-    /// `"Relationship"`.
-    Relationship,
-}
-
-/// One URI or a list of them, as NGSI-LD writes a relationship's object.
+/// One URI or a list of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Objects {
@@ -103,21 +92,15 @@ impl Objects {
     }
 }
 
-impl Relationship {
-    /// A relationship to one URI.
-    pub fn to(object: impl Into<String>) -> Self {
-        Self {
-            kind: RelationshipKind::Relationship,
-            object: Objects::One(object.into()),
-        }
+impl Provenance {
+    /// Provenance of one URN.
+    pub fn to(urn: impl Into<String>) -> Self {
+        Self::new(Objects::One(urn.into()))
     }
 
-    /// A relationship to several URIs.
-    pub fn to_all(objects: Vec<String>) -> Self {
-        Self {
-            kind: RelationshipKind::Relationship,
-            object: Objects::Many(objects),
-        }
+    /// Provenance of several URNs.
+    pub fn to_all(urns: Vec<String>) -> Self {
+        Self::new(Objects::Many(urns))
     }
 }
 
@@ -180,9 +163,9 @@ pub struct KeyPerformanceIndicator {
     /// When the value was written.
     pub updated_at: Property<DateTime>,
     /// The Endpoint URN the sources were read through, and the source entity URNs when few.
-    pub derived_from: Relationship,
+    pub derived_from: Provenance,
     /// The Pipeline URN or the agent run URN that computed the value.
-    pub computed_by: Relationship,
+    pub computed_by: Provenance,
     /// The JSON-LD context, present on the wire and absent inside a broker's response body.
     #[serde(default, rename = "@context", skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
@@ -198,8 +181,8 @@ impl KeyPerformanceIndicator {
         unit_code: Option<&str>,
         period: Period,
         updated_at: &str,
-        derived_from: Relationship,
-        computed_by: Relationship,
+        derived_from: Provenance,
+        computed_by: Provenance,
     ) -> Self {
         let mut current_value = Property::new(value);
         current_value.unit_code = unit_code.map(str::to_owned);
@@ -280,17 +263,17 @@ impl KeyPerformanceIndicator {
                 reason: "start and end are both given",
             });
         }
-        for (field, relationship) in [
+        for (field, provenance) in [
             ("derivedFrom", &self.derived_from),
             ("computedBy", &self.computed_by),
         ] {
             let mut any = false;
-            for object in relationship.object.iter() {
+            for object in provenance.value.iter() {
                 any = true;
                 object.parse::<Urn>().map_err(|_| Error::Name {
                     field,
                     value: object.to_owned(),
-                    reason: "every object is a platform URN (PF-42)",
+                    reason: "every value is a platform URN (PF-42)",
                 })?;
             }
             if !any {
@@ -335,8 +318,8 @@ pub fn context() -> Value {
             "currentValue": format!("{KPI_NAMESPACE}currentValue"),
             "calculationPeriod": format!("{KPI_NAMESPACE}calculationPeriod"),
             "updatedAt": format!("{KPI_NAMESPACE}updatedAt"),
-            "derivedFrom": { "@id": format!("{KPI_NAMESPACE}derivedFrom"), "@type": "@id" },
-            "computedBy": { "@id": format!("{KPI_NAMESPACE}computedBy"), "@type": "@id" }
+            "derivedFrom": format!("{KPI_NAMESPACE}derivedFrom"),
+            "computedBy": format!("{KPI_NAMESPACE}computedBy")
         },
         NGSI_LD_CORE_CONTEXT
     ])

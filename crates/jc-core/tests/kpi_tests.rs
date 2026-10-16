@@ -3,7 +3,7 @@
 //! NGSI-LD, its `@context` maps every term, and the committed schema is the generated one.
 use jc_core::kpi::{
     context, indicator_urn, kpi_space, schema, IndicatorValue, KeyPerformanceIndicator, Objects,
-    Period, Relationship, KPI_TYPE,
+    Period, Provenance, KPI_TYPE,
 };
 use jc_core::Urn;
 use serde_json::{json, Value};
@@ -20,8 +20,8 @@ fn indicator() -> KeyPerformanceIndicator {
             end: "2026-09-13T08:00:00Z".into(),
         },
         "2026-09-13T08:00:12Z",
-        Relationship::to("urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-all"),
-        Relationship::to("urn:ngsi-ld:AgentRun:hel.fi:helsinki:3f9c2a1e"),
+        Provenance::to("urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-all"),
+        Provenance::to("urn:ngsi-ld:AgentRun:hel.fi:helsinki:3f9c2a1e"),
     )
 }
 
@@ -54,9 +54,9 @@ fn a_complete_indicator_validates_and_round_trips_as_normalized_ngsi_ld() {
         "2026-09-13T07:00:00Z"
     );
     assert_eq!(json["updatedAt"]["value"]["@type"], "DateTime");
-    assert_eq!(json["derivedFrom"]["type"], "Relationship");
+    assert_eq!(json["derivedFrom"]["type"], "Property");
     assert_eq!(
-        json["derivedFrom"]["object"],
+        json["derivedFrom"]["value"],
         "urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-all"
     );
     assert!(
@@ -71,14 +71,26 @@ fn a_complete_indicator_validates_and_round_trips_as_normalized_ngsi_ld() {
 fn a_broker_body_without_context_and_with_many_sources_is_read_back() {
     let mut json = indicator().to_json();
     json.as_object_mut().unwrap().remove("@context");
-    json["derivedFrom"]["object"] = json!([
+    json["derivedFrom"]["value"] = json!([
         "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:01",
         "urn:ngsi-ld:AirQualityObserved:hel.fi:air-quality:02"
     ]);
     let kpi = KeyPerformanceIndicator::from_json(json).expect("valid");
     assert!(kpi.context.is_none());
-    assert_eq!(kpi.derived_from.object.iter().count(), 2);
-    assert!(matches!(kpi.derived_from.object, Objects::Many(_)));
+    assert_eq!(kpi.derived_from.value.iter().count(), 2);
+    assert!(matches!(kpi.derived_from.value, Objects::Many(_)));
+}
+
+/// T-4230: a broker view refuses a Relationship to an Entity it does not show (threat-model D7),
+/// and an Endpoint or a Pipeline is never an Entity of the indicator space, so every KPI
+/// pipeline's write was refused. Provenance is a Property of URNs; the old shape is refused here,
+/// before it reaches a broker.
+#[test]
+fn provenance_written_as_a_relationship_is_refused() {
+    let mut json = indicator().to_json();
+    json["computedBy"] =
+        json!({ "type": "Relationship", "object": "urn:ngsi-ld:Pipeline:hel.fi:helsinki-kpi:x" });
+    assert!(KeyPerformanceIndicator::from_json(json).is_err());
 }
 
 #[test]
@@ -99,14 +111,14 @@ fn an_indicator_outside_a_kpi_space_or_without_provenance_is_refused() {
     assert!(no_formula.validate().is_err());
 
     let mut no_sources = indicator();
-    no_sources.derived_from = Relationship::to_all(Vec::new());
+    no_sources.derived_from = Provenance::to_all(Vec::new());
     assert!(
         no_sources.validate().is_err(),
         "derivedFrom is required (PF-55)"
     );
 
     let mut foreign = indicator();
-    foreign.computed_by = Relationship::to("https://example.org/not-a-platform-urn");
+    foreign.computed_by = Provenance::to("https://example.org/not-a-platform-urn");
     assert!(foreign.validate().is_err(), "computedBy is a platform URN");
 
     let mut renamed = indicator();
@@ -125,7 +137,7 @@ fn an_indicator_outside_a_kpi_space_or_without_provenance_is_refused() {
 }
 
 #[test]
-fn the_context_maps_every_term_and_relationships_are_ids() {
+fn the_context_maps_every_term() {
     let context = context();
     let terms = context[0].as_object().expect("the platform's terms");
     for term in [
@@ -140,8 +152,6 @@ fn the_context_maps_every_term_and_relationships_are_ids() {
     ] {
         assert!(terms.contains_key(term), "{term} is mapped");
     }
-    assert_eq!(terms["derivedFrom"]["@type"], "@id");
-    assert_eq!(terms["computedBy"]["@type"], "@id");
     assert!(context[1]
         .as_str()
         .unwrap()
