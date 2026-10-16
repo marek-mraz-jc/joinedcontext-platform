@@ -235,6 +235,27 @@ async fn without_a_token_an_internal_slug_is_the_login_prompt_like_an_unknown_on
     );
 }
 
+/// T-4373: the hub's answer names the unit a person reads beside each UN/CEFACT code, as
+/// Claude.ai otherwise reads `GQ` as "no unit".
+#[tokio::test]
+async fn the_hubs_tool_result_names_the_unit_beside_its_code() {
+    let realm = common::Realm::new();
+    let station = json!({ "id": "urn:ngsi-ld:AirQualityObserved:s1", "type": "AirQualityObserved",
+        "pm10": { "type": "Property", "value": 8.9, "unitCode": "GQ" } });
+    let broker = common::BrokerStub::start(vec![json!([station])]).await;
+    let app = app(&broker.url, &realm);
+    let message = call(
+        "query_entities",
+        json!({ "endpoint": OPEN, "type": ["AirQualityObserved"] }),
+    );
+    let (status, _, body) = raw(app, rpc(None, message)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    let pm10 = &answer["result"]["structuredContent"]["entities"][0]["pm10"];
+    assert_eq!(pm10["unit"], "µg/m³", "{body}");
+    assert_eq!(pm10["unitCode"], "GQ");
+}
+
 #[tokio::test]
 async fn without_a_token_a_public_endpoint_is_read_as_the_anonymous_caller() {
     let realm = common::Realm::new();

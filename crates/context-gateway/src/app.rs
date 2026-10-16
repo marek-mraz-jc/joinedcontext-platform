@@ -3249,7 +3249,15 @@ async fn mcp_answer(
     if narrowed && !json {
         return unreadable_tool_list(id, &endpoint);
     }
-    if key.is_none() && !decorated || !answer.status().is_success() || !json {
+    // A tool result is read to name its units (T-4373), but only one whose length is declared
+    // and fits the buffer: a larger or unsized one goes on unread, never cut to nothing.
+    let fits = answer
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<usize>().ok())
+        .is_some_and(|length| length <= MAX_BODY);
+    let units = calls && fits;
+    if key.is_none() && !decorated && !units || !answer.status().is_success() || !json {
         return answer;
     }
     let (parts, body) = answer.into_parts();
@@ -3264,6 +3272,9 @@ async fn mcp_answer(
     };
     if decorated {
         federated(&mut listed, &method, &federates);
+    }
+    if units {
+        mcp::units::readable(&mut listed);
     }
     if let Some(key) = key {
         let kept = match key {
@@ -3447,6 +3458,7 @@ pub(crate) async fn member_call(
             if !federates.is_empty() {
                 federated(&mut answer, "tools/call", &federates);
             }
+            mcp::units::readable(&mut answer);
             answer
         }
         _ if status.is_client_error() => member_refusal(id, problem_text(&held)),
