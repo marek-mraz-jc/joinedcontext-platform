@@ -1138,6 +1138,7 @@ pub async fn answer(
         model: ask.router_model,
         max_tokens: ROUTER_TOKENS,
         json: true,
+        provider: ask.provider,
     };
     let live = live(ask).await;
     let languages = languages(ask).await;
@@ -1403,6 +1404,7 @@ pub async fn answer(
         model: ask.answer_model,
         max_tokens: ask.output_tokens,
         json: false,
+        provider: ask.provider,
     };
     let at = Instant::now();
     let streamed = ask
