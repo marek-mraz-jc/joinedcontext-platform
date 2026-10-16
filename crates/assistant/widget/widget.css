@@ -55,7 +55,9 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
    on the composer, as in a messenger; scrolling up still reaches its start. */
 .jc-log > :first-child { margin-top: auto; }
 .jc-log > li { margin: 0 0 14px; overflow-wrap: anywhere; }
-.jc-you { display: flex; justify-content: flex-end; }
+.jc-you { display: flex; flex-wrap: wrap; justify-content: flex-end; }
+.jc-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.jc-you .jc-time { flex-basis: 100%; text-align: right; margin-top: 2px; }
 .jc-you p { margin: 0; max-width: 85%; padding: 9px 13px; border-radius: 18px 18px 4px 18px; background: var(--accent);
   color: var(--on-accent); white-space: pre-wrap; }
 .jc-bot { max-width: 100%; }

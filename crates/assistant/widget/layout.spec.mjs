@@ -127,6 +127,12 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     await expect(frame.locator(".jc-followups button")).toHaveCount(2);
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(2);
     await expect(frame.locator(".jc-sources-title")).toHaveText("Sources");
+    // T-4339: the question and the answer show their time, the UTC minute on hover.
+    for (const who of [".jc-you", ".jc-bot"]) {
+      const time = frame.locator(`${who} .jc-time`).first();
+      await expect(time).toHaveText(/^\d{1,2}[:.]\d{2}/);
+      await expect(time).toHaveAttribute("title", /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$/);
+    }
     // The rest open and close again behind one button.
     await frame.locator(".jc-more-sources").click();
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(4);

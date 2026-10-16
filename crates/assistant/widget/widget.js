@@ -348,6 +348,17 @@
     return item;
   }
 
+  // When a message was written (T-4339): the visitor's HH:MM, the UTC minute on hover and to a
+  // screen reader's time element; nothing when the moment is not known.
+  function when(at) {
+    var s = JCRender.stamp(at, lang);
+    if (!s) return null;
+    var node = el("time", "jc-time", s.text);
+    node.setAttribute("datetime", s.datetime);
+    node.title = s.title;
+    return node;
+  }
+
   function link(href, text, cls) {
     var a = el("a", cls || "", text);
     a.href = href;
@@ -389,7 +400,7 @@
   }
 
   // The answer, formatted, its markers linked to the source cards under it, and its copy button.
-  function show(item, text, citations, turn) {
+  function show(item, text, citations, turn, at) {
     turns += 1;
     var ids = "jc-src-" + turns;
     var grouped = JCRender.sources(citations);
@@ -442,6 +453,8 @@
       }
     }
     var tools = el("div", "jc-answer-tools");
+    var time = when(at === undefined ? Date.now() : at);
+    if (time) tools.appendChild(time);
     var copy = iconButton("jc-copy", "copy", "copy");
     copy.addEventListener("click", function () {
       if (!navigator.clipboard) return;
@@ -726,7 +739,8 @@
   function saved(item, text, citations) {
     if (!conversation || !item.turn) return;
     kept = JCRender.remember(kept, conversation, asked,
-      { question: item.question || "", text: text, turn: item.turn, citations: citations });
+      { question: item.question || "", text: text, turn: item.turn, citations: citations,
+        askedAt: item.askedAt, at: new Date().toISOString() });
     keep();
   }
 
@@ -791,10 +805,15 @@
       intro = null;
     }
     Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
-    turn("jc-you", "you").appendChild(el("p", "", question));
+    var mine = turn("jc-you", "you");
+    mine.appendChild(el("p", "", question));
+    var askedAt = new Date().toISOString();
+    var time = when(askedAt);
+    if (time) mine.appendChild(time);
     input.value = "";
     var item = turn("jc-bot", "assistant");
     item.question = question;
+    item.askedAt = askedAt;
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
     item.appendChild(item.status);
@@ -862,8 +881,11 @@
     log.textContent = "";
     intro = null;
     kept.turns.forEach(function (t) {
-      turn("jc-you", "you").appendChild(el("p", "", t.question));
-      show(turn("jc-bot", "assistant"), t.text, t.citations, t.turn);
+      var mine = turn("jc-you", "you");
+      mine.appendChild(el("p", "", t.question));
+      var time = when(t.askedAt);
+      if (time) mine.appendChild(time);
+      show(turn("jc-bot", "assistant"), t.text, t.citations, t.turn, t.at || null);
       history.push({ role: "user", text: t.question });
       history.push({ role: "assistant", text: t.text });
     });

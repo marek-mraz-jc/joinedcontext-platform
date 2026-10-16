@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { monogram, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { monogram, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -486,4 +486,26 @@ test("the data loop's stages name their topic, and two or more work steps are li
   assert.deepEqual(took, { summary: "Postup (2)", lines: ["Čítam živé údaje: „School“…", "Čítam schému údajov: „od“…"] });
   assert.equal(steps([{ stage: "reading", topic: "School" }], "en"), null, "one step needs no list");
   assert.equal(steps(undefined, "en"), null);
+});
+
+test("a message's time is the visitor's HH:MM with the UTC minute beside it, kept across a page change (T-4339)", () => {
+  const at = stamp("2026-10-16T12:05:59.123Z", "sk");
+  assert.equal(at.datetime, "2026-10-16T12:05Z");
+  assert.equal(at.title, "2026-10-16 12:05 UTC");
+  const local = new Date("2026-10-16T12:05:59Z");
+  assert.match(at.text, new RegExp("^0?" + local.getHours() + "[:.]" + String(local.getMinutes()).padStart(2, "0")));
+  assert.equal(stamp(Date.UTC(2026, 9, 16, 23, 59)).datetime, "2026-10-16T23:59Z");
+  for (const none of [null, undefined, "", "yesterday", NaN]) assert.equal(stamp(none), null);
+  const conversation = "0b8e7e8e-3f7a-4b9e-9a51-1d2c3b4a5f60";
+  const kept = remember(null, conversation, 1, { question: "q", text: "a", turn: 1, citations: [],
+    askedAt: "2026-10-16T12:05:01Z", at: "2026-10-16T12:05:09Z" });
+  const back = restore(JSON.stringify(kept));
+  assert.equal(back.turns[0].askedAt, "2026-10-16T12:05Z");
+  assert.equal(back.turns[0].at, "2026-10-16T12:05Z");
+  // A planted or broken time is dropped, the turn still shown.
+  const planted = restore(JSON.stringify({ conversation, asked: 1, turns: [
+    { question: "q", text: "a", turn: 1, citations: [], askedAt: "<img src=x>", at: 7 } ] }));
+  assert.equal(planted.turns[0].askedAt, undefined);
+  assert.equal(planted.turns[0].at, undefined);
+  assert.equal(planted.turns[0].text, "a");
 });
