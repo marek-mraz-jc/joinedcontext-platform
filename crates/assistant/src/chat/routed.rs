@@ -677,7 +677,7 @@ pub fn attributes_of(schema: &Value) -> Vec<String> {
 }
 
 /// The arguments of one read: the type as the one-item list `query_entities` takes, the first
-/// [`READ_ROWS`] rows, the total when the schema offers `count`, and `q` when it offers that.
+/// `READ_ROWS` rows, the total when the schema offers `count`, and `q` when it offers that.
 pub fn read_arguments(schema: &Value, kind: &str, q: Option<&str>) -> Value {
     let offered = |name: &str| schema.pointer(&format!("/properties/{name}")).is_some();
     let mut arguments = json!({"type": [kind], "limit": READ_ROWS});
