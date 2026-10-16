@@ -184,6 +184,17 @@
             }
           ],
           "description": "How the chat looks."
+        },
+        "widget": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ChatWidget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the chat picks its language and whether it shows the toggle (T-4343)."
         }
       },
       "required": [
@@ -325,6 +336,27 @@
           "type": "string"
         }
       ]
+    },
+    "ChatWidget": {
+      "additionalProperties": false,
+      "description": "How the chat behaves where it is placed (T-4343).",
+      "properties": {
+        "language": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WidgetLanguage"
+            }
+          ],
+          "default": "browser",
+          "description": "How it picks its language; `browser` by default."
+        },
+        "languageToggle": {
+          "default": true,
+          "description": "Whether the header shows the language toggle; default true.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "Condition": {
       "additionalProperties": false,
@@ -705,6 +737,32 @@
         }
       },
       "type": "object"
+    },
+    "WidgetLanguage": {
+      "description": "How the chat picks the language it opens in (T-4343).",
+      "oneOf": [
+        {
+          "description": "The page's `?lang=`, the visitor's toggle pick, the browser's languages, then the first of `languages`.",
+          "enum": [
+            "browser"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The panel asks on its first open in a browser.",
+          "enum": [
+            "ask"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Always the first of `languages`, or the page's `?lang=`.",
+          "enum": [
+            "fixed"
+          ],
+          "type": "string"
+        }
+      ]
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",

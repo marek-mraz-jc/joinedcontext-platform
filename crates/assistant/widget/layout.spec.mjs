@@ -20,9 +20,11 @@ const CONFIG = {
   enabled: true, connectors: [],
 };
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const PAGE = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
+// The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
+let WIDGET;
+const PAGE = () => `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/d/widget.css"></head>
-<body><main id="jc-chat" class="jc-chat" data-config="${attr(JSON.stringify(CONFIG))}"></main>
+<body><main id="jc-chat" class="jc-chat" data-config="${attr(JSON.stringify({ ...CONFIG, widget: WIDGET }))}"></main>
 <script src="/d/widget.js" defer></script></body></html>`;
 const HOST = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -48,8 +50,8 @@ test.beforeAll(async () => {
     const path = new URL(req.url, "http://x").pathname;
     if (path === "/d/widget.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("render.js") + read("widget.js"));
     if (path === "/d/widget.css") return res.writeHead(200, { "Content-Type": "text/css" }).end(read("widget.css"));
-    if (path === "/d/bb/widget") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE);
-    if (path === "/d/bb") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE.replace("<body>", '<body class="jc-page">'));
+    if (path === "/d/bb/widget") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE());
+    if (path === "/d/bb") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE().replace("<body>", '<body class="jc-page">'));
     if (path === "/d/bb/embed.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("embed.js"));
     if (path === "/host") return res.writeHead(200, { "Content-Type": "text/html" }).end(HOST);
     if (path === "/api/v1/d/bb/chat") return sse(res);
@@ -74,7 +76,8 @@ async function scrollers(frame) {
 const inside = (box, width, height) => box && box.x >= 0 && box.y >= 0 && box.x + box.width <= width + 0.5 && box.y + box.height <= height + 0.5;
 
 for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
-  test(`the panel at ${width}x${height}: chooser once, one scroll area, nothing cut`, async ({ page }) => {
+  test(`the panel at ${width}x${height}: the browser's language at once, one scroll area, nothing cut`, async ({ page }) => {
+    WIDGET = undefined;
     await page.setViewportSize({ width, height });
     await page.goto(`${base}/host`);
     const launcher = page.locator("[data-jc-assistant]").locator(".jc-launch");
@@ -82,16 +85,10 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     await launcher.click();
     const frame = page.frameLocator("[data-jc-assistant] iframe");
 
-    // First open: the language before anything else, Slovak first and focused.
-    const choices = frame.locator(".jc-choose-list button");
-    await expect(choices).toHaveText(["Slovensky", "English"]);
-    await expect(choices.first()).toBeFocused();
-    await expect(frame.locator("#jc-question")).toBeHidden();
-    // The chooser is never a dead end: its header keeps the close button (a phone's panel is the
-    // whole screen, with no launcher to close it from).
-    await expect(frame.locator(".jc-head .jc-close")).toBeVisible();
-    await expect(frame.locator(".jc-head .jc-langs")).toBeHidden();
-    await choices.nth(1).click();
+    // T-4343: the first open asks nothing; this browser is en-US, so the chat speaks English.
+    await expect(frame.locator("#jc-question")).toBeVisible();
+    await expect(frame.locator(".jc-choose-list")).toHaveCount(0);
+    await expect(frame.locator(".jc-greeting")).toBeVisible();
     await expect(frame.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
     await expect(frame.locator(".jc-suggest button")).toHaveCount(3);
     await expect(frame.locator("select")).toHaveCount(0);
@@ -190,4 +187,51 @@ test("the full page that names ?lang= does not ask", async ({ page }) => {
   await expect(page.locator("#jc-question")).toBeVisible();
   await expect(page.locator(".jc-choose-list")).toHaveCount(0);
   await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
+});
+
+// T-4343: the deployment's widget.language decides; the browser's languages never leave the page.
+test("a Slovak browser opens in Slovak with no question", async ({ browser }) => {
+  WIDGET = { language: "browser" };
+  const context = await browser.newContext({ locale: "sk-SK" });
+  const page = await context.newPage();
+  await page.goto(`${base}/d/bb`);
+  await expect(page.locator("#jc-question")).toBeVisible();
+  await expect(page.locator(".jc-choose-list")).toHaveCount(0);
+  await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("SK");
+  // The toggle still switches, and the pick wins over the browser on the next open.
+  await page.locator(".jc-langs button", { hasText: "EN" }).click();
+  await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
+  await page.reload();
+  await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
+  await context.close();
+});
+
+test("ask mode keeps the first-open chooser, Slovak first and focused", async ({ page }) => {
+  WIDGET = { language: "ask" };
+  await page.goto(`${base}/host`);
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  const frame = page.frameLocator("[data-jc-assistant] iframe");
+  const choices = frame.locator(".jc-choose-list button");
+  await expect(choices).toHaveText(["Slovensky", "English"]);
+  await expect(choices.first()).toBeFocused();
+  await expect(frame.locator("#jc-question")).toBeHidden();
+  // The chooser is never a dead end: its header keeps the close button.
+  await expect(frame.locator(".jc-head .jc-close")).toBeVisible();
+  await expect(frame.locator(".jc-head .jc-langs")).toBeHidden();
+  await choices.nth(1).click();
+  await expect(frame.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
+  await expect(frame.locator("#jc-question")).toBeVisible();
+});
+
+test("fixed mode ignores the browser, and languageToggle false hides the toggle", async ({ page }) => {
+  WIDGET = { language: "fixed" };
+  await page.goto(`${base}/d/bb`);
+  await expect(page.locator(".jc-choose-list")).toHaveCount(0);
+  await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("SK");
+  WIDGET = { language: "browser", languageToggle: false };
+  await page.goto(`${base}/d/bb`);
+  await expect(page.locator("#jc-question")).toBeVisible();
+  await expect(page.locator(".jc-langs")).toHaveCount(0);
+  // Without the toggle the en-US browser still picks English.
+  await expect(page.locator("#jc-question")).toHaveAttribute("placeholder", "Type your question");
 });

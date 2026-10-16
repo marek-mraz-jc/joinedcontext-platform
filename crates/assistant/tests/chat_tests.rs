@@ -96,6 +96,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             scope: None,
             answer: None,
             feedback: true,
+            widget: None,
         },
     }
 }

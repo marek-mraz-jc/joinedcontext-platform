@@ -135,12 +135,13 @@ test("a delta keeps its leading space and multi-line data is joined", () => {
   ]);
 });
 
-test("Slovak by default, the host page's language when the widget knows it", () => {
+test("Slovak by default, a ?lang= the deployment offers when the widget knows it", () => {
   const known = { sk: {}, en: {}, cs: {} };
   assert.equal(language("", ["sk", "en"], known), "sk");
   assert.equal(language(undefined, [], known), "sk");
   assert.equal(language("en-GB", ["sk", "en"], known), "en");
   assert.equal(language("hu", ["sk", "en"], known), "sk");
+  assert.equal(language("cs", ["sk", "en"], known), "sk", "a ?lang= the deployment does not offer");
   assert.equal(language("", ["en", "cs"], known), "en");
   // T-4281: the first language the deployment lists opens, Slovak or not.
   assert.equal(language("", ["en", "sk"], known), "en");
@@ -148,17 +149,32 @@ test("Slovak by default, the host page's language when the widget knows it", () 
   assert.equal(language("", ["fi"], { en: {} }), "en");
 });
 
-// T-4280: the visitor's choice in the widget wins; without one the chat opens in Slovak, and only
-// a site's deliberate data-lang (never the host page's lang, which no longer reaches the widget)
-// changes that.
-test("the visitor's stored choice first, else Slovak", () => {
+test("the visitor's toggle pick, else the browser's language, else the deployment's first (T-4280, T-4343)", () => {
   const known = { sk: {}, en: {}, cs: {} };
-  assert.equal(language("", ["sk", "en"], known, null), "sk");
-  assert.equal(language("", ["sk", "en"], known, "en"), "en");
-  assert.equal(language("cs", ["sk", "en"], known, "en"), "en");
-  assert.equal(language("", ["sk", "en"], known, "hu"), "sk");
-  assert.equal(language("", ["sk", "en"], known, undefined), "sk");
-  assert.equal(language("en", ["sk", "en"], known, ""), "en");
+  const skEn = ["sk", "en"];
+  assert.equal(language("", skEn, known, null), "sk");
+  assert.equal(language("", skEn, known, "en"), "en");
+  assert.equal(language("", skEn, known, "hu"), "sk");
+  assert.equal(language("", skEn, known, undefined), "sk");
+  assert.equal(language("en", skEn, known, ""), "en");
+  // browser: the first of navigator.languages the deployment offers.
+  assert.equal(language("", skEn, known, null, ["en-GB", "sk"], "browser"), "en");
+  assert.equal(language("", skEn, known, null, ["de-DE"], "browser"), "sk", "none offered: the deployment's first");
+  assert.equal(language("", ["en", "sk"], known, null, ["de-DE"], "browser"), "en");
+  assert.equal(language("", skEn, known, null, ["cs-CZ"], "browser"), "sk", "Czech reads Slovak when there is no cs");
+  assert.equal(language("", ["cs", "en"], known, null, ["en-US", "cs"], "browser"), "en");
+  assert.equal(language("", ["sk", "cs", "en"], known, null, ["cs-CZ"], "browser"), "cs", "cs when the deployment has it");
+  assert.equal(language("", skEn, known, null, ["fr", "de", "EN"], "browser"), "en", "the first offered of several");
+  assert.equal(language("", skEn, known, null, [], "browser"), "sk");
+  assert.equal(language("", skEn, known, null, undefined, "browser"), "sk");
+  // A stored pick wins over the browser, ?lang= over both.
+  assert.equal(language("", skEn, known, "en", ["sk-SK"], "browser"), "en");
+  assert.equal(language("sk", skEn, known, "en", ["en-GB"], "browser"), "sk");
+  // fixed: the deployment's first, whatever the browser or an old pick says; ?lang= still names one.
+  assert.equal(language("", skEn, known, "en", ["en-GB"], "fixed"), "sk");
+  assert.equal(language("en", skEn, known, null, ["sk"], "fixed"), "en");
+  // ask opens like browser beneath the chooser.
+  assert.equal(language("", skEn, known, null, ["en-GB"], "ask"), "en");
 });
 
 test("a data table shows at most 50 rows of text and only http(s) links", () => {
@@ -429,17 +445,22 @@ test("the header's monogram is the first letters of the first two words (T-4283)
   assert.equal(monogram(undefined), "");
 });
 
-test("the panel asks for the language once, and only where there is a choice (T-4283)", () => {
+test("the panel asks for the language once, only in ask mode and where there is a choice (T-4283, T-4343)", () => {
   const two = ["sk", "en"];
-  assert.equal(asksLanguage({ offered: two }), true, "a first open");
-  assert.equal(asksLanguage({ offered: two, requested: "en" }), true, "the host page's language does not choose for the visitor");
-  assert.equal(asksLanguage({ offered: two, stored: "en" }), false, "a later open");
-  assert.equal(asksLanguage({ offered: two, page: true, requested: "en" }), false, "the full page with ?lang=");
-  assert.equal(asksLanguage({ offered: two, page: true }), true);
-  assert.equal(asksLanguage({ offered: ["sk"] }), false, "nothing to choose");
-  assert.equal(asksLanguage({ offered: two, kept: true }), false, "a conversation already open");
-  assert.equal(asksLanguage({ offered: two, enabled: false }), false, "a paused assistant");
+  const ask = (at) => asksLanguage(Object.assign({ mode: "ask" }, at));
+  assert.equal(ask({ offered: two }), true, "a first open");
+  assert.equal(ask({ offered: two, requested: "en" }), true, "the host page's language does not choose for the visitor");
+  assert.equal(ask({ offered: two, stored: "en" }), false, "a later open");
+  assert.equal(ask({ offered: two, page: true, requested: "en" }), false, "the full page with ?lang=");
+  assert.equal(ask({ offered: two, page: true }), true);
+  assert.equal(ask({ offered: ["sk"] }), false, "nothing to choose");
+  assert.equal(ask({ offered: two, kept: true }), false, "a conversation already open");
+  assert.equal(ask({ offered: two, enabled: false }), false, "a paused assistant");
   assert.equal(asksLanguage(undefined), false);
+  // browser (the default) and fixed never ask.
+  assert.equal(asksLanguage({ offered: two }), false, "no mode is browser");
+  assert.equal(asksLanguage({ offered: two, mode: "browser" }), false);
+  assert.equal(asksLanguage({ offered: two, mode: "fixed" }), false);
   assert.equal(chosen("en", two), "en");
   assert.equal(chosen("cs", two), null, "a language no longer offered is asked again");
   assert.equal(chosen(null, two), null);
