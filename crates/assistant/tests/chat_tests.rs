@@ -3041,6 +3041,7 @@ async fn feedback_off_takes_no_verdict_and_rag_never_reaches_the_gateway() {
     rag.spec.feedback = false;
     rag.spec.answer = Some(jc_core::kinds::AnswerSpec {
         routes: jc_core::kinds::Routes::Rag,
+        ..Default::default()
     });
     for (test, deployment, reached) in [
         ("chatrag", rag, false),
@@ -3076,4 +3077,44 @@ async fn feedback_off_takes_no_verdict_and_rag_never_reaches_the_gateway() {
         }
         db::drop_database(w.admin, w.pool, &w.name).await;
     }
+}
+
+/// T-4294: `answer.maxDataSteps` bounds the loop instead of the default ten: with 2, the router's
+/// read and one of the model's are all, and the next model call is told to answer.
+#[tokio::test]
+async fn a_deployments_max_data_steps_ends_its_loop() {
+    let mut d = deployment(Channel::Public, 200_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    d.spec.answer = Some(jc_core::kinds::AnswerSpec {
+        max_data_steps: Some(2),
+        ..Default::default()
+    });
+    let w = world("chatsteps", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let call = |n: u32| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": format!("{{\"type\":[\"AirQualityObserved\"],\"limit\":{n}}}")}});
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [call(1), call(2)]}), 1_000),
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [1]."}), 1_000),
+    ]).await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Ako sa mení NO2?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "answer" && d["text"] == "NO2 je 21 [1]."),
+        "{events:?}"
+    );
+    assert_eq!(tool_calls_of(&w.gateway, "query_entities").await.len(), 2);
+    let all = model_calls(&w.proxy).await;
+    let answers = calls_of(&all, None);
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[1]["tool_choice"], "none");
+    db::drop_database(w.admin, w.pool, &w.name).await;
 }

@@ -1,6 +1,7 @@
 //! The data loop of one question (T-4294, AG-107, API/05 §1.4): the router's reads are its first
 //! steps, then the answering model is offered the connectors' read-only tools and calls them as
-//! it needs, at most [`MAX_DATA_STEPS`] tool calls and [`DATA_SECONDS`] per question. A reply
+//! it needs, at most `answer.maxDataSteps` tool calls and `answer.maxDataSeconds` per question
+//! ([`Ask::data_steps`], [`Ask::data_time`]). A reply
 //! without a tool call is the answer. The bounds, the allowlist and the arguments are checked
 //! here, never left to the model.
 
@@ -16,12 +17,6 @@ use super::agent::{
 };
 use super::mcp::{cut, Tool};
 use super::model::{Call, CallError};
-
-/// The most tool calls one question makes, the router's reads included.
-pub const MAX_DATA_STEPS: usize = 10;
-
-/// How long after the question the last tool may be called; the answer call comes after.
-pub const DATA_SECONDS: u64 = 20;
 
 /// The most of one tool result the model reads in the loop: ten of them stay within a prompt.
 const STEP_RESULT_CHARS: usize = 8_000;
@@ -108,9 +103,9 @@ fn stage_of(tool: &str, endpoint: &str, arguments: &Value) -> (&'static str, Opt
     }
 }
 
-/// Whether the loop may still call a tool: steps left and time left.
-pub fn may_call(steps: usize, elapsed: Duration) -> bool {
-    steps < MAX_DATA_STEPS && elapsed < Duration::from_secs(DATA_SECONDS)
+/// Whether the loop may still call a tool: steps left of `most` and time left of `time`.
+pub fn may_call(steps: usize, elapsed: Duration, most: usize, time: Duration) -> bool {
+    steps < most && elapsed < time
 }
 
 /// What one question's loop needs from the routed answer before it.
@@ -153,7 +148,9 @@ pub async fn answer(
         if events.is_closed() {
             return None;
         }
-        let allow = !tools.is_empty() && !forced && may_call(steps, started.elapsed());
+        let allow = !tools.is_empty()
+            && !forced
+            && may_call(steps, started.elapsed(), ask.data_steps, ask.data_time);
         if !allow && !tools.is_empty() && !forced {
             // `tool_choice: none` alone is not obeyed (T-3205): the last call is told as well.
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
@@ -247,7 +244,9 @@ pub async fn answer(
             .push(json!({"role": "assistant", "content": completion.text, "tool_calls": calls}));
         for (at, (id, name, arguments)) in completion.calls.iter().enumerate() {
             // Every call is answered, so the history stays whole; what is refused is never sent.
-            let content = if at >= MAX_CALLS_PER_REPLY || !may_call(steps, started.elapsed()) {
+            let content = if at >= MAX_CALLS_PER_REPLY
+                || !may_call(steps, started.elapsed(), ask.data_steps, ask.data_time)
+            {
                 "Not run: the question's tool calls are used up. Answer from what you have."
                     .to_owned()
             } else if arguments.len() > MAX_ARGUMENTS {
@@ -364,14 +363,20 @@ mod tests {
     }
 
     #[test]
-    fn the_loop_stops_at_ten_steps_or_twenty_seconds() {
-        assert!(may_call(0, Duration::ZERO));
-        assert!(may_call(9, Duration::from_secs(19)));
-        assert!(!may_call(10, Duration::ZERO), "the tenth call was the last");
+    fn the_loop_stops_at_its_steps_or_its_seconds() {
+        let twenty = Duration::from_secs(20);
+        assert!(may_call(0, Duration::ZERO, 10, twenty));
+        assert!(may_call(9, Duration::from_secs(19), 10, twenty));
         assert!(
-            !may_call(3, Duration::from_secs(20)),
-            "the time budget is spent"
+            !may_call(10, Duration::ZERO, 10, twenty),
+            "the tenth call was the last"
         );
+        assert!(!may_call(3, twenty, 10, twenty), "the time budget is spent");
+        assert!(
+            may_call(24, Duration::from_secs(59), 25, Duration::from_secs(60)),
+            "raised"
+        );
+        assert!(!may_call(25, Duration::ZERO, 25, Duration::from_secs(60)));
     }
 
     #[test]
