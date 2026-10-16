@@ -395,11 +395,7 @@ impl Hub {
                         "name": "joinedcontext-hub",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": "One connector over several Endpoints. Call list_endpoints \
-                                     to see which ones this token reaches, then name one in the \
-                                     `endpoint` argument of every other tool; each call reads or \
-                                     writes that Endpoint alone, under its own Policy. To compare \
-                                     two Endpoints, make two calls.",
+                    "instructions": super::PRIMER,
                 }),
             ),
             "ping" => result(id, json!({})),
