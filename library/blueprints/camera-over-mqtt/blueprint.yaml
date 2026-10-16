@@ -10,7 +10,12 @@ kind: Blueprint
 metadata:
   name: camera-over-mqtt
   namespace: org
-  title: { en: "Camera over MQTT", fi: "Kamera MQTT:n kautta", sk: "Kamera cez MQTT" }
+  title: { en: "Camera over MQTT", fi: "Kamera MQTT:n kautta", sk: "Kamera cez MQTT", cs: "Kamera přes MQTT", de: "Kamera über MQTT" }
+  description:
+    en: "Connects a camera that signs in with its own key and sends its readings over MQTT."
+    sk: "Pripojí kameru, ktorá sa prihlasuje vlastným kľúčom a posiela svoje údaje cez MQTT."
+    cs: "Připojí kameru, která se přihlašuje vlastním klíčem a posílá svá data přes MQTT."
+    de: "Bindet eine Kamera an, die sich mit eigenem Schlüssel anmeldet und ihre Messwerte über MQTT sendet."
 spec:
   version: 1.0.0
   category: ingestion
@@ -21,14 +26,14 @@ spec:
     required: [name, space, camera, owner, keyId, keyX, keyY, endpointSlug]
     additionalProperties: false
     properties:
-      name: { type: string, title: "Name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the broker, the DataSource, the Pipeline and the Endpoint." }
-      space: { type: string, title: "Context space", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
-      camera: { type: string, title: "Camera", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "The camera's ServiceAccount; it signs in as {project}-{camera}." }
-      owner: { type: string, title: "Accountable person", pattern: "^[A-Za-z0-9._@-]{1,64}$", description: "The user who answers for the camera (PF-34)." }
-      keyId: { type: string, title: "Key id", pattern: "^[A-Za-z0-9._-]{1,64}$", description: "The kid the camera names in its signed assertion." }
-      keyX: { type: string, title: "Public key x", pattern: "^[A-Za-z0-9_-]{43}$", description: "The x coordinate of the camera's P-256 public key, base64url." }
-      keyY: { type: string, title: "Public key y", pattern: "^[A-Za-z0-9_-]{43}$", description: "The y coordinate of the camera's P-256 public key, base64url." }
-      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+      name: { type: string, title: "Name", x-jc-title: { sk: "Názov", cs: "Název", de: "Name" }, pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the broker, the DataSource, the Pipeline and the Endpoint.", x-jc-description: { sk: "Jedno slovo so spojovníkmi; pomenuje broker, zdroj údajov, pipelinu a Endpoint.", cs: "Jedno slovo se spojovníky; pojmenuje broker, zdroj dat, pipeline a Endpoint.", de: "Ein Wort mit Bindestrichen; benennt den Broker, die Datenquelle, die Pipeline und den Endpoint." } }
+      space: { type: string, title: "Context space", x-jc-title: { sk: "Kontextový priestor", cs: "Kontextový prostor", de: "Kontextbereich" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      camera: { type: string, title: "Camera", x-jc-title: { sk: "Kamera", cs: "Kamera", de: "Kamera" }, pattern: "^[a-z][a-z0-9-]{1,40}$", description: "The camera's ServiceAccount; it signs in as {project}-{camera}.", x-jc-description: { sk: "Servisný účet kamery; prihlasuje sa ako {project}-{camera}.", cs: "Servisní účet kamery; přihlašuje se jako {project}-{camera}.", de: "Das Dienstkonto der Kamera; es meldet sich als {project}-{camera} an." } }
+      owner: { type: string, title: "Accountable person", x-jc-title: { sk: "Zodpovedná osoba", cs: "Odpovědná osoba", de: "Verantwortliche Person" }, pattern: "^[A-Za-z0-9._@-]{1,64}$", description: "The user who answers for the camera.", x-jc-description: { sk: "Používateľ, ktorý za kameru zodpovedá.", cs: "Uživatel, který za kameru odpovídá.", de: "Die Person, die für die Kamera verantwortlich ist." } }
+      keyId: { type: string, title: "Key id", x-jc-title: { sk: "Identifikátor kľúča", cs: "Identifikátor klíče", de: "Schlüssel-ID" }, pattern: "^[A-Za-z0-9._-]{1,64}$", description: "The kid the camera names in its signed assertion.", x-jc-description: { sk: "Hodnota kid, ktorú kamera uvádza vo svojom podpísanom tvrdení.", cs: "Hodnota kid, kterou kamera uvádí ve svém podepsaném tvrzení.", de: "Die kid, die die Kamera in ihrer signierten Assertion nennt." } }
+      keyX: { type: string, title: "Public key x", x-jc-title: { sk: "Verejný kľúč x", cs: "Veřejný klíč x", de: "Öffentlicher Schlüssel x" }, pattern: "^[A-Za-z0-9_-]{43}$", description: "The x coordinate of the camera's P-256 public key, base64url.", x-jc-description: { sk: "Súradnica x verejného kľúča P-256 kamery, base64url.", cs: "Souřadnice x veřejného klíče P-256 kamery, base64url.", de: "Die x-Koordinate des öffentlichen P-256-Schlüssels der Kamera, base64url." } }
+      keyY: { type: string, title: "Public key y", x-jc-title: { sk: "Verejný kľúč y", cs: "Veřejný klíč y", de: "Öffentlicher Schlüssel y" }, pattern: "^[A-Za-z0-9_-]{43}$", description: "The y coordinate of the camera's P-256 public key, base64url.", x-jc-description: { sk: "Súradnica y verejného kľúča P-256 kamery, base64url.", cs: "Souřadnice y veřejného klíče P-256 kamery, base64url.", de: "Die y-Koordinate des öffentlichen P-256-Schlüssels der Kamera, base64url." } }
+      endpointSlug: { type: string, title: "Endpoint slug", x-jc-title: { sk: "Slug endpointu", cs: "Slug endpointu", de: "Endpoint-Slug" }, pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform; nobody types it.", x-jc-description: { sk: "Vytvorí ho platforma; nikto ho nepíše.", cs: "Vytvoří ho platforma; nikdo ho nepíše.", de: "Von der Plattform erzeugt; niemand tippt ihn ein." } }
   templates:
     - name: broker
       template: |

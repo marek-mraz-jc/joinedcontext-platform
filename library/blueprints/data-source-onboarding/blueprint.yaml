@@ -8,7 +8,12 @@ kind: Blueprint
 metadata:
   name: data-source-onboarding
   namespace: org
-  title: { en: "Onboard a data source", fi: "Ota tietolähde käyttöön", sk: "Pripojiť zdroj dát" }
+  title: { en: "Onboard a data source", fi: "Ota tietolähde käyttöön", sk: "Pripojiť zdroj dát", cs: "Připojit zdroj dat", de: "Eine Datenquelle anbinden" }
+  description:
+    en: "Fetches a JSON resource into a context space and publishes it through an Endpoint."
+    sk: "Načíta zdroj JSON do kontextového priestoru a zverejní ho cez Endpoint."
+    cs: "Načte zdroj JSON do kontextového prostoru a zveřejní ho přes Endpoint."
+    de: "Ruft eine JSON-Ressource in einen Kontextbereich ab und veröffentlicht sie über einen Endpoint."
 spec:
   version: 1.0.0
   category: ingestion
@@ -19,19 +24,20 @@ spec:
     required: [name, space, url, entityType, endpointSlug]
     additionalProperties: false
     properties:
-      name: { type: string, title: "Source name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the DataSource, the Pipeline and the Endpoint." }
-      space: { type: string, title: "Context space", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
-      url: { type: string, title: "URL of the JSON resource", format: uri, pattern: "^https://[^\\s\"\\\\]+$" }
-      entityType: { type: string, title: "Entity type written", pattern: "^[A-Z][A-Za-z0-9]+$" }
+      name: { type: string, title: "Source name", x-jc-title: { sk: "Názov zdroja", cs: "Název zdroje", de: "Name der Quelle" }, pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the DataSource, the Pipeline and the Endpoint.", x-jc-description: { sk: "Jedno slovo so spojovníkmi; pomenuje zdroj údajov, pipelinu a Endpoint.", cs: "Jedno slovo se spojovníky; pojmenuje zdroj dat, pipeline a Endpoint.", de: "Ein Wort mit Bindestrichen; benennt die Datenquelle, die Pipeline und den Endpoint." } }
+      space: { type: string, title: "Context space", x-jc-title: { sk: "Kontextový priestor", cs: "Kontextový prostor", de: "Kontextbereich" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      url: { type: string, title: "URL of the JSON resource", x-jc-title: { sk: "URL zdroja JSON", cs: "URL zdroje JSON", de: "URL der JSON-Ressource" }, format: uri, pattern: "^https://[^\\s\"\\\\]+$" }
+      entityType: { type: string, title: "Entity type written", x-jc-title: { sk: "Zapisovaný typ entity", cs: "Zapisovaný typ entity", de: "Geschriebener Entitätstyp" }, pattern: "^[A-Z][A-Za-z0-9]+$" }
       period:
         type: string
         title: "Fetch every"
+        x-jc-title: { sk: "Načítať každých", cs: "Načíst každých", de: "Abrufen alle" }
         default: 1h
         oneOf:
-          - { const: 15m, title: "15 minutes" }
-          - { const: 1h, title: "Hour" }
-          - { const: 1d, title: "Day" }
-      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+          - { const: 15m, title: "15 minutes", x-jc-title: { sk: "15 minút", cs: "15 minut", de: "15 Minuten" } }
+          - { const: 1h, title: "Hour", x-jc-title: { sk: "Hodinu", cs: "Hodinu", de: "Stunde" } }
+          - { const: 1d, title: "Day", x-jc-title: { sk: "Deň", cs: "Den", de: "Tag" } }
+      endpointSlug: { type: string, title: "Endpoint slug", x-jc-title: { sk: "Slug endpointu", cs: "Slug endpointu", de: "Endpoint-Slug" }, pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform; nobody types it.", x-jc-description: { sk: "Vytvorí ho platforma; nikto ho nepíše.", cs: "Vytvoří ho platforma; nikdo ho nepíše.", de: "Von der Plattform erzeugt; niemand tippt ihn ein." } }
   # A parameter with a default is filled by the form; a caller of the API may leave it out, so
   # every template names the same default again.
   templates:
