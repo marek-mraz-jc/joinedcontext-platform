@@ -319,6 +319,46 @@ pub struct Spent {
     pub cost_micros: u64,
     /// Model calls whose provider reported no cost, so `cost_micros` is a floor (T-4178).
     pub uncosted: u64,
+    /// How long each stage took (T-4293).
+    pub stages: Stages,
+}
+
+/// The wall time of each stage of one answer, in milliseconds; `None` for a stage that did not
+/// run (API/05 §1.3, T-4293).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stages {
+    /// The router call.
+    pub route: Option<u64>,
+    /// Every search, summed over the rounds.
+    pub search: Option<u64>,
+    /// Every judgement of the passages found, summed over the rounds.
+    pub judge: Option<u64>,
+    /// The answer call, from its request to its last token.
+    pub answer: Option<u64>,
+}
+
+impl Stages {
+    /// Adds the time since `since` to a stage.
+    pub fn add(stage: &mut Option<u64>, since: std::time::Instant) {
+        let ms = u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX);
+        *stage = Some(stage.unwrap_or(0).saturating_add(ms));
+    }
+
+    /// The stages that ran, as the `done` event's `stagesMs` names them.
+    pub fn json(&self) -> Value {
+        let mut out = serde_json::Map::new();
+        for (name, ms) in [
+            ("route", self.route),
+            ("search", self.search),
+            ("judge", self.judge),
+            ("answer", self.answer),
+        ] {
+            if let Some(ms) = ms {
+                out.insert(name.into(), json!(ms));
+            }
+        }
+        Value::Object(out)
+    }
 }
 
 impl Spent {

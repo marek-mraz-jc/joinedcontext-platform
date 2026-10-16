@@ -505,6 +505,10 @@ pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     // column named here would need a SELECT policy across projects.
     // Verdicts are kept for 90 days, by their own policy (migration 0008).
     sqlx::query("DELETE FROM feedback").execute(pool).await?;
+    // Timings are kept for 30 days, by their own policy (migration 0010).
+    sqlx::query("DELETE FROM answer_timings")
+        .execute(pool)
+        .await?;
     let gone = sqlx::query("DELETE FROM conversations")
         .execute(pool)
         .await?;
@@ -522,12 +526,14 @@ fn uuid_shaped(id: &str) -> bool {
         })
 }
 
-/// Counts what a question spent against its conversation and its deployment's day.
+/// Counts what a question spent against its conversation and its deployment's day, and keeps
+/// how long it took (T-4293).
 async fn record(
     pool: &PgPool,
     deployment: &Deployment,
     conversation: &str,
     spent: Spent,
+    total_ms: u64,
 ) -> Result<(), crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
     sqlx::query(
@@ -550,6 +556,24 @@ async fn record(
     .bind(i64::try_from(spent.input).unwrap_or(i64::MAX))
     .bind(i64::try_from(spent.output).unwrap_or(i64::MAX))
     .bind(i64::try_from(spent.cost_micros).unwrap_or(i64::MAX))
+    .execute(&mut *tx)
+    .await?;
+    let ms = |ms: Option<u64>| ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
+    sqlx::query(
+        "INSERT INTO answer_timings (project, deployment, cached, model_calls, first_token_ms, \
+         total_ms, route_ms, search_ms, judge_ms, answer_ms) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(&deployment.project)
+    .bind(&deployment.name)
+    .bind(spent.cached)
+    .bind(i32::try_from(spent.calls).unwrap_or(i32::MAX))
+    .bind(ms(spent.first_token_ms))
+    .bind(ms(Some(total_ms)))
+    .bind(ms(spent.stages.route))
+    .bind(ms(spent.stages.search))
+    .bind(ms(spent.stages.judge))
+    .bind(ms(spent.stages.answer))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -713,6 +737,7 @@ fn sse(event: &Event) -> SseEvent {
                 "firstTokenMs": spent.first_token_ms,
                 "totalMs": total_ms,
                 "cached": spent.cached,
+                "stagesMs": spent.stages.json(),
             });
             // Present only when every call reported its cost (T-4178): a missing one would make
             // the sum look cheaper than the answer was.
@@ -1195,7 +1220,8 @@ async fn ask(
             cached = spent.cached,
             "question answered"
         );
-        if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent).await {
+        if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent, total_ms).await
+        {
             tracing::error!(%err, "a question's tokens were not recorded");
         }
         if streams.is_some() {
