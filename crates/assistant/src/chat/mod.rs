@@ -566,8 +566,8 @@ async fn record(
     let ms = |ms: Option<u64>| ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
     sqlx::query(
         "INSERT INTO answer_timings (project, deployment, cached, model_calls, first_token_ms, \
-         total_ms, route_ms, search_ms, judge_ms, answer_ms) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         total_ms, route_ms, search_ms, judge_ms, answer_ms, judge_skipped) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(&deployment.project)
     .bind(&deployment.name)
@@ -579,6 +579,7 @@ async fn record(
     .bind(ms(spent.stages.search))
     .bind(ms(spent.stages.judge))
     .bind(ms(spent.stages.answer))
+    .bind(spent.stages.judge_skipped)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
