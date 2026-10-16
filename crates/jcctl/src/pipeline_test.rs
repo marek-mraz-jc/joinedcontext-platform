@@ -161,19 +161,26 @@ pub fn harness(
     }
     match sample.format {
         SampleFormat::Text => {}
-        SampleFormat::Csv | SampleFormat::Json => {
-            let parse = match sample.format {
-                SampleFormat::Csv => "content().string().parse_csv()",
-                _ => "content().parse_json()",
-            };
+        SampleFormat::Json => {
             // The page stays one message, the way the reconciler renders a live stream: the
             // author's mapping runs over what the source answered, and the split into one
             // entity per element happens after it (PL-47, PL-48). Splitting first would test a
             // mapping against a shape production never gives it — an aggregate over the page
             // would read one entity and answer zero (T-0911).
             processors.push(json!({ "mapping": format!(
-                "let rows = {parse}\nroot = if $rows.type() == \"array\" {{ $rows.slice(0, {MAX_MESSAGES}) }} else {{ $rows }}"
+                "let rows = content().parse_json()\nroot = if $rows.type() == \"array\" {{ $rows.slice(0, {MAX_MESSAGES}) }} else {{ $rows }}"
             )}));
+        }
+        SampleFormat::Csv => {
+            // A CSV reaches a live stream through Bento's `csv` input, one message per row with
+            // the header's names as keys; nothing renders a parsed CSV page. So the rows are
+            // split before the mapping, which a per-row mapping failed on as one array with
+            // "expected string value, got null" (T-4268). A header with no rows stays one
+            // message of an empty array, so the test still answers.
+            processors.push(json!({ "mapping": format!(
+                "let rows = content().string().parse_csv()\nroot = if $rows.length() > 0 {{ $rows.slice(0, {MAX_MESSAGES}) }} else {{ [$rows] }}"
+            )}));
+            processors.push(json!({ "unarchive": { "format": "json_array" } }));
         }
     }
     processors.push(json!({ "mapping": "meta jc_input = content().string()" }));
@@ -494,9 +501,9 @@ mod tests {
     }
 
     #[test]
-    fn a_csv_sample_reaches_the_mapping_whole_and_its_output_is_posted_per_row() {
+    fn a_csv_sample_reaches_the_mapping_one_row_each_the_way_the_csv_input_sends_it() {
         let sample = Sample {
-            text: Some("station_id,pm10\n01,18.2\n".into()),
+            text: Some("station_id,pm10\n01,18.2\n02,7.5\n03,11.0\n".into()),
             url: None,
             format: SampleFormat::Csv,
         };
@@ -515,22 +522,16 @@ mod tests {
             .expect("processors");
         assert!(processors[0]["mapping"]
             .as_str()
-            .is_some_and(|m| m.contains("parse_csv")));
-        // The rows reach the author's mapping as one page, the way a live stream gives them
-        // (PL-47, T-0911): parse, record the input, map.
-        assert!(processors[1]["mapping"]
+            .is_some_and(|m| m.contains("parse_csv") && m.contains("slice(0, 20)")));
+        // T-4268: the rows are split before the mapping, one message each, the way Bento's csv
+        // input gives a live stream a file; then the input is recorded and the step runs.
+        assert_eq!(processors[1]["unarchive"]["format"], "json_array");
+        assert!(processors[2]["mapping"]
             .as_str()
             .is_some_and(|m| m.contains("meta jc_input")));
         // Then the step's own marker, then the step (PL-56).
-        assert_eq!(processors[2]["mapping"], step_marker(0));
-        assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
-        assert!(
-            processors
-                .iter()
-                .take(4)
-                .all(|p| p.get("unarchive").is_none()),
-            "nothing splits the page before the mapping: {processors:?}"
-        );
+        assert_eq!(processors[3]["mapping"], step_marker(0));
+        assert_eq!(processors[4]["mapping"], "root.id = this.station_id");
         let n = processors.len();
         assert_eq!(processors[n - 3]["catch"], json!([]));
         assert!(processors[n - 2]["mapping"].as_str().is_some_and(|m| m
@@ -1015,14 +1016,15 @@ mod tests {
         let processors = config["pipeline"]["processors"]
             .as_array()
             .expect("processors");
-        // Each step between its marker and its snapshot (T-3089).
-        assert_eq!(processors[2]["mapping"], step_marker(0));
-        assert_eq!(processors[3]["mapping"], "root.id = this.station_id");
-        assert_eq!(processors[4]["mapping"], stage_snapshot(0));
-        assert_eq!(processors[5]["mapping"], step_marker(1));
-        assert_eq!(processors[6]["log"]["message"], "seen");
-        assert_eq!(processors[7]["mapping"], stage_snapshot(1));
-        let envelope = processors[8]["mapping"].as_str().expect("the envelope");
+        // Each step between its marker and its snapshot (T-3089), after the CSV's parse,
+        // its split into rows (T-4268) and the input's record.
+        assert_eq!(processors[3]["mapping"], step_marker(0));
+        assert_eq!(processors[4]["mapping"], "root.id = this.station_id");
+        assert_eq!(processors[5]["mapping"], stage_snapshot(0));
+        assert_eq!(processors[6]["mapping"], step_marker(1));
+        assert_eq!(processors[7]["log"]["message"], "seen");
+        assert_eq!(processors[8]["mapping"], stage_snapshot(1));
+        let envelope = processors[9]["mapping"].as_str().expect("the envelope");
         assert!(
             envelope.ends_with(
                 r#"root.steps = [meta("jc_after_0").or(null), meta("jc_after_1").or(null)]"#
