@@ -231,6 +231,31 @@ async fn a_tool_call_is_the_brokers_answer_under_the_verified_caller() {
     assert_eq!(header("authorization"), None);
 }
 
+/// T-4373: a quantity's UN/CEFACT code comes back with the unit a person reads beside it, in
+/// both halves of the tool result; the code itself is kept.
+#[tokio::test]
+async fn a_tool_result_names_the_unit_beside_its_code() {
+    let entities =
+        json!({ "entities": [{ "pm10": { "type": "Property", "value": 8.9, "unitCode": "GQ" } }] });
+    let answered = json!({ "jsonrpc": "2.0", "id": 7, "result": {
+        "content": [{ "type": "text", "text": entities.to_string() }],
+        "structuredContent": entities,
+    } });
+    let (upstream, _) = broker(StatusCode::OK, answered).await;
+    let message = call("query_entities", json!({ "type": ["AirQualityObserved"] }));
+    let (status, answer) = post(gateway(upstream, endpoint()), &endpoint_mcp(), &message).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let pm10 = &answer["result"]["structuredContent"]["entities"][0]["pm10"];
+    assert_eq!(
+        (pm10["unitCode"].as_str(), pm10["unit"].as_str()),
+        (Some("GQ"), Some("µg/m³"))
+    );
+    let text = answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(text.contains("µg/m³"), "{text}");
+}
+
 /// The space surface is the space's view (`cs-{space}`).
 #[tokio::test]
 async fn the_space_surface_is_the_spaces_view() {
