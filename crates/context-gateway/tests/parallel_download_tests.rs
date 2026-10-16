@@ -66,6 +66,18 @@ async fn view(counts: bool) -> (String, Arc<Seen>) {
             tokio::time::sleep(Duration::from_millis(50)).await;
             seen.now.fetch_sub(1, Ordering::SeqCst);
 
+            // The broker's scan ceiling: a `q` the view checks entity by entity is never counted
+            // past 10 000 stored rows, and `q=past-ceiling` stands for a read over it (T-4324).
+            let q = param(&query, "q");
+            if q == Some("past-ceiling") || (q.is_some() && param(&query, "count") == Some("true"))
+            {
+                let problem = json!({
+                    "type": "https://uri.etsi.org/ngsi-ld/errors/TooManyResults",
+                    "title": "TooManyResults",
+                    "detail": "query matched more than 10000 entities before filtering",
+                });
+                return (StatusCode::FORBIDDEN, axum::Json(problem)).into_response();
+            }
             let name = param(&query, "type").unwrap_or_default().to_owned();
             let total = HELD
                 .iter()
@@ -149,13 +161,17 @@ fn endpoint(max_file_rows: Option<u32>) -> Endpoint {
 }
 
 async fn download(broker: &str, endpoint: Endpoint) -> (StatusCode, Value) {
+    download_with(broker, endpoint, "").await
+}
+
+async fn download_with(broker: &str, endpoint: Endpoint, query: &str) -> (StatusCode, Value) {
     let app = router(Arc::new(
         Gateway::new(Broker::new(broker), Box::new(PolicyPdp), "praha.eu").serve([endpoint]),
     ));
     let response = app
         .oneshot(
             HttpRequest::builder()
-                .uri(format!("/api/endpoint/{SLUG}/file.geojson"))
+                .uri(format!("/api/endpoint/{SLUG}/file.geojson{query}"))
                 .body(Body::empty())
                 .expect("a request"),
         )
@@ -226,4 +242,39 @@ async fn a_total_past_the_ceiling_is_refused_before_the_rest_is_read() {
         asked.iter().all(|query| query.contains("offset=0")),
         "{asked:?}"
     );
+}
+
+/// A download filtered by `q` asks for no count, which the broker cannot give past its scan
+/// ceiling, and walks the pages instead: on dev every file link of a catalogue dataset (`q` on
+/// `dataset`) answered 403 "Access Denied by Policy" (T-4324).
+#[tokio::test]
+async fn a_download_with_a_q_walks_its_pages_without_a_count() {
+    let (broker, seen) = view(true).await;
+    let (status, collection) = download_with(
+        &broker,
+        endpoint(None),
+        "?type=WasteContainer&q=dataset%3D%3D%22d%22",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{collection}");
+    assert_eq!(ids(&collection).len(), 2500);
+    let asked = seen.asked.lock().expect("no poisoned lock").clone();
+    assert!(
+        asked.iter().all(|query| !query.contains("count=true")),
+        "{asked:?}"
+    );
+}
+
+/// The broker's TooManyResults is the download's 413, never a Policy's 403.
+#[tokio::test]
+async fn the_brokers_scan_ceiling_is_payload_too_large_not_forbidden() {
+    let (broker, _) = view(true).await;
+    let (status, problem) = download_with(
+        &broker,
+        endpoint(None),
+        "?type=WasteContainer&q=past-ceiling",
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{problem}");
+    assert_eq!(problem["status"], 413, "{problem}");
 }
