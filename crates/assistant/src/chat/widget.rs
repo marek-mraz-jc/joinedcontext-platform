@@ -113,7 +113,13 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
         "publicId": spec.public_id,
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
         "color": spec.theme.as_ref().and_then(|t| t.primary_color.clone()),
-        "connectors": spec.connectors.iter().map(|c| c.endpoint.clone()).collect::<Vec<_>>(),
+        // A visitor gets no picker: the assistant chooses among all its connectors, and their
+        // Endpoint names stay off an anonymous page (T-4253). An internal channel keeps it.
+        "connectors": if spec.channel.is_anonymous() {
+            Vec::new()
+        } else {
+            spec.connectors.iter().map(|c| c.endpoint.clone()).collect::<Vec<_>>()
+        },
         "languages": spec.languages,
         "suggestions": spec.suggestions,
         "disclaimer": spec.disclaimer,
@@ -284,6 +290,28 @@ mod tests {
             );
             assert!(html.contains("Kedy je zber odpadu?"));
         }
+    }
+
+    /// T-4253: a visitor's page names no connector, so it shows no picker and no Endpoint name;
+    /// an internal deployment keeps the picker.
+    #[test]
+    fn a_public_page_names_no_connector_and_an_internal_one_keeps_them() {
+        let spec = |channel: &str| {
+            json!({
+                "publicId": "bb",
+                "channel": channel,
+                "sources": ["web"],
+                "connectors": [{"endpoint": "banskabystrica/air-quality", "tools": ["query_entities"]}],
+            })
+        };
+        let public = deployment(spec("public"));
+        assert_eq!(config(&public, &[])["connectors"], json!([]));
+        assert!(!html(&public, &[], false).contains("air-quality"));
+        let internal = deployment(spec("internal"));
+        assert_eq!(
+            config(&internal, &[])["connectors"],
+            json!(["banskabystrica/air-quality"])
+        );
     }
 
     #[test]

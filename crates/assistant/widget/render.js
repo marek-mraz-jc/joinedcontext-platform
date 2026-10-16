@@ -394,11 +394,60 @@ var JCRender = (function () {
     return { conversation: conversation, asked: asked, turns: turns.slice(-MAX_KEPT) };
   }
 
+  /**
+   * The questions an empty chat offers (T-4253): the deployment's own in the language the chat
+   * speaks, else the widget's own, never another language's; at most four distinct ones.
+   */
+  function suggestions(own, lang, fallback) {
+    var list = own && Array.isArray(own[lang]) && own[lang].length > 0 ? own[lang] : fallback || [];
+    var seen = [];
+    list.forEach(function (q) {
+      var text = typeof q === "string" ? q.trim() : "";
+      if (text && seen.indexOf(text) < 0 && seen.length < 4) seen.push(text);
+    });
+    return seen;
+  }
+
+  // The service's error titles (API/05 §1.6), English and stable, to the widget's own words.
+  var TROUBLE = {
+    "Budget Spent": "spent", "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
+    "No Answer": "unanswered", "Answer Took Too Long": "slow"
+  };
+
+  /**
+   * The widget's own word for a failed answer (T-4253), so the visitor reads it in the chat's
+   * language and never an English detail: by the service's title, else by the status, a lost
+   * connection (no status) as offline.
+   */
+  function trouble(status, title) {
+    if (Object.prototype.hasOwnProperty.call(TROUBLE, title)) return TROUBLE[title];
+    if (status === 429) return "busy";
+    if (status === 503) return "paused";
+    if (!status) return "offline";
+    return "failed";
+  }
+
+  /** Whether asking the same again can help: not once the day's or the conversation's share is spent. */
+  function retryable(word) {
+    return word !== "spent" && word !== "full";
+  }
+
+  /**
+   * What Retry sends again (T-4253): the last question and the history without it, which the
+   * failed request already carried; null when the history does not end on a question.
+   */
+  function retry(history) {
+    var last = Array.isArray(history) ? history[history.length - 1] : null;
+    if (!last || last.role !== "user" || typeof last.text !== "string" || !last.text.trim()) return null;
+    return { question: last.text, history: history.slice(0, -1) };
+  }
+
   return {
     followups: followups, restore: restore, remember: remember,
     cards: cards, stage: stage, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting
+    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting,
+    suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry
   };
 })();
 if (typeof module !== "undefined") module.exports = JCRender;

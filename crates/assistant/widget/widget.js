@@ -21,7 +21,13 @@
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
       missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
-      thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup" },
+      thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup", retry: "Skúsiť znova",
+      spent: "Dnešné odpovede tohto asistenta sú vyčerpané. Znova odpovedá po polnoci UTC.",
+      full: "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor.",
+      unreachable: "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.",
+      unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
+      slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
+      ideas: ["Aké údaje tu nájdem?", "Aké údaje sú o doprave?", "Ako si stiahnem údaje?"] },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…", sources: "Sources",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -34,7 +40,13 @@
       dataset: "Open the dataset", download: "Download the data", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
       missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
-      thanks: "Thank you for the feedback.", more: "More questions", contact: "Contact", map: "Show on the map", steps: "Steps" },
+      thanks: "Thank you for the feedback.", more: "More questions", contact: "Contact", map: "Show on the map", steps: "Steps", retry: "Try again",
+      spent: "This assistant has used up today's answers. It answers again after midnight UTC.",
+      full: "This conversation has used up its share of the assistant. To ask more, start a new conversation.",
+      unreachable: "The assistant cannot reach its model right now. Try again in a minute.",
+      unanswered: "The assistant could not put an answer together. Try asking in other words.",
+      slow: "The answer took too long. Try a shorter or different question.",
+      ideas: ["What data can I find here?", "What data is there about transport?", "How do I download the data?"] },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…", sources: "Zdroje",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -47,7 +59,13 @@
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
       missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
-      thanks: "Děkujeme za hodnocení.", more: "Další otázky", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup" }
+      thanks: "Děkujeme za hodnocení.", more: "Další otázky", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup", retry: "Zkusit znovu",
+      spent: "Dnešní odpovědi tohoto asistenta jsou vyčerpané. Znovu odpovídá po půlnoci UTC.",
+      full: "Tento rozhovor už vyčerpal svůj podíl asistenta. Chcete-li se ptát dál, začněte novou konverzaci.",
+      unreachable: "Asistent se teď nemůže spojit se svým modelem. Zkuste to za minutu znovu.",
+      unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
+      slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
+      ideas: ["Jaká data tu najdu?", "Jaká data jsou o dopravě?", "Jak si stáhnu data?"] }
   };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
@@ -81,19 +99,18 @@
   var head = el("header", "jc-head");
   var title = words(el("h1"), "assistant");
   var actions = el("div", "jc-actions");
-  var switches = [];
+  // The language as one compact menu, so the header keeps to one row on a phone (T-4253).
+  var picker = null;
   if (offered.length > 1) {
-    var picker = el("div", "jc-langs");
-    picker.setAttribute("role", "group");
+    picker = el("select", "jc-langs");
     words(picker, "language", "ariaLabel");
     offered.forEach(function (code) {
-      var b = el("button", "jc-lang", code.toUpperCase());
-      b.type = "button";
-      b.lang = code;
-      b.addEventListener("click", function () { relabel(code); });
-      picker.appendChild(b);
-      switches.push(b);
+      var option = el("option", "", code.toUpperCase());
+      option.value = code;
+      option.lang = code;
+      picker.appendChild(option);
     });
+    picker.addEventListener("change", function () { relabel(picker.value); });
     actions.appendChild(picker);
   }
   var fresh = button("jc-fresh", "fresh");
@@ -191,7 +208,8 @@
     intro = el("li", "jc-intro");
     var hello = JCRender.greeting(config.greeting, config.languages, lang, w.hello);
     if (hello) intro.appendChild(el("p", "jc-greeting", hello));
-    var asks = (perLanguage(config.suggestions) || []).slice(0, 6);
+    // The deployment's questions in this language, else the widget's own (T-4253).
+    var asks = JCRender.suggestions(config.suggestions, lang, w.ideas);
     if (asks.length > 0) {
       var list = el("ul", "jc-suggest");
       list.setAttribute("aria-label", w.suggested);
@@ -213,7 +231,7 @@
     w = WORDS[code];
     document.documentElement.lang = code;
     bound.forEach(function (b) { b[0][b[2]] = w[b[1]]; });
-    switches.forEach(function (b) { b.setAttribute("aria-pressed", String(b.lang === code)); });
+    if (picker) picker.value = code;
     disclaimer.textContent = perLanguage(config.disclaimer) || "";
     disclaimer.hidden = !disclaimer.textContent;
     if (turns === 0 && !busy && config.enabled !== false) {
@@ -363,8 +381,7 @@
           body: JSON.stringify(body)
         });
         if (response.ok) return said(w.thanks);
-        var problem = await response.json().catch(function () { return {}; });
-        said(refusal(response.status, problem.detail));
+        said(w[refusal(response.status)]);
         // A refused note may be sent again without it.
         up.disabled = false;
         down.disabled = false;
@@ -499,16 +516,30 @@
     item.data = figure;
   }
 
-  function fail(item, sentence) {
+  // A failed answer as one quiet line in the visitor's language and a Retry that asks the same
+  // question again, through the same route and its per-visitor limit (T-4253).
+  function fail(item, word) {
     if (item.status) item.status.remove();
     if (item.streaming) {
       item.streaming.remove();
       item.streaming = null;
     }
     item.classList.add("jc-error");
-    var p = el("p", "", sentence);
+    var p = el("p", "", w[word]);
     p.setAttribute("role", "alert");
     item.appendChild(p);
+    if (!JCRender.retryable(word)) return;
+    var again = button("jc-retry", "retry");
+    again.addEventListener("click", function () {
+      var resend = JCRender.retry(history);
+      if (!resend || busy) return;
+      history = resend.history;
+      var question = item.previousSibling;
+      if (question && question.classList.contains("jc-you")) question.remove();
+      item.remove();
+      submit(resend.question);
+    });
+    item.appendChild(again);
   }
 
   function handle(item, name, data) {
@@ -560,7 +591,7 @@
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
     } else if (name === "error") {
-      fail(item, data.detail || w.failed);
+      fail(item, JCRender.trouble(data.status, data.title));
     }
   }
 
@@ -572,11 +603,9 @@
     keep();
   }
 
-  function refusal(status, detail) {
-    if (detail) return detail;
-    if (status === 429) return w.busy;
-    if (status === 503) return w.paused;
-    return w.failed;
+  // The server's detail is English and for the logs; the visitor reads the widget's words.
+  function refusal(status, title) {
+    return JCRender.trouble(status, title);
   }
 
   async function ask(question, item, signal) {
@@ -595,7 +624,7 @@
     });
     if (!response.ok || !response.body) {
       var problem = await response.json().catch(function () { return {}; });
-      fail(item, refusal(response.status, problem.detail));
+      fail(item, refusal(response.status, problem.title));
       return;
     }
     var reader = response.body.getReader();
@@ -654,7 +683,7 @@
         item.appendChild(el("p", "jc-status", w.stopped));
         return;
       }
-      fail(item, error instanceof TypeError ? w.offline : w.failed);
+      fail(item, error instanceof TypeError ? "offline" : "failed");
     }).then(function () {
       if (busy === controller) settle();
     });
