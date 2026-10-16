@@ -76,7 +76,7 @@
   var offered = JCRender.ordered((config.languages || []).filter(function (l) { return WORDS[l]; }));
   // The visitor's own choice, kept in this browser's storage; storage may be off, then the
   // chooser asks again on the next open.
-  var LANG_KEY = "jc-lang:" + config.publicId;
+  var LANG_KEY = "jc-chat-lang";
   function storedLanguage() {
     try { return JCRender.chosen(localStorage.getItem(LANG_KEY), offered); } catch (e) { return null; }
   }
@@ -84,7 +84,7 @@
     try { localStorage.setItem(LANG_KEY, code); } catch (e) { /* asked again next time */ }
   }
   var stored = storedLanguage();
-  var lang = stored || JCRender.language(params.get("lang"), config.languages, WORDS);
+  var lang = JCRender.language(params.get("lang"), config.languages, WORDS, stored);
   var w = WORDS[lang];
   if (/^#[0-9a-fA-F]{6}$/.test(config.color || "")) {
     document.documentElement.style.setProperty("--accent", config.color);
@@ -336,9 +336,14 @@
     }
   }
 
+  // `who` is the word's key, bound like every other word, so a language switch renames the
+  // speakers of the turns already shown (T-4278: "Vy" stayed on an English page).
   function turn(cls, who) {
     var item = el("li", cls);
-    item.appendChild(el("span", "jc-sr", who + ": "));
+    var speaker = el("span", "jc-sr");
+    speaker.appendChild(words(el("span"), who));
+    speaker.appendChild(document.createTextNode(": "));
+    item.appendChild(speaker);
     log.appendChild(item);
     log.scrollTop = log.scrollHeight;
     return item;
@@ -405,7 +410,7 @@
     announce.textContent = body.textContent;
     if (grouped.list.length > 0) {
       var list = el("ul", "jc-cards");
-      list.setAttribute("aria-label", w.sources);
+      words(list, "sources", "ariaLabel");
       grouped.list.forEach(function (source, i) {
         var li = el("li", "jc-card");
         li.id = ids + "-" + (i + 1);
@@ -546,7 +551,7 @@
   function chips(item, questions) {
     if (questions.length === 0) return;
     var list = el("ul", "jc-suggest jc-followups");
-    list.setAttribute("aria-label", w.more);
+    words(list, "more", "ariaLabel");
     questions.forEach(function (question) {
       var li = el("li");
       var b = el("button", "", question);
@@ -771,9 +776,9 @@
       intro = null;
     }
     Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
-    turn("jc-you", w.you).appendChild(el("p", "", question));
+    turn("jc-you", "you").appendChild(el("p", "", question));
     input.value = "";
-    var item = turn("jc-bot", w.assistant);
+    var item = turn("jc-bot", "assistant");
     item.question = question;
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
@@ -842,8 +847,8 @@
     log.textContent = "";
     intro = null;
     kept.turns.forEach(function (t) {
-      turn("jc-you", w.you).appendChild(el("p", "", t.question));
-      show(turn("jc-bot", w.assistant), t.text, t.citations, t.turn);
+      turn("jc-you", "you").appendChild(el("p", "", t.question));
+      show(turn("jc-bot", "assistant"), t.text, t.citations, t.turn);
       history.push({ role: "user", text: t.question });
       history.push({ role: "assistant", text: t.text });
     });

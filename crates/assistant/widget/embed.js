@@ -4,7 +4,9 @@
 // the panel live in a shadow root, so neither the site's styles nor ours leak. It carries no
 // secret: the chat answers only on the deployment's allowed origins, and the iframe's own page
 // may be framed by them alone. The accent colour comes from `data-color` on the script tag or
-// the CSS variable `--jc-assistant-color`; the language from `data-lang` or the page's `lang`.
+// the CSS variable `--jc-assistant-color`; the language from `data-lang` alone, never the page's
+// own `lang` (T-4280): the chat opens in the deployment's language, Slovak, until the visitor
+// switches it.
 "use strict";
 (function () {
   var me = document.currentScript;
@@ -13,7 +15,7 @@
   var match = /^\/d\/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)\/embed\.js$/.exec(src.pathname);
   if (!match) return;
   var publicId = match[1];
-  var pageLang = String(me.getAttribute("data-lang") || document.documentElement.lang || "").slice(0, 2).toLowerCase();
+  var pageLang = String(me.getAttribute("data-lang") || "").slice(0, 2).toLowerCase();
   var colour = me.getAttribute("data-color") ||
     getComputedStyle(document.documentElement).getPropertyValue("--jc-assistant-color").trim();
   if (!/^#[0-9a-fA-F]{6}$/.test(colour)) colour = "#1f5fae";

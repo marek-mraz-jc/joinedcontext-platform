@@ -43,6 +43,37 @@ var JCRender = (function () {
   var NUMBERED = /^\s*\d{1,3}[.)]\s+(.*)$/;
   var HEADING = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/;
 
+  // The citation numbers an item carries at its own level, as one key; "" when it cites nothing.
+  function citeKey(item) {
+    var numbers = [];
+    item.children.forEach(function (node) {
+      if (node && node.tag === "cite") numbers = numbers.concat(node.numbers);
+    });
+    return numbers.filter(function (n, i) { return numbers.indexOf(n) === i; }).sort(function (a, b) { return a - b; }).join(",");
+  }
+
+  // An item without its markers, and without the commas and spaces that only joined them.
+  function uncited(item) {
+    var kept = item.children.filter(function (node) { return !(node && node.tag === "cite"); });
+    var at = kept.length - 1;
+    while (at >= 0 && typeof kept[at] === "string" && /^[\s,;]*$/.test(kept[at])) at -= 1;
+    kept = kept.slice(0, at + 1);
+    if (typeof kept[at] === "string") kept[at] = kept[at].replace(/[\s,;]+$/, "");
+    item.children = kept.filter(function (node) { return node !== ""; });
+  }
+
+  /**
+   * Consecutive items of a list that cite the same sources keep the markers on the last of them
+   * only (T-4278): "[1],[2]" after every weekday of the opening hours was noise on a phone.
+   */
+  function collapseCites(list) {
+    var items = list.children;
+    for (var i = 0; i < items.length - 1; i += 1) {
+      var key = citeKey(items[i]);
+      if (key !== "" && key === citeKey(items[i + 1])) uncited(items[i]);
+    }
+  }
+
   /**
    * The answer as blocks: paragraphs (lines joined by line breaks), bullet and numbered lists,
    * headings read as bold paragraphs. `known(n)` says whether citation n exists, `linkable(url)`
@@ -87,6 +118,9 @@ var JCRender = (function () {
         }
         paragraph.children = paragraph.children.concat(inline(line.trim(), known, linkable));
       }
+    });
+    blocks.forEach(function (block) {
+      if (block.tag === "ul" || block.tag === "ol") collapseCites(block);
     });
     return blocks;
   }
@@ -195,13 +229,17 @@ var JCRender = (function () {
   }
 
   /**
-   * The language the chat speaks (T-4138): the one asked for (the host page's, or the visitor's
-   * switch) when the widget has words for it, else Slovak when the deployment offers it or names
-   * none, else the deployment's first language the widget knows, else English.
+   * The language the chat speaks (T-4138, T-4280): the one the visitor chose in the widget before
+   * (`chosen`), else the one the embedding site names on purpose (`requested`, its `data-lang`),
+   * when the widget has words for it; else Slovak when the deployment offers it or names none,
+   * else the deployment's first language the widget knows, else English. The host page's own
+   * language is never asked: an English catalogue page still opens a Slovak chat.
    */
-  function language(requested, offered, known) {
+  function language(requested, offered, known, chosen) {
     var has = function (l) { return Object.prototype.hasOwnProperty.call(known, l); };
-    var asked = String(requested || "").slice(0, 2).toLowerCase();
+    var pick = function (l) { return String(l || "").slice(0, 2).toLowerCase(); };
+    if (has(pick(chosen))) return pick(chosen);
+    var asked = pick(requested);
     if (asked && has(asked)) return asked;
     offered = (offered || []).filter(has);
     if (offered.length === 0 || offered.indexOf("sk") >= 0) return has("sk") ? "sk" : "en";

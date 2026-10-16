@@ -146,6 +146,19 @@ test("Slovak by default, the host page's language when the widget knows it", () 
   assert.equal(language("", ["fi"], { en: {} }), "en");
 });
 
+// T-4280: the visitor's choice in the widget wins; without one the chat opens in Slovak, and only
+// a site's deliberate data-lang (never the host page's lang, which no longer reaches the widget)
+// changes that.
+test("the visitor's stored choice first, else Slovak", () => {
+  const known = { sk: {}, en: {}, cs: {} };
+  assert.equal(language("", ["sk", "en"], known, null), "sk");
+  assert.equal(language("", ["sk", "en"], known, "en"), "en");
+  assert.equal(language("cs", ["sk", "en"], known, "en"), "en");
+  assert.equal(language("", ["sk", "en"], known, "hu"), "sk");
+  assert.equal(language("", ["sk", "en"], known, undefined), "sk");
+  assert.equal(language("en", ["sk", "en"], known, ""), "en");
+});
+
 test("a data table shows at most 50 rows of text and only http(s) links", () => {
   const rows = Array.from({ length: 60 }, (_, i) => [`Stanica ${i}`, i, null]);
   const shown = table({
@@ -431,4 +444,33 @@ test("the panel asks for the language once, and only where there is a choice (T-
   assert.deepEqual(ordered(["en", "cs", "sk"]), ["sk", "en", "cs"]);
   assert.deepEqual(ordered(["en"]), ["en"]);
   assert.deepEqual(ordered(undefined), []);
+});
+
+// T-4278: the owner's transcript repeated "[1],[2]" after every weekday of the Client Centre's hours.
+test("a list whose lines cite the same sources carries the markers once, on its last line", () => {
+  const known = (n) => n === 1 || n === 2 || n === 3;
+  const cites = (block) => block.children.map((li) => li.children.filter((node) => node.tag === "cite").map((c) => c.numbers));
+  const [hours] = markdown("- Monday: 8:00–17:00 [1],[2]\n- Tuesday: 8:00–15:00 [1], [2]\n- Friday: 8:00–13:00 [2][1]", known);
+  assert.deepEqual(cites(hours), [[], [], [[2], [1]]]);
+  assert.deepEqual(hours.children[0].children, ["Monday: 8:00–17:00"], "no comma or space left where the markers were");
+  // A line with other sources keeps its own, and so does the line before it.
+  const [mixed] = markdown("1. Roads [3]\n2. Schools [1]\n3. Health [1]", known);
+  assert.deepEqual(cites(mixed), [[[3]], [], [[1]]]);
+  // Lines that cite nothing, and a paragraph, are left as they are.
+  assert.deepEqual(markdown("- a\n- b", known)[0].children.map((li) => li.children), [["a"], ["b"]]);
+  assert.deepEqual(cites({ children: markdown("One [1].\nTwo [1].", known) }), [[[1], [1]]]);
+});
+
+// T-4278: on an English page the owner read "Vy" and "Užitočná odpoveď" (speakers and thumbs
+// named once, in the language of the moment), and a language switch wrote the word over the thumb.
+test("the speakers, the thumbs and every answer's tools are named by bound words", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
+  assert.doesNotMatch(widget, /turn\("jc-(you|bot)", w\./, "a speaker is a key, not the word of the moment");
+  assert.doesNotMatch(widget, /setAttribute\("aria-label", w\.(up|down|sources|more)\)/);
+  assert.doesNotMatch(widget, /button\("jc-thumb"/, "a thumb's word is its name, never its text");
+  assert.match(widget, /words\(b, key, "ariaLabel"\)/);
+  // T-4283: copy, thumbs and the header's actions are icon buttons named by their bound word.
+  assert.match(widget, /iconButton\("jc-copy", "copy", "copy"\)/);
 });

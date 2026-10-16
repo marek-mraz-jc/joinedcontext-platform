@@ -1105,6 +1105,77 @@ async fn queue_concurrent_claim_and_retry_limits() {
     drop_database(admin, pool, &db_name).await;
 }
 
+/// T-4278: a job whose worker died mid-crawl (a pod replaced by an apply) stayed `running` for
+/// good, so it was never claimed again and `pending` kept every later job of the source out:
+/// web-bbsk stopped at 84 of bbsk.sk's pages. A running job past its lease is claimed again, as a
+/// further attempt; one within its lease is not.
+#[tokio::test]
+async fn a_job_left_running_by_a_dead_worker_is_claimed_again_after_its_lease() {
+    let (admin, pool, db_name) = database("stale").await;
+    let job_id = queue::enqueue(&pool, "stale-proj", "web")
+        .await
+        .expect("enqueue");
+    let first = queue::claim(&pool, "jc-assistant-old")
+        .await
+        .expect("claim");
+    assert_eq!(first.map(|job| job.id), Some(job_id));
+
+    // Still within its lease: the worker may be crawling, so nobody else takes it.
+    assert_eq!(
+        queue::claim(&pool, "jc-assistant-new")
+            .await
+            .expect("claim"),
+        None
+    );
+    assert!(queue::pending(&pool, "stale-proj", "web")
+        .await
+        .expect("pending"));
+
+    sqlx::query("UPDATE crawl_jobs SET claimed_at = now() - interval '7 hours' WHERE id = $1")
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("age the claim");
+    let again = queue::claim(&pool, "jc-assistant-new")
+        .await
+        .expect("claim")
+        .expect("the stale job is claimed again");
+    assert_eq!((again.id, again.attempts), (job_id, 1));
+    let owner: String = sqlx::query_scalar("SELECT claimed_by FROM crawl_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("owner");
+    assert_eq!(owner, "jc-assistant-new");
+
+    // A job that took its worker down five times is failed, not claimed a sixth time.
+    sqlx::query(
+        "UPDATE crawl_jobs SET attempts = 5, claimed_at = now() - interval '7 hours' WHERE id = $1",
+    )
+    .bind(job_id)
+    .execute(&pool)
+    .await
+    .expect("five attempts");
+    assert_eq!(
+        queue::claim(&pool, "jc-assistant-new")
+            .await
+            .expect("claim"),
+        None
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM crawl_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("state");
+    assert_eq!(state, "failed");
+    // And no longer keeps the source's next job out.
+    assert!(!queue::pending(&pool, "stale-proj", "web")
+        .await
+        .expect("pending"));
+
+    drop_database(admin, pool, &db_name).await;
+}
+
 /// Case 7: robots.txt HTTP status semantics (404 allows, 500 disallows).
 #[tokio::test]
 async fn robots_http_status_semantics() {
