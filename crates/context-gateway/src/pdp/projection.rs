@@ -51,18 +51,6 @@ pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>, hidden: &B
     });
 }
 
-/// Strips a whole broker answer, whether it is one entity or an array of them (R9, EP-61).
-pub fn project(body: &mut Value, granted: &BTreeSet<String>, hidden: &BTreeSet<String>) {
-    match body {
-        Value::Array(entities) => {
-            for entity in entities {
-                project_entity(entity, granted, hidden);
-            }
-        }
-        entity => project_entity(entity, granted, hidden),
-    }
-}
-
 /// The same, by the constraint set, so each entity is stripped by the slots of its own type
 /// (MP-02, T-1862).
 ///
@@ -309,13 +297,6 @@ pub fn type_iri(name: &str) -> Option<String> {
     Some(format!("{DEFAULT_VOCAB}{name}"))
 }
 
-/// Whether `name`, compacted under the core context or expanded, is one of the granted types,
-/// compared as IRIs: the core context's reading of each granted name, and what the space's own
-/// `@context`s make of it (`type_iris`). A name the gateway cannot expand grants nothing.
-pub fn type_named(constraints: &Constraints, name: &str) -> bool {
-    named_in(&constraints.types, &constraints.type_iris, name)
-}
-
 fn named_in(types: &BTreeSet<String>, type_iris: &BTreeSet<String>, name: &str) -> bool {
     type_iri(name).is_some_and(|asked| {
         type_iris.contains(&asked)
@@ -361,14 +342,6 @@ pub fn model_type_iris<'a>(
         }
     }
     out
-}
-
-/// The last segment of an IRI, after `#` or `/`; a plain term is returned unchanged.
-///
-/// It picks attribute slots for a name, never an access decision: two vocabularies' `Depot`
-/// share it, so a type is granted by [`type_named`], which compares IRIs (T-3473).
-pub fn term(iri: &str) -> &str {
-    iri.rsplit(['#', '/']).next().unwrap_or(iri)
 }
 
 /// Whether the entity's id falls inside the anchored id patterns of the matching grants (R24).
