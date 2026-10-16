@@ -235,11 +235,13 @@ pub fn load_from(
 }
 
 fn tables(repo: &Repository, root: &Path) -> Tables {
-    let endpoints = endpoints_with_models(repo, Some(root));
+    // Read and compiled once per reload, then shared by every Endpoint and Space (T-4352).
+    let models = ModelSet::of(repo, Some(root));
+    let endpoints = endpoints_from(repo, Some(root), &models);
     let homes = brokers_of(repo, &endpoints);
     (
         endpoints,
-        spaces_of(repo, Some(root)),
+        spaces_from(repo, &models),
         accounts_of(repo),
         federations_of(repo),
         agreements_of(repo),
@@ -349,15 +351,16 @@ pub fn load_with_previews(
             .map(|s| s.endpoint.space.clone())
             .chain(endpoints.iter().map(|e| e.space.clone()))
             .collect();
+        let models = ModelSet::of(&repo, Some(&root));
         endpoints.extend(
-            endpoints_with_models(&repo, Some(&root))
+            endpoints_from(&repo, Some(&root), &models)
                 .into_iter()
                 .filter(|endpoint| {
                     !slugs.contains(&endpoint.slug) && !segments.contains(&endpoint.space)
                 }),
         );
         spaces.extend(
-            spaces_of(&repo, Some(&root))
+            spaces_from(&repo, &models)
                 .into_iter()
                 .filter(|space| !segments.contains(&space.endpoint.space)),
         );
@@ -393,9 +396,12 @@ fn app_of(repo: &Repository, project: &str, endpoint: &str) -> Option<String> {
 /// (DM-02, EP-46). Deterministic: the repository is indexed by resource identity, so two runs
 /// on the same commit build the same table in the same order (CC-27).
 pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endpoint> {
+    endpoints_from(repo, root, &ModelSet::of(repo, root))
+}
+
+fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> Vec<Endpoint> {
+    let ModelSet { models, declared } = models;
     let policies = policies_by_space(repo);
-    let models = models_by_space(repo, root);
-    let declared = declared_types(repo, &models);
     let views = view_mappings(repo, root);
     let projections = projections(repo);
 
@@ -572,9 +578,12 @@ fn view_mappings(
 /// so that the decision belongs to the policy set alone: a space with no grant for the
 /// caller answers 404, which is what a space that does not exist answers (SP-06, SP-11).
 pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
+    spaces_from(repo, &ModelSet::of(repo, root))
+}
+
+fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
+    let ModelSet { models, declared } = models;
     let policies = policies_by_space(repo);
-    let models = models_by_space(repo, root);
-    let declared = declared_types(repo, &models);
 
     let mut spaces = Vec::new();
     for (id, resource) in repo.iter() {
@@ -751,6 +760,22 @@ fn bound_policy(
 /// organisation's model as its own, which is exactly what DM-49 forbids. The reconciler
 /// commits such a model beside the reference that fetched it, and the Mappings that read it
 /// are how it reaches local data (DM-48, DM-49).
+/// Every space's models and the declared types compiled from them, built once per reload and
+/// handed to the Endpoint and the Space tables alike, so each parsed schema, `@context` and
+/// compiled rule set exists once however many records serve the space (T-4352).
+struct ModelSet {
+    models: BTreeMap<(String, String), Vec<Model>>,
+    declared: BTreeMap<(String, String), Arc<DeclaredTypes>>,
+}
+
+impl ModelSet {
+    fn of(repo: &Repository, root: Option<&Path>) -> Self {
+        let models = models_by_space(repo, root);
+        let declared = declared_types(repo, &models);
+        Self { models, declared }
+    }
+}
+
 fn models_by_space(
     repo: &Repository,
     root: Option<&Path>,
@@ -789,7 +814,7 @@ fn models_by_space(
 fn declared_types(
     repo: &Repository,
     models: &BTreeMap<(String, String), Vec<Model>>,
-) -> BTreeMap<(String, String), DeclaredTypes> {
+) -> BTreeMap<(String, String), Arc<DeclaredTypes>> {
     let mut declared = BTreeMap::new();
     for (id, resource) in repo.iter() {
         if id.kind != "ContextSpace" {
@@ -809,7 +834,7 @@ fn declared_types(
             Some(model) => {
                 declared.insert(
                     key,
-                    DeclaredTypes {
+                    Arc::new(DeclaredTypes {
                         model: model.name.clone(),
                         classes: model.classes.iter().cloned().collect(),
                         units: model
@@ -819,7 +844,7 @@ fn declared_types(
                             .unwrap_or_default(),
                         relationships: model
                             .json_schema
-                            .as_ref()
+                            .as_deref()
                             .map(RelationshipRules::from_schema)
                             .unwrap_or_default(),
                         quality: space.quality.clone(),
@@ -835,7 +860,7 @@ fn declared_types(
                                 space.missing_unit_code,
                             ))
                         }),
-                    },
+                    }),
                 );
             }
             None => tracing::warn!(
@@ -900,7 +925,8 @@ fn beside(
 }
 
 fn model_of(name: &str, spec: &DataModelSpec, root: Option<&Path>, manifest_path: &Path) -> Model {
-    let beside = |relative: &Option<String>| beside(root, manifest_path, relative, name);
+    let beside =
+        |relative: &Option<String>| beside(root, manifest_path, relative, name).map(Arc::new);
 
     Model {
         name: name.to_owned(),

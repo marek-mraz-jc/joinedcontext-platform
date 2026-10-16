@@ -69,13 +69,16 @@ fn both_types() -> PolicySpec {
 
 fn endpoint(declared: Option<&[&str]>) -> Endpoint {
     Endpoint {
-        declared_types: declared.map(|classes| DeclaredTypes {
-            model: "bb-air-quality".into(),
-            classes: classes.iter().map(|class| (*class).to_owned()).collect(),
-            units: Default::default(),
-            relationships: Default::default(),
-            quality: Vec::new(),
-            schema: None,
+        declared_types: declared.map(|classes| {
+            DeclaredTypes {
+                model: "bb-air-quality".into(),
+                classes: classes.iter().map(|class| (*class).to_owned()).collect(),
+                units: Default::default(),
+                relationships: Default::default(),
+                quality: Vec::new(),
+                schema: None,
+            }
+            .into()
         }),
         catalog: None,
         roles: Default::default(),
@@ -247,8 +250,8 @@ fn declared_of(dir: &Path) -> (Option<DeclaredTypes>, Option<DeclaredTypes>) {
         .expect("the endpoint");
     let space = spaces.first().expect("the space");
     (
-        endpoint.declared_types.clone(),
-        space.endpoint.declared_types.clone(),
+        endpoint.declared_types.as_deref().cloned(),
+        space.endpoint.declared_types.as_deref().cloned(),
     )
 }
 

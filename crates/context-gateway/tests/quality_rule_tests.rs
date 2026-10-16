@@ -76,14 +76,17 @@ fn policy() -> PolicySpec {
 
 fn endpoint(quality: Vec<QualityRule>) -> Endpoint {
     Endpoint {
-        declared_types: Some(DeclaredTypes {
-            model: "bb-air-quality".into(),
-            classes: ["AirQualityObserved".to_owned()].into(),
-            units: UnitRules::from_schema(&schema(), MissingUnitCode::Fill),
-            relationships: Default::default(),
-            quality,
-            schema: None,
-        }),
+        declared_types: Some(
+            DeclaredTypes {
+                model: "bb-air-quality".into(),
+                classes: ["AirQualityObserved".to_owned()].into(),
+                units: UnitRules::from_schema(&schema(), MissingUnitCode::Fill),
+                relationships: Default::default(),
+                quality,
+                schema: None,
+            }
+            .into(),
+        ),
         catalog: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),

@@ -80,7 +80,7 @@ fn endpoint(
             version: "1.0.0".to_owned(),
             major: 1,
             classes: vec![class.to_owned()],
-            json_schema: Some(schema),
+            json_schema: Some(schema.into()),
             context: None,
         }],
         policy_names: Vec::new(),

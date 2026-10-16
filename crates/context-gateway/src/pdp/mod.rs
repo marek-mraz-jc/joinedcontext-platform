@@ -98,7 +98,7 @@ impl Pdp for PolicyPdp {
                     endpoint
                         .models
                         .iter()
-                        .filter_map(|model| model.context.as_ref())
+                        .filter_map(|model| model.context.as_deref())
                 };
                 constraints.type_iris = projection::model_type_iris(&constraints.types, contexts());
                 // Each grant by its own names, so one grant's IRI never admits an entity to another
