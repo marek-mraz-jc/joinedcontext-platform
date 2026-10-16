@@ -428,6 +428,22 @@
       ],
       "type": "object"
     },
+    "Localised": {
+      "anyOf": [
+        {
+          "description": "One string, in the deployment's first language.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "A language of `languages` to its string.",
+          "type": "object"
+        }
+      ],
+      "description": "A text the chat shows: one string in the deployment's first language, or one per language of `languages` (T-4365)."
+    },
     "ModelChoice": {
       "additionalProperties": false,
       "description": "The models a deployment asks `jc-agent-proxy` for; each [`DEFAULT_MODEL`] when absent.",
@@ -448,7 +464,18 @@
               "type": "null"
             }
           ],
-          "description": "The OpenRouter providers both calls are asked on (T-4292)."
+          "description": "The OpenRouter providers both calls are asked on (T-4292); OpenRouter's fastest when absent (T-4360)."
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StageReasoning"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The reasoning effort of each call (T-4360); `low` when absent."
         },
         "router": {
           "description": "The model that picks the tools and sources of a question, `vendor/name`.",
@@ -591,13 +618,50 @@
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderSort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How OpenRouter ranks the providers `order` does not pin (T-4360)."
         }
       },
-      "required": [
-        "order"
-      ],
       "type": "object"
+    },
+    "ProviderSort": {
+      "description": "OpenRouter's `provider.sort` (T-4360).",
+      "oneOf": [
+        {
+          "description": "The provider that answers first.",
+          "enum": [
+            "latency"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The provider that writes the most tokens a second.",
+          "enum": [
+            "throughput"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The cheapest provider.",
+          "enum": [
+            "price"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "RateLimit": {
       "additionalProperties": false,
@@ -650,6 +714,46 @@
       ],
       "type": "object"
     },
+    "ReasoningEffort": {
+      "description": "A reasoning effort, from none to high (T-4360).",
+      "oneOf": [
+        {
+          "description": "No reasoning: sent as `reasoning.enabled: false`.",
+          "enum": [
+            "none"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The least the model allows.",
+          "enum": [
+            "minimal"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Short thinking, the answer keeps its room (T-3203).",
+          "enum": [
+            "low"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "More thinking, slower.",
+          "enum": [
+            "medium"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The most thinking, the slowest.",
+          "enum": [
+            "high"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Routes": {
       "description": "What one answer may use (T-4281).",
       "oneOf": [
@@ -675,6 +779,46 @@
           "type": "string"
         }
       ]
+    },
+    "StageReasoning": {
+      "additionalProperties": false,
+      "description": "The reasoning effort of the router, judge and answer calls apart; each `low` when absent.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The answer call, and each step of the data loop."
+        },
+        "judge": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The judge call, which reads the first passages and says whether they answer."
+        },
+        "router": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The router call, which picks the route and the queries."
+        }
+      },
+      "type": "object"
     },
     "Status": {
       "additionalProperties": false,
@@ -750,11 +894,15 @@
       "description": "How the chat looks where it is placed.",
       "properties": {
         "greeting": {
-          "description": "The first line the chat shows, at most 500 characters.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Localised"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The first line the chat shows, at most 500 characters."
         },
         "primaryColor": {
           "description": "The accent colour, `#rrggbb`.",
@@ -764,11 +912,15 @@
           ]
         },
         "title": {
-          "description": "The body's name in the chat's header, beside its monogram; at most 60 characters.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Localised"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The body's name in the chat's header, beside its monogram; at most 60 characters."
         }
       },
       "type": "object"

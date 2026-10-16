@@ -24,6 +24,31 @@ pub struct Completion {
     /// What the provider says the call cost, in millionths of a US dollar (OpenRouter's
     /// `usage.cost`, T-4149); `None` when it says nothing, which is not the same as free (T-4178).
     pub cost_micros: Option<u64>,
+    /// The provider OpenRouter served the call on (its `provider` field, T-4360), when it names
+    /// one in [`provider_name`]'s bounds.
+    pub provider: Option<String>,
+    /// The reasoning tokens the call spent (`usage.completion_tokens_details.reasoning_tokens`,
+    /// T-4360), when the provider reports them.
+    pub reasoning: Option<u64>,
+}
+
+/// `usage.completion_tokens_details.reasoning_tokens`, when reported.
+fn reasoning_tokens(usage: &Value) -> Option<u64> {
+    usage
+        .pointer("/completion_tokens_details/reasoning_tokens")?
+        .as_u64()
+}
+
+/// The served provider as OpenRouter names it, `Google Vertex` or `DeepInfra`: at most 64
+/// characters of letters, digits, space and `. _ / -`; anything else is not kept (T-4360).
+fn provider_name(chunk: &Value) -> Option<String> {
+    let name = chunk.get("provider")?.as_str()?;
+    (!name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " ._/-".contains(c)))
+    .then(|| name.to_owned())
 }
 
 /// `usage.cost` in millionths of a US dollar; `None` when absent, negative or not a number.
@@ -79,13 +104,8 @@ pub struct Model {
 const TOKEN_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The longest answer one call may write. A reasoning model counts its thinking inside it, so
-/// `REASONING_EFFORT` keeps the thinking short and the room is the answer's (T-3203).
+/// a `low` reasoning effort keeps the thinking short and the room is the answer's (T-3203).
 pub const MAX_ANSWER_TOKENS: u64 = 3_000;
-
-/// The reasoning effort every call asks for, which the proxy passes on as it is. Left to the
-/// provider, gemini-3.8-flash thought through 1,438 of 1,500 tokens and the last call of a
-/// question came back empty: "No Answer" on dev (T-3203).
-const REASONING_EFFORT: &str = "low";
 
 impl Model {
     pub fn new(config: ModelConfig, http: reqwest::Client) -> Self {
@@ -204,7 +224,7 @@ impl Model {
             "model": self.config.model,
             "messages": messages,
             "max_tokens": MAX_ANSWER_TOKENS,
-            "reasoning": {"effort": REASONING_EFFORT},
+            "reasoning": jc_core::kinds::ReasoningEffort::default().openrouter(),
         });
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
@@ -297,13 +317,14 @@ impl Model {
             "model": call.model.unwrap_or(&self.config.model),
             "messages": messages,
             "max_tokens": call.max_tokens,
-            "reasoning": {"effort": REASONING_EFFORT},
+            "reasoning": call.reasoning.openrouter(),
+            "provider": call.provider.map_or_else(
+                || jc_core::kinds::ProviderRouting::fastest().openrouter(),
+                jc_core::kinds::ProviderRouting::openrouter,
+            ),
         });
         if call.json {
             body["response_format"] = json!({"type": "json_object"});
-        }
-        if let Some(provider) = call.provider {
-            body["provider"] = provider.openrouter();
         }
         if stream {
             // The proxy adds `stream_options.include_usage`, so the last chunk carries `usage`.
@@ -373,8 +394,12 @@ pub struct Call<'a> {
     pub max_tokens: u64,
     /// Whether the answer must be one JSON object.
     pub json: bool,
-    /// The OpenRouter providers to ask, sent as its `provider` field (T-4292).
+    /// The OpenRouter providers to ask, sent as its `provider` field (T-4292); the fastest when
+    /// `None` (T-4360).
     pub provider: Option<&'a jc_core::kinds::ProviderRouting>,
+    /// The call's reasoning effort (T-4360). Left to the provider, gemini-3.8-flash thought
+    /// through 1,438 of 1,500 tokens and the call came back empty, so the default is `low` (T-3203).
+    pub reasoning: jc_core::kinds::ReasoningEffort,
 }
 
 /// Reads an OpenAI-compatible completion stream (`data: {chunk}` lines, `data: [DONE]` last) as
@@ -387,6 +412,8 @@ pub struct StreamReader {
     output: u64,
     total: Option<u64>,
     cost_micros: Option<u64>,
+    provider: Option<String>,
+    reasoning: Option<u64>,
     chunks: usize,
 }
 
@@ -418,12 +445,16 @@ impl StreamReader {
         }
         let chunk: Value = serde_json::from_str(data).ok()?;
         self.chunks += 1;
+        if self.provider.is_none() {
+            self.provider = provider_name(&chunk);
+        }
         if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
             let count = |key: &str| usage.get(key).and_then(Value::as_u64);
             self.input = count("prompt_tokens").unwrap_or(self.input);
             self.output = count("completion_tokens").unwrap_or(self.output);
             self.total = count("total_tokens").or(self.total);
             self.cost_micros = cost_micros(usage).or(self.cost_micros);
+            self.reasoning = reasoning_tokens(usage).or(self.reasoning);
         }
         let piece = chunk.pointer("/choices/0/delta/content")?.as_str()?;
         if piece.is_empty() {
@@ -446,6 +477,8 @@ impl StreamReader {
             input: self.input,
             output: self.output,
             cost_micros: self.cost_micros,
+            provider: self.provider,
+            reasoning: self.reasoning,
         })
     }
 }
@@ -488,12 +521,51 @@ pub fn parse(body: &Value) -> Option<Completion> {
         input,
         output,
         cost_micros: usage.and_then(cost_micros),
+        provider: provider_name(body),
+        reasoning: usage.and_then(reasoning_tokens),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4360: the served provider is kept as OpenRouter names it, from a reply or the first
+    /// stream chunk that names one; a name out of bounds is not kept.
+    #[test]
+    fn the_served_provider_is_kept_only_in_its_bounds() {
+        let named = |provider: Value| provider_name(&json!({ "provider": provider }));
+        assert_eq!(named(json!("Google Vertex")), Some("Google Vertex".into()));
+        assert_eq!(named(json!("deepinfra/fp8")), Some("deepinfra/fp8".into()));
+        for bad in [
+            json!(""),
+            json!("a".repeat(65)),
+            json!("x\ny"),
+            json!("<b>"),
+            json!(7),
+        ] {
+            assert_eq!(named(bad.clone()), None, "{bad}");
+        }
+        let mut reader = StreamReader::default();
+        reader.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n");
+        reader
+            .feed(b"data: {\"provider\":\"Groq\",\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n");
+        reader.feed(b"data: {\"provider\":\"Cerebras\",\"choices\":[],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":12}}}\n");
+        let streamed = reader.finish().expect("a completion");
+        assert_eq!(
+            (streamed.provider.as_deref(), streamed.reasoning),
+            (Some("Groq"), Some(12))
+        );
+        let reply = |usage: Value| {
+            parse(&json!({"choices": [{"message": {"content": "a"}}], "usage": usage}))
+                .and_then(|c| c.reasoning)
+        };
+        assert_eq!(
+            reply(json!({"completion_tokens_details": {"reasoning_tokens": 3}})),
+            Some(3)
+        );
+        assert_eq!(reply(json!({"completion_tokens": 3})), None);
+    }
 
     /// T-4325: a realm that never answers holds the token lock for the token request's own
     /// deadline, not for the model client's 120 s, and a question waiting on the lock meanwhile

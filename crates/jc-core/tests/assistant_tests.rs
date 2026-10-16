@@ -5,7 +5,10 @@
 
 use jc_core::error::Error;
 use jc_core::kinds::assistant::{SourceType, UploadLimits, DEFAULT_MODEL};
-use jc_core::kinds::{AssistantDeployment, Channel, KnowledgeSource, PdfPolicyKind, Visibility};
+use jc_core::kinds::{
+    AssistantDeployment, Channel, KnowledgeSource, PdfPolicyKind, ProviderRouting, ReasoningEffort,
+    Visibility,
+};
 use jc_core::registry;
 
 const SOURCE: &str = include_str!("golden/028-KnowledgeSource-22-knowledge-assistant.yaml");
@@ -913,6 +916,61 @@ fn the_data_loop_bounds_default_and_stay_within_their_ranges() {
     assert!(refused(deployment(&with("  answer: { maxDataSteps: -1 }\n"))).contains("invalid"));
 }
 
+/// T-4365: the title and the greeting are one string or one per language of `languages`.
+#[test]
+fn the_title_and_greeting_are_one_string_or_one_per_language() {
+    use jc_core::kinds::Localised;
+    const THEME: &str =
+        "theme: { title: Banská Bystrica, primaryColor: \"#0b5394\", greeting: \"Dobrý deň, s čím vám pomôžem?\" }";
+    let per_language = deployment(&deployment_with(
+        THEME,
+        "theme: { title: { sk: Banská Bystrica, en: Banská Bystrica city }, greeting: { sk: \"Dobrý deň!\", en: \"Hello!\" } }",
+    ))
+    .expect("a greeting per language");
+    let theme = per_language.spec.theme.expect("the theme");
+    assert_eq!(
+        theme.greeting.expect("greeting").texts(),
+        vec![(Some("en"), "Hello!"), (Some("sk"), "Dobrý deň!")]
+    );
+    assert!(matches!(theme.title, Some(Localised::ByLanguage(_))));
+    let one = deployment(DEPLOYMENT)
+        .expect("one string")
+        .spec
+        .theme
+        .expect("theme");
+    assert_eq!(one.title, Some("Banská Bystrica".into()));
+    assert!(
+        deployment(&deployment_with(THEME, "theme: { greeting: \"\" }")).is_ok(),
+        "no greeting"
+    );
+
+    let long = "a".repeat(501);
+    for (to, field) in [
+        (
+            "theme: { greeting: { sk: Ahoj, fi: Hei } }".to_owned(),
+            "theme.greeting",
+        ),
+        (
+            "theme: { greeting: { sk: \"  \" } }".to_owned(),
+            "theme.greeting",
+        ),
+        ("theme: { greeting: {} }".to_owned(), "theme.greeting"),
+        (
+            format!("theme: {{ greeting: {{ en: {long} }} }}"),
+            "theme.greeting",
+        ),
+        (
+            "theme: { title: { sk: Mesto, de: Stadt } }".to_owned(),
+            "theme.title",
+        ),
+        ("theme: { title: { en: \" \" } }".to_owned(), "theme.title"),
+    ] {
+        let result = deployment(&deployment_with(THEME, &to));
+        assert_eq!(refused(result), field, "{to}");
+    }
+    assert!(deployment(&deployment_with(THEME, "theme: { title: [Mesto] }")).is_err());
+}
+
 /// T-4292: `model.provider` pins OpenRouter providers; it reaches OpenRouter in its own field
 /// names, and a slug, a count or a field out of bounds is refused.
 #[test]
@@ -971,7 +1029,83 @@ fn a_model_provider_pins_openrouter_providers_within_bounds() {
         assert_eq!(refused(deployment(&with(&model))), field, "{model}");
     }
     let unknown = refused(deployment(&with(
-        "{ provider: { order: [groq], sort: price } }",
+        "{ provider: { order: [groq], data_collection: deny } }",
     )));
-    assert!(unknown.contains("unknown field `sort`"), "{unknown}");
+    assert!(
+        unknown.contains("unknown field `data_collection`"),
+        "{unknown}"
+    );
+}
+
+/// T-4360: `model.provider.sort` ranks the providers `order` does not pin, alone or beside it;
+/// a deployment without `model.provider` asks for the fastest; a sort OpenRouter does not know,
+/// and a provider with neither, are refused.
+#[test]
+fn a_provider_sort_ranks_providers_and_latency_is_the_default() {
+    let with = |model: &str| {
+        deployment_with(
+            "  sandbox: false\n",
+            &format!("  sandbox: false\n  model: {model}\n"),
+        )
+    };
+    let provider = |model: &str| {
+        deployment(&with(model))
+            .expect(model)
+            .spec
+            .model
+            .and_then(|m| m.provider)
+            .expect("provider")
+            .openrouter()
+    };
+    assert_eq!(
+        provider("{ provider: { sort: throughput } }"),
+        serde_json::json!({"sort": "throughput", "allow_fallbacks": true})
+    );
+    assert_eq!(
+        provider("{ provider: { order: [cerebras], sort: price, allowFallbacks: false } }"),
+        serde_json::json!({"order": ["cerebras"], "sort": "price", "allow_fallbacks": false})
+    );
+    assert_eq!(
+        ProviderRouting::fastest().openrouter(),
+        serde_json::json!({"sort": "latency", "allow_fallbacks": true})
+    );
+    let unknown = refused(deployment(&with("{ provider: { sort: fastest } }")));
+    assert!(unknown.contains("unknown variant `fastest`"), "{unknown}");
+    assert_eq!(
+        refused(deployment(&with("{ provider: { allowFallbacks: false } }"))),
+        "model.provider"
+    );
+}
+
+/// T-4360: `model.reasoning` sets each call's effort apart, `low` when a stage is left out; `none`
+/// turns reasoning off in OpenRouter's words, and a level or a stage it does not know is refused.
+#[test]
+fn reasoning_is_set_per_stage_and_low_by_default() {
+    let with = |model: &str| {
+        deployment_with(
+            "  sandbox: false\n",
+            &format!("  sandbox: false\n  model: {model}\n"),
+        )
+    };
+    let reasoning = deployment(&with("{ reasoning: { router: none, judge: minimal } }"))
+        .expect("reasoning")
+        .spec
+        .model
+        .and_then(|m| m.reasoning)
+        .expect("set");
+    assert_eq!(reasoning.router, Some(ReasoningEffort::None));
+    assert_eq!(reasoning.judge, Some(ReasoningEffort::Minimal));
+    assert_eq!(reasoning.answer.unwrap_or_default(), ReasoningEffort::Low);
+    assert_eq!(
+        ReasoningEffort::None.openrouter(),
+        serde_json::json!({"enabled": false})
+    );
+    assert_eq!(
+        ReasoningEffort::High.openrouter(),
+        serde_json::json!({"effort": "high"})
+    );
+    let level = refused(deployment(&with("{ reasoning: { answer: max } }")));
+    assert!(level.contains("unknown variant `max`"), "{level}");
+    let stage = refused(deployment(&with("{ reasoning: { search: low } }")));
+    assert!(stage.contains("unknown field `search`"), "{stage}");
 }

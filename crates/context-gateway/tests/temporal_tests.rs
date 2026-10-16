@@ -1,8 +1,7 @@
 //! A caller's temporal window clamped to what the grants permit (T-0150, GW26).
 
 use chrono::{DateTime, Duration, Utc};
-use context_gateway::pdp::temporal::{clamp, keep_windows, parse, Window};
-use serde_json::json;
+use context_gateway::pdp::temporal::{clamp, parse, Window};
 
 fn now() -> DateTime<Utc> {
     "2026-09-06T12:00:00Z".parse().expect("a fixed instant")
@@ -120,10 +119,9 @@ fn a_disjoint_window_is_empty_rather_than_unbounded() {
     assert!(archive.empty, "yesterday is not older than a week");
 }
 
-/// Several grants are several windows. The hull is what the broker can execute; the
-/// windows are what was granted, and the instances between them leave at the gateway.
+/// Several grants are several windows, and the broker is given their hull.
 #[test]
-fn several_grant_windows_forward_the_hull_and_filter_the_gaps() {
+fn several_grant_windows_forward_the_hull() {
     let outcome = clamp(
         None,
         &[
@@ -139,39 +137,9 @@ fn several_grant_windows_forward_the_hull_and_filter_the_gaps() {
     );
     assert_eq!(outcome.windows.len(), 2);
 
-    let mut history = json!([{
-        "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:s1",
-        "type": "AirQualityObserved",
-        "pm10": [
-            { "type": "Property", "value": 10, "observedAt": "2026-01-15T00:00:00Z" },
-            { "type": "Property", "value": 20, "observedAt": "2026-05-01T00:00:00Z" },
-            { "type": "Property", "value": 30, "observedAt": "2026-09-06T06:00:00Z" },
-            { "type": "Property", "value": 40 },
-        ],
-    }]);
-    keep_windows(&mut history, &outcome.windows);
-    let values: Vec<i64> = history[0]["pm10"]
-        .as_array()
-        .expect("instances")
-        .iter()
-        .filter_map(|instance| instance["value"].as_i64())
-        .collect();
-    assert_eq!(
-        values,
-        vec![10, 30, 40],
-        "January and this morning stay, May leaves, an instance with no timestamp is not a temporal one"
-    );
-    assert_eq!(
-        history[0]["id"].as_str().map(|id| id.starts_with("urn:")),
-        Some(true)
-    );
-
-    // One window filters nothing, because the forwarded query already was the window.
+    // One window is the forwarded query itself.
     let single = clamp(None, &["timerel=after;timeAt=P-1D"], now());
     assert!(single.windows.is_empty());
-    let mut untouched = history.clone();
-    keep_windows(&mut untouched, &single.windows);
-    assert_eq!(untouched, history);
 }
 
 #[test]

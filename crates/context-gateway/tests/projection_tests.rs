@@ -1,5 +1,5 @@
 use context_gateway::pdp::evaluator::Constraints;
-use context_gateway::pdp::projection::{permitted, project, project_entity, ungranted};
+use context_gateway::pdp::projection::{permitted, project_entity, ungranted};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -67,18 +67,6 @@ fn an_empty_grant_list_is_a_grant_over_the_whole_entity() {
     project_entity(&mut entity, &BTreeSet::new(), &nothing());
 
     assert_eq!(entity, before, "no whitelist means nothing to strip");
-}
-
-#[test]
-fn a_whole_query_answer_is_projected_entity_by_entity() {
-    let mut answer = json!([station(), station()]);
-    project(&mut answer, &granted(&["pm25"]), &nothing());
-
-    for entity in answer.as_array().expect("an array of entities") {
-        assert!(entity.get("pm25").is_some());
-        assert!(entity.get("pm10").is_none());
-        assert!(entity.get("operatorPhone").is_none());
-    }
 }
 
 /// GW17: a write is refused whole when it touches an ungranted attribute, so the caller

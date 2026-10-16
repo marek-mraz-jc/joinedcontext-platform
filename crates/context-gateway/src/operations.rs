@@ -88,19 +88,6 @@ pub fn addressed_entity(path: &str) -> Option<&str> {
     }
 }
 
-/// The one type or attribute name a discovery path addresses, when it addresses one.
-///
-/// `GET /types/{type}` and `GET /attributes/{attr}` are the two reads that name a member of the
-/// vocabulary rather than an entity, and whether the caller may learn that the name exists is
-/// decided before the broker is asked (EP-25, T-2134).
-pub fn addressed_vocabulary(path: &str) -> Option<&str> {
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    match segments.as_slice() {
-        ["types", name] | ["attributes", name] => Some(name),
-        _ => None,
-    }
-}
-
 /// The attribute a Set Attribute Value write addresses (`PUT entities/{id}/attrs/{attr}/value`,
 /// CIM 009 10.2.6). No Endpoint offers it (T-3606): its body is a bare value, which the grant,
 /// unit and relationship checks cannot judge as an Attribute, so it names no operation and the

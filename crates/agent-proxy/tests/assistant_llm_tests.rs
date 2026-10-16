@@ -305,7 +305,24 @@ async fn a_pinned_provider_reaches_openrouter_and_an_unknown_field_is_refused() 
         json!({"order": ["cerebras"], "allow_fallbacks": false})
     );
 
+    // T-4360: a sort beside the order passes as written.
+    let sorted = proxy
+        .clone()
+        .oneshot(send(
+            r#"{"model":"m","messages":[],"provider":{"order":["groq"],"sort":"latency","allow_fallbacks":true}}"#,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(sorted.status(), StatusCode::OK);
+    let seen = provider.received_requests().await.unwrap_or_default();
+    let body: serde_json::Value = serde_json::from_slice(&seen[1].body).expect("json");
+    assert_eq!(
+        body["provider"],
+        json!({"order": ["groq"], "sort": "latency", "allow_fallbacks": true})
+    );
+
     let unknown = proxy
+        .clone()
         .oneshot(send(
             r#"{"model":"m","messages":[],"provider":{"order":["groq"],"data_collection":"allow"}}"#,
         ))
@@ -314,6 +331,16 @@ async fn a_pinned_provider_reaches_openrouter_and_an_unknown_field_is_refused() 
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
     assert!(body_of(unknown)
         .await
-        .contains("only order and allow_fallbacks"));
-    assert_eq!(reached(&provider).await, 1, "the refused call never left");
+        .contains("only order, sort and allow_fallbacks"));
+    let unsorted = proxy
+        .oneshot(send(
+            r#"{"model":"m","messages":[],"provider":{"sort":"fastest"}}"#,
+        ))
+        .await
+        .expect("an answer");
+    assert_eq!(unsorted.status(), StatusCode::BAD_REQUEST);
+    assert!(body_of(unsorted)
+        .await
+        .contains("latency, throughput or price"));
+    assert_eq!(reached(&provider).await, 2, "the refused calls never left");
 }

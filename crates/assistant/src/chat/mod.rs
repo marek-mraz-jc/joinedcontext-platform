@@ -537,7 +537,7 @@ async fn record(
     pool: &PgPool,
     deployment: &Deployment,
     conversation: &str,
-    spent: Spent,
+    spent: &Spent,
     total_ms: u64,
 ) -> Result<(), crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
@@ -564,10 +564,13 @@ async fn record(
     .execute(&mut *tx)
     .await?;
     let ms = |ms: Option<u64>| ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
+    let tokens = |tokens: Option<u64>| tokens.map(|t| i32::try_from(t).unwrap_or(i32::MAX));
     sqlx::query(
         "INSERT INTO answer_timings (project, deployment, cached, model_calls, first_token_ms, \
-         total_ms, route_ms, search_ms, judge_ms, answer_ms) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         total_ms, route_ms, search_ms, judge_ms, answer_ms, judge_skipped, dangling_markers, \
+         router_provider, judge_provider, answer_provider, route_reasoning_tokens, \
+         judge_reasoning_tokens, answer_reasoning_tokens) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
     )
     .bind(&deployment.project)
     .bind(&deployment.name)
@@ -579,6 +582,14 @@ async fn record(
     .bind(ms(spent.stages.search))
     .bind(ms(spent.stages.judge))
     .bind(ms(spent.stages.answer))
+    .bind(spent.stages.judge_skipped)
+    .bind(i32::try_from(spent.dangling).unwrap_or(i32::MAX))
+    .bind(&spent.providers.route)
+    .bind(&spent.providers.judge)
+    .bind(&spent.providers.answer)
+    .bind(tokens(spent.reasoning.route))
+    .bind(tokens(spent.reasoning.judge))
+    .bind(tokens(spent.reasoning.answer))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -755,6 +766,9 @@ fn sse(event: &Event) -> SseEvent {
                 "totalMs": total_ms,
                 "cached": spent.cached,
                 "stagesMs": spent.stages.json(),
+                "judgeSkipped": spent.stages.judge_skipped,
+                "providers": spent.providers.json(),
+                "reasoningTokens": spent.reasoning.json(),
             });
             // Present only when every call reported its cost (T-4178): a missing one would make
             // the sum look cheaper than the answer was.
@@ -1222,6 +1236,12 @@ async fn ask(
                 .model
                 .as_ref()
                 .and_then(|m| m.provider.as_ref()),
+            reasoning: deployment
+                .spec
+                .model
+                .as_ref()
+                .and_then(|m| m.reasoning)
+                .unwrap_or_default(),
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),
@@ -1266,7 +1286,7 @@ async fn ask(
             cached = spent.cached,
             "question answered"
         );
-        if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent, total_ms).await
+        if let Err(err) = record(&state.pool, &deployment, &conversation_id, &spent, total_ms).await
         {
             tracing::error!(%err, "a question's tokens were not recorded");
         }

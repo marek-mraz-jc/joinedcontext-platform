@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::sync::mpsc::Sender;
@@ -165,6 +166,8 @@ pub struct Ask<'a> {
     pub answer_model: Option<&'a str>,
     /// The OpenRouter providers both are asked on (`model.provider`, T-4292).
     pub provider: Option<&'a jc_core::kinds::ProviderRouting>,
+    /// Each call's reasoning effort (`model.reasoning`, T-4360).
+    pub reasoning: jc_core::kinds::StageReasoning,
     /// The most tokens the answer call may write (`budget.outputTokensPerAnswer`).
     pub output_tokens: u64,
     /// Answers to first questions asked before (T-4139).
@@ -307,6 +310,61 @@ pub(super) fn markers(answer: &str) -> HashSet<usize> {
     found
 }
 
+/// The Endpoint slug of an Endpoint's public address (`…/api/endpoint/{slug}/…`), else `None`.
+pub(super) fn endpoint_slug(url: &str) -> Option<String> {
+    let slug = url
+        .split_once("/api/endpoint/")?
+        .1
+        .split(['/', '?', '#'])
+        .next()?;
+    (!slug.is_empty()).then(|| slug.to_owned())
+}
+
+/// The highest number read as a citation marker: a bracketed year such as [2024] is text.
+const MAX_MARKER: usize = 99;
+
+/// `answer` without the citation markers that name none of `cited`, and how many numbers were
+/// removed (T-4366): "[6]" beside two sources points the reader at nothing. A bracket keeps the
+/// numbers that do name a source; one left empty goes with the space before it.
+pub(super) fn without_dangling(answer: &str, cited: &[Citation]) -> (String, u64) {
+    let known: HashSet<usize> = cited.iter().map(|c| c.n).collect();
+    let mut out = String::with_capacity(answer.len());
+    let mut dropped = 0u64;
+    let mut rest = answer;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        let numbers: Option<Vec<usize>> = after[1..].find(']').and_then(|close| {
+            after[1..=close]
+                .split(',')
+                .map(|n| n.trim().parse::<usize>().ok().filter(|n| *n <= MAX_MARKER))
+                .collect()
+        });
+        let Some(numbers) = numbers else {
+            out.push('[');
+            rest = &after[1..];
+            continue;
+        };
+        let close = after.find(']').unwrap_or(after.len() - 1);
+        let kept: Vec<String> = numbers
+            .iter()
+            .filter(|n| known.contains(n))
+            .map(usize::to_string)
+            .collect();
+        dropped += (numbers.len() - kept.len()) as u64;
+        if kept.is_empty() {
+            out.truncate(out.trim_end().len());
+        } else if kept.len() == numbers.len() {
+            out.push_str(&after[..=close]);
+        } else {
+            out.push_str(&format!("[{}]", kept.join(", ")));
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    (out, dropped)
+}
+
 pub(super) async fn send(events: &Sender<Event>, event: Event) {
     // A channel that went away stops reading; the loop stops at its next call.
     let _ = events.send(event).await;
@@ -314,7 +372,7 @@ pub(super) async fn send(events: &Sender<Event>, event: Event) {
 
 /// What one question spent, read and written, as the provider counted it, and what the final
 /// `done` event reports beside it (API/05 §1.3).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Spent {
     pub total: u64,
     pub input: u64,
@@ -331,6 +389,54 @@ pub struct Spent {
     pub uncosted: u64,
     /// How long each stage took (T-4293).
     pub stages: Stages,
+    /// Citation markers the answer wrote for no source, removed before it was sent (T-4366).
+    pub dangling: u64,
+    /// The provider OpenRouter served each stage's last call on (T-4360).
+    pub providers: PerStage<String>,
+    /// The reasoning tokens each stage's calls spent, as the providers reported them (T-4360).
+    pub reasoning: PerStage<u64>,
+}
+
+/// A stage that calls the model (T-4360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Route,
+    Judge,
+    Answer,
+}
+
+/// One value per calling stage, `None` where it made no call or the provider said nothing
+/// (T-4360); the `done` event names the stages as `stagesMs` does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PerStage<T> {
+    pub route: Option<T>,
+    pub judge: Option<T>,
+    pub answer: Option<T>,
+}
+
+impl<T: Serialize> PerStage<T> {
+    fn slot(&mut self, stage: Stage) -> &mut Option<T> {
+        match stage {
+            Stage::Route => &mut self.route,
+            Stage::Judge => &mut self.judge,
+            Stage::Answer => &mut self.answer,
+        }
+    }
+
+    /// The stages that have a value, as the `done` event names them.
+    pub fn json(&self) -> Value {
+        let mut out = serde_json::Map::new();
+        for (name, value) in [
+            ("route", &self.route),
+            ("judge", &self.judge),
+            ("answer", &self.answer),
+        ] {
+            if let Some(value) = value {
+                out.insert(name.into(), json!(value));
+            }
+        }
+        Value::Object(out)
+    }
 }
 
 /// The wall time of each stage of one answer, in milliseconds; `None` for a stage that did not
@@ -345,6 +451,8 @@ pub struct Stages {
     pub judge: Option<u64>,
     /// The answer call, from its request to its last token.
     pub answer: Option<u64>,
+    /// The first round's passages covered the question, so they were not judged (T-4360).
+    pub judge_skipped: bool,
 }
 
 impl Stages {
@@ -382,6 +490,17 @@ impl Spent {
             None => self.uncosted += 1,
         }
         self.calls += 1;
+    }
+
+    /// Notes which provider served `stage`'s call and adds the reasoning tokens it spent (T-4360).
+    pub fn served(&mut self, stage: Stage, completion: &Completion) {
+        if completion.provider.is_some() {
+            self.providers.slot(stage).clone_from(&completion.provider);
+        }
+        if let Some(tokens) = completion.reasoning {
+            let spent = self.reasoning.slot(stage);
+            *spent = Some(spent.unwrap_or(0).saturating_add(tokens));
+        }
     }
 
     /// The answer's cost in US dollars, only when every call reported one; a cached answer and
@@ -492,6 +611,8 @@ pub async fn answer(
                 .await;
                 return spent;
             }
+            let (text, dangling) = without_dangling(&text, &citations);
+            spent.dangling += dangling;
             let used = markers(&text);
             citations.retain(|c| used.contains(&c.n));
             name_sources(ask, &mut citations).await;
@@ -814,16 +935,24 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
         return;
     }
     let named: Result<(), crate::Error> = async {
-        for citation in citations.iter_mut().filter(|c| c.url.is_none()) {
-            let slug = ask
-                .connectors
-                .iter()
-                .find(|c| Some(&c.endpoint) == citation.endpoint.as_ref())
-                .map(|c| c.surface.slug.as_str());
-            if let Some(slug) = slug {
-                citation.url =
-                    crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
-                        .await?;
+        for citation in citations.iter_mut() {
+            // A table names its connector; a passage of an Endpoint's own page names its address,
+            // which a visitor reads as JSON: both cite the dataset's page where one names the
+            // Endpoint (T-4366), and an address stays only when no page does.
+            let slug = match citation.url.as_deref() {
+                None => ask
+                    .connectors
+                    .iter()
+                    .find(|c| Some(&c.endpoint) == citation.endpoint.as_ref())
+                    .map(|c| c.surface.slug.clone()),
+                Some(url) => endpoint_slug(url),
+            };
+            let Some(slug) = slug else { continue };
+            let page = crate::endpoint_page_projects(ask.pool, &slug, ask.sources, ask.public_only)
+                .await?;
+            if citation.url.is_none() || page.as_deref().is_some_and(|p| endpoint_slug(p).is_none())
+            {
+                citation.url = page.or(citation.url.take());
             }
         }
         let urls: Vec<String> = citations
@@ -940,6 +1069,67 @@ mod tests {
         assert!(!system.contains("2026-10-08") && system.contains("The Now line"));
         // How a list of events is written is the prefix's, so every answer gets it (T-3325).
         assert!(system.contains("its start date and time") && system.contains("its place"));
+    }
+
+    fn cited(numbers: &[usize]) -> Vec<Citation> {
+        numbers
+            .iter()
+            .map(|n| Citation {
+                n: *n,
+                url: None,
+                tool: None,
+                endpoint: None,
+                title: None,
+                cards: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// T-4366: the live answer said "… nástroj nebol spustený [6]." beside two sources.
+    #[test]
+    fn a_marker_without_a_source_leaves_the_answer_and_is_counted() {
+        let answer = "Údaje z roku 1995 nemám [1]. Nepodarilo sa mi ich prečítať [6].";
+        assert_eq!(
+            without_dangling(answer, &cited(&[1, 2])),
+            (
+                "Údaje z roku 1995 nemám [1]. Nepodarilo sa mi ich prečítať.".to_owned(),
+                1
+            )
+        );
+        // A list keeps the numbers that name a source; nothing to remove changes nothing.
+        assert_eq!(
+            without_dangling("A [1, 6] b [2][7]", &cited(&[1, 2])),
+            ("A [1] b [2]".to_owned(), 2)
+        );
+        let clean = "A [1], b [2], [x], [] and [2024], a [link](https://x.sk) and [";
+        assert_eq!(
+            without_dangling(clean, &cited(&[1, 2])),
+            (clean.to_owned(), 0)
+        );
+        assert_eq!(without_dangling("[3] Nič", &[]), (" Nič".to_owned(), 1));
+        assert_eq!(
+            markers(&without_dangling(answer, &cited(&[1, 2])).0),
+            HashSet::from([1])
+        );
+    }
+
+    #[test]
+    fn an_endpoint_address_names_its_slug_and_nothing_else_does() {
+        for (url, slug) in [
+            (
+                "https://dev.example/api/endpoint/od-air/schema/index.json",
+                Some("od-air"),
+            ),
+            ("https://dev.example/api/endpoint/od-air", Some("od-air")),
+            (
+                "https://dev.example/api/endpoint/od-air?type=A",
+                Some("od-air"),
+            ),
+            ("https://data.dev.example/dataset/air", None),
+            ("https://dev.example/api/endpoint/", None),
+        ] {
+            assert_eq!(endpoint_slug(url).as_deref(), slug, "{url}");
+        }
     }
 
     #[test]

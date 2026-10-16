@@ -153,49 +153,6 @@ pub fn referenced_attributes(params: &[(String, String)]) -> BTreeSet<String> {
     names
 }
 
-/// The same, for a batch query whose selectors travel in the body (CIM 009 clause 5.6.9).
-///
-/// `POST /entityOperations/query` is the one read whose `q`, `attrs` and geo query are JSON
-/// members rather than query parameters, and a filter is a read wherever it is written: a name
-/// the endpoint does not serve may no more be selected on here than in a URL (T-2259, T-1862).
-pub fn referenced_in_body(body: &serde_json::Value) -> BTreeSet<String> {
-    let text = |member: &str| -> Option<String> {
-        body.get(member)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    };
-    let mut params: Vec<(String, String)> = Vec::new();
-    for member in ["q", "orderBy", "geoproperty", "timeproperty", "georel"] {
-        if let Some(value) = text(member) {
-            params.push((member.to_owned(), value));
-        }
-    }
-    // `attrs` is a list in the body where the URL spells it comma-separated.
-    if let Some(attrs) = body.get("attrs").and_then(serde_json::Value::as_array) {
-        let listed: Vec<&str> = attrs.iter().filter_map(serde_json::Value::as_str).collect();
-        params.push(("attrs".to_owned(), listed.join(",")));
-    } else if let Some(attrs) = text("attrs") {
-        params.push(("attrs".to_owned(), attrs));
-    }
-    // A `geoQ` of its own, which is where a batch query puts the geo selector.
-    if let Some(geo) = body.get("geoQ") {
-        for member in ["georel", "geoproperty", "geometry", "coordinates"] {
-            if let Some(value) = geo.get(member).and_then(serde_json::Value::as_str) {
-                params.push((member.to_owned(), value.to_owned()));
-            }
-        }
-    }
-    if let Some(temporal) = body.get("temporalQ") {
-        if let Some(value) = temporal
-            .get("timeproperty")
-            .and_then(serde_json::Value::as_str)
-        {
-            params.push(("timeproperty".to_owned(), value.to_owned()));
-        }
-    }
-    referenced_attributes(&params)
-}
-
 /// The attribute names one `q` uses, whatever shape the terms have (CIM 009 4.9).
 ///
 /// Terms are separated by `;`, `|` and parentheses; a term is `path op value`, a bare path
@@ -252,55 +209,6 @@ fn compact(name: &str) -> String {
         Some(last) if name.contains("://") && !last.is_empty() => last.to_owned(),
         _ => name,
     }
-}
-
-/// The GeoProperty a grant's own area is drawn on.
-///
-/// A `Policy` writes its spatial constraint as `georel`, `geometry` and `coordinates` and names
-/// no property, so the area means what CIM 009 clause 4.10 means by default: `location`.
-const GRANTED_GEOPROPERTY: &str = "location";
-
-/// Why the caller's `geoproperty` or `geometryProperty` cannot be served as sent (AG-85, T-2299).
-///
-/// Both parameters move the attribute a decision is taken on, and the words of a grant were
-/// written for the attribute the grant names, so neither can ride through the way a window or a
-/// format does. The refusal names the parameter, because a request for a member the caller may
-/// not read is a bad request and not an empty answer: an attribute's existence is not the secret
-/// here, its value is (CIM 009 clause 5.5.2).
-pub fn geo_refusal(params: &[(String, String)], constraints: &Constraints) -> Option<String> {
-    if let Some(property) = first(params, "geoproperty") {
-        // A grant that draws no area constrains no GeoProperty, so the caller's own pair of
-        // property and area goes upstream together and narrows only itself.
-        if !constraints.geo_areas.is_empty() && compact(property) != GRANTED_GEOPROPERTY {
-            return Some(format!(
-                "geoproperty: the area this endpoint grants you is drawn on \
-                 `{GRANTED_GEOPROPERTY}`, so a geo query on another GeoProperty cannot be \
-                 answered inside it (CIM 009 clause 5.5.2). Send the geo query without \
-                 `geoproperty`, or ask for a grant drawn on the property you need"
-            ));
-        }
-    }
-    if let Some(property) = first(params, "geometryProperty") {
-        let name = compact(property);
-        let served = constraints.served.is_empty() || constraints.served.contains(&name);
-        if !served || constraints.hidden.contains(&name) {
-            return Some(
-                "geometryProperty: the GeoJSON geometry is that attribute's own value, and \
-                 this endpoint does not serve you the attribute you named. Ask for one of the \
-                 attributes the answer already carries"
-                    .to_owned(),
-            );
-        }
-    }
-    None
-}
-
-/// The query string of a write: the caller's harmless parameters and nothing else.
-///
-/// A write is bounded by the write guard, which reads the payload; narrowing parameters
-/// would say nothing about what the body contains and only confuse the broker.
-pub fn passthrough(params: &[(String, String)]) -> String {
-    render(&kept(params))
 }
 
 /// Whether the caller's own query names a selector, as CIM 009 5.7.2 requires of one.
@@ -487,75 +395,6 @@ fn joined(params: &[(String, String)], names: &[&str]) -> Option<String> {
         .filter_map(|name| first(params, name).map(|value| format!("{name}={value}")))
         .collect();
     (!parts.is_empty()).then(|| parts.join(";"))
-}
-
-/// The URL of a batch query: the caller's window and nothing else (T-2995).
-///
-/// `POST /entityOperations/query` and `POST /temporal/entityOperations/query` carry their
-/// selector in the body (CIM 009 clauses 5.6.9 and 5.6.12), and the body is narrowed to the
-/// grants before it is sent. Their URL takes only these parameters, and a broker that holds
-/// to it (Antares) refuses any other with `400`, so a grant's `type` appended here failed the
-/// read rather than narrowing it.
-pub fn batch_window(params: &[(String, String)]) -> String {
-    const WINDOW: [&str; 6] = ["limit", "offset", "count", "options", "format", "local"];
-    let kept: Vec<(String, String)> = params
-        .iter()
-        .filter(|(name, _)| WINDOW.contains(&name.as_str()))
-        .cloned()
-        .collect();
-    render(&kept)
-}
-
-/// A grant's compound filter (`georel=within;geometry=Polygon;coordinates=[…]`) as the object a
-/// query body carries it in (`geoQ`, `temporalQ`; CIM 009 clauses 5.2.13 and 5.2.21). The
-/// coordinates are the JSON they are written as; a value that is not JSON stays a string.
-pub fn compound_object(compound: &str) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    for (name, value) in split_compound(compound) {
-        let value = match name.as_str() {
-            "coordinates" => {
-                serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value))
-            }
-            _ => serde_json::Value::String(value),
-        };
-        object.insert(name, value);
-    }
-    serde_json::Value::Object(object)
-}
-
-/// The attributes a batch query's body may ask for (T-2995): with no `attrs` of its own, the
-/// granted ones as `broker_attrs` gives them to the URL; with its own, those of them the grants
-/// cover. `None` when the grants name no attributes, so the body's own stand; an empty set when
-/// the body asked only for attributes it may not read.
-pub fn body_attrs(
-    asked: Option<&[String]>,
-    granted: &BTreeSet<String>,
-) -> Option<BTreeSet<String>> {
-    if granted.is_empty() {
-        return None;
-    }
-    let asked_set: BTreeSet<String> = asked.unwrap_or_default().iter().cloned().collect();
-    let as_param = [(
-        "attrs".to_owned(),
-        asked_set.iter().cloned().collect::<Vec<_>>().join(","),
-    )];
-    let allowed = broker_attrs(&as_param, granted);
-    Some(match asked {
-        None => allowed,
-        Some(asked) => asked
-            .iter()
-            .filter(|name| {
-                // T-3533: as IRIs under the core context, the only one a request is read in;
-                // `https://b.example/plate` is not a granted `plate`.
-                let iri = crate::pdp::projection::type_iri(name);
-                iri.is_some()
-                    && allowed
-                        .iter()
-                        .any(|one| crate::pdp::projection::type_iri(one) == iri)
-            })
-            .cloned()
-            .collect(),
-    })
 }
 
 /// The parameters a compound geo or temporal filter is made of, and the only names a `;`
@@ -764,23 +603,6 @@ mod tests {
         for q in ["a==1)", "(a==1", "name==%22open", "a%20==%201"] {
             assert!(refused(&format!("type=A&q={q}")).is_some(), "{q}");
         }
-    }
-
-    /// T-3533: a batch query's `attrs` keeps a granted name, compacted or expanded under the
-    /// core context, and drops another vocabulary's attribute that ends in the same term.
-    #[test]
-    fn body_attrs_compare_as_iris() {
-        let granted: BTreeSet<String> = ["plate".to_owned()].into();
-        let asked = [
-            "plate".to_owned(),
-            "https://uri.etsi.org/ngsi-ld/default-context/plate".to_owned(),
-            "https://b.example/plate".to_owned(),
-            "other:plate".to_owned(),
-        ];
-        assert_eq!(
-            body_attrs(Some(&asked), &granted),
-            Some(asked[..2].iter().cloned().collect())
-        );
     }
 
     #[test]

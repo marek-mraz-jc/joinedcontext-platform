@@ -602,30 +602,107 @@ pub struct ModelChoice {
     /// The model that writes the answer, `vendor/name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
-    /// The OpenRouter providers both calls are asked on (T-4292).
+    /// The OpenRouter providers both calls are asked on (T-4292); OpenRouter's fastest when
+    /// absent (T-4360).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderRouting>,
+    /// The reasoning effort of each call (T-4360); `low` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<StageReasoning>,
 }
 
 /// OpenRouter provider routing, sent as its `provider` request field (T-4292, MF-52).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProviderRouting {
     /// Provider slugs, tried in this order, e.g. `cerebras`, `groq`; 1 to 8.
-    pub order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    /// How OpenRouter ranks the providers `order` does not pin (T-4360).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<ProviderSort>,
     /// Whether another provider may answer when these fail; default `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_fallbacks: Option<bool>,
 }
 
+/// OpenRouter's `provider.sort` (T-4360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderSort {
+    /// The provider that answers first.
+    Latency,
+    /// The provider that writes the most tokens a second.
+    Throughput,
+    /// The cheapest provider.
+    Price,
+}
+
 impl ProviderRouting {
-    /// The field as OpenRouter reads it: `{order, allow_fallbacks}`.
-    pub fn openrouter(&self) -> serde_json::Value {
-        serde_json::json!({
-            "order": self.order,
-            "allow_fallbacks": self.allow_fallbacks.unwrap_or(true),
-        })
+    /// What a deployment without `model.provider` is asked on: OpenRouter's fastest provider,
+    /// another when it fails (T-4360).
+    pub fn fastest() -> Self {
+        Self {
+            sort: Some(ProviderSort::Latency),
+            ..Self::default()
+        }
     }
+
+    /// The field as OpenRouter reads it: `{order, sort, allow_fallbacks}`.
+    pub fn openrouter(&self) -> serde_json::Value {
+        let mut field = serde_json::json!({
+            "allow_fallbacks": self.allow_fallbacks.unwrap_or(true),
+        });
+        if let Some(order) = &self.order {
+            field["order"] = serde_json::json!(order);
+        }
+        if let Some(sort) = self.sort {
+            field["sort"] = serde_json::json!(sort);
+        }
+        field
+    }
+}
+
+/// A reasoning effort, from none to high (T-4360).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// No reasoning: sent as `reasoning.enabled: false`.
+    None,
+    /// The least the model allows.
+    Minimal,
+    /// Short thinking, the answer keeps its room (T-3203).
+    #[default]
+    Low,
+    /// More thinking, slower.
+    Medium,
+    /// The most thinking, the slowest.
+    High,
+}
+
+impl ReasoningEffort {
+    /// The field as OpenRouter reads it: `{effort}`, or `{enabled: false}` for none.
+    pub fn openrouter(self) -> serde_json::Value {
+        match self {
+            Self::None => serde_json::json!({"enabled": false}),
+            effort => serde_json::json!({"effort": effort}),
+        }
+    }
+}
+
+/// The reasoning effort of the router, judge and answer calls apart; each `low` when absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StageReasoning {
+    /// The router call, which picks the route and the queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<ReasoningEffort>,
+    /// The judge call, which reads the first passages and says whether they answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<ReasoningEffort>,
+    /// The answer call, and each step of the data loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<ReasoningEffort>,
 }
 
 /// What one answer may use (T-4281).
@@ -674,13 +751,43 @@ pub struct AssistantScope {
 pub struct Theme {
     /// The body's name in the chat's header, beside its monogram; at most 60 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<Localised>,
     /// The accent colour, `#rrggbb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_color: Option<String>,
     /// The first line the chat shows, at most 500 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub greeting: Option<String>,
+    pub greeting: Option<Localised>,
+}
+
+/// A text the chat shows: one string in the deployment's first language, or one per language of
+/// `languages` (T-4365).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Localised {
+    /// One string, in the deployment's first language.
+    Text(String),
+    /// A language of `languages` to its string.
+    ByLanguage(BTreeMap<String, String>),
+}
+
+impl Localised {
+    /// Each text with the language it is keyed by, `None` for the one string.
+    pub fn texts(&self) -> Vec<(Option<&str>, &str)> {
+        match self {
+            Self::Text(text) => vec![(None, text.as_str())],
+            Self::ByLanguage(map) => map
+                .iter()
+                .map(|(language, text)| (Some(language.as_str()), text.as_str()))
+                .collect(),
+        }
+    }
+}
+
+impl From<&str> for Localised {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
 }
 
 /// How the chat picks the language it opens in (T-4343).
@@ -1106,14 +1213,22 @@ impl AssistantDeploymentSpec {
                 }
             }
             if let Some(provider) = &model.provider {
-                if provider.order.is_empty() || provider.order.len() > MAX_PROVIDERS {
+                if provider.order.is_none() && provider.sort.is_none() {
+                    return Err(name(
+                        "model.provider",
+                        String::new(),
+                        "model.provider names an order, a sort or both",
+                    ));
+                }
+                let order = provider.order.as_deref().unwrap_or_default();
+                if provider.order.is_some() && (order.is_empty() || order.len() > MAX_PROVIDERS) {
                     return Err(name(
                         "model.provider.order",
-                        provider.order.len().to_string(),
+                        order.len().to_string(),
                         "model.provider.order names 1 to 8 providers",
                     ));
                 }
-                if let Some(slug) = provider.order.iter().find(|s| !is_provider_slug(s)) {
+                if let Some(slug) = order.iter().find(|s| !is_provider_slug(s)) {
                     return Err(name(
                         "model.provider.order",
                         slug.clone(),
@@ -1220,25 +1335,44 @@ impl AssistantDeploymentSpec {
                     ));
                 }
             }
-            if theme
-                .greeting
-                .as_deref()
-                .is_some_and(|greeting| greeting.chars().count() > MAX_GREETING_LEN)
-            {
-                return Err(name(
+            let shown = [
+                (
                     "theme.greeting",
-                    String::new(),
+                    &theme.greeting,
+                    MAX_GREETING_LEN,
                     "greeting is at most 500 characters",
-                ));
-            }
-            if theme.title.as_deref().is_some_and(|title| {
-                title.trim().is_empty() || title.chars().count() > MAX_TITLE_LEN
-            }) {
-                return Err(name(
+                ),
+                (
                     "theme.title",
-                    String::new(),
+                    &theme.title,
+                    MAX_TITLE_LEN,
                     "title is 1 to 60 characters",
-                ));
+                ),
+            ];
+            for (field, value, max, rule) in shown {
+                let Some(value) = value else { continue };
+                let texts = value.texts();
+                if texts.is_empty() {
+                    return Err(name(field, String::new(), rule));
+                }
+                for (language, text) in texts {
+                    if let Some(language) = language {
+                        self.known_language(field, language)?;
+                    }
+                    // A one-string greeting may be empty (no greeting), as before T-4365.
+                    let blank =
+                        text.trim().is_empty() && (field == "theme.title" || language.is_some());
+                    if blank || text.chars().count() > max {
+                        return Err(name(field, String::new(), rule));
+                    }
+                    if text.split_whitespace().any(names::looks_like_a_credential) {
+                        return Err(name(
+                            field,
+                            String::new(),
+                            "carries the shape of a credential; a key or token never goes into the text",
+                        ));
+                    }
+                }
             }
         }
         languages(&self.languages)
