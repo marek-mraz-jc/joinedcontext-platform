@@ -15,6 +15,12 @@ use std::collections::BTreeMap;
 pub struct ProjectSpec {
     /// Reference to the parent Organization.
     pub organization_ref: Ref,
+    /// The internet domain of the body that publishes the project's data, the `did:web` assigner
+    /// of the Policies compiled for its Apps; absent, the Organization's (PF-108). It describes
+    /// who publishes and grants, verifies and routes nothing; pipelines keep minting over
+    /// `JC_ORG_DOMAIN` (PF-44).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
     /// Optional resource quotas for this Project (PF-17); the project file's, never a registry
     /// entry's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +85,12 @@ impl ProjectSpec {
         }
         if let Some(ref q) = self.quotas {
             q.validate()?;
+        }
+        if let Some(domain) = &self.domain {
+            names::validate_org_domain(domain).map_err(|e| Error::Invalid {
+                field: "spec.domain".to_owned(),
+                reason: e.to_string(),
+            })?;
         }
         let entry = self.is_registry_entry();
         let belongs = |field: &str, place: &str| Error::Invalid {
