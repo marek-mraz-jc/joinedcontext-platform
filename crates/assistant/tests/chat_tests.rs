@@ -1403,9 +1403,10 @@ async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cooki
         "{html}"
     );
     assert!(!html.contains("<b>"));
+    // A visitor gets no picker: the page names no connector, the assistant uses them all (T-4253).
     assert!(
-        html.contains("ovzdusie"),
-        "the connectors the visitor may switch off"
+        !html.contains("ovzdusie"),
+        "a public page names no connector: {html}"
     );
 
     let (status, headers, script) = get(&w.app, "/d/widget.js").await;
