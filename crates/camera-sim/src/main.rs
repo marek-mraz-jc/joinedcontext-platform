@@ -128,7 +128,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-#[derive(Debug)]
 struct Config {
     token_url: String,
     client_id: String,
@@ -139,6 +138,23 @@ struct Config {
     count: u32,
     interval: Duration,
     measurement: String,
+}
+
+/// Everything but the private key (T-4320).
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("key_pem", &"<redacted>")
+            .field("kid", &self.kid)
+            .field("broker", &self.broker)
+            .field("ca", &self.ca)
+            .field("count", &self.count)
+            .field("interval", &self.interval)
+            .field("measurement", &self.measurement)
+            .finish()
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -461,6 +477,31 @@ mod tests {
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::VerifyingKey;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_config_debug_never_shows_the_private_key() {
+        let config = Config {
+            token_url: "https://idp.test/token".into(),
+            client_id: "cam-1".into(),
+            key_pem: "s3cr3t-test".into(),
+            kid: "k1".into(),
+            broker: Broker {
+                tls: false,
+                host: "broker".into(),
+                port: 1883,
+            },
+            ca: String::new(),
+            count: 1,
+            interval: Duration::from_secs(1),
+            measurement: "m".into(),
+        };
+        let text = format!("{config:?}");
+        assert!(!text.contains("s3cr3t-test"), "{text}");
+        assert!(
+            text.contains("cam-1") && text.contains("<redacted>"),
+            "{text}"
+        );
+    }
 
     fn decode(part: &str) -> Value {
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(part).expect("base64url")).expect("json")

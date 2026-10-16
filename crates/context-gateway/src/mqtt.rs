@@ -92,7 +92,7 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
 }
 
 /// What `rmqtt-auth-http` posts (`http_auth_req.params`, JSON).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct Connect {
     /// The MQTT client id.
     #[serde(default)]
@@ -107,6 +107,18 @@ pub struct Connect {
     /// on the public listener, the caller's pod address on the internal one.
     #[serde(default)]
     pub ipaddr: String,
+}
+
+/// Everything but the password, a person's access token (T-4320).
+impl std::fmt::Debug for Connect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connect")
+            .field("clientid", &self.clientid)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("ipaddr", &self.ipaddr)
+            .finish()
+    }
 }
 
 /// RMQTT's answer format (`docs/en_US/auth-http.md`, `perm-list.md`).
@@ -324,6 +336,21 @@ pub fn internal_router(gateway: Arc<Gateway>, runner_host: Option<String>) -> ax
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connect_debug_never_shows_the_password() {
+        let connect = Connect {
+            username: "anna".into(),
+            password: "s3cr3t-test".into(),
+            ..Connect::default()
+        };
+        let text = format!("{connect:?}");
+        assert!(!text.contains("s3cr3t-test"), "{text}");
+        assert!(
+            text.contains("anna") && text.contains("<redacted>"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn a_mesh_identity_names_its_broker_by_its_first_label() {

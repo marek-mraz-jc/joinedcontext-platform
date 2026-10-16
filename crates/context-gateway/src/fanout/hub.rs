@@ -176,7 +176,7 @@ struct Conn {
 }
 
 /// A closed connection, held for [`RESUME_WINDOW`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Closed {
     /// The secret its `x-welcome` carried.
     pub token: String,
@@ -188,6 +188,19 @@ pub struct Closed {
     pub sent: VecDeque<(u64, String)>,
     /// When it closed.
     pub at: Instant,
+}
+
+/// Everything but the resume secret (T-4320).
+impl std::fmt::Debug for Closed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Closed")
+            .field("token", &"<redacted>")
+            .field("principal", &self.principal)
+            .field("subs", &self.subs)
+            .field("sent", &self.sent)
+            .field("at", &self.at)
+            .finish()
+    }
 }
 
 /// The answer to one client message, as `x-result` carries it.
@@ -760,6 +773,23 @@ mod tests {
     use super::tests_support::endpoint;
     use super::*;
     use crate::pdp::grants::GrantView;
+
+    #[test]
+    fn a_closed_debug_never_shows_the_resume_token() {
+        let closed = Closed {
+            token: "s3cr3t-test".into(),
+            principal: "anna".into(),
+            subs: Vec::new(),
+            sent: VecDeque::new(),
+            at: Instant::now(),
+        };
+        let text = format!("{closed:?}");
+        assert!(!text.contains("s3cr3t-test"), "{text}");
+        assert!(
+            text.contains("anna") && text.contains("<redacted>"),
+            "{text}"
+        );
+    }
 
     fn bus(id: &str, speed: f64, secret: &str) -> Value {
         json!({
