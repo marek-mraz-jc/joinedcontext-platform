@@ -229,22 +229,30 @@ var JCRender = (function () {
   }
 
   /**
-   * The language the chat speaks (T-4138, T-4280): the one the visitor chose in the widget before
-   * (`chosen`), else the one the embedding site names on purpose (`requested`, its `data-lang`),
-   * when the widget has words for it; else Slovak when the deployment offers it or names none,
-   * else the deployment's first language the widget knows, else English. The host page's own
-   * language is never asked: an English catalogue page still opens a Slovak chat.
+   * The language the chat opens in (T-4343), by the deployment's `widget.language` (`mode`): the
+   * page's `?lang=` (`requested`) when the deployment offers it; with `fixed` then the first of the
+   * deployment's languages; otherwise the language the visitor picked with the toggle (`chosen`),
+   * then the first of the browser's `navigator.languages` (`browser`) whose primary subtag the
+   * deployment offers (`cs` falls back to `sk` only when it offers no `cs`), then its first
+   * language. Only languages the widget has words for (`known`) count; Slovak, else English, when
+   * the deployment lists none of them.
    */
-  function language(requested, offered, known, chosen) {
+  function language(requested, offered, known, chosen, browser, mode) {
     var has = function (l) { return Object.prototype.hasOwnProperty.call(known, l); };
-    var pick = function (l) { return String(l || "").slice(0, 2).toLowerCase(); };
-    if (has(pick(chosen))) return pick(chosen);
-    var asked = pick(requested);
-    if (asked && has(asked)) return asked;
-    offered = (offered || []).filter(has);
-    // The deployment's first language is its default (MF-52, T-4281); Slovak when it lists none.
-    if (offered.length > 0) return offered[0];
-    return has("sk") ? "sk" : "en";
+    var pick = function (l) { return String(l || "").split("-")[0].toLowerCase(); };
+    var list = (offered || []).map(pick).filter(has);
+    var offers = function (l) { return has(l) && (list.length === 0 || list.indexOf(l) >= 0); };
+    var first = list.length > 0 ? list[0] : has("sk") ? "sk" : "en";
+    if (offers(pick(requested))) return pick(requested);
+    if (mode === "fixed") return first;
+    if (offers(pick(chosen))) return pick(chosen);
+    var tags = Array.isArray(browser) ? browser : [];
+    for (var i = 0; i < tags.length; i += 1) {
+      var tag = pick(tags[i]);
+      if (list.indexOf(tag) >= 0) return tag;
+      if (tag === "cs" && list.indexOf("sk") >= 0) return "sk";
+    }
+    return first;
   }
 
   /**
@@ -538,12 +546,13 @@ var JCRender = (function () {
   }
 
   /**
-   * Whether the panel asks for the language first (T-4283 item 13): on a first open where there
+   * Whether the panel asks for the language first (T-4283 item 13), only with `widget.language:
+   * ask` (T-4343): on a first open where there
    * is a choice to make, never on the full page that names `?lang=`, never over a conversation
    * already open or a paused deployment.
    */
   function asksLanguage(at) {
-    if (!at || at.stored || at.kept || at.enabled === false) return false;
+    if (!at || at.mode !== "ask" || at.stored || at.kept || at.enabled === false) return false;
     if ((at.offered || []).length < 2) return false;
     return !(at.page && at.requested);
   }

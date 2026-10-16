@@ -64,15 +64,19 @@
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
       choose: "Vyberte jazyk", moreSources: "Další zdroje", fewerSources: "Méně zdrojů", moreInfo: "Více", lessInfo: "Méně" }
   };
-  // Each language's name in itself, for the first-open chooser (T-4283).
+  // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
   var framed = window.parent !== window;
   var page = document.body.classList.contains("jc-page");
   var offered = JCRender.ordered((config.languages || []).filter(function (l) { return WORDS[l]; }));
+  // How the chat picks its language and whether it shows the toggle, the deployment's
+  // `widget` (T-4343): `browser` by default, `ask` keeps the first-open chooser, `fixed` its first.
+  var mode = (config.widget && config.widget.language) || "browser";
+  var toggled = !(config.widget && config.widget.languageToggle === false);
   // The visitor's own choice, kept in this browser's storage; storage may be off, then the
-  // chooser asks again on the next open.
+  // chat opens by the browser's languages again (or the chooser asks again, in `ask` mode).
   var LANG_KEY = "jc-chat-lang";
   function storedLanguage() {
     try { return JCRender.chosen(localStorage.getItem(LANG_KEY), offered); } catch (e) { return null; }
@@ -80,8 +84,11 @@
   function storeLanguage(code) {
     try { localStorage.setItem(LANG_KEY, code); } catch (e) { /* asked again next time */ }
   }
-  var stored = storedLanguage();
-  var lang = JCRender.language(params.get("lang"), config.languages, WORDS, stored);
+  // Without the toggle there is nothing to pick, so an old pick is not read.
+  var stored = toggled ? storedLanguage() : null;
+  // The browser's languages are read here and never sent: only the chosen code is used.
+  var browser = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language];
+  var lang = JCRender.language(params.get("lang"), config.languages, WORDS, stored, browser, mode);
   var w = WORDS[lang];
   if (/^#[0-9a-fA-F]{6}$/.test(config.color || "")) {
     document.documentElement.style.setProperty("--accent", config.color);
@@ -163,7 +170,7 @@
   // The languages as a segmented toggle, SK | EN: nothing drops down over the conversation
   // (T-4283 item 8), and the visitor's choice is kept for the next open.
   var picker = null;
-  if (offered.length > 1) {
+  if (offered.length > 1 && toggled) {
     picker = el("div", "jc-langs");
     picker.setAttribute("role", "group");
     words(picker, "language", "ariaLabel");
@@ -910,7 +917,7 @@
     form.hidden = true;
     fresh.hidden = true;
   }
-  if (JCRender.asksLanguage({ offered: offered, stored: stored, kept: Boolean(kept && kept.turns.length > 0),
+  if (JCRender.asksLanguage({ mode: mode, offered: offered, stored: stored, kept: Boolean(kept && kept.turns.length > 0),
     enabled: config.enabled, page: page, requested: params.get("lang") })) {
     choose();
   }

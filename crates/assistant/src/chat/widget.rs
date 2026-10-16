@@ -130,6 +130,8 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
         "disclaimer": spec.disclaimer,
         "enabled": spec.enabled,
         "feedback": spec.feedback,
+        // How the chat picks its language and whether it shows the toggle (T-4343).
+        "widget": spec.widget.unwrap_or_default(),
         "questionChars": spec.budget.as_ref().map(|b| b.question_chars),
     })
 }
@@ -285,6 +287,20 @@ mod tests {
         );
         assert_eq!(config["enabled"], json!(true));
         assert_eq!(config["questionChars"], json!(500));
+        // T-4343: a deployment that names no widget opens in the browser's language, toggle on.
+        assert_eq!(
+            config["widget"],
+            json!({"language": "browser", "languageToggle": true})
+        );
+        let mut asking = public.clone();
+        asking.spec.widget = Some(jc_core::kinds::ChatWidget {
+            language: jc_core::kinds::WidgetLanguage::Ask,
+            language_toggle: false,
+        });
+        assert_eq!(
+            super::config(&asking, &[])["widget"],
+            json!({"language": "ask", "languageToggle": false})
+        );
         let panel = html(&public, &[], false);
         let page = html(&public, &[], true);
         assert!(panel.contains("<html lang=\"sk\">") && panel.contains("<body>"));
