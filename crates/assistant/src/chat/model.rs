@@ -519,7 +519,10 @@ mod tests {
         let started = Instant::now();
         let (first, second) = tokio::join!(model.token(), model.token());
         assert!(matches!(first, Err(CallError::Unavailable(_))), "{first:?}");
-        assert!(matches!(second, Err(CallError::Unavailable(_))), "{second:?}");
+        assert!(
+            matches!(second, Err(CallError::Unavailable(_))),
+            "{second:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "both waited {:?}",
