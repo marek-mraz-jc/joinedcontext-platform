@@ -73,7 +73,7 @@ fn endpoint(slug: &str, space: &str, base_path: String) -> Endpoint {
             classes: vec!["AirQualityObserved".to_owned()],
             json_schema: Some(json!({
                 "$defs": { "AirQualityObserved": { "type": "object", "properties": { "id": {} } } }
-            })),
+            }).into()),
             context: None,
         }],
         policy_names: Vec::new(),

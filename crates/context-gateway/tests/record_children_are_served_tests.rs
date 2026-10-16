@@ -56,23 +56,29 @@ fn air_quality() -> Model {
         version: "1.4.0".to_owned(),
         major: 1,
         classes: vec!["AirQualityObserved".to_owned()],
-        json_schema: Some(json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "$defs": {
-                "AirQualityObserved": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "type": { "const": "AirQualityObserved" },
-                        "pm10": { "type": "number" },
-                        "operatorPhone": { "type": "string" },
+        json_schema: Some(
+            json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$defs": {
+                    "AirQualityObserved": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "type": { "const": "AirQualityObserved" },
+                            "pm10": { "type": "number" },
+                            "operatorPhone": { "type": "string" },
+                        },
                     },
                 },
-            },
-        })),
-        context: Some(json!({
-            "@context": { "pm10": "https://bb.example.sk/schema/air-quality/pm10" }
-        })),
+            })
+            .into(),
+        ),
+        context: Some(
+            json!({
+                "@context": { "pm10": "https://bb.example.sk/schema/air-quality/pm10" }
+            })
+            .into(),
+        ),
     }
 }
 

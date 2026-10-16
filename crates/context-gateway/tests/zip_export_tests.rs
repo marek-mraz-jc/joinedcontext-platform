@@ -50,18 +50,24 @@ fn endpoint(limits: Option<FileLimits>, hidden: &[&str]) -> Endpoint {
             version: "1.2.0".to_owned(),
             major: 1,
             classes: vec!["AirQualityObserved".to_owned()],
-            json_schema: Some(json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "$defs": { "AirQualityObserved": { "type": "object", "properties": {
-                    "pm10": { "type": "number" }, "secret": { "type": "number" }
-                } } }
-            })),
+            json_schema: Some(
+                json!({
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "$defs": { "AirQualityObserved": { "type": "object", "properties": {
+                        "pm10": { "type": "number" }, "secret": { "type": "number" }
+                    } } }
+                })
+                .into(),
+            ),
             // The committed context describes the whole model, the attribute this endpoint
             // hides included: narrowing it is the gateway's job, not the model author's.
-            context: Some(json!({ "@context": {
+            context: Some(
+                json!({ "@context": {
                 "pm10": "https://smartdatamodels.org/pm10",
                 "secret": "https://smartdatamodels.org/secret"
-            } })),
+            } })
+                .into(),
+            ),
         }],
         policy_names: Vec::new(),
         policies: vec![serde_norway::from_str(

@@ -120,7 +120,7 @@ fn endpoint(granted_types: &[&str]) -> Endpoint {
             major: 1,
             classes: vec!["Vehicle".to_owned(), "Depot".to_owned(), "Tram".to_owned()],
             json_schema: None,
-            context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
+            context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } }).into()),
         }],
         policy_names: Vec::new(),
         policies: vec![policy],
