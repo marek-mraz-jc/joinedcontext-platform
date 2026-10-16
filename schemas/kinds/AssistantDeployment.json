@@ -2,6 +2,22 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AnswerSpec": {
+      "additionalProperties": false,
+      "description": "How the deployment answers.",
+      "properties": {
+        "routes": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Routes"
+            }
+          ],
+          "default": "both",
+          "description": "What one answer may use; default `both`."
+        }
+      },
+      "type": "object"
+    },
     "AssistantDeploymentSpec": {
       "additionalProperties": false,
       "description": "Desired specification of an [`AssistantDeployment`][crate::kinds::AssistantDeployment] (MF-52).",
@@ -12,6 +28,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AnswerSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How it answers: what one answer may use."
         },
         "budget": {
           "anyOf": [
@@ -49,6 +76,11 @@
         "enabled": {
           "default": true,
           "description": "Whether it answers at all; `false` makes every chat request answer `503`. Default true.",
+          "type": "boolean"
+        },
+        "feedback": {
+          "default": true,
+          "description": "Whether the chat shows the helpful/unhelpful buttons under an answer; default true.",
           "type": "boolean"
         },
         "languages": {
@@ -101,7 +133,7 @@
           "description": "What it reaches beyond its own project."
         },
         "sources": {
-          "description": "The `KnowledgeSource`s of this project it answers from.",
+          "description": "The `KnowledgeSource`s it answers from: one of this project by its name, one of a project in `scope.projects` as `{project}/{source}` (T-4281).",
           "items": {
             "type": "string"
           },
@@ -147,7 +179,7 @@
       "description": "What a deployment reaches beyond its own project.",
       "properties": {
         "projects": {
-          "description": "Other projects whose `audience: public` Endpoints its connectors may name; at most 10, never its own and never `*`.",
+          "description": "Other projects whose `audience: public` Endpoints its connectors, and whose `KnowledgeSource`s its sources, may name; at most 10, never its own and never `*`.",
           "items": {
             "type": "string"
           },
@@ -506,6 +538,13 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "perClientPerMonth": {
+          "default": 300,
+          "description": "Questions per UTC calendar month from one client; 1 to 100,000, default 300 (T-4286).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "requestsPerMinute": {
           "description": "Questions per minute across everyone; 1 to 600.",
           "format": "uint32",
@@ -525,6 +564,32 @@
         "requestsPerMinute"
       ],
       "type": "object"
+    },
+    "Routes": {
+      "description": "What one answer may use (T-4281).",
+      "oneOf": [
+        {
+          "description": "The sources and the connectors, as the router picks.",
+          "enum": [
+            "both"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The sources alone: no connector is offered and no tool called.",
+          "enum": [
+            "rag"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The connectors alone: no search round.",
+          "enum": [
+            "data"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "Status": {
       "additionalProperties": false,
@@ -608,6 +673,13 @@
         },
         "primaryColor": {
           "description": "The accent colour, `#rrggbb`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "The body's name in the chat's header, beside its monogram; at most 60 characters.",
           "type": [
             "string",
             "null"

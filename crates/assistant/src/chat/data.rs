@@ -187,7 +187,8 @@ pub async fn answer(
             )
             .await;
         }
-        let completion = match ask
+        let at = Instant::now();
+        let stepped = ask
             .model
             .step(
                 ask.deployment,
@@ -197,8 +198,9 @@ pub async fn answer(
                 &tools,
                 allow,
             )
-            .await
-        {
+            .await;
+        super::agent::Stages::add(&mut spent.stages.answer, at);
+        let completion = match stepped {
             Ok(completion) => completion,
             Err(err) => {
                 let (status, title) = match err {

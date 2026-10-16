@@ -2,13 +2,15 @@
 //! call on the cheap model (route and up to 3 search queries, in the question's language and in
 //! the sources' own, T-4259), at most [`MAX_ROUNDS`] hybrid search rounds the service runs itself
 //! (after each but the last, a follow-up call reads the start of the best passages as data and
-//! says whether they answer the question, or what to search next), and one streamed answer call
+//! says whether they answer the question, or what to search next; the first round searches the
+//! question as asked and is judged while the router call runs, T-4293), and one streamed answer call
 //! that sees the top [`ANSWER_PASSAGES`] passages as quoted data. A data question reads its rows from the deployment's connectors
 //! with `query_entities` (T-4140, Architecture/23 §5), the router naming an Endpoint and a type
 //! from the ones `list_types` lists. A repeated question is answered from [`AnswerCache`]. The
 //! model never calls a tool here, so the tool allowlist is this code.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -17,10 +19,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::Sender;
 
 use super::agent::{
-    fits, name_sources, quoted, send, Ask, Citation, Connected, Event, Spent, Table, Turn,
+    fits, name_sources, quoted, send, Ask, Citation, Connected, Event, Spent, Stages, Table, Turn,
 };
 use super::model::{Call, CallError, Completion};
-use crate::{hybrid_search, Hit, Search, CANDIDATES};
+use crate::{Hit, Search, CANDIDATES};
 
 /// The most search rounds one question runs.
 pub const MAX_ROUNDS: usize = 3;
@@ -413,19 +415,28 @@ async fn languages(ask: &Ask<'_>) -> Vec<String> {
         return known;
     }
     let found = async {
-        let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT c.lang FROM chunks c JOIN sites s ON s.id = c.site_id \
-             WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public') AND c.lang IS NOT NULL \
-             GROUP BY c.lang ORDER BY count(*) DESC, c.lang LIMIT $3",
-        )
-        .bind(ask.sources)
-        .bind(ask.public_only)
-        .bind(MAX_LANGUAGES as i64)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.rollback().await?;
-        Ok::<_, crate::Error>(rows.into_iter().map(|(lang,)| lang).collect::<Vec<_>>())
+        // Passages per language, summed over the projects the sources are in (T-4281).
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        for (project, names) in ask.sources {
+            let mut tx = crate::project_scope(ask.pool, project).await?;
+            let rows: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT c.lang, count(*)::int8 FROM chunks c JOIN sites s ON s.id = c.site_id \
+                 WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public') AND c.lang IS NOT NULL \
+                 GROUP BY c.lang",
+            )
+            .bind(names)
+            .bind(ask.public_only)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.rollback().await?;
+            for (lang, n) in rows {
+                *counts.entry(lang).or_default() += n;
+            }
+        }
+        let mut ranked: Vec<(String, i64)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(MAX_LANGUAGES);
+        Ok::<_, crate::Error>(ranked.into_iter().map(|(lang, _)| lang).collect::<Vec<_>>())
     }
     .await;
     match found {
@@ -567,35 +578,37 @@ impl AnswerCache {
 /// The digest of the deployment's index: how many passages its sources hold and the newest one's
 /// id. A crawl that adds, drops or replaces a passage changes it.
 async fn digest(ask: &Ask<'_>) -> Result<String, crate::Error> {
-    let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-    let (count, newest): (i64, i64) = sqlx::query_as(
-        "SELECT count(*)::int8, COALESCE(max(c.id), 0)::int8 FROM chunks c JOIN sites s ON s.id = c.site_id \
-         WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public')",
-    )
-    .bind(ask.sources)
-    .bind(ask.public_only)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.rollback().await?;
-    Ok(format!("{count}:{newest}"))
+    let mut digest = String::new();
+    for (project, names) in ask.sources {
+        let mut tx = crate::project_scope(ask.pool, project).await?;
+        let (count, newest): (i64, i64) = sqlx::query_as(
+            "SELECT count(*)::int8, COALESCE(max(c.id), 0)::int8 FROM chunks c JOIN sites s ON s.id = c.site_id \
+             WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public')",
+        )
+        .bind(names)
+        .bind(ask.public_only)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        let _ = write!(digest, "{project}:{count}:{newest};");
+    }
+    Ok(digest)
 }
 
 async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
     let vector = ask.embedder.query(query).await?;
-    let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-    let hits = hybrid_search(
-        &mut tx,
+    crate::search_projects(
+        ask.pool,
+        ask.sources,
         &Search {
             text: query,
             embedding: &vector,
-            sources: ask.sources,
+            sources: &[],
             public_only: ask.public_only,
             limit: ROUND_PASSAGES.min(CANDIDATES),
         },
     )
-    .await?;
-    tx.rollback().await?;
-    Ok(hits)
+    .await
 }
 
 fn offers(connector: &Connected, tool: &str) -> bool {
@@ -730,14 +743,9 @@ pub(super) async fn table(
     let total = total_of(text);
     let (columns, rows) = table_of(text, READ_ROWS)?;
     let slug = connector.surface.slug.as_str();
-    let dataset = async {
-        let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-        let page = crate::endpoint_page(&mut tx, slug, ask.sources, ask.public_only).await?;
-        tx.rollback().await?;
-        Ok::<_, crate::Error>(page)
-    }
-    .await
-    .unwrap_or_else(|why| {
+    let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
+        .await
+        .unwrap_or_else(|why| {
         tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
         None
     });
@@ -934,6 +942,15 @@ fn refusal(err: &CallError) -> Event {
     }
 }
 
+/// What a question spent before the day ran out, with the search-only answer's first token.
+fn with_search(mut spent: Spent, searched: Spent) -> Spent {
+    spent.first_token_ms = searched.first_token_ms;
+    if let Some(ms) = searched.stages.search {
+        spent.stages.search = Some(spent.stages.search.unwrap_or(0).saturating_add(ms));
+    }
+    spent
+}
+
 fn conversation_spent() -> Event {
     Event::Error {
         status: 429,
@@ -950,11 +967,56 @@ pub const SEARCH_ONLY_NOTHING: &str = "Dnes už asistent vyčerpal svoj denný r
     vyhľadávanie k vašej otázke nenašlo žiadnu stránku. Skúste to zajtra alebo navštívte \
     kontaktnú stránku mesta.";
 
+/// Why a question is answered as search, without a model (T-4149, T-4286). No cap ever refuses:
+/// the visitor gets the pages that answer, and a sentence saying why the assistant did not write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cap {
+    /// The deployment's day is spent: its `costPerDayUsd`, or the proxy's `tokensPerDay`.
+    Day,
+    /// This visitor asked their month's questions (`perClientPerMonth`); `resets` is the first day
+    /// of the next month as the visitor reads it, e.g. `1. 11. 2026`.
+    Month { resets: String },
+}
+
+impl Cap {
+    /// The sentence before the links.
+    pub fn lead(&self) -> String {
+        match self {
+            Cap::Day => SEARCH_ONLY.to_owned(),
+            Cap::Month { resets } => format!(
+                "Tento mesiac ste už položili všetky otázky, na ktoré asistent odpovedá vlastnými \
+                 slovami; znova tak odpovedá od {resets}. Tu sú stránky, ktoré k vašej otázke našiel \
+                 vyhľadávaním:"
+            ),
+        }
+    }
+
+    /// The sentence when the search found nothing either.
+    pub fn nothing(&self) -> String {
+        match self {
+            Cap::Day => SEARCH_ONLY_NOTHING.to_owned(),
+            Cap::Month { resets } => format!(
+                "Tento mesiac ste už položili všetky otázky, na ktoré asistent odpovedá vlastnými \
+                 slovami (znova od {resets}), a vyhľadávanie k vašej otázke nenašlo žiadnu stránku. \
+                 Navštívte kontaktnú stránku mesta alebo kraja."
+            ),
+        }
+    }
+}
+
 /// Answers as search when the day's cost cap is reached (T-4149): one hybrid search for the
 /// question, the best pages as citations under a sentence that says why, no model call.
-pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) -> Spent {
+pub async fn search_only(
+    ask: &Ask<'_>,
+    cap: &Cap,
+    question: &str,
+    events: &Sender<Event>,
+) -> Spent {
     let started = Instant::now();
-    let found = match search(ask, question).await {
+    let searched = search(ask, question).await;
+    let mut stages = Stages::default();
+    Stages::add(&mut stages.search, started);
+    let found = match searched {
         Ok(found) => found,
         Err(why) => {
             tracing::warn!(deployment = %ask.deployment, %why, "the search-only answer's search failed");
@@ -978,13 +1040,14 @@ pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) 
         }
     }
     let text = if citations.is_empty() {
-        SEARCH_ONLY_NOTHING.to_owned()
+        cap.nothing()
     } else {
         let marks: Vec<String> = citations.iter().map(|c| format!("[{}]", c.n)).collect();
-        format!("{SEARCH_ONLY} {}", marks.join(" "))
+        format!("{} {}", cap.lead(), marks.join(" "))
     };
     let spent = Spent {
         first_token_ms: Some(started.elapsed().as_millis() as u64),
+        stages,
         ..Spent::default()
     };
     name_sources(ask, &mut citations).await;
@@ -995,6 +1058,35 @@ pub async fn search_only(ask: &Ask<'_>, question: &str, events: &Sender<Event>) 
 
 fn stage(stage: &'static str, topic: Option<String>) -> Event {
     Event::Stage { stage, topic }
+}
+
+fn millis(took: Duration) -> u64 {
+    u64::try_from(took.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// One search with its progress events; `None` when it failed, which the answer survives.
+async fn searched(ask: &Ask<'_>, events: &Sender<Event>, query: &str) -> Option<Vec<Hit>> {
+    let tool = |status| Event::Tool {
+        name: "search".into(),
+        endpoint: None,
+        status,
+    };
+    send(events, stage("searching", Some(query.to_owned()))).await;
+    send(events, tool("started")).await;
+    let hits = search(ask, query)
+        .await
+        .map_err(|why| tracing::warn!(deployment = %ask.deployment, %why, "search failed"))
+        .ok();
+    send(events, tool(if hits.is_some() { "done" } else { "failed" })).await;
+    hits
+}
+
+/// The queries not searched yet, each once, compared without case.
+pub fn new_queries<'a>(asked: &[String], next: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut seen: HashSet<String> = asked.iter().map(|q| q.to_lowercase()).collect();
+    next.filter(|q| seen.insert(q.to_lowercase()))
+        .cloned()
+        .collect()
 }
 
 /// Answers one question by the routed loop; returns what it spent. Every outcome reaches
@@ -1044,14 +1136,78 @@ pub async fn answer(
         return spent;
     }
     send(events, stage("understanding", None)).await;
-    let routing = match ask
-        .model
-        .ask(ask.deployment, ask.tokens_per_day, &router, &messages)
-        .await
-    {
+    // The question is searched as asked and its passages judged while the router call runs
+    // (T-4293): the first round costs no wait of its own, and when it covers the question the
+    // router's queries only add to it. The judgement keeps room for the router's own call.
+    let reserve = tokens_of(&messages) + ROUTER_TOKENS;
+    let route = async {
+        let at = Instant::now();
+        let reply = ask
+            .model
+            .ask(ask.deployment, ask.tokens_per_day, &router, &messages)
+            .await;
+        (reply, at.elapsed())
+    };
+    let first = async {
+        let at = Instant::now();
+        let hits = searched(ask, events, question).await;
+        let search = at.elapsed();
+        let judged = match &hits {
+            Some(hits) if !hits.is_empty() && !events.is_closed() => {
+                let asked = [question.to_owned()];
+                let messages = follow_messages(
+                    history,
+                    question,
+                    &asked,
+                    &languages,
+                    &top(hits, ANSWER_PASSAGES),
+                );
+                if within(&spent, &messages, reserve + ROUTER_TOKENS) {
+                    let at = Instant::now();
+                    let reply = ask
+                        .model
+                        .ask(ask.deployment, ask.tokens_per_day, &router, &messages)
+                        .await;
+                    Some((reply, at.elapsed()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        (hits, search, judged)
+    };
+    let ((routed, route_took), (first_hits, first_took, judged)) = tokio::join!(route, first);
+    spent.stages.route = Some(millis(route_took));
+    spent.stages.search = Some(millis(first_took));
+    let mut covered = false;
+    let mut more = Vec::new();
+    if let Some((reply, took)) = judged {
+        spent.stages.judge = Some(millis(took));
+        match reply {
+            Ok(reply) => {
+                count(&mut spent, &reply);
+                let seen = HashSet::from([question.to_lowercase()]);
+                // `Stop` answers with what is found, as after any round: the router's queries
+                // are added, and nothing more is judged.
+                match verdict(&reply.text, &seen) {
+                    Verdict::Answers | Verdict::Stop => covered = true,
+                    Verdict::More(next) => more = next,
+                }
+            }
+            // The router's rounds still run; only the early judgement is lost.
+            Err(err) => {
+                tracing::warn!(deployment = %ask.deployment, %err, "the first round's judgement failed")
+            }
+        }
+    }
+    let routing = match routed {
         Ok(reply) => {
             count(&mut spent, &reply);
             routing(&reply.text, question, &live)
+        }
+        Err(CallError::DaySpent(_)) => {
+            return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
         }
         Err(err) => {
             send(events, refusal(&err)).await;
@@ -1092,51 +1248,34 @@ pub async fn answer(
 
     let mut found: Vec<Hit> = Vec::new();
     let mut asked: Vec<String> = Vec::new();
-    // A data question whose rows came back needs no search; one whose read failed is searched.
-    let mut pending = if routing.rag || tables.is_empty() {
-        routing.queries.clone()
-    } else {
-        Vec::new()
-    };
     let mut rounds = 0;
+    // A data question whose rows came back needs no search, and the first round's passages are
+    // left out of its answer; one whose read failed is searched.
+    let mut pending = Vec::new();
+    if routing.rag || tables.is_empty() {
+        if let Some(hits) = first_hits {
+            merge(&mut found, hits);
+            asked.push(question.to_owned());
+            rounds = 1;
+        }
+        pending = new_queries(&asked, routing.queries.iter().chain(&more));
+    }
     while rounds < MAX_ROUNDS && !pending.is_empty() {
         rounds += 1;
         for query in pending.drain(..) {
             if events.is_closed() {
                 return spent;
             }
-            send(events, stage("searching", Some(query.clone()))).await;
-            send(
-                events,
-                Event::Tool {
-                    name: "search".into(),
-                    endpoint: None,
-                    status: "started",
-                },
-            )
-            .await;
-            let status = match search(ask, &query).await {
-                Ok(hits) => {
-                    merge(&mut found, hits);
-                    "done"
-                }
-                Err(why) => {
-                    tracing::warn!(deployment = %ask.deployment, %why, "search failed");
-                    "failed"
-                }
-            };
-            send(
-                events,
-                Event::Tool {
-                    name: "search".into(),
-                    endpoint: None,
-                    status,
-                },
-            )
-            .await;
+            let at = Instant::now();
+            if let Some(hits) = searched(ask, events, &query).await {
+                merge(&mut found, hits);
+            }
+            Stages::add(&mut spent.stages.search, at);
             asked.push(query);
         }
-        if rounds == MAX_ROUNDS {
+        // A first round that answers needs only what the router adds to it; the last round is
+        // never judged.
+        if covered || rounds == MAX_ROUNDS {
             break;
         }
         // One more round only when the passages found do not answer the question, judged on
@@ -1151,11 +1290,13 @@ pub async fn answer(
         if !within(&spent, &messages, ROUTER_TOKENS) {
             break;
         }
-        match ask
+        let at = Instant::now();
+        let reply = ask
             .model
             .ask(ask.deployment, ask.tokens_per_day, &router, &messages)
-            .await
-        {
+            .await;
+        Stages::add(&mut spent.stages.judge, at);
+        match reply {
             Ok(reply) => {
                 count(&mut spent, &reply);
                 let seen: HashSet<String> = asked.iter().map(|q| q.to_lowercase()).collect();
@@ -1251,12 +1392,18 @@ pub async fn answer(
         max_tokens: ask.output_tokens,
         json: false,
     };
-    let (completion, first) = match ask
+    let at = Instant::now();
+    let streamed = ask
         .model
         .stream(ask.deployment, ask.tokens_per_day, &call, &messages, events)
-        .await
-    {
+        .await;
+    Stages::add(&mut spent.stages.answer, at);
+    let (completion, first) = match streamed {
         Ok(streamed) => streamed,
+        // The proxy refuses before the stream starts, so nothing of an answer was sent yet.
+        Err(CallError::DaySpent(_)) => {
+            return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
+        }
         Err(err) => {
             send(events, refusal(&err)).await;
             return spent;
@@ -1557,6 +1704,21 @@ mod tests {
         ] {
             assert_eq!(verdict(nonsense, &asked), Verdict::Stop, "{nonsense}");
         }
+    }
+
+    #[test]
+    fn only_queries_not_searched_yet_are_searched_each_once() {
+        let asked = vec!["Dokedy je otvorená knižnica?".to_owned()];
+        let next: Vec<String> = [
+            "knižnica",
+            "DOKEDY je otvorená knižnica?",
+            "Knižnica",
+            "pobočky",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(new_queries(&asked, next.iter()), ["knižnica", "pobočky"]);
+        assert!(new_queries(&asked, [].iter()).is_empty());
     }
 
     #[test]

@@ -1,63 +1,126 @@
-/* The knowledge assistant's chat (T-3058, T-4138): one column, readable at 320 px, the accent
-   colour a deployment chooses on --accent. System fonts, no image, no font file. The full page
-   (/d/{publicId}) centres the same column; the launcher's panel shows it edge to edge. */
-:root { --accent: #1f5fae; --fg: #1a1d21; --muted: #5b6470; --bg: #ffffff; --line: #d5dae0; --soft: #f3f5f8; }
+/* The knowledge assistant's chat (T-3058, T-4138, T-4283): one column, readable at 320 px, the
+   accent colour a deployment chooses on --accent. System fonts, no image, no font file. The full
+   page (/d/{publicId}) centres the same column; the launcher's panel shows it edge to edge. The
+   page itself never scrolls: the conversation is the one scroll area, between a header and a
+   composer that stay put. Contrast is AA in both schemes. */
+:root {
+  --accent: #1f5fae; --on-accent: #ffffff; --link: var(--accent);
+  --fg: #1a1d21; --muted: #555e69; --bg: #ffffff; --line: #d9dee4; --soft: #f2f4f7; --bubble: var(--soft);
+  --radius: 12px; --radius-s: 8px; --pill: 999px;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%);
+}
 @media (prefers-color-scheme: dark) {
-  :root { --fg: #eef1f5; --muted: #a9b3bf; --bg: #15181c; --line: #343b44; --soft: #1f242a; }
+  /* Text in the accent would be too dark on a dark page: links and chips take a light blue (AA). */
+  :root { --fg: #eef1f5; --muted: #aab4c0; --bg: #15181c; --line: #343b44; --soft: #1f242a; --bubble: #23292f;
+    --link: #9cc3ff; --shadow: none; }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: var(--bg); }
 .jc-chat { display: flex; flex-direction: column; height: 100%; height: 100dvh; }
 .jc-page .jc-chat { max-width: 760px; margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
-.jc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 6px max(12px, env(safe-area-inset-right)) 6px max(12px, env(safe-area-inset-left));
-  border-bottom: 1px solid var(--line); }
-.jc-head h1 { font-size: 16px; margin: 0; }
-.jc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; justify-content: flex-end; }
-.jc-actions button, .jc-answer-tools button { min-height: 36px; padding: 0 10px; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; }
-.jc-langs { min-height: 36px; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
-  color: var(--fg); font: inherit; font-size: 13px; }
-.jc-tools { margin: 0; padding: 6px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.jc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.jc-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* The header: the body's monogram and name, the language toggle, New conversation. */
+.jc-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px max(12px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--line); background: var(--bg); }
+.jc-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.jc-avatar { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px;
+  border-radius: 50%; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 14px; letter-spacing: .02em; }
+.jc-avatar .jc-icon { width: 18px; height: 18px; }
+.jc-title { margin: 0; display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+.jc-name { font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jc-role { font-size: 12px; font-weight: 400; color: var(--muted); }
+.jc-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.jc-actions [hidden], .jc-form[hidden], .jc-notice[hidden] { display: none; }
+.jc-langs { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: var(--pill); background: var(--soft); }
+.jc-langs button { min-width: 40px; min-height: 32px; padding: 0 10px; border: 0; border-radius: var(--pill);
+  background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.jc-langs button[aria-pressed="true"] { background: var(--bg); color: var(--fg); box-shadow: 0 1px 3px rgb(16 24 40 / 15%); }
+.jc-icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 36px; padding: 0;
+  border: 0; border-radius: var(--pill); background: transparent; color: var(--muted); cursor: pointer; }
+.jc-icon-button:hover { background: var(--soft); color: var(--fg); }
+.jc-icon-button:disabled { opacity: .5; cursor: default; }
+.jc-tools { flex: none; margin: 0; padding: 6px 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
 .jc-tools summary { cursor: pointer; color: var(--muted); }
 .jc-tools label { display: inline-flex; gap: 6px; align-items: center; margin: 6px 12px 0 0; }
-.jc-log { flex: 1; overflow-y: auto; padding: 12px 16px; margin: 0; list-style: none; }
-.jc-log li { margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; overflow-wrap: anywhere; }
-.jc-you { background: var(--soft); margin-left: 15%; }
-.jc-bot { border: 1px solid var(--line); margin-right: 5%; }
-.jc-bot > p { margin: 0; white-space: pre-wrap; }
-.jc-you p { margin: 0; white-space: pre-wrap; }
+
+/* The conversation: the only scroll area. */
+.jc-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 14px 4px; margin: 0; list-style: none;
+  display: flex; flex-direction: column; }
+/* Where the panel is taller than the conversation (a phone's full screen), the conversation sits
+   on the composer, as in a messenger; scrolling up still reaches its start. */
+.jc-log > :first-child { margin-top: auto; }
+.jc-log > li { margin: 0 0 14px; overflow-wrap: anywhere; }
+.jc-you { display: flex; justify-content: flex-end; }
+.jc-you p { margin: 0; max-width: 85%; padding: 9px 13px; border-radius: 18px 18px 4px 18px; background: var(--accent);
+  color: var(--on-accent); white-space: pre-wrap; }
+.jc-bot { max-width: 100%; }
+.jc-bot > .jc-answer { padding: 10px 13px; border-radius: 18px 18px 18px 4px; background: var(--bubble); }
 .jc-answer p { margin: 0 0 8px; }
 .jc-answer p:last-child, .jc-answer ul:last-child, .jc-answer ol:last-child { margin-bottom: 0; }
 .jc-answer ul, .jc-answer ol { margin: 0 0 8px; padding-left: 20px; }
-.jc-answer li, .jc-part li { margin: 0 0 4px; padding: 0; border-radius: 0; }
-.jc-answer code { font-size: 13px; background: var(--soft); padding: 0 4px; border-radius: 4px; }
-.jc-answer a, .jc-cite a { color: var(--accent); }
+.jc-answer li, .jc-part li { margin: 0 0 4px; padding: 0; }
+.jc-answer code { font-size: 13px; background: var(--bg); padding: 0 4px; border-radius: 4px; }
+.jc-answer a, .jc-cite a { color: var(--link); }
 .jc-cite { font-size: 11px; margin-left: 1px; }
-.jc-log li.jc-intro { padding: 4px 0; }
-.jc-greeting { margin: 0 0 12px; white-space: pre-wrap; font-size: 16px; }
-.jc-suggest { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.jc-log .jc-suggest li { margin: 0; padding: 0; }
-.jc-suggest button { min-height: 40px; padding: 8px 12px; text-align: left; border: 1px solid var(--accent);
-  border-radius: 18px; background: var(--bg); color: var(--accent); font: inherit; font-size: 14px; cursor: pointer; }
-.jc-suggest button:hover { background: var(--soft); }
 .jc-streaming { white-space: pre-wrap; }
-.jc-cards { list-style: none; margin: 10px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
-.jc-log .jc-cards > li { margin: 0; padding: 8px 10px 8px 36px; position: relative; border: 1px solid var(--line);
-  border-radius: 8px; background: var(--soft); font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
-.jc-card-n { position: absolute; left: 10px; top: 8px; width: 18px; height: 18px; border-radius: 50%;
-  background: var(--accent); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
-.jc-cards a { color: var(--accent); font-weight: 600; }
+.jc-status { margin: 0; padding: 8px 2px; font-size: 13px; color: var(--muted); }
+
+/* The empty chat: greeting, then the deployment's questions as compact chips in a wrapping row. */
+.jc-log > li.jc-intro { margin-bottom: 8px; }
+.jc-greeting { margin: 2px 0 12px; white-space: pre-wrap; font-size: 16px; }
+.jc-suggest { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.jc-log .jc-suggest li { margin: 0; padding: 0; }
+.jc-suggest button { min-height: 36px; padding: 7px 12px; text-align: left; border: 1px solid var(--line);
+  border-radius: var(--pill); background: var(--bg); color: var(--link); font: inherit; font-size: 13.5px; line-height: 1.3; cursor: pointer; }
+.jc-suggest button:hover { border-color: var(--accent); background: var(--soft); }
+.jc-followups { margin-top: 10px; }
+
+/* The first open: the language before anything else (T-4283 item 13). */
+.jc-choosing .jc-actions, .jc-choosing .jc-foot { display: none; }
+.jc-choose { padding: 16px 0; text-align: center; }
+.jc-log > .jc-choose:first-child { margin-block: auto; }
+.jc-choose-title { margin: 0 0 16px; font-size: 17px; font-weight: 600; }
+.jc-choose-list { display: flex; flex-direction: column; gap: 10px; max-width: 280px; margin: 0 auto; }
+.jc-choose-list button { min-height: 48px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--bg);
+  color: var(--link); font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
+.jc-choose-list button:first-child { background: var(--accent); color: var(--on-accent); }
+
+/* Sources: a compact numbered list under the answer, two shown, the rest behind one button. */
+.jc-cards { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.jc-log .jc-cards > li { margin: 0; padding: 6px 10px 6px 34px; position: relative; border: 1px solid var(--line);
+  border-radius: var(--radius-s); background: var(--bg); font-size: 13px; display: flex; flex-direction: column; }
+.jc-cards > li[hidden] { display: none; }
+.jc-card-n { position: absolute; left: 9px; top: 8px; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); color: var(--on-accent); font-size: 11px; line-height: 18px; text-align: center; }
+.jc-cards a { color: var(--link); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jc-domain { color: var(--muted); font-size: 12px; }
-.jc-cards > li:has(.jc-part) { grid-column: 1 / -1; }
-.jc-part { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--bg); overflow-wrap: anywhere; }
+.jc-more-sources { margin-top: 4px; min-height: 32px; padding: 0 10px; border: 0; border-radius: var(--pill); background: none;
+  color: var(--link); font: inherit; font-size: 13px; cursor: pointer; }
+.jc-more-sources:hover { background: var(--soft); }
+.jc-part { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--soft); overflow-wrap: anywhere; }
 .jc-part p { margin: 2px 0; }
 .jc-part ol { margin: 4px 0 0; padding-left: 20px; }
-.jc-part a { font-weight: 400; }
-.jc-answer-tools { margin-top: 8px; display: flex; gap: 6px; }
+.jc-part a { font-weight: 400; white-space: normal; }
+
+/* Copy and the verdict, small icons under the answer. */
+.jc-answer-tools { margin-top: 4px; display: flex; gap: 2px; }
+.jc-answer-tools .jc-icon-button { min-width: 32px; min-height: 32px; }
+.jc-answer-tools .jc-icon { width: 17px; height: 17px; }
+.jc-note { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.jc-note textarea { flex: 1 1 100%; min-height: 48px; font: inherit; color: inherit; background: var(--bg);
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-s); }
+.jc-note button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--pill);
+  background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; }
+.jc-thanks { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+
+/* A data answer's table, chart and links (T-4140, T-4198). */
 .jc-data { margin: 0 0 10px; }
-.jc-data-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.jc-data-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--bg); }
 .jc-data table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .jc-data caption { text-align: left; padding: 6px 8px; color: var(--muted); }
 .jc-data th, .jc-data td { padding: 4px 8px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; }
@@ -67,41 +130,49 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-chart-bar { fill: var(--accent); }
 .jc-chart-text { fill: var(--muted); font-size: 10px; }
 .jc-data-links { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0 0; font-size: 13px; }
-.jc-data-links a { color: var(--accent); }
-.jc-status { font-size: 13px; color: var(--muted); }
-/* A failed answer is one quiet line and its Retry, not an alarm (T-4253). */
-.jc-log li.jc-error { border-style: dashed; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.jc-error > p { flex: 1 1 12em; }
-.jc-retry { min-height: 36px; padding: 0 12px; border: 1px solid var(--accent); border-radius: 18px; background: var(--bg);
-  color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; }
+.jc-data-links a { color: var(--link); }
 .jc-steps { margin-top: 6px; font-size: 13px; color: var(--muted); }
 .jc-steps summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
 .jc-steps ol { margin: 0 0 4px; padding-left: 20px; }
 .jc-script summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .jc-script pre { font-size: 12px; overflow-x: auto; background: var(--soft); padding: 8px; border-radius: 6px; }
-.jc-foot { border-top: 1px solid var(--line); padding: 10px max(12px, env(safe-area-inset-right))
-  calc(8px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: var(--bg); }
-.jc-form { display: flex; gap: 8px; }
-.jc-form[hidden], .jc-actions [hidden] { display: none; }
-.jc-disclaimer { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
-.jc-form textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; font: inherit; color: inherit;
-  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.jc-form button { min-width: 44px; min-height: 44px; padding: 0 16px; border: 0; border-radius: 8px;
-  background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
-.jc-form button[disabled] { opacity: .6; cursor: not-allowed; }
-.jc-form button[hidden] { display: none; }
+
+/* A failed answer is one quiet line and its Retry, not an alarm (T-4253). */
+.jc-log li.jc-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 13px;
+  border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted); }
+.jc-error > p { flex: 1 1 12em; margin: 0; }
+.jc-retry { min-height: 36px; padding: 0 12px; border: 1px solid var(--accent); border-radius: var(--pill); background: var(--bg);
+  color: var(--link); font: inherit; font-size: 13px; cursor: pointer; }
+
+/* The composer: one rounded field, the send button inside it; the notice under it, one line. */
+.jc-foot { flex: none; padding: 8px max(12px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  background: var(--bg); }
+.jc-form { display: flex; align-items: flex-end; gap: 4px; padding: 4px 4px 4px 14px; border: 1px solid var(--line);
+  border-radius: 22px; background: var(--bg); box-shadow: var(--shadow); }
+.jc-form:focus-within { border-color: var(--accent); }
+.jc-form textarea { flex: 1; min-height: 36px; max-height: 160px; padding: 7px 0; resize: none; border: 0; outline: none;
+  font: inherit; color: inherit; background: transparent; }
+.jc-form .jc-icon-button { flex: none; width: 36px; height: 36px; background: var(--accent); color: var(--on-accent); }
+.jc-form .jc-icon-button:hover { background: var(--accent); filter: brightness(1.1); }
 .jc-form .jc-stop { background: var(--fg); color: var(--bg); }
-:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-.jc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.jc-form button[hidden] { display: none; }
+.jc-notice { display: flex; align-items: baseline; gap: 6px; margin: 5px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.jc-disclaimer { flex: 1; min-width: 0; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.jc-notice.jc-open .jc-disclaimer { white-space: normal; }
+.jc-more { flex: none; padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; cursor: pointer; }
+
+/* A phone's full screen (the desktop panel is about 400 px wide and keeps the subtitle): a long
+   name wraps to two lines rather than losing its end. */
+@media (max-width: 390px) {
+  .jc-name { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; font-size: 15px; }
+  .jc-role { display: none; }
+}
+@media (max-width: 480px) {
+  .jc-icon-button, .jc-langs button { min-height: 44px; min-width: 44px; }
+  .jc-form .jc-icon-button { width: 44px; height: 44px; }
+  .jc-suggest button { min-height: 44px; }
+  .jc-more { min-height: 24px; }
+}
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
-
-/* T-4174: thumbs, the optional note, follow-up chips. */
-.jc-thumb { min-width: 36px; }
-.jc-thumb:disabled { opacity: .5; }
-.jc-note { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-.jc-note textarea { flex: 1 1 100%; min-height: 48px; font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
-.jc-note button { min-height: 36px; padding: 0 10px; }
-.jc-thanks { margin: 6px 0 0; font-size: .9em; }
-.jc-followups { margin-top: 10px; }

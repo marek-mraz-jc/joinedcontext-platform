@@ -242,8 +242,9 @@ var JCRender = (function () {
     var asked = pick(requested);
     if (asked && has(asked)) return asked;
     offered = (offered || []).filter(has);
-    if (offered.length === 0 || offered.indexOf("sk") >= 0) return has("sk") ? "sk" : "en";
-    return offered[0];
+    // The deployment's first language is its default (MF-52, T-4281); Slovak when it lists none.
+    if (offered.length > 0) return offered[0];
+    return has("sk") ? "sk" : "en";
   }
 
   /**
@@ -467,7 +468,7 @@ var JCRender = (function () {
 
   // The service's error titles (API/05 §1.6), English and stable, to the widget's own words.
   var TROUBLE = {
-    "Budget Spent": "spent", "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
+    "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
     "No Answer": "unanswered", "Answer Took Too Long": "slow"
   };
 
@@ -484,9 +485,12 @@ var JCRender = (function () {
     return "failed";
   }
 
-  /** Whether asking the same again can help: not once the day's or the conversation's share is spent. */
+  /**
+   * Whether asking the same again can help: not once the conversation's share is spent. A spent
+   * day is no error at all: the service answers it with links (T-4286).
+   */
   function retryable(word) {
-    return word !== "spent" && word !== "full";
+    return word !== "full";
   }
 
   /**
@@ -499,7 +503,38 @@ var JCRender = (function () {
     return { question: last.text, history: history.slice(0, -1) };
   }
 
+  /** The header's monogram (T-4283): the first letters of the first two words, upper case. */
+  function monogram(title) {
+    var words = String(title || "").trim().split(/[\s\-–]+/).filter(function (word) { return /^\p{L}/u.test(word); });
+    return words.slice(0, 2).map(function (word) { return word.charAt(0).toLocaleUpperCase(); }).join("");
+  }
+
+  /** The language this browser chose before, when the deployment still offers it; else null. */
+  function chosen(stored, offered) {
+    return typeof stored === "string" && (offered || []).indexOf(stored) >= 0 ? stored : null;
+  }
+
+  /**
+   * Whether the panel asks for the language first (T-4283 item 13): on a first open where there
+   * is a choice to make, never on the full page that names `?lang=`, never over a conversation
+   * already open or a paused deployment.
+   */
+  function asksLanguage(at) {
+    if (!at || at.stored || at.kept || at.enabled === false) return false;
+    if ((at.offered || []).length < 2) return false;
+    return !(at.page && at.requested);
+  }
+
+  /** Slovak first, then the deployment's order: the chooser's and the toggle's buttons. */
+  function ordered(offered) {
+    var list = (offered || []).slice();
+    var sk = list.indexOf("sk");
+    if (sk > 0) list.unshift(list.splice(sk, 1)[0]);
+    return list;
+  }
+
   return {
+    monogram: monogram, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,

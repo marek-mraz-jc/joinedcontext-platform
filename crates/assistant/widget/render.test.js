@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { monogram, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -142,6 +142,8 @@ test("Slovak by default, the host page's language when the widget knows it", () 
   assert.equal(language("en-GB", ["sk", "en"], known), "en");
   assert.equal(language("hu", ["sk", "en"], known), "sk");
   assert.equal(language("", ["en", "cs"], known), "en");
+  // T-4281: the first language the deployment lists opens, Slovak or not.
+  assert.equal(language("", ["en", "sk"], known), "en");
   assert.equal(language("", ["hu"], known), "sk");
   assert.equal(language("", ["fi"], { en: {} }), "en");
 });
@@ -373,7 +375,8 @@ test("an empty chat offers the deployment's questions in its language, else the 
 });
 
 test("a failed answer is said in the widget's words, by the service's title, else its status (T-4253)", () => {
-  assert.equal(trouble(429, "Budget Spent"), "spent");
+  // T-4286: the service never sends a spent day as an error, so the widget has no word for it.
+  assert.equal(trouble(429, "Budget Spent"), "busy");
   assert.equal(trouble(429, "Conversation Budget Spent"), "full");
   assert.equal(trouble(503, "Model Unavailable"), "unreachable");
   assert.equal(trouble(502, "No Answer"), "unanswered");
@@ -384,7 +387,6 @@ test("a failed answer is said in the widget's words, by the service's title, els
   assert.equal(trouble(400, "constructor"), "failed", "a title is looked up as data, never as a property");
   assert.equal(trouble(undefined), "offline");
   assert.equal(trouble(0), "offline");
-  assert.equal(retryable("spent"), false);
   assert.equal(retryable("full"), false);
   for (const word of ["busy", "paused", "offline", "failed", "unreachable", "unanswered", "slow"]) {
     assert.equal(retryable(word), true, word);
@@ -395,11 +397,12 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   const fs = require("node:fs");
   const path = require("node:path");
   const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
-  const words = ["spent", "full", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
+  const words = ["full", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
-    assert.match(block, /ideas: \[/, `${lang}.ideas`);
+    // T-4283: the chips are the deployment's own; the widget invents no city questions.
+    assert.doesNotMatch(block, /ideas: \[/, `${lang}.ideas`);
   }
 });
 
@@ -415,6 +418,34 @@ test("Retry resends the last question with the history before it, and nothing el
   assert.equal(retry([]), null);
   assert.equal(retry(undefined), null);
   assert.equal(retry([{ role: "user", text: "  " }]), null);
+});
+
+test("the header's monogram is the first letters of the first two words (T-4283)", () => {
+  assert.equal(monogram("Banská Bystrica"), "BB");
+  assert.equal(monogram("helsinki"), "H");
+  assert.equal(monogram("  Žilina – mesto a univerzita "), "ŽM");
+  assert.equal(monogram("1. obvod Praha"), "OP");
+  assert.equal(monogram(""), "");
+  assert.equal(monogram(undefined), "");
+});
+
+test("the panel asks for the language once, and only where there is a choice (T-4283)", () => {
+  const two = ["sk", "en"];
+  assert.equal(asksLanguage({ offered: two }), true, "a first open");
+  assert.equal(asksLanguage({ offered: two, requested: "en" }), true, "the host page's language does not choose for the visitor");
+  assert.equal(asksLanguage({ offered: two, stored: "en" }), false, "a later open");
+  assert.equal(asksLanguage({ offered: two, page: true, requested: "en" }), false, "the full page with ?lang=");
+  assert.equal(asksLanguage({ offered: two, page: true }), true);
+  assert.equal(asksLanguage({ offered: ["sk"] }), false, "nothing to choose");
+  assert.equal(asksLanguage({ offered: two, kept: true }), false, "a conversation already open");
+  assert.equal(asksLanguage({ offered: two, enabled: false }), false, "a paused assistant");
+  assert.equal(asksLanguage(undefined), false);
+  assert.equal(chosen("en", two), "en");
+  assert.equal(chosen("cs", two), null, "a language no longer offered is asked again");
+  assert.equal(chosen(null, two), null);
+  assert.deepEqual(ordered(["en", "cs", "sk"]), ["sk", "en", "cs"]);
+  assert.deepEqual(ordered(["en"]), ["en"]);
+  assert.deepEqual(ordered(undefined), []);
 });
 
 // T-4278: the owner's transcript repeated "[1],[2]" after every weekday of the Client Centre's hours.
@@ -442,7 +473,8 @@ test("the speakers, the thumbs and every answer's tools are named by bound words
   assert.doesNotMatch(widget, /setAttribute\("aria-label", w\.(up|down|sources|more)\)/);
   assert.doesNotMatch(widget, /button\("jc-thumb"/, "a thumb's word is its name, never its text");
   assert.match(widget, /words\(b, key, "ariaLabel"\)/);
-  assert.match(widget, /words\(el\("button", "jc-copy"\), "copy"\)/);
+  // T-4283: copy, thumbs and the header's actions are icon buttons named by their bound word.
+  assert.match(widget, /iconButton\("jc-copy", "copy", "copy"\)/);
 });
 
 test("the data loop's stages name their topic, and two or more work steps are listed under the answer (T-4294)", () => {

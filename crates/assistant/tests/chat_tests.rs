@@ -75,6 +75,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
                 per_client_per_minute: per_client,
                 per_client_per_hour: 600,
                 per_client_per_day: 6_000,
+                per_client_per_month: 6_000,
                 streams_per_client: 2,
             }),
             budget: Some(Budget {
@@ -93,6 +94,8 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             disclaimer: Default::default(),
             enabled: true,
             scope: None,
+            answer: None,
+            feedback: true,
         },
     }
 }
@@ -266,6 +269,59 @@ async fn script(proxy: &MockServer, answers: Vec<ResponseTemplate>) {
     }
 }
 
+/// The first words of the router's and the judge's rules: the routed loop calls them side by
+/// side (T-4293), so their replies are matched by what they are told, not by their order.
+const ROUTER: &str = "You prepare the searches";
+const JUDGE: &str = "You check whether the passages";
+
+/// The routed loop's script: each router, judge and answer reply once, in order of its kind.
+async fn script_routed(
+    proxy: &MockServer,
+    routers: Vec<ResponseTemplate>,
+    judges: Vec<ResponseTemplate>,
+    answers: Vec<ResponseTemplate>,
+) {
+    for (rules, replies, first) in [(ROUTER, routers, 1), (JUDGE, judges, 1)] {
+        for (i, reply) in replies.into_iter().enumerate() {
+            Mock::given(method("POST"))
+                .and(path("/v1/llm/chat/completions"))
+                .and(body_string_contains(rules))
+                .respond_with(reply)
+                .up_to_n_times(1)
+                .with_priority(u8::try_from(first + i).expect("few"))
+                .mount(proxy)
+                .await;
+        }
+    }
+    for (i, reply) in answers.into_iter().enumerate() {
+        Mock::given(method("POST"))
+            .and(path("/v1/llm/chat/completions"))
+            .respond_with(reply)
+            .up_to_n_times(1)
+            .with_priority(u8::try_from(100 + i).expect("few"))
+            .mount(proxy)
+            .await;
+    }
+}
+
+/// The model calls told `rules`, in the order they arrived; `None` for the answer calls.
+fn calls_of<'a>(
+    calls: &'a [(axum::http::HeaderMap, Value)],
+    rules: Option<&str>,
+) -> Vec<&'a Value> {
+    let told = |body: &Value| {
+        let system = body["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        [ROUTER, JUDGE].into_iter().find(|r| system.starts_with(r))
+    };
+    calls
+        .iter()
+        .map(|(_, body)| body)
+        .filter(|body| told(body) == rules)
+        .collect()
+}
+
 fn ask(body: Value, origin: Option<&str>) -> Request<Body> {
     ask_from(body, origin, "203.0.113.7")
 }
@@ -401,8 +457,11 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     ];
     let w = world("chatok", d).await;
     recorded_air(&w.gateway, SLUG).await;
-    script(&w.proxy, vec![
+    script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [\"NO2\"], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"interne\", \"type\": \"Record\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false, \"queries\": [\"NO2 Námestie SNP\"]}"}), 50),
+    ], vec![
         completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 930),
     ]).await;
     let (status, events, headers) = answer_of(
@@ -429,6 +488,9 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "stage",
             "tool",
             "tool",
+            "stage",
+            "tool",
+            "tool",
             "data",
             "stage",
             "answer",
@@ -437,12 +499,17 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         ],
         "{events:?}"
     );
+    // The question itself is searched while the router call runs (T-4293).
     assert_eq!(
-        events[4].1,
+        events[2].1,
+        json!({"stage": "searching", "topic": "Aké je NO2 na Námestí SNP?"})
+    );
+    assert_eq!(
+        events[7].1,
         json!({"name": "query_entities", "endpoint": "ovzdusie", "status": "done"})
     );
     assert_eq!(
-        events[5].1,
+        events[8].1,
         json!({
             "endpoint": "ovzdusie",
             "type": "AirQualityObserved",
@@ -456,18 +523,26 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     );
     // No page of the sources gives this Endpoint's address: the live data stays unlinked.
     assert_eq!(
-        events[8].1,
+        events[11].1,
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    let done = &events[9].1;
+    let done = &events[12].1;
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
-        (&json!(1330), &json!(2), &json!(false))
+        (&json!(1380), &json!(3), &json!(false))
     );
+    let stages = done["stagesMs"].as_object().expect("stagesMs");
+    for stage in ["route", "search", "judge", "answer"] {
+        assert!(stages[stage].as_u64().is_some(), "{done}");
+    }
 
     let calls = model_calls(&w.proxy).await;
-    assert_eq!(calls.len(), 2, "no search round, no follow-up");
-    let router = calls[0].1["messages"][1]["content"]
+    assert_eq!(
+        calls.len(),
+        3,
+        "the first round's judgement, no round for the rows"
+    );
+    let router = calls_of(&calls, Some(ROUTER))[0]["messages"][1]["content"]
         .as_str()
         .unwrap_or_default();
     assert!(
@@ -475,12 +550,16 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         "{router}"
     );
     assert!(!router.contains("interne"), "{router}");
-    let answering = calls[1].1["messages"][2]["content"]
+    let answering = calls_of(&calls, None)[0]["messages"][2]["content"]
         .as_str()
         .unwrap_or_default();
     let given: Value = serde_json::from_str(answering.split('\n').next().unwrap_or_default())
         .expect("the data as JSON");
-    assert_eq!(given["passages"], json!([]));
+    assert_eq!(
+        given["passages"],
+        json!([]),
+        "rows that came back answer alone"
+    );
     assert_eq!(given["data"][0]["n"], 1);
     assert_eq!(
         given["data"][0]["rows"][1],
@@ -506,9 +585,9 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     }
     // The router is offered no tool; the answer call the read-only ones, never the write
     // (T-4294).
-    assert!(calls[0].1.get("tools").is_none());
+    assert!(calls_of(&calls, Some(ROUTER))[0].get("tools").is_none());
     assert_eq!(
-        offered_tools(&calls[1].1),
+        offered_tools(calls_of(&calls, None)[0]),
         ["ovzdusie__list_types", "ovzdusie__query_entities"]
     );
     let sent: Vec<String> = w
@@ -539,11 +618,14 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         .await
         .expect("one");
     tx.rollback().await.expect("rollback");
-    assert_eq!(tokens, 1330);
+    assert_eq!(tokens, 1380);
 
     // Live values are read again, never answered from the cache; the types are.
-    script(&w.proxy, vec![
+    script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
         completion(json!({"role": "assistant", "content": "21 [1]."}), 930),
     ]).await;
     let (_, again, _) = answer_of(
@@ -558,7 +640,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         again.last().map(|(_, d)| d["cached"].clone()),
         Some(json!(false))
     );
-    assert_eq!(model_calls(&w.proxy).await.len(), 4);
+    assert_eq!(model_calls(&w.proxy).await.len(), 6);
     let types_listed = w
         .gateway
         .received_requests()
@@ -654,16 +736,15 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
 #[tokio::test]
 async fn a_question_stops_when_its_visitor_leaves() {
     let w = world("chatgone", deployment(Channel::Public, 50_000, 10)).await;
-    script(
+    let slow = std::time::Duration::from_millis(300);
+    script_routed(
         &w.proxy,
-        vec![
-            completion(tool_call("c1", "search", json!({"query": "knižnica"})), 100)
-                .set_delay(std::time::Duration::from_millis(300)),
-            completion(
-                json!({"role": "assistant", "content": "Do 18:00 [1]."}),
-                100,
-            ),
-        ],
+        vec![completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}"}), 100).set_delay(slow)],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100).set_delay(slow)],
+        vec![completion(
+            json!({"role": "assistant", "content": "Do 18:00 [1]."}),
+            100,
+        )],
     )
     .await;
     let response = w
@@ -685,9 +766,10 @@ async fn a_question_stops_when_its_visitor_leaves() {
     }
     drop(response);
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    assert_eq!(
-        model_calls(&w.proxy).await.len(),
-        1,
+    // The router and the first round's judgement were with the model; no answer call followed.
+    let calls = model_calls(&w.proxy).await;
+    assert!(
+        calls_of(&calls, None).is_empty(),
         "no call after the visitor left"
     );
     let mut tx = assistant::project_scope(&w.pool, "hronov")
@@ -697,7 +779,11 @@ async fn a_question_stops_when_its_visitor_leaves() {
         .fetch_one(&mut *tx)
         .await
         .expect("one");
-    assert_eq!(tokens, 100, "the call that was sent is counted");
+    assert_eq!(
+        tokens,
+        100 * i64::try_from(calls.len()).expect("few"),
+        "every call that was sent is counted"
+    );
     drop(tx);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
@@ -834,18 +920,21 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .up_to_n_times(1)
         .mount(&w.proxy)
         .await;
+    // T-4286: a day the proxy refuses is answered as search, never as a refusal.
     let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
-    let error = events
-        .iter()
-        .find(|(n, _)| n == "error")
-        .expect("an error")
-        .1
-        .clone();
-    assert_eq!(
-        error["detail"],
-        "Dnešné odpovede tohto asistenta sú vyčerpané. Znova odpovedá po polnoci UTC.",
-        "{error}"
+    assert!(
+        events.iter().all(|(n, _)| n != "error"),
+        "no refusal: {events:?}"
     );
+    let answer = events
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .expect("a search answer")
+        .1["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(answer.contains("denný rozpočet"), "{answer}");
 
     Mock::given(method("POST"))
         .and(path("/v1/llm/chat/completions"))
@@ -1064,16 +1153,17 @@ async fn an_internal_deployment_is_not_served_by_this_route() {
 #[tokio::test]
 async fn a_conversation_continues_with_its_id() {
     let w = world("chatcontinue", deployment(Channel::Public, 50_000, 10)).await;
-    script(
+    script_routed(
         &w.proxy,
         vec![
             completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"prvá\"]}"}), 60),
-            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20),
-            streamed(&["Prvá."], 15, 5),
             completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"druhá\"]}"}), 60),
-            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20),
-            streamed(&["Druhá."], 60, 10),
         ],
+        vec![
+            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20),
+            completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20),
+        ],
+        vec![streamed(&["Prvá."], 15, 5), streamed(&["Druhá."], 60, 10)],
     )
     .await;
     let (_, first, _) =
@@ -1092,7 +1182,9 @@ async fn a_conversation_continues_with_its_id() {
     tx.rollback().await.expect("rollback");
     assert_eq!(tokens, [250]);
     // The second question's router reads the first turn.
-    let history = model_calls(&w.proxy).await[3].1["messages"][1]["content"]
+    let calls = model_calls(&w.proxy).await;
+    assert_eq!(calls.len(), 6, "a router, a judgement and an answer each");
+    let history = calls_of(&calls, Some(ROUTER))[1]["messages"][1]["content"]
         .as_str()
         .expect("text")
         .to_owned();
@@ -1381,6 +1473,7 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMa
 async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cookie() {
     let mut public = deployment(Channel::Public, 50_000, 10);
     public.spec.theme = Some(jc_core::kinds::assistant::Theme {
+        title: Some("Hronov <i>".into()),
         primary_color: Some("#0b5394".into()),
         greeting: Some("Dobrý deň \"<b>\"".into()),
     });
@@ -1408,6 +1501,12 @@ async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cooki
         "{html}"
     );
     assert!(!html.contains("<b>"));
+    // T-4283: the header's name rides in the same attribute, escaped the same way.
+    assert!(
+        html.contains("&quot;title&quot;:&quot;Hronov &lt;i&gt;&quot;"),
+        "{html}"
+    );
+    assert!(!html.contains("<i>"));
     // A visitor gets no picker: the page names no connector, the assistant uses them all (T-4253).
     assert!(
         !html.contains("ovzdusie"),
@@ -1836,16 +1935,14 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         answer: Some("test/answer".into()),
     });
     let w = world("chatrouted", sources_only).await;
-    script(
+    script_routed(
         &w.proxy,
-        vec![
-            completion(
-                json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"], \"followups\": [\"Kde je knižnica?\", \"Koľko stojí preukaz?\"]}"}),
-                130,
-            ),
-            completion(json!({"role": "assistant", "content": "{\"answers\": true, \"queries\": [\"pobočky\"]}"}), 90),
-            streamed(&["Knižnica je otvorená ", "v pondelok až piatok od 9:00 do 18:00 [1]", " [7]."], 900, 40),
-        ],
+        vec![completion(
+            json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"], \"followups\": [\"Kde je knižnica?\", \"Koľko stojí preukaz?\"]}"}),
+            130,
+        )],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": true, \"queries\": [\"pobočky\"]}"}), 90)],
+        vec![streamed(&["Knižnica je otvorená ", "v pondelok až piatok od 9:00 do 18:00 [1]", " [7]."], 900, 40)],
     )
     .await;
     let (status, events, _) = answer_of(
@@ -1864,6 +1961,9 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
             "tool",
             "tool",
             "stage",
+            "tool",
+            "tool",
+            "stage",
             "delta",
             "delta",
             "delta",
@@ -1874,19 +1974,25 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         ],
         "{events:?}"
     );
-    // The progress line's steps, the search with its query (T-4155).
+    // The progress line's steps, each search with its query (T-4155): the question as asked,
+    // judged while the router ran, then the router's query; no further judgement (T-4293).
     let stages: Vec<(&str, Option<&str>)> = events
         .iter()
         .filter(|(n, _)| n == "stage")
         .map(|(_, d)| (d["stage"].as_str().unwrap_or_default(), d["topic"].as_str()))
         .collect();
-    assert_eq!(stages[0], ("understanding", None));
-    assert_eq!(stages[1].0, "searching");
-    assert!(stages[1].1.is_some_and(|q| !q.is_empty()), "{stages:?}");
-    assert_eq!(stages[2], ("answering", None));
+    assert_eq!(
+        stages,
+        [
+            ("understanding", None),
+            ("searching", Some("Dokedy je otvorená knižnica?")),
+            ("searching", Some("knižnica otváracie hodiny")),
+            ("answering", None)
+        ]
+    );
     // T-4174: the router's follow-up questions, from the call it made anyway.
     assert_eq!(
-        events[11].1["questions"],
+        events[14].1["questions"],
         json!(["Kde je knižnica?", "Koľko stojí preukaz?"])
     );
     let deltas: String = events
@@ -1894,12 +2000,21 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         .filter(|(n, _)| n == "delta")
         .filter_map(|(_, d)| d["text"].as_str())
         .collect();
-    let answer = events[9].1["text"].as_str().expect("an answer");
+    let answer = events[12].1["text"].as_str().expect("an answer");
     assert_eq!(answer, deltas.trim());
 
     let calls = model_calls(&w.proxy).await;
     assert_eq!(calls.len(), 3);
-    let (router, follow, answering) = (&calls[0].1, &calls[1].1, &calls[2].1);
+    assert_eq!(
+        calls_of(&calls, Some(JUDGE)).len(),
+        1,
+        "a first round that answers is not judged again"
+    );
+    let (router, follow, answering) = (
+        calls_of(&calls, Some(ROUTER))[0],
+        calls_of(&calls, Some(JUDGE))[0],
+        calls_of(&calls, None)[0],
+    );
     assert_eq!(router["model"], "test/router");
     assert_eq!(router["response_format"]["type"], "json_object");
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
@@ -1939,12 +2054,12 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         "another source's passage reached the model"
     );
     // Only the retrieved passage it cites is a citation; [7] was never given.
-    let citations = events[10].1.as_array().expect("citations");
+    let citations = events[13].1.as_array().expect("citations");
     assert_eq!(citations.len(), 1, "{citations:?}");
     assert_eq!(citations[0]["n"], 1);
     assert_eq!(citations[0]["url"], first);
 
-    let done = &events[12].1;
+    let done = &events[15].1;
     assert_eq!(done["tokensIn"], 120 + 80 + 900);
     assert_eq!(done["tokensOut"], 10 + 10 + 40);
     assert_eq!(done["tokens"], 130 + 90 + 940);
@@ -1966,10 +2081,110 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["conversation", "answer", "citations", "done"]);
     assert_eq!(again[1].1["text"], answer);
-    assert_eq!(again[2].1, events[10].1);
+    assert_eq!(again[2].1, events[13].1);
     assert_eq!(again[3].1["cached"], true);
     assert_eq!(again[3].1["tokensIn"], 0);
     assert_eq!(again[3].1["modelCalls"], 0);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// A row of `answer_timings`: deployment, cached, model calls, then the first token, the total
+/// and the route, search, judge and answer stages in milliseconds.
+type Timing = (
+    String,
+    bool,
+    i32,
+    Option<i64>,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// T-4293: the question is searched and its passages judged while the router call is with the
+/// model, so a slow router and a slow judgement cost the time of one, and each answer leaves one
+/// row of stage times with no text in it.
+#[tokio::test]
+async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept() {
+    let mut sources_only = deployment(Channel::Public, 50_000, 10);
+    sources_only.spec.connectors.clear();
+    let w = world("chatparallel", sources_only).await;
+    let slow = std::time::Duration::from_millis(700);
+    script_routed(
+        &w.proxy,
+        vec![completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}"}), 100).set_delay(slow)],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 50).set_delay(slow)],
+        vec![streamed(&["Od 9:00 do 18:00 [1]."], 300, 10)],
+    )
+    .await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Dokedy je otvorená knižnica?"}), None),
+    )
+    .await;
+    let done = &events.last().expect("done").1;
+    let stages = &done["stagesMs"];
+    let (route, judge, total) = (
+        stages["route"].as_u64().expect("route"),
+        stages["judge"].as_u64().expect("judge"),
+        done["totalMs"].as_u64().expect("totalMs"),
+    );
+    assert!(route >= 700 && judge >= 700, "{done}");
+    assert!(
+        total < 1_400,
+        "the router and the judgement ran one after the other: {done}"
+    );
+    assert!(
+        stages["search"].as_u64().is_some() && stages["answer"].as_u64().is_some(),
+        "{done}"
+    );
+    assert_eq!(done["modelCalls"], 3);
+
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let rows: Vec<Timing> = sqlx::query_as(
+        "SELECT deployment, cached, model_calls, first_token_ms, total_ms, route_ms, search_ms, \
+             judge_ms, answer_ms FROM answer_timings",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("timings");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(rows.len(), 1, "one row per answer");
+    let row = &rows[0];
+    assert_eq!((row.0.as_str(), row.1, row.2), ("obcania", false, 3));
+    assert_eq!(row.5, i64::try_from(route).ok());
+    assert_eq!(row.7, i64::try_from(judge).ok());
+    assert!(
+        row.3.is_some() && row.6.is_some() && row.8.is_some(),
+        "{row:?}"
+    );
+    // Times and counts only: no column a question or an answer could sit in.
+    let mut columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'answer_timings'",
+    )
+    .fetch_all(&w.pool)
+    .await
+    .expect("columns");
+    columns.sort();
+    assert_eq!(
+        columns,
+        [
+            "answer_ms",
+            "at",
+            "cached",
+            "deployment",
+            "first_token_ms",
+            "judge_ms",
+            "model_calls",
+            "project",
+            "route_ms",
+            "search_ms",
+            "total_ms"
+        ]
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -1981,20 +2196,20 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
     let mut sources_only = deployment(Channel::Public, 50_000, 10);
     sources_only.spec.connectors.clear();
     let w = world("chatroutedlang", sources_only).await;
-    script(
+    script_routed(
         &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"library opening hours\", \"knižnica otváracie hodiny\"]}"}),
+            120,
+        )],
         vec![
-            completion(
-                json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"library opening hours\", \"knižnica otváracie hodiny\"]}"}),
-                120,
-            ),
             completion(
                 json!({"role": "assistant", "content": "{\"answers\": false, \"missing\": \"where the stations are\", \"queries\": [\"meracie stanice ovzdušia\"]}"}),
                 90,
             ),
             completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 60),
-            streamed(&["The library is open on weekdays from 9:00 to 18:00 [1]."], 900, 30),
         ],
+        vec![streamed(&["The library is open on weekdays from 9:00 to 18:00 [1]."], 900, 30)],
     )
     .await;
     let (status, events, _) = answer_of(
@@ -2011,6 +2226,7 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
     assert_eq!(
         searched,
         [
+            "When is the library open?",
             "library opening hours",
             "knižnica otváracie hodiny",
             "meracie stanice ovzdušia"
@@ -2018,9 +2234,10 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
         "{events:?}"
     );
     let calls = model_calls(&w.proxy).await;
-    // Router, two verdicts, the answer: the "yes" after round 2 ended the rounds.
+    // Router, two verdicts, the answer: the first round's "no" sent its query into the router's
+    // round, and the "yes" after it ended the rounds.
     assert_eq!(calls.len(), 4, "{calls:?}");
-    let second = calls[2].1["messages"][1]["content"]
+    let second = calls_of(&calls, Some(JUDGE))[1]["messages"][1]["content"]
         .as_str()
         .expect("passages");
     assert!(second.contains("meracie stanice ovzdušia"), "{second}");
@@ -2028,7 +2245,7 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
         second.contains("Meracie stanice kvality ovzdušia"),
         "{second}"
     );
-    assert_eq!(calls[3].1["stream"], true);
+    assert_eq!(calls_of(&calls, None)[0]["stream"], true);
     assert!(events.iter().any(|(n, _)| n == "answer"));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
@@ -2244,6 +2461,114 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
         model_calls(&w.proxy).await.len(),
         before,
         "no model call past the cap"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4286: at 08:25Z on 2026-10-16 every visitor of the public assistant read "used up today's
+/// answers": the proxy's `tokensPerDay` refused the router call. Such a day now answers as
+/// search with the pages as links, like the cost cap, and nobody reads a refusal.
+#[tokio::test]
+async fn a_day_the_proxy_refuses_answers_with_links_not_a_refusal() {
+    let w = world("chatproxyday", deployment(Channel::Public, 1_000_000, 10)).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/llm/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_json(json!({"title": "Daily Budget Spent"})),
+        )
+        .mount(&w.proxy)
+        .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Dokedy je otvorená knižnica?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.iter().all(|(n, _)| n != "error"), "{events:?}");
+    let answer = events
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .expect("an answer")
+        .1["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(answer.contains("Tu sú stránky"), "{answer}");
+    assert!(!answer.contains("vyčerpané"), "{answer}");
+    let citations = &events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations")
+        .1;
+    assert!(
+        citations.as_array().is_some_and(|c| !c.is_empty()),
+        "the library's page as a link: {events:?}"
+    );
+    assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4286: a visitor past `perClientPerMonth` gets links and the day it resets, without a model
+/// call, while another visitor is still answered by the model.
+#[tokio::test]
+async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
+    let mut monthly = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(rate) = monthly.spec.rate_limit.as_mut() {
+        rate.per_client_per_month = 1;
+    }
+    let w = world("chatmonth", monthly).await;
+    let answered = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Áno."}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+        }))
+    };
+    script(
+        &w.proxy,
+        vec![answered(), answered(), answered(), answered()],
+    )
+    .await;
+    let from =
+        |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
+    // Whatever the model makes of it, the first question of the month is the model's.
+    let month_said = |events: &[(String, Value)]| {
+        events.iter().any(|(n, d)| {
+            n == "answer"
+                && d["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Tento mesiac"))
+        })
+    };
+    let (status, first, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!month_said(&first), "{first:?}");
+    let calls = model_calls(&w.proxy).await.len();
+    assert!(calls > 0, "the first question asks the model");
+
+    let (status, second, _) =
+        answer_of(&w.app, from("203.0.113.7", "Dokedy je otvorená knižnica?")).await;
+    assert_eq!(status, StatusCode::OK, "never a refusal");
+    let answer = second
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .expect("an answer")
+        .1["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(answer.contains("Tento mesiac"), "{answer}");
+    assert!(answer.contains("znova tak odpovedá od 1. "), "{answer}");
+    assert_eq!(second.last().expect("done").1["modelCalls"], 0);
+    assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
+
+    let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
+    assert!(!month_said(&other), "{other:?}");
+    assert!(
+        model_calls(&w.proxy).await.len() > calls,
+        "another visitor is answered by the model"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
@@ -2526,7 +2851,7 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
 }
 
 /// The gateway's `tools/call` bodies of `tool`, in order.
-async fn calls_of(gateway: &MockServer, tool: &str) -> Vec<Value> {
+async fn tool_calls_of(gateway: &MockServer, tool: &str) -> Vec<Value> {
     gateway
         .received_requests()
         .await
@@ -2550,8 +2875,11 @@ async fn a_data_question_reads_again_until_the_model_answers() {
     ];
     let w = world("chatloop", d).await;
     recorded_air(&w.gateway, SLUG).await;
-    script(&w.proxy, vec![
+    script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
         completion(json!({"role": "assistant", "content": null, "tool_calls": [
             {"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":5}"}},
             {"id": "c2", "type": "function", "function": {"name": "ovzdusie__delete_entity", "arguments": "{}"}}
@@ -2577,7 +2905,13 @@ async fn a_data_question_reads_again_until_the_model_answers() {
             .iter()
             .map(|s| s["stage"].as_str().unwrap_or_default().to_owned())
             .collect::<Vec<_>>(),
-        ["understanding", "reading", "answering", "reading"]
+        [
+            "understanding",
+            "searching",
+            "reading",
+            "answering",
+            "reading"
+        ]
     );
     assert_eq!(
         named("answer")[0]["text"],
@@ -2587,17 +2921,15 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         named("citations")[0],
         json!([{"n": 2, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    assert_eq!(named("done")[0]["modelCalls"], 3);
+    assert_eq!(named("done")[0]["modelCalls"], 4);
 
-    let calls = model_calls(&w.proxy).await;
+    let all = model_calls(&w.proxy).await;
+    let calls = calls_of(&all, None);
     assert_eq!(
-        offered_tools(&calls[1].1),
+        offered_tools(calls[0]),
         ["ovzdusie__list_types", "ovzdusie__query_entities"]
     );
-    let last = calls[2].1["messages"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let last = calls[1]["messages"].as_array().cloned().unwrap_or_default();
     let tools: Vec<&Value> = last.iter().filter(|m| m["role"] == "tool").collect();
     assert_eq!(tools.len(), 2);
     let read: Value = serde_json::from_str(tools[0]["content"].as_str().unwrap_or_default())
@@ -2611,21 +2943,21 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         "There is no tool of that name. Use only the tools you were given."
     );
     assert!(
-        calls[2].1.get("tool_choice").is_none(),
+        calls[1].get("tool_choice").is_none(),
         "the model was still free to read"
     );
-    assert!(calls[1].1["messages"][0]["content"][0]["text"]
+    assert!(calls[0]["messages"][0]["content"][0]["text"]
         .as_str()
         .unwrap_or_default()
         .contains("At most 10 tool calls"));
 
-    let reads = calls_of(&w.gateway, "query_entities").await;
+    let reads = tool_calls_of(&w.gateway, "query_entities").await;
     assert_eq!(reads.len(), 2);
     assert_eq!(
         reads[1]["params"]["arguments"],
         json!({"type": ["AirQualityObserved"], "limit": 5})
     );
-    assert!(calls_of(&w.gateway, "delete_entity").await.is_empty());
+    assert!(tool_calls_of(&w.gateway, "delete_entity").await.is_empty());
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -2649,8 +2981,11 @@ async fn the_tenth_tool_call_is_the_last_and_the_answer_comes_from_what_was_read
             1_000,
         )
     };
-    script(&w.proxy, vec![
+    script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
         reply(&[1, 2, 3, 4]),
         reply(&[5, 6, 7, 1]),
         reply(&[8, 9, 10, 11]),
@@ -2668,10 +3003,10 @@ async fn the_tenth_tool_call_is_the_last_and_the_answer_comes_from_what_was_read
         "{events:?}"
     );
     // 1 (the router's) + 4 + 3 new + 1: the repeat was not sent, the eleventh call not either.
-    assert_eq!(calls_of(&w.gateway, "query_entities").await.len(), 9);
+    assert_eq!(tool_calls_of(&w.gateway, "query_entities").await.len(), 9);
     let calls = model_calls(&w.proxy).await;
-    assert_eq!(calls.len(), 5);
-    let last = &calls[4].1;
+    assert_eq!(calls.len(), 6, "router, judge and four loop calls");
+    let last = &calls[5].1;
     assert_eq!(last["tool_choice"], "none");
     let messages = last["messages"].as_array().cloned().unwrap_or_default();
     assert!(messages
@@ -2696,4 +3031,49 @@ async fn the_tenth_tool_call_is_the_last_and_the_answer_comes_from_what_was_read
         .count();
     assert_eq!(repeated, 2, "both calls of limit 1 were answered");
     db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4281, MF-52: `feedback: false` takes no verdict, and `answer.routes: rag` connects no
+/// Endpoint: the gateway is never asked, while the default `both` asks it.
+#[tokio::test]
+async fn feedback_off_takes_no_verdict_and_rag_never_reaches_the_gateway() {
+    let mut rag = deployment(Channel::Public, 1_000_000, 10);
+    rag.spec.feedback = false;
+    rag.spec.answer = Some(jc_core::kinds::AnswerSpec {
+        routes: jc_core::kinds::Routes::Rag,
+    });
+    for (test, deployment, reached) in [
+        ("chatrag", rag, false),
+        ("chatboth", deployment(Channel::Public, 1_000_000, 10), true),
+    ] {
+        let w = world(test, deployment).await;
+        script(
+            &w.proxy,
+            vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 4],
+        )
+        .await;
+        let (status, events, _) = answer_of(
+            &w.app,
+            ask(json!({"message": "Kedy je zber?"}), Some(ORIGIN)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        let asked = w.gateway.received_requests().await.unwrap_or_default();
+        assert_eq!(!asked.is_empty(), reached, "{test}: {asked:?}");
+        if !reached {
+            let id = events[0].1["id"].as_str().expect("an id").to_owned();
+            let response = w
+                .app
+                .clone()
+                .oneshot(verdict(
+                    json!({"conversation": id, "turn": 1, "verdict": "up"}),
+                    Some(ORIGIN),
+                    "198.51.100.30",
+                ))
+                .await
+                .expect("an answer");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        db::drop_database(w.admin, w.pool, &w.name).await;
+    }
 }

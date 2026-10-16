@@ -342,8 +342,9 @@ impl Model {
 pub const MODEL_UNREACHABLE: &str =
     "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.";
 pub const MODEL_DID_NOT_ANSWER: &str = "Model asistenta neodpovedal. Skúste to o minútu znova.";
-pub const DAY_SPENT: &str =
-    "Dnešné odpovede tohto asistenta sú vyčerpané. Znova odpovedá po polnoci UTC.";
+/// Why the proxy refused, for the log: a visitor never reads it, the chat answers as search
+/// instead (T-4286).
+pub const DAY_SPENT: &str = "the model proxy refused the deployment's day (budget.tokensPerDay)";
 pub const CONVERSATION_SPENT: &str =
     "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor.";
 

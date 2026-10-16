@@ -87,10 +87,14 @@ const LINK_HOSTS: &[&str] = &["data.gov.sk"];
 pub fn link_hosts(deployment: &Deployment, sources: &[Source]) -> Vec<String> {
     let spec = &deployment.spec;
     let mut urls: Vec<&str> = spec.allowed_origins.iter().map(String::as_str).collect();
-    for source in sources
-        .iter()
-        .filter(|s| s.project == deployment.project && spec.sources.contains(&s.name))
-    {
+    // A source of another project, `{project}/{source}`, adds that source's sites (T-4281).
+    let named = |s: &&Source| {
+        spec.sources.iter().any(|name| match name.split_once('/') {
+            Some((project, name)) => s.project == project && s.name == name,
+            None => s.project == deployment.project && s.name == *name,
+        })
+    };
+    for source in sources.iter().filter(named) {
         urls.extend(source.spec.start_urls.iter().map(String::as_str));
         urls.extend(source.ckan_url.as_deref());
     }
@@ -111,6 +115,7 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
     json!({
         "linkHosts": link_hosts,
         "publicId": spec.public_id,
+        "title": spec.theme.as_ref().and_then(|t| t.title.clone()),
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
         "color": spec.theme.as_ref().and_then(|t| t.primary_color.clone()),
         // A visitor gets no picker: the assistant chooses among all its connectors, and their
@@ -124,6 +129,7 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
         "suggestions": spec.suggestions,
         "disclaimer": spec.disclaimer,
         "enabled": spec.enabled,
+        "feedback": spec.feedback,
         "questionChars": spec.budget.as_ref().map(|b| b.question_chars),
     })
 }
@@ -131,11 +137,8 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
 /// The page of one public deployment: the panel, or with `full` the page of its own.
 pub fn html(deployment: &Deployment, link_hosts: &[String], full: bool) -> String {
     let spec = &deployment.spec;
-    let lang = if spec.languages.is_empty() || spec.languages.iter().any(|l| l == "sk") {
-        "sk"
-    } else {
-        spec.languages[0].as_str()
-    };
+    // The first of `languages` is the one the chat opens in (MF-52, T-4281); Slovak when none.
+    let lang = spec.languages.first().map_or("sk", String::as_str);
     format!(
         "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, interactive-widget=resizes-content\">\n\
@@ -264,10 +267,13 @@ mod tests {
             "languages": ["sk", "en"],
             "suggestions": {"sk": ["Kedy je zber odpadu?"], "en": ["When is waste collected?"]},
             "disclaimer": {"sk": "Odpovede píše umelá inteligencia."},
+            "theme": {"title": "Banská Bystrica"},
             "rateLimit": {"requestsPerMinute": 60, "perClientPerMinute": 10},
             "budget": {"tokensPerDay": 100000, "tokensPerConversation": 10000, "questionChars": 500},
         }));
         let config = config(&public, &[]);
+        // T-4283: the header's name; the monogram is drawn from it, no image.
+        assert_eq!(config["title"], json!("Banská Bystrica"));
         assert_eq!(config["languages"], json!(["sk", "en"]));
         assert_eq!(
             config["suggestions"]["en"],
