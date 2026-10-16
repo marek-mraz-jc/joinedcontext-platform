@@ -3,4 +3,6 @@ target/
 **/*.md
 # The User Guide jc-assistant embeds (AG-118, scripts/sync-user-guide.sh).
 !crates/assistant/guide/*.md
+# Markdown a crate embeds from its own sources (include_str!, T-4267).
+!crates/*/src/**/*.md
 schemas/
