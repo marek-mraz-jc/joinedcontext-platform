@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -531,6 +531,25 @@ test("a message's time is the visitor's HH:MM with the UTC minute beside it, kep
   assert.equal(planted.turns[0].askedAt, undefined);
   assert.equal(planted.turns[0].at, undefined);
   assert.equal(planted.turns[0].text, "a");
+});
+
+// T-4365: a greeting and a title per language.
+test("a greeting per language is this language's, else the widget's own", () => {
+  const own = { sk: "Dobrý deň!", en: "Hello! Ask about the catalogue." };
+  assert.equal(greeting(own, ["sk", "en", "fi"], "en", "Hello!"), "Hello! Ask about the catalogue.");
+  assert.equal(greeting(own, ["sk", "en", "fi"], "fi", "Hei!"), "Hei!");
+  assert.equal(greeting({ sk: "  " }, ["sk"], "sk", "Dobrý deň!"), "Dobrý deň!");
+  assert.equal(greeting(own, ["sk"], "constructor", "Hi"), "Hi");
+});
+
+test("a title per language is this language's, else the first language's, else any", () => {
+  assert.equal(title(" data.dev ", ["sk", "en"], "en"), "data.dev");
+  assert.equal(title({ sk: "Mesto", en: "City" }, ["sk", "en"], "en"), "City");
+  assert.equal(title({ sk: "Mesto", en: "City" }, ["sk", "en", "fi"], "fi"), "Mesto");
+  assert.equal(title({ en: "City" }, ["sk", "en"], "sk"), "City");
+  assert.equal(title({}, ["sk"], "sk"), "");
+  assert.equal(title(null, ["sk"], "sk"), "");
+  assert.equal(title(["Mesto"], ["sk"], "sk"), "");
 });
 
 test("the footer's count takes each language's plural for 1, 2 and 5 (T-4364)", () => {
