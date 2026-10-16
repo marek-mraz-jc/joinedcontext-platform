@@ -256,6 +256,22 @@ async fn a_tool_result_names_the_unit_beside_its_code() {
     assert!(text.contains("µg/m³"), "{text}");
 }
 
+/// A tool result larger than the gateway's buffer goes on whole and unread, never cut to an
+/// empty answer; it only misses the units (T-4373).
+#[tokio::test]
+async fn a_tool_result_past_the_buffer_goes_on_whole() {
+    let note = "x".repeat(9 * 1024 * 1024);
+    let entities =
+        json!({ "entities": [{ "pm10": { "unitCode": "GQ", "value": 1 }, "note": note }] });
+    let answered =
+        json!({ "jsonrpc": "2.0", "id": 7, "result": { "structuredContent": entities } });
+    let (upstream, _) = broker(StatusCode::OK, answered.clone()).await;
+    let message = call("query_entities", json!({ "type": ["AirQualityObserved"] }));
+    let (status, answer) = post(gateway(upstream, endpoint()), &endpoint_mcp(), &message).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer, answered);
+}
+
 /// The space surface is the space's view (`cs-{space}`).
 #[tokio::test]
 async fn the_space_surface_is_the_spaces_view() {
