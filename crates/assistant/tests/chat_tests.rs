@@ -1483,9 +1483,19 @@ async fn script_answer(proxy: &MockServer) {
 #[tokio::test]
 async fn an_internal_deployment_has_no_widget() {
     let w = world("widgetinternal", deployment(Channel::Internal, 50_000, 10)).await;
-    let (status, headers, _) = get(&w.app, "/d/hronov-obcania/widget").await;
+    let (status, headers, body) = get(&w.app, "/d/hronov-obcania/widget").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(headers.get("content-security-policy").is_none());
+    // T-4241: it answers the bytes of an id that never existed, so nothing tells the two apart,
+    // and its policy frames nothing and runs nothing.
+    let (_, unknown_headers, unknown_body) = get(&w.app, "/d/nikdy-nebolo/widget").await;
+    assert_eq!(body, unknown_body);
+    assert_eq!(headers, unknown_headers);
+    assert_eq!(
+        headers
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok()),
+        Some("default-src 'none'; base-uri 'none'; form-action 'none'")
+    );
     // The edge leaves Cache-Control to the service on this host, so the refusal says it too.
     assert_eq!(
         headers.get("cache-control").and_then(|v| v.to_str().ok()),
