@@ -8,7 +8,12 @@ kind: Blueprint
 metadata:
   name: cross-city-sharing
   namespace: org
-  title: { en: "Share with a partner city", fi: "Jaa kumppanikaupungin kanssa", sk: "Zdieľať s partnerským mestom" }
+  title: { en: "Share with a partner city", fi: "Jaa kumppanikaupungin kanssa", sk: "Zdieľať s partnerským mestom", cs: "Sdílet s partnerským městem", de: "Mit einer Partnerstadt teilen" }
+  description:
+    en: "Reads chosen entity types from a partner city and shares one space of this city with it."
+    sk: "Číta vybrané typy entít od partnerského mesta a zdieľa s ním jeden priestor tohto mesta."
+    cs: "Čte vybrané typy entit od partnerského města a sdílí s ním jeden prostor tohoto města."
+    de: "Liest ausgewählte Entitätstypen einer Partnerstadt und teilt einen Bereich dieser Stadt mit ihr."
 spec:
   version: 1.0.0
   category: federation
@@ -19,20 +24,21 @@ spec:
     required: [name, hubSpace, sharedSpace, partnerProject, partnerEndpoint, entityTypes, serviceAccount, endpointSlug]
     additionalProperties: false
     properties:
-      name: { type: string, title: "Share name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the registration and the Endpoint." }
-      hubSpace: { type: string, title: "Hub space that reads the partner", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
-      sharedSpace: { type: string, title: "Space this city shares", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
-      partnerProject: { type: string, title: "The partner city's project", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
-      partnerEndpoint: { type: string, title: "The partner's NGSI-LD address", format: uri, pattern: "^https://[^@/?#]+(/[^?#@]*)?$" }
+      name: { type: string, title: "Share name", x-jc-title: { sk: "Názov zdieľania", cs: "Název sdílení", de: "Name der Freigabe" }, pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the registration and the Endpoint.", x-jc-description: { sk: "Jedno slovo so spojovníkmi; pomenuje registráciu a Endpoint.", cs: "Jedno slovo se spojovníky; pojmenuje registraci a Endpoint.", de: "Ein Wort mit Bindestrichen; benennt die Registrierung und den Endpoint." } }
+      hubSpace: { type: string, title: "Hub space that reads the partner", x-jc-title: { sk: "Centrálny priestor, ktorý číta partnera", cs: "Centrální prostor, který čte partnera", de: "Hub-Bereich, der den Partner liest" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      sharedSpace: { type: string, title: "Space this city shares", x-jc-title: { sk: "Priestor, ktorý toto mesto zdieľa", cs: "Prostor, který toto město sdílí", de: "Bereich, den diese Stadt teilt" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      partnerProject: { type: string, title: "The partner city's project", x-jc-title: { sk: "Projekt partnerského mesta", cs: "Projekt partnerského města", de: "Projekt der Partnerstadt" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
+      partnerEndpoint: { type: string, title: "The partner's NGSI-LD address", x-jc-title: { sk: "NGSI-LD adresa partnera", cs: "NGSI-LD adresa partnera", de: "NGSI-LD-Adresse des Partners" }, format: uri, pattern: "^https://[^@/?#]+(/[^?#@]*)?$" }
       entityTypes:
         type: array
         title: "Entity types read from the partner"
+        x-jc-title: { sk: "Typy entít čítané od partnera", cs: "Typy entit čtené od partnera", de: "Vom Partner gelesene Entitätstypen" }
         minItems: 1
         maxItems: 20
         uniqueItems: true
         items: { type: string, pattern: "^[A-Z][A-Za-z0-9]+$" }
-      serviceAccount: { type: string, title: "Account the partner granted this city", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: serviceaccounts } }
-      endpointSlug: { type: string, title: "Endpoint slug", pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform (EP-02); nobody types it." }
+      serviceAccount: { type: string, title: "Account the partner granted this city", x-jc-title: { sk: "Účet, ktorý partner pridelil tomuto mestu", cs: "Účet, který partner přidělil tomuto městu", de: "Konto, das der Partner dieser Stadt gewährt hat" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: serviceaccounts } }
+      endpointSlug: { type: string, title: "Endpoint slug", x-jc-title: { sk: "Slug endpointu", cs: "Slug endpointu", de: "Endpoint-Slug" }, pattern: "^[a-z2-7]{26,64}$", x-jc-widget: endpointSlug, description: "Minted by the platform; nobody types it.", x-jc-description: { sk: "Vytvorí ho platforma; nikto ho nepíše.", cs: "Vytvoří ho platforma; nikdo ho nepíše.", de: "Von der Plattform erzeugt; niemand tippt ihn ein." } }
   templates:
     - name: registration
       template: |

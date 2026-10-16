@@ -6,7 +6,12 @@ kind: Blueprint
 metadata:
   name: threshold-alert
   namespace: org
-  title: { en: "Threshold alert", fi: "Raja-arvohälytys", sk: "Upozornenie na prekročenie hodnoty" }
+  title: { en: "Threshold alert", fi: "Raja-arvohälytys", sk: "Upozornenie na prekročenie hodnoty", cs: "Upozornění na překročení hodnoty", de: "Grenzwertwarnung" }
+  description:
+    en: "Watches a property and notifies a channel when it crosses a limit."
+    sk: "Sleduje vlastnosť a upozorní kanál, keď prekročí limit."
+    cs: "Sleduje vlastnost a upozorní kanál, když překročí limit."
+    de: "Beobachtet eine Eigenschaft und benachrichtigt einen Kanal, wenn sie einen Grenzwert überschreitet."
 spec:
   version: 1.0.0
   category: alerting
@@ -17,24 +22,26 @@ spec:
     required: [name, space, entityType, observedProperty, thresholdValue, webhookUrl]
     additionalProperties: false
     properties:
-      name: { type: string, title: "Alert name", pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the subscription." }
-      space: { type: string, title: "Context space", pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
-      entityType: { type: string, title: "Entity type watched", pattern: "^[A-Z][A-Za-z0-9]+$", default: AirQualityObserved }
-      observedProperty: { type: string, title: "Property watched", pattern: "^[a-zA-Z][A-Za-z0-9_]*$", default: airQualityIndex }
+      name: { type: string, title: "Alert name", x-jc-title: { sk: "Názov upozornenia", cs: "Název upozornění", de: "Name der Warnung" }, pattern: "^[a-z][a-z0-9-]{1,40}$", description: "One word with hyphens; names the subscription.", x-jc-description: { sk: "Jedno slovo so spojovníkmi; pomenuje odber.", cs: "Jedno slovo se spojovníky; pojmenuje odběr.", de: "Ein Wort mit Bindestrichen; benennt das Abonnement." } }
+      space: { type: string, title: "Context space", x-jc-title: { sk: "Kontextový priestor", cs: "Kontextový prostor", de: "Kontextbereich" }, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", x-jc-widget: resourcePicker, x-jc-options: { plural: spaces } }
+      entityType: { type: string, title: "Entity type watched", x-jc-title: { sk: "Sledovaný typ entity", cs: "Sledovaný typ entity", de: "Beobachteter Entitätstyp" }, pattern: "^[A-Z][A-Za-z0-9]+$", default: AirQualityObserved }
+      observedProperty: { type: string, title: "Property watched", x-jc-title: { sk: "Sledovaná vlastnosť", cs: "Sledovaná vlastnost", de: "Beobachtete Eigenschaft" }, pattern: "^[a-zA-Z][A-Za-z0-9_]*$", default: airQualityIndex }
       comparison:
         type: string
         title: "Alert when the value is"
+        x-jc-title: { sk: "Upozorniť, keď je hodnota", cs: "Upozornit, když je hodnota", de: "Warnen, wenn der Wert" }
         default: ">"
         oneOf:
-          - { const: ">", title: "above the limit" }
-          - { const: ">=", title: "at or above the limit" }
-          - { const: "<", title: "below the limit" }
-          - { const: "<=", title: "at or below the limit" }
-      thresholdValue: { type: number, title: "Limit" }
-      webhookUrl: { type: string, title: "Notification channel (webhook URL)", format: uri, pattern: "^https://[^\\s\"\\\\]+$" }
+          - { const: ">", title: "above the limit", x-jc-title: { sk: "nad limitom", cs: "nad limitem", de: "über dem Grenzwert liegt" } }
+          - { const: ">=", title: "at or above the limit", x-jc-title: { sk: "na limite alebo nad ním", cs: "na limitu nebo nad ním", de: "am oder über dem Grenzwert liegt" } }
+          - { const: "<", title: "below the limit", x-jc-title: { sk: "pod limitom", cs: "pod limitem", de: "unter dem Grenzwert liegt" } }
+          - { const: "<=", title: "at or below the limit", x-jc-title: { sk: "na limite alebo pod ním", cs: "na limitu nebo pod ním", de: "am oder unter dem Grenzwert liegt" } }
+      thresholdValue: { type: number, title: "Limit", x-jc-title: { sk: "Limit", cs: "Limit", de: "Grenzwert" } }
+      webhookUrl: { type: string, title: "Notification channel (webhook URL)", x-jc-title: { sk: "Kanál pre upozornenia (URL webhooku)", cs: "Kanál pro upozornění (URL webhooku)", de: "Benachrichtigungskanal (Webhook-URL)" }, format: uri, pattern: "^https://[^\\s\"\\\\]+$" }
       webhookSecret:
         type: object
         title: "Token the channel expects"
+        x-jc-title: { sk: "Token, ktorý kanál očakáva", cs: "Token, který kanál očekává", de: "Token, den der Kanal erwartet" }
         x-jc-widget: secretRef
         required: [name]
         additionalProperties: false
@@ -42,7 +49,7 @@ spec:
           name: { type: string, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
           key: { type: string, pattern: "^[-._a-zA-Z0-9]{1,253}$" }
           envVar: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
-      throttling: { type: integer, title: "Seconds between two alerts", minimum: 0, maximum: 86400, default: 300 }
+      throttling: { type: integer, title: "Seconds between two alerts", x-jc-title: { sk: "Sekundy medzi dvoma upozorneniami", cs: "Sekundy mezi dvěma upozorněními", de: "Sekunden zwischen zwei Warnungen" }, minimum: 0, maximum: 86400, default: 300 }
   # A parameter with a default is filled by the form; a caller of the API may leave it out, so
   # every template names the same default again.
   templates:
