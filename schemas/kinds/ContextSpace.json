@@ -458,7 +458,14 @@
           "type": "string"
         },
         "history": {
-          "description": "How long a temporal instance is kept, in the same form (DM-84).",
+          "description": "How long a temporal instance is kept, in the same form (DM-84); `off` keeps the current state only and records no history, `forever` keeps it all and needs a `reason` (T-4275).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why the type keeps its whole history: required with `history: forever` (T-4275).",
           "type": [
             "string",
             "null"

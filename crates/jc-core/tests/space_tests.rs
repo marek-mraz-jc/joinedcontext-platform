@@ -306,6 +306,15 @@ fn retention_rules_round_trip_and_refuse_what_the_broker_cannot_run_dm_81() {
     let empty = serde_json::to_value(ContextSpaceSpec::default()).expect("serialize");
     assert!(empty.get("retention").is_none(), "no rule, no field");
 
+    // T-4275: history off records nothing; forever keeps all of it and says why.
+    let words = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Vehicle, history: off }\n    - { entityType: Stop, history: forever, reason: \"the timetable archive is the dataset\" }",
+    );
+    let words = ContextSpace::from_yaml(&words).expect("parses");
+    assert!(words.spec.validate_with_meta(&words.metadata).is_ok());
+    assert_eq!(words.spec.retention[0].history.as_deref(), Some("off"));
+
     for (rule, field) in [
         (
             "{ entityType: Vehicle, current: PT0M }",
@@ -332,6 +341,26 @@ fn retention_rules_round_trip_and_refuse_what_the_broker_cannot_run_dm_81() {
             "spec.retention.history",
         ),
         ("{ entityType: vehicle }", "entityType"),
+        (
+            "{ entityType: Vehicle, history: Off }",
+            "spec.retention.history",
+        ),
+        (
+            "{ entityType: Vehicle, current: off }",
+            "spec.retention.current",
+        ),
+        (
+            "{ entityType: Vehicle, history: forever }",
+            "spec.retention.reason",
+        ),
+        (
+            "{ entityType: Vehicle, history: P30D, reason: \"kept\" }",
+            "spec.retention.reason",
+        ),
+        (
+            "{ entityType: Vehicle, history: forever, reason: \"  \" }",
+            "spec.retention.reason",
+        ),
     ] {
         let yaml = GOLDEN_SPACE.replace(
             "isSandbox: false",
