@@ -9,6 +9,7 @@
 pub mod admin;
 pub mod agent;
 pub mod cards;
+pub mod clock;
 pub mod data;
 pub mod mcp;
 pub mod model;
@@ -1208,6 +1209,8 @@ async fn ask(
             search_only,
             data_steps: deployment.spec.data_steps() as usize,
             data_time: Duration::from_secs(u64::from(deployment.spec.data_seconds())),
+            now: time::OffsetDateTime::now_utc(),
+            zone: clock::Zone::of(&deployment.spec.languages),
         };
         let started = Instant::now();
         // A raised data loop keeps its answer call's time after its last tool (T-4294).
