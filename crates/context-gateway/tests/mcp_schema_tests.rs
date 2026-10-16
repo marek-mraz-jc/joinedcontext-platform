@@ -191,11 +191,14 @@ fn endpoint() -> Endpoint {
             version: "1.0.0".to_owned(),
             major: 1,
             classes: vec!["User".to_owned(), "Vehicle".to_owned()],
-            json_schema: Some(json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "$defs": { "User": properties("User"), "Vehicle": properties("Vehicle") }
-            })),
-            context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
+            json_schema: Some(
+                json!({
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "$defs": { "User": properties("User"), "Vehicle": properties("Vehicle") }
+                })
+                .into(),
+            ),
+            context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } }).into()),
         }],
         policy_names: Vec::new(),
         policies: vec![policy],
@@ -237,11 +240,14 @@ fn big_endpoint() -> Endpoint {
             version: "1.0.0".to_owned(),
             major: 1,
             classes,
-            json_schema: Some(json!({
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "$defs": Value::Object(defs),
-            })),
-            context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } })),
+            json_schema: Some(
+                json!({
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "$defs": Value::Object(defs),
+                })
+                .into(),
+            ),
+            context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } }).into()),
         }],
         policy_names: Vec::new(),
         policies: vec![policy],

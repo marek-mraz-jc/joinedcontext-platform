@@ -42,6 +42,41 @@ fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
         .unwrap_or_else(|_| body.clone())
 }
 
+/// Why the body's OpenRouter `provider` field is refused, or `None` when it is absent or holds
+/// only `order` (1 to 8 provider slugs) and `allow_fallbacks` (a boolean); it is sent as is
+/// otherwise (T-4292, MF-52). A body that is not a JSON object is left to the provider.
+fn provider_refusal(body: &Bytes) -> Option<&'static str> {
+    use jc_core::kinds::assistant::{is_provider_slug, MAX_PROVIDERS};
+    let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(body) else {
+        return None;
+    };
+    let provider = map.get("provider")?;
+    let Some(fields) = provider.as_object() else {
+        return Some("provider is an object of order and allow_fallbacks");
+    };
+    if fields
+        .keys()
+        .any(|k| k != "order" && k != "allow_fallbacks")
+    {
+        return Some("provider takes only order and allow_fallbacks");
+    }
+    let order = fields.get("order").and_then(Value::as_array);
+    let slugs_ok = order.is_some_and(|o| {
+        (1..=MAX_PROVIDERS).contains(&o.len())
+            && o.iter().all(|s| s.as_str().is_some_and(is_provider_slug))
+    });
+    if !slugs_ok {
+        return Some("provider.order names 1 to 8 provider slugs of a-z 0-9 . _ / -");
+    }
+    if fields
+        .get("allow_fallbacks")
+        .is_some_and(|v| !v.is_boolean())
+    {
+        return Some("provider.allow_fallbacks is true or false");
+    }
+    None
+}
+
 /// Each reasoning effort and the thinking budget it is on Anthropic messages (AG-72).
 const BUDGETS: [(&str, u64); 3] = [("low", 2048), ("medium", 8192), ("high", 24576)];
 
@@ -583,6 +618,11 @@ pub async fn handler(
         Ok(bytes) => bytes,
         Err(refusal) => return *refusal,
     };
+    if let Some(why) = provider_refusal(&body_bytes) {
+        return jc_core::ProblemDetails::bad_request()
+            .with_detail(why)
+            .into_response();
+    }
 
     let effort_setting = match &caller {
         Caller::Run(run) => run.reasoning_effort.as_deref(),
@@ -794,6 +834,34 @@ mod tests {
     fn sent(body: &str, rest: &str, effort: &str) -> Value {
         serde_json::from_slice(&with_reasoning(&Bytes::from(body.to_owned()), rest, effort))
             .unwrap()
+    }
+
+    /// T-4292: OpenRouter's `provider` passes as written; a field or slug out of bounds is refused
+    /// before the provider is asked, and a body without one is not looked at.
+    #[test]
+    fn a_provider_field_passes_only_in_its_bounds() {
+        let refusal = |body: &str| provider_refusal(&Bytes::from(body.to_owned()));
+        for ok in [
+            r#"{"model":"a/b","messages":[]}"#,
+            r#"{"provider":{"order":["cerebras"]}}"#,
+            r#"{"provider":{"order":["groq","deepinfra/fp8"],"allow_fallbacks":false}}"#,
+            "not json",
+        ] {
+            assert_eq!(refusal(ok), None, "{ok}");
+        }
+        for bad in [
+            r#"{"provider":"cerebras"}"#,
+            r#"{"provider":{"order":["groq"],"sort":"price"}}"#,
+            r#"{"provider":{"order":["groq"],"data_collection":"allow"}}"#,
+            r#"{"provider":{"order":[]}}"#,
+            r#"{"provider":{"allow_fallbacks":true}}"#,
+            r#"{"provider":{"order":["Groq"]}}"#,
+            r#"{"provider":{"order":[1]}}"#,
+            r#"{"provider":{"order":["a","b","c","d","e","f","g","h","i"]}}"#,
+            r#"{"provider":{"order":["groq"],"allow_fallbacks":"no"}}"#,
+        ] {
+            assert!(refusal(bad).is_some(), "{bad}");
+        }
     }
 
     #[test]

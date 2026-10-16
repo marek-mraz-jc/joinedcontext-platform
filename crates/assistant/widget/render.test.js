@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { monogram, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -550,4 +550,37 @@ test("a title per language is this language's, else the first language's, else a
   assert.equal(title({}, ["sk"], "sk"), "");
   assert.equal(title(null, ["sk"], "sk"), "");
   assert.equal(title(["Mesto"], ["sk"], "sk"), "");
+});
+
+test("the footer's count takes each language's plural for 1, 2 and 5 (T-4364)", () => {
+  const forms = (lang) => [1, 2, 5].map((n) => sourceCount(n, lang));
+  assert.deepEqual(forms("sk"), ["1 zdroj", "2 zdroje", "5 zdrojov"]);
+  assert.deepEqual(forms("cs"), ["1 zdroj", "2 zdroje", "5 zdrojů"]);
+  assert.deepEqual(forms("en"), ["1 source", "2 sources", "5 sources"]);
+  assert.equal(sourceCount(22, "sk"), "22 zdrojov");
+  assert.equal(sourceCount(3, "de"), "3 sources");
+});
+
+test("at most three badges, one per site, a letter and a hue that the site alone decides (T-4364)", () => {
+  const { list } = sources([
+    { n: 1, url: "https://www.zilina.sk/a" }, { n: 2, url: "https://zilina.sk/b" },
+    { n: 3, url: "https://3dzilina.sk/" }, { n: 4, tool: "query_entities", endpoint: "parkovanie" },
+    { n: 5, url: "https://kia.sk/" },
+  ]);
+  const got = badges(list);
+  assert.deepEqual(got.map((b) => [b.site, b.letter]), [["zilina.sk", "Z"], ["3dzilina.sk", "3"], ["parkovanie", "P"]]);
+  assert.equal(got[0].hue, badges([{ domain: "zilina.sk" }])[0].hue);
+  assert.ok(got.every((b) => Number.isInteger(b.hue) && b.hue >= 0 && b.hue < 360));
+  assert.deepEqual(badges([]), []);
+  assert.deepEqual(badges(undefined), []);
+});
+
+test("opening hours read as a list of bold days and their times, not one paragraph (T-4364)", () => {
+  assert.deepEqual(markdown("Klientske centrum má otvorené:\n- **Pondelok:** 8:00 – 17:00\n- **Piatok:** 8:00 – 12:00 [1]", upTo(1)), [
+    { tag: "p", children: ["Klientske centrum má otvorené:"] },
+    { tag: "ul", children: [
+      { tag: "li", children: [{ tag: "strong", children: ["Pondelok:"] }, " 8:00 – 17:00"] },
+      { tag: "li", children: [{ tag: "strong", children: ["Piatok:"] }, " 8:00 – 12:00 ", { tag: "cite", numbers: [1] }] },
+    ] },
+  ]);
 });

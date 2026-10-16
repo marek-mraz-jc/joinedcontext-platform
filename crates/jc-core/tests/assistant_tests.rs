@@ -967,3 +967,66 @@ fn the_title_and_greeting_are_one_string_or_one_per_language() {
     }
     assert!(deployment(&deployment_with(THEME, "theme: { title: [Mesto] }")).is_err());
 }
+
+/// T-4292: `model.provider` pins OpenRouter providers; it reaches OpenRouter in its own field
+/// names, and a slug, a count or a field out of bounds is refused.
+#[test]
+fn a_model_provider_pins_openrouter_providers_within_bounds() {
+    let with = |model: &str| {
+        deployment_with(
+            "  sandbox: false\n",
+            &format!("  sandbox: false\n  model: {model}\n"),
+        )
+    };
+    let parsed = deployment(&with(
+        "{ answer: openai/gpt-oss-120b, provider: { order: [cerebras, deepinfra/fp8], allowFallbacks: false } }",
+    ))
+    .expect("a pinned provider");
+    let provider = parsed
+        .spec
+        .model
+        .as_ref()
+        .and_then(|m| m.provider.as_ref())
+        .expect("provider");
+    assert_eq!(
+        provider.openrouter(),
+        serde_json::json!({"order": ["cerebras", "deepinfra/fp8"], "allow_fallbacks": false})
+    );
+    let fallback = deployment(&with("{ provider: { order: [groq] } }")).expect("default fallback");
+    assert_eq!(
+        fallback
+            .spec
+            .model
+            .and_then(|m| m.provider)
+            .map(|p| p.openrouter()["allow_fallbacks"].clone()),
+        Some(serde_json::json!(true))
+    );
+    let nine = (0..9)
+        .map(|i| format!("p{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for (model, field) in [
+        (
+            "{ provider: { order: [] } }".to_owned(),
+            "model.provider.order",
+        ),
+        (
+            format!("{{ provider: {{ order: [{nine}] }} }}"),
+            "model.provider.order",
+        ),
+        (
+            "{ provider: { order: [Cerebras] } }".to_owned(),
+            "model.provider.order",
+        ),
+        (
+            format!("{{ provider: {{ order: [{}] }} }}", "c".repeat(65)),
+            "model.provider.order",
+        ),
+    ] {
+        assert_eq!(refused(deployment(&with(&model))), field, "{model}");
+    }
+    let unknown = refused(deployment(&with(
+        "{ provider: { order: [groq], sort: price } }",
+    )));
+    assert!(unknown.contains("unknown field `sort`"), "{unknown}");
+}

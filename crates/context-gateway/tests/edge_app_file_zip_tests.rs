@@ -34,17 +34,23 @@ fn model() -> Model {
         version: "1.2.0".to_owned(),
         major: 1,
         classes: vec!["AirQualityObserved".to_owned()],
-        json_schema: Some(json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "$defs": { "AirQualityObserved": { "type": "object", "properties": {
-                "pm10": { "type": "number" },
-                "secret": { "type": "number", "description": "the operator's own reading" }
-            } } }
-        })),
-        context: Some(json!({ "@context": {
+        json_schema: Some(
+            json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "$defs": { "AirQualityObserved": { "type": "object", "properties": {
+                    "pm10": { "type": "number" },
+                    "secret": { "type": "number", "description": "the operator's own reading" }
+                } } }
+            })
+            .into(),
+        ),
+        context: Some(
+            json!({ "@context": {
             "pm10": "https://smartdatamodels.org/pm10",
             "secret": "https://smartdatamodels.org/secret"
-        } })),
+        } })
+            .into(),
+        ),
     }
 }
 

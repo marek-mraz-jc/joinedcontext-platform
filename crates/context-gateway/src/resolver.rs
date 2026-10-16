@@ -141,8 +141,9 @@ pub struct Endpoint {
     pub models: Vec<Model>,
     /// The classes of the space's one model, when the space names it in `spec.dataModelRef`
     /// (DM-61): a write of any other type is refused. `None` for a space that names no model
-    /// yet, which `jcctl validate` warns about while the repository is migrated.
-    pub declared_types: Option<DeclaredTypes>,
+    /// yet, which `jcctl validate` warns about while the repository is migrated. Shared by every
+    /// Endpoint of the space and its own surface: one compiled copy per reload (T-4352).
+    pub declared_types: Option<std::sync::Arc<DeclaredTypes>>,
     /// The Mapping this endpoint serves its space through, when it serves a view of another
     /// model rather than the space's own (EP-54, DM-51).
     ///
@@ -203,10 +204,12 @@ pub struct Model {
     pub major: u32,
     /// The NGSI-LD entity types the model defines.
     pub classes: Vec<String>,
-    /// The generated JSON Schema, when the repository carries it (DM-02).
-    pub json_schema: Option<serde_json::Value>,
-    /// The generated JSON-LD `@context`, when the repository carries it (DM-02).
-    pub context: Option<serde_json::Value>,
+    /// The generated JSON Schema, when the repository carries it (DM-02). Parsed once per
+    /// reload and shared by every Endpoint of the space (T-4352).
+    pub json_schema: Option<std::sync::Arc<serde_json::Value>>,
+    /// The generated JSON-LD `@context`, when the repository carries it (DM-02); shared the same
+    /// way.
+    pub context: Option<std::sync::Arc<serde_json::Value>>,
 }
 
 impl Endpoint {

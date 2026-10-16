@@ -97,30 +97,40 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   color: var(--link); font: inherit; font-size: 16px; font-weight: 600; cursor: pointer; }
 .jc-choose-list button:first-child { background: var(--accent); color: var(--on-accent); }
 
-/* Sources: a compact numbered list under the answer, two shown, the rest behind one button. */
-.jc-sources-title { margin: 10px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+/* Sources: a compact numbered list under the footer row, closed until its count opens it (T-4364). */
 .jc-cards { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 /* One line per source: number, title, host; what the page publishes (its parts) wraps under it. */
 .jc-log .jc-cards > li { margin: 0; padding: 5px 10px 5px 34px; position: relative; border: 1px solid var(--line);
   border-radius: var(--radius-s); background: var(--bg); font-size: 13px; display: flex; flex-wrap: wrap; align-items: baseline;
   column-gap: 8px; }
 .jc-cards > li > .jc-part { flex-basis: 100%; }
-.jc-cards > li[hidden] { display: none; }
+.jc-cards[hidden] { display: none; }
 .jc-card-n { position: absolute; left: 9px; top: 7px; width: 18px; height: 18px; border-radius: 50%;
   background: var(--accent); color: var(--on-accent); font-size: 11px; line-height: 18px; text-align: center; }
 .jc-cards a { flex: 0 1 auto; min-width: 0; color: var(--link); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jc-domain { flex: none; margin-left: auto; color: var(--muted); font-size: 12px; }
-.jc-more-sources { margin-top: 4px; min-height: 32px; padding: 0 10px; border: 0; border-radius: var(--pill); background: none;
-  color: var(--link); font: inherit; font-size: 13px; cursor: pointer; }
-.jc-more-sources:hover { background: var(--soft); }
 .jc-part { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--soft); overflow-wrap: anywhere; }
 .jc-part p { margin: 2px 0; }
 .jc-part ol { margin: 4px 0 0; padding-left: 20px; }
 .jc-part a { font-weight: 400; white-space: normal; }
 
-/* Copy and the verdict, small icons under the answer. */
-/* Icon actions with a visible outline, so they read as buttons. */
-.jc-answer-tools { margin-top: 6px; display: flex; gap: 6px; }
+/* One quiet row under the answer (T-4364): who and when, copy, the verdict, then the sources'
+   badges and count; icon actions keep a visible outline, so they read as buttons. */
+.jc-answer-tools { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.jc-by { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.jc-by .jc-time { font-size: 12px; }
+.jc-sources { margin-left: auto; min-height: 32px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px;
+  border: 0; border-radius: var(--pill); background: none; color: var(--muted); font: inherit; font-size: 12px;
+  white-space: nowrap; cursor: pointer; }
+.jc-sources:hover { background: var(--soft); }
+.jc-badges { display: inline-flex; }
+.jc-badge { width: 18px; height: 18px; margin-left: -5px; border: 2px solid var(--bg); border-radius: 50%;
+  background: var(--badge, var(--accent)); color: #fff; font-size: 10px; font-weight: 700; line-height: 18px; text-align: center;
+  box-sizing: content-box; }
+.jc-badge:first-child { margin-left: 0; }
+.jc-chevron { width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg); }
+.jc-sources[aria-expanded="true"] .jc-chevron { transform: translateY(2px) rotate(-135deg); }
 .jc-answer-tools .jc-icon-button { min-width: 32px; min-height: 32px; border: 1px solid var(--line); background: var(--bg); }
 .jc-answer-tools .jc-icon { width: 17px; height: 17px; }
 .jc-note { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -188,7 +198,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   .jc-icon-button, .jc-answer-tools .jc-icon-button, .jc-langs button { min-height: 44px; min-width: 44px; }
   .jc-log .jc-cards > li { min-height: 44px; align-items: center; }
   .jc-card-n { top: 12px; }
-  .jc-more-sources { min-height: 44px; }
+  .jc-sources { min-height: 44px; }
   .jc-form .jc-icon-button { width: 44px; height: 44px; }
   .jc-suggest button { min-height: 44px; }
   .jc-more { min-height: 44px; min-width: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--pill); text-decoration: none; }

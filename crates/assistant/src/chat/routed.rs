@@ -454,6 +454,16 @@ async fn languages(ask: &Ask<'_>) -> Vec<String> {
     }
 }
 
+/// The fused score at or above which the first round's passages answer without a judgement
+/// (T-4360): the top passage is among the first three of both the meaning and the word ranking,
+/// `2 / (60 + 3)`. A passage only one ranking found scores at most `1 / 61` and is still judged.
+const COVERED_SCORE: f64 = 2.0 / 63.0;
+
+/// Whether a round's passages cover the question without asking the model (T-4360).
+fn covers(hits: &[Hit]) -> bool {
+    hits.iter().any(|hit| hit.score >= COVERED_SCORE)
+}
+
 /// Adds a round's hits, each passage once with its best score.
 pub fn merge(found: &mut Vec<Hit>, hits: Vec<Hit>) {
     for hit in hits {
@@ -1138,6 +1148,7 @@ pub async fn answer(
         model: ask.router_model,
         max_tokens: ROUTER_TOKENS,
         json: true,
+        provider: ask.provider,
     };
     let live = live(ask).await;
     let languages = languages(ask).await;
@@ -1164,6 +1175,8 @@ pub async fn answer(
         let hits = searched(ask, events, question).await;
         let search = at.elapsed();
         let judged = match &hits {
+            // Passages both rankings put at the top answer as they are: no judgement to wait for.
+            Some(hits) if covers(hits) => None,
             Some(hits) if !hits.is_empty() && !events.is_closed() => {
                 let asked = [question.to_owned()];
                 let messages = follow_messages(
@@ -1192,7 +1205,8 @@ pub async fn answer(
     let ((routed, route_took), (first_hits, first_took, judged)) = tokio::join!(route, first);
     spent.stages.route = Some(millis(route_took));
     spent.stages.search = Some(millis(first_took));
-    let mut covered = false;
+    let mut covered = first_hits.as_deref().is_some_and(covers);
+    spent.stages.judge_skipped = covered;
     let mut more = Vec::new();
     if let Some((reply, took)) = judged {
         spent.stages.judge = Some(millis(took));
@@ -1403,6 +1417,7 @@ pub async fn answer(
         model: ask.answer_model,
         max_tokens: ask.output_tokens,
         json: false,
+        provider: ask.provider,
     };
     let at = Instant::now();
     let streamed = ask
@@ -1480,6 +1495,18 @@ mod tests {
             text: format!("passage {chunk}"),
             score,
         }
+    }
+
+    /// T-4360: a passage both rankings put in their first three skips the judgement; one only a
+    /// single ranking found, or none at all, is still judged.
+    #[test]
+    fn passages_both_rankings_put_on_top_cover_the_question() {
+        assert!(covers(&[hit(1, 1.0 / 70.0), hit(2, 2.0 / 61.0)]));
+        assert!(covers(&[hit(1, 1.0 / 61.0 + 1.0 / 62.0)]));
+        assert!(covers(&[hit(1, 2.0 / 63.0)]));
+        assert!(!covers(&[hit(1, 1.0 / 61.0)]));
+        assert!(!covers(&[hit(1, 1.0 / 62.0 + 1.0 / 66.0)]));
+        assert!(!covers(&[]));
     }
 
     fn shown(endpoint: &str, types: &[&str], attributes: &[&str]) -> Shown {
