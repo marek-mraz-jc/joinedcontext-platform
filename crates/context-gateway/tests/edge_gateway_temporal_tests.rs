@@ -1,5 +1,5 @@
-//! Edge cases of `pdp::temporal::{to_temporal_q, clamp, parse, keep_windows}` (T-1935, T-1936,
-//! T-1937, T-1938; EP-26, MP-02, GW26).
+//! Edge cases of `pdp::temporal::{to_temporal_q, clamp, parse}` (T-1935, T-1936, T-1937; EP-26,
+//! MP-02, GW26).
 //!
 //! Contracts, one sentence each:
 //!
@@ -9,17 +9,13 @@
 //!   ever reads an instant outside every grant.
 //! - `to_temporal_q`: the window is written as the relation that exactly describes it, in the one
 //!   format the broker reads.
-//! - `keep_windows`: what lies between the grant windows was never granted, and it leaves before
-//!   the answer does.
 //!
 //! `temporal_tests.rs` covers a sliding grant, a clamp, a disjoint pair, the hull of several and
 //! the window algebra. These are the inputs around them: the durations a policy can be written
-//! with, the relations it cannot, and what the filter does to a payload that is not the shape it
-//! expects.
+//! with and the relations it cannot.
 
 use chrono::{DateTime, Duration, Utc};
-use context_gateway::pdp::temporal::{clamp, keep_windows, parse, Window};
-use serde_json::json;
+use context_gateway::pdp::temporal::{clamp, parse, Window};
 
 fn now() -> DateTime<Utc> {
     "2026-09-06T12:00:00Z".parse().expect("a fixed instant")
@@ -448,169 +444,4 @@ fn a_callers_unparseable_window_is_read_as_no_window_and_the_grant_still_holds()
         Some("timerel=after;timeAt=2026-09-05T12:00:00Z")
     );
     assert!(!clamped.empty);
-}
-
-// --- keep_windows (T-1938) ------------------------------------------------------------------
-
-fn windows() -> Vec<Window> {
-    vec![
-        Window {
-            from: Some(at("2026-01-01T00:00:00Z")),
-            to: Some(at("2026-02-01T00:00:00Z")),
-        },
-        Window {
-            from: Some(at("2026-06-01T00:00:00Z")),
-            to: Some(at("2026-07-01T00:00:00Z")),
-        },
-    ]
-}
-
-#[test]
-fn an_instance_in_the_gap_between_two_grants_leaves_the_answer() {
-    let mut payload = json!({
-        "id": "urn:ngsi-ld:AirQualityObserved:bbsk.sk:kraj:s-1",
-        "type": "AirQualityObserved",
-        "pm10": [
-            { "type": "Property", "value": 1, "observedAt": "2026-01-15T00:00:00Z" },
-            { "type": "Property", "value": 2, "observedAt": "2026-03-15T00:00:00Z" },
-            { "type": "Property", "value": 3, "observedAt": "2026-06-15T00:00:00Z" }
-        ]
-    });
-    keep_windows(&mut payload, &windows());
-    let kept = payload["pm10"]
-        .as_array()
-        .expect("the instances are a list");
-    assert_eq!(kept.len(), 2);
-    assert_eq!(kept[0]["value"], 1);
-    assert_eq!(kept[1]["value"], 3, "the March instance was never granted");
-}
-
-#[test]
-fn an_empty_window_list_is_a_hull_that_is_the_permission_and_nothing_is_dropped() {
-    let original = json!({
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": [{ "type": "Property", "value": 1, "observedAt": "2099-01-01T00:00:00Z" }]
-    });
-    let mut payload = original.clone();
-    keep_windows(&mut payload, &[]);
-    assert_eq!(payload, original);
-}
-
-#[test]
-fn an_instance_with_no_stamp_at_all_is_kept_rather_than_silently_dropped() {
-    // The gateway filters what it can place in time. An instance carrying no `observedAt`,
-    // `modifiedAt` or `createdAt` cannot be placed, and dropping it would remove data the grant
-    // never excluded; it is the broker's to narrow, having been sent the hull.
-    let mut payload = json!({
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": [
-            { "type": "Property", "value": 1 },
-            { "type": "Property", "value": 2, "observedAt": "2026-03-15T00:00:00Z" }
-        ]
-    });
-    keep_windows(&mut payload, &windows());
-    let kept = payload["pm10"].as_array().expect("a list");
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0]["value"], 1);
-}
-
-#[test]
-fn the_stamps_are_read_in_the_order_observed_modified_created() {
-    // An instance carrying several is placed by the one that says when it was observed, which is
-    // what a temporal grant is written about.
-    let mut payload = json!({
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": [{
-            "type": "Property", "value": 1,
-            "observedAt": "2026-01-15T00:00:00Z",
-            "modifiedAt": "2026-03-15T00:00:00Z",
-            "createdAt": "2026-03-15T00:00:00Z"
-        }]
-    });
-    keep_windows(&mut payload, &windows());
-    assert_eq!(payload["pm10"].as_array().map(Vec::len), Some(1));
-
-    // And one with no `observedAt` falls back to `modifiedAt`.
-    let mut fallback = json!({
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": [{ "type": "Property", "value": 1, "modifiedAt": "2026-03-15T00:00:00Z" }]
-    });
-    keep_windows(&mut fallback, &windows());
-    assert_eq!(fallback["pm10"].as_array().map(Vec::len), Some(0));
-}
-
-#[test]
-fn a_stamp_that_is_not_a_stamp_leaves_the_instance_unplaceable_and_therefore_kept() {
-    let mut payload = json!({
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": [{ "type": "Property", "value": 1, "observedAt": "not a date" }]
-    });
-    keep_windows(&mut payload, &windows());
-    assert_eq!(payload["pm10"].as_array().map(Vec::len), Some(1));
-}
-
-#[test]
-fn the_entity_members_are_never_mistaken_for_history() {
-    // `id`, `type` and anything under `@` are the entity, not its instances. A filter that
-    // walked them would corrupt the entity rather than narrow it.
-    let mut payload = json!({
-        "@context": ["https://example.org/ctx.jsonld"],
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": [{ "type": "Property", "value": 1, "observedAt": "2026-03-15T00:00:00Z" }]
-    });
-    keep_windows(&mut payload, &windows());
-    assert_eq!(payload["id"], "urn:ngsi-ld:X:a:b:1");
-    assert_eq!(payload["type"], "X");
-    assert_eq!(payload["@context"].as_array().map(Vec::len), Some(1));
-    assert_eq!(payload["pm10"].as_array().map(Vec::len), Some(0));
-}
-
-#[test]
-fn every_entity_of_a_list_answer_is_filtered_and_not_only_the_first() {
-    let mut payload = json!([
-        { "id": "urn:ngsi-ld:X:a:b:1", "type": "X",
-          "pm10": [{ "type": "Property", "value": 1, "observedAt": "2026-03-15T00:00:00Z" }] },
-        { "id": "urn:ngsi-ld:X:a:b:2", "type": "X",
-          "pm10": [{ "type": "Property", "value": 2, "observedAt": "2026-03-15T00:00:00Z" }] }
-    ]);
-    keep_windows(&mut payload, &windows());
-    for entity in payload.as_array().expect("a list") {
-        assert_eq!(entity["pm10"].as_array().map(Vec::len), Some(0), "{entity}");
-    }
-}
-
-#[test]
-fn a_payload_that_is_not_an_entity_is_left_alone_rather_than_panicking() {
-    // A broker can answer with a problem document, a number or a string; the filter runs over
-    // whatever came back, so it has to survive all of them.
-    for original in [
-        json!(null),
-        json!(7),
-        json!("text"),
-        json!({"title": "Not Found"}),
-    ] {
-        let mut payload = original.clone();
-        keep_windows(&mut payload, &windows());
-        assert_eq!(payload, original);
-    }
-}
-
-#[test]
-fn an_attribute_that_is_not_a_list_of_instances_is_untouched() {
-    // A normalized (non-temporal) entity has objects here, not lists. Filtering one would be
-    // filtering something that was never history.
-    let original = json!({
-        "id": "urn:ngsi-ld:X:a:b:1",
-        "type": "X",
-        "pm10": { "type": "Property", "value": 1, "observedAt": "2026-03-15T00:00:00Z" }
-    });
-    let mut payload = original.clone();
-    keep_windows(&mut payload, &windows());
-    assert_eq!(payload, original);
 }

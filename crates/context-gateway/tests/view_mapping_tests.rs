@@ -1,17 +1,10 @@
 //! T-0175: serving one space as somebody else's model (EP-54, DM-51, DM-52).
 //!
-//! A view Endpoint is the one surface where the caller and the broker do not speak the same
-//! model, so both directions have to hold at once: what comes back is rebuilt in the target
-//! model, and what goes out — `attrs`, `q`, `geoQ` — is written back into the source model
-//! the broker actually stores. A translation that works in one direction only is a view that
-//! answers correctly right up until somebody filters.
-//!
-//! Since T-3799 the slug's NGSI-LD surface of such an Endpoint is the broker's view, which
-//! inverts and rebuilds in Antares (`crates/antares-views/tests/views/views_mapped.rs`: the
-//! target-model answer, the filter in the source model, a non-invertible or unserved filter and a
-//! write refused, another type answered empty, `pick`/`omit` and `attrs` of a computed slot), so
-//! the request-level cases left here; the translator's own rules stay until the MCP façade and the
-//! preview stop calling it (T-3647, T-3802, then T-3644).
+//! Since T-3799 the broker's view inverts the caller's query and rebuilds every entity in the
+//! target model (`crates/antares-views/tests/views/views_mapped.rs` in Antares: the target-model
+//! answer, the filter in the source model, a non-invertible or unserved filter and a write
+//! refused, `pick`/`omit` and `attrs` of a computed slot). What is left in the gateway is the
+//! request-level case and the parser that decides which IR a gateway loads (T-4361).
 
 mod common;
 
@@ -77,10 +70,6 @@ fn ir() -> Value {
             }
         ]
     })
-}
-
-fn mapping() -> ViewMapping {
-    ViewMapping::parse(&ir()).expect("the IR parses")
 }
 
 /// The entity as the broker holds it, in the source model's own names.
@@ -189,31 +178,6 @@ async fn an_endpoint_without_a_view_mapping_still_accepts_a_write() {
 }
 
 #[test]
-fn the_two_directions_agree_on_every_derivation() {
-    let mapping = mapping();
-    let mut entity = stored();
-    mapping.translate_entity(&mut entity);
-
-    // Whatever the forward direction produced, the inverse of a filter for that same value
-    // asks the broker for the value the entity actually stores.
-    for (target, produced, source, stored_value) in [
-        ("reliability", "high", "spolahlivost", "vysoka"),
-        ("temperature", "19", "teplota", "292.15"),
-        ("pm25", "12.5", "pm2p5", "12.5"),
-    ] {
-        let inverted = mapping
-            .invert_q(&format!("{target}=={produced}"))
-            .expect("the filter inverts");
-        // the rewritten query is rendered from its parse, which quotes every string
-        let stored_value = match stored_value.parse::<f64>() {
-            Ok(_) => stored_value.to_owned(),
-            Err(_) => format!("\"{stored_value}\""),
-        };
-        assert_eq!(inverted, format!("{source}=={stored_value}"));
-    }
-}
-
-#[test]
 fn an_ir_from_a_newer_model_tools_is_refused_rather_than_half_understood() {
     let mut newer = ir();
     newer["version"] = json!(3);
@@ -234,180 +198,8 @@ fn a_slot_kind_this_gateway_does_not_run_is_refused() {
     );
 }
 
-/// The compiler decides what is filterable; an interpreter that decided for itself would
-/// forward a filter through a derivation with no inverse.
-#[test]
-fn a_slot_that_does_not_say_it_is_filterable_is_not() {
-    let mapping = ViewMapping::parse(&json!({
-        "version": 2,
-        "sourceClass": "A",
-        "targetClass": "B",
-        "slots": [{ "target": "x", "source": "y", "kind": "rename" }]
-    }))
-    .expect("the IR parses");
-
-    assert!(mapping.invert_q("x==1").is_err());
-    assert_eq!(mapping.source_of("x"), Some("y"), "it is still served");
-}
-
-// --- computed slots (T-0455, DM-51) ---------------------------------------------------
-
-/// One IR whose every slot is computed, so the forms can be checked without a broker.
-fn computed(slots: Value) -> ViewMapping {
-    ViewMapping::parse(&json!({
-        "version": 2,
-        "sourceClass": "A",
-        "targetClass": "B",
-        "slots": slots
-    }))
-    .expect("the IR parses")
-}
-
 fn slot_of(target: &str, expression: Value) -> Value {
     json!({ "target": target, "kind": "expr", "filterable": false, "expression": expression })
-}
-
-#[test]
-fn every_form_of_the_expression_subset_evaluates() {
-    let mapping = computed(json!([
-        slot_of(
-            "sum",
-            json!({ "binary": "+", "left": { "slot": "a" }, "right": { "slot": "b" } })
-        ),
-        slot_of(
-            "half",
-            json!({ "binary": "/", "left": { "slot": "a" }, "right": { "const": 2 } })
-        ),
-        slot_of(
-            "negated",
-            json!({ "unary": "-", "operand": { "slot": "b" } })
-        ),
-        slot_of(
-            "joined",
-            json!({
-                "binary": "+", "left": { "slot": "name" }, "right": { "const": "!" }
-            })
-        ),
-        slot_of(
-            "over",
-            json!({
-                "compare": ">", "left": { "slot": "a" }, "right": { "const": 3 }
-            })
-        ),
-        slot_of(
-            "both",
-            json!({
-                "boolean": "and",
-                "operands": [
-                    { "compare": ">=", "left": { "slot": "a" }, "right": { "const": 4 } },
-                    { "unary": "not", "operand": {
-                        "compare": "==", "left": { "slot": "name" }, "right": { "const": "x" }
-                    } }
-                ]
-            })
-        ),
-        slot_of(
-            "either",
-            json!({
-                "boolean": "or",
-                "operands": [
-                    { "compare": "<", "left": { "slot": "a" }, "right": { "const": 0 } },
-                    { "compare": "!=", "left": { "slot": "b" }, "right": { "const": 3 } }
-                ]
-            })
-        )
-    ]));
-
-    let mut entity = json!({
-        "id": "urn:ngsi-ld:A:x:y:1",
-        "type": "A",
-        "a": { "type": "Property", "value": 4 },
-        "b": { "type": "Property", "value": 3 },
-        "name": { "type": "Property", "value": "sensor" }
-    });
-    mapping.translate_entity(&mut entity);
-
-    // Two whole numbers stay whole; a division answers a fraction, as Python and Bloblang do.
-    // The entity is normalized, so each produced value arrives as a Property (T-0473).
-    assert_eq!(entity["sum"]["value"], json!(7));
-    assert_eq!(entity["half"]["value"], json!(2.0));
-    assert_eq!(entity["negated"]["value"], json!(-3));
-    assert_eq!(entity["joined"]["value"], json!("sensor!"));
-    assert_eq!(entity["over"]["value"], json!(true));
-    assert_eq!(entity["both"]["value"], json!(true));
-    assert_eq!(entity["either"]["value"], json!(false));
-}
-
-/// A view must not invent a value. An attribute the broker did not send, and one whose
-/// operands do not combine, are both absent from the answer rather than served as null.
-#[test]
-fn a_computed_slot_with_nothing_to_compute_from_is_left_out() {
-    let mapping = computed(json!([
-        slot_of(
-            "missing",
-            json!({
-                "binary": "+", "left": { "slot": "absent" }, "right": { "const": 1 }
-            })
-        ),
-        slot_of(
-            "mixed",
-            json!({
-                "binary": "+", "left": { "slot": "name" }, "right": { "slot": "a" }
-            })
-        ),
-        slot_of(
-            "incomparable",
-            json!({
-                "compare": "<", "left": { "slot": "name" }, "right": { "slot": "a" }
-            })
-        ),
-        slot_of(
-            "divided",
-            json!({
-                "binary": "/", "left": { "slot": "a" }, "right": { "const": 0 }
-            })
-        ),
-        slot_of(
-            "present",
-            json!({
-                "binary": "*", "left": { "slot": "a" }, "right": { "const": 10 }
-            })
-        )
-    ]));
-
-    let mut entity = json!({
-        "id": "urn:ngsi-ld:A:x:y:1",
-        "type": "A",
-        "a": { "type": "Property", "value": 4 },
-        "name": { "type": "Property", "value": "sensor" }
-    });
-    mapping.translate_entity(&mut entity);
-
-    for absent in ["missing", "mixed", "incomparable", "divided"] {
-        assert!(
-            entity.get(absent).is_none(),
-            "`{absent}` has no value, and null is not one: {entity}"
-        );
-    }
-    assert_eq!(
-        entity["present"]["value"],
-        json!(40),
-        "the rest of the view still answers"
-    );
-}
-
-/// The representation is the caller's choice, so an expression reads a normalized attribute
-/// and a key-value one alike (the same rule `map_value` follows for every other derivation).
-#[test]
-fn an_expression_reads_a_key_value_entity_as_readily_as_a_normalized_one() {
-    let mapping = computed(json!([slot_of(
-        "joined",
-        json!({ "binary": "+", "left": { "slot": "name" }, "right": { "const": "!" } })
-    )]));
-
-    let mut entity = json!({ "id": "urn:ngsi-ld:A:x:y:1", "type": "A", "name": "sensor" });
-    mapping.translate_entity(&mut entity);
-    assert_eq!(entity["joined"], json!("sensor!"));
 }
 
 #[test]
@@ -446,133 +238,4 @@ fn an_expression_node_this_gateway_does_not_evaluate_is_refused() {
             "{node} was accepted: {refused:?}"
         );
     }
-}
-
-/// A computed slot is served and never filtered, which is the pair DM-51 asks for: the
-/// expression has no inverse, so a `q` naming it is a bad request rather than a filter the
-/// broker is given in some other form.
-#[test]
-fn a_computed_slot_is_still_refused_in_a_filter() {
-    let mapping = computed(json!([slot_of(
-        "label",
-        json!({ "binary": "+", "left": { "slot": "name" }, "right": { "const": "!" } })
-    )]));
-    assert!(mapping.invert_q("label==\"x!\"").is_err());
-    assert!(mapping.invert_geo_property("label").is_err());
-}
-
-// --- the q rewrite on the parsed query (T-3672) -------------------------------------------
-
-fn slots(slots: Value) -> ViewMapping {
-    ViewMapping::parse(&json!({
-        "version": 2, "sourceClass": "S", "targetClass": "T", "slots": slots
-    }))
-    .expect("the IR parses")
-}
-
-/// A `;`, `|` or parenthesis inside a quoted value is part of the value, not of the query.
-#[test]
-fn a_separator_inside_a_quoted_value_stays_in_the_value() {
-    let mapping = slots(json!([
-        { "target": "name", "source": "nazov", "kind": "rename", "filterable": true }
-    ]));
-    assert_eq!(
-        mapping.invert_q(r#"name=="a;b|(c)""#).expect("inverts"),
-        r#"nazov=="a;b|(c)""#
-    );
-}
-
-/// `target = source * factor + offset` with a negative factor reverses the order, so `>` on
-/// the target is `<` on the source, and a range's ends trade places.
-#[test]
-fn a_negative_factor_turns_the_comparison_around() {
-    let mapping = slots(json!([{
-        "target": "depth", "source": "height", "kind": "unitConversion",
-        "factor": -1.0, "offset": 0.0, "filterable": true
-    }]));
-    for (asked, sent) in [
-        ("depth>5", "height<-5"),
-        ("depth<=5", "height>=-5"),
-        ("depth==1..3", "height==-3..-1"),
-        ("depth==2", "height==-2"),
-    ] {
-        assert_eq!(mapping.invert_q(asked).expect("inverts"), sent, "{asked}");
-    }
-}
-
-/// A table that maps several source values to one target value is inverted to all of them,
-/// and a target value no source value maps to matches nothing rather than a source value
-/// that happens to be spelled the same.
-#[test]
-fn a_many_to_one_table_inverts_to_every_source_value() {
-    let mapping = slots(json!([{
-        "target": "level", "source": "uroven", "kind": "valueMappings",
-        "forward": { "a": "high", "b": "high", "c": "low", "high": "low", "7": "seven" },
-        "inverse": { "high": "a", "low": "c" },
-        "filterable": true
-    }]));
-    for (asked, sent) in [
-        ("level==high", r#"uroven=="a","b""#),
-        ("level!=high", r#"uroven!="a","b""#),
-        ("level==low", r#"uroven=="c","high""#),
-        ("level==high,low", r#"uroven=="a","b","c","high""#),
-        ("level==none", "uroven;!uroven"),
-        ("level!=none", "uroven"),
-        // a numeric source value goes back as the number the broker stores
-        ("level==seven", "uroven==7"),
-    ] {
-        assert_eq!(mapping.invert_q(asked).expect("inverts"), sent, "{asked}");
-    }
-    // a table has no order, so an ordering comparison has no inverse
-    assert!(mapping.invert_q("level>high").is_err());
-}
-
-/// A `q` that is not one is refused here, with the reason, instead of reaching the broker in
-/// pieces.
-#[test]
-fn an_unparsable_q_is_a_bad_request() {
-    let mapping = slots(json!([
-        { "target": "name", "source": "nazov", "kind": "rename", "filterable": true }
-    ]));
-    assert!(mapping.invert_q("name==").is_err());
-    assert!(
-        mapping.invert_q("name.sub==1").is_err(),
-        "a path below the attribute is not mapped"
-    );
-}
-
-/// The vocabulary answers (5.7.5 to 5.7.10) come back in the target model too: the source
-/// class is the target class, an attribute the mapping derives carries its target name, and
-/// one it does not serve is left out.
-#[test]
-fn a_discovery_answer_is_translated() {
-    let mapping = mapping();
-    let mut types = json!({
-        "id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList",
-        "typeList": ["MestskySenzor", "Other"]
-    });
-    mapping.translate(&mut types);
-    assert_eq!(types["typeList"], json!(["AirQualityObserved"]));
-
-    let mut attributes = json!({
-        "id": "urn:ngsi-ld:AttributeList:1", "type": "AttributeList",
-        "attributeList": ["pm2p5", "teplota", "kalibracia"]
-    });
-    mapping.translate(&mut attributes);
-    assert_eq!(
-        attributes["attributeList"],
-        json!(["pm25", "temperature", "dataProvider"])
-    );
-
-    let mut detailed = json!([{
-        "id": "MestskySenzor", "type": "EntityType", "typeName": "MestskySenzor",
-        "attributeNames": ["pm2p5", "spolahlivost", "nazov"]
-    }]);
-    mapping.translate(&mut detailed);
-    assert_eq!(detailed[0]["typeName"], json!("AirQualityObserved"));
-    assert_eq!(detailed[0]["type"], json!("EntityType"));
-    assert_eq!(
-        detailed[0]["attributeNames"],
-        json!(["pm25", "reliability", "dataProvider", "label"])
-    );
 }
