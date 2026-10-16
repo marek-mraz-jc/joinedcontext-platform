@@ -313,8 +313,111 @@ pub async fn endpoint_page(
     Ok(url)
 }
 
+/// A deployment's sources by the project that holds them, its own project first: a source named
+/// `{project}/{source}` is another project's (T-4281), which the kind admits only from its
+/// `scope.projects`. Every lookup below runs in each project's own scope, so the row-level
+/// security that keeps a project's rows to itself still holds.
+pub fn sources_by_project(own: &str, sources: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut grouped: Vec<(String, Vec<String>)> = vec![(own.to_owned(), Vec::new())];
+    for source in sources {
+        let (project, name) = match source.split_once('/') {
+            Some((project, name)) => (project, name),
+            None => (own, source.as_str()),
+        };
+        match grouped.iter_mut().find(|(p, _)| p == project) {
+            Some((_, names)) => names.push(name.to_owned()),
+            None => grouped.push((project.to_owned(), vec![name.to_owned()])),
+        }
+    }
+    grouped.retain(|(_, names)| !names.is_empty());
+    grouped
+}
+
+/// [`hybrid_search`] over every project's sources, each ranked in its own project; the best
+/// `search.limit` of all by fused score.
+pub async fn search_projects(
+    pool: &sqlx::PgPool,
+    sources: &[(String, Vec<String>)],
+    search: &Search<'_>,
+) -> Result<Vec<Hit>, Error> {
+    let mut hits = Vec::new();
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        hits.extend(
+            hybrid_search(
+                &mut tx,
+                &Search {
+                    sources: names,
+                    ..search.clone()
+                },
+            )
+            .await?,
+        );
+        tx.rollback().await?;
+    }
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.chunk.cmp(&b.chunk)));
+    hits.truncate(usize::try_from(search.limit).unwrap_or(0));
+    Ok(hits)
+}
+
+/// [`titles`] over every project's sources.
+pub async fn titles_projects(
+    pool: &sqlx::PgPool,
+    urls: &[String],
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<HashMap<String, String>, Error> {
+    let mut found = HashMap::new();
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        for (url, title) in titles(&mut tx, urls, names, public_only).await? {
+            found.entry(url).or_insert(title);
+        }
+        tx.rollback().await?;
+    }
+    Ok(found)
+}
+
+/// [`endpoint_page`] over every project's sources, the deployment's own project first.
+pub async fn endpoint_page_projects(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        let page = endpoint_page(&mut tx, slug, names, public_only).await?;
+        tx.rollback().await?;
+        if page.is_some() {
+            return Ok(page);
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sources_are_grouped_by_the_project_that_holds_them_own_first() {
+        let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            sources_by_project(
+                "banskabystrica",
+                &names(&["bbsk/web", "web", "bbsk/data-portal", "catalogue"])
+            ),
+            vec![
+                ("banskabystrica".to_owned(), names(&["web", "catalogue"])),
+                ("bbsk".to_owned(), names(&["web", "data-portal"])),
+            ]
+        );
+        assert_eq!(
+            sources_by_project("bbsk", &names(&["banskabystrica/web"])),
+            vec![("banskabystrica".to_owned(), names(&["web"]))]
+        );
+        assert!(sources_by_project("bbsk", &[]).is_empty());
+    }
     use super::*;
 
     #[test]

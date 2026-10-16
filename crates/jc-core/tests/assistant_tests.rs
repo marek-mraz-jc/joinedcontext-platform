@@ -772,3 +772,66 @@ fn a_connector_reaches_another_project_only_through_its_scope() {
         );
     }
 }
+
+/// T-4281, MF-52: a source names another project's `KnowledgeSource` as `{project}/{source}`, and
+/// only of a project its `scope.projects` lists.
+#[test]
+fn a_source_reaches_another_project_only_through_its_scope() {
+    let scoped = |sources: &str, scope: &str| {
+        deployment(
+            &deployment_with(
+                "  sandbox: false\n",
+                &format!("  sandbox: false\n  scope: {{ projects: [{scope}] }}\n"),
+            )
+            .replace("sources: [bb-web]", &format!("sources: [{sources}]")),
+        )
+    };
+    let parsed = scoped("bb-web, \"bbsk/web\"", "bbsk").expect("in scope");
+    assert_eq!(parsed.spec.sources, ["bb-web", "bbsk/web"]);
+    for (sources, scope) in [
+        ("\"helsinki/web\"", "bbsk"),
+        ("\"bbsk/\"", "bbsk"),
+        ("\"/web\"", "bbsk"),
+        ("\"bbsk/web/x\"", "bbsk"),
+        ("\"bbsk/Bad_Name\"", "bbsk"),
+    ] {
+        assert_eq!(refused(scoped(sources, scope)), "sources", "{sources}");
+    }
+}
+
+/// T-4281: `answer.routes` is `both` when absent, `rag` needs a source and `data` a connector;
+/// `feedback` is on unless switched off.
+#[test]
+fn routes_and_feedback_default_and_are_held_to_what_they_answer_from() {
+    use jc_core::kinds::Routes;
+    let parsed = deployment(DEPLOYMENT).expect("documented");
+    assert_eq!(parsed.spec.routes(), Routes::Both);
+    assert!(parsed.spec.feedback);
+    let with =
+        |extra: &str| deployment_with("  sandbox: false\n", &format!("  sandbox: false\n{extra}"));
+    let parsed = deployment(&with("  answer: { routes: rag }\n  feedback: false\n")).expect("rag");
+    assert_eq!(parsed.spec.routes(), Routes::Rag);
+    assert!(!parsed.spec.feedback);
+    let again: AssistantDeployment =
+        serde_norway::from_str(&serde_norway::to_string(&parsed).expect("yaml")).expect("parse");
+    assert_eq!(again, parsed);
+    assert_eq!(
+        deployment(&with("  answer: { routes: data }\n"))
+            .expect("data")
+            .spec
+            .routes(),
+        Routes::Data
+    );
+
+    let no_sources = with("  answer: { routes: rag }\n").replace("  sources: [bb-web]\n", "");
+    assert_eq!(refused(deployment(&no_sources)), "answer.routes");
+    let start = DEPLOYMENT.find("  connectors:").expect("connectors");
+    let end = start
+        + DEPLOYMENT[start..]
+            .find("  allowedOrigins")
+            .expect("origins");
+    let no_connectors = with("  answer: { routes: data }\n").replace(&DEPLOYMENT[start..end], "");
+    assert_eq!(refused(deployment(&no_connectors)), "answer.routes");
+    assert!(refused(deployment(&with("  answer: { routes: all }\n"))).contains("unknown variant"));
+    assert!(refused(deployment(&with("  answer: { mode: rag }\n"))).contains("unknown field"));
+}

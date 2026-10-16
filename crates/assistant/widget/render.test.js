@@ -142,6 +142,8 @@ test("Slovak by default, the host page's language when the widget knows it", () 
   assert.equal(language("en-GB", ["sk", "en"], known), "en");
   assert.equal(language("hu", ["sk", "en"], known), "sk");
   assert.equal(language("", ["en", "cs"], known), "en");
+  // T-4281: the first language the deployment lists opens, Slovak or not.
+  assert.equal(language("", ["en", "sk"], known), "en");
   assert.equal(language("", ["hu"], known), "sk");
   assert.equal(language("", ["fi"], { en: {} }), "en");
 });

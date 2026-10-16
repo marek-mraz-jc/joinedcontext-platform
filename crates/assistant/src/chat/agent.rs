@@ -12,7 +12,7 @@ use tokio::sync::mpsc::Sender;
 use super::mcp::{cut, Surface, Tool, MAX_RESULT_CHARS};
 use super::model::{CallError, Completion, Model};
 use crate::embed::Embedder;
-use crate::{hybrid_search, Search};
+use crate::Search;
 
 /// The most model calls one question makes (AG-107).
 pub const MAX_CALLS: usize = 6;
@@ -147,7 +147,9 @@ pub struct Ask<'a> {
     /// `{project}/{name}`.
     pub deployment: &'a str,
     pub system_prompt: Option<&'a str>,
-    pub sources: &'a [String],
+    /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
+    /// `answer.routes` is `data`.
+    pub sources: &'a [(String, Vec<String>)],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,
@@ -759,7 +761,6 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
         return;
     }
     let named: Result<(), crate::Error> = async {
-        let mut tx = crate::project_scope(ask.pool, ask.project).await?;
         for citation in citations.iter_mut().filter(|c| c.url.is_none()) {
             let slug = ask
                 .connectors
@@ -768,7 +769,8 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
                 .map(|c| c.surface.slug.as_str());
             if let Some(slug) = slug {
                 citation.url =
-                    crate::endpoint_page(&mut tx, slug, ask.sources, ask.public_only).await?;
+                    crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
+                        .await?;
             }
         }
         let urls: Vec<String> = citations
@@ -777,8 +779,7 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let titles = crate::titles(&mut tx, &urls, ask.sources, ask.public_only).await?;
-        tx.rollback().await?;
+        let titles = crate::titles_projects(ask.pool, &urls, ask.sources, ask.public_only).await?;
         for citation in citations.iter_mut() {
             citation.title = citation
                 .url
@@ -795,19 +796,18 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
 
 async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<(String, String)>, crate::Error> {
     let vector = ask.embedder.query(query).await?;
-    let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-    let hits = hybrid_search(
-        &mut tx,
+    let hits = crate::search_projects(
+        ask.pool,
+        ask.sources,
         &Search {
             text: query,
             embedding: &vector,
-            sources: ask.sources,
+            sources: &[],
             public_only: ask.public_only,
             limit: PASSAGES,
         },
     )
     .await?;
-    tx.rollback().await?;
     Ok(hits.into_iter().map(|hit| (hit.url, hit.text)).collect())
 }
 

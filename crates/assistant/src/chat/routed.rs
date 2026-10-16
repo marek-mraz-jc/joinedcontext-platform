@@ -9,6 +9,7 @@
 //! model never calls a tool here, so the tool allowlist is this code.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use super::agent::{
     fits, name_sources, quoted, send, Ask, Citation, Connected, Event, Spent, Table, Turn,
 };
 use super::model::{Call, CallError, Completion};
-use crate::{hybrid_search, Hit, Search, CANDIDATES};
+use crate::{Hit, Search, CANDIDATES};
 
 /// The most search rounds one question runs.
 pub const MAX_ROUNDS: usize = 3;
@@ -413,19 +414,28 @@ async fn languages(ask: &Ask<'_>) -> Vec<String> {
         return known;
     }
     let found = async {
-        let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT c.lang FROM chunks c JOIN sites s ON s.id = c.site_id \
-             WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public') AND c.lang IS NOT NULL \
-             GROUP BY c.lang ORDER BY count(*) DESC, c.lang LIMIT $3",
-        )
-        .bind(ask.sources)
-        .bind(ask.public_only)
-        .bind(MAX_LANGUAGES as i64)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.rollback().await?;
-        Ok::<_, crate::Error>(rows.into_iter().map(|(lang,)| lang).collect::<Vec<_>>())
+        // Passages per language, summed over the projects the sources are in (T-4281).
+        let mut counts: HashMap<String, i64> = HashMap::new();
+        for (project, names) in ask.sources {
+            let mut tx = crate::project_scope(ask.pool, project).await?;
+            let rows: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT c.lang, count(*)::int8 FROM chunks c JOIN sites s ON s.id = c.site_id \
+                 WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public') AND c.lang IS NOT NULL \
+                 GROUP BY c.lang",
+            )
+            .bind(names)
+            .bind(ask.public_only)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.rollback().await?;
+            for (lang, n) in rows {
+                *counts.entry(lang).or_default() += n;
+            }
+        }
+        let mut ranked: Vec<(String, i64)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(MAX_LANGUAGES);
+        Ok::<_, crate::Error>(ranked.into_iter().map(|(lang, _)| lang).collect::<Vec<_>>())
     }
     .await;
     match found {
@@ -567,35 +577,37 @@ impl AnswerCache {
 /// The digest of the deployment's index: how many passages its sources hold and the newest one's
 /// id. A crawl that adds, drops or replaces a passage changes it.
 async fn digest(ask: &Ask<'_>) -> Result<String, crate::Error> {
-    let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-    let (count, newest): (i64, i64) = sqlx::query_as(
-        "SELECT count(*)::int8, COALESCE(max(c.id), 0)::int8 FROM chunks c JOIN sites s ON s.id = c.site_id \
-         WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public')",
-    )
-    .bind(ask.sources)
-    .bind(ask.public_only)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.rollback().await?;
-    Ok(format!("{count}:{newest}"))
+    let mut digest = String::new();
+    for (project, names) in ask.sources {
+        let mut tx = crate::project_scope(ask.pool, project).await?;
+        let (count, newest): (i64, i64) = sqlx::query_as(
+            "SELECT count(*)::int8, COALESCE(max(c.id), 0)::int8 FROM chunks c JOIN sites s ON s.id = c.site_id \
+             WHERE s.source = ANY($1) AND (NOT $2 OR c.visibility = 'public')",
+        )
+        .bind(names)
+        .bind(ask.public_only)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        let _ = write!(digest, "{project}:{count}:{newest};");
+    }
+    Ok(digest)
 }
 
 async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
     let vector = ask.embedder.query(query).await?;
-    let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-    let hits = hybrid_search(
-        &mut tx,
+    crate::search_projects(
+        ask.pool,
+        ask.sources,
         &Search {
             text: query,
             embedding: &vector,
-            sources: ask.sources,
+            sources: &[],
             public_only: ask.public_only,
             limit: ROUND_PASSAGES.min(CANDIDATES),
         },
     )
-    .await?;
-    tx.rollback().await?;
-    Ok(hits)
+    .await
 }
 
 fn offers(connector: &Connected, tool: &str) -> bool {
@@ -717,14 +729,9 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
     let (columns, rows) =
         table_of(&text, READ_ROWS).ok_or("the Endpoint's answer is no list of entities")?;
     let slug = connector.surface.slug.as_str();
-    let dataset = async {
-        let mut tx = crate::project_scope(ask.pool, ask.project).await?;
-        let page = crate::endpoint_page(&mut tx, slug, ask.sources, ask.public_only).await?;
-        tx.rollback().await?;
-        Ok::<_, crate::Error>(page)
-    }
-    .await
-    .unwrap_or_else(|why| {
+    let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
+        .await
+        .unwrap_or_else(|why| {
         tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
         None
     });
