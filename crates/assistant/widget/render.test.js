@@ -495,6 +495,8 @@ test("a message's time is the visitor's HH:MM with the UTC minute beside it, kep
   const local = new Date("2026-10-16T12:05:59Z");
   assert.match(at.text, new RegExp("^0?" + local.getHours() + "[:.]" + String(local.getMinutes()).padStart(2, "0")));
   assert.equal(stamp(Date.UTC(2026, 9, 16, 23, 59)).datetime, "2026-10-16T23:59Z");
+  // A 24-hour clock in English too, never "02:17 PM".
+  assert.doesNotMatch(stamp("2026-10-16T12:17:00Z", "en").text, /AM|PM/);
   for (const none of [null, undefined, "", "yesterday", NaN]) assert.equal(stamp(none), null);
   const conversation = "0b8e7e8e-3f7a-4b9e-9a51-1d2c3b4a5f60";
   const kept = remember(null, conversation, 1, { question: "q", text: "a", turn: 1, citations: [],

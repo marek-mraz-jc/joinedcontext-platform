@@ -693,6 +693,18 @@ async fn connected(
     connected
 }
 
+/// `at` as RFC 3339 UTC to the second, like `2026-10-16T12:17:05Z`.
+fn utc_second(at: time::OffsetDateTime) -> String {
+    let at = at.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        at.date(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
+}
+
 fn sse(event: &Event) -> SseEvent {
     let (name, data) = match event {
         Event::Tool {
@@ -1142,6 +1154,8 @@ async fn ask(
     let (tokens_per_day, tokens_per_conversation) =
         (budget.tokens_per_day, budget.tokens_per_conversation);
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
+    // One moment for the question: every model call is told it and the chat shows it (T-4339).
+    let asked_at = time::OffsetDateTime::now_utc();
     let task_state = Arc::clone(state);
     let conversation_id = conversation.clone();
     tokio::spawn(async move {
@@ -1209,7 +1223,7 @@ async fn ask(
             search_only,
             data_steps: deployment.spec.data_steps() as usize,
             data_time: Duration::from_secs(u64::from(deployment.spec.data_seconds())),
-            now: time::OffsetDateTime::now_utc(),
+            now: asked_at,
             zone: clock::Zone::of(&deployment.spec.languages),
         };
         let started = Instant::now();
@@ -1261,7 +1275,7 @@ async fn ask(
         Ok::<_, Infallible>(
             SseEvent::default()
                 .event("conversation")
-                .data(json!({"id": conversation}).to_string()),
+                .data(json!({"id": conversation, "at": utc_second(asked_at)}).to_string()),
         )
     });
     let rest = futures_util::stream::unfold(rx, |mut rx| async move {

@@ -452,7 +452,8 @@ var JCRender = (function () {
   }
 
   /**
-   * A message's time (T-4339): `text` HH:MM in the visitor's own time zone, `datetime` and `title`
+   * A message's time (T-4339): `text` HH:MM, a 24-hour clock in every language as the answer
+   * writes it, in the visitor's own time zone, `datetime` and `title`
    * the UTC minute; null when `at` is no moment.
    */
   function stamp(at, locale) {
@@ -461,7 +462,7 @@ var JCRender = (function () {
     var utc = d.toISOString().slice(0, 16);
     var text;
     try {
-      text = d.toLocaleTimeString(locale || undefined, { hour: "2-digit", minute: "2-digit" });
+      text = d.toLocaleTimeString(locale || undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     } catch (e) {
       text = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
     }
