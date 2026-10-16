@@ -34,7 +34,7 @@ const LONG = ["The client centre is open on weekdays; the details by service fol
 function sse(res) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
-  send("conversation", { id: "c1" });
+  send("conversation", { id: "c1", at: "2026-10-16T12:17:05Z" });
   send("answer", { text: LONG });
   send("citations", [1, 2, 3, 4].map((n) => ({ n, url: `https://example.sk/strana-${n}`, title: `Source ${n}` })));
   send("followups", { questions: ["Where is the client centre?", "Do I need an appointment?"] });
@@ -127,7 +127,12 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     await expect(frame.locator(".jc-followups button")).toHaveCount(2);
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(2);
     await expect(frame.locator(".jc-sources-title")).toHaveText("Sources");
-    // T-4339: the question and the answer show their time, the UTC minute on hover.
+    // T-4339: the question shows the server's moment in the visitor's zone (Europe/Bratislava
+    // here, layout.config.mjs), the owner's "14:17" beside "Je piatok 16. októbra 2026, 14:17 (CEST)".
+    const asked = frame.locator(".jc-you .jc-time").first();
+    await expect(asked).toHaveText("14:17");
+    await expect(asked).toHaveAttribute("datetime", "2026-10-16T12:17Z");
+    await expect(asked).toHaveAttribute("title", "2026-10-16 12:17 UTC");
     for (const who of [".jc-you", ".jc-bot"]) {
       const time = frame.locator(`${who} .jc-time`).first();
       await expect(time).toHaveText(/^\d{1,2}[:.]\d{2}/);

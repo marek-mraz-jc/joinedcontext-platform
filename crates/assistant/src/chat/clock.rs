@@ -35,6 +35,22 @@ impl Zone {
     /// The offset at `utc`: standard time, one hour more in EU summer time, which all three
     /// keep (from the last Sunday of March to the last Sunday of October, 01:00 UTC both).
     fn offset(self, utc: OffsetDateTime) -> UtcOffset {
+        let (hours, _) = self.at(utc);
+        UtcOffset::from_hms(hours, 0, 0).unwrap_or(UtcOffset::UTC)
+    }
+
+    /// The zone's abbreviation at `utc`, as the IANA database names it: CET or CEST, EET or EEST.
+    fn abbreviation(self, utc: OffsetDateTime) -> &'static str {
+        match (self, self.at(utc).1) {
+            (Zone::Bratislava | Zone::Prague, false) => "CET",
+            (Zone::Bratislava | Zone::Prague, true) => "CEST",
+            (Zone::Helsinki, false) => "EET",
+            (Zone::Helsinki, true) => "EEST",
+        }
+    }
+
+    /// The hours ahead of UTC at `utc`, and whether summer time is on.
+    fn at(self, utc: OffsetDateTime) -> (i8, bool) {
         let standard = match self {
             Zone::Bratislava | Zone::Prague => 1,
             Zone::Helsinki => 2,
@@ -44,11 +60,10 @@ impl Zone {
                 .with_hms(1, 0, 0)
                 .map(|at| at.assume_utc())
         };
-        let hours = match (summer(Month::March), summer(Month::October)) {
-            (Ok(from), Ok(until)) if utc >= from && utc < until => standard + 1,
-            _ => standard,
-        };
-        UtcOffset::from_hms(hours, 0, 0).unwrap_or(UtcOffset::UTC)
+        match (summer(Month::March), summer(Month::October)) {
+            (Ok(from), Ok(until)) if utc >= from && utc < until => (standard + 1, true),
+            _ => (standard, false),
+        }
     }
 }
 
@@ -76,32 +91,34 @@ pub fn local(utc: OffsetDateTime, zone: Option<Zone>) -> OffsetDateTime {
     zone.map_or(utc, |zone| utc.to_offset(zone.offset(utc)))
 }
 
-/// The line every model call reads beside the question, like
-/// `Now: 2026-10-16T12:05Z (Friday); local time 2026-10-16 14:05 (Friday) Europe/Bratislava, UTC+02:00.`
+/// The line every model call reads beside the question, local first as a person says it, then
+/// UTC: `Now: Friday 2026-10-16 14:17 CEST (Europe/Bratislava, UTC+02:00); 12:17 UTC (2026-10-16T12:17Z).`
 pub fn now_line(utc: OffsetDateTime, zone: Option<Zone>) -> String {
     let utc = utc.to_offset(UtcOffset::UTC);
-    let mut line = format!(
-        "Now: {}T{:02}:{:02}Z ({})",
-        utc.date(),
+    let iso = format!("{}T{:02}:{:02}Z", utc.date(), utc.hour(), utc.minute());
+    let Some(zone) = zone else {
+        return format!(
+            "Now: {} {} {:02}:{:02} UTC ({iso}).",
+            weekday(utc.weekday()),
+            utc.date(),
+            utc.hour(),
+            utc.minute()
+        );
+    };
+    let offset = zone.offset(utc);
+    let local = utc.to_offset(offset);
+    format!(
+        "Now: {} {} {:02}:{:02} {} ({}, UTC+{:02}:00); {:02}:{:02} UTC ({iso}).",
+        weekday(local.weekday()),
+        local.date(),
+        local.hour(),
+        local.minute(),
+        zone.abbreviation(utc),
+        zone.name(),
+        offset.whole_hours(),
         utc.hour(),
-        utc.minute(),
-        weekday(utc.weekday())
-    );
-    if let Some(zone) = zone {
-        let offset = zone.offset(utc);
-        let local = utc.to_offset(offset);
-        line.push_str(&format!(
-            "; local time {} {:02}:{:02} ({}) {}, UTC+{:02}:00",
-            local.date(),
-            local.hour(),
-            local.minute(),
-            weekday(local.weekday()),
-            zone.name(),
-            offset.whole_hours()
-        ));
-    }
-    line.push('.');
-    line
+        utc.minute()
+    )
 }
 
 /// The clock readings of `line` an answer may quote, `HH:MM` in UTC and in local time: an answer
@@ -123,23 +140,56 @@ mod tests {
     use time::macros::datetime;
 
     #[test]
-    fn the_line_names_the_utc_minute_the_weekday_and_the_local_time() {
+    fn the_line_is_local_first_with_its_zone_then_utc() {
+        // The owner's reference (T-4339): "Je piatok 16. októbra 2026, 14:17 (CEST)."
         assert_eq!(
-            now_line(datetime!(2026-10-16 12:05:59 UTC), Some(Zone::Bratislava)),
-            "Now: 2026-10-16T12:05Z (Friday); local time 2026-10-16 14:05 (Friday) Europe/Bratislava, UTC+02:00."
+            now_line(datetime!(2026-10-16 12:17:59 UTC), Some(Zone::Bratislava)),
+            "Now: Friday 2026-10-16 14:17 CEST (Europe/Bratislava, UTC+02:00); 12:17 UTC (2026-10-16T12:17Z)."
         );
         assert_eq!(
-            now_line(datetime!(2026-10-16 12:05 UTC), None),
-            "Now: 2026-10-16T12:05Z (Friday)."
+            now_line(datetime!(2026-10-16 12:17 UTC), None),
+            "Now: Friday 2026-10-16 12:17 UTC (2026-10-16T12:17Z)."
         );
         // Past midnight in Helsinki, still the day before in UTC: the local day is the one "today" means.
         assert_eq!(
             now_line(datetime!(2026-12-31 22:30 UTC), Some(Zone::Helsinki)),
-            "Now: 2026-12-31T22:30Z (Thursday); local time 2027-01-01 00:30 (Friday) Europe/Helsinki, UTC+02:00."
+            "Now: Friday 2027-01-01 00:30 EET (Europe/Helsinki, UTC+02:00); 22:30 UTC (2026-12-31T22:30Z)."
         );
-        // An offset moment reads as the same instant in UTC.
-        assert!(
-            now_line(datetime!(2026-10-16 14:05 +2), None).starts_with("Now: 2026-10-16T12:05Z")
+        // An offset moment reads as the same instant.
+        assert!(now_line(datetime!(2026-10-16 14:17 +2), None).ends_with("(2026-10-16T12:17Z)."));
+    }
+
+    /// 2026-10-25, 01:00 UTC: CEST becomes CET, and 02:30 local comes twice, an hour apart.
+    #[test]
+    fn the_night_summer_time_ends_names_each_02_30_by_its_zone() {
+        assert_eq!(
+            now_line(datetime!(2026-10-25 00:30 UTC), Some(Zone::Bratislava)),
+            "Now: Sunday 2026-10-25 02:30 CEST (Europe/Bratislava, UTC+02:00); 00:30 UTC (2026-10-25T00:30Z)."
+        );
+        assert_eq!(
+            now_line(datetime!(2026-10-25 01:30 UTC), Some(Zone::Bratislava)),
+            "Now: Sunday 2026-10-25 02:30 CET (Europe/Bratislava, UTC+01:00); 01:30 UTC (2026-10-25T01:30Z)."
+        );
+        assert_eq!(
+            now_line(datetime!(2026-10-25 01:30 UTC), Some(Zone::Prague)),
+            "Now: Sunday 2026-10-25 02:30 CET (Europe/Prague, UTC+01:00); 01:30 UTC (2026-10-25T01:30Z)."
+        );
+        assert_eq!(
+            Zone::Helsinki.abbreviation(datetime!(2026-10-25 00:30 UTC)),
+            "EEST"
+        );
+        assert_eq!(
+            Zone::Helsinki.abbreviation(datetime!(2026-10-25 01:30 UTC)),
+            "EET"
+        );
+        // And back: 2027-03-28 01:00 UTC, CET becomes CEST.
+        assert_eq!(
+            Zone::Prague.abbreviation(datetime!(2027-03-28 00:59 UTC)),
+            "CET"
+        );
+        assert_eq!(
+            Zone::Prague.abbreviation(datetime!(2027-03-28 01:00 UTC)),
+            "CEST"
         );
     }
 

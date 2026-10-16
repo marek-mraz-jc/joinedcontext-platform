@@ -499,6 +499,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         ],
         "{events:?}"
     );
+    // T-4339: the question's moment, the server's, in UTC to the second.
+    let at = events[0].1["at"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        at.len() == 20 && at.ends_with('Z') && at.as_bytes()[10] == b'T',
+        "{at}"
+    );
     // The question itself is searched while the router call runs (T-4293).
     assert_eq!(
         events[2].1,
@@ -582,6 +588,19 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             body["messages"][0]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
+        // T-4339: every call is told the moment the conversation event names, beside the
+        // question and never in the cached rules.
+        let told = format!("{}Z).\nThe question:\n", &at[..16]);
+        assert!(
+            body["messages"][1]["content"]
+                .as_str()
+                .is_some_and(|asked| asked.starts_with("Now: ") || asked.contains("\nNow: "))
+                && body["messages"][1]["content"]
+                    .as_str()
+                    .is_some_and(|asked| asked.contains(&told)),
+            "{body}"
+        );
+        assert!(!body["messages"][0].to_string().contains(&at[..16]));
     }
     // The router is offered no tool; the answer call the read-only ones, never the write
     // (T-4294).
@@ -889,12 +908,13 @@ async fn arguments_that_break_the_tools_schema_are_never_sent() {
 async fn budgets_and_failures_reach_the_person_as_sentences() {
     // Room for a short question beside the answer's 3,000 tokens (T-3203), not for a long one;
     // `questionChars` at its largest, so the conversation's budget is what refuses it (T-4149).
-    let mut long = looped(3_600);
+    // 3,700: the rules grew by the clock line's (T-4339).
+    let mut long = looped(3_700);
     if let Some(budget) = long.spec.budget.as_mut() {
         budget.question_chars = 4_000;
     }
     let w = world("chatbudget", long).await;
-    // The estimate of the first call alone is over a 3,600-token conversation.
+    // The estimate of the first call alone is over a 3,700-token conversation.
     let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "x".repeat(4000)}))).await;
     let error = events
         .iter()

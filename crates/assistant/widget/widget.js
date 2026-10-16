@@ -674,6 +674,15 @@
 
   function handle(item, name, data) {
     if (name === "conversation") {
+      // The server's moment of the question, the one the answer is told, replaces this
+      // browser's guess, so the time beside the question is the time the answer states (T-4339).
+      var at = JCRender.stamp(data.at, lang);
+      if (at && item.askedTime) {
+        item.askedTime.textContent = at.text;
+        item.askedTime.setAttribute("datetime", at.datetime);
+        item.askedTime.title = at.title;
+        item.askedAt = data.at;
+      }
       if (data.id !== conversation) asked = 0;
       conversation = data.id;
       asked += 1;
@@ -814,6 +823,7 @@
     var item = turn("jc-bot", "assistant");
     item.question = question;
     item.askedAt = askedAt;
+    item.askedTime = time;
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
     item.appendChild(item.status);
