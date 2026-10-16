@@ -304,6 +304,10 @@ impl Broker {
         copy_relayable(&headers, out);
         // The upstream authority is ours, not the client's.
         out.remove(HOST);
+        // The length is the body's that goes up, which a route may have rewritten: the MCP hop
+        // sends its message re-serialised, and a client's spaced JSON then promised the broker
+        // bytes that never came (T-4337). hyper writes it from the body itself.
+        out.remove(CONTENT_LENGTH);
 
         let request = upstream
             .body(body)
