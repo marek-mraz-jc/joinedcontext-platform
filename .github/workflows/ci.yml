@@ -23,6 +23,10 @@ jobs:
       # and the image build failed on main while this lane stayed green).
       - name: the Dockerfile copies every workspace member
         run: python3 scripts/ci/check-dockerfile-members.py
+      # A file a crate embeds (include_str!) that .dockerignore keeps out compiles here and
+      # fails only in the image build (T-4267: mcp/primer.md under **/*.md).
+      - name: every file a crate embeds reaches the image build
+        run: python3 scripts/ci/check-dockerignore-includes.py
       # The checker itself; the statements run on a full `cg build --fg` before every merge, since
       # cg is not on the runner (T-3682, as Antares T-3587).
       - name: cg security invariants self-test
