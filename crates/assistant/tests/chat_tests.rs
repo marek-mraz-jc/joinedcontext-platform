@@ -460,9 +460,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     recorded_air(&w.gateway, SLUG).await;
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [\"NO2\"], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"interne\", \"type\": \"Record\"}]}"}), 400),
-    ], vec![
-        completion(json!({"role": "assistant", "content": "{\"answers\": false, \"queries\": [\"NO2 Námestie SNP\"]}"}), 50),
-    ], vec![
+    ], vec![], vec![
         completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 930),
     ]).await;
     let (status, events, headers) = answer_of(
@@ -536,18 +534,20 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     let done = &events[12].1;
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
-        (&json!(1380), &json!(3), &json!(false))
+        (&json!(1330), &json!(2), &json!(false))
     );
     let stages = done["stagesMs"].as_object().expect("stagesMs");
-    for stage in ["route", "search", "judge", "answer"] {
+    for stage in ["route", "search", "answer"] {
         assert!(stages[stage].as_u64().is_some(), "{done}");
     }
+    // The station's passage tops both rankings: the first round is not judged (T-4360).
+    assert!(stages.get("judge").is_none(), "{done}");
 
     let calls = model_calls(&w.proxy).await;
     assert_eq!(
         calls.len(),
-        3,
-        "the first round's judgement, no round for the rows"
+        2,
+        "a covered first round is not judged, no round for the rows"
     );
     let router = calls_of(&calls, Some(ROUTER))[0]["messages"][1]["content"]
         .as_str()
@@ -638,14 +638,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         .await
         .expect("one");
     tx.rollback().await.expect("rollback");
-    assert_eq!(tokens, 1380);
+    assert_eq!(tokens, 1330);
 
     // Live values are read again, never answered from the cache; the types are.
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
-    ], vec![
-        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
-    ], vec![
+    ], vec![], vec![
         completion(json!({"role": "assistant", "content": "21 [1]."}), 930),
     ]).await;
     let (_, again, _) = answer_of(
@@ -660,7 +658,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         again.last().map(|(_, d)| d["cached"].clone()),
         Some(json!(false))
     );
-    assert_eq!(model_calls(&w.proxy).await.len(), 6);
+    assert_eq!(model_calls(&w.proxy).await.len(), 4);
     let types_listed = w
         .gateway
         .received_requests()
@@ -1962,7 +1960,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
             json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica otváracie hodiny\"], \"followups\": [\"Kde je knižnica?\", \"Koľko stojí preukaz?\"]}"}),
             130,
         )],
-        vec![completion(json!({"role": "assistant", "content": "{\"answers\": true, \"queries\": [\"pobočky\"]}"}), 90)],
+        vec![],
         vec![streamed(&["Knižnica je otvorená ", "v pondelok až piatok od 9:00 do 18:00 [1]", " [7]."], 900, 40)],
     )
     .await;
@@ -2025,36 +2023,22 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(answer, deltas.trim());
 
     let calls = model_calls(&w.proxy).await;
-    assert_eq!(calls.len(), 3);
-    assert_eq!(
-        calls_of(&calls, Some(JUDGE)).len(),
-        1,
-        "a first round that answers is not judged again"
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls_of(&calls, Some(JUDGE)).is_empty(),
+        "the library's passage tops both rankings: nothing to judge (T-4360)"
     );
-    let (router, follow, answering) = (
-        calls_of(&calls, Some(ROUTER))[0],
-        calls_of(&calls, Some(JUDGE))[0],
-        calls_of(&calls, None)[0],
-    );
+    let (router, answering) = (calls_of(&calls, Some(ROUTER))[0], calls_of(&calls, None)[0]);
     assert_eq!(router["model"], "test/router");
     assert_eq!(router["response_format"]["type"], "json_object");
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
-    // The router hears the sources' language; the follow-up reads the passages' text as data.
+    // The router hears the sources' language.
     let routed = router["messages"][1]["content"]
         .as_str()
         .expect("the router's question");
     assert!(
         routed.contains("The sources are written in: sk."),
         "{routed}"
-    );
-    let judged = follow["messages"][1]["content"].as_str().expect("passages");
-    assert!(
-        judged.contains("Knižnica je otvorená v pondelok"),
-        "{judged}"
-    );
-    assert!(
-        !judged.contains("Platové tabuľky"),
-        "another source's passage reached the model"
     );
     assert_eq!(answering["model"], "test/answer");
     assert_eq!(answering["stream"], true);
@@ -2081,10 +2065,10 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(citations[0]["url"], first);
 
     let done = &events[15].1;
-    assert_eq!(done["tokensIn"], 120 + 80 + 900);
-    assert_eq!(done["tokensOut"], 10 + 10 + 40);
-    assert_eq!(done["tokens"], 130 + 90 + 940);
-    assert_eq!(done["modelCalls"], 3);
+    assert_eq!(done["tokensIn"], 120 + 900);
+    assert_eq!(done["tokensOut"], 10 + 40);
+    assert_eq!(done["tokens"], 130 + 940);
+    assert_eq!(done["modelCalls"], 2);
     assert_eq!(done["cached"], false);
     assert!(done["firstTokenMs"].as_u64().is_some() && done["totalMs"].as_u64().is_some());
 
@@ -2096,7 +2080,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     .await;
     assert_eq!(
         model_calls(&w.proxy).await.len(),
-        3,
+        2,
         "the cache made a model call"
     );
     let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
@@ -2106,11 +2090,23 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(again[3].1["cached"], true);
     assert_eq!(again[3].1["tokensIn"], 0);
     assert_eq!(again[3].1["modelCalls"], 0);
+    // The skip is counted, so the eval shows how often the judgement is saved (T-4360).
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let skipped: Vec<bool> =
+        sqlx::query_scalar("SELECT judge_skipped FROM answer_timings WHERE NOT cached")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("timings");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(skipped, [true]);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
 /// A row of `answer_timings`: deployment, cached, model calls, then the first token, the total
-/// and the route, search, judge and answer stages in milliseconds.
+/// and the route, search, judge and answer stages in milliseconds, and whether the judgement
+/// was skipped.
 type Timing = (
     String,
     bool,
@@ -2121,11 +2117,13 @@ type Timing = (
     Option<i64>,
     Option<i64>,
     Option<i64>,
+    bool,
 );
 
 /// T-4293: the question is searched and its passages judged while the router call is with the
 /// model, so a slow router and a slow judgement cost the time of one, and each answer leaves one
-/// row of stage times with no text in it.
+/// row of stage times with no text in it. The question shares no word with the passages, so only
+/// the meaning ranking finds them and they are judged (T-4360).
 #[tokio::test]
 async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept() {
     let mut sources_only = deployment(Channel::Public, 50_000, 10);
@@ -2141,7 +2139,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
     .await;
     let (_, events, _) = answer_of(
         &w.app,
-        ask(json!({"message": "Dokedy je otvorená knižnica?"}), None),
+        ask(json!({"message": "Kedy si môžem požičať knihy?"}), None),
     )
     .await;
     let done = &events.last().expect("done").1;
@@ -2161,13 +2159,26 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         "{done}"
     );
     assert_eq!(done["modelCalls"], 3);
+    // The judgement reads the passages' text as data, from this deployment's sources only.
+    let calls = model_calls(&w.proxy).await;
+    let judged = calls_of(&calls, Some(JUDGE))[0]["messages"][1]["content"]
+        .as_str()
+        .expect("passages");
+    assert!(
+        judged.contains("Knižnica je otvorená v pondelok"),
+        "{judged}"
+    );
+    assert!(
+        !judged.contains("Platové tabuľky"),
+        "another source's passage reached the model"
+    );
 
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
         .expect("scope");
     let rows: Vec<Timing> = sqlx::query_as(
         "SELECT deployment, cached, model_calls, first_token_ms, total_ms, route_ms, search_ms, \
-             judge_ms, answer_ms FROM answer_timings",
+             judge_ms, answer_ms, judge_skipped FROM answer_timings",
     )
     .fetch_all(&mut *tx)
     .await
@@ -2178,6 +2189,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
     assert_eq!((row.0.as_str(), row.1, row.2), ("obcania", false, 3));
     assert_eq!(row.5, i64::try_from(route).ok());
     assert_eq!(row.7, i64::try_from(judge).ok());
+    assert!(!row.9, "the judgement ran: {row:?}");
     assert!(
         row.3.is_some() && row.6.is_some() && row.8.is_some(),
         "{row:?}"
@@ -2199,6 +2211,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
             "deployment",
             "first_token_ms",
             "judge_ms",
+            "judge_skipped",
             "model_calls",
             "project",
             "route_ms",
@@ -2292,7 +2305,7 @@ async fn a_router_that_fails_searches_the_question_and_a_refusal_is_not_cached()
     .await;
     let (_, events, _) = answer_of(
         &w.app,
-        ask(json!({"message": "Kde merajú ovzdušie?"}), None),
+        ask(json!({"message": "Kde sa kontroluje vzduch?"}), None),
     )
     .await;
     assert!(events
@@ -2306,12 +2319,13 @@ async fn a_router_that_fails_searches_the_question_and_a_refusal_is_not_cached()
             .map(|(n, d)| (n.as_str(), d["cached"].clone())),
         Some(("done", json!(false)))
     );
-    // Two router calls (the second a follow-up whose reply is no verdict, so the rounds end: T-4259),
-    // then the answer call that failed.
+    // The question shares no word with the passages, so its round is judged (T-4360): two router
+    // calls (the second a follow-up whose reply is no verdict, so the rounds end: T-4259), then the
+    // answer call that failed.
     assert_eq!(model_calls(&w.proxy).await.len(), 3);
     let (_, again, _) = answer_of(
         &w.app,
-        ask(json!({"message": "Kde merajú ovzdušie?"}), None),
+        ask(json!({"message": "Kde sa kontroluje vzduch?"}), None),
     )
     .await;
     assert!(

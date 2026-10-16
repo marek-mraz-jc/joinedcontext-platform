@@ -343,6 +343,8 @@ pub struct Stages {
     pub judge: Option<u64>,
     /// The answer call, from its request to its last token.
     pub answer: Option<u64>,
+    /// The first round's passages covered the question, so they were not judged (T-4360).
+    pub judge_skipped: bool,
 }
 
 impl Stages {
