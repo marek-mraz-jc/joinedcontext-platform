@@ -2100,6 +2100,8 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(done["tokensOut"], 10 + 40);
     assert_eq!(done["tokens"], 130 + 940);
     assert_eq!(done["modelCalls"], 2);
+    assert_eq!(done["judgeSkipped"], true);
+    assert_eq!(done["providers"], json!({}), "no reply named its provider");
     assert_eq!(done["cached"], false);
     assert!(done["firstTokenMs"].as_u64().is_some() && done["totalMs"].as_u64().is_some());
 
@@ -2166,13 +2168,14 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         ResponseTemplate::new(200).set_body_json(json!({
             "provider": provider,
             "choices": [{"message": {"role": "assistant", "content": content}}],
-            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50,
+                "completion_tokens_details": {"reasoning_tokens": 6}}
         }))
     };
     let answer = format!(
         "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
         json!({"provider": "DeepInfra", "choices": [{"delta": {"content": "Od 9:00 do 18:00 [1]."}}]}),
-        json!({"provider": "DeepInfra", "choices": [], "usage": {"prompt_tokens": 300, "completion_tokens": 10, "total_tokens": 310}})
+        json!({"provider": "DeepInfra", "choices": [], "usage": {"prompt_tokens": 300, "completion_tokens": 10, "total_tokens": 310, "completion_tokens_details": {"reasoning_tokens": 0}}})
     );
     script_routed(
         &w.proxy,
@@ -2209,6 +2212,16 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         "{done}"
     );
     assert_eq!(done["modelCalls"], 3);
+    // T-4360: the provider that served each stage and the reasoning tokens it spent.
+    assert_eq!(done["judgeSkipped"], false);
+    assert_eq!(
+        done["providers"],
+        json!({"route": "Google Vertex", "judge": "Groq", "answer": "DeepInfra"})
+    );
+    assert_eq!(
+        done["reasoningTokens"],
+        json!({"route": 6, "judge": 6, "answer": 0})
+    );
     // The judgement reads the passages' text as data, from this deployment's sources only.
     let calls = model_calls(&w.proxy).await;
     // T-4360: a deployment without `model` asks for OpenRouter's fastest provider, with fallbacks,
@@ -2242,8 +2255,17 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
     .await
     .expect("timings");
     // The provider OpenRouter served each stage on, as its reply named it (T-4360).
-    let providers: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT router_provider, judge_provider, answer_provider FROM answer_timings",
+    type Served = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        Option<i32>,
+        Option<i32>,
+    );
+    let providers: Served = sqlx::query_as(
+        "SELECT router_provider, judge_provider, answer_provider, route_reasoning_tokens, \
+         judge_reasoning_tokens, answer_reasoning_tokens FROM answer_timings",
     )
     .fetch_one(&mut *tx)
     .await
@@ -2254,7 +2276,10 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         (
             Some("Google Vertex".into()),
             Some("Groq".into()),
-            Some("DeepInfra".into())
+            Some("DeepInfra".into()),
+            Some(6),
+            Some(6),
+            Some(0)
         )
     );
     assert_eq!(rows.len(), 1, "one row per answer");
@@ -2280,6 +2305,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         [
             "answer_ms",
             "answer_provider",
+            "answer_reasoning_tokens",
             "at",
             "cached",
             "dangling_markers",
@@ -2287,10 +2313,12 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
             "first_token_ms",
             "judge_ms",
             "judge_provider",
+            "judge_reasoning_tokens",
             "judge_skipped",
             "model_calls",
             "project",
             "route_ms",
+            "route_reasoning_tokens",
             "router_provider",
             "search_ms",
             "total_ms"

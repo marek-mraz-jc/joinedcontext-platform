@@ -27,6 +27,16 @@ pub struct Completion {
     /// The provider OpenRouter served the call on (its `provider` field, T-4360), when it names
     /// one in [`provider_name`]'s bounds.
     pub provider: Option<String>,
+    /// The reasoning tokens the call spent (`usage.completion_tokens_details.reasoning_tokens`,
+    /// T-4360), when the provider reports them.
+    pub reasoning: Option<u64>,
+}
+
+/// `usage.completion_tokens_details.reasoning_tokens`, when reported.
+fn reasoning_tokens(usage: &Value) -> Option<u64> {
+    usage
+        .pointer("/completion_tokens_details/reasoning_tokens")?
+        .as_u64()
 }
 
 /// The served provider as OpenRouter names it, `Google Vertex` or `DeepInfra`: at most 64
@@ -403,6 +413,7 @@ pub struct StreamReader {
     total: Option<u64>,
     cost_micros: Option<u64>,
     provider: Option<String>,
+    reasoning: Option<u64>,
     chunks: usize,
 }
 
@@ -443,6 +454,7 @@ impl StreamReader {
             self.output = count("completion_tokens").unwrap_or(self.output);
             self.total = count("total_tokens").or(self.total);
             self.cost_micros = cost_micros(usage).or(self.cost_micros);
+            self.reasoning = reasoning_tokens(usage).or(self.reasoning);
         }
         let piece = chunk.pointer("/choices/0/delta/content")?.as_str()?;
         if piece.is_empty() {
@@ -466,6 +478,7 @@ impl StreamReader {
             output: self.output,
             cost_micros: self.cost_micros,
             provider: self.provider,
+            reasoning: self.reasoning,
         })
     }
 }
@@ -509,6 +522,7 @@ pub fn parse(body: &Value) -> Option<Completion> {
         output,
         cost_micros: usage.and_then(cost_micros),
         provider: provider_name(body),
+        reasoning: usage.and_then(reasoning_tokens),
     })
 }
 
@@ -536,11 +550,21 @@ mod tests {
         reader.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n");
         reader
             .feed(b"data: {\"provider\":\"Groq\",\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n");
-        reader.feed(b"data: {\"provider\":\"Cerebras\",\"choices\":[]}\n");
+        reader.feed(b"data: {\"provider\":\"Cerebras\",\"choices\":[],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":12}}}\n");
+        let streamed = reader.finish().expect("a completion");
         assert_eq!(
-            reader.finish().and_then(|c| c.provider),
-            Some("Groq".into())
+            (streamed.provider.as_deref(), streamed.reasoning),
+            (Some("Groq"), Some(12))
         );
+        let reply = |usage: Value| {
+            parse(&json!({"choices": [{"message": {"content": "a"}}], "usage": usage}))
+                .and_then(|c| c.reasoning)
+        };
+        assert_eq!(
+            reply(json!({"completion_tokens_details": {"reasoning_tokens": 3}})),
+            Some(3)
+        );
+        assert_eq!(reply(json!({"completion_tokens": 3})), None);
     }
 
     /// T-4325: a realm that never answers holds the token lock for the token request's own

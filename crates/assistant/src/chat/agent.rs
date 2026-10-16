@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::sync::mpsc::Sender;
@@ -391,16 +392,51 @@ pub struct Spent {
     /// Citation markers the answer wrote for no source, removed before it was sent (T-4366).
     pub dangling: u64,
     /// The provider OpenRouter served each stage's last call on (T-4360).
-    pub providers: Providers,
+    pub providers: PerStage<String>,
+    /// The reasoning tokens each stage's calls spent, as the providers reported them (T-4360).
+    pub reasoning: PerStage<u64>,
 }
 
-/// The provider that served the router, judge and answer calls of one answer, as OpenRouter names
-/// it; `None` for a stage that made no call or a provider that went unnamed (T-4360).
+/// A stage that calls the model (T-4360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Route,
+    Judge,
+    Answer,
+}
+
+/// One value per calling stage, `None` where it made no call or the provider said nothing
+/// (T-4360); the `done` event names the stages as `stagesMs` does.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Providers {
-    pub router: Option<String>,
-    pub judge: Option<String>,
-    pub answer: Option<String>,
+pub struct PerStage<T> {
+    pub route: Option<T>,
+    pub judge: Option<T>,
+    pub answer: Option<T>,
+}
+
+impl<T: Serialize> PerStage<T> {
+    fn slot(&mut self, stage: Stage) -> &mut Option<T> {
+        match stage {
+            Stage::Route => &mut self.route,
+            Stage::Judge => &mut self.judge,
+            Stage::Answer => &mut self.answer,
+        }
+    }
+
+    /// The stages that have a value, as the `done` event names them.
+    pub fn json(&self) -> Value {
+        let mut out = serde_json::Map::new();
+        for (name, value) in [
+            ("route", &self.route),
+            ("judge", &self.judge),
+            ("answer", &self.answer),
+        ] {
+            if let Some(value) = value {
+                out.insert(name.into(), json!(value));
+            }
+        }
+        Value::Object(out)
+    }
 }
 
 /// The wall time of each stage of one answer, in milliseconds; `None` for a stage that did not
@@ -454,6 +490,17 @@ impl Spent {
             None => self.uncosted += 1,
         }
         self.calls += 1;
+    }
+
+    /// Notes which provider served `stage`'s call and adds the reasoning tokens it spent (T-4360).
+    pub fn served(&mut self, stage: Stage, completion: &Completion) {
+        if completion.provider.is_some() {
+            self.providers.slot(stage).clone_from(&completion.provider);
+        }
+        if let Some(tokens) = completion.reasoning {
+            let spent = self.reasoning.slot(stage);
+            *spent = Some(spent.unwrap_or(0).saturating_add(tokens));
+        }
     }
 
     /// The answer's cost in US dollars, only when every call reported one; a cached answer and

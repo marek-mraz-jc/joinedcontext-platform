@@ -19,7 +19,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::Sender;
 
 use super::agent::{
-    fits, name_sources, quoted, send, Ask, Citation, Connected, Event, Spent, Stages, Table, Turn,
+    fits, name_sources, quoted, send, Ask, Citation, Connected, Event, Spent, Stage, Stages, Table,
+    Turn,
 };
 use super::model::{Call, CallError, Completion};
 use crate::{Hit, Search, CANDIDATES};
@@ -1219,7 +1220,7 @@ pub async fn answer(
         match reply {
             Ok(reply) => {
                 count(&mut spent, &reply);
-                spent.providers.judge.clone_from(&reply.provider);
+                spent.served(Stage::Judge, &reply);
                 let seen = HashSet::from([question.to_lowercase()]);
                 // `Stop` answers with what is found, as after any round: the router's queries
                 // are added, and nothing more is judged.
@@ -1237,7 +1238,7 @@ pub async fn answer(
     let routing = match routed {
         Ok(reply) => {
             count(&mut spent, &reply);
-            spent.providers.router.clone_from(&reply.provider);
+            spent.served(Stage::Route, &reply);
             routing(&reply.text, question, &live)
         }
         Err(CallError::DaySpent(_)) => {
@@ -1334,7 +1335,7 @@ pub async fn answer(
         match reply {
             Ok(reply) => {
                 count(&mut spent, &reply);
-                spent.providers.judge.clone_from(&reply.provider);
+                spent.served(Stage::Judge, &reply);
                 let seen: HashSet<String> = asked.iter().map(|q| q.to_lowercase()).collect();
                 match verdict(&reply.text, &seen) {
                     Verdict::More(next) => pending = next,
@@ -1447,7 +1448,7 @@ pub async fn answer(
         }
     };
     count(&mut spent, &completion);
-    spent.providers.answer.clone_from(&completion.provider);
+    spent.served(Stage::Answer, &completion);
     spent.first_token_ms = first.map(|at| at.duration_since(started).as_millis() as u64);
     let text = completion.text.trim().to_owned();
     if text.is_empty() {

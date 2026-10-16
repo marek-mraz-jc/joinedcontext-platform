@@ -13,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 
 use super::agent::{
     fits, markers, name_sources, quoted, send, without_dangling, Ask, Citation, Connected, Event,
-    Spent, MAX_ARGUMENTS, MAX_CALLS_PER_REPLY,
+    Spent, Stage, MAX_ARGUMENTS, MAX_CALLS_PER_REPLY,
 };
 use super::mcp::{cut, Tool};
 use super::model::{Call, CallError};
@@ -219,7 +219,7 @@ pub async fn answer(
             }
         };
         spent.add(&completion);
-        spent.providers.answer.clone_from(&completion.provider);
+        spent.served(Stage::Answer, &completion);
         if completion.calls.is_empty() || !allow {
             let text = completion.text.trim().to_owned();
             if text.is_empty() {
