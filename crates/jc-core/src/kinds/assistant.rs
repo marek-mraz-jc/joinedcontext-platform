@@ -620,6 +620,14 @@ pub struct AnswerSpec {
     /// What one answer may use; default `both`.
     #[serde(default)]
     pub routes: Routes,
+    /// The most tool calls a data question's loop makes, the router's reads included; 1 to 25,
+    /// default 10 (T-4294).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_data_steps: Option<u32>,
+    /// The seconds after the question in which the loop may still call a tool; 1 to 60,
+    /// default 20 (T-4294).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_data_seconds: Option<u32>,
 }
 
 /// What a deployment reaches beyond its own project.
@@ -759,6 +767,22 @@ impl AssistantDeploymentSpec {
         self.answer.as_ref().map(|a| a.routes).unwrap_or_default()
     }
 
+    /// The most tool calls of a data question's loop; 10 when absent.
+    pub fn data_steps(&self) -> u32 {
+        self.answer
+            .as_ref()
+            .and_then(|a| a.max_data_steps)
+            .unwrap_or(10)
+    }
+
+    /// The seconds a data question's loop may call tools; 20 when absent.
+    pub fn data_seconds(&self) -> u32 {
+        self.answer
+            .as_ref()
+            .and_then(|a| a.max_data_seconds)
+            .unwrap_or(20)
+    }
+
     /// Every rule of MF-52 that one manifest can be judged by.
     pub fn validate(&self) -> Result<()> {
         names::validate_dns1123_label(&self.public_id).map_err(|_| {
@@ -808,6 +832,24 @@ impl AssistantDeploymentSpec {
                 ))
             }
             _ => {}
+        }
+        for (field, value, most, reason) in [
+            (
+                "answer.maxDataSteps",
+                self.data_steps(),
+                25,
+                "maxDataSteps is 1 to 25",
+            ),
+            (
+                "answer.maxDataSeconds",
+                self.data_seconds(),
+                60,
+                "maxDataSeconds is 1 to 60",
+            ),
+        ] {
+            if !(1..=most).contains(&value) {
+                return Err(name(field, value.to_string(), reason));
+            }
         }
         for connector in &self.connectors {
             let (project, endpoint) = connector_target(&connector.endpoint);

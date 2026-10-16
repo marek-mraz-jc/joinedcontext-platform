@@ -29,14 +29,15 @@ const HOST = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <body style="margin:0;font:16px sans-serif"><p style="padding:16px">Stránka mesta.</p>
 <script src="/d/bb/embed.js" defer></script></body></html>`;
 // About three screens of answer, four sources, and follow-ups.
-const LONG = Array.from({ length: 30 }, (_, i) => `- Riadok odpovede ${i + 1} s dostatkom slov, aby sa zalomil [${(i % 4) + 1}]`).join("\n");
+const LONG = ["The client centre is open on weekdays; the details by service follow.", "",
+  ...Array.from({ length: 30 }, (_, i) => `- Answer line ${i + 1} with enough words to wrap at a phone's width [${(i % 4) + 1}]`)].join("\n");
 function sse(res) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   send("conversation", { id: "c1" });
   send("answer", { text: LONG });
-  send("citations", [1, 2, 3, 4].map((n) => ({ n, url: `https://example.sk/strana-${n}`, title: `Zdroj ${n}` })));
-  send("followups", { questions: ["Kde je klientske centrum?", "Treba sa objednať?"] });
+  send("citations", [1, 2, 3, 4].map((n) => ({ n, url: `https://example.sk/strana-${n}`, title: `Source ${n}` })));
+  send("followups", { questions: ["Where is the client centre?", "Do I need an appointment?"] });
   res.end();
 }
 
@@ -86,6 +87,10 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     await expect(choices).toHaveText(["Slovensky", "English"]);
     await expect(choices.first()).toBeFocused();
     await expect(frame.locator("#jc-question")).toBeHidden();
+    // The chooser is never a dead end: its header keeps the close button (a phone's panel is the
+    // whole screen, with no launcher to close it from).
+    await expect(frame.locator(".jc-head .jc-close")).toBeVisible();
+    await expect(frame.locator(".jc-head .jc-langs")).toBeHidden();
     await choices.nth(1).click();
     await expect(frame.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
     await expect(frame.locator(".jc-suggest button")).toHaveCount(3);
@@ -108,13 +113,35 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
       }, { message: "the panel fits its content" }).toBeLessThan(40);
     }
 
+    // The name and its subtitle keep one line each, whole, at every size.
+    const header = await frame.locator(".jc-title").evaluate((title) => {
+      const name = title.querySelector(".jc-name");
+      return { whole: name.scrollWidth <= name.clientWidth, lines: Math.round(name.offsetHeight / parseFloat(getComputedStyle(name).lineHeight)),
+        role: getComputedStyle(title.querySelector(".jc-role")).display !== "none" };
+    });
+    expect(header, "the header name is one whole line with its subtitle").toEqual({ whole: true, lines: 1, role: true });
+
     // A three-screen answer: the conversation scrolls, the page does not, header and composer stay.
     await frame.locator("#jc-question").fill("Kedy má otvorené klientske centrum?");
     await frame.locator("#jc-question").press("Enter");
     await expect(frame.locator(".jc-followups button")).toHaveCount(2);
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(2);
+    await expect(frame.locator(".jc-sources-title")).toHaveText("Sources");
+    // The rest open and close again behind one button.
     await frame.locator(".jc-more-sources").click();
     await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(4);
+    await expect(frame.locator(".jc-more-sources")).toHaveAttribute("aria-expanded", "true");
+    await frame.locator(".jc-more-sources").click();
+    await expect(frame.locator(".jc-cards > li:visible")).toHaveCount(2);
+    await expect(frame.locator(".jc-more-sources")).toHaveText("More sources (2)");
+    await frame.locator(".jc-more-sources").click();
+    await expect(frame.locator(".jc-more-sources")).toHaveText("Fewer sources");
+    // One line per source: the number, the title and the host share a row.
+    const row = await frame.locator(".jc-cards > li").first().evaluate((li) => {
+      const [a, host] = [li.querySelector("a"), li.querySelector(".jc-domain")];
+      return Math.abs(a.getBoundingClientRect().top - host.getBoundingClientRect().top) < 6;
+    });
+    expect(row, "a source is one row").toBe(true);
     const chat = page.frames().find((f) => f.url().includes("/d/bb/widget"));
     await chat.evaluate(() => { const log = document.querySelector(".jc-log"); log.scrollTop = log.scrollHeight; });
     const scroll = await scrollers(chat);
@@ -131,7 +158,8 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812]]) {
     expect(head.y, "the header stays at the top after a long answer").toBeLessThanOrEqual(frameBox.y + 1);
     if (width > 640) expect(inside(await panel.boundingBox(), width, height), "the grown panel still fits").toBe(true);
     if (width <= 480) {
-      for (const control of await frame.locator(".jc-head button, .jc-form button:visible").all()) {
+      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-more-sources", ".jc-cards > li", ".jc-followups button", ".jc-notice .jc-more"].map((s) => s + ":visible").join(", ");
+      for (const control of await frame.locator(controls).all()) {
         const box = await control.boundingBox();
         expect(Math.min(box.width, box.height), "a tap target of 44 px").toBeGreaterThanOrEqual(44);
       }

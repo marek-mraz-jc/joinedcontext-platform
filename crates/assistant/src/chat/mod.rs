@@ -9,6 +9,7 @@
 pub mod admin;
 pub mod agent;
 pub mod cards;
+pub mod data;
 pub mod mcp;
 pub mod model;
 pub mod routed;
@@ -89,6 +90,8 @@ pub struct ChatState {
 pub const MAX_KEYS: usize = 50_000;
 /// How long one answer may take, model calls and searches together (T-4149).
 pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+/// The time a data question's answer call has after the loop's last tool may be called.
+const DATA_ANSWER: Duration = Duration::from_secs(25);
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3_600);
 const DAY: Duration = Duration::from_secs(86_400);
@@ -1203,10 +1206,13 @@ async fn ask(
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),
             search_only,
+            data_steps: deployment.spec.data_steps() as usize,
+            data_time: Duration::from_secs(u64::from(deployment.spec.data_seconds())),
         };
         let started = Instant::now();
+        // A raised data loop keeps its answer call's time after its last tool (T-4294).
         let spent = match tokio::time::timeout(
-            ANSWER_TIMEOUT,
+            ANSWER_TIMEOUT.max(ask.data_time + DATA_ANSWER),
             agent::answer(&ask, &question.history, &question.message, &tx),
         )
         .await
