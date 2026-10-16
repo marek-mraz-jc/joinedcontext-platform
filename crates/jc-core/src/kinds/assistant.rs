@@ -674,13 +674,43 @@ pub struct AssistantScope {
 pub struct Theme {
     /// The body's name in the chat's header, beside its monogram; at most 60 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub title: Option<Localised>,
     /// The accent colour, `#rrggbb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_color: Option<String>,
     /// The first line the chat shows, at most 500 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub greeting: Option<String>,
+    pub greeting: Option<Localised>,
+}
+
+/// A text the chat shows: one string in the deployment's first language, or one per language of
+/// `languages` (T-4365).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum Localised {
+    /// One string, in the deployment's first language.
+    Text(String),
+    /// A language of `languages` to its string.
+    ByLanguage(BTreeMap<String, String>),
+}
+
+impl Localised {
+    /// Each text with the language it is keyed by, `None` for the one string.
+    pub fn texts(&self) -> Vec<(Option<&str>, &str)> {
+        match self {
+            Self::Text(text) => vec![(None, text.as_str())],
+            Self::ByLanguage(map) => map
+                .iter()
+                .map(|(language, text)| (Some(language.as_str()), text.as_str()))
+                .collect(),
+        }
+    }
+}
+
+impl From<&str> for Localised {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
 }
 
 /// How the chat picks the language it opens in (T-4343).
@@ -1220,25 +1250,44 @@ impl AssistantDeploymentSpec {
                     ));
                 }
             }
-            if theme
-                .greeting
-                .as_deref()
-                .is_some_and(|greeting| greeting.chars().count() > MAX_GREETING_LEN)
-            {
-                return Err(name(
+            let shown = [
+                (
                     "theme.greeting",
-                    String::new(),
+                    &theme.greeting,
+                    MAX_GREETING_LEN,
                     "greeting is at most 500 characters",
-                ));
-            }
-            if theme.title.as_deref().is_some_and(|title| {
-                title.trim().is_empty() || title.chars().count() > MAX_TITLE_LEN
-            }) {
-                return Err(name(
+                ),
+                (
                     "theme.title",
-                    String::new(),
+                    &theme.title,
+                    MAX_TITLE_LEN,
                     "title is 1 to 60 characters",
-                ));
+                ),
+            ];
+            for (field, value, max, rule) in shown {
+                let Some(value) = value else { continue };
+                let texts = value.texts();
+                if texts.is_empty() {
+                    return Err(name(field, String::new(), rule));
+                }
+                for (language, text) in texts {
+                    if let Some(language) = language {
+                        self.known_language(field, language)?;
+                    }
+                    // A one-string greeting may be empty (no greeting), as before T-4365.
+                    let blank =
+                        text.trim().is_empty() && (field == "theme.title" || language.is_some());
+                    if blank || text.chars().count() > max {
+                        return Err(name(field, String::new(), rule));
+                    }
+                    if text.split_whitespace().any(names::looks_like_a_credential) {
+                        return Err(name(
+                            field,
+                            String::new(),
+                            "carries the shape of a credential; a key or token never goes into the text",
+                        ));
+                    }
+                }
             }
         }
         languages(&self.languages)

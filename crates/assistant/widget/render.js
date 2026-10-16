@@ -287,8 +287,30 @@ var JCRender = (function () {
    * widget's greeting in the visitor's language.
    */
   function greeting(own, languages, lang, fallback) {
+    // One per language (T-4365): this language's, else the widget's own.
+    if (own && typeof own === "object") return Array.isArray(own) ? fallback : entry(own, lang) || fallback;
     if (!own) return "";
     return !Array.isArray(languages) || languages.length === 0 || languages[0] === lang ? own : fallback;
+  }
+
+  function entry(map, key) {
+    var text = Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null;
+    return typeof text === "string" && text.trim() ? text.trim() : "";
+  }
+
+  /**
+   * The header's title (T-4365): the one string, or of a map per language this language's, else
+   * the first of `languages`'s, else any; "" when there is none.
+   */
+  function title(own, languages, lang) {
+    if (typeof own === "string") return own.trim();
+    if (!own || typeof own !== "object" || Array.isArray(own)) return "";
+    var first = Array.isArray(languages) ? languages[0] : undefined;
+    var keys = [lang, first].concat(Object.keys(own).sort());
+    for (var i = 0; i < keys.length; i++) {
+      if (entry(own, keys[i])) return entry(own, keys[i]);
+    }
+    return "";
   }
 
   var TIME = /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/;
@@ -540,6 +562,44 @@ var JCRender = (function () {
     return words.slice(0, 2).map(function (word) { return word.charAt(0).toLocaleUpperCase(); }).join("");
   }
 
+  // The count's noun per plural category; which category a number takes is Intl.PluralRules' (T-4364).
+  var SOURCE_FORMS = {
+    sk: { one: "zdroj", few: "zdroje", other: "zdrojov" },
+    cs: { one: "zdroj", few: "zdroje", other: "zdrojů" },
+    en: { one: "source", other: "sources" }
+  };
+
+  /** The footer's count (T-4364): `1 zdroj`, `2 zdroje`, `5 zdrojov`; English for an unknown language. */
+  function sourceCount(n, lang) {
+    var forms = SOURCE_FORMS[lang] ? SOURCE_FORMS[lang] : SOURCE_FORMS.en;
+    var category;
+    try {
+      category = new Intl.PluralRules(SOURCE_FORMS[lang] ? lang : "en").select(n);
+    } catch (e) {
+      category = n === 1 ? "one" : "other";
+    }
+    return n + " " + (forms[category] || forms.other);
+  }
+
+  /**
+   * The footer's source badges (T-4364): one per site, at most three, each the site's first letter
+   * on a hue derived from its name. A monogram, never a favicon, so the widget asks no third party.
+   */
+  function badges(list) {
+    var out = [];
+    var seen = {};
+    (list || []).forEach(function (source) {
+      var site = source.domain || source.endpoint || label(source);
+      if (!site || seen[site] || out.length >= 3) return;
+      seen[site] = true;
+      var letter = (String(site).match(/\p{L}|\p{N}/u) || ["?"])[0].toLocaleUpperCase();
+      var hash = 0;
+      for (var i = 0; i < site.length; i++) hash = (hash * 31 + site.charCodeAt(i)) % 360;
+      out.push({ site: site, letter: letter, hue: hash });
+    });
+    return out;
+  }
+
   /** The language this browser chose before, when the deployment still offers it; else null. */
   function chosen(stored, offered) {
     return typeof stored === "string" && (offered || []).indexOf(stored) >= 0 ? stored : null;
@@ -566,11 +626,11 @@ var JCRender = (function () {
   }
 
   return {
-    monogram: monogram, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
+    monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting,
+    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
     suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry
   };
 })();
