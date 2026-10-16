@@ -332,9 +332,17 @@ async fn paged_view(
         let headers = &headers;
         async move { view_page(gateway, slug, view, &target, headers).await }
     };
+    // A `q` the view checks entity by entity cannot be counted under the broker's scan ceiling:
+    // it answers TooManyResults past 10 000 stored rows (T-4324), so such a read is walked page
+    // by page, as a broker that sends no count is.
+    let counted = if query::first(&windowless, "q").is_some() {
+        ""
+    } else {
+        "&count=true"
+    };
     let targets: Vec<String> = selectors
         .iter()
-        .map(|narrowed| format!("entities?{narrowed}&limit={PAGE}&offset=0&count=true"))
+        .map(|narrowed| format!("entities?{narrowed}&limit={PAGE}&offset=0{counted}"))
         .collect();
     let firsts: Vec<_> = stream::iter(targets)
         .map(read)
@@ -540,6 +548,11 @@ async fn view_page(
         return Ok((Vec::new(), false, 0, Some(0)));
     }
     if parts.status == StatusCode::FORBIDDEN {
+        // The broker's resource ceiling (CIM 009 TooManyResults) is no refusal by a Policy: the
+        // caller asked for more than one read may hold, which is the download's own 413.
+        if names_too_many_results(&bytes) {
+            return Err(Box::new(too_large()));
+        }
         return Err(Box::new(ProblemDetails::forbidden().into_response()));
     }
     if !parts.status.is_success() {
@@ -553,6 +566,16 @@ async fn view_page(
         _ => Vec::new(),
     };
     Ok((page, restricted, bytes.len(), total))
+}
+
+/// Whether a broker answer is CIM 009's TooManyResults.
+fn names_too_many_results(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
+        problem
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.ends_with("TooManyResults"))
+    })
 }
 
 /// Whether the broker marked its answer narrowed (Antares `ANTARES_POLICY`, R22).
