@@ -449,7 +449,7 @@ var JCRender = (function () {
 
   // The service's error titles (API/05 §1.6), English and stable, to the widget's own words.
   var TROUBLE = {
-    "Budget Spent": "spent", "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
+    "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
     "No Answer": "unanswered", "Answer Took Too Long": "slow"
   };
 
@@ -466,9 +466,12 @@ var JCRender = (function () {
     return "failed";
   }
 
-  /** Whether asking the same again can help: not once the day's or the conversation's share is spent. */
+  /**
+   * Whether asking the same again can help: not once the conversation's share is spent. A spent
+   * day is no error at all: the service answers it with links (T-4286).
+   */
   function retryable(word) {
-    return word !== "spent" && word !== "full";
+    return word !== "full";
   }
 
   /**

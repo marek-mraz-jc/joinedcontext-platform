@@ -365,9 +365,10 @@ fn a_deployment_without_the_new_fields_takes_the_safe_defaults() {
         (
             limit.per_client_per_hour,
             limit.per_client_per_day,
+            limit.per_client_per_month,
             limit.streams_per_client
         ),
-        (60, 200, 2)
+        (60, 200, 300, 2)
     );
     let budget = spec.budget.expect("budget");
     assert_eq!(budget.cost_per_day_usd, 3.0);

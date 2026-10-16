@@ -92,6 +92,9 @@ pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3_600);
 const DAY: Duration = Duration::from_secs(86_400);
+/// The monthly window's length: its key names the calendar month, so a new month is a new key
+/// and the window only has to outlast the longest month (T-4286).
+const MONTH: Duration = Duration::from_secs(31 * 86_400);
 
 /// Requests per key in fixed windows (AG-101, T-4149), and the answers each visitor has streaming.
 /// A visitor is known by a keyed hash of their address and the UTC day, never the address itself:
@@ -156,6 +159,15 @@ impl Limits {
         format!("{:016x}", self.salt.hash_one((day, client)))
     }
 
+    /// Whether `key`'s window already counts `limit` requests at `now`; counts nothing (T-4286).
+    pub fn full(&self, key: &str, limit: u32, now: Instant) -> bool {
+        self.windows
+            .get(key)
+            .is_some_and(|(started, count, window)| {
+                now.duration_since(*started) < *window && *count >= limit
+            })
+    }
+
     /// Takes one of `visitor`'s `limit` streams; `false` when all are taken.
     pub fn open_stream(&mut self, visitor: &str, limit: u32) -> bool {
         let open = self.streams.entry(visitor.to_owned()).or_insert(0);
@@ -184,6 +196,19 @@ impl Limits {
 }
 
 /// Today, as days since 1970 in UTC.
+/// The UTC calendar month as a number (`year * 12 + month - 1`) and the first day of the next
+/// one as the visitor reads it, `1. 11. 2026` (T-4286).
+pub fn month_of(now: time::OffsetDateTime) -> (u64, String) {
+    let (year, month) = (now.year(), u8::from(now.month()));
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let index = u64::try_from(year).unwrap_or(0) * 12 + u64::from(month) - 1;
+    (index, format!("1. {next_month}. {next_year}"))
+}
+
 fn today() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -481,6 +506,10 @@ pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     // column named here would need a SELECT policy across projects.
     // Verdicts are kept for 90 days, by their own policy (migration 0008).
     sqlx::query("DELETE FROM feedback").execute(pool).await?;
+    // Timings are kept for 30 days, by their own policy (migration 0010).
+    sqlx::query("DELETE FROM answer_timings")
+        .execute(pool)
+        .await?;
     let gone = sqlx::query("DELETE FROM conversations")
         .execute(pool)
         .await?;
@@ -498,12 +527,14 @@ fn uuid_shaped(id: &str) -> bool {
         })
 }
 
-/// Counts what a question spent against its conversation and its deployment's day.
+/// Counts what a question spent against its conversation and its deployment's day, and keeps
+/// how long it took (T-4293).
 async fn record(
     pool: &PgPool,
     deployment: &Deployment,
     conversation: &str,
     spent: Spent,
+    total_ms: u64,
 ) -> Result<(), crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
     sqlx::query(
@@ -526,6 +557,24 @@ async fn record(
     .bind(i64::try_from(spent.input).unwrap_or(i64::MAX))
     .bind(i64::try_from(spent.output).unwrap_or(i64::MAX))
     .bind(i64::try_from(spent.cost_micros).unwrap_or(i64::MAX))
+    .execute(&mut *tx)
+    .await?;
+    let ms = |ms: Option<u64>| ms.map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
+    sqlx::query(
+        "INSERT INTO answer_timings (project, deployment, cached, model_calls, first_token_ms, \
+         total_ms, route_ms, search_ms, judge_ms, answer_ms) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(&deployment.project)
+    .bind(&deployment.name)
+    .bind(spent.cached)
+    .bind(i32::try_from(spent.calls).unwrap_or(i32::MAX))
+    .bind(ms(spent.first_token_ms))
+    .bind(ms(Some(total_ms)))
+    .bind(ms(spent.stages.route))
+    .bind(ms(spent.stages.search))
+    .bind(ms(spent.stages.judge))
+    .bind(ms(spent.stages.answer))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -689,6 +738,7 @@ fn sse(event: &Event) -> SseEvent {
                 "firstTokenMs": spent.first_token_ms,
                 "totalMs": total_ms,
                 "cached": spent.cached,
+                "stagesMs": spent.stages.json(),
             });
             // Present only when every call reported its cost (T-4178): a missing one would make
             // the sum look cheaper than the answer was.
@@ -985,21 +1035,32 @@ async fn ask(
         "{key}\u{0}{}",
         state.limits.lock().await.visitor(client, today())
     );
+    let (month, resets) = month_of(time::OffsetDateTime::now_utc());
+    // A visitor past their month is answered as search, with links (T-4286): the other windows
+    // still count, so the search itself stays paced.
+    let mut month_spent = false;
     if let Some(rate) = &rate {
         let (minute, hour, day) = (
             format!("{visitor}\u{0}m"),
             format!("{visitor}\u{0}h"),
             format!("{visitor}\u{0}d"),
         );
-        let admitted = state.limits.lock().await.admit(
-            &[
-                (&key, rate.requests_per_minute, MINUTE),
-                (&minute, rate.per_client_per_minute, MINUTE),
-                (&hour, rate.per_client_per_hour, HOUR),
-                (&day, rate.per_client_per_day, DAY),
-            ],
-            Instant::now(),
-        );
+        let mut limits = state.limits.lock().await;
+        // Keyed by the month, not the day, so the count survives the visitor's day changing.
+        let monthly = format!("{key}\u{0}{}\u{0}mo", limits.visitor(client, month));
+        let now = Instant::now();
+        month_spent = limits.full(&monthly, rate.per_client_per_month, now);
+        let mut windows = vec![
+            (key.as_str(), rate.requests_per_minute, MINUTE),
+            (minute.as_str(), rate.per_client_per_minute, MINUTE),
+            (hour.as_str(), rate.per_client_per_hour, HOUR),
+            (day.as_str(), rate.per_client_per_day, DAY),
+        ];
+        if !month_spent {
+            windows.push((monthly.as_str(), rate.per_client_per_month, MONTH));
+        }
+        let admitted = limits.admit(&windows, now);
+        drop(limits);
         if let Err(retry) = admitted {
             return too_many(
                 retry,
@@ -1054,7 +1115,7 @@ async fn ask(
             );
         }
     }
-    let search_only = match spent_today(&state.pool, &deployment).await {
+    let day_spent = match spent_today(&state.pool, &deployment).await {
         Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
         Err(err) => {
             // Unknown spend is spend: the chat goes on as search rather than past the cap.
@@ -1062,7 +1123,12 @@ async fn ask(
             true
         }
     };
-    if search_only && state.limits.lock().await.first_cap_today(&key, today()) {
+    let search_only = if month_spent {
+        Some(routed::Cap::Month { resets })
+    } else {
+        day_spent.then_some(routed::Cap::Day)
+    };
+    if day_spent && state.limits.lock().await.first_cap_today(&key, today()) {
         tracing::warn!(
             deployment = %key,
             cap_usd = budget.cost_per_day_usd,
@@ -1172,7 +1238,8 @@ async fn ask(
             cached = spent.cached,
             "question answered"
         );
-        if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent).await {
+        if let Err(err) = record(&state.pool, &deployment, &conversation_id, spent, total_ms).await
+        {
             tracing::error!(%err, "a question's tokens were not recorded");
         }
         if streams.is_some() {
@@ -1326,6 +1393,63 @@ mod tests {
         assert!(limits
             .admit(&one("a", 2), start + Duration::from_secs(60))
             .is_ok());
+    }
+
+    /// T-4286: 300 questions a month per visitor. The 300th is counted, the 301st finds the window
+    /// full for that visitor alone, and the next month is a new key with a fresh count.
+    #[test]
+    fn a_visitor_s_month_holds_300_questions_and_a_new_month_starts_over() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        let october = format!("d\u{0}{}\u{0}mo", limits.visitor("10.0.0.1", 24_321));
+        for asked in 0..300 {
+            assert!(!limits.full(&october, 300, start), "question {}", asked + 1);
+            assert!(limits.admit(&[(&october, 300, MONTH)], start).is_ok());
+        }
+        // Weeks later, still October: the 301st finds the month full.
+        let later = start + Duration::from_secs(20 * 86_400);
+        assert!(limits.full(&october, 300, later));
+        // Another visitor of the same deployment is served.
+        let other = format!("d\u{0}{}\u{0}mo", limits.visitor("10.0.0.2", 24_321));
+        assert!(!limits.full(&other, 300, later));
+        // November is another key: the visitor starts over.
+        let november = format!("d\u{0}{}\u{0}mo", limits.visitor("10.0.0.1", 24_322));
+        assert_ne!(november, october);
+        assert!(!limits.full(&november, 300, later));
+        // `full` counts nothing.
+        assert!(!limits.full("never-seen", 1, later));
+        assert!(!limits.full("never-seen", 1, later));
+    }
+
+    /// T-4286: no cap refuses a visitor, so the sentence they read at 08:25Z is nowhere left.
+    #[test]
+    fn no_sentence_says_the_day_s_answers_are_used_up() {
+        for (file, text) in [
+            ("model.rs", include_str!("model.rs")),
+            ("routed.rs", include_str!("routed.rs")),
+            ("agent.rs", include_str!("agent.rs")),
+            ("widget.js", include_str!("../../widget/widget.js")),
+            ("render.js", include_str!("../../widget/render.js")),
+        ] {
+            for refusal in [
+                "used up today's answers",
+                "odpovede tohto asistenta sú vyčerpané",
+                "odpovědi tohoto asistenta jsou vyčerpané",
+            ] {
+                assert!(!text.contains(refusal), "{file} says {refusal:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_month_resets_on_the_first_of_the_next_one() {
+        use time::macros::datetime;
+        let (october, resets) = month_of(datetime!(2026-10-16 08:25 UTC));
+        assert_eq!(resets, "1. 11. 2026");
+        let (december, resets) = month_of(datetime!(2026-12-31 23:59 UTC));
+        assert_eq!(resets, "1. 1. 2027");
+        let (january, _) = month_of(datetime!(2027-01-01 00:00 UTC));
+        assert_eq!((december - october, january - december), (2, 1));
     }
 
     /// T-4149: the owner's defaults, 10 a minute, 60 an hour, 200 a day: the 11th question of a
