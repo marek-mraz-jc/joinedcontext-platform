@@ -6,6 +6,24 @@
       "additionalProperties": false,
       "description": "How the deployment answers.",
       "properties": {
+        "maxDataSeconds": {
+          "description": "The seconds after the question in which the loop may still call a tool; 1 to 60, default 20 (T-4294).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxDataSteps": {
+          "description": "The most tool calls a data question's loop makes, the router's reads included; 1 to 25, default 10 (T-4294).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "routes": {
           "allOf": [
             {

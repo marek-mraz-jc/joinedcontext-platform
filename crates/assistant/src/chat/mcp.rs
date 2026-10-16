@@ -19,9 +19,12 @@ pub const MAX_KEPT_CHARS: usize = 250_000;
 /// (T-4140, Architecture/23 §5). Any other name is dropped before a request leaves.
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "list_types",
+    "get_type",
+    "list_attributes",
     "query_entities",
     "get_entity",
     "get_attribute_value",
+    "query_temporal",
     "retrieve_temporal",
     "describe_schema",
     "describe_access",

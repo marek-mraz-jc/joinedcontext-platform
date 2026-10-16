@@ -168,6 +168,10 @@ pub struct Ask<'a> {
     pub cache: &'a super::routed::AnswerCache,
     /// The public origin `/api/endpoint/{slug}` is served under: a data table's download link.
     pub endpoint_base: Option<&'a url::Url>,
+    /// The most tool calls of a data question's loop (`answer.maxDataSteps`, T-4294).
+    pub data_steps: usize,
+    /// How long after the question the loop may still call a tool (`answer.maxDataSeconds`).
+    pub data_time: std::time::Duration,
     /// The day's cost cap is reached: the sources' links, no model call (T-4149).
     /// Set when the question is answered as search, without a model (T-4149, T-4286).
     pub search_only: Option<super::routed::Cap>,

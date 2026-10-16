@@ -371,12 +371,17 @@ var JCRender = (function () {
 
   var STAGES = {
     sk: { understanding: "Rozmýšľam nad otázkou…", searching: "Hľadám v zdrojoch", reading: "Čítam živé údaje",
-      answering: "Pripravujem odpoveď…" },
+      history: "Čítam históriu údajov", schema: "Čítam schému údajov", answering: "Pripravujem odpoveď…",
+      steps: "Postup" },
     en: { understanding: "Reading your question…", searching: "Searching the sources", reading: "Reading live data",
-      answering: "Preparing the answer…" },
+      history: "Reading the data's history", schema: "Reading the data's schema", answering: "Preparing the answer…",
+      steps: "Steps" },
     cs: { understanding: "Přemýšlím nad otázkou…", searching: "Hledám ve zdrojích", reading: "Čtu živá data",
-      answering: "Připravuji odpověď…" }
+      history: "Čtu historii dat", schema: "Čtu schéma dat", answering: "Připravuji odpověď…",
+      steps: "Postup" }
   };
+  // The stages that are one step of the answer's work, listed under it (T-4294).
+  var STEPS = ["searching", "reading", "history", "schema"];
 
   /**
    * The progress line of a `stage` event (T-4155): fixed words per step, a search or a read
@@ -385,12 +390,26 @@ var JCRender = (function () {
   function stage(data, lang) {
     var words = STAGES[lang] || STAGES.en;
     var name = data && data.stage;
-    if (!Object.prototype.hasOwnProperty.call(words, name)) return null;
+    if (name === "steps" || !Object.prototype.hasOwnProperty.call(words, name)) return null;
     var topic = text(data.topic, 60);
-    if (name === "searching" || name === "reading") {
+    if (STEPS.indexOf(name) >= 0) {
       return words[name] + (topic ? ": „" + topic + "“…" : "…");
     }
     return words[name];
+  }
+
+
+  /**
+   * The steps an answer took, for the collapsed list under it (T-4294): the line of each stage
+   * that did work, in order; null for fewer than two, which need no list.
+   */
+  function steps(stages, lang) {
+    var lines = (Array.isArray(stages) ? stages : [])
+      .filter(function (data) { return data && STEPS.indexOf(data.stage) >= 0; })
+      .map(function (data) { return stage(data, lang); })
+      .filter(Boolean);
+    if (lines.length < 2) return null;
+    return { summary: (STAGES[lang] || STAGES.en).steps + " (" + lines.length + ")", lines: lines };
   }
 
 
@@ -517,7 +536,7 @@ var JCRender = (function () {
   return {
     monogram: monogram, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember,
-    cards: cards, stage: stage, tel: tel, mailto: mailto,
+    cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting,
     suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry
