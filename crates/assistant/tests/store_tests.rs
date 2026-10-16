@@ -440,6 +440,57 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
         .expect("page");
     assert_eq!(odd, None, "a slug that is no DNS label is never looked up");
     tx.rollback().await.expect("rollback");
+
+    // T-4366: the catalogue's page of an Endpoint is cited by its schema, a JSON file to a
+    // visitor; the dataset page that names the same Endpoint, indexed later, is cited instead.
+    let schema = site(
+        &pool,
+        "helsinki",
+        "hel-od",
+        &[(
+            "# Air\n\nAddress: https://gw.example/api/endpoint/od-air",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    sqlx::query("UPDATE chunks SET url = 'https://gw.example/api/endpoint/od-air/schema/index.json' WHERE id = $1")
+        .bind(schema[0])
+        .execute(&pool)
+        .await
+        .expect("the schema page's url");
+    site(
+        &pool,
+        "helsinki",
+        "hel-ckan",
+        &[(
+            "# Air quality\n\nReadings (API) (https://gw.example/api/endpoint/od-air/ngsi-ld/v1/entities?type=A)",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+    let both = ["hel-od".to_owned(), "hel-ckan".to_owned()];
+    let dataset = endpoint_page(&mut tx, "od-air", &both, true)
+        .await
+        .expect("page");
+    assert_eq!(dataset.as_deref(), Some("https://hel-ckan.example/#0"));
+    let alone = endpoint_page(&mut tx, "od-air", &both[..1], true)
+        .await
+        .expect("page");
+    assert_eq!(
+        alone.as_deref(),
+        Some("https://gw.example/api/endpoint/od-air/schema/index.json"),
+        "with no dataset page the Endpoint's own page is still named"
+    );
+    tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
 }
 
