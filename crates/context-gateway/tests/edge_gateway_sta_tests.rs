@@ -657,3 +657,31 @@ fn two_bounds_of_the_same_side_leave_the_last_one_and_not_the_narrower() {
         "the narrower bound survived, so this test is stale and the defect is fixed"
     );
 }
+
+/// T-4323 (cg-audit T-4308): a filter is split at its top-level ` and ` byte by byte; a character
+/// of two or three bytes, outside parentheses or in them, never cuts a slice in half (it panicked
+/// the request) and stays whole in the query it becomes.
+#[test]
+fn a_filter_with_characters_of_several_bytes_is_split_and_never_panics() {
+    for filter in [
+        "name eq 'Žilina'",
+        "name eq 'Banská Bystrica' and phenomenonTime gt 2026-09-01T00:00:00Z",
+        "(name eq 'Příbram') and pm10 gt 30",
+        "unit eq '€' and pm10 gt 30",
+        "ľ",
+    ] {
+        let outcome = std::panic::catch_unwind(|| series_filter(filter));
+        assert!(outcome.is_ok(), "{filter}: series_filter panicked");
+    }
+    let series = series_filter("name eq 'Žilina' and phenomenonTime gt 2026-09-01T00:00:00Z")
+        .expect("a filter");
+    assert_eq!(
+        window(&series),
+        vec![("timerel", "after"), ("timeAt", "2026-09-01T00:00:00Z")]
+    );
+    assert!(
+        series.q.as_deref().is_some_and(|q| q.contains("Žilina")),
+        "{:?}",
+        series.q
+    );
+}

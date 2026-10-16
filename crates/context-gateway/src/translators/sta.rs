@@ -484,15 +484,17 @@ fn conjuncts(filter: &str) -> Vec<&str> {
         match bytes[at] {
             b'(' => depth += 1,
             b')' => depth = depth.saturating_sub(1),
-            _ if depth == 0 => {
-                // ` and ` with its spaces, so an attribute named `brand` is not a connective.
-                let tail = &filter[at..];
-                if tail.len() >= 5 && tail[..5].eq_ignore_ascii_case(" and ") {
-                    terms.push(filter[start..at].trim());
-                    at += 5;
-                    start = at;
-                    continue;
-                }
+            // ` and ` with its spaces, so an attribute named `brand` is not a connective.
+            // Compared as bytes: `at` walks bytes, and a str slice there would cut a character
+            // of several bytes in half (T-4323).
+            _ if depth == 0
+                && bytes[at..].len() >= 5
+                && bytes[at..at + 5].eq_ignore_ascii_case(b" and ") =>
+            {
+                terms.push(filter[start..at].trim());
+                at += 5;
+                start = at;
+                continue;
             }
             _ => {}
         }
