@@ -252,6 +252,12 @@ fn a_deployment_is_refused_with_the_field_to_change() {
             "primaryColor: blue",
             "theme.primaryColor",
         ),
+        ("title: Banská Bystrica", "title: \"   \"", "theme.title"),
+        (
+            "title: Banská Bystrica",
+            "title: Mesto Banská Bystrica a Banskobystrický samosprávny kraj spolu",
+            "theme.title",
+        ),
         ("languages: [sk, en]", "languages: [SK]", "languages"),
     ];
     for (from, to, field) in cases {

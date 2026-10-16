@@ -6,3 +6,6 @@ __pycache__/
 
 # Agent worktrees, never part of the repository
 .claude/
+
+# T-4283: the widget layout test installs @playwright/test here for its run
+crates/assistant/widget/node_modules/

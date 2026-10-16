@@ -33,7 +33,8 @@
     "display:flex;align-items:center;justify-content:center;padding:0}" +
     ".jc-launch:focus-visible{outline:3px solid var(--jc-accent);outline-offset:3px}" +
     ".jc-launch svg{width:28px;height:28px;fill:currentColor}" +
-    ".jc-panel{position:fixed;right:20px;bottom:88px;z-index:2147483000;width:400px;height:min(640px,calc(100vh - 108px));" +
+    // The chat says how tall its content is (--jc-h, T-4283); never taller than 640 px or the window.
+    ".jc-panel{position:fixed;right:20px;bottom:88px;z-index:2147483000;width:400px;height:min(var(--jc-h,640px),640px,calc(100vh - 108px));" +
     "border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);background:#fff}" +
     ".jc-panel[hidden]{display:none}" +
     ".jc-panel iframe{width:100%;height:100%;border:0;display:block}" +
@@ -68,7 +69,10 @@
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
   var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm3 6a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm5 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm5 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z");
+  // Open, the button is the panel's close control and shows a cross, never the chat icon too (T-4283).
+  var CHAT = "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm3 6a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm5 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm5 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z";
+  var CROSS = "M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z";
+  path.setAttribute("d", CHAT);
   svg.appendChild(path);
   launch.appendChild(svg);
 
@@ -105,6 +109,7 @@
     wrap.classList.add("jc-open");
     launch.setAttribute("aria-expanded", "true");
     launch.setAttribute("aria-label", words.close);
+    path.setAttribute("d", CROSS);
     silence(true);
     frame.focus();
   }
@@ -116,6 +121,7 @@
     silence(false);
     launch.setAttribute("aria-expanded", "false");
     launch.setAttribute("aria-label", words.open);
+    path.setAttribute("d", CHAT);
     launch.focus();
   }
 
@@ -131,6 +137,11 @@
     if (frame && event.source === frame.contentWindow && event.origin === src.origin &&
         event.data && event.data.type === "jc-assistant-close") {
       close();
+    }
+    if (frame && event.source === frame.contentWindow && event.origin === src.origin &&
+        event.data && event.data.type === "jc-assistant-height") {
+      var height = Number(event.data.height);
+      if (isFinite(height) && height > 0) wrap.style.setProperty("--jc-h", Math.ceil(height) + "px");
     }
   });
 

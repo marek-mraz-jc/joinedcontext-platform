@@ -612,6 +612,13 @@
             "string",
             "null"
           ]
+        },
+        "title": {
+          "description": "The body's name in the chat's header, beside its monogram; at most 60 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"

@@ -111,6 +111,7 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
     json!({
         "linkHosts": link_hosts,
         "publicId": spec.public_id,
+        "title": spec.theme.as_ref().and_then(|t| t.title.clone()),
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
         "color": spec.theme.as_ref().and_then(|t| t.primary_color.clone()),
         // A visitor gets no picker: the assistant chooses among all its connectors, and their
@@ -264,10 +265,13 @@ mod tests {
             "languages": ["sk", "en"],
             "suggestions": {"sk": ["Kedy je zber odpadu?"], "en": ["When is waste collected?"]},
             "disclaimer": {"sk": "Odpovede píše umelá inteligencia."},
+            "theme": {"title": "Banská Bystrica"},
             "rateLimit": {"requestsPerMinute": 60, "perClientPerMinute": 10},
             "budget": {"tokensPerDay": 100000, "tokensPerConversation": 10000, "questionChars": 500},
         }));
         let config = config(&public, &[]);
+        // T-4283: the header's name; the monogram is drawn from it, no image.
+        assert_eq!(config["title"], json!("Banská Bystrica"));
         assert_eq!(config["languages"], json!(["sk", "en"]));
         assert_eq!(
             config["suggestions"]["en"],
