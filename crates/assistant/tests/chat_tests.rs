@@ -1376,6 +1376,7 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMa
 async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cookie() {
     let mut public = deployment(Channel::Public, 50_000, 10);
     public.spec.theme = Some(jc_core::kinds::assistant::Theme {
+        title: Some("Hronov <i>".into()),
         primary_color: Some("#0b5394".into()),
         greeting: Some("Dobrý deň \"<b>\"".into()),
     });
@@ -1403,6 +1404,12 @@ async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cooki
         "{html}"
     );
     assert!(!html.contains("<b>"));
+    // T-4283: the header's name rides in the same attribute, escaped the same way.
+    assert!(
+        html.contains("&quot;title&quot;:&quot;Hronov &lt;i&gt;&quot;"),
+        "{html}"
+    );
+    assert!(!html.contains("<i>"));
     // A visitor gets no picker: the page names no connector, the assistant uses them all (T-4253).
     assert!(
         !html.contains("ovzdusie"),

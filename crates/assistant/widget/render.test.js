@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { monogram, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -386,7 +386,8 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
-    assert.match(block, /ideas: \[/, `${lang}.ideas`);
+    // T-4283: the chips are the deployment's own; the widget invents no city questions.
+    assert.doesNotMatch(block, /ideas: \[/, `${lang}.ideas`);
   }
 });
 
@@ -402,4 +403,32 @@ test("Retry resends the last question with the history before it, and nothing el
   assert.equal(retry([]), null);
   assert.equal(retry(undefined), null);
   assert.equal(retry([{ role: "user", text: "  " }]), null);
+});
+
+test("the header's monogram is the first letters of the first two words (T-4283)", () => {
+  assert.equal(monogram("Banská Bystrica"), "BB");
+  assert.equal(monogram("helsinki"), "H");
+  assert.equal(monogram("  Žilina – mesto a univerzita "), "ŽM");
+  assert.equal(monogram("1. obvod Praha"), "OP");
+  assert.equal(monogram(""), "");
+  assert.equal(monogram(undefined), "");
+});
+
+test("the panel asks for the language once, and only where there is a choice (T-4283)", () => {
+  const two = ["sk", "en"];
+  assert.equal(asksLanguage({ offered: two }), true, "a first open");
+  assert.equal(asksLanguage({ offered: two, requested: "en" }), true, "the host page's language does not choose for the visitor");
+  assert.equal(asksLanguage({ offered: two, stored: "en" }), false, "a later open");
+  assert.equal(asksLanguage({ offered: two, page: true, requested: "en" }), false, "the full page with ?lang=");
+  assert.equal(asksLanguage({ offered: two, page: true }), true);
+  assert.equal(asksLanguage({ offered: ["sk"] }), false, "nothing to choose");
+  assert.equal(asksLanguage({ offered: two, kept: true }), false, "a conversation already open");
+  assert.equal(asksLanguage({ offered: two, enabled: false }), false, "a paused assistant");
+  assert.equal(asksLanguage(undefined), false);
+  assert.equal(chosen("en", two), "en");
+  assert.equal(chosen("cs", two), null, "a language no longer offered is asked again");
+  assert.equal(chosen(null, two), null);
+  assert.deepEqual(ordered(["en", "cs", "sk"]), ["sk", "en", "cs"]);
+  assert.deepEqual(ordered(["en"]), ["en"]);
+  assert.deepEqual(ordered(undefined), []);
 });

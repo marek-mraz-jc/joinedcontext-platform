@@ -149,6 +149,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: node --test crates/assistant/widget/render.test.js
+  widget-layout:
+    # T-4283: the widget in Chromium at 1280, 768 and 375 px against a stand-in server: one
+    # scroll area, header and composer whole, the panel fitted to its content, the language asked
+    # once. The browser image is pinned by digest; the test runner is the image's version.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+    defaults: { run: { working-directory: crates/assistant/widget } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: npm install --no-save --no-package-lock @playwright/test@1.62.1
+      - run: npx playwright test -c layout.config.mjs --output "$RUNNER_TEMP/layout"
   gitleaks:
     runs-on: ubuntu-latest
     timeout-minutes: 3

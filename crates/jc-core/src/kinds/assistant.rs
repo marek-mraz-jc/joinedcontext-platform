@@ -31,6 +31,8 @@ pub const MAX_PDF_PAGES: u32 = 2_000;
 pub const MAX_PROMPT_LEN: usize = 8_000;
 /// The longest greeting.
 pub const MAX_GREETING_LEN: usize = 500;
+/// The longest name in the chat's header.
+pub const MAX_TITLE_LEN: usize = 60;
 /// The longest a connector's tool call may take.
 pub const MAX_TIMEOUT_SECONDS: u16 = 120;
 /// The most WordPress post types one `website` source may list (T-4154).
@@ -606,6 +608,9 @@ pub struct AssistantScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Theme {
+    /// The body's name in the chat's header, beside its monogram; at most 60 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The accent colour, `#rrggbb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_color: Option<String>,
@@ -1029,6 +1034,15 @@ impl AssistantDeploymentSpec {
                     "theme.greeting",
                     String::new(),
                     "greeting is at most 500 characters",
+                ));
+            }
+            if theme.title.as_deref().is_some_and(|title| {
+                title.trim().is_empty() || title.chars().count() > MAX_TITLE_LEN
+            }) {
+                return Err(name(
+                    "theme.title",
+                    String::new(),
+                    "title is 1 to 60 characters",
                 ));
             }
         }

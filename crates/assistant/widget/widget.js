@@ -27,7 +27,7 @@
       unreachable: "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.",
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
-      ideas: ["Aké údaje tu nájdem?", "Aké údaje sú o doprave?", "Ako si stiahnem údaje?"] },
+      choose: "Vyberte jazyk", moreSources: "Ďalšie zdroje", moreInfo: "Viac", lessInfo: "Menej" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…", sources: "Sources",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -46,7 +46,7 @@
       unreachable: "The assistant cannot reach its model right now. Try again in a minute.",
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
-      ideas: ["What data can I find here?", "What data is there about transport?", "How do I download the data?"] },
+      choose: "Choose your language", moreSources: "More sources", moreInfo: "More", lessInfo: "Less" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…", sources: "Zdroje",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -65,12 +65,26 @@
       unreachable: "Asistent se teď nemůže spojit se svým modelem. Zkuste to za minutu znovu.",
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
-      ideas: ["Jaká data tu najdu?", "Jaká data jsou o dopravě?", "Jak si stáhnu data?"] }
+      choose: "Vyberte jazyk", moreSources: "Další zdroje", moreInfo: "Více", lessInfo: "Méně" }
   };
+  // Each language's name in itself, for the first-open chooser (T-4283).
+  var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
-  var offered = (config.languages || []).filter(function (l) { return WORDS[l]; });
-  var lang = JCRender.language(params.get("lang"), config.languages, WORDS);
+  var framed = window.parent !== window;
+  var page = document.body.classList.contains("jc-page");
+  var offered = JCRender.ordered((config.languages || []).filter(function (l) { return WORDS[l]; }));
+  // The visitor's own choice, kept in this browser's storage; storage may be off, then the
+  // chooser asks again on the next open.
+  var LANG_KEY = "jc-lang:" + config.publicId;
+  function storedLanguage() {
+    try { return JCRender.chosen(localStorage.getItem(LANG_KEY), offered); } catch (e) { return null; }
+  }
+  function storeLanguage(code) {
+    try { localStorage.setItem(LANG_KEY, code); } catch (e) { /* asked again next time */ }
+  }
+  var stored = storedLanguage();
+  var lang = stored || JCRender.language(params.get("lang"), config.languages, WORDS);
   var w = WORDS[lang];
   if (/^#[0-9a-fA-F]{6}$/.test(config.color || "")) {
     document.documentElement.style.setProperty("--accent", config.color);
@@ -96,31 +110,86 @@
     return words(b, key);
   }
 
+  var SVG = "http://www.w3.org/2000/svg";
+
+  function svg(tag, attrs, text) {
+    var node = document.createElementNS(SVG, tag);
+    Object.keys(attrs).forEach(function (k) { node.setAttribute(k, String(attrs[k])); });
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  // The widget's few icons, drawn inline (no font, no image request): 24-unit paths, stroked.
+  var ICONS = {
+    fresh: "M12 5v14M5 12h14",
+    close: "M6 6l12 12M18 6L6 18",
+    chat: "M4 5h16v11H9l-5 4z",
+    send: "M5 12h13M12 5l7 7-7 7",
+    stop: "M7 7h10v10H7z",
+    copy: "M9 9h10v10H9zM5 15V5h10",
+    up: "M7 11v9H4v-9zM7 11l4-7c1.5 0 2.5 1 2 3l-1 3h6c1 0 2 1 1.7 2.2l-1.5 6C18 19.3 17.2 20 16 20H7",
+    down: "M7 13V4H4v9zM7 13l4 7c1.5 0 2.5-1 2-3l-1-3h6c1 0 2-1 1.7-2.2l-1.5-6C18 4.7 17.2 4 16 4H7"
+  };
+  function icon(name) {
+    var drawing = svg("svg", { viewBox: "0 0 24 24", width: 20, height: 20, "aria-hidden": "true", focusable: "false", class: "jc-icon" });
+    drawing.appendChild(svg("path", { d: ICONS[name] }));
+    return drawing;
+  }
+  // An icon button: its name is the word, read out and shown as a tooltip.
+  function iconButton(cls, key, name) {
+    var b = el("button", "jc-icon-button " + cls);
+    b.type = "button";
+    b.appendChild(icon(name));
+    words(b, key, "ariaLabel");
+    words(b, key, "title");
+    return b;
+  }
+
   var head = el("header", "jc-head");
-  var title = words(el("h1"), "assistant");
+  var brand = el("div", "jc-brand");
+  var named = typeof config.title === "string" && config.title.trim() !== "";
+  var avatar = el("span", "jc-avatar", named ? JCRender.monogram(config.title) : "");
+  avatar.setAttribute("aria-hidden", "true");
+  if (!named) avatar.appendChild(icon("chat"));
+  var title = el("h1", "jc-title");
+  if (named) {
+    title.appendChild(el("span", "jc-name", config.title.trim()));
+    title.appendChild(words(el("span", "jc-role"), "assistant"));
+  } else {
+    title.appendChild(words(el("span", "jc-name"), "assistant"));
+  }
+  brand.appendChild(avatar);
+  brand.appendChild(title);
   var actions = el("div", "jc-actions");
-  // The language as one compact menu, so the header keeps to one row on a phone (T-4253).
+  // The languages as a segmented toggle, SK | EN: nothing drops down over the conversation
+  // (T-4283 item 8), and the visitor's choice is kept for the next open.
   var picker = null;
   if (offered.length > 1) {
-    picker = el("select", "jc-langs");
+    picker = el("div", "jc-langs");
+    picker.setAttribute("role", "group");
     words(picker, "language", "ariaLabel");
     offered.forEach(function (code) {
-      var option = el("option", "", code.toUpperCase());
-      option.value = code;
+      var option = el("button", "", code.toUpperCase());
+      option.type = "button";
       option.lang = code;
+      option.value = code;
+      option.setAttribute("aria-label", NATIVE[code] || code);
+      option.addEventListener("click", function () {
+        storeLanguage(code);
+        relabel(code);
+      });
       picker.appendChild(option);
     });
-    picker.addEventListener("change", function () { relabel(picker.value); });
     actions.appendChild(picker);
   }
-  var fresh = button("jc-fresh", "fresh");
+  var fresh = iconButton("jc-fresh", "fresh", "fresh");
   actions.appendChild(fresh);
   if (embedded) {
-    var close = button("jc-close", "close");
+    var close = iconButton("jc-close", "close", "close");
     close.addEventListener("click", closePanel);
     actions.appendChild(close);
   }
-  head.appendChild(title);
+  head.appendChild(brand);
   head.appendChild(actions);
 
   var toggles = [];
@@ -157,18 +226,42 @@
   var label = words(el("label", "jc-sr"), "ask");
   label.htmlFor = "jc-question";
   words(input, "ask", "placeholder");
-  var send = words(el("button", "jc-send"), "send");
+  // One rounded field with its send button inside (T-4283); the box grows with the question.
+  var send = el("button", "jc-icon-button jc-send");
   send.type = "submit";
-  var stop = button("jc-stop", "stop");
+  send.appendChild(icon("send"));
+  words(send, "send", "ariaLabel");
+  words(send, "send", "title");
+  var stop = iconButton("jc-stop", "stop", "stop");
   stop.hidden = true;
+  input.addEventListener("input", grow);
+  function grow() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  }
   form.appendChild(label);
   form.appendChild(input);
   form.appendChild(send);
   form.appendChild(stop);
   var foot = el("footer", "jc-foot");
+  // The disclaimer as one line, the rest behind "More" (T-4283).
+  var notice = el("div", "jc-notice");
   var disclaimer = el("p", "jc-disclaimer");
+  disclaimer.id = "jc-disclaimer";
+  var more = el("button", "jc-more");
+  more.type = "button";
+  more.setAttribute("aria-controls", "jc-disclaimer");
+  more.setAttribute("aria-expanded", "false");
+  more.addEventListener("click", function () {
+    var open = more.getAttribute("aria-expanded") !== "true";
+    more.setAttribute("aria-expanded", String(open));
+    notice.classList.toggle("jc-open", open);
+    more.textContent = open ? w.lessInfo : w.moreInfo;
+  });
+  notice.appendChild(disclaimer);
+  notice.appendChild(more);
   foot.appendChild(form);
-  foot.appendChild(disclaimer);
+  foot.appendChild(notice);
 
   root.appendChild(head);
   if (tools) root.appendChild(tools);
@@ -208,8 +301,8 @@
     intro = el("li", "jc-intro");
     var hello = JCRender.greeting(config.greeting, config.languages, lang, w.hello);
     if (hello) intro.appendChild(el("p", "jc-greeting", hello));
-    // The deployment's questions in this language, else the widget's own (T-4253).
-    var asks = JCRender.suggestions(config.suggestions, lang, w.ideas);
+    // The deployment's own questions in this language, and none it did not set (T-4283).
+    var asks = JCRender.suggestions(config.suggestions, lang, []);
     if (asks.length > 0) {
       var list = el("ul", "jc-suggest");
       list.setAttribute("aria-label", w.suggested);
@@ -231,9 +324,12 @@
     w = WORDS[code];
     document.documentElement.lang = code;
     bound.forEach(function (b) { b[0][b[2]] = w[b[1]]; });
-    if (picker) picker.value = code;
+    if (picker) {
+      Array.prototype.forEach.call(picker.children, function (b) { b.setAttribute("aria-pressed", String(b.value === code)); });
+    }
     disclaimer.textContent = perLanguage(config.disclaimer) || "";
-    disclaimer.hidden = !disclaimer.textContent;
+    notice.hidden = !disclaimer.textContent;
+    more.textContent = more.getAttribute("aria-expanded") === "true" ? w.lessInfo : w.moreInfo;
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
       welcome();
@@ -272,6 +368,11 @@
           if (i > 0) out.appendChild(document.createTextNode(","));
           var to = el("a", "", String(p));
           to.href = "#" + ids + "-" + p;
+          // A marker of a source behind "More sources" opens the list first.
+          to.addEventListener("click", function () {
+            var card = document.getElementById(ids + "-" + p);
+            if (card && card.hidden) reveal(card.parentNode);
+          });
           to.setAttribute("aria-label", w.source + " " + p);
           out.appendChild(to);
         });
@@ -316,13 +417,22 @@
         li.appendChild(heading);
         if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
         source.cards.forEach(function (card) { li.appendChild(showCard(card)); });
+        // After two, the rest wait behind one button (T-4283).
+        if (i >= SHOWN_SOURCES) li.hidden = true;
         list.appendChild(li);
       });
       item.appendChild(list);
+      var rest = grouped.list.length - SHOWN_SOURCES;
+      if (rest > 0) {
+        var open = el("button", "jc-more-sources", w.moreSources + " (" + rest + ")");
+        open.type = "button";
+        open.addEventListener("click", function () { reveal(list); });
+        list.more = open;
+        item.appendChild(open);
+      }
     }
     var tools = el("div", "jc-answer-tools");
-    var copy = el("button", "jc-copy", w.copy);
-    copy.type = "button";
+    var copy = iconButton("jc-copy", "copy", "copy");
     copy.addEventListener("click", function () {
       if (!navigator.clipboard) return;
       navigator.clipboard.writeText(text).then(function () { announce.textContent = w.copied; }, function () {});
@@ -330,6 +440,16 @@
     tools.appendChild(copy);
     if (turn) thumbs(tools, turn);
     item.appendChild(tools);
+  }
+
+  var SHOWN_SOURCES = 2;
+
+  function reveal(list) {
+    Array.prototype.forEach.call(list.children, function (li) { li.hidden = false; });
+    if (list.more) {
+      list.more.remove();
+      list.more = null;
+    }
   }
 
   // What the cited page publishes (T-4155): text, and a link only where render.js checked one.
@@ -357,12 +477,8 @@
   // Thumbs up or down on one answer, a thumbs down asking one optional note (API/05 §1.8).
   function thumbs(tools, turn) {
     var of = conversation;
-    var up = button("jc-thumb", "up");
-    var down = button("jc-thumb", "down");
-    up.textContent = "👍";
-    down.textContent = "👎";
-    up.setAttribute("aria-label", w.up);
-    down.setAttribute("aria-label", w.down);
+    var up = iconButton("jc-thumb", "up", "up");
+    var down = iconButton("jc-thumb", "down", "down");
     function said(sentence) {
       var p = el("p", "jc-thanks", sentence);
       p.setAttribute("role", "status");
@@ -440,15 +556,6 @@
       list.appendChild(li);
     });
     item.appendChild(list);
-  }
-
-  var SVG = "http://www.w3.org/2000/svg";
-
-  function svg(tag, attrs, text) {
-    var node = document.createElementNS(SVG, tag);
-    Object.keys(attrs).forEach(function (k) { node.setAttribute(k, String(attrs[k])); });
-    if (text) node.textContent = text;
-    return node;
   }
 
   // A data round's one numeric column as a small line or bar chart under its table (T-4198). The
@@ -750,5 +857,73 @@
     log.appendChild(paused);
     form.hidden = true;
     fresh.hidden = true;
+  }
+  if (JCRender.asksLanguage({ offered: offered, stored: stored, kept: Boolean(kept && kept.turns.length > 0),
+    enabled: config.enabled, page: page, requested: params.get("lang") })) {
+    choose();
+  }
+
+  // T-4283 item 13: on the first open the panel asks for the language before anything else,
+  // Slovak first and focused; the answer is kept, so later opens go straight to the chat.
+  function choose() {
+    log.textContent = "";
+    intro = null;
+    root.classList.add("jc-choosing");
+    var box = el("li", "jc-intro jc-choose");
+    var heading = el("p", "jc-choose-title");
+    heading.id = "jc-choose-title";
+    heading.textContent = offered.map(function (code) { return WORDS[code].choose; })
+      .filter(function (text, i, all) { return all.indexOf(text) === i; }).join(" / ");
+    var group = el("div", "jc-choose-list");
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-labelledby", heading.id);
+    offered.forEach(function (code) {
+      var b = el("button", "", NATIVE[code] || code.toUpperCase());
+      b.type = "button";
+      b.lang = code;
+      b.addEventListener("click", function () {
+        storeLanguage(code);
+        root.classList.remove("jc-choosing");
+        relabel(code);
+        input.focus();
+      });
+      group.appendChild(b);
+    });
+    box.appendChild(heading);
+    box.appendChild(group);
+    log.appendChild(box);
+    group.firstChild.focus();
+  }
+
+  // T-4283: the page that framed the panel sizes it to this content (Architecture/22 §4), so a
+  // short conversation leaves no empty panel. The message carries one number and nothing else.
+  var reported = 0;
+  var measuring = false;
+  // The conversation's own height, its items and their margins, not the space the panel gives
+  // it (the first item's automatic top margin is that space).
+  function measure() {
+    var style = getComputedStyle(log);
+    var list = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    Array.prototype.forEach.call(log.children, function (item) {
+      list += item.offsetHeight + parseFloat(getComputedStyle(item).marginBottom);
+    });
+    return Math.ceil(head.offsetHeight + (tools ? tools.offsetHeight : 0) + list + foot.offsetHeight);
+  }
+  function report() {
+    measuring = false;
+    var height = measure();
+    if (height === reported) return;
+    reported = height;
+    window.parent.postMessage({ type: "jc-assistant-height", height: height }, "*");
+  }
+  function schedule() {
+    if (measuring) return;
+    measuring = true;
+    requestAnimationFrame(report);
+  }
+  if (framed) {
+    new MutationObserver(schedule).observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
+    window.addEventListener("resize", schedule);
+    schedule();
   }
 })();

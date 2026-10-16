@@ -11,6 +11,6 @@ spec:
   allowedOrigins: [https://www.banskabystrica.sk]
   rateLimit: { requestsPerMinute: 60, perClientPerMinute: 10 }
   budget: { tokensPerDay: 2000000, tokensPerConversation: 40000 }
-  theme: { primaryColor: "#0b5394", greeting: "Dobrý deň, s čím vám pomôžem?" }
+  theme: { title: Banská Bystrica, primaryColor: "#0b5394", greeting: "Dobrý deň, s čím vám pomôžem?" }
   languages: [sk, en]
   sandbox: false
