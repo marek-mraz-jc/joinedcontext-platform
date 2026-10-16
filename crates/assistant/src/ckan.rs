@@ -88,6 +88,8 @@ struct Resource {
     description: Option<String>,
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 /// A CKAN dataset name: 2 to 100 of `a-z`, `0-9`, `-` and `_`. Anything else is not put into a
@@ -118,7 +120,8 @@ fn present(value: &Option<String>) -> Option<&str> {
 }
 
 /// The page a dataset is indexed as: its title, description, publisher, keywords and the name,
-/// format and description of each resource. HTML, so it goes through the same extraction as a
+/// format and description of each resource, with the address of one an Endpoint serves, so a
+/// citation of that Endpoint finds this page (T-4366). HTML, so it goes through the same extraction as a
 /// crawled page; every value is escaped.
 fn dataset_html(dataset: &Dataset) -> String {
     let mut html = String::from("<html><body>");
@@ -153,6 +156,9 @@ fn dataset_html(dataset: &Dataset) -> String {
             }
             if let Some(description) = present(&resource.description) {
                 item.push_str(&format!(": {}", escape(description)));
+            }
+            if let Some(url) = present(&resource.url).filter(|u| u.contains("/api/endpoint/")) {
+                item.push_str(&format!(" ({})", escape(url)));
             }
             html.push_str(&format!("<li>{item}</li>"));
         }
@@ -280,15 +286,19 @@ pub async fn sync_ckan(
         organizations,
     } = catalogue;
     let base = base_of(ckan_url)?;
-    let known: HashMap<String, Option<String>> = {
+    // What each indexed dataset was written from, and the page it became: a dataset is written
+    // again when either changed, so a new page format reaches the unchanged ones too (T-4366).
+    let known: HashMap<String, (Option<String>, Option<String>)> = {
         let mut tx = crate::project_scope(pool, project).await?;
-        let rows: Vec<(String, Option<String>)> =
-            sqlx::query_as("SELECT url, last_modified FROM pages WHERE site_id = $1")
+        let rows: Vec<(String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT url, last_modified, content_hash FROM pages WHERE site_id = $1")
                 .bind(site_id)
                 .fetch_all(&mut *tx)
                 .await?;
         tx.rollback().await?;
-        rows.into_iter().collect()
+        rows.into_iter()
+            .map(|(url, modified, hash)| (url, (modified, hash)))
+            .collect()
     };
 
     let mut report = CkanReport::default();
@@ -311,14 +321,15 @@ pub async fn sync_ckan(
             if !listed.insert(url.clone()) {
                 continue;
             }
-            if known
-                .get(&url)
-                .is_some_and(|seen| seen.is_some() && *seen == dataset.metadata_modified)
-            {
-                continue;
-            }
             let html = dataset_html(&dataset);
             let hash = hex::encode(Sha256::digest(html.as_bytes()));
+            if known.get(&url).is_some_and(|(modified, held)| {
+                modified.is_some()
+                    && *modified == dataset.metadata_modified
+                    && held.as_deref() == Some(hash.as_str())
+            }) {
+                continue;
+            }
             let mut tx = crate::project_scope(pool, project).await?;
             let page_id: i64 = sqlx::query_scalar(
                 "INSERT INTO pages (site_id, project, url, depth, status, content_hash, language, included, last_modified, fetched_at) \
@@ -376,8 +387,9 @@ mod tests {
             "organization": {"title": "Environment"},
             "tags": [{"display_name": "air"}, {"name": "no2"}, {}],
             "resources": [
-                {"name": "Readings", "format": "CSV", "description": "One row per hour"},
-                {"format": "API"}
+                {"name": "Readings", "format": "CSV", "description": "One row per hour",
+                 "url": "https://files.example.org/readings.csv"},
+                {"format": "API", "url": "https://dev.example.org/api/endpoint/od-air/ngsi-ld/v1/entities?type=A&x=<y>"}
             ],
             "extra_field_ckan_adds": 1
         }))
@@ -387,8 +399,12 @@ mod tests {
         assert!(html.contains("<p>Hourly readings.</p><p>From five stations &amp; a van.</p>"));
         assert!(html.contains("<p>Publisher: Environment</p>"));
         assert!(html.contains("<p>Keywords: air, no2</p>"));
+        // A plain file's address is noise to a reader; an Endpoint's lets its citation find this
+        // page (T-4366), escaped like every other value.
         assert!(html.contains("<li>Readings (CSV): One row per hour</li>"));
-        assert!(html.contains("<li>Unnamed resource (API)</li>"));
+        assert!(html.contains(
+            "<li>Unnamed resource (API) (https://dev.example.org/api/endpoint/od-air/ngsi-ld/v1/entities?type=A&amp;x=&lt;y&gt;)</li>"
+        ));
     }
 
     #[test]

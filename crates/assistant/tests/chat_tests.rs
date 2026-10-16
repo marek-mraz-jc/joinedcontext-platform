@@ -2023,8 +2023,19 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         .filter(|(n, _)| n == "delta")
         .filter_map(|(_, d)| d["text"].as_str())
         .collect();
+    // The streamed text is the model's; the answer shown drops [7], which names no source
+    // (T-4366), and the drop is counted in the answer's timings.
     let answer = events[12].1["text"].as_str().expect("an answer");
-    assert_eq!(answer, deltas.trim());
+    assert_eq!(answer, deltas.trim().replace(" [7]", ""));
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let dangling: Vec<i32> = sqlx::query_scalar("SELECT dangling_markers FROM answer_timings")
+        .fetch_all(&mut *tx)
+        .await
+        .expect("timings");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(dangling, [1]);
 
     let calls = model_calls(&w.proxy).await;
     assert_eq!(calls.len(), 2);
@@ -2218,6 +2229,7 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
             "answer_ms",
             "at",
             "cached",
+            "dangling_markers",
             "deployment",
             "first_token_ms",
             "judge_ms",
