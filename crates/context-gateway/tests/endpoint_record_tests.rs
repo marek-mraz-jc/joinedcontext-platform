@@ -58,8 +58,8 @@ fn air_quality() -> Model {
             "AirQualityObserved".to_owned(),
             "InternalIncident".to_owned(),
         ],
-        json_schema: Some(compiled_schema()),
-        context: Some(json!({ "@context": { "pm10": "https://bb.example.sk/pm10" } })),
+        json_schema: Some(compiled_schema().into()),
+        context: Some(json!({ "@context": { "pm10": "https://bb.example.sk/pm10" } }).into()),
     }
 }
 

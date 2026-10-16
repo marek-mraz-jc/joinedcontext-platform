@@ -145,17 +145,20 @@ fn policy(operations: &str, types: &[&str]) -> PolicySpec {
 /// The writer writes Users and reads the `readable` classes.
 fn endpoint(readable: &[&str]) -> Endpoint {
     Endpoint {
-        declared_types: Some(DeclaredTypes {
-            model: "bb-skoly".into(),
-            classes: ["User", "School", "Course"]
-                .iter()
-                .map(|class| (*class).to_owned())
-                .collect(),
-            units: Default::default(),
-            relationships: rules(),
-            quality: Vec::new(),
-            schema: None,
-        }),
+        declared_types: Some(
+            DeclaredTypes {
+                model: "bb-skoly".into(),
+                classes: ["User", "School", "Course"]
+                    .iter()
+                    .map(|class| (*class).to_owned())
+                    .collect(),
+                units: Default::default(),
+                relationships: rules(),
+                quality: Vec::new(),
+                schema: None,
+            }
+            .into(),
+        ),
         catalog: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),

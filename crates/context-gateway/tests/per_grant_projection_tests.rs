@@ -365,10 +365,13 @@ fn a_models_type_iri_admits_an_entity_to_its_own_grant_only() {
             major: 1,
             classes: vec!["Depot".to_owned(), "Vehicle".to_owned()],
             json_schema: None,
-            context: Some(json!({ "@context": {
+            context: Some(
+                json!({ "@context": {
                 "Depot": "https://hel.fi/ns/Depot",
                 "Vehicle": "https://hel.fi/ns/Vehicle"
-            } })),
+            } })
+                .into(),
+            ),
         }],
         policies: vec![typed("Depot", "name"), typed("Vehicle", "name, odometer")],
     };

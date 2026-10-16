@@ -65,7 +65,7 @@ fn air_quality() -> Model {
                     "properties": { "severity": { "type": "string" } },
                 },
             },
-        })),
+        }).into()),
         context: Some(json!({
             "@context": {
                 "AirQualityObserved": "https://bb.example.sk/schema/air-quality/AirQualityObserved",
@@ -73,7 +73,7 @@ fn air_quality() -> Model {
                 "pm10": "https://bb.example.sk/schema/air-quality/pm10",
                 "internalNote": "https://bb.example.sk/schema/air-quality/internalNote",
             }
-        })),
+        }).into()),
     }
 }
 

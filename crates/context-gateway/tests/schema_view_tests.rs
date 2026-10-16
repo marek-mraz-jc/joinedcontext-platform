@@ -113,9 +113,12 @@ fn endpoint() -> Endpoint {
             version: "1.4.0".to_owned(),
             major: 1,
             classes: vec!["AirQualityObserved".to_owned()],
-            json_schema: Some(json!({ "$defs": { "AirQualityObserved": {
-                "type": "object", "properties": { "pm10": { "type": "number" } } } } })),
-            context: Some(json!({ "@context": { "pm10": "https://bb.example.sk/pm10" } })),
+            json_schema: Some(
+                json!({ "$defs": { "AirQualityObserved": {
+                "type": "object", "properties": { "pm10": { "type": "number" } } } } })
+                .into(),
+            ),
+            context: Some(json!({ "@context": { "pm10": "https://bb.example.sk/pm10" } }).into()),
         }],
         view_mapping: None,
         catalog: None,

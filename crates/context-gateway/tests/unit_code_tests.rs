@@ -78,14 +78,17 @@ fn policy() -> PolicySpec {
 
 fn endpoint(missing: MissingUnitCode) -> Endpoint {
     Endpoint {
-        declared_types: Some(DeclaredTypes {
-            model: "bb-air-quality".into(),
-            classes: ["AirQualityObserved".to_owned()].into(),
-            units: UnitRules::from_schema(&schema(), missing),
-            relationships: Default::default(),
-            quality: Vec::new(),
-            schema: None,
-        }),
+        declared_types: Some(
+            DeclaredTypes {
+                model: "bb-air-quality".into(),
+                classes: ["AirQualityObserved".to_owned()].into(),
+                units: UnitRules::from_schema(&schema(), missing),
+                relationships: Default::default(),
+                quality: Vec::new(),
+                schema: None,
+            }
+            .into(),
+        ),
         catalog: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
