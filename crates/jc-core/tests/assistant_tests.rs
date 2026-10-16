@@ -836,3 +836,36 @@ fn routes_and_feedback_default_and_are_held_to_what_they_answer_from() {
     assert!(refused(deployment(&with("  answer: { routes: all }\n"))).contains("unknown variant"));
     assert!(refused(deployment(&with("  answer: { mode: rag }\n"))).contains("unknown field"));
 }
+
+/// T-4294: the data loop's bounds default to 10 calls and 20 seconds, and a deployment may raise
+/// them to 25 and 60, never to 0 or past.
+#[test]
+fn the_data_loop_bounds_default_and_stay_within_their_ranges() {
+    let parsed = deployment(DEPLOYMENT).expect("documented");
+    assert_eq!(
+        (parsed.spec.data_steps(), parsed.spec.data_seconds()),
+        (10, 20)
+    );
+    let with =
+        |extra: &str| deployment_with("  sandbox: false\n", &format!("  sandbox: false\n{extra}"));
+    let raised = deployment(&with(
+        "  answer: { maxDataSteps: 25, maxDataSeconds: 60 }\n",
+    ))
+    .expect("the most");
+    assert_eq!(
+        (raised.spec.data_steps(), raised.spec.data_seconds()),
+        (25, 60)
+    );
+    for (extra, field) in [
+        ("  answer: { maxDataSteps: 0 }\n", "answer.maxDataSteps"),
+        ("  answer: { maxDataSteps: 26 }\n", "answer.maxDataSteps"),
+        ("  answer: { maxDataSeconds: 0 }\n", "answer.maxDataSeconds"),
+        (
+            "  answer: { maxDataSeconds: 61 }\n",
+            "answer.maxDataSeconds",
+        ),
+    ] {
+        assert_eq!(refused(deployment(&with(extra))), field, "{extra}");
+    }
+    assert!(refused(deployment(&with("  answer: { maxDataSteps: -1 }\n"))).contains("invalid"));
+}
