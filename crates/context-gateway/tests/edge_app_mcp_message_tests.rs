@@ -373,3 +373,94 @@ async fn nothing_but_post_reaches_the_instance() {
         );
     }
 }
+
+/// A broker that reads the whole body, as the real one does, and lists one tool only for a
+/// message it could parse: a hop whose `Content-Length` promises more than it sends never ends.
+async fn reading_broker() -> String {
+    let stub = axum::Router::new().fallback(|body: axum::body::Bytes| async move {
+        let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        axum::Json(json!({ "jsonrpc": "2.0", "id": message["id"], "result": { "tools": [] } }))
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, stub).await;
+    });
+    url
+}
+
+/// T-4337: the gateway re-serialises the message compactly, so the client's own
+/// `Content-Length` (one space after a comma is enough: Python's `json.dumps`) promised the
+/// broker bytes that never came, and the call hung until the client gave up. Every spelling of
+/// the same message answers, at once.
+#[tokio::test]
+async fn a_spaced_or_pretty_printed_message_answers_like_a_compact_one() {
+    let realm = common::Realm::new();
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new(reading_broker().await),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([endpoint(
+            OPEN,
+            Audience::Public,
+            vec![Representation::NgsiLd, Representation::Mcp],
+        )])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some(HOST.to_owned()),
+        ),
+    ));
+    for method in ["initialize", "tools/list"] {
+        let compact = format!(r#"{{"jsonrpc":"2.0","id":7,"method":"{method}"}}"#);
+        let spaced = format!(r#"{{"jsonrpc": "2.0", "id": 7, "method": "{method}"}}"#);
+        let pretty =
+            format!("{{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 7,\n  \"method\": \"{method}\"\n}}\n");
+        for body in [compact, spaced, pretty] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/api/endpoint/{OPEN}/mcp"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::CONTENT_LENGTH, body.len())
+                .body(Body::from(body.clone()))
+                .expect("a request");
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                app.clone().oneshot(request),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{method} {body:?} hung"))
+            .expect("the gateway answers");
+            assert_eq!(response.status(), StatusCode::OK, "{body:?}");
+            let answer: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .expect("a readable body"),
+            )
+            .expect("a JSON-RPC answer");
+            assert_eq!(answer["id"], json!(7), "{method} {body:?}: {answer}");
+        }
+    }
+    // A body that is not JSON is answered at once too, before any hop.
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/endpoint/{OPEN}/mcp"))
+        .header(axum::http::header::CONTENT_LENGTH, 9)
+        .body(Body::from("not json "))
+        .expect("a request");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(1), app.oneshot(request))
+        .await
+        .expect("a parse error is answered within a second")
+        .expect("the gateway answers");
+    let answer: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("a readable body"),
+    )
+    .expect("a JSON-RPC answer");
+    assert_eq!(answer["error"]["code"], json!(-32700));
+}
