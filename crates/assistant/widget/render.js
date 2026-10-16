@@ -287,8 +287,30 @@ var JCRender = (function () {
    * widget's greeting in the visitor's language.
    */
   function greeting(own, languages, lang, fallback) {
+    // One per language (T-4365): this language's, else the widget's own.
+    if (own && typeof own === "object") return Array.isArray(own) ? fallback : entry(own, lang) || fallback;
     if (!own) return "";
     return !Array.isArray(languages) || languages.length === 0 || languages[0] === lang ? own : fallback;
+  }
+
+  function entry(map, key) {
+    var text = Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null;
+    return typeof text === "string" && text.trim() ? text.trim() : "";
+  }
+
+  /**
+   * The header's title (T-4365): the one string, or of a map per language this language's, else
+   * the first of `languages`'s, else any; "" when there is none.
+   */
+  function title(own, languages, lang) {
+    if (typeof own === "string") return own.trim();
+    if (!own || typeof own !== "object" || Array.isArray(own)) return "";
+    var first = Array.isArray(languages) ? languages[0] : undefined;
+    var keys = [lang, first].concat(Object.keys(own).sort());
+    for (var i = 0; i < keys.length; i++) {
+      if (entry(own, keys[i])) return entry(own, keys[i]);
+    }
+    return "";
   }
 
   var TIME = /^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/;
@@ -570,7 +592,7 @@ var JCRender = (function () {
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting,
+    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
     suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry
   };
 })();

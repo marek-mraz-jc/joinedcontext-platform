@@ -912,3 +912,58 @@ fn the_data_loop_bounds_default_and_stay_within_their_ranges() {
     }
     assert!(refused(deployment(&with("  answer: { maxDataSteps: -1 }\n"))).contains("invalid"));
 }
+
+/// T-4365: the title and the greeting are one string or one per language of `languages`.
+#[test]
+fn the_title_and_greeting_are_one_string_or_one_per_language() {
+    use jc_core::kinds::Localised;
+    const THEME: &str =
+        "theme: { title: Banská Bystrica, primaryColor: \"#0b5394\", greeting: \"Dobrý deň, s čím vám pomôžem?\" }";
+    let per_language = deployment(&deployment_with(
+        THEME,
+        "theme: { title: { sk: Banská Bystrica, en: Banská Bystrica city }, greeting: { sk: \"Dobrý deň!\", en: \"Hello!\" } }",
+    ))
+    .expect("a greeting per language");
+    let theme = per_language.spec.theme.expect("the theme");
+    assert_eq!(
+        theme.greeting.expect("greeting").texts(),
+        vec![(Some("en"), "Hello!"), (Some("sk"), "Dobrý deň!")]
+    );
+    assert!(matches!(theme.title, Some(Localised::ByLanguage(_))));
+    let one = deployment(DEPLOYMENT)
+        .expect("one string")
+        .spec
+        .theme
+        .expect("theme");
+    assert_eq!(one.title, Some("Banská Bystrica".into()));
+    assert!(
+        deployment(&deployment_with(THEME, "theme: { greeting: \"\" }")).is_ok(),
+        "no greeting"
+    );
+
+    let long = "a".repeat(501);
+    for (to, field) in [
+        (
+            "theme: { greeting: { sk: Ahoj, fi: Hei } }".to_owned(),
+            "theme.greeting",
+        ),
+        (
+            "theme: { greeting: { sk: \"  \" } }".to_owned(),
+            "theme.greeting",
+        ),
+        ("theme: { greeting: {} }".to_owned(), "theme.greeting"),
+        (
+            format!("theme: {{ greeting: {{ en: {long} }} }}"),
+            "theme.greeting",
+        ),
+        (
+            "theme: { title: { sk: Mesto, de: Stadt } }".to_owned(),
+            "theme.title",
+        ),
+        ("theme: { title: { en: \" \" } }".to_owned(), "theme.title"),
+    ] {
+        let result = deployment(&deployment_with(THEME, &to));
+        assert_eq!(refused(result), field, "{to}");
+    }
+    assert!(deployment(&deployment_with(THEME, "theme: { title: [Mesto] }")).is_err());
+}

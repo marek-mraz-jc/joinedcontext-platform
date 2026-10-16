@@ -151,14 +151,21 @@
 
   var head = el("header", "jc-head");
   var brand = el("div", "jc-brand");
-  var named = typeof config.title === "string" && config.title.trim() !== "";
-  var avatar = el("span", "jc-avatar", named ? JCRender.monogram(config.title) : "");
+  var named = JCRender.title(config.title, config.languages, lang) !== "";
+  var avatar = el("span", "jc-avatar");
   avatar.setAttribute("aria-hidden", "true");
   if (!named) avatar.appendChild(icon("chat"));
   var title = el("h1", "jc-title");
+  var name = el("span", "jc-name");
+  // The title in the chat's language, again on every language switch (T-4365).
+  function retitle() {
+    var text = JCRender.title(config.title, config.languages, lang);
+    avatar.textContent = JCRender.monogram(text);
+    name.textContent = text;
+    name.title = text;
+  }
   if (named) {
-    var name = el("span", "jc-name", config.title.trim());
-    name.title = config.title.trim();
+    retitle();
     title.appendChild(name);
     title.appendChild(words(el("span", "jc-role"), "assistant"));
   } else {
@@ -333,6 +340,7 @@
     if (picker) {
       Array.prototype.forEach.call(picker.children, function (b) { b.setAttribute("aria-pressed", String(b.value === code)); });
     }
+    if (named) retitle();
     disclaimer.textContent = perLanguage(config.disclaimer) || "";
     notice.hidden = !disclaimer.textContent;
     more.textContent = more.getAttribute("aria-expanded") === "true" ? w.lessInfo : w.moreInfo;

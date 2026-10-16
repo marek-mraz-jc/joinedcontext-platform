@@ -428,6 +428,22 @@
       ],
       "type": "object"
     },
+    "Localised": {
+      "anyOf": [
+        {
+          "description": "One string, in the deployment's first language.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "A language of `languages` to its string.",
+          "type": "object"
+        }
+      ],
+      "description": "A text the chat shows: one string in the deployment's first language, or one per language of `languages` (T-4365)."
+    },
     "ModelChoice": {
       "additionalProperties": false,
       "description": "The models a deployment asks `jc-agent-proxy` for; each [`DEFAULT_MODEL`] when absent.",
@@ -715,11 +731,15 @@
       "description": "How the chat looks where it is placed.",
       "properties": {
         "greeting": {
-          "description": "The first line the chat shows, at most 500 characters.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Localised"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The first line the chat shows, at most 500 characters."
         },
         "primaryColor": {
           "description": "The accent colour, `#rrggbb`.",
@@ -729,11 +749,15 @@
           ]
         },
         "title": {
-          "description": "The body's name in the chat's header, beside its monogram; at most 60 characters.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Localised"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The body's name in the chat's header, beside its monogram; at most 60 characters."
         }
       },
       "type": "object"

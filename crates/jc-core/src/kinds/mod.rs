@@ -46,8 +46,8 @@ pub use app::{
 };
 pub use assistant::{
     AnswerSpec, AssistantDeploymentSpec, AssistantScope, Budget, Channel, ChatWidget, Connector,
-    KnowledgeSourceSpec, ModelChoice, PdfPolicy, PdfPolicyKind, RateLimit, Routes, SourceType,
-    Theme, UploadLimits, Visibility, WidgetLanguage,
+    KnowledgeSourceSpec, Localised, ModelChoice, PdfPolicy, PdfPolicyKind, RateLimit, Routes,
+    SourceType, Theme, UploadLimits, Visibility, WidgetLanguage,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use catalog::{
