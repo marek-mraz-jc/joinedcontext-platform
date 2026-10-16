@@ -10,11 +10,11 @@
   var config = JSON.parse(root.getAttribute("data-config") || "{}");
   var WORDS = {
     sk: { ask: "Napíšte otázku", send: "Odoslať", stop: "Zastaviť", stopped: "Odpoveď ste zastavili.",
-      tools: "Živé dáta, ktoré smie asistent čítať", thinking: "Hľadám…", sources: "Zdroje",
+      tools: "Živé dáta, ktoré smie asistent čítať", thinking: "Hľadám…",
       script: "Skript, ktorý asistent spustil", failed: "Odpoveď sa nepodarilo načítať. Skúste to znova.",
       offline: "Nepodarilo sa spojiť so službou. Skontrolujte pripojenie a skúste to znova.",
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
-      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent",
+      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
@@ -26,13 +26,13 @@
       unreachable: "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.",
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
-      choose: "Vyberte jazyk", moreSources: "Ďalšie zdroje", fewerSources: "Menej zdrojov", moreInfo: "Viac", lessInfo: "Menej" },
+      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
-      tools: "Live data the assistant may read", thinking: "Looking it up…", sources: "Sources",
+      tools: "Live data the assistant may read", thinking: "Looking it up…",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
       offline: "The service could not be reached. Check your connection and try again.",
       busy: "You asked many questions at once. Wait a moment and try again.",
-      paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant",
+      paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
@@ -44,13 +44,13 @@
       unreachable: "The assistant cannot reach its model right now. Try again in a minute.",
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
-      choose: "Choose your language", moreSources: "More sources", fewerSources: "Fewer sources", moreInfo: "More", lessInfo: "Less" },
+      choose: "Choose your language", moreInfo: "More", lessInfo: "Less" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
-      tools: "Živá data, která smí asistent číst", thinking: "Hledám…", sources: "Zdroje",
+      tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
       offline: "Službu se nepodařilo zastihnout. Zkontrolujte připojení a zkuste to znovu.",
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
-      paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent",
+      paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
@@ -62,7 +62,7 @@
       unreachable: "Asistent se teď nemůže spojit se svým modelem. Zkuste to za minutu znovu.",
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
-      choose: "Vyberte jazyk", moreSources: "Další zdroje", fewerSources: "Méně zdrojů", moreInfo: "Více", lessInfo: "Méně" }
+      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -105,7 +105,7 @@
   var bound = [];
   function words(node, key, prop) {
     bound.push([node, key, prop || "textContent"]);
-    node[prop || "textContent"] = w[key];
+    node[prop || "textContent"] = typeof key === "function" ? key() : w[key];
     return node;
   }
   function button(cls, key) {
@@ -329,7 +329,7 @@
     lang = code;
     w = WORDS[code];
     document.documentElement.lang = code;
-    bound.forEach(function (b) { b[0][b[2]] = w[b[1]]; });
+    bound.forEach(function (b) { b[0][b[2]] = typeof b[1] === "function" ? b[1]() : w[b[1]]; });
     if (picker) {
       Array.prototype.forEach.call(picker.children, function (b) { b.setAttribute("aria-pressed", String(b.value === code)); });
     }
@@ -390,10 +390,10 @@
           if (i > 0) out.appendChild(document.createTextNode(","));
           var to = el("a", "", String(p));
           to.href = "#" + ids + "-" + p;
-          // A marker of a source behind "More sources" opens the list first.
+          // A marker opens the closed source list first (T-4364).
           to.addEventListener("click", function () {
             var card = document.getElementById(ids + "-" + p);
-            if (card && card.hidden) reveal(card.parentNode, true);
+            if (card && card.parentNode.hidden) reveal(card.parentNode, true);
           });
           to.setAttribute("aria-label", w.source + " " + p);
           out.appendChild(to);
@@ -425,43 +425,17 @@
       item.appendChild(body);
     }
     announce.textContent = body.textContent;
-    if (grouped.list.length > 0) {
-      var caption = words(el("p", "jc-sources-title"), "sources");
-      caption.id = ids + "-sources";
-      item.appendChild(caption);
-      var list = el("ul", "jc-cards");
-      list.setAttribute("aria-labelledby", caption.id);
-      grouped.list.forEach(function (source, i) {
-        var li = el("li", "jc-card");
-        li.id = ids + "-" + (i + 1);
-        var name = (source.live ? w.live + ": " : "") + JCRender.label(source);
-        // Only an http(s) address is a link: an uploaded file cites `upload:{source}/{name}` (T-4184).
-        var href = JCRender.safeUrl(source.url);
-        var heading = href ? link(href, name) : el("span", "", name);
-        li.appendChild(el("span", "jc-card-n", String(i + 1)));
-        li.appendChild(heading);
-        if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
-        source.cards.forEach(function (card) { li.appendChild(showCard(card)); });
-        // After two, the rest wait behind one button (T-4283).
-        if (i >= SHOWN_SOURCES) li.hidden = true;
-        list.appendChild(li);
-      });
-      item.appendChild(list);
-      var rest = grouped.list.length - SHOWN_SOURCES;
-      if (rest > 0) {
-        var open = el("button", "jc-more-sources");
-        open.type = "button";
-        open.setAttribute("aria-expanded", "false");
-        open.addEventListener("click", function () { reveal(list, open.getAttribute("aria-expanded") !== "true"); });
-        list.more = open;
-        list.rest = rest;
-        reveal(list, false);
-        item.appendChild(open);
-      }
-    }
+    // One row under the answer (T-4364): who and when, copy, thumbs, then the sources' badges and
+    // count, which open the cards under the row.
     var tools = el("div", "jc-answer-tools");
+    var by = el("span", "jc-by");
+    by.appendChild(words(el("span"), "bot"));
     var time = when(at === undefined ? Date.now() : at);
-    if (time) tools.appendChild(time);
+    if (time) {
+      by.appendChild(document.createTextNode(" • "));
+      by.appendChild(time);
+    }
+    tools.appendChild(by);
     var copy = iconButton("jc-copy", "copy", "copy");
     copy.addEventListener("click", function () {
       if (!navigator.clipboard) return;
@@ -470,16 +444,49 @@
     tools.appendChild(copy);
     if (turn && config.feedback !== false) thumbs(tools, turn);
     item.appendChild(tools);
+    if (grouped.list.length === 0) return;
+    var open = el("button", "jc-sources");
+    open.type = "button";
+    open.id = ids + "-toggle";
+    var stack = el("span", "jc-badges");
+    stack.setAttribute("aria-hidden", "true");
+    JCRender.badges(grouped.list).forEach(function (badge) {
+      var b = el("span", "jc-badge", badge.letter);
+      b.style.setProperty("--badge", "hsl(" + badge.hue + " 45% 38%)");
+      stack.appendChild(b);
+    });
+    open.appendChild(stack);
+    var n = grouped.list.length;
+    open.appendChild(words(el("span", "jc-count"), function () { return JCRender.sourceCount(n, lang); }));
+    open.appendChild(el("span", "jc-chevron")).setAttribute("aria-hidden", "true");
+    tools.appendChild(open);
+    var list = el("ul", "jc-cards");
+    list.id = ids;
+    list.setAttribute("aria-labelledby", open.id);
+    open.setAttribute("aria-controls", list.id);
+    grouped.list.forEach(function (source, i) {
+      var li = el("li", "jc-card");
+      li.id = ids + "-" + (i + 1);
+      var name = (source.live ? w.live + ": " : "") + JCRender.label(source);
+      // Only an http(s) address is a link: an uploaded file cites `upload:{source}/{name}` (T-4184).
+      var href = JCRender.safeUrl(source.url);
+      var heading = href ? link(href, name) : el("span", "", name);
+      li.appendChild(el("span", "jc-card-n", String(i + 1)));
+      li.appendChild(heading);
+      if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
+      source.cards.forEach(function (card) { li.appendChild(showCard(card)); });
+      list.appendChild(li);
+    });
+    list.toggle = open;
+    open.addEventListener("click", function () { reveal(list, list.hidden); });
+    reveal(list, false);
+    tools.parentNode.insertBefore(list, tools.nextSibling);
   }
 
-  var SHOWN_SOURCES = 2;
-
-  // The sources after the first two open and close again behind one button (T-4283).
+  // The source cards stay closed under the footer row until its count opens them (T-4364).
   function reveal(list, open) {
-    Array.prototype.forEach.call(list.children, function (li, i) { li.hidden = !open && i >= SHOWN_SOURCES; });
-    if (!list.more) return;
-    list.more.setAttribute("aria-expanded", String(open));
-    list.more.textContent = open ? w.fewerSources : w.moreSources + " (" + list.rest + ")";
+    list.hidden = !open;
+    list.toggle.setAttribute("aria-expanded", String(open));
   }
 
   // What the cited page publishes (T-4155): text, and a link only where render.js checked one.
