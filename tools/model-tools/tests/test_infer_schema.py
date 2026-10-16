@@ -369,9 +369,9 @@ def test_every_unit_the_inference_emits_is_a_code_of_the_list_with_its_qudt_anch
     UN/CEFACT code alone resolves to nothing, so each carries its QUDT unit and quantity kind.
     `hPa` was once written down as `HPA`, which Rec 20 calls a hectolitre of pure alcohol."""
     from import_sdm import UNIT_SYNONYMS
-    from infer_schema import CODE_LIST, UNIT_PREFIXES, UNITS, unit_block
+    from infer_schema import UNIT_PREFIXES, UNITS, code_list, unit_block
 
-    assert UNITS["hpa"] == "A97" and CODE_LIST["A97"]["name"] == "hectopascal"
+    assert UNITS["hpa"] == "A97" and code_list()["A97"]["name"] == "hectopascal"
     for code in set(UNITS.values()) | set(UNIT_SYNONYMS):
         block = unit_block(code)
         assert block["exact_mappings"][0] == f"ucefact:{code}", code

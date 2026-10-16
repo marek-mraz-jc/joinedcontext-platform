@@ -37,7 +37,15 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import yaml
 
-from common import MODEL_IMPORT, RelationshipError, as_path, generator_version, imported, model_imports
+from common import (
+    MODEL_IMPORT,
+    RelationshipError,
+    as_path,
+    generator_version,
+    imported,
+    model_imports,
+    one_parse,
+)
 from gen_broker_schema import compile_broker_schema
 from gen_context import compile_context
 from gen_docs import compile_docs
@@ -55,6 +63,7 @@ from import_sdm import (
     _get,
     convert,
     fetch,
+    read_capped,
     resolve_commit,
     split_identifier,
 )
@@ -71,6 +80,10 @@ MAX_INFER_BODY_BYTES = MAX_SAMPLE_BYTES * 4 // 3 + 4096
 #: Largest catalogue document accepted from upstream. The index is a few megabytes and grows
 #: slowly; a response far past that is a mirror gone wrong, not a catalogue.
 MAX_CATALOGUE_BYTES = 16 * 1024 * 1024
+#: How many requests parse, generate or fetch at once (T-4357). One connection is still one
+#: thread, but past this they wait for a slot instead of each holding a parsed model: memory is
+#: bounded by four generations, whatever the Portal sends.
+WORK_SLOTS = threading.BoundedSemaphore(4)
 
 #: The catalogue index, and the per-model titles and descriptions the wizard searches. Both
 #: are inside the Smart Data Models organisation, so `_get`'s allowlist covers them (DM-10).
@@ -124,11 +137,9 @@ def artifacts(
 
     failures: dict[str, list[str]] = {}
     broken: list[str] = []
-    # Spooled once, so a parse error reads the same from all four and is reported once, and so
-    # the temporary path never reaches the person editing the model.
-    # ponytail: each generator still parses the file again, about a second for the four of
-    # them. Share one SchemaView across them if the preview ever has to be faster.
-    with as_path(source) as path:
+    # Spooled once, so a parse error reads the same from all of them and is reported once, and so
+    # the temporary path never reaches the person editing the model; parsed once (T-4357).
+    with as_path(source) as path, one_parse():
         for field, render in RENDERERS:
             if field in rendered:
                 # An import carries the catalogue's own example down with it, and real data
@@ -357,10 +368,7 @@ def _document(url: str) -> Any:
     `ast.literal_eval`, which evaluates literals and nothing else — never `eval`, on a
     document fetched over the network.
     """
-    response = _get(url)
-    if len(response.content) > MAX_CATALOGUE_BYTES:
-        raise ImportError_(f"{url} answered {len(response.content)} bytes, past the cap")
-    text = response.content.decode("utf-8")
+    text = read_capped(url, MAX_CATALOGUE_BYTES).decode("utf-8")
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -488,17 +496,20 @@ def application(environ: dict[str, Any], start_response: Callable[..., Any]) -> 
     method = environ.get("REQUEST_METHOD", "GET")
     path = "/" + environ.get("PATH_INFO", "").strip("/")
 
+    work: dict[tuple[str, str], Callable[[], tuple[int, Any]]] = {
+        ("GET", "/catalog"): lambda: catalog(_query(environ)),
+        ("POST", "/generate"): lambda: generate(_read_body(environ)),
+        ("POST", "/import-sdm"): lambda: import_sdm(_read_body(environ)),
+        ("POST", "/infer-schema"): lambda: infer_schema(_read_body(environ, MAX_INFER_BODY_BYTES)),
+    }
     try:
         if method == "GET" and path == "/healthz":
+            # Never behind the work: the kubelet's probe gives it 3 s.
             status, payload = healthz()
-        elif method == "GET" and path == "/catalog":
-            status, payload = catalog(_query(environ))
-        elif method == "POST" and path == "/generate":
-            status, payload = generate(_read_body(environ))
-        elif method == "POST" and path == "/import-sdm":
-            status, payload = import_sdm(_read_body(environ))
-        elif method == "POST" and path == "/infer-schema":
-            status, payload = infer_schema(_read_body(environ, MAX_INFER_BODY_BYTES))
+        elif (method, path) in work:
+            # The body is read inside the slot too, so waiting requests hold no model.
+            with WORK_SLOTS:
+                status, payload = work[(method, path)]()
         else:
             status, payload = 404, {"errors": [f"{method} {path} is not a Model Tools route"]}
     except ValueError as err:

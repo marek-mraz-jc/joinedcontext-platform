@@ -123,12 +123,38 @@ def _get(url: str) -> requests.Response:
     allowed prefix and still leaves the organisation once a server normalises it, so a URL
     carrying a traversal is refused as well.
     """
-    if not url.startswith(ALLOWED_PREFIXES) or ".." in url:
-        raise ImportError_(f"refusing to fetch outside the Smart Data Models allowlist: {url}")
+    _allowed(url)
     response = requests.get(url, timeout=REQUEST_TIMEOUT)
     if response.status_code != 200:
         raise ImportError_(f"{url} answered {response.status_code}")
     return response
+
+
+def _allowed(url: str) -> None:
+    """Refuse a URL outside the Smart Data Models organisation, see `_get`."""
+    if not url.startswith(ALLOWED_PREFIXES) or ".." in url:
+        raise ImportError_(f"refusing to fetch outside the Smart Data Models allowlist: {url}")
+
+
+def read_capped(url: str, max_bytes: int) -> bytes:
+    """The body of one allowed GET, refused once it passes `max_bytes` (T-4357).
+
+    The body is streamed, so a mirror answering gigabytes costs at most `max_bytes` and one
+    chunk before it is refused, never the whole answer in memory first.
+    """
+    _allowed(url)
+    with requests.get(url, timeout=REQUEST_TIMEOUT, stream=True) as response:
+        if response.status_code != 200:
+            raise ImportError_(f"{url} answered {response.status_code}")
+        declared = response.headers.get("Content-Length", "")
+        if declared.isdigit() and int(declared) > max_bytes:
+            raise ImportError_(f"{url} answered {declared} bytes, past the cap of {max_bytes}")
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            body += chunk
+            if len(body) > max_bytes:
+                raise ImportError_(f"{url} answered more than {max_bytes} bytes, past the cap")
+        return bytes(body)
 
 
 def resolve_commit(subject: str, ref: str = "master") -> str:
@@ -285,7 +311,7 @@ FORMAT_RANGES = {"date-time": "datetime", "date": "date", "time": "time", "uri":
 #: Smart Data Models has no unit field: the unit is a clause of the description, written by hand
 #: and spelled differently every time — `Units:'Celsius degrees'`, `Units:'Km/h'`,
 #: `Units:'w/m2'`, `Units:'centimeters'`. So this is a synonym table over the codes the platform
-#: code list carries (`infer_schema.CODE_LIST`), and a spelling that is not in it leaves the slot
+#: code list carries (`infer_schema.code_list()`), and a spelling that is not in it leaves the slot
 #: without a unit rather than with a guessed one: a wrong unit is a wrong number, and every
 #: consumer of the model would carry it.
 UNIT_SYNONYMS = {

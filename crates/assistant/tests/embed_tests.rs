@@ -74,6 +74,22 @@ fn a_model_file_that_is_not_the_pinned_one_is_refused_before_it_is_loaded() {
     );
 
     std::fs::copy(source.join("tokenizer.json"), copy.join("tokenizer.json")).expect("restore");
+    // The model, hashed as a stream (T-4357): one byte more is still not the pinned file.
+    let onnx = copy.join("model_qint8_avx512_vnni.onnx");
+    let mut grown = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&onnx)
+        .expect("open");
+    std::io::Write::write_all(&mut grown, b"\0").expect("tamper");
+    drop(grown);
+    let refused = Embedder::load(&copy, 1).err().expect("refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("model_qint8_avx512_vnni.onnx is not the pinned file"),
+        "{refused}"
+    );
+
     std::fs::remove_file(copy.join("model_qint8_avx512_vnni.onnx")).expect("remove");
     let missing = Embedder::load(&copy, 1).err().expect("refused");
     assert!(
