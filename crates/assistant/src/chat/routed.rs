@@ -697,7 +697,8 @@ pub fn router_messages(
 }
 
 /// The follow-up call's messages: the question, the searches so far, the sources' languages and
-/// the first [`PREVIEW_CHARS`] of each passage found, as JSON like the answer call reads them.
+/// the first 300 characters (`PREVIEW_CHARS`, private) of each passage found, as JSON like the
+/// answer call reads them.
 pub fn follow_messages(
     question: &str,
     asked: &[String],
