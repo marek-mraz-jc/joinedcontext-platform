@@ -30,6 +30,30 @@ pub struct Completion {
     /// The reasoning tokens the call spent (`usage.completion_tokens_details.reasoning_tokens`,
     /// T-4360), when the provider reports them.
     pub reasoning: Option<u64>,
+    /// Why the call ended (`choices[0].finish_reason`: `stop`, `length`, `content_filter`, …),
+    /// when the provider says (T-4370).
+    pub finish: Option<String>,
+}
+
+impl Completion {
+    /// Whether the provider stopped the answer for its content (a safety stop, T-4370).
+    pub fn declined(&self) -> bool {
+        self.finish.as_deref() == Some("content_filter")
+    }
+
+    /// Whether the call ended on its own: a normal stop, or no reason given (T-4370).
+    pub fn whole(&self) -> bool {
+        matches!(self.finish.as_deref(), None | Some("stop"))
+    }
+}
+
+/// `choices[0].finish_reason`, at most 32 characters of `a-z _`; anything else is not kept.
+fn finish_reason(chunk: &Value) -> Option<String> {
+    let reason = chunk.pointer("/choices/0/finish_reason")?.as_str()?;
+    (!reason.is_empty()
+        && reason.len() <= 32
+        && reason.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+    .then(|| reason.to_owned())
 }
 
 /// `usage.completion_tokens_details.reasoning_tokens`, when reported.
@@ -414,6 +438,7 @@ pub struct StreamReader {
     cost_micros: Option<u64>,
     provider: Option<String>,
     reasoning: Option<u64>,
+    finish: Option<String>,
     chunks: usize,
 }
 
@@ -448,6 +473,7 @@ impl StreamReader {
         if self.provider.is_none() {
             self.provider = provider_name(&chunk);
         }
+        self.finish = finish_reason(&chunk).or(self.finish.take());
         if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
             let count = |key: &str| usage.get(key).and_then(Value::as_u64);
             self.input = count("prompt_tokens").unwrap_or(self.input);
@@ -479,6 +505,7 @@ impl StreamReader {
             cost_micros: self.cost_micros,
             provider: self.provider,
             reasoning: self.reasoning,
+            finish: self.finish,
         })
     }
 }
@@ -523,12 +550,41 @@ pub fn parse(body: &Value) -> Option<Completion> {
         cost_micros: usage.and_then(cost_micros),
         provider: provider_name(body),
         reasoning: usage.and_then(reasoning_tokens),
+        finish: finish_reason(body),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4370: the reason a call ended is read from the stream's last chunk that names one and
+    /// from a reply; only a normal stop (or none said) is whole, `content_filter` is declined.
+    #[test]
+    fn the_finish_reason_says_whether_an_answer_is_whole() {
+        let mut reader = StreamReader::default();
+        reader.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"I cannot\"},\"finish_reason\":null}]}\n");
+        reader.feed(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n");
+        reader.feed(
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n",
+        );
+        let cut = reader.finish().expect("a completion");
+        assert_eq!(cut.finish.as_deref(), Some("content_filter"));
+        assert!(cut.declined() && !cut.whole());
+        let reply = |reason: Value| {
+            parse(&json!({"choices": [{"message": {"content": "Od 9:00."}, "finish_reason": reason}]}))
+                .expect("a completion")
+        };
+        assert!(reply(json!("stop")).whole());
+        assert!(reply(Value::Null).whole(), "no reason said is not a cut");
+        let long = reply(json!("length"));
+        assert!(!long.whole() && !long.declined());
+        assert_eq!(
+            reply(json!("Stop; DROP")).finish,
+            None,
+            "out of bounds is not kept"
+        );
+    }
 
     /// T-4360: the served provider is kept as OpenRouter names it, from a reply or the first
     /// stream chunk that names one; a name out of bounds is not kept.

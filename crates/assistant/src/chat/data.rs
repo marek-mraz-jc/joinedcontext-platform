@@ -221,14 +221,13 @@ pub async fn answer(
         spent.add(&completion);
         spent.served(Stage::Answer, &completion);
         if completion.calls.is_empty() || !allow {
+            if completion.declined() {
+                send(events, super::agent::declined()).await;
+                return None;
+            }
             let text = completion.text.trim().to_owned();
             if text.is_empty() {
-                send(events, Event::Error {
-                    status: 502,
-                    title: "No Answer",
-                    detail: "The assistant could not put an answer together. Try asking in other words.".into(),
-                })
-                .await;
+                send(events, super::agent::no_answer(spent)).await;
                 return None;
             }
             spent.first_token_ms = Some(started.elapsed().as_millis() as u64);
