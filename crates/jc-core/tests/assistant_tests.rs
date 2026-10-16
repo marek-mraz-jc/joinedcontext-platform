@@ -800,6 +800,49 @@ fn a_source_reaches_another_project_only_through_its_scope() {
     }
 }
 
+/// T-4343: `widget.language` is `browser`, `ask` or `fixed`, `browser` when absent, and
+/// `widget.languageToggle` is on unless switched off; anything else is refused.
+#[test]
+fn the_widget_language_modes_default_to_the_browser_and_refuse_the_unknown() {
+    use jc_core::kinds::{ChatWidget, WidgetLanguage};
+    let parsed = deployment(DEPLOYMENT).expect("documented");
+    assert_eq!(parsed.spec.widget, None);
+    let with =
+        |extra: &str| deployment_with("  sandbox: false\n", &format!("  sandbox: false\n{extra}"));
+    for (mode, want) in [
+        ("browser", WidgetLanguage::Browser),
+        ("ask", WidgetLanguage::Ask),
+        ("fixed", WidgetLanguage::Fixed),
+    ] {
+        let parsed = deployment(&with(&format!("  widget: {{ language: {mode} }}\n"))).expect(mode);
+        assert_eq!(
+            parsed.spec.widget,
+            Some(ChatWidget {
+                language: want,
+                language_toggle: true
+            })
+        );
+        let again: AssistantDeployment =
+            serde_norway::from_str(&serde_norway::to_string(&parsed).expect("yaml"))
+                .expect("parse");
+        assert_eq!(again, parsed);
+    }
+    let empty = deployment(&with("  widget: {}\n")).expect("empty");
+    assert_eq!(empty.spec.widget, Some(ChatWidget::default()));
+    assert_eq!(ChatWidget::default().language, WidgetLanguage::Browser);
+    let off = deployment(&with("  widget: { languageToggle: false }\n")).expect("toggle off");
+    assert_eq!(
+        off.spec.widget,
+        Some(ChatWidget {
+            language: WidgetLanguage::Browser,
+            language_toggle: false
+        })
+    );
+    assert!(deployment(&with("  widget: { language: auto }\n")).is_err());
+    assert!(deployment(&with("  widget: { languages: ask }\n")).is_err());
+    assert!(deployment(&with("  widget: { languageToggle: maybe }\n")).is_err());
+}
+
 /// T-4281: `answer.routes` is `both` when absent, `rag` needs a source and `data` a connector;
 /// `feedback` is on unless switched off.
 #[test]

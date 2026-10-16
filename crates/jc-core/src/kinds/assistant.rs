@@ -655,6 +655,41 @@ pub struct Theme {
     pub greeting: Option<String>,
 }
 
+/// How the chat picks the language it opens in (T-4343).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WidgetLanguage {
+    /// The page's `?lang=`, the visitor's toggle pick, the browser's languages, then the first
+    /// of `languages`.
+    #[default]
+    Browser,
+    /// The panel asks on its first open in a browser.
+    Ask,
+    /// Always the first of `languages`, or the page's `?lang=`.
+    Fixed,
+}
+
+/// How the chat behaves where it is placed (T-4343).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ChatWidget {
+    /// How it picks its language; `browser` by default.
+    #[serde(default)]
+    pub language: WidgetLanguage,
+    /// Whether the header shows the language toggle; default true.
+    #[serde(default = "default_true")]
+    pub language_toggle: bool,
+}
+
+impl Default for ChatWidget {
+    fn default() -> Self {
+        ChatWidget {
+            language: WidgetLanguage::Browser,
+            language_toggle: true,
+        }
+    }
+}
+
 /// Desired specification of an [`AssistantDeployment`][crate::kinds::AssistantDeployment] (MF-52).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -712,6 +747,9 @@ pub struct AssistantDeploymentSpec {
     /// Whether the chat shows the helpful/unhelpful buttons under an answer; default true.
     #[serde(default = "default_true")]
     pub feedback: bool,
+    /// How the chat picks its language and whether it shows the toggle (T-4343).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget: Option<ChatWidget>,
 }
 
 impl Kind for AssistantDeploymentSpec {
