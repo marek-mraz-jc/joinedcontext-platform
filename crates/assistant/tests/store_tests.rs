@@ -655,3 +655,48 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
     app.close().await;
     drop_database(admin, pool, &name).await;
 }
+
+/// T-4370: a passage on a news page ranks below the same passage on a page beside the news,
+/// though both rankings put the news one first.
+#[tokio::test]
+async fn a_news_page_ranks_below_the_same_passage_elsewhere() {
+    let (admin, pool, name) = database("news").await;
+    let text = "Plaváreň je otvorená denne od 6:00 do 21:00";
+    let ids = site(
+        &pool,
+        "bb",
+        "bb-web",
+        &[
+            (text, "sk", "public", embedding(0, None)),
+            (text, "sk", "public", embedding(0, None)),
+        ],
+    )
+    .await;
+    let mut tx = project_scope(&pool, "bb").await.expect("scope");
+    for (id, url) in [
+        (
+            ids[0],
+            "https://bb.example/aktuality/kategorie-aktualit/covid-19/",
+        ),
+        (ids[1], "https://bb.example/sport/plavaren"),
+    ] {
+        sqlx::query("UPDATE chunks SET url = $2 WHERE id = $1")
+            .bind(id)
+            .bind(url)
+            .execute(&mut *tx)
+            .await
+            .expect("url");
+    }
+    tx.commit().await.expect("commit");
+    let order = search(
+        &pool,
+        "bb",
+        "plaváreň otvorená",
+        &embedding(0, None),
+        &["bb-web"],
+        false,
+    )
+    .await;
+    assert_eq!(order, vec![ids[1], ids[0]]);
+    drop_database(admin, pool, &name).await;
+}

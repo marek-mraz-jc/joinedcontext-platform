@@ -176,7 +176,10 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 /// it matches a chunk in whatever language that chunk is, and the GIN index still serves it.
 /// Its words are OR-ed: a question asked in a person's words never has all of them in the
 /// passage that answers it (AND-ed, the lexical ranking found nothing for any of the forty eval
-/// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first.
+/// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first. A page under a
+/// news path (`/aktuality/`, `/novinky/`, `/news/`, …) counts 0.9 of its score and loses a tie:
+/// opening hours, prices and contacts are kept on the pages beside the news, and a news item about
+/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370).
 const HYBRID: &str = r#"
 WITH scope AS (
     SELECT c.id, c.fts, c.embedding
@@ -202,10 +205,12 @@ semantic AS (
     LIMIT $5
 )
 SELECT c.id, c.url, c.text,
-       (COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))::float8 AS score
+       ((COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))
+        * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score
 FROM lexical FULL OUTER JOIN semantic USING (id)
 JOIN chunks c ON c.id = COALESCE(lexical.id, semantic.id)
-ORDER BY score DESC, c.id
+CROSS JOIN LATERAL (SELECT c.url ~* '/(aktuality|aktualita|aktualne|novinky|spravy|tlacove-spravy|clanky|news|uutiset|tiedotteet|blog)(/|$|\?|#)' AS item) news
+ORDER BY score DESC, news.item, c.id
 LIMIT $7
 "#;
 
