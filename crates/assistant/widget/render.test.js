@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, tel, mailto } = require("./render.js");
+const { markdown, sources, label, safeUrl, events, language, table, chart, greeting, linkHost, followups, restore, remember, cards, stage, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -347,4 +347,59 @@ test("the deployment's greeting in its first language, the widget's own in any o
   assert.equal(greeting("Dobrý deň!", ["sk", "en"], "en", "Hello!"), "Hello!");
   assert.equal(greeting("Hi", undefined, "sk", "Dobrý deň!"), "Hi");
   assert.equal(greeting("", ["sk"], "en", "Hello!"), "");
+});
+
+test("an empty chat offers the deployment's questions in its language, else the widget's (T-4253)", () => {
+  const own = { sk: ["Kedy je zber odpadu?", " Kedy je zber odpadu? ", "", 7], en: [] };
+  const mine = ["a", "b", "c", "d", "e"];
+  assert.deepEqual(suggestions(own, "sk", mine), ["Kedy je zber odpadu?"]);
+  // English has none of its own: the widget's English, never the Slovak ones.
+  assert.deepEqual(suggestions(own, "en", mine), ["a", "b", "c", "d"]);
+  assert.deepEqual(suggestions(null, "cs", ["x"]), ["x"]);
+  assert.deepEqual(suggestions(undefined, "sk", undefined), []);
+});
+
+test("a failed answer is said in the widget's words, by the service's title, else its status (T-4253)", () => {
+  assert.equal(trouble(429, "Budget Spent"), "spent");
+  assert.equal(trouble(429, "Conversation Budget Spent"), "full");
+  assert.equal(trouble(503, "Model Unavailable"), "unreachable");
+  assert.equal(trouble(502, "No Answer"), "unanswered");
+  assert.equal(trouble(504, "Answer Took Too Long"), "slow");
+  assert.equal(trouble(429, "Too Many Requests"), "busy");
+  assert.equal(trouble(503), "paused");
+  assert.equal(trouble(502), "failed");
+  assert.equal(trouble(400, "constructor"), "failed", "a title is looked up as data, never as a property");
+  assert.equal(trouble(undefined), "offline");
+  assert.equal(trouble(0), "offline");
+  assert.equal(retryable("spent"), false);
+  assert.equal(retryable("full"), false);
+  for (const word of ["busy", "paused", "offline", "failed", "unreachable", "unanswered", "slow"]) {
+    assert.equal(retryable(word), true, word);
+  }
+});
+
+test("every word trouble names is in each of the widget's languages (T-4253)", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
+  const words = ["spent", "full", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
+  for (const lang of ["sk", "en", "cs"]) {
+    const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
+    for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
+    assert.match(block, /ideas: \[/, `${lang}.ideas`);
+  }
+});
+
+test("Retry resends the last question with the history before it, and nothing else (T-4253)", () => {
+  const history = [
+    { role: "user", text: "Kde parkovať?" },
+    { role: "assistant", text: "Na Námestí SNP." },
+    { role: "user", text: "A v nedeľu?" },
+  ];
+  assert.deepEqual(retry(history), { question: "A v nedeľu?", history: history.slice(0, 2) });
+  assert.equal(history.length, 3, "the history itself is left alone");
+  assert.equal(retry(history.slice(0, 2)), null, "an answered turn is not resent");
+  assert.equal(retry([]), null);
+  assert.equal(retry(undefined), null);
+  assert.equal(retry([{ role: "user", text: "  " }]), null);
 });
