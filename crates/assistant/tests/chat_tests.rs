@@ -156,7 +156,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     let gateway = MockServer::start().await;
     Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp"))).and(body_string_contains("tools/list"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
-            {"name": "query_entities", "description": "Reads air quality stations.", "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}}}},
+            {"name": "query_entities", "description": "Reads air quality stations.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}}}}},
             {"name": "delete_everything", "description": "Not allowed.", "inputSchema": {"type": "object"}}
         ]}})))
         .mount(&gateway).await;
@@ -351,7 +351,7 @@ async fn recorded_air(gateway: &MockServer, slug: &str) {
     mcp().and(body_string_contains("tools/list"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
             {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
-            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}, "limit": {"type": "integer", "maximum": 1000}}}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "limit": {"type": "integer", "maximum": 1000}}}},
             {"name": "delete_entity", "description": "Writes.", "inputSchema": {"type": "object"}}
         ]}})))
         .with_priority(1).mount(gateway).await;
@@ -1169,7 +1169,7 @@ async fn a_long_result_is_filtered_by_a_script_in_the_sandbox() {
         &w.proxy,
         vec![
             completion(
-                tool_call("c1", "ovzdusie__query_entities", json!({"type": "Event"})),
+                tool_call("c1", "ovzdusie__query_entities", json!({"type": ["Event"]})),
                 500,
             ),
             completion(

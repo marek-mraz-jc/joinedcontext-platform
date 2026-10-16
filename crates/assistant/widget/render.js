@@ -229,13 +229,17 @@ var JCRender = (function () {
   }
 
   /**
-   * The language the chat speaks (T-4138): the one asked for (the host page's, or the visitor's
-   * switch) when the widget has words for it, else Slovak when the deployment offers it or names
-   * none, else the deployment's first language the widget knows, else English.
+   * The language the chat speaks (T-4138, T-4280): the one the visitor chose in the widget before
+   * (`chosen`), else the one the embedding site names on purpose (`requested`, its `data-lang`),
+   * when the widget has words for it; else Slovak when the deployment offers it or names none,
+   * else the deployment's first language the widget knows, else English. The host page's own
+   * language is never asked: an English catalogue page still opens a Slovak chat.
    */
-  function language(requested, offered, known) {
+  function language(requested, offered, known, chosen) {
     var has = function (l) { return Object.prototype.hasOwnProperty.call(known, l); };
-    var asked = String(requested || "").slice(0, 2).toLowerCase();
+    var pick = function (l) { return String(l || "").slice(0, 2).toLowerCase(); };
+    if (has(pick(chosen))) return pick(chosen);
+    var asked = pick(requested);
     if (asked && has(asked)) return asked;
     offered = (offered || []).filter(has);
     if (offered.length === 0 || offered.indexOf("sk") >= 0) return has("sk") ? "sk" : "en";
