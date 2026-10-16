@@ -35,7 +35,7 @@ pub(crate) fn tools(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -
                 "description": tool.description,
                 "inputSchema": tool.input_schema(),
                 "outputSchema": crate::mcp::tools::output_schema(tool),
-                "annotations": { "readOnlyHint": true, "destructiveHint": false },
+                "annotations": crate::mcp::tools::annotations(tool.name, true, false),
             })
         })
         .collect()

@@ -80,6 +80,12 @@ impl Tool {
             )
     }
 
+    /// The four annotations a directory reviewer and an agent runtime read (MCP 2025-06-18
+    /// `ToolAnnotations`, T-4315).
+    pub(crate) fn annotations(&self) -> Value {
+        annotations(self.name, self.read_only(), self.destructive())
+    }
+
     /// The tool's published JSON Schema.
     pub(crate) fn input_schema(&self) -> Value {
         match self.shape {
@@ -1142,13 +1148,25 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                 ),
                 "inputSchema": schema,
                 "outputSchema": output_schema(tool),
-                "annotations": {
-                    "readOnlyHint": tool.read_only(),
-                    "destructiveHint": tool.destructive(),
-                },
+                "annotations": tool.annotations(),
             })
         })
         .collect()
+}
+
+/// `query_entities` → `title: "Query entities"`, the hints beside it. Every tool reads or
+/// writes this platform's own data, never an open world (`openWorldHint: false`).
+pub(crate) fn annotations(name: &str, read_only: bool, destructive: bool) -> Value {
+    let mut title = name.replace('_', " ");
+    if let Some(first) = title.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    json!({
+        "title": title,
+        "readOnlyHint": read_only,
+        "destructiveHint": destructive,
+        "openWorldHint": false,
+    })
 }
 
 /// How the hub stands with one tool on the Endpoint a call names (ADR-N-025 2.8, SP-17, SP-20).

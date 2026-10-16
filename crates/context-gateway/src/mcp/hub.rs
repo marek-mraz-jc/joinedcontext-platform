@@ -743,7 +743,7 @@ fn list_endpoints_tool() -> Value {
             },
             "required": ["endpoints", "total"],
         },
-        "annotations": { "readOnlyHint": true, "destructiveHint": false },
+        "annotations": crate::mcp::tools::annotations("list_endpoints", true, false),
     })
 }
 

@@ -420,6 +420,15 @@ async fn an_agent_with_only_the_address_reads_ngsi_ld_from_catalogue_to_history(
     assert!(names.contains(&"query_temporal"), "{names:?}");
     for tool in tools["result"]["tools"].as_array().into_iter().flatten() {
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{tool}");
+        // T-4315: the four hints a directory reviewer reads, on every tool.
+        assert_eq!(tool["annotations"]["destructiveHint"], false, "{tool}");
+        assert_eq!(tool["annotations"]["openWorldHint"], false, "{tool}");
+        assert!(
+            tool["annotations"]["title"]
+                .as_str()
+                .is_some_and(|title| !title.is_empty() && !title.contains('_')),
+            "{tool}"
+        );
     }
 
     let found = listed(app.clone(), None, json!({ "q": "air" })).await;
