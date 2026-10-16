@@ -447,10 +447,19 @@ pub struct RetentionRule {
     /// How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
-    /// How long a temporal instance is kept, in the same form (DM-84).
+    /// How long a temporal instance is kept, in the same form (DM-84); `off` keeps the current
+    /// state only and records no history, `forever` keeps it all and needs a `reason` (T-4275).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<String>,
+    /// Why the type keeps its whole history: required with `history: forever` (T-4275).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
+
+/// The `history` of a rule that records nothing for its type (T-4275).
+pub const HISTORY_OFF: &str = "off";
+/// The `history` of a rule that keeps everything, with a `reason` (T-4275).
+pub const HISTORY_FOREVER: &str = "forever";
 
 /// Seconds of a retention duration `P[nD][T[nH][nM][nS]]` from one minute to 3650 days, the
 /// form the broker's `/q/retention` reads; `None` for anything else (DM-82).
@@ -557,16 +566,33 @@ impl ContextSpaceSpec {
                     reason: "a type has at most one retention rule (DM-82)",
                 });
             }
+            let word = rule
+                .history
+                .as_deref()
+                .filter(|h| [HISTORY_OFF, HISTORY_FOREVER].contains(h));
+            let reasoned = rule.reason.as_deref().is_some_and(|r| !r.trim().is_empty());
+            if (word == Some(HISTORY_FOREVER)) != reasoned {
+                return Err(Error::Name {
+                    field: "spec.retention.reason",
+                    value: rule.entity_type.clone(),
+                    reason: "history: forever names why the type keeps all of it, and only \
+                             it carries a reason (T-4275)",
+                });
+            }
             for (field, value) in [
                 ("spec.retention.current", &rule.current),
-                ("spec.retention.history", &rule.history),
+                (
+                    "spec.retention.history",
+                    &rule.history.clone().filter(|_| word.is_none()),
+                ),
             ] {
                 if let Some(v) = value.as_deref().filter(|v| retention_seconds(v).is_none()) {
                     return Err(Error::Name {
                         field,
                         value: v.to_owned(),
                         reason: "a retention duration is PT1M to P3650D, as PT5M, PT8H, \
-                                 P30D or P1DT12H (DM-82)",
+                                 P30D or P1DT12H; history may also be off, or forever with a \
+                                 reason (DM-82)",
                     });
                 }
             }
