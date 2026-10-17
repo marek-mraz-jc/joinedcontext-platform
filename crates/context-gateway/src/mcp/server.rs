@@ -6,6 +6,11 @@
 //! call to the member's URL is. A read without `endpoint` visits every member the caller may read,
 //! in parallel, and answers each member apart: nothing is filtered, sorted or counted across two
 //! members' Policies (§2.4).
+//!
+//! A server may also `select` Endpoints by project, space, domain, theme and access level
+//! (ADR-N-043 §7): the selector is matched per call against the Endpoints the caller reads, each
+//! then a member call like any other, so it only narrows; a read without `endpoint` asks at most
+//! ten of them.
 
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::{authenticate, subject_from, EDGE_AUDIENCE, HUB_PATH};
@@ -21,6 +26,7 @@ use axum::extract::{Path, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
+use jc_core::kinds::mcp_server::{breadth, AccessLevel, Select};
 use jc_core::kinds::{Audience, Representation};
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
@@ -37,6 +43,12 @@ pub(crate) const MEMBER_DEADLINE: Duration = Duration::from_secs(10);
 /// How long a whole fan-out may take (ADR-N-043 §2.7).
 const CALL_DEADLINE: Duration = Duration::from_secs(15);
 
+/// The most Endpoints a read without `endpoint` asks (ADR-N-043 §7.4, EP-121).
+pub(crate) const MAX_FAN_OUT: usize = 10;
+
+/// The name of the server every organization has without a manifest (EP-122).
+pub const ORG_ALL: &str = "all";
+
 /// One named server as the gateway serves it (MF-53).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
@@ -50,6 +62,8 @@ pub struct McpServer {
     pub description: Option<String>,
     /// The member Endpoints' slugs, in the order of `spec.members`.
     pub members: Vec<String>,
+    /// The Endpoints it selects beside its members (MF-55, ADR-N-043 §7).
+    pub select: Option<Select>,
     /// Who may connect.
     pub audience: Audience,
     /// The projects a `project-list` server admits besides its own.
@@ -60,6 +74,85 @@ pub struct McpServer {
 pub type McpServers = Vec<McpServer>;
 
 impl McpServer {
+    /// `org/all`: every Endpoint an organization member reads, served without a manifest until
+    /// the organization declares `mcp/all.yaml` (EP-122, ADR-N-043 §7.5).
+    pub fn org_all() -> Self {
+        Self {
+            project: jc_core::envelope::ORG_NAMESPACE.to_owned(),
+            name: ORG_ALL.to_owned(),
+            title: Some("All data".to_owned()),
+            description: Some(
+                "Every Endpoint of the organization you may read. Find a dataset in the \
+                 `catalog` endpoint first, then read it by its own Endpoint."
+                    .to_owned(),
+            ),
+            members: Vec::new(),
+            select: Some(Select::default()),
+            audience: Audience::Organization,
+            allowed_projects: Vec::new(),
+        }
+    }
+
+    /// Whether the selector takes `endpoint`, before who the caller is: its project, space,
+    /// domain and theme match, and its audience is at least as wide as the server's, so a
+    /// public server selects public Endpoints only (EP-120). A member is never selected twice.
+    fn selects(&self, endpoint: &Endpoint) -> bool {
+        let Some(select) = &self.select else {
+            return false;
+        };
+        if self.members.contains(&endpoint.slug)
+            || breadth(endpoint.audience) < breadth(self.audience)
+        {
+            return false;
+        }
+        let any = |values: &Option<Vec<String>>, wanted: &str| {
+            values
+                .as_ref()
+                .is_none_or(|values| values.iter().any(|v| v == wanted))
+        };
+        if !any(&select.projects, &endpoint.project)
+            || !any(
+                &select.spaces,
+                &format!("{}/{}", endpoint.project, endpoint.space),
+            )
+        {
+            return false;
+        }
+        if select.domains.is_none() && select.themes.is_none() {
+            return true;
+        }
+        let classified = crate::handlers::endpoint_surface::classification(endpoint);
+        let domains = select.domains.as_ref().is_none_or(|wanted| {
+            wanted
+                .iter()
+                .any(|d| classified.domains.contains(d.as_str()))
+        });
+        // A theme set by hand wins over the derived one, as on the DCAT record (T-4498).
+        let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
+            Some(catalog) => catalog.themes.iter().copied().collect(),
+            None => classified.themes,
+        };
+        domains
+            && select
+                .themes
+                .as_ref()
+                .is_none_or(|wanted| wanted.iter().any(|t| themes.contains(t)))
+    }
+
+    /// Whether the selector's `accessLevel` takes an Endpoint this caller reads as `subject`.
+    fn selects_level(&self, endpoint: &Endpoint, subject: &Subject) -> bool {
+        let level = match super::catalog::because(endpoint, subject) {
+            "public" => AccessLevel::Public,
+            "grant" => AccessLevel::Grant,
+            "organization" => AccessLevel::Organization,
+            _ => AccessLevel::Project,
+        };
+        self.select
+            .as_ref()
+            .and_then(|select| select.access_level.as_ref())
+            .is_none_or(|levels| levels.contains(&level))
+    }
+
     /// Its address under the gateway's base URL (EP-92).
     pub fn path(&self) -> String {
         format!("{HUB_PATH}/{}/{}", self.project, self.name)
@@ -95,13 +188,24 @@ pub async fn message(
     let Some(server) = gateway.server(&project, &name) else {
         return ProblemDetails::not_found().into_response();
     };
-    // Members in the order the manifest names them; one that no longer serves MCP is no member.
+    // Members in the order the manifest names them, then the selected Endpoints by slug; one
+    // that no longer serves MCP is no member.
     let members: Vec<Arc<Endpoint>> = server
         .members
         .iter()
         .filter_map(|slug| gateway.resolver.resolve(slug))
+        .chain(
+            gateway
+                .resolver
+                .endpoints()
+                .into_iter()
+                .filter(|endpoint| server.selects(endpoint)),
+        )
         .filter(|endpoint| endpoint.serves(Representation::Mcp))
         .collect();
+    let level = |(endpoint, subject): &(Arc<Endpoint>, Subject)| {
+        server.members.contains(&endpoint.slug) || server.selects_level(endpoint, subject)
+    };
 
     let authorization = request.headers().get(AUTHORIZATION).cloned();
     let presented = authorization.as_ref().and_then(|value| value.to_str().ok());
@@ -119,6 +223,7 @@ pub async fn message(
                     let subject = authenticate(&gateway, &endpoint, &HeaderMap::new()).ok()?;
                     readable(&gateway, endpoint, subject)
                 })
+                .filter(level)
                 .collect();
             (format!("anonymous:{caller}"), reach, true)
         }
@@ -153,6 +258,7 @@ pub async fn message(
                     let subject = subject_from(&gateway, &endpoint, &claims).ok()?;
                     readable(&gateway, endpoint, subject)
                 })
+                .filter(level)
                 .collect();
             (format!("subject:{}", claims.sub), reach, false)
         }
@@ -316,6 +422,19 @@ impl Hub {
             }
         };
 
+        // A selector can reach thousands: past ten the agent finds its Endpoint first (EP-121).
+        let asking = cursors.as_ref().map_or(self.reach.len(), Map::len);
+        if asking > MAX_FAN_OUT {
+            return Answer::Json(result(
+                id,
+                refused(
+                    &format!(
+                        "this server reaches {asking} Endpoints you may read, more than the {MAX_FAN_OUT} a call without `endpoint` asks: find the one you need with list_endpoints or the `catalog` endpoint, then name it in `endpoint`"
+                    ),
+                    &Value::Null,
+                ),
+            ));
+        }
         let mut failed: Vec<(usize, Value)> = Vec::new();
         let mut runs = tokio::task::JoinSet::new();
         let mut asked: Vec<(usize, String)> = Vec::new();
@@ -523,6 +642,7 @@ mod tests {
             title: None,
             description: None,
             members: vec!["bikes".into()],
+            select: None,
             audience,
             allowed_projects: vec!["espoo".into()],
         }
