@@ -15,6 +15,11 @@ use jc_core::kinds::Operation;
 /// `details` query parameter, which is what separates the two type-listing operations.
 pub fn operation_of(method: &Method, path: &str, details: bool) -> Option<Operation> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // A hop that resolves dot segments (RFC 3986 clause 5.2.4) would run another operation
+    // than the one the Policy was asked about: `…/attrs/..` is every attribute (T-3588).
+    if segments.iter().any(|segment| is_dot_segment(segment)) {
+        return None;
+    }
     match (segments.as_slice(), method) {
         (["entities"], &Method::GET) => Some(Operation::QueryEntity),
         (["entities"], &Method::POST) => Some(Operation::CreateEntity),
@@ -114,6 +119,12 @@ pub fn targeted_attribute(path: &str) -> Option<&str> {
     }
 }
 
+/// `.` or `..`, however it is percent-spelled: `%2e` is the only other spelling of a dot.
+pub(crate) fn is_dot_segment(segment: &str) -> bool {
+    let unescaped = segment.to_ascii_lowercase().replace("%2e", ".");
+    unescaped == "." || unescaped == ".."
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +161,10 @@ mod tests {
             (Method::GET, "entities/urn:x/attrs/temperature"),
             (Method::POST, "entities/urn:x"),
             (Method::GET, "../../admin"),
+            (Method::PATCH, "entities/urn:x/attrs/.."),
+            (Method::GET, "entities/%2E%2e"),
+            (Method::GET, "types/."),
+            (Method::DELETE, "temporal/entities/.%2e"),
             (Method::GET, ""),
             (Method::HEAD, "entities"),
             (Method::GET, "entityOperations/query"),

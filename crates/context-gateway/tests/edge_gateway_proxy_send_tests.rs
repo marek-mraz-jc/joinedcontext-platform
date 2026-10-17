@@ -157,7 +157,10 @@ async fn a_caller_cannot_move_the_hop_to_another_host_through_the_path() {
             .send(Method::GET, hostile, HeaderMap::new(), Body::empty())
             .await
         {
-            Err(error) => assert!(matches!(error, ProxyError::Uri(_)), "{hostile}: {error}"),
+            Err(error) => assert!(
+                matches!(error, ProxyError::Uri(_) | ProxyError::DotSegment),
+                "{hostile}: {error}"
+            ),
             Ok(_) => {
                 let asked = log
                     .lock()
@@ -620,4 +623,50 @@ fn a_header_carrying_a_line_break_cannot_be_built_at_all() {
     map.insert(CONNECTION, HeaderValue::from_static("close"));
     assert_eq!(map.len(), 1);
     assert!(map.get(HOST).is_none());
+}
+
+#[tokio::test]
+async fn a_dot_segment_in_any_forwarded_path_is_refused_before_the_hop() {
+    // T-3588: the LinkML, OGC and OData routes append the caller's rest of the path, and a hop
+    // that resolves dot segments would serve another resource than the one decided on.
+    let (base, log) = upstream(200, "[]", Vec::new()).await;
+    let broker = Broker::new(base);
+    for hostile in [
+        "/x/views/v/linkml/schema/../../ngsi-ld/v1/entities",
+        "/x/views/v/odata/v4/%2e%2e/%2E%2E/q/tenants",
+        "/x/views/v/ngsi-ld/v1/entities/urn:x/attrs/.",
+        "/x/views/v/ogc/features/collections/.%2e?f=json",
+    ] {
+        let refused = broker
+            .send(Method::GET, hostile, HeaderMap::new(), Body::empty())
+            .await
+            .expect_err("a dot segment is refused");
+        assert!(
+            matches!(refused, ProxyError::DotSegment),
+            "{hostile}: {refused}"
+        );
+        assert_eq!(ProblemDetails::from(refused).status, 400, "{hostile}");
+    }
+    assert!(
+        log.lock().expect("the log").is_empty(),
+        "nothing was forwarded"
+    );
+}
+
+#[tokio::test]
+async fn dots_inside_a_segment_or_in_the_query_are_forwarded() {
+    let (base, log) = upstream(200, "[]", Vec::new()).await;
+    let broker = Broker::new(base);
+    for fine in [
+        "/x/views/v/ngsi-ld/v1/entities/urn:ngsi-ld:Device:a..b",
+        "/x/views/v/ngsi-ld/v1/entities?q=path==%22../x%22",
+        "/x/views/v/linkml/schema/model.v1.yaml",
+    ] {
+        let response = broker
+            .send(Method::GET, fine, HeaderMap::new(), Body::empty())
+            .await
+            .expect("forwarded");
+        assert_eq!(response.status(), StatusCode::OK, "{fine}");
+    }
+    assert_eq!(log.lock().expect("the log").len(), 3);
 }
