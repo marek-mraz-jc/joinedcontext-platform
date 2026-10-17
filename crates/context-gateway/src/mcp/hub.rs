@@ -411,7 +411,11 @@ impl Hub {
             ),
             "ping" => result(id, json!({})),
             "tools/list" => {
-                let mut tools = vec![list_endpoints_tool(), get_endpoint_tool()];
+                let mut tools = vec![
+                    super::search::tool(),
+                    list_endpoints_tool(),
+                    get_endpoint_tool(),
+                ];
                 tools.extend(tools::hub_tools(&self.gateway, &self.reach));
                 if self.reads_only {
                     tools::keep_anonymous(&mut tools);
@@ -463,6 +467,9 @@ impl Hub {
         }
         if name == "get_endpoint" {
             return Answer::Json(self.get_endpoint(id, &arguments));
+        }
+        if name == "search" {
+            return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments));
         }
 
         // The one routing argument, one string, never a list (ADR-N-025 2.5, 2.6).
