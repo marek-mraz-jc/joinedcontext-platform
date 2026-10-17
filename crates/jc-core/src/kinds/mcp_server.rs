@@ -1,12 +1,13 @@
 //! `kind: McpServer`, one named MCP server over chosen Endpoints (MF-53, ADR-N-043).
 //!
 //! The gateway serves it at `/api/mcp/{project}/{name}` with the hub's catalogue narrowed to its
-//! members (EP-92…EP-96). Every rule one manifest can be judged by is judged here; whether each
+//! members and to the Endpoints its `select` matches (EP-92…EP-96, MF-55, ADR-N-043 §7). Every rule one manifest can be judged by is judged here; whether each
 //! member exists, serves MCP and admits at least the server's audience needs the whole repository
 //! and is `jcctl validate`'s.
 
 use crate::envelope::{Kind, ObjectMeta, Scope, TypedRef};
 use crate::error::{Error, Result};
+use crate::kinds::catalog::DataTheme;
 use crate::kinds::endpoint::Audience;
 use crate::names;
 use schemars::JsonSchema;
@@ -16,13 +17,84 @@ use std::collections::BTreeSet;
 /// The most member Endpoints one server may name (ADR-N-043 §2.7).
 pub const MAX_MEMBERS: usize = 10;
 
+/// The most values one `select` field may hold (MF-55).
+pub const MAX_SELECT_VALUES: usize = 50;
+
+/// How a caller reaches an Endpoint, the levels of the per-caller catalogue (T-4503).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccessLevel {
+    /// Anyone, signed in or not.
+    Public,
+    /// Every member of the organization.
+    Organization,
+    /// The members of the projects the Endpoint admits.
+    Project,
+    /// The ServiceAccounts a grant names.
+    Grant,
+}
+
+impl AccessLevel {
+    /// Whether a server of `audience` may select this level: a public server public Endpoints
+    /// only, an organization server public and organization ones (MF-55, ADR-N-043 §7.3).
+    pub fn fits(self, audience: Audience) -> bool {
+        match audience {
+            Audience::Public => self == Self::Public,
+            Audience::Organization => matches!(self, Self::Public | Self::Organization),
+            Audience::ProjectList => true,
+        }
+    }
+}
+
+impl std::fmt::Display for AccessLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Public => "public",
+            Self::Organization => "organization",
+            Self::Project => "project",
+            Self::Grant => "grant",
+        })
+    }
+}
+
+/// Which Endpoints a server selects beside its members (MF-55). An Endpoint is selected when it
+/// matches every field given, one value of a field being enough; `select: {}` selects every
+/// Endpoint the caller's token and the server's audience admit. The gateway resolves it per
+/// call from the caller's own reach, so it only narrows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Select {
+    /// Project names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Vec<String>>,
+    /// Context Spaces as `{project}/{space}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spaces: Option<Vec<String>>,
+    /// Smart Data Models domains of the Endpoint's classification, e.g. `Environment` (T-4498).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domains: Option<Vec<String>>,
+    /// EU data themes of that classification, e.g. `ENVI`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub themes: Option<Vec<DataTheme>>,
+    /// How the caller reaches the Endpoint; no wider than the server's audience admits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_level: Option<Vec<AccessLevel>>,
+}
+
 /// One named MCP server (MF-53).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct McpServerSpec {
-    /// The Endpoints the server reads, one to ten, by typed reference (`kind: Endpoint`); a
-    /// member of another project names its project in `namespace`.
+    /// The Endpoints the server reads, up to ten, by typed reference (`kind: Endpoint`); a
+    /// member of another project names its project in `namespace`. At least one without
+    /// `select`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<TypedRef>,
+    /// The Endpoints it selects beside its members (MF-55).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<Select>,
     /// Who may connect: `public`, `organization` or `project-list`. No wider than the narrowest
     /// member's own audience; `public` takes the red lane (EP-16).
     pub audience: Audience,
@@ -48,14 +120,24 @@ impl Kind for McpServerSpec {
 impl McpServerSpec {
     /// Every rule of MF-53 that one manifest can be judged by; `namespace` is the server's own.
     pub fn validate(&self, namespace: &str) -> Result<()> {
-        if self.members.is_empty() || self.members.len() > MAX_MEMBERS {
+        if self.members.len() > MAX_MEMBERS {
             return Err(invalid(
                 "members",
                 format!(
-                    "a server names one to {MAX_MEMBERS} member Endpoints, not {}",
+                    "a server names at most {MAX_MEMBERS} member Endpoints, not {}",
                     self.members.len()
                 ),
             ));
+        }
+        match &self.select {
+            None if self.members.is_empty() => {
+                return Err(invalid(
+                    "members",
+                    "a server names at least one member Endpoint or a `select`".into(),
+                ))
+            }
+            None => {}
+            Some(select) => select.validate(self.audience)?,
         }
         let mut seen = BTreeSet::new();
         for member in &self.members {
@@ -113,6 +195,64 @@ impl McpServerSpec {
     }
 }
 
+impl Select {
+    /// The rules of MF-55 one manifest can be judged by; whether a project or space exists is
+    /// `jcctl validate`'s.
+    pub fn validate(&self, audience: Audience) -> Result<()> {
+        fn bounded<T>(field: &str, values: &Option<Vec<T>>) -> Result<()> {
+            match values {
+                Some(values) if values.is_empty() || values.len() > MAX_SELECT_VALUES => {
+                    Err(select_invalid(
+                        field,
+                        format!(
+                            "a select field holds one to {MAX_SELECT_VALUES} values, not {}",
+                            values.len()
+                        ),
+                    ))
+                }
+                _ => Ok(()),
+            }
+        }
+        bounded("projects", &self.projects)?;
+        bounded("spaces", &self.spaces)?;
+        bounded("domains", &self.domains)?;
+        bounded("themes", &self.themes)?;
+        bounded("accessLevel", &self.access_level)?;
+        for project in self.projects.iter().flatten() {
+            names::validate_dns1123_label(project)?;
+        }
+        for space in self.spaces.iter().flatten() {
+            let Some((project, name)) = space.split_once('/') else {
+                return Err(select_invalid(
+                    "spaces",
+                    format!("`{space}` is not `{{project}}/{{space}}`"),
+                ));
+            };
+            names::validate_dns1123_label(project)?;
+            names::validate_dns1123_label(name)?;
+        }
+        for domain in self.domains.iter().flatten() {
+            if !crate::classification::is_domain(domain) {
+                return Err(select_invalid(
+                    "domains",
+                    format!("`{domain}` is no Smart Data Models domain of the classification"),
+                ));
+            }
+        }
+        for level in self.access_level.iter().flatten() {
+            if !level.fits(audience) {
+                return Err(select_invalid(
+                    "accessLevel",
+                    format!(
+                        "a `{audience}` server selects no `{level}` Endpoint: a selector never reaches past the server's audience"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// How wide an audience is: a server is no wider than its narrowest member (MF-53).
 pub fn breadth(audience: Audience) -> u8 {
     match audience {
@@ -126,6 +266,13 @@ fn invalid(field: &str, reason: String) -> Error {
     Error::Invalid {
         field: format!("spec.{field}"),
         reason: format!("{reason} (MF-53)"),
+    }
+}
+
+fn select_invalid(field: &str, reason: String) -> Error {
+    Error::Invalid {
+        field: format!("spec.select.{field}"),
+        reason: format!("{reason} (MF-55)"),
     }
 }
 
@@ -144,9 +291,80 @@ mod tests {
     fn spec(members: Vec<TypedRef>, audience: Audience) -> McpServerSpec {
         McpServerSpec {
             members,
+            select: None,
             audience,
             allowed_projects: Vec::new(),
         }
+    }
+
+    fn selecting(select: &str, audience: Audience) -> Result<()> {
+        let mut server = spec(Vec::new(), audience);
+        server.select = Some(serde_json::from_str(select).map_err(|e| Error::Invalid {
+            field: "spec.select".into(),
+            reason: e.to_string(),
+        })?);
+        server.validate("helsinki")
+    }
+
+    #[test]
+    fn a_select_alone_names_no_member() {
+        assert!(selecting("{}", Audience::Public).is_ok());
+        assert!(selecting(
+            r#"{"themes":["ENVI","TRAN"],"domains":["Environment"],"spaces":["praha/ovzdusie"]}"#,
+            Audience::Organization
+        )
+        .is_ok());
+        let none = spec(Vec::new(), Audience::Public).validate("helsinki");
+        assert!(none.unwrap_err().to_string().contains("or a `select`"));
+    }
+
+    #[test]
+    fn a_selector_never_reaches_past_the_servers_audience() {
+        for level in ["organization", "project", "grant"] {
+            let err = selecting(
+                &format!(r#"{{"accessLevel":["{level}"]}}"#),
+                Audience::Public,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("spec.select.accessLevel"), "{err}");
+        }
+        assert!(selecting(r#"{"accessLevel":["public"]}"#, Audience::Public).is_ok());
+        assert!(selecting(
+            r#"{"accessLevel":["public","organization"]}"#,
+            Audience::Organization
+        )
+        .is_ok());
+        for level in ["project", "grant"] {
+            assert!(selecting(
+                &format!(r#"{{"accessLevel":["{level}"]}}"#),
+                Audience::Organization
+            )
+            .is_err());
+        }
+        assert!(selecting(r#"{"accessLevel":["grant"]}"#, Audience::ProjectList).is_ok());
+    }
+
+    #[test]
+    fn a_select_names_known_codes_in_bounded_lists() {
+        // an unknown theme code is refused by the kind's own type
+        assert!(selecting(r#"{"themes":["SPACE"]}"#, Audience::Public).is_err());
+        assert!(selecting(r#"{"domains":["Astrology"]}"#, Audience::Public)
+            .unwrap_err()
+            .to_string()
+            .contains("spec.select.domains"));
+        assert!(selecting(r#"{"spaces":["ovzdusie"]}"#, Audience::Public)
+            .unwrap_err()
+            .to_string()
+            .contains("{project}/{space}"));
+        assert!(selecting(r#"{"projects":[]}"#, Audience::Public).is_err());
+        let many: Vec<String> = (0..51).map(|i| format!("\"p{i}\"")).collect();
+        assert!(selecting(
+            &format!(r#"{{"projects":[{}]}}"#, many.join(",")),
+            Audience::Public
+        )
+        .is_err());
+        assert!(selecting(r#"{"favourites":true}"#, Audience::Public).is_err());
     }
 
     #[test]

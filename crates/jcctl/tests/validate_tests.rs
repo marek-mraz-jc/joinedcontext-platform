@@ -1758,3 +1758,98 @@ fn a_replace_into_the_same_type_of_another_space_is_valid() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- T-4529: a named MCP server's select and an assistant's mcpServer (MF-55, MF-56) ---
+
+fn selecting_server(dir: &Path, audience: &str, select: &str) {
+    write(
+        dir,
+        "projects/ovzdusie/mcp/air.yaml",
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: McpServer\nmetadata:\n  name: air\n  namespace: ovzdusie\n  title: {{ en: Air in Banská Bystrica }}\nspec:\n  audience: {audience}\n  select: {select}\n"),
+    );
+}
+
+fn citing<'a>(report: &'a validate::Report, rule: &str) -> Vec<&'a str> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains(rule))
+        .map(|f| f.message.as_str())
+        .collect()
+}
+
+/// MF-55: a select over the repository's own project and space is no finding; an undeclared
+/// project or space is named with its field.
+#[test]
+fn a_select_names_projects_and_spaces_the_repository_declares() {
+    let dir = valid_repo("mcp-select");
+    selecting_server(
+        &dir,
+        "public",
+        "{ projects: [ovzdusie], spaces: [ovzdusie/ovzdusie], themes: [ENVI] }",
+    );
+    let report = validate::run(&dir);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    selecting_server(
+        &dir,
+        "public",
+        "{ projects: [nowhere], spaces: [ovzdusie/nothing] }",
+    );
+    let report = validate::run(&dir);
+    let found = citing(&report, "MF-55");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].contains("spec.select.projects") && found[0].contains("`nowhere`"));
+    assert!(found[1].contains("spec.select.spaces") && found[1].contains("`ovzdusie/nothing`"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-55: a public server with an organization-level selector fails validate.
+#[test]
+fn a_public_server_selecting_organization_endpoints_is_refused() {
+    let dir = valid_repo("mcp-select-wide");
+    selecting_server(&dir, "public", "{ accessLevel: [organization] }");
+    let report = validate::run(&dir);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.message.contains("spec.select.accessLevel")),
+        "{:?}",
+        report.findings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MF-56: an assistant names a server the repository declares, `org/all` included, and one
+/// that answers people nobody signed in names a public server only.
+#[test]
+fn an_assistant_names_a_declared_server_its_channel_may_read() {
+    let dir = valid_repo("assistant-mcp-server");
+    knowledge_source(&dir, "web", "public", None);
+    selecting_server(&dir, "public", "{}");
+    let deployment = |channel: &str, server: &str| {
+        write(
+            &dir,
+            "projects/ovzdusie/assistant/deployments/chat.yaml",
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: AssistantDeployment\nmetadata:\n  name: chat\n  namespace: ovzdusie\nspec:\n  publicId: bb-chat\n  channel: {channel}\n  sources: [web]\n  mcpServer: {server}\n  allowedOrigins: [https://www.banskabystrica.sk]\n  rateLimit: {{ requestsPerMinute: 60, perClientPerMinute: 10 }}\n  budget: {{ tokensPerDay: 1000000, tokensPerConversation: 20000 }}\n"),
+        );
+        validate::run(&dir)
+    };
+    for (channel, server) in [("public", "ovzdusie/air"), ("internal", "org/all")] {
+        let report = deployment(channel, server);
+        assert!(
+            report.findings.is_empty(),
+            "{channel} {server}: {:?}",
+            report.findings
+        );
+    }
+    let report = deployment("public", "org/all");
+    let found = citing(&report, "MF-56");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("`organization`") && found[0].contains("public server only"));
+    let report = deployment("internal", "ovzdusie/nowhere");
+    let found = citing(&report, "MF-56");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("no manifest declares"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

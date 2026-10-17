@@ -108,6 +108,13 @@
           },
           "type": "array"
         },
+        "mcpServer": {
+          "description": "The named MCP server whose reach it reads, `{project}/{name}` or `org/{name}` (MF-56, ADR-N-043 §7.6); on every channel but `internal` a `public` one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "model": {
           "anyOf": [
             {
