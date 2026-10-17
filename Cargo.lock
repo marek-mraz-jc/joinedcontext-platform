@@ -123,7 +123,6 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
- "chrono",
  "futures",
  "http-body-util",
  "jc-core",
@@ -136,7 +135,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -7357,7 +7355,6 @@ dependencies = [
  "base64 0.22.1",
  "jc-core",
  "reqwest 0.12.28",
- "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -8068,7 +8065,6 @@ dependencies = [
 name = "wasm-host"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "bytes",
  "futures-util",
  "hex",
