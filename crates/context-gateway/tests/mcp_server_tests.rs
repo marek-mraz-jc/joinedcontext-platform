@@ -1019,9 +1019,11 @@ fn personal(
         ServiceAccounts::new(),
         Some(HOST.to_owned()),
     )
-    .read_personal_connectors(
-        context_gateway::mcp::personal::Personal::new(portal.url.clone(), None).keeping(keep),
-    );
+    .read_personal_connectors(context_gateway::mcp::personal::Personal::new(
+        portal.url.clone(),
+        None,
+        keep,
+    ));
     router(Arc::new(gateway))
 }
 

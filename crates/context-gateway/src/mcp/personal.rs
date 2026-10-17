@@ -85,9 +85,9 @@ pub struct Personal {
 }
 
 impl Personal {
-    /// Reads from `url` (`…/internal/connectors`), as `token` when the gateway has one; the
-    /// Portal refuses a call without it.
-    pub fn new(url: String, token: Option<Arc<WorkloadToken>>) -> Self {
+    /// Reads from `url` (`…/internal/connectors`), as `token` when the gateway has one (the
+    /// Portal refuses a call without it), holding each list `keep`, never longer than [`KEEP`].
+    pub fn new(url: String, token: Option<Arc<WorkloadToken>>, keep: Duration) -> Self {
         Self {
             url: url.trim_end_matches('/').to_owned(),
             token,
@@ -97,15 +97,9 @@ impl Personal {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("a client with a timeout builds"),
-            keep: KEEP,
+            keep: keep.min(KEEP),
             held: tokio::sync::Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Holds a list `keep` instead of [`KEEP`]; never longer than a minute.
-    pub fn keeping(mut self, keep: Duration) -> Self {
-        self.keep = keep.min(KEEP);
-        self
     }
 
     /// `sub`'s connectors: the held list while it is younger than the hold, else the Portal's

@@ -172,9 +172,13 @@ async fn main() -> ExitCode {
         .gate_writes_on(domain_gate);
     // A person's own connectors are the Portal's to keep and the gateway's to serve (EP-123).
     let gateway = Arc::new(match config.connectors_url.clone() {
-        Some(url) => gateway.read_personal_connectors(
-            context_gateway::mcp::personal::Personal::new(url, token.clone()),
-        ),
+        Some(url) => {
+            gateway.read_personal_connectors(context_gateway::mcp::personal::Personal::new(
+                url,
+                token.clone(),
+                context_gateway::mcp::personal::KEEP,
+            ))
+        }
         None => gateway,
     });
     // The repository is a cache of the enforcement point's decisions, so it is followed
