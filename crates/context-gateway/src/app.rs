@@ -361,6 +361,10 @@ impl Gateway {
             .iter()
             .find(|server| server.project == project && server.name == name)
             .cloned()
+            .or_else(|| {
+                (project == jc_core::envelope::ORG_NAMESPACE && name == crate::mcp::server::ORG_ALL)
+                    .then(crate::mcp::server::McpServer::org_all)
+            })
     }
 
     /// The project of the ServiceAccount a token's `azp` names, when it acts as itself rather
