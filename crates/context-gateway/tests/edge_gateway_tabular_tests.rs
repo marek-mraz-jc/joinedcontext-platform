@@ -37,7 +37,14 @@ fn parts(workbook: &[u8]) -> Vec<String> {
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(workbook.to_vec())).expect("a zip archive");
     (0..archive.len())
-        .map(|index| archive.by_index(index).expect("an entry").name().to_owned())
+        .map(|index| {
+            archive
+                .by_index(index)
+                .expect("an entry")
+                .name()
+                .expect("an entry name")
+                .into_owned()
+        })
         .collect()
 }
 

@@ -154,7 +154,7 @@ fn members(archive: &[u8]) -> Vec<(String, String)> {
             let mut member = zip.by_index(index).expect("a member");
             let mut body = String::new();
             member.read_to_string(&mut body).expect("a text member");
-            (member.name().to_owned(), body)
+            (member.name().expect("a member name").into_owned(), body)
         })
         .collect()
 }

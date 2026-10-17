@@ -56,7 +56,7 @@ fn members(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
     (0..zip.len())
         .map(|index| {
             let mut entry = zip.by_index(index).expect("an entry");
-            let name = entry.name().to_owned();
+            let name = entry.name().expect("an entry name").into_owned();
             let mut body = Vec::new();
             entry.read_to_end(&mut body).expect("the member");
             (name, body)

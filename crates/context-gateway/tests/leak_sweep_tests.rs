@@ -454,7 +454,7 @@ fn readable(headers: &str, bytes: &[u8]) -> String {
             zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("a ZIP container");
         for index in 0..archive.len() {
             let mut part = archive.by_index(index).expect("a part of the container");
-            let name = part.name().to_owned();
+            let name = part.name().expect("a part name").into_owned();
             let mut content = Vec::new();
             std::io::Read::read_to_end(&mut part, &mut content).expect("the part reads");
             text.push_str(&format!(

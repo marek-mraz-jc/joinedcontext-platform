@@ -143,7 +143,7 @@ fn stored(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut found = Vec::new();
     for index in 0..zip.len() {
         let mut member = zip.by_index(index).expect("a member");
-        let name = member.name().to_owned();
+        let name = member.name().expect("a member name").into_owned();
         let mut body = Vec::new();
         member.read_to_end(&mut body).expect("a readable member");
         found.push((name, body));

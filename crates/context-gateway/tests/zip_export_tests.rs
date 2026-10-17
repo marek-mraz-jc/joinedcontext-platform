@@ -137,6 +137,7 @@ fn members(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
         let mut member = zip.by_index(index).expect("a member");
         let name = member
             .name()
+            .expect("a member name")
             .split_once('/')
             .map(|(_, tail)| tail.to_owned())
             .expect("every member is under one directory");
