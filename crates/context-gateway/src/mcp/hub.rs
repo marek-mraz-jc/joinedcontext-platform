@@ -12,10 +12,10 @@ use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::{anonymous_on, principal_of, subject_from, HUB_PATH};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
-use crate::mcp::describe;
 use crate::mcp::jsonrpc::{self, answered, error, refused, result};
 use crate::mcp::server::{self, McpServer};
 use crate::mcp::tools::{self, HubTool};
+use crate::mcp::{catalog, describe};
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -464,16 +464,21 @@ impl Hub {
             None if self.server.is_some() && server::FAN_OUT.contains(&name) => {
                 return self.fan_out(id, name, &params, arguments).await;
             }
-            None => {
-                return Answer::Json(error(
-                    id,
-                    -32602,
-                    "`endpoint` is required: an Endpoint list_endpoints answers, by slug, title or space (EP-87)",
-                ))
-            }
+            // Catalogue first: a read that names no Endpoint asks the catalogue (T-4501).
+            None => catalog::NAME.to_owned(),
         };
         if let Some(refusal) = misrouted(&id, &arguments) {
             return Answer::Json(refusal);
+        }
+        // The caller's own catalogue, built from `reach` alone (T-4503).
+        if catalog::names_catalog(&slug) {
+            return Answer::Json(catalog::call(
+                &self.gateway,
+                &self.reach,
+                id,
+                name,
+                &arguments,
+            ));
         }
 
         // An Endpoint outside the caller's list and one that does not exist are the same answer,
@@ -775,7 +780,7 @@ fn attributes_of(
 }
 
 /// The tool that answers the caller's list (ADR-N-025 2.1).
-fn list_endpoints_tool() -> Value {
+pub(crate) fn list_endpoints_tool() -> Value {
     json!({
         "name": "list_endpoints",
         "description": "The Endpoints this connector reaches: open ones without a login, and \

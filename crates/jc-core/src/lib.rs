@@ -18,6 +18,7 @@ pub mod kpi;
 #[cfg(feature = "logs")]
 pub mod logs;
 pub mod names;
+pub mod ngsi_catalog;
 pub mod project;
 pub mod qb;
 pub mod quality;
