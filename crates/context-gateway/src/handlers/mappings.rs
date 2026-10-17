@@ -141,7 +141,7 @@ fn names_secret_ref(value: &Value) -> bool {
 /// `class_derivations` (a map by target name, or a list of derivations with a `name`).
 ///
 /// A class derivation reads `populated_from`, or the class of its own name; a slot derivation
-/// reads the first segment of `populated_from`, every slot its `expr` names ([`expr_reads`]), or
+/// reads the first segment of `populated_from`, every slot its `expr` names (`expr_reads`), or
 /// the slot of its own name. Anything else in the specification names no source term; an `expr`
 /// that cannot be read makes the whole transformation unreadable.
 pub fn reads(transformation: &Value) -> Option<BTreeMap<String, BTreeSet<String>>> {

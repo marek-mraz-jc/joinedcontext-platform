@@ -525,7 +525,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
 
 /// The Mappings each Endpoint publishes beside its model, by slug (EP-53): those of its project
 /// and space whose source is a model it serves, at that major, with both compiled artifacts
-/// committed beside them. One that may not be published ([`PublishedMapping::of`]) is left out
+/// committed beside them. One that may not be published ([`crate::handlers::mappings::PublishedMapping::of`]) is left out
 /// with a line in the log.
 pub fn mappings_of(
     repo: &Repository,
