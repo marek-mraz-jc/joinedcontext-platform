@@ -61,7 +61,8 @@ slice (after):
 T-4451 (2026-10-17): the ratchet had run only as a self-test, so main drifted to jc-core 51 and
 assistant 2 while context-gateway (39) and jcctl (31) fell below their lines unrecorded. After
 the slice below, on a graph of the branch: agent-proxy 3, assistant 1, context-gateway 39,
-jc-core 46, jcctl 31, wasm-host 6; the baseline holds these.
+jc-core 46, jcctl 31, wasm-host 6; the baseline holds these. T-4452 then took context-gateway
+from 39 to 31, and 32 with T-4444's `Reaper::files_walked` (test API) merged meanwhile; jcctl, wasm-host and agent-proxy rows are all reasoned below and stay.
 
 `ci/cg-dead-code-baseline.txt` holds the after column. The check is red when a crate has more
 rows than its line (new code nothing calls, or a caller deleted and its callees kept) and red
@@ -100,6 +101,17 @@ T-4451 deleted these too, each with no production caller:
 | `assistant::chat::routed::answer_messages` | a wrapper only its tests called; the answer call uses `messages_with` |
 | `jc_core::kinds::assistant::KnowledgeSourceSpec::upload_limits` | not deleted: the assistant's upload route repeated its body, and now calls it |
 
+T-4452, context-gateway:
+
+| Row | Why it was dead |
+|---|---|
+| `store::spaces_of`, `store::endpoints_with_models` | no caller, not even a test: the loader builds both tables from one `ModelSet` |
+| `pdp::evaluator::Constraints::in_source_model` | the view-endpoint inversion (DM-51) left with the views for Antares; only its test called it |
+| `federation::Federations::needing_caller_identity` | its test now reads `caller_members`, which the read path uses |
+| `middleware::response::RESULTS_COUNT` | named nothing; the count passes through as the broker sent it |
+| `middleware::response::WARNING` | the scrub passes the broker's warning through without naming it; the const moved into its test |
+| `fanout::Index::notified`, `scanned` | not deleted: the test oracles of the index (the hub runs `candidates` and `decides` itself), moved into the test module |
+
 ### 3.2 Removed by an open delete task
 
 These go with the surface that used them; deleting them here would collide with those tasks.
@@ -108,7 +120,7 @@ These go with the surface that used them; deleting them here would collide with 
 |---|---|
 | `federation/odrl_compiler.rs` (14 rows), `handlers/access_odrl.rs` (7 rows) | T-3650 |
 | `pdp::evaluator::Verdict::constraints`, `pdp::projection::project` | T-3644 |
-| `handlers::schema::Visible::only` | T-3646 |
+| `handlers::schema::Visible::only`, `only_each` | T-3646 |
 | `app::Gateway::limit_hub_to` (the MCP hub's limiter) | T-3648 |
 | `translators::tabular::Table::is_empty`, `translators::view_mapping::ViewMapping::source_of` | T-3652 |
 
@@ -120,7 +132,10 @@ hide them from it.
 
 - agent-proxy: `RunResolver::with_cached`, `with_cached_at`; `DataCredentials::revoke`.
 - assistant: `worker::sources`.
-- context-gateway: `ServiceAccounts::is_empty`, `with_app`; `Agreements::len`, `is_empty`;
+- context-gateway: `Gateway::wait_for_writes`, `limit_anonymous_mcp_to` (the tests shorten the
+  write wait and the anonymous MCP limit); `pdp::temporal::Window::admits`;
+  `pdp::reaper::Reaper::files_walked` (store_layout_tests and `examples/scale_bench.rs`, T-4444);
+  `ServiceAccounts::is_empty`, `with_app`; `Agreements::len`, `is_empty`;
   `Federations::is_federated`; `RateLimiter::len`, `is_empty`; `WorkloadToken::new`;
   `Broker::new` (plain HTTP), `Broker::base`; `SlugResolver::with`, `len`, `is_empty`.
 - jc-core: `ResourceEnvelope::new`, `strip_status`, `without_status`, `resource_path`, `to_yaml`,

@@ -10,13 +10,11 @@
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, HeaderValue, Response, StatusCode};
+use axum::http::{header, HeaderName, HeaderValue, Response, StatusCode};
 use axum::routing::get;
 use axum::Router;
 use context_gateway::app::Gateway;
-use context_gateway::middleware::response::{
-    asked_about_narrowing, scrub, RESULTS_RESTRICTED, WARNING,
-};
+use context_gateway::middleware::response::{asked_about_narrowing, scrub, RESULTS_RESTRICTED};
 use context_gateway::middleware::tenancy::TENANT;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -182,6 +180,9 @@ async fn the_tenant_header_is_matched_however_the_handler_spelt_it() {
     assert!(!response.headers().contains_key("ngsild-tenant"));
     assert!(!response.headers().contains_key("NGSILD-Tenant"));
 }
+
+/// The broker's warning (CIM 009 clause 6.3.11): the scrub passes it through untouched.
+const WARNING: HeaderName = HeaderName::from_static("ngsild-warning");
 
 #[tokio::test]
 async fn the_warning_reaches_everybody_because_it_names_only_what_the_caller_may_read() {

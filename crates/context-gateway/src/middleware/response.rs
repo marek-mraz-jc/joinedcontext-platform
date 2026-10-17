@@ -171,20 +171,6 @@ fn negotiated(accept: &str) -> Artifact {
 /// it is (R22, GW12). It tells a prober that something was there to hide.
 pub const RESULTS_RESTRICTED: HeaderName = HeaderName::from_static("ngsild-results-restricted");
 
-/// What a caller has to know to read the answer they got (CIM 009 clause 6.3.11).
-///
-/// Sent to everybody, unlike [`RESULTS_RESTRICTED`]: it names types the caller may read and says
-/// why they were not queried, which is the difference between an empty list a developer can fix
-/// and one they bisect with more filters until it answers (T-1862).
-pub const WARNING: HeaderName = HeaderName::from_static("ngsild-warning");
-
-/// The total a broker reports for a query that asked to be counted (CIM 009 clause 6.3.13).
-///
-/// The gateway never writes it: it is the broker's number, over the entities the broker saw. It
-/// is removed from an answer the gateway narrowed, because a total over what was withheld is the
-/// same disclosure as the withheld entities (R22, T-2131).
-pub const RESULTS_COUNT: HeaderName = HeaderName::from_static("ngsild-results-count");
-
 /// Whether the request asked to be told about narrowing (R22).
 pub fn asked_about_narrowing(request: &Request) -> bool {
     request

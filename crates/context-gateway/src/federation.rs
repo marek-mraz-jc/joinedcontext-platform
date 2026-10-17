@@ -56,15 +56,8 @@ impl Federations {
             .unwrap_or_default()
     }
 
-    /// The registrations of one space that ask for the caller's own identity (PF-48).
-    pub fn needing_caller_identity(&self, project: &str, space: &str) -> Vec<&str> {
-        self.caller_members(project, space)
-            .map(|member| member.name.as_str())
-            .collect()
-    }
-
-    /// [`Self::needing_caller_identity`], whole: a read over this space forwards a token of
-    /// the caller exchanged for these members' brokers (T-3999).
+    /// The registrations of one space that ask for the caller's own identity (PF-48): a read over
+    /// this space forwards a token of the caller exchanged for these members' brokers (T-3999).
     pub fn caller_members<'a>(
         &'a self,
         project: &str,

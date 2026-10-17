@@ -590,7 +590,7 @@ pub struct Budget {
     pub question_chars: u32,
 }
 
-/// The models a deployment asks `jc-agent-proxy` for; each [`DEFAULT_MODEL`] when absent.
+/// The models a deployment names for `jc-agent-proxy` (MF-52): the router and answer calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ModelChoice {

@@ -670,7 +670,10 @@ fn the_table_is_what_the_repository_says_and_nothing_else() {
     assert!(table.is_federated(PROJECT, HUB));
     assert!(!table.is_federated(PROJECT, "air-quality"));
     assert_eq!(
-        table.needing_caller_identity(PROJECT, HUB),
+        table
+            .caller_members(PROJECT, HUB)
+            .map(|member| member.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["regional"],
         "only the registration that asks for it"
     );

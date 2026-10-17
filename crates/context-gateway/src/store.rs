@@ -395,16 +395,9 @@ fn app_of(repo: &Repository, project: &str, endpoint: &str) -> Option<String> {
         .then(|| endpoint.to_owned())
 }
 
-/// The endpoint table, with the model artifacts read from `root` when one is given.
-///
-/// `DataModel.spec.artifacts` names files committed beside the LinkML source, so the
-/// schema surface publishes what was reviewed rather than what a compiler produces now
-/// (DM-02, EP-46). Deterministic: the repository is indexed by resource identity, so two runs
-/// on the same commit build the same table in the same order (CC-27).
-pub fn endpoints_with_models(repo: &Repository, root: Option<&Path>) -> Vec<Endpoint> {
-    endpoints_from(repo, root, &ModelSet::of(repo, root))
-}
-
+/// The endpoint table, with the model artifacts read from `root` when one is given (DM-02,
+/// EP-46). Deterministic: the repository is indexed by resource identity, so two runs on the same
+/// commit build the same table in the same order (CC-27).
 fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> Vec<Endpoint> {
     let ModelSet { models, declared } = models;
     let policies = policies_by_space(repo);
@@ -639,10 +632,6 @@ fn view_mappings(
 /// the same grants because they read the same `Vec<PolicySpec>`. The audience is `public`
 /// so that the decision belongs to the policy set alone: a space with no grant for the
 /// caller answers 404, which is what a space that does not exist answers (SP-06, SP-11).
-pub fn spaces_of(repo: &Repository, root: Option<&Path>) -> Vec<Space> {
-    spaces_from(repo, &ModelSet::of(repo, root))
-}
-
 fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
     let ModelSet { models, declared } = models;
     let policies = policies_by_space(repo);
