@@ -329,21 +329,19 @@ fn hit(doc: &Doc, score: f64, lang: &str) -> Value {
 pub(crate) fn tool() -> Value {
     json!({
         "name": "search",
-        "description": "Find the dataset for a question in one call: ranked words of titles and \
-                        descriptions (sk and en, diacritics optional), entity types and their \
-                        Smart Data Model domain, places and publishers, over the Endpoints you \
-                        may read. Each hit names the Endpoint and its nextQuery, the call that \
-                        reads it.",
+        "description": "The datasets you may read, ranked for a question by title, description \
+                        (sk, en, diacritics optional), type, domain, place and publisher; each hit \
+                        names its Endpoint and nextQuery.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": { "type": "string", "minLength": 1, "maxLength": 200, "description": "The question's words, e.g. air quality Banská Bystrica" },
-                "domain": { "type": "string", "minLength": 1, "maxLength": 200, "description": "A Smart Data Model domain, e.g. Environment" },
-                "theme": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An EU data theme code, e.g. ENVI" },
-                "type": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An entity type the dataset holds" },
-                "place": { "type": "string", "minLength": 1, "maxLength": 200, "description": "A place every hit names" },
+                "query": { "type": "string", "minLength": 1, "maxLength": 200, "description": "e.g. air quality Banská Bystrica" },
+                "domain": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "theme": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "type": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "place": { "type": "string", "minLength": 1, "maxLength": 200 },
                 "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT },
-                "lang": { "type": "string", "minLength": 2, "maxLength": 8, "description": "The language of the titles, e.g. sk; English otherwise" },
+                "lang": { "type": "string", "minLength": 2, "maxLength": 8 },
             },
             "required": ["query"],
             "additionalProperties": false,

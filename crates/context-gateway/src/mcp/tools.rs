@@ -1207,7 +1207,8 @@ pub(crate) fn output_schema(tool: &Tool) -> Value {
     json!({
         "type": "object",
         "properties": {
-            tool.result_key: { "description": tool.description },
+            // The tool's own description says what it is; a copy here cost each tool its length.
+            tool.result_key: {},
             "restricted": {
                 "type": "boolean",
                 "description": "Present when the policy narrowed this answer (AG-13, R22)",

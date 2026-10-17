@@ -960,13 +960,10 @@ fn attributes_of(
 pub(crate) fn list_endpoints_tool() -> Value {
     json!({
         "name": "list_endpoints",
-        "description": "The Endpoints this connector reaches: open ones without a login, and \
-                        the ones you may read once signed in. One line each: slug, title, \
-                        context space, public or internal, entity types, Smart Data Model \
-                        domain, EU theme, area and period. Filter with q, type, attribute, \
-                        space, access, domain and theme; name one in the `endpoint` argument \
-                        of every other tool; get_endpoint gives its URLs, attributes and data \
-                        model.",
+        "description": "The Endpoints you may read, open ones without a login. One line each: \
+                        slug, title, space, access, types, domain, EU theme, area, period. Name \
+                        one as `endpoint` in the other tools; get_endpoint gives its URLs, \
+                        attributes and data model.",
         "inputSchema": {
             "type": "object",
             "properties": {
