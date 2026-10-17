@@ -1,0 +1,41 @@
+# Routes of the platform's other servers (T-3591): agent-proxy, the assistant (chat, widget, the
+# Portal's knowledge admin), the gateway's internal MQTT auth hook, functions and token-sidecar.
+# Same shape as gateway.toml: `.route("/path", verb(handler))`, one line or broken by rustfmt.
+# A closure handler (`get(|| async { "ok" })`, the health probes) names no symbol and gets no key.
+[[link]]
+name = "service-routes"
+channel = "http"
+role = "provides"
+files = [
+  "crates/agent-proxy/src/lib.rs",
+  "crates/assistant/src/chat/admin.rs",
+  "crates/assistant/src/chat/mod.rs",
+  "crates/assistant/src/chat/widget.rs",
+  "crates/context-gateway/src/mqtt.rs",
+  "crates/functions/src/lib.rs",
+  "crates/token-sidecar/src/lib.rs",
+]
+pattern = '(?s)\.route\(\s*"(?P<key>/[^"]+)"\s*,(?P<body>[^\n]*\)|.*?\n[ \t]*\))[ \t]*,?[ \t]*\r?\n'
+each = '(?P<verb>get|post|put|patch|delete|head|options|any)\(\s*(?P<symbol>[\w:]+)'
+key = "{verb} {key}"
+
+# wasm-host matches paths by hand on a hyper service (server.rs): the apps port serves the placed
+# Apps under their base paths, which come from the placement file at run time; the admin port serves
+# /metrics and /jobs on a listener no edge route reaches (T-3857).
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "ANY /{app}/{rest}"
+symbol = "wasm_host::server::Shard::handle"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /metrics"
+symbol = "wasm_host::server::Shard::handle_admin"
+
+[[endpoint]]
+channel = "http"
+role = "provides"
+key = "GET /jobs"
+symbol = "wasm_host::server::Shard::handle_admin"

@@ -46,6 +46,9 @@ async fn run() -> Result<(), String> {
     let http = reqwest::Client::builder()
         .add_root_certificate(ca)
         .timeout(std::time::Duration::from_secs(15))
+        // No redirect: the grant carries the ServiceAccount assertion, which a 307 or 308 would
+        // resend to whatever host the answer names (T-3591).
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("the HTTP client: {error}"))?;
     let config = Config {

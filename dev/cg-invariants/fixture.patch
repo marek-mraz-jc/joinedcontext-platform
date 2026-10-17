@@ -40,7 +40,7 @@ index 0000000..bf92d2b
 +    secret.expose().to_owned()
 +}
 diff --git a/crates/context-gateway/src/lib.rs b/crates/context-gateway/src/lib.rs
-index 3ad41b0..df9246c 100644
+index d10f5ed..28a961d 100644
 --- a/crates/context-gateway/src/lib.rs
 +++ b/crates/context-gateway/src/lib.rs
 @@ -10,6 +10,7 @@
@@ -51,3 +51,21 @@ index 3ad41b0..df9246c 100644
  pub mod app;
  pub mod auth;
  pub mod config;
+diff --git a/crates/functions/src/lib.rs b/crates/functions/src/lib.rs
+index c200402..3ad9149 100644
+--- a/crates/functions/src/lib.rs
++++ b/crates/functions/src/lib.rs
+@@ -211,7 +211,13 @@ async fn invoke(
+ pub fn router(state: Arc<AppState>) -> Router {
+     Router::new()
+         .route("/invoke", post(invoke))
++        .route("/cg-fixture", get(cg_fixture_route))
+         .route("/healthz", get(|| async { "ok" }))
+         .layer(DefaultBodyLimit::max(INVOCATION_LIMIT))
+         .with_state(state)
+ }
++
++/// cg-invariants fixture: a route that checks no caller.
++async fn cg_fixture_route() -> &'static str {
++    "open"
++}
