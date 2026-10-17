@@ -994,15 +994,18 @@ impl Repository {
     /// A space the repository does not hold, or cannot parse, renders without a pin: an id
     /// minted for it can then never land in a space that pins another segment.
     pub fn space_segment(&self, project: &str, name: &str) -> String {
+        // Looked up by its id, not found by a scan: every Endpoint and space asks, and a scan
+        // per ask made a load of 10,000 spaces quadratic (T-4443).
+        let id = ResourceId::new(
+            "joinedcontext.com",
+            "ContextSpace",
+            Some(project.to_owned()),
+            name,
+        );
         let pin = self
             .resources
-            .iter()
-            .find(|(id, _)| {
-                id.kind == "ContextSpace"
-                    && id.name == name
-                    && id.namespace.as_deref() == Some(project)
-            })
-            .and_then(|(_, resource)| resource.manifest.spec.get("urnSegment"))
+            .get(&id)
+            .and_then(|resource| resource.manifest.spec.get("urnSegment"))
             .and_then(|pin| pin.as_str().map(str::to_owned));
         jc_core::kinds::urn_segment(project, name, pin.as_deref())
     }
@@ -1020,6 +1023,13 @@ impl Repository {
     /// Returns `true` if the repository contains no loaded resources.
     pub fn is_empty(&self) -> bool {
         self.resources.is_empty()
+    }
+
+    /// The same load, its files moved to `root` as they are: every path it holds but the root
+    /// is relative, so a tree renamed into place needs no second parse (T-4443).
+    pub(crate) fn moved_to(mut self, root: &Path) -> Self {
+        root.clone_into(&mut self.root);
+        self
     }
 
     /// Returns the root path of the organization repository (CC-08).

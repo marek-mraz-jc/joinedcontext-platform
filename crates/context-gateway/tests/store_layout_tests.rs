@@ -346,3 +346,66 @@ fn an_apps_client_reaches_a_further_space_through_its_public_endpoint_alone() {
         "its own space's endpoint, none generated yet"
     );
 }
+
+/// T-4444: checkouts linked in by commit, as `jcctl checkouts` writes them, are fingerprinted by
+/// their links: an idle tick stats no file of any project, and a project relinked to a commit
+/// that changes a Policy is served on the next tick.
+#[cfg(unix)]
+#[test]
+fn an_idle_tick_reads_the_checkout_links_and_walks_no_project_file() {
+    let root = temp_dir("linked");
+    let tree = jcctl::bench_org::write(&root.join("bench"), 200).expect("the tree");
+    let projects = root.join("checkouts");
+    let cache = projects.join(".cache");
+    std::fs::create_dir_all(&cache).expect("the cache");
+    for slug in ["p0000", "p0001"] {
+        let commit = cache.join(format!("{slug}.tree-c1"));
+        std::fs::rename(tree.projects.join(slug), &commit).expect("the tree moves");
+        std::os::unix::fs::symlink(format!(".cache/{slug}.tree-c1"), projects.join(slug))
+            .expect("the link");
+    }
+    let checkouts = Checkouts {
+        projects: projects.clone(),
+        assembly: root.join("assembly"),
+    };
+    let (endpoints, spaces, ..) = store::load_from(&tree.org, Some(&checkouts)).expect("loads");
+    assert_eq!(endpoints.len(), 200);
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1".to_owned()),
+            Box::new(PolicyPdp),
+            "bench.example",
+        )
+        .serve(endpoints)
+        .serve_spaces(spaces),
+    );
+    let mut reaper = Reaper::new(Arc::clone(&gateway), &tree.org).with_checkouts(checkouts);
+    assert!(!reaper.tick(), "nothing changed");
+    // org.yaml, the registry directory and its two entries; none of the 600-odd project files.
+    assert_eq!(reaper.files_walked(), 4);
+
+    // The next commit of p0001: its first Endpoint withdrawn, swapped in by one rename.
+    let next = cache.join("p0001.tree-c2");
+    copy(&cache.join("p0001.tree-c1"), &next);
+    std::fs::remove_file(next.join("spaces/s00100/endpoints/e00100.yaml")).expect("withdrawn");
+    let link = projects.join(".p0001.link");
+    std::os::unix::fs::symlink(".cache/p0001.tree-c2", &link).expect("the next link");
+    std::fs::rename(&link, projects.join("p0001")).expect("relinked");
+    assert!(reaper.tick(), "the relinked project reloads");
+    assert!(gateway.resolver.resolve(&tree.slugs[100]).is_none());
+    assert!(gateway.resolver.resolve(&tree.slugs[101]).is_some());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn copy(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).expect("a directory").flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            std::fs::create_dir_all(&target).expect("a directory");
+            copy(&entry.path(), &target);
+        } else {
+            std::fs::create_dir_all(to).expect("a directory");
+            std::fs::copy(entry.path(), &target).expect("a copy");
+        }
+    }
+}
