@@ -87,7 +87,7 @@ const READS_SHOWN: &str = r#"    id: https://example.org/mappings/air-to-sdm
         populated_from: AirQualityObserved
         slot_derivations:
           pm10: { populated_from: pm10 }
-          pm2p5: { expr: "{pm25} * 1" }
+          pm2p5: { expr: "round(pm25 * 1.5, 1)" }
           location: {}"#;
 
 const READS_HIDDEN: &str = r#"    class_derivations:
@@ -96,6 +96,14 @@ const READS_HIDDEN: &str = r#"    class_derivations:
         slot_derivations:
           pm10: { populated_from: pm10 }
           contact: { populated_from: operatorPhone }"#;
+
+/// T-4423: a hidden slot named bare in an expression, as LinkML-Map evaluates it.
+const READS_HIDDEN_BARE: &str = r#"    class_derivations:
+      AirQualityObservedSdm:
+        populated_from: AirQualityObserved
+        slot_derivations:
+          pm10: { populated_from: pm10 }
+          note: { expr: "'call ' + operatorPhone" }"#;
 
 const SECRET: &str = r#"    class_derivations:
       AirQualityObservedSdm:
@@ -119,6 +127,7 @@ fn repo(test: &str) -> PathBuf {
         ("air-to-sdm", "ovzdusie-air", READS_SHOWN, ""),
         ("air-uncompiled", "ovzdusie-air", READS_SHOWN, ""),
         ("air-phone", "ovzdusie-air", READS_HIDDEN, ""),
+        ("air-phone-bare", "ovzdusie-air", READS_HIDDEN_BARE, ""),
         ("air-native", "ovzdusie-air", READS_SHOWN, native),
         ("air-secret", "ovzdusie-air", SECRET, ""),
         ("partner-to-sdm", "partner-air", READS_SHOWN, ""),
@@ -219,6 +228,7 @@ async fn the_approved_readable_mapping_is_listed_and_served_and_no_other() {
     // One was left out for this caller; the index says so and never which.
     assert_eq!(index["redacted"], true);
     assert!(!String::from_utf8_lossy(&body).contains("air-phone"));
+    assert!(!String::from_utf8_lossy(&body).contains("operatorPhone"));
     let artifacts = index["mappings"][0]["artifacts"]
         .as_object()
         .expect("artifacts");
@@ -260,6 +270,8 @@ async fn the_approved_readable_mapping_is_listed_and_served_and_no_other() {
         "v1/mappings/air-uncompiled.blobl",
         "v1/mappings/air-phone.blobl",
         "v1/mappings/air-phone.linkml-map.yaml",
+        "v1/mappings/air-phone-bare.blobl",
+        "v1/mappings/air-phone-bare.linkml-map.yaml",
         "v1/mappings/air-native.blobl",
         "v1/mappings/air-secret.linkml-map.yaml",
         "v1/mappings/partner-to-sdm.blobl",
@@ -355,4 +367,35 @@ fn a_mapping_reads_its_sources_in_every_form_linkml_map_writes() {
     assert!(read(json!({ "id": "x" })).is_empty());
     assert!(reads(&json!({ "class_derivations": "Out" })).is_none());
     assert!(reads(&json!({ "class_derivations": { "Out": { "populated_from": 7 } } })).is_none());
+}
+
+/// T-4423: what an `expr` reads, braced or bare, and an expression that cannot be read.
+#[test]
+fn an_expression_reads_every_slot_it_names_braced_or_bare() {
+    let slots = |expr: &str| {
+        reads(
+            &json!({ "class_derivations": { "Out": { "populated_from": "In",
+            "slot_derivations": { "o": { "expr": expr } } } } }),
+        )
+        .map(|got| got["In"].iter().cloned().collect::<Vec<_>>())
+    };
+    let some = |names: &[&str]| Some(names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+    assert_eq!(slots("{a} + ' ' + {b}"), some(&["a", "b"]));
+    assert_eq!(slots("round({a} * 1.5)"), some(&["a"]));
+    assert_eq!(slots("hiddenSlot * 2"), some(&["hiddenSlot"]));
+    // Strings, numbers, keywords, called functions and attributes after a dot name no slot.
+    assert_eq!(
+        slots("str(level) + ' µg' if {flag} and not 2e3 > 0.5 else \"a {x} 'y'\""),
+        some(&["flag", "level"])
+    );
+    assert_eq!(
+        slots("{name}.upper() + street.title()"),
+        some(&["name", "street"])
+    );
+    // A function's name used bare is a slot of that name.
+    assert_eq!(slots("max + 1"), some(&["max"]));
+    // Unreadable: the Mapping is not published at all.
+    for bad in ["'open", "{a", "{}", "{a b}", "a | b", "`a`", "$a", "a; b"] {
+        assert_eq!(slots(bad), None, "{bad}");
+    }
 }
