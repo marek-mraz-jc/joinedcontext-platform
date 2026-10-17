@@ -546,6 +546,39 @@ async fn a_broker_failure_behind_the_view_is_the_gateways_own_answer() {
     );
 }
 
+/// T-4438: a broker that is down or overloaded is not an `@context` that could not be fetched.
+/// The caller gets the gateway's own 503 with the broker's Retry-After and no broker host.
+#[tokio::test]
+async fn a_broker_503_is_no_ld_context_problem_and_keeps_its_retry_after() {
+    let (upstream, _) = broker(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &[("retry-after", "7")],
+        json!({ "detail": "antares-broker.antares.svc:8080 is draining" }),
+    )
+    .await;
+    let (status, headers, body) = call(
+        app(upstream, endpoint()),
+        get(&format!(
+            "/api/endpoint/{SLUG}/ngsi-ld/v1/entities/{STATION}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        headers.get("retry-after").map(|v| v.as_bytes()),
+        Some(&b"7"[..])
+    );
+    let problem: Value = serde_json::from_str(&body).expect("a problem document");
+    assert_ne!(
+        problem["type"], "https://uri.etsi.org/ngsi-ld/errors/LdContextNotAvailable",
+        "{body}"
+    );
+    assert!(
+        !body.contains("antares-broker") && !body.contains("svc"),
+        "{body}"
+    );
+}
+
 /// EP-22, R20: a space nobody has written to has no tenant at the broker. A listing answers
 /// empty and a read of one thing the plain miss, and neither names the tenant.
 #[tokio::test]

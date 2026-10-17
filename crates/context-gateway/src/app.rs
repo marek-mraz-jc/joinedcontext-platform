@@ -760,9 +760,11 @@ async fn space_ngsi_ld(
 
 /// The error types of CIM 009 clause 5.5.2 the gateway's own refusals map to, by status.
 ///
-/// The clause defines no type for 401, 403 (other than the two query-size ones), 415 or
-/// 502, so those keep the joinedcontext type URI: a made-up ETSI URI would be a lie a
-/// client could act on, and a joinedcontext one is at least documented.
+/// The clause defines no type for 401, 403 (other than the two query-size ones), 415, 502 or
+/// 503, so those keep the joinedcontext type URI: a made-up ETSI URI would be a lie a
+/// client could act on, and a joinedcontext one is at least documented. Its only 503 type,
+/// `LdContextNotAvailable`, means an `@context` that could not be fetched, which the gateway
+/// never fetches: a busy gateway or a failed broker is not that (T-4438).
 fn ngsi_ld_error_type(status: u16) -> Option<&'static str> {
     Some(match status {
         400 => "https://uri.etsi.org/ngsi-ld/errors/BadRequestData",
@@ -770,7 +772,6 @@ fn ngsi_ld_error_type(status: u16) -> Option<&'static str> {
         409 => "https://uri.etsi.org/ngsi-ld/errors/AlreadyExists",
         422 => "https://uri.etsi.org/ngsi-ld/errors/OperationNotSupported",
         500 => "https://uri.etsi.org/ngsi-ld/errors/InternalError",
-        503 => "https://uri.etsi.org/ngsi-ld/errors/LdContextNotAvailable",
         _ => return None,
     })
 }
@@ -858,8 +859,13 @@ fn query_shape_refusal(params: &[(String, String)]) -> Option<Response<Body>> {
 /// A broker's `5xx` as the caller gets it: the gateway's own document, and the broker's text
 /// in the operator's log. What a broker says when it fails is whatever it was holding: an entity
 /// id in a message, a fragment of its own query, the name of an attribute an endpoint hides
-/// (T-2260).
-pub(crate) async fn broker_failure(status: StatusCode, body: Body) -> Response<Body> {
+/// (T-2260). The broker's `Retry-After` is passed on: when to ask again is no secret of its own
+/// (T-4438).
+pub(crate) async fn broker_failure(
+    status: StatusCode,
+    retry_after: Option<HeaderValue>,
+    body: Body,
+) -> Response<Body> {
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
@@ -868,13 +874,17 @@ pub(crate) async fn broker_failure(status: StatusCode, body: Body) -> Response<B
         broker = %String::from_utf8_lossy(&held),
         "the broker failed; its own explanation is not passed on"
     );
-    ProblemDetails::new(
+    let mut answer = ProblemDetails::new(
         status.as_u16(),
         "broker-failure",
         "The context broker could not answer",
     )
     .with_detail("the context broker behind this endpoint failed to answer this request")
-    .into_response()
+    .into_response();
+    if let Some(retry_after) = retry_after {
+        answer.headers_mut().insert("retry-after", retry_after);
+    }
+    answer
 }
 
 /// The NGSI-LD operation a request stands for, or the answer to one that stands for none: Set
@@ -1116,7 +1126,12 @@ pub(crate) async fn serve_ngsi_ld_view(
     }
     if answer.status().is_server_error() {
         let (parts, body) = answer.into_parts();
-        return broker_failure(parts.status, body).await;
+        return broker_failure(
+            parts.status,
+            parts.headers.get("retry-after").cloned(),
+            body,
+        )
+        .await;
     }
     if answer.status() == StatusCode::FORBIDDEN {
         return with_platform_slug(answer).await;
@@ -3260,7 +3275,12 @@ async fn mcp_answer(
     };
     if answer.status().is_server_error() {
         let (parts, body) = answer.into_parts();
-        return broker_failure(parts.status, body).await;
+        return broker_failure(
+            parts.status,
+            parts.headers.get("retry-after").cloned(),
+            body,
+        )
+        .await;
     }
     let json = answer
         .headers()

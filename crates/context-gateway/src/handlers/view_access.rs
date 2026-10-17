@@ -191,7 +191,14 @@ async fn from_view(
         .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
     let (parts, body) = answer.into_parts();
     if parts.status.is_server_error() {
-        return Err(Box::new(broker_failure(parts.status, body).await));
+        return Err(Box::new(
+            broker_failure(
+                parts.status,
+                parts.headers.get("retry-after").cloned(),
+                body,
+            )
+            .await,
+        ));
     }
     let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
         return Err(Box::new(not_a_document()));
