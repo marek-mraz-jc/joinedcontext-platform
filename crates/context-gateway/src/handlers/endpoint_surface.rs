@@ -18,6 +18,7 @@
 
 use crate::handlers::space_surface::{escape, literal, localized, plain};
 use crate::resolver::{Endpoint, Space};
+use jc_core::classification::classify;
 use jc_core::kinds::catalog::spatial_iri;
 use jc_core::kinds::{Audience, Catalog, Duty, Representation};
 use serde_json::{json, Value};
@@ -514,6 +515,32 @@ pub(crate) fn duties(duty: Duty) -> Vec<Value> {
 pub(crate) const SHARE_ALIKE: &str = "http://creativecommons.org/ns#ShareAlike";
 
 /// What the catalogue block says about the dataset itself (EP-78).
+/// The Endpoint's catalogue block, its themes and keywords derived from the Smart Data Models of
+/// the types it holds where the block sets none (T-4498): a theme or keyword set by hand wins.
+/// The types are the space's declared classes, else its models' classes.
+fn classified(endpoint: &Endpoint) -> Catalog {
+    let mut catalog = endpoint.catalog.as_deref().cloned().unwrap_or_default();
+    if !catalog.themes.is_empty() && !catalog.keywords.is_empty() {
+        return catalog;
+    }
+    let derived = match endpoint.declared_types.as_deref() {
+        Some(declared) => classify(declared.classes.iter().map(String::as_str)),
+        None => classify(
+            endpoint
+                .models
+                .iter()
+                .flat_map(|model| model.classes.iter().map(String::as_str)),
+        ),
+    };
+    if catalog.themes.is_empty() {
+        catalog.themes = derived.themes.into_iter().collect();
+    }
+    if catalog.keywords.is_empty() {
+        catalog.keywords = derived.keywords;
+    }
+    catalog
+}
+
 fn describe(record: &mut Value, included: &mut Vec<Value>, catalog: &Catalog) {
     if let Some(publisher) = &catalog.publisher {
         let mut agent = json!({
@@ -675,9 +702,7 @@ pub fn dataset(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: 
         "@id": access_rights(endpoint.audience),
         "@type": "dct:RightsStatement",
     })];
-    if let Some(catalog) = endpoint.catalog.as_deref() {
-        describe(&mut record, &mut included, catalog);
-    }
+    describe(&mut record, &mut included, &classified(endpoint));
     let mut policies = Vec::new();
     if endpoint.audience != Audience::Public {
         // What a connector dereferences to build an offer: the endpoint's own grant
