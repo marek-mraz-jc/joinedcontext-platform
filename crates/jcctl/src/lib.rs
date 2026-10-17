@@ -5,6 +5,7 @@
 
 pub mod apisix;
 pub mod assemble;
+pub mod bench_org;
 pub mod bento;
 pub mod blueprints;
 pub mod commands;
