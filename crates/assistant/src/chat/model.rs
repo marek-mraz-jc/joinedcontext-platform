@@ -25,7 +25,7 @@ pub struct Completion {
     /// `usage.cost`, T-4149); `None` when it says nothing, which is not the same as free (T-4178).
     pub cost_micros: Option<u64>,
     /// The provider OpenRouter served the call on (its `provider` field, T-4360), when it names
-    /// one in [`provider_name`]'s bounds.
+    /// one in bounds: at most 64 characters of letters, digits, space and `. _ / -`.
     pub provider: Option<String>,
     /// The reasoning tokens the call spent (`usage.completion_tokens_details.reasoning_tokens`,
     /// T-4360), when the provider reports them.
