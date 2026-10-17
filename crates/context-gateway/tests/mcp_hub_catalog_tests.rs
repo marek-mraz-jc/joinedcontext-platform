@@ -554,3 +554,160 @@ async fn one_hundred_eleven_endpoints_list_in_under_25000_characters() {
         "{entry}"
     );
 }
+
+fn holding(mut e: Endpoint, class: &str, sk: &str) -> Endpoint {
+    let mut declared = area();
+    declared.classes = [class.to_owned()].into_iter().collect();
+    e.declared_types = Some(Arc::new(declared));
+    e.title.insert("sk".to_owned(), sk.to_owned());
+    e
+}
+
+/// T-4493: one search call from a question in either language, with or without diacritics,
+/// to the Dataset, its Endpoint and the call that reads it; an internal Endpoint never shows
+/// to a caller who may not read it.
+#[tokio::test]
+async fn search_ranks_the_dataset_a_question_names_first() {
+    let realm = common::Realm::new();
+    let endpoints = vec![
+        holding(
+            endpoint(
+                AIR,
+                "Air quality Banská Bystrica",
+                "banskabystrica-ovzdusie",
+                Audience::Public,
+                "public",
+            ),
+            "AirQualityObserved",
+            "Kvalita ovzdušia Banská Bystrica",
+        ),
+        holding(
+            endpoint(
+                BIKES,
+                "Bike sharing Banská Bystrica",
+                "banskabystrica-bicykle",
+                Audience::Public,
+                "public",
+            ),
+            "BikeHireDockingStation",
+            "Zdieľané bicykle Banská Bystrica",
+        ),
+        holding(
+            endpoint(
+                "zzzzzzzzzzzzzzzzzzzzzzzzzz",
+                "Events in Žilina",
+                "zilina-podujatia",
+                Audience::Public,
+                "public",
+            ),
+            "Event",
+            "Podujatia v Žiline",
+        ),
+        holding(
+            endpoint(
+                "pppppppppppppppppppppppppp",
+                "Air quality Prešov",
+                "presov-ovzdusie",
+                Audience::Public,
+                "public",
+            ),
+            "AirQualityObserved",
+            "Kvalita ovzdušia Prešov",
+        ),
+        holding(
+            endpoint(
+                INNER,
+                "Air quality sensors, internal Banská Bystrica",
+                "banskabystrica-senzory",
+                Audience::Organization,
+                "steward",
+            ),
+            "AirQualityObserved",
+            "Interné senzory ovzdušia Banská Bystrica",
+        ),
+    ];
+    let app = app(&realm, endpoints);
+    let top = |answer: &Value| answer["result"]["structuredContent"]["hits"][0].clone();
+    for question in [
+        "ovzdušie Banská Bystrica",
+        "air quality banska bystrica",
+        "NO2 Bystrica",
+    ] {
+        let answer = call(app.clone(), None, "search", json!({ "query": question })).await;
+        let hit = top(&answer);
+        assert_eq!(hit["endpoint"], json!(AIR), "{question}: {answer}");
+        assert_eq!(
+            hit["dataset"],
+            json!("urn:ngsi-ld:Dataset:banskabystrica-ovzdusie")
+        );
+        assert_eq!(
+            hit["nextQuery"]["arguments"]["type"],
+            json!("AirQualityObserved")
+        );
+        assert_eq!(hit["domains"], json!(["Environment"]));
+        eprintln!("search {question:?}: {}", hit["title"]);
+    }
+    let events = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "events Zilina", "lang": "sk" }),
+    )
+    .await;
+    assert_eq!(
+        top(&events)["endpoint"],
+        json!("zzzzzzzzzzzzzzzzzzzzzzzzzz"),
+        "{events}"
+    );
+    assert_eq!(top(&events)["title"], json!("Podujatia v Žiline"));
+    // Facets narrow; a place every hit must name.
+    let near = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality", "place": "Prešov" }),
+    )
+    .await;
+    assert_eq!(
+        near["result"]["structuredContent"]["total"],
+        json!(1),
+        "{near}"
+    );
+    let none = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality", "domain": "Transportation" }),
+    )
+    .await;
+    assert_eq!(none["result"]["structuredContent"]["total"], json!(0));
+    // The internal Endpoint is no hit anonymously, and is one for its steward.
+    let anonymous = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "senzory interné" }),
+    )
+    .await;
+    assert!(!anonymous.to_string().contains(INNER), "{anonymous}");
+    let token = steward(&realm);
+    let member = call(
+        app.clone(),
+        Some(&token),
+        "search",
+        json!({ "query": "senzory interné" }),
+    )
+    .await;
+    assert_eq!(top(&member)["endpoint"], json!(INNER), "{member}");
+    // A missing question and a foreign argument are refused by name.
+    for (arguments, word) in [
+        (json!({}), "query"),
+        (json!({ "query": "x", "slug": "y" }), "slug"),
+    ] {
+        let refused = call(app.clone(), None, "search", arguments).await;
+        assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
+        assert!(refused["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains(word)));
+    }
+}

@@ -96,6 +96,7 @@ impl Tool {
 pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "list_endpoints",
     "get_endpoint",
+    "search",
     "list_types",
     "get_type",
     "list_type_details",
@@ -1382,7 +1383,7 @@ mod tests {
     fn an_anonymous_caller_may_use_the_named_reads_alone() {
         for name in ANONYMOUS_TOOLS
             .iter()
-            .filter(|name| !matches!(**name, "list_endpoints" | "get_endpoint"))
+            .filter(|name| !matches!(**name, "list_endpoints" | "get_endpoint" | "search"))
         {
             let tool = TOOLS.iter().find(|tool| tool.name == *name);
             assert!(

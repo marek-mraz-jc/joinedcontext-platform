@@ -68,6 +68,8 @@ struct Catalog {
     /// and no address of them is reused while the entry lives.
     built_from: Vec<Arc<Endpoint>>,
     entities: Vec<(Value, Value)>,
+    /// The Datasets ranked by words, for the hub's `search` (T-4493).
+    index: super::search::Index,
 }
 
 fn cache() -> &'static Mutex<HashMap<u64, Arc<Catalog>>> {
@@ -143,7 +145,27 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
     let base = gateway.base_url();
     let mut records = Vec::with_capacity(listed.len());
     let mut places = BTreeMap::new();
+    let mut facts = HashMap::new();
     for (endpoint, subject) in &listed {
+        let classified = endpoint_surface::classification(endpoint);
+        facts.insert(
+            endpoint.slug.clone(),
+            super::search::Facts {
+                types: classified
+                    .subjects
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .chain(classified.unclassified.iter().cloned())
+                    .collect(),
+                domains: classified.domains.iter().map(|d| (*d).to_owned()).collect(),
+                themes: endpoint_surface::classified(endpoint)
+                    .themes
+                    .iter()
+                    .map(|theme| theme.code().to_owned())
+                    .collect(),
+                words: classified.keywords.into_values().flatten().collect(),
+            },
+        );
         let index = json!({ "endpoint": endpoint.slug, "models": [] });
         let space = gateway.resolver.resolve_space(&endpoint.space);
         records.push(endpoint_surface::dataset(
@@ -176,13 +198,15 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
                 .unwrap_or(Value::Null);
             (entity, expanded)
         })
-        .collect();
+        .collect::<Vec<(Value, Value)>>();
+    let index = super::search::Index::build(entities.iter().map(|(entity, _)| entity), &facts);
     let catalog = Arc::new(Catalog {
         built_from: listed
             .iter()
             .map(|(endpoint, _)| Arc::clone(endpoint))
             .collect(),
         entities,
+        index,
     });
     if let Ok(mut cache) = cache().lock() {
         if cache.len() >= CACHED {
@@ -191,6 +215,24 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
         cache.insert(key, Arc::clone(&catalog));
     }
     catalog
+}
+
+/// The hub's `search` over the caller's catalogue (T-4493).
+pub(crate) fn search(
+    gateway: &Gateway,
+    reach: &[(Arc<Endpoint>, Subject)],
+    id: Value,
+    arguments: &Map<String, Value>,
+) -> Value {
+    tracing::info!(endpoints = reach.len(), "hub search");
+    let catalog = of(gateway, reach);
+    result(
+        id,
+        catalog
+            .index
+            .search(arguments)
+            .unwrap_or_else(|why| refused(&why, &Value::Null)),
+    )
 }
 
 /// One tool call on the catalogue.

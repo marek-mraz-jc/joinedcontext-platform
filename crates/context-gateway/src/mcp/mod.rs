@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod describe;
 pub mod hub;
 pub mod jsonrpc;
+pub mod search;
 pub mod server;
 pub mod tools;
 pub mod units;
@@ -46,6 +47,7 @@ mod tests {
         }
         names(&hub::list_endpoints_tool()["inputSchema"], &mut arguments);
         names(&hub::get_endpoint_tool()["inputSchema"], &mut arguments);
+        names(&super::search::tool()["inputSchema"], &mut arguments);
         arguments.sort();
         arguments.dedup();
         let unexplained: Vec<&String> = arguments
