@@ -4,7 +4,7 @@
 //! signed in never runs without explicit origins, a rate limit and a budget.
 
 use jc_core::error::Error;
-use jc_core::kinds::assistant::{SourceType, UploadLimits, DEFAULT_MODEL};
+use jc_core::kinds::assistant::{SourceType, UploadLimits};
 use jc_core::kinds::{
     AssistantDeployment, Channel, KnowledgeSource, PdfPolicyKind, ProviderRouting, ReasoningEffort,
     Visibility,
@@ -359,8 +359,8 @@ fn a_deployment_without_the_new_fields_takes_the_safe_defaults() {
         .expect("the documented deployment")
         .spec;
     assert!(spec.enabled);
-    assert_eq!(spec.router_model(), DEFAULT_MODEL);
-    assert_eq!(spec.answer_model(), DEFAULT_MODEL);
+    // No model named: the worker's configured model answers (JC_ASSISTANT's `llm`).
+    assert!(spec.model.is_none());
     assert!(spec.scope_projects().is_empty());
     assert!(spec.suggestions.is_empty() && spec.disclaimer.is_empty());
     let limit = spec.rate_limit.expect("rate limit");
@@ -406,7 +406,10 @@ fn a_deployment_with_every_new_field_validates_and_round_trips() {
     );
     let parsed = deployment(&yaml).expect("every new field");
     assert!(!parsed.spec.enabled);
-    assert_eq!(parsed.spec.answer_model(), "deepseek/deepseek-v4.1-flash");
+    assert_eq!(
+        parsed.spec.model.as_ref().and_then(|m| m.answer.as_deref()),
+        Some("deepseek/deepseek-v4.1-flash")
+    );
     assert_eq!(parsed.spec.scope_projects(), ["bbsk", "mobilita"]);
     assert_eq!(parsed.spec.suggestions["sk"].len(), 2);
     assert_eq!(
