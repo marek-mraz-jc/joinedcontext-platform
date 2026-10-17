@@ -4,11 +4,15 @@
 //! registry, `projects/{slug}.yaml`, and each project lives in a repository of its own. The
 //! assembly writes the tree of layout 1 into a directory: the organization checkout, and each
 //! registered project checkout at `projects/{slug}/`, its manifests mounted under the slug and
-//! its parameters rendered (CC-88). [`Repository::load_for`] then loads that tree as it loads a
-//! layout 1 repository, so every consumer that reads a path keeps working. A layout 1
-//! organization repository is loaded where it is.
+//! its parameters rendered (CC-88), so every consumer that reads a path keeps working. The
+//! [`Repository`] is built from the manifests as they were rendered, and is the one
+//! [`Repository::load_for`] would read back from that tree (T-4457). A layout 1 organization
+//! repository is loaded where it is.
 
-use crate::loader::{is_native_yaml, parse_yaml_documents, LoadError, Repository};
+use crate::loader::{
+    document, is_native_yaml, parse_yaml_documents, read_documents, DocChunk, LoadError,
+    LoadedResource, Repository,
+};
 use jc_core::kinds::{Project, ProjectSpec};
 use jc_core::project::{self, LiteralParameter, Parameters, RepositoryRole};
 use std::collections::BTreeMap;
@@ -161,9 +165,15 @@ pub fn assemble(
     let registry = read_registry(org_root)?;
     let next = sibling(into, "next");
     remove(&next)?;
-    copy_tree(org_root, &next, &|rel| {
-        rel.starts_with("projects") && rel.components().count() == 2
-    })?;
+    copy_tree(
+        org_root,
+        &next,
+        &|rel| rel.starts_with("projects") && rel.components().count() == 2,
+        &mut copy_file,
+    )?;
+    // The organization's own manifests, read before any project is mounted beside them; each
+    // project's are kept as the mount renders them, never read back (T-4457).
+    let mut documents = read_documents(&next, &next)?;
 
     let mut entries = Vec::new();
     let mut findings = Vec::new();
@@ -172,7 +182,14 @@ pub fn assemble(
         let target = next.join("projects").join(slug);
         match resolver.checkout(slug, &entry.spec) {
             Ok(checkout) => {
-                mount_project(slug, &entry.spec, &checkout, &target, &mut findings)?;
+                mount_project(
+                    slug,
+                    &entry.spec,
+                    &checkout,
+                    &next,
+                    &mut documents,
+                    &mut findings,
+                )?;
                 entries.push(EntryStatus {
                     slug: slug.clone(),
                     git_ref,
@@ -184,7 +201,8 @@ pub fn assemble(
                 let last = into.join("projects").join(slug);
                 let rendered = last.is_dir();
                 if rendered {
-                    copy_tree(&last, &target, &|_| false)?;
+                    copy_tree(&last, &target, &|_| false, &mut copy_file)?;
+                    documents.extend(read_documents(&next, &target)?);
                 }
                 entries.push(EntryStatus {
                     slug: slug.clone(),
@@ -196,7 +214,7 @@ pub fn assemble(
         }
     }
 
-    let loaded = Repository::load_for(&next, environment);
+    let loaded = Repository::from_documents(&next, documents, environment);
     let loaded = match loaded {
         Ok(repository) => repository,
         Err(err) => {
@@ -277,13 +295,15 @@ pub fn read_registry(org_root: &Path) -> Result<BTreeMap<String, Project>, Assem
     Ok(registry)
 }
 
-/// Writes one project checkout into the tree at `target`: every manifest mounted under `slug`
-/// with the parameters rendered, every other file as it is.
+/// Writes one project checkout into the tree at `root/projects/{slug}`: every manifest
+/// mounted under `slug` with the parameters rendered, and kept in `documents` as it was
+/// written; every other file as it is.
 fn mount_project(
     slug: &str,
     entry: &ProjectSpec,
     checkout: &Path,
-    target: &Path,
+    root: &Path,
+    documents: &mut Vec<LoadedResource>,
     findings: &mut Vec<Finding>,
 ) -> Result<(), AssembleError> {
     let in_project = |rel: &str| format!("{slug}: {rel}");
@@ -303,54 +323,68 @@ fn mount_project(
     let parameters = project::resolve_parameters(&own.spec, entry)
         .map_err(|err| refused(format!("projects/{slug}.yaml"), err))?;
 
-    copy_tree(checkout, target, &|_| false)?;
-    for item in WalkDir::new(target).into_iter().filter_map(Result::ok) {
-        if !item.file_type().is_file() {
-            continue;
-        }
-        let path = item.path();
-        let rel = path.strip_prefix(target).unwrap_or(path).to_path_buf();
-        // A dot-directory holds the forge's files (`.gitea/workflows/`, CC-90) and `.jc/`,
-        // never a manifest: copied as they are, as the loader skips them (CC-08).
-        if rel.parent().is_some_and(|dir| {
-            dir.components()
-                .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
-        }) {
-            continue;
-        }
-        let name = item.file_name().to_string_lossy();
-        let text = std::fs::read_to_string(path).map_err(io(path))?;
-        if name == "bento.yaml" || name.ends_with(".blobl") {
-            for unknown in parameters.unknown_in_mapping(&text) {
-                findings.push(Finding {
-                    slug: slug.to_owned(),
-                    path: rel.clone(),
-                    message: format!(
-                        "reads env(\"{unknown}\"), which the project does not provide: declare \
-                         the parameter in project.yaml, or read a non-secret one (CC-88)"
-                    ),
-                });
+    let mounted = Path::new("projects").join(slug);
+    copy_tree(
+        checkout,
+        &root.join(&mounted),
+        &|_| false,
+        &mut |rel, from, to| {
+            // A dot-directory holds the forge's files (`.gitea/workflows/`, CC-90) and `.jc/`,
+            // never a manifest: copied as they are, as the loader skips them (CC-08).
+            if rel.parent().is_some_and(|dir| {
+                dir.components()
+                    .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+            }) {
+                return copy_file(rel, from, to);
             }
-            continue;
-        }
-        if !(name.ends_with(".yaml") || name.ends_with(".yml")) || is_native_yaml(&name) {
-            continue;
-        }
-        let rendered = render_manifests(slug, &parameters, &rel, &text, findings)?;
-        std::fs::write(path, rendered).map_err(io(path))?;
-    }
-    Ok(())
+            let name = rel
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
+            let mapping = name == "bento.yaml" || name.ends_with(".blobl");
+            let manifest =
+                (name.ends_with(".yaml") || name.ends_with(".yml")) && !is_native_yaml(&name);
+            if !mapping && !manifest {
+                return copy_file(rel, from, to);
+            }
+            let text = std::fs::read_to_string(from).map_err(io(from))?;
+            if mapping {
+                for unknown in parameters.unknown_in_mapping(&text) {
+                    findings.push(Finding {
+                        slug: slug.to_owned(),
+                        path: rel.to_path_buf(),
+                        message: format!(
+                            "reads env(\"{unknown}\"), which the project does not provide: \
+                             declare the parameter in project.yaml, or read a non-secret one \
+                             (CC-88)"
+                        ),
+                    });
+                }
+                return std::fs::write(to, text).map_err(io(to));
+            }
+            let (rendered, manifests) = render_manifests(slug, &parameters, rel, &text, findings)?;
+            let path = mounted.join(rel);
+            for (chunk, manifest) in manifests {
+                let manifest = serde_json::from_value(manifest).map_err(|err| err.to_string());
+                documents.push(document(&path, &chunk, manifest)?);
+            }
+            std::fs::write(to, rendered).map_err(io(to))
+        },
+    )
 }
 
+/// The file at `rel`, rendered, and each of its documents with where it starts in the render.
 fn render_manifests(
     slug: &str,
     parameters: &Parameters,
     rel: &Path,
     text: &str,
     findings: &mut Vec<Finding>,
-) -> Result<String, AssembleError> {
+) -> Result<(String, Vec<(DocChunk, serde_json::Value)>), AssembleError> {
     let at = |document: usize| format!("{slug}: {} (document {document})", rel.display());
     let mut out = String::new();
+    let mut manifests = Vec::new();
+    let mut written = 0;
     for chunk in parse_yaml_documents(text) {
         if crate::loader::is_empty_doc(&chunk.content) {
             continue;
@@ -381,15 +415,27 @@ fn render_manifests(
         parameters
             .render(&mut manifest)
             .map_err(|err| refused(at(chunk.document_index), err))?;
+        let text = serde_norway::to_string(&manifest)
+            .map_err(|err| refused(at(chunk.document_index), err))?;
+        // Where `parse_yaml_documents` places it in the render: the first at line 1, each later
+        // one at its `---`.
+        let start_line = written + 1;
         if !out.is_empty() {
             out.push_str("---\n");
+            written += 1;
         }
-        out.push_str(
-            &serde_norway::to_string(&manifest)
-                .map_err(|err| refused(at(chunk.document_index), err))?,
-        );
+        written += text.lines().count();
+        manifests.push((
+            DocChunk {
+                document_index: manifests.len() + 1,
+                start_line,
+                content: String::new(),
+            },
+            manifest,
+        ));
+        out.push_str(&text);
     }
-    Ok(out)
+    Ok((out, manifests))
 }
 
 /// A name the organization holds once, claimed by two projects, is refused (CC-86, PF-44).
@@ -449,9 +495,15 @@ fn remove(path: &Path) -> Result<(), AssembleError> {
     }
 }
 
-/// Copies `from` into `to`, leaving out `.git` and every relative path `skip` names. A link is
-/// copied as the file it points to, and one out of `from` is refused.
-fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<(), AssembleError> {
+/// Copies `from` into `to`, leaving out `.git` and every relative path `skip` names; each file
+/// is written by `file(rel, from, to)`. A link is copied as the file it points to, and one out
+/// of `from` is refused.
+fn copy_tree(
+    from: &Path,
+    to: &Path,
+    skip: &dyn Fn(&Path) -> bool,
+    file: &mut dyn FnMut(&Path, &Path, &Path) -> Result<(), AssembleError>,
+) -> Result<(), AssembleError> {
     let root = from.canonicalize().map_err(io(from))?;
     let walk = WalkDir::new(from)
         .follow_links(true)
@@ -485,10 +537,14 @@ fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<(),
         if item.file_type().is_dir() {
             std::fs::create_dir_all(&dest).map_err(io(&dest))?;
         } else {
-            std::fs::copy(item.path(), &dest).map_err(io(&dest))?;
+            file(rel, item.path(), &dest)?;
         }
     }
     Ok(())
+}
+
+fn copy_file(_rel: &Path, from: &Path, to: &Path) -> Result<(), AssembleError> {
+    std::fs::copy(from, to).map(drop).map_err(io(to))
 }
 
 /// The HTTP basic credential a repository is read with: a user name and a password or token.

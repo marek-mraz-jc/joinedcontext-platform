@@ -179,6 +179,10 @@ fn an_unfetchable_ref_keeps_the_last_checkout_and_reports_it() {
         .as_deref()
         .is_some_and(|error| error.contains("ovzdusie")));
     assert_eq!(resources(&again.repository), before);
+    assert_eq!(
+        again.repository,
+        Repository::load_for(&into, None).expect("the last render loads")
+    );
 
     let fresh = assemble(
         &org,
@@ -356,4 +360,52 @@ fn a_checkout_that_links_out_is_refused_and_one_that_links_inside_is_copied() {
         refused.to_string().contains("links out of the repository"),
         "{refused}"
     );
+}
+
+/// T-4457: the assembly keeps each manifest as it rendered it instead of reading the tree back,
+/// and what it keeps is what reading the tree back gives: same paths, documents, lines,
+/// manifests, rendered parameters and `{orgDomain}`.
+#[test]
+fn the_assembly_in_memory_is_what_the_written_render_loads() {
+    let project = project_repository("in-memory");
+    write(
+        &project,
+        "project.yaml",
+        &(PROJECT.to_owned()
+            + "  parameters:\n    audience: { type: string, default: public, enum: [public, organization] }\n"),
+    );
+    write(
+        &project,
+        "spaces/ovzdusie/endpoints/public-air.yaml",
+        &ENDPOINT.replace("audience: public", "audience: \"{param:audience}\""),
+    );
+    // A leading `---`, an empty document and a comment: each moves the index or the line of
+    // the documents after it.
+    write(
+        &project,
+        "spaces/ovzdusie/more.yaml",
+        &format!(
+            "---\n{}---\n# nothing here\n---\n{}",
+            SPACE.replace("name: ovzdusie\n  namespace", "name: second\n  namespace"),
+            ENDPOINT
+                .replace("public-air", "second-air")
+                .replace("contextSpaceRef: ovzdusie", "contextSpaceRef: second")
+                .replace("zt4qm7ge2xdv6ksb3ncf5arw2y", "qp3mx7kd2wbv5nsc4jgf6rta2e")
+                .replace("public\n", "\"{orgDomain}\"\n")
+        ),
+    );
+    let entry = ENTRY.to_owned() + "  parameters: { audience: organization }\n";
+    let org = organization("in-memory", &[("ovzdusie", &entry)]);
+    let into = temp_dir("in-memory-into").join("render");
+    let assembly =
+        assemble(&org, &checkouts(&[("ovzdusie", &project)]), &into, None).expect("assembles");
+    let read_back = Repository::load_for(&into, None).expect("the written render loads");
+    assert_eq!(assembly.repository, read_back);
+    let second = assembly
+        .repository
+        .iter()
+        .find(|(id, _)| id.name == "second-air")
+        .map(|(_, loaded)| loaded)
+        .expect("the third document");
+    assert_eq!((second.document, second.line), (2, 8));
 }
