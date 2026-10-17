@@ -186,23 +186,6 @@ pub struct Constraints {
     pub attrs_asked: BTreeSet<String>,
 }
 
-impl Constraints {
-    /// The same constraints written in the model the broker holds, for a view endpoint (DM-51).
-    ///
-    /// A grant on a view endpoint names the class the view serves; the broker's answer carries the
-    /// class it stores. The query's `type` is already inverted before it is sent
-    /// (`invert_query`), and the answer has to be judged by the same pair — otherwise the type
-    /// check drops every entity a view endpoint ever returns, which is what T-2130 did until
-    /// T-2241.
-    pub fn in_source_model(&self, target_class: &str, source_class: &str) -> Self {
-        let mut inverted = self.clone();
-        if inverted.types.remove(target_class) {
-            inverted.types.insert(source_class.to_owned());
-        }
-        inverted
-    }
-}
-
 /// What the gateway does with the request (GW1, GW2, GW3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
