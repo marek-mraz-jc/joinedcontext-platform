@@ -354,3 +354,62 @@ fn a_pipeline_may_not_take_the_harness_name() {
     near.metadata.name = "pipeline-tests".to_owned();
     near.validate().expect("a name beside it");
 }
+
+/// PL-79, T-4408: an output that names no type writes every type of its space, so a replace
+/// beside it conflicts whatever its own type once their ids can meet; a record-made id meets any
+/// other declared mint, a mapping-set id is not judged, and another space never meets.
+#[test]
+fn a_replace_meets_the_outputs_whose_ids_can_be_its_own() {
+    let prefixed = "    id:\n      mint: prefixed\n      from: code\n";
+    let pipeline = |name: &str, endpoint: &str, output: &str| {
+        Pipeline::from_yaml(&format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata:\n  name: {name}\n  namespace: p\nspec:\n  class: scheduled\n  schedule: \"0 * * * *\"\n  source:\n    dataSourceRef: feed\n  targetEndpoint: urn:ngsi-ld:Endpoint:example.org:s:{endpoint}\n{output}"
+        ))
+        .expect("parses")
+    };
+    let replace = pipeline(
+        "a",
+        "ep",
+        &format!("  output:\n    type: T\n    mode: replace\n{prefixed}"),
+    );
+    let untyped = pipeline("b", "ep", "");
+    let typed = pipeline(
+        "c",
+        "ep",
+        &format!("  output:\n    type: U\n    mode: upsert\n{prefixed}"),
+    );
+    let mapped = pipeline("d", "ep", "  output:\n    type: T\n    mode: upsert\n");
+    let elsewhere = pipeline(
+        "e",
+        "other",
+        &format!("  output:\n    type: T\n    mode: upsert\n{prefixed}"),
+    );
+    let space = |endpoint: &str| Some(if endpoint == "ep" { "s" } else { "s2" }.to_owned());
+    let specs = [
+        ("a", &replace.spec),
+        ("b", &untyped.spec),
+        ("c", &typed.spec),
+        ("d", &mapped.spec),
+        ("e", &elsewhere.spec),
+    ];
+    // b names no type and d a's type, but their mappings set their ids; c mints another type; e
+    // writes another space: none meets a.
+    assert!(jc_core::kinds::replace_conflicts(&specs, space).is_empty());
+    let same = pipeline(
+        "c",
+        "ep",
+        &format!("  output:\n    mode: upsert\n    type: T\n{prefixed}"),
+    );
+    let specs = [("a", &replace.spec), ("c", &same.spec)];
+    let conflicts = jc_core::kinds::replace_conflicts(&specs, space);
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(
+        (conflicts[0].pipeline.as_str(), conflicts[0].others.clone()),
+        ("a", vec!["c".to_owned()])
+    );
+    assert!(conflicts[0].to_string().contains("PL-79"));
+    assert!(
+        jc_core::kinds::replace_conflicts(&specs[..1], space).is_empty(),
+        "a replace alone is valid"
+    );
+}
