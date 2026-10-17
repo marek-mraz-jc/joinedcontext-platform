@@ -96,7 +96,7 @@ fn because(endpoint: &Endpoint, subject: &Subject) -> &'static str {
 }
 
 /// The space's `area` rule, which is where `georel=near` finds its Dataset (DM-87).
-fn bbox(endpoint: &Endpoint) -> Option<[f64; 4]> {
+pub(crate) fn bbox(endpoint: &Endpoint) -> Option<[f64; 4]> {
     let rules = endpoint.declared_types.as_ref()?;
     rules.quality.iter().find_map(|rule| {
         let corners = rule

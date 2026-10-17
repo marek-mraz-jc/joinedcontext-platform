@@ -692,3 +692,83 @@ async fn two_calls_find_the_air_dataset_and_read_it_without_a_token() {
     assert_eq!(entities(&read)[0]["pm10"]["value"], 10.362, "{read}");
     assert_eq!(broker.hops().len(), 1, "the catalogue read no broker");
 }
+
+/// T-4492: the whole list of dev's size reads in a few thousand tokens, one line per Endpoint,
+/// and pages the same way twice; a row's URLs are get_endpoint's.
+#[tokio::test]
+async fn one_hundred_eleven_endpoints_list_in_under_25000_characters() {
+    let realm = common::Realm::new();
+    let endpoints: Vec<Endpoint> = (0..111)
+        .map(|n| {
+            let mut e = endpoint(
+                &format!("{n:0>26}"),
+                &format!("Kvalita ovzdušia a merania v Banskej Bystrici {n}"),
+                &format!("banska-bystrica-ovzdusie-{n}"),
+                Audience::Public,
+                "public",
+            );
+            e.declared_types = Some(Arc::new(area()));
+            e
+        })
+        .collect();
+    let app = app(&realm, endpoints);
+    let mut chars = 0;
+    let mut slugs = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut arguments = json!({ "limit": 100 });
+        if let Some(next) = &cursor {
+            arguments["cursor"] = json!(next);
+        }
+        let page = call(app.clone(), None, "list_endpoints", arguments).await;
+        let text = page["result"]["content"][0]["text"].as_str().expect("text");
+        chars += text.chars().count();
+        let rows = page["result"]["structuredContent"]["endpoints"]
+            .as_array()
+            .expect("rows")
+            .clone();
+        assert!(
+            rows.iter().all(|row| row["place"] == json!(BBOX)),
+            "{rows:?}"
+        );
+        slugs.extend(
+            rows.iter()
+                .map(|row| row["slug"].as_str().expect("slug").to_owned()),
+        );
+        cursor = page["result"]["structuredContent"]["nextCursor"]
+            .as_str()
+            .map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(slugs.len(), 111);
+    assert!(slugs.windows(2).all(|w| w[0] < w[1]), "stable slug order");
+    assert!(chars < 25_000, "{chars} characters for 111 Endpoints");
+    eprintln!("list_endpoints: 111 Endpoints in {chars} characters");
+    for (filter, total) in [
+        (json!({ "theme": "envi" }), 111),
+        (json!({ "domain": "Environment" }), 111),
+        (json!({ "domain": "Transportation" }), 0),
+    ] {
+        let page = call(app.clone(), None, "list_endpoints", filter.clone()).await;
+        assert_eq!(
+            page["result"]["structuredContent"]["total"],
+            json!(total),
+            "{filter}"
+        );
+    }
+    let whole = call(app, None, "get_endpoint", json!({ "endpoint": slugs[7] })).await;
+    let entry = &whole["result"]["structuredContent"]["endpoint"];
+    assert_eq!(entry["slug"], json!(slugs[7]));
+    assert_eq!(
+        (&entry["domains"], &entry["themes"]),
+        (&json!(["Environment"]), &json!(["ENVI"]))
+    );
+    assert!(
+        entry["surfaces"]["ngsi-ld"]
+            .as_str()
+            .is_some_and(|url| url.ends_with("/ngsi-ld/v1/")),
+        "{entry}"
+    );
+}

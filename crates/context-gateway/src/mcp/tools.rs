@@ -95,6 +95,7 @@ impl Tool {
 /// caller until it is named here, so an unknown name is refused, never taken for a read.
 pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "list_endpoints",
+    "get_endpoint",
     "list_types",
     "get_type",
     "list_type_details",
@@ -1381,7 +1382,7 @@ mod tests {
     fn an_anonymous_caller_may_use_the_named_reads_alone() {
         for name in ANONYMOUS_TOOLS
             .iter()
-            .filter(|name| **name != "list_endpoints")
+            .filter(|name| !matches!(**name, "list_endpoints" | "get_endpoint"))
         {
             let tool = TOOLS.iter().find(|tool| tool.name == *name);
             assert!(

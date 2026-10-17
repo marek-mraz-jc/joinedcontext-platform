@@ -75,6 +75,7 @@ mod tests {
             names(&tool.input_schema(), &mut arguments);
         }
         names(&hub::list_endpoints_tool()["inputSchema"], &mut arguments);
+        names(&hub::get_endpoint_tool()["inputSchema"], &mut arguments);
         arguments.sort();
         arguments.dedup();
         let unexplained: Vec<&String> = arguments

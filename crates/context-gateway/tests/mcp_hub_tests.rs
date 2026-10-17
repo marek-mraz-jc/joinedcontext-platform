@@ -749,6 +749,30 @@ async fn list_endpoints_pages_and_describes_each_endpoint() {
     assert_eq!(entry["slug"], json!(AIR));
     assert_eq!(entry["space"], json!("ovzdusie"));
     assert_eq!(entry["types"], json!(["AirQualityObserved"]));
+    assert_eq!(entry["title"], json!("Endpoint a"));
+    // A title in another language falls back to English (T-4492).
+    let (_, slovak) = send(
+        app.clone(),
+        hub(
+            Some(&token),
+            call("list_endpoints", json!({ "lang": "sk" })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        slovak["result"]["structuredContent"]["endpoints"][0]["title"],
+        json!("Endpoint a")
+    );
+    // The URLs are get_endpoint's, the record list_endpoints answered before T-4492.
+    let (_, whole) = send(
+        app.clone(),
+        hub(
+            Some(&token),
+            call("get_endpoint", json!({ "endpoint": AIR })),
+        ),
+    )
+    .await;
+    let entry = &whole["result"]["structuredContent"]["endpoint"];
     assert_eq!(
         entry["mcp"],
         json!(format!("{HOST}/api/endpoint/{AIR}/mcp"))

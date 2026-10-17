@@ -303,7 +303,15 @@ fn page(
 }
 
 /// The filters `list_endpoints` takes beside its paging (EP-111), each one text.
-const FILTERS: &[&str] = &["q", "type", "attribute", "space", "access"];
+const FILTERS: &[&str] = &[
+    "q",
+    "type",
+    "attribute",
+    "space",
+    "access",
+    "domain",
+    "theme",
+];
 
 /// Whether one described Endpoint passes one filter; `value` is lowercase. A type, an
 /// attribute and a space match whole names, `q` any part of a title or description.
@@ -337,6 +345,8 @@ fn matches(entry: &Value, name: &str, value: &str) -> bool {
         "attribute" => names("/attributes").iter().any(|a| a == value),
         "space" => names("/space").iter().any(|s| s == value),
         "access" => names("/access").iter().any(|a| a == value),
+        "domain" => names("/domains").iter().any(|d| d == value),
+        "theme" => names("/themes").iter().any(|t| t == value),
         _ => false,
     }
 }
@@ -401,7 +411,7 @@ impl Hub {
             ),
             "ping" => result(id, json!({})),
             "tools/list" => {
-                let mut tools = vec![list_endpoints_tool()];
+                let mut tools = vec![list_endpoints_tool(), get_endpoint_tool()];
                 tools.extend(tools::hub_tools(&self.gateway, &self.reach));
                 if self.reads_only {
                     tools::keep_anonymous(&mut tools);
@@ -450,6 +460,9 @@ impl Hub {
         }
         if name == "list_endpoints" {
             return Answer::Json(self.list_endpoints(id, &arguments));
+        }
+        if name == "get_endpoint" {
+            return Answer::Json(self.get_endpoint(id, &arguments));
         }
 
         // The one routing argument, one string, never a list (ADR-N-025 2.5, 2.6).
@@ -603,12 +616,30 @@ impl Hub {
     }
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).
+    /// One line per Endpoint (T-4492): what an agent picks by, not the URLs, which
+    /// `get_endpoint` answers for the one it picked.
     fn list_endpoints(&self, id: Value, arguments: &Map<String, Value>) -> Value {
-        let page = match page(&self.gateway, &self.reach, arguments) {
+        let mut arguments = arguments.clone();
+        let lang = match arguments.remove("lang") {
+            None => "en".to_owned(),
+            Some(Value::String(lang)) if (2..=8).contains(&lang.len()) => lang.to_lowercase(),
+            Some(_) => {
+                return result(
+                    id,
+                    refused("`lang` is a language tag such as sk or en", &Value::Null),
+                )
+            }
+        };
+        let page = match page(&self.gateway, &self.reach, &arguments) {
             Ok(page) => page,
             Err(why) => return result(id, refused(&why, &Value::Null)),
         };
-        let mut answer = answered(&page["endpoints"], "endpoints");
+        let rows: Vec<Value> = page["endpoints"]
+            .as_array()
+            .map(|entries| entries.iter().map(|entry| compact(entry, &lang)).collect())
+            .unwrap_or_default();
+        let mut answer = answered(&json!(rows), "endpoints");
+        answer["content"][0]["text"] = json!(lines(&rows, &page));
         if let Some(structured) = answer
             .get_mut("structuredContent")
             .and_then(Value::as_object_mut)
@@ -620,6 +651,128 @@ impl Hub {
         }
         result(id, answer)
     }
+
+    /// One Endpoint of the caller's list, whole: today's `list_endpoints` record with its
+    /// surface, DCAT, schema and MCP URLs (T-4492).
+    fn get_endpoint(&self, id: Value, arguments: &Map<String, Value>) -> Value {
+        if let Some(unknown) = arguments.keys().find(|key| *key != "endpoint") {
+            return result(
+                id,
+                refused(
+                    &format!("`{unknown}` is not an argument of get_endpoint"),
+                    &Value::Null,
+                ),
+            );
+        }
+        let Some(named) = arguments.get("endpoint").and_then(Value::as_str) else {
+            return result(
+                id,
+                refused(
+                    "`endpoint` names one Endpoint: its slug, title or space",
+                    &Value::Null,
+                ),
+            );
+        };
+        match resolve(&self.reach, named) {
+            Ok((endpoint, subject)) => {
+                let mut entry = described(&self.gateway, endpoint, subject);
+                entry["broker"] = json!(self.gateway.broker.broker_of_view(&endpoint.slug));
+                result(id, answered(&entry, "endpoint"))
+            }
+            Err(near) => result(
+                id,
+                refused(
+                    &format!(
+                        "no Endpoint you may read is called `{named}`; closest: {}",
+                        near.join(", ")
+                    ),
+                    &Value::Null,
+                ),
+            ),
+        }
+    }
+}
+
+/// One `list_endpoints` row (T-4492): the title in `lang`, else English, else any.
+fn compact(entry: &Value, lang: &str) -> Value {
+    let titles = entry["title"].as_object();
+    let title = titles
+        .and_then(|t| {
+            t.get(lang)
+                .or_else(|| t.get("en"))
+                .or_else(|| t.values().next())
+        })
+        .cloned()
+        .unwrap_or_else(|| entry["space"].clone());
+    let mut row = json!({
+        "slug": entry["slug"],
+        "title": title,
+        "space": entry["space"],
+        "access": entry["access"],
+        "types": entry["types"],
+        "domains": entry["domains"],
+        "themes": entry["themes"],
+    });
+    for key in ["place", "period", "broker"] {
+        if let Some(value) = entry.get(key) {
+            row[key] = value.clone();
+        }
+    }
+    row
+}
+
+/// The rows as the text an agent reads: one line each, then the paging.
+fn lines(rows: &[Value], page: &Value) -> String {
+    let joined = |value: &Value| {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default()
+    };
+    let mut text = String::from(
+        "slug | title | space | access | types | domain | theme | place (W,S,E,N) | period\n",
+    );
+    for row in rows {
+        let place = row["place"]
+            .as_array()
+            .map(|corners| {
+                corners
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let period = match row.get("period") {
+            Some(period) => format!(
+                "{}..{}",
+                period["start"].as_str().unwrap_or(""),
+                period["end"].as_str().unwrap_or("")
+            ),
+            None => String::new(),
+        };
+        text.push_str(&format!(
+            "{} | {} | {} | {} | {} | {} | {} | {place} | {period}\n",
+            row["slug"].as_str().unwrap_or(""),
+            row["title"].as_str().unwrap_or(""),
+            row["space"].as_str().unwrap_or(""),
+            row["access"].as_str().unwrap_or(""),
+            joined(&row["types"]),
+            joined(&row["domains"]),
+            joined(&row["themes"]),
+        ));
+    }
+    text.push_str(&format!("total {}", page["total"]));
+    if let Some(next) = page.get("nextCursor").and_then(Value::as_str) {
+        text.push_str(&format!("; nextCursor {next}"));
+    }
+    text
 }
 
 /// The Endpoint of the caller's list that `named` names (T-4491): its slug; else, compared
@@ -731,6 +884,23 @@ fn described(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Value
         // The Endpoint's root answers its DCAT-AP record (EP-27).
         "dcat": format!("{base}{}/", endpoint.base_path),
     });
+    // What the dataset is about (T-4498), where and when, for the one-line list (T-4492).
+    let catalog = endpoint_surface::classified(endpoint);
+    entry["domains"] = json!(endpoint_surface::classification(endpoint).domains);
+    entry["themes"] = json!(catalog
+        .themes
+        .iter()
+        .map(|theme| theme.code())
+        .collect::<Vec<_>>());
+    if let Some(place) = super::catalog::bbox(endpoint) {
+        entry["place"] = json!(place);
+    }
+    if let Some(period) = catalog
+        .temporal
+        .filter(|t| t.start.is_some() || t.end.is_some())
+    {
+        entry["period"] = json!(period);
+    }
     // The recommended formalism of the newest major, the one describe_schema recommends.
     if let Some(major) = newest {
         entry["schema"] = json!(format!(
@@ -784,13 +954,12 @@ pub(crate) fn list_endpoints_tool() -> Value {
     json!({
         "name": "list_endpoints",
         "description": "The Endpoints this connector reaches: open ones without a login, and \
-                        the ones you may read once signed in. Each row names its context space, \
-                        whether it is public or internal, the entity types and per type the \
-                        attributes you may read, whether history (temporal) reads answer, its \
-                        DCAT record and its data model. Filter with q, type, attribute, space \
-                        and access; name one in the `endpoint` argument of every other tool, \
-                        then describe_schema for its LinkML model and @context, describe_access \
-                        for what you may do.",
+                        the ones you may read once signed in. One line each: slug, title, \
+                        context space, public or internal, entity types, Smart Data Model \
+                        domain, EU theme, area and period. Filter with q, type, attribute, \
+                        space, access, domain and theme; name one in the `endpoint` argument \
+                        of every other tool; get_endpoint gives its URLs, attributes and data \
+                        model.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -799,6 +968,9 @@ pub(crate) fn list_endpoints_tool() -> Value {
                 "attribute": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An attribute name of such a type" },
                 "space": { "type": "string", "minLength": 1, "maxLength": 200, "description": "The context space" },
                 "access": { "type": "string", "enum": ["public", "internal"] },
+                "domain": { "type": "string", "minLength": 1, "maxLength": 200, "description": "A Smart Data Model domain, e.g. Environment" },
+                "theme": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An EU data theme code, e.g. ENVI" },
+                "lang": { "type": "string", "minLength": 2, "maxLength": 8, "description": "The language of the titles, e.g. sk; English otherwise" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "cursor": { "type": "string", "maxLength": 20, "description": "The previous page's nextCursor, passed back as given" },
             },
@@ -812,6 +984,25 @@ pub(crate) fn list_endpoints_tool() -> Value {
                 "nextCursor": { "type": "string" },
             },
             "required": ["endpoints", "total"],
+        },
+        "annotations": { "readOnlyHint": true, "destructiveHint": false },
+    })
+}
+
+/// The tool that answers one Endpoint whole (T-4492).
+pub(crate) fn get_endpoint_tool() -> Value {
+    json!({
+        "name": "get_endpoint",
+        "description": "One Endpoint of list_endpoints, whole: per type the attributes you may \
+                        read, whether history reads answer, each surface's URL, its DCAT record, \
+                        its data model and its MCP URL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "endpoint": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Its slug, title or space" },
+            },
+            "required": ["endpoint"],
+            "additionalProperties": false,
         },
         "annotations": { "readOnlyHint": true, "destructiveHint": false },
     })
