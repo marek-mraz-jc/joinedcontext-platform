@@ -335,7 +335,7 @@ fn app_login(settings: &Settings, app: &RoutedApp, unauth_action: &'static str) 
     let name = app.name.as_str();
     Session {
         unauth_action,
-        cookie_name: format!("jc_edge_app_{name}"),
+        cookie_name: format!("__Host-jc_edge_app_{name}"),
         cookie_path: "/".to_owned(),
         redirect_uri: settings.app_url(name, "/callback"),
         logout_path: "/logout".to_owned(),
@@ -631,7 +631,7 @@ fn openid_connect_bearer(settings: &Settings, bearer_only: bool) -> Value {
 fn plugin_configs(settings: &Settings) -> Value {
     let portal_login = |unauth_action| Session {
         unauth_action,
-        cookie_name: "jc_edge".to_owned(),
+        cookie_name: "__Host-jc_edge".to_owned(),
         cookie_path: "/".to_owned(),
         redirect_uri: settings.portal_url("/callback"),
         logout_path: "/logout".to_owned(),
