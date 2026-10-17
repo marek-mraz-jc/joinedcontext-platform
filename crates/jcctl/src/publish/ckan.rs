@@ -165,6 +165,33 @@ pub fn package(
         "resources": resources(&served, &url, record),
         "extras": extras(record, &url, language),
     });
+    // The record names an original dataset by its IRI only; the Endpoint's catalogue block
+    // also holds its title and description, which the catalogue page and the DCAT-AP export
+    // show instead of a bare URL (T-4436, EP-78).
+    let sources = spec
+        .catalog
+        .as_ref()
+        .map(|c| c.source.as_slice())
+        .unwrap_or_default();
+    if !sources.is_empty() {
+        let titled: Vec<Value> = sources
+            .iter()
+            .map(|s| {
+                json!({
+                    "url": s.url,
+                    "title": in_language(&s.title, language),
+                    "description": in_language(&s.description, language),
+                })
+            })
+            .collect();
+        if let (Some(extras), Ok(value)) = (
+            payload["extras"].as_array_mut(),
+            serde_json::to_string(&titled),
+        ) {
+            extras.retain(|extra| extra["key"] != "source");
+            extras.push(json!({ "key": "source", "value": value }));
+        }
+    }
     if let Some(notes) = text_in(record.get("dct:description"), language) {
         payload["notes"] = json!(notes);
     }
@@ -907,6 +934,14 @@ fn text_in(value: Option<&Value>, language: Option<&str>) -> Option<String> {
         }
     }
     text_of(value)
+}
+
+/// A text of the catalogue block in `language`, else in any language it has.
+fn in_language(texts: &jc_core::kinds::catalog::Texts, language: Option<&str>) -> Option<String> {
+    language
+        .and_then(|language| texts.get(language))
+        .or_else(|| texts.values().next())
+        .cloned()
 }
 
 fn text_of(value: &Value) -> Option<String> {
