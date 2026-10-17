@@ -13,10 +13,10 @@ use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{DeclaredTypes, Endpoint};
-use jc_core::kinds::{Audience, PolicySpec, QualityRule, Representation};
+use jc_core::kinds::{Audience, PolicySpec, QualityRule, RateLimits, Representation};
 use jc_core::ngsi_catalog::{self, Place};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -929,4 +929,358 @@ async fn search_ranks_the_dataset_a_question_names_first() {
             .as_str()
             .is_some_and(|t| t.contains(word)));
     }
+}
+
+/// T-4497: a catalogue of `n` Datasets a person would search, one Endpoint each: an SDM topic
+/// in sk and en, a place read from dev's AdministrativeArea entities (`fixtures/places-dev.txt`),
+/// a year and a publisher, so near-duplicates differ by a year or a place only. Seeded: the
+/// same seed gives the same catalogue.
+mod scale {
+    use super::*;
+
+    /// (type, en topic, sk topic, sk publisher prefix)
+    pub const TOPICS: &[(&str, &str, &str, &str)] = &[
+        (
+            "AirQualityObserved",
+            "Air quality",
+            "Kvalita ovzdušia",
+            "SHMÚ",
+        ),
+        (
+            "WeatherObserved",
+            "Weather observations",
+            "Meteorologické pozorovania",
+            "SHMÚ",
+        ),
+        ("Event", "Events", "Podujatia", "Mesto"),
+        (
+            "BikeHireDockingStation",
+            "Bike sharing",
+            "Zdieľané bicykle",
+            "Mesto",
+        ),
+        ("ParkingSpot", "Parking spots", "Parkovacie miesta", "Mesto"),
+        (
+            "TrafficFlowObserved",
+            "Traffic counts",
+            "Sčítanie dopravy",
+            "Kraj",
+        ),
+        (
+            "KeyPerformanceIndicator",
+            "Population statistics",
+            "Štatistika obyvateľstva",
+            "ŠÚ SR",
+        ),
+        (
+            "PointOfInterest",
+            "Points of interest",
+            "Body záujmu",
+            "Mesto",
+        ),
+        (
+            "WasteContainer",
+            "Waste containers",
+            "Kontajnery na odpad",
+            "Mesto",
+        ),
+        ("Alert", "Weather warnings", "Výstrahy pred počasím", "SHMÚ"),
+        (
+            "NoiseLevelObserved",
+            "Noise levels",
+            "Hladina hluku",
+            "Mesto",
+        ),
+        (
+            "WaterQualityObserved",
+            "Water quality",
+            "Kvalita vody",
+            "Kraj",
+        ),
+        (
+            "Streetlight",
+            "Street lighting",
+            "Verejné osvetlenie",
+            "Mesto",
+        ),
+        (
+            "Vehicle",
+            "Public transport vehicles",
+            "Vozidlá MHD",
+            "Dopravný podnik",
+        ),
+    ];
+    pub const YEARS: [u32; 4] = [2023, 2024, 2025, 2026];
+
+    pub fn places() -> Vec<&'static str> {
+        include_str!("fixtures/places-dev.txt")
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    /// One generated Dataset: its slug and the (topic, place, year) it is about.
+    pub struct Generated {
+        pub endpoint: Endpoint,
+        pub about: (usize, usize, u32),
+    }
+
+    /// xorshift64*: enough spread for a catalogue, no dependency.
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    pub fn catalogue(seed: u64, n: usize) -> Vec<Generated> {
+        let places = places();
+        let mut state = seed.max(1);
+        (0..n)
+            .map(|i| {
+                let topic = (next(&mut state) % TOPICS.len() as u64) as usize;
+                let place = (next(&mut state) % places.len() as u64) as usize;
+                let year = YEARS[(next(&mut state) % YEARS.len() as u64) as usize];
+                let (class, en, sk, publisher) = TOPICS[topic];
+                let at = places[place];
+                let mut e = holding(
+                    endpoint(
+                        &format!("{i:0>26}"),
+                        &format!("{en} {at} {year}"),
+                        &format!("d{i}"),
+                        Audience::Public,
+                        "public",
+                    ),
+                    class,
+                    &format!("{sk} {at} {year}"),
+                );
+                let by = if publisher == "Mesto" || publisher == "Kraj" {
+                    format!("{publisher} {at}")
+                } else {
+                    publisher.to_owned()
+                };
+                e.description.insert(
+                    "sk".to_owned(),
+                    format!("{sk}, {at}, rok {year}. Zverejňuje {by}."),
+                );
+                e.description.insert(
+                    "en".to_owned(),
+                    format!("{en} in {at}, {year}, published by {by}."),
+                );
+                Generated {
+                    endpoint: e,
+                    about: (topic, place, year),
+                }
+            })
+            .collect()
+    }
+
+    /// The share of questions whose target is among the first three hits: a question's targets
+    /// are every slug about the same (topic, place, year), which no title tells apart.
+    pub fn top3_rate(answers: &[(Vec<String>, BTreeSet<String>)]) -> f64 {
+        if answers.is_empty() {
+            return 0.0;
+        }
+        let found = answers
+            .iter()
+            .filter(|(hits, targets)| hits.iter().take(3).any(|hit| targets.contains(hit)))
+            .count();
+        found as f64 / answers.len() as f64
+    }
+
+    /// p50 and p95 of measured durations.
+    pub fn percentiles(
+        mut took: Vec<std::time::Duration>,
+    ) -> (std::time::Duration, std::time::Duration) {
+        took.sort();
+        let at = |p: usize| {
+            took.get((took.len() * p / 100).min(took.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or_default()
+        };
+        (at(50), at(95))
+    }
+}
+
+#[test]
+fn the_generated_catalogue_is_the_same_for_the_same_seed() {
+    let titles = |seed| {
+        scale::catalogue(seed, 200)
+            .into_iter()
+            .map(|g| {
+                (
+                    g.endpoint.title.clone(),
+                    g.endpoint.description.clone(),
+                    g.about,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles(7), titles(7));
+    assert_ne!(titles(7), titles(8));
+    let one = scale::catalogue(7, 200);
+    assert!(one
+        .iter()
+        .any(|g| g.endpoint.title["sk"].contains('ž') || g.endpoint.title["sk"].contains('á')));
+    assert!(
+        one.iter().map(|g| g.about.0).collect::<BTreeSet<_>>().len() > 10,
+        "every topic shows"
+    );
+}
+
+#[test]
+fn the_relevance_rate_counts_a_target_in_the_first_three() {
+    let set = |s: &[&str]| s.iter().map(|x| (*x).to_owned()).collect::<BTreeSet<_>>();
+    let hits = |s: &[&str]| s.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+    let answers = vec![
+        (hits(&["a", "b", "c"]), set(&["c"])),
+        (hits(&["a", "b", "c", "d"]), set(&["d"])),
+        (hits(&[]), set(&["a"])),
+        (hits(&["x"]), set(&["x", "y"])),
+    ];
+    assert!((scale::top3_rate(&answers) - 0.5).abs() < f64::EPSILON);
+    assert!(scale::top3_rate(&[]).abs() < f64::EPSILON);
+    let ms = std::time::Duration::from_millis;
+    assert_eq!(
+        scale::percentiles((1..=100).map(ms).collect()),
+        (ms(51), ms(96))
+    );
+}
+
+/// T-4497, run on its own in release:
+/// `cargo test --release -p context-gateway --test mcp_hub_catalog_tests ten_thousand_generated -- --ignored --nocapture`.
+/// 200 questions each through MCP search, list_endpoints (first page, a deep cursor) and the
+/// catalog Endpoint's query_entities (searchText, a theme); 30 with a known target for top-3.
+#[tokio::test]
+#[ignore = "a 10,000-Dataset measurement; run in release"]
+async fn ten_thousand_generated_datasets_are_found_fast() {
+    let realm = common::Realm::new();
+    let generated = scale::catalogue(4497, 10_000);
+    let places = scale::places();
+    // The quotas guard dev from a scraper; this loop is one, on purpose.
+    let unlimited = RateLimits {
+        requests_per_minute: 1_000_000,
+        burst: Some(1_000_000),
+    };
+    let gateway = Gateway::new(
+        Broker::new("http://127.0.0.1:1"),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(generated.iter().map(|g| g.endpoint.clone()))
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some("https://city.example".to_owned()),
+    )
+    .limit_hub_to(unlimited.clone())
+    .limit_anonymous_mcp_to(unlimited);
+    let app = router(Arc::new(gateway));
+    let mut questions = Vec::new();
+    for (i, g) in generated.iter().step_by(50).take(200).enumerate() {
+        let (topic, place, year) = g.about;
+        let (_, en, sk, _) = scale::TOPICS[topic];
+        let at = places[place];
+        let text = match i % 3 {
+            0 => format!("{sk} {at} {year}"),
+            1 => jc_core::ngsi_catalog::fold(&format!("{sk} {at} {year}")),
+            _ => format!("{en} {at} {year}"),
+        };
+        let targets: BTreeSet<String> = generated
+            .iter()
+            .filter(|other| other.about == g.about)
+            .map(|other| other.endpoint.slug.clone())
+            .collect();
+        questions.push((text, targets));
+    }
+    let timed = |tool: &'static str, arguments: Value| {
+        let app = app.clone();
+        async move {
+            let started = std::time::Instant::now();
+            let answer = call(app, None, tool, arguments).await;
+            (started.elapsed(), answer)
+        }
+    };
+    let _ = timed("search", json!({ "query": "warm" })).await;
+    let mut took = Vec::new();
+    let mut answers = Vec::new();
+    for (text, targets) in &questions {
+        let (t, answer) = timed("search", json!({ "query": text })).await;
+        took.push(t);
+        let hits = answer["result"]["structuredContent"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| h["endpoint"].as_str().map(str::to_owned))
+            .collect();
+        answers.push((hits, targets.clone()));
+    }
+    let search = scale::percentiles(took);
+    let relevance = scale::top3_rate(&answers[..30]);
+    let relevance_all = scale::top3_rate(&answers);
+    let mut first = Vec::new();
+    let mut deep = Vec::new();
+    for i in 0..200 {
+        first.push(timed("list_endpoints", json!({ "limit": 20 })).await.0);
+        let cursor = (9_000 + i * 4).to_string();
+        let (t, page) = timed("list_endpoints", json!({ "limit": 20, "cursor": cursor })).await;
+        assert_eq!(
+            page["result"]["structuredContent"]["total"],
+            json!(10_000),
+            "{page}"
+        );
+        deep.push(t);
+    }
+    let mut text = Vec::new();
+    let mut theme = Vec::new();
+    for (i, (question, _)) in questions.iter().enumerate() {
+        let word = jc_core::ngsi_catalog::fold(question.split(' ').nth(1).unwrap_or("x"));
+        let q = format!("searchText~=\"{word}\"");
+        text.push(
+            timed(
+                "query_entities",
+                json!({ "endpoint": "catalog", "type": "Dataset", "q": q, "limit": 20 }),
+            )
+            .await
+            .0,
+        );
+        let themes = ["ENVI", "TRAN", "SOCI", "GOVE"];
+        let q = format!("theme==\"{}\"", themes[i % themes.len()]);
+        theme.push(
+            timed(
+                "query_entities",
+                json!({ "endpoint": "catalog", "type": "Dataset", "q": q, "limit": 20 }),
+            )
+            .await
+            .0,
+        );
+    }
+    let rows = [
+        ("MCP search", search, 100),
+        ("list_endpoints first page", scale::percentiles(first), 100),
+        (
+            "list_endpoints cursor 9,000+",
+            scale::percentiles(deep),
+            100,
+        ),
+        (
+            "catalog query_entities searchText",
+            scale::percentiles(text),
+            200,
+        ),
+        (
+            "catalog query_entities theme",
+            scale::percentiles(theme),
+            200,
+        ),
+    ];
+    eprintln!("| path | p50 | p95 | target p95 |\n|---|---|---|---|");
+    for (path, (p50, p95), target) in rows {
+        eprintln!("| {path} | {p50:.1?} | {p95:.1?} | < {target} ms |");
+    }
+    eprintln!("relevance: top-3 {relevance:.2} of 30 known targets, {relevance_all:.2} of all 200");
+    for (path, (_, p95), target) in rows {
+        assert!(p95.as_millis() < target, "{path}: p95 {p95:?}");
+    }
+    assert!(relevance >= 0.9, "top-3 rate {relevance}");
 }
