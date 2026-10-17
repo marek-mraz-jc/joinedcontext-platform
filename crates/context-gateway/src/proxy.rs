@@ -84,12 +84,19 @@ pub enum ProxyError {
     /// The request names a JSON-LD context other than the core one (T-3287).
     #[error("{0}")]
     Context(&'static str),
+    /// The forwarded path has a `.` or `..` segment, which a hop resolving dot segments would
+    /// turn into another resource than the one the gateway decided on (T-3588).
+    #[error("a path segment of `.` or `..` names no resource")]
+    DotSegment,
 }
 
 impl From<ProxyError> for ProblemDetails {
     fn from(error: ProxyError) -> Self {
         if let ProxyError::Context(why) = error {
             return ProblemDetails::bad_request().with_detail(why);
+        }
+        if let ProxyError::DotSegment = error {
+            return ProblemDetails::bad_request().with_detail(error.to_string());
         }
         // The caller learns that the platform, not their request, is at fault, and nothing
         // about the topology behind the endpoint.
@@ -277,6 +284,11 @@ impl Broker {
             return Err(ProxyError::Uri(
                 "the forwarded path is not absolute".to_owned(),
             ));
+        }
+        // Every route that forwards a client's path passes here, whatever surface it serves.
+        let path = path_and_query.split('?').next().unwrap_or_default();
+        if path.split('/').any(crate::operations::is_dot_segment) {
+            return Err(ProxyError::DotSegment);
         }
         if self.held(&method, path_and_query, &headers) {
             let mut answer = ProblemDetails::new(503, "space-moving", "Space Moving")
