@@ -624,6 +624,78 @@ pub(crate) fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadErro
     Ok(entries)
 }
 
+/// Every manifest document under `dir`, parsed, with its path relative to `root` (CC-08,
+/// MF-05).
+pub(crate) fn read_documents(root: &Path, dir: &Path) -> Result<Vec<LoadedResource>, LoadError> {
+    let mut documents = Vec::new();
+    for entry in walk_files(dir)? {
+        let rel_path = entry
+            .path()
+            .strip_prefix(root)
+            .unwrap_or(entry.path())
+            .to_path_buf();
+        let Some(file_name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !(file_name.ends_with(".yaml") || file_name.ends_with(".yml"))
+            || is_native_yaml(file_name)
+        {
+            continue;
+        }
+        let content = std::fs::read_to_string(entry.path()).map_err(|source| LoadError::Io {
+            path: rel_path.clone(),
+            source,
+        })?;
+        for chunk in parse_yaml_documents(&content) {
+            if is_empty_doc(&chunk.content) {
+                continue;
+            }
+            let manifest = serde_norway::from_str(&chunk.content).map_err(|e| e.to_string());
+            documents.push(document(&rel_path, &chunk, manifest)?);
+        }
+    }
+    Ok(documents)
+}
+
+/// The document `chunk` of the file at `path`, or why it does not parse.
+pub(crate) fn document(
+    path: &Path,
+    chunk: &DocChunk,
+    manifest: Result<RawManifest, String>,
+) -> Result<LoadedResource, LoadError> {
+    match manifest {
+        Ok(manifest) => {
+            if !jc_core::serves(&manifest.kind, &manifest.api_version) {
+                return Err(LoadError::ApiVersion {
+                    path: path.to_path_buf(),
+                    document: chunk.document_index,
+                    expected: jc_core::API_VERSION,
+                    got: manifest.api_version,
+                });
+            }
+            if registry::by_kind(&manifest.kind).is_none() {
+                return Err(LoadError::UnknownKind {
+                    path: path.to_path_buf(),
+                    document: chunk.document_index,
+                    kind: manifest.kind,
+                });
+            }
+            Ok(LoadedResource {
+                path: path.to_path_buf(),
+                document: chunk.document_index,
+                line: chunk.start_line,
+                manifest,
+            })
+        }
+        Err(message) => Err(LoadError::Parse {
+            path: path.to_path_buf(),
+            document: chunk.document_index,
+            line: chunk.start_line,
+            message,
+        }),
+    }
+}
+
 /// The slug a preview Endpoint answers on: the first 160 bits of SHA-256 over the prefix and
 /// the origin's slug, in lowercase base32, so it is opaque like every slug (EP-02), the same on
 /// every render and never the origin's (Architecture/06 §7.2).
@@ -755,88 +827,29 @@ impl Repository {
 
     /// The same load, with the environment named rather than read from the process (CC-73).
     pub fn load_for(root: &Path, environment: Option<&str>) -> Result<Self, LoadError> {
+        Self::from_documents(root, read_documents(root, root)?, environment)
+    }
+
+    /// The repository at `root` made of documents already parsed, in any order: the assembly
+    /// hands over what it rendered instead of writing it and reading it back (T-4457).
+    pub(crate) fn from_documents(
+        root: &Path,
+        mut documents: Vec<LoadedResource>,
+        environment: Option<&str>,
+    ) -> Result<Self, LoadError> {
+        // Path order, as a walk reads them, so a duplicate names the same file first.
+        documents.sort_by(|a, b| (&a.path, a.document).cmp(&(&b.path, b.document)));
         let mut resources: BTreeMap<ResourceId, LoadedResource> = BTreeMap::new();
-
-        for entry in walk_files(root)? {
-            let rel_path = entry
-                .path()
-                .strip_prefix(root)
-                .unwrap_or(entry.path())
-                .to_path_buf();
-
-            let file_name = match entry.file_name().to_str() {
-                Some(s) => s,
-                None => continue,
-            };
-
-            if !file_name.ends_with(".yaml") && !file_name.ends_with(".yml") {
-                continue;
+        for loaded in documents {
+            let id = ResourceId::from_manifest(&loaded.manifest);
+            if let Some(existing) = resources.get(&id) {
+                return Err(LoadError::DuplicateIdentity {
+                    id: Box::new(id),
+                    first: existing.path.clone(),
+                    second: loaded.path,
+                });
             }
-
-            if is_native_yaml(file_name) {
-                continue;
-            }
-
-            let content =
-                std::fs::read_to_string(entry.path()).map_err(|source| LoadError::Io {
-                    path: rel_path.clone(),
-                    source,
-                })?;
-
-            let chunks = parse_yaml_documents(&content);
-            for chunk in chunks {
-                if is_empty_doc(&chunk.content) {
-                    continue;
-                }
-
-                let manifest: RawManifest = match serde_norway::from_str(&chunk.content) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        return Err(LoadError::Parse {
-                            path: rel_path,
-                            document: chunk.document_index,
-                            line: chunk.start_line,
-                            message: e.to_string(),
-                        });
-                    }
-                };
-
-                if !jc_core::serves(&manifest.kind, &manifest.api_version) {
-                    return Err(LoadError::ApiVersion {
-                        path: rel_path,
-                        document: chunk.document_index,
-                        expected: jc_core::API_VERSION,
-                        got: manifest.api_version,
-                    });
-                }
-
-                if registry::by_kind(&manifest.kind).is_none() {
-                    return Err(LoadError::UnknownKind {
-                        path: rel_path,
-                        document: chunk.document_index,
-                        kind: manifest.kind,
-                    });
-                }
-
-                let id = ResourceId::from_manifest(&manifest);
-                if let Some(existing) = resources.get(&id) {
-                    return Err(LoadError::DuplicateIdentity {
-                        id: Box::new(id),
-                        first: existing.path.clone(),
-                        second: rel_path,
-                    });
-                }
-
-                resources.insert(
-                    id,
-                    LoadedResource {
-                        path: rel_path.clone(),
-                        document: chunk.document_index,
-                        line: chunk.start_line,
-                        manifest,
-                    },
-                );
-            }
+            resources.insert(id, loaded);
         }
 
         // One repository, every environment (CC-73, CC-74): the overlay `JC_ENVIRONMENT` names

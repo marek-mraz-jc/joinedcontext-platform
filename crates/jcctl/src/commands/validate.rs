@@ -66,7 +66,18 @@ impl Report {
 /// symlink out of the tree) yields the one finding that stopped the walk: the loader
 /// refuses to build a half-repository it would then validate against itself.
 pub fn run(repo_dir: &Path) -> Report {
-    check(repo_dir, true)
+    match Repository::load(repo_dir) {
+        Ok(repo) => check(repo_dir, repo, true),
+        Err(err) => refused(err.into()),
+    }
+}
+
+/// The environment [`Repository::load`] renders with (CC-73), so a render checked from memory
+/// is the one it would read back.
+fn environment() -> Option<String> {
+    std::env::var("JC_ENVIRONMENT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Validates an organization of either layout (CC-86): layout 1 where it is, layout 2 as the
@@ -75,11 +86,17 @@ pub fn run(repo_dir: &Path) -> Report {
 /// reading an undeclared one are findings like any other (CC-83, CC-88).
 pub fn run_assembled(org_dir: &Path, resolver: &dyn Resolver) -> Report {
     let into = scratch("validate");
-    let report = match assemble(org_dir, resolver, &into.join("render"), None) {
+    let environment = environment();
+    let report = match assemble(
+        org_dir,
+        resolver,
+        &into.join("render"),
+        environment.as_deref(),
+    ) {
         Ok(assembly) if assembly.layout == 1 => run(org_dir),
         Ok(assembly) => {
-            let mut report = check(&into.join("render"), true);
             let mut found = assembly_findings(&assembly, |path| path.to_path_buf());
+            let mut report = check(&into.join("render"), assembly.repository, true);
             found.append(&mut report.findings);
             report.findings = found;
             report
@@ -106,15 +123,23 @@ pub fn run_project(
         Ok(slug) => {
             let prefix = PathBuf::from("projects").join(&slug);
             let resolver = Directories(BTreeMap::from([(slug.clone(), project_dir.to_path_buf())]));
-            match assemble(&into.join("org"), &resolver, &into.join("render"), None) {
+            let environment = environment();
+            let render = into.join("render");
+            match assemble(
+                &into.join("org"),
+                &resolver,
+                &render,
+                environment.as_deref(),
+            ) {
                 Ok(assembly) => {
                     let local =
                         |path: &Path| path.strip_prefix(&prefix).unwrap_or(path).to_path_buf();
-                    let mut report = check(&into.join("render"), false);
+                    let found = assembly_findings(&assembly, |path| path.to_path_buf());
+                    let mut report = check(&render, assembly.repository, false);
                     for finding in report.findings.iter_mut().chain(report.warnings.iter_mut()) {
                         finding.path = local(&finding.path);
                     }
-                    let mut found = assembly_findings(&assembly, |path| path.to_path_buf());
+                    let mut found = found;
                     found.append(&mut report.findings);
                     report.findings = found;
                     report
@@ -242,20 +267,10 @@ fn scratch(what: &str) -> PathBuf {
     std::env::temp_dir().join(format!("jcctl-{what}-{}-{now}", std::process::id()))
 }
 
-/// `organization` is false for a project checked alone: its groups, bindings and domain are
-/// the organization's, which the check does not have.
-fn check(repo_dir: &Path, organization: bool) -> Report {
-    let repo = match Repository::load(repo_dir) {
-        Ok(repo) => repo,
-        Err(err) => {
-            return Report {
-                checked: 0,
-                findings: vec![finding_of(err)],
-                warnings: Vec::new(),
-            }
-        }
-    };
-
+/// `repo` is the repository loaded from `repo_dir`. `organization` is false for a project
+/// checked alone: its groups, bindings and domain are the organization's, which the check does
+/// not have.
+fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
     let mut report = Report {
         checked: 0,
         findings: Vec::new(),
