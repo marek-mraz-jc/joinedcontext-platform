@@ -69,6 +69,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
                     timeout_seconds: 5,
                 },
             ],
+            mcp_server: None,
             allowed_origins: vec![ORIGIN.into()],
             rate_limit: Some(RateLimit {
                 requests_per_minute: 100,

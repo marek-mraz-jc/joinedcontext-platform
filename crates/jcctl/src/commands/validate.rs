@@ -1029,6 +1029,28 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
         })
         .collect();
 
+    // Every named MCP server's audience, for the deployments that name one (MF-56).
+    let servers: BTreeMap<(Option<String>, String), jc_core::kinds::Audience> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "McpServer")
+        .filter_map(|(id, resource)| {
+            let spec: jc_core::kinds::McpServerSpec =
+                serde_json::from_value(resource.manifest.spec.clone()).ok()?;
+            Some(((id.namespace.clone(), id.name.clone()), spec.audience))
+        })
+        .collect();
+    // The projects and spaces a selector may name (MF-55): a project is any namespace a
+    // manifest lives in.
+    let projects: std::collections::BTreeSet<String> = repo
+        .iter()
+        .filter_map(|(id, _)| match id.kind.as_str() {
+            "Project" => Some(id.name.clone()),
+            _ => id.namespace.clone(),
+        })
+        .filter(|project| project != jc_core::envelope::ORG_NAMESPACE)
+        .collect();
+    let spaces = declared("ContextSpace");
+
     let mut found = Vec::new();
     for (id, resource) in repo.iter() {
         let at = (resource.path.clone(), resource.document, resource.line);
@@ -1043,6 +1065,23 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                     continue;
                 };
                 let namespace = id.namespace.clone().unwrap_or_default();
+                if let Some(select) = &server.select {
+                    for project in select.projects.iter().flatten() {
+                        if !projects.contains(project) {
+                            found.push((at.clone(), format!(
+                                "{id}: spec.select.projects names project `{project}`, which the repository does not declare (MF-55)"
+                            )));
+                        }
+                    }
+                    for space in select.spaces.iter().flatten() {
+                        let (project, name) = space.split_once('/').unwrap_or_default();
+                        if !spaces.contains(&(Some(project.to_owned()), name.to_owned())) {
+                            found.push((at.clone(), format!(
+                                "{id}: spec.select.spaces names Context Space `{space}`, which no manifest declares (MF-55)"
+                            )));
+                        }
+                    }
+                }
                 for (project, name) in server.member_ids(&namespace) {
                     let Some(member) =
                         endpoint_specs.get(&(Some(project.to_owned()), name.to_owned()))
@@ -1084,6 +1123,25 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                     .get("channel")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                if let Some(server) = spec.get("mcpServer").and_then(|v| v.as_str()) {
+                    let (project, name) = jc_core::kinds::assistant::connector_target(server);
+                    // `org/all` is every organization's, served without a manifest (EP-122).
+                    let audience = match servers.get(&(project.map(str::to_owned), name.to_owned()))
+                    {
+                        Some(audience) => Some(*audience),
+                        None if server == "org/all" => Some(jc_core::kinds::Audience::Organization),
+                        None => None,
+                    };
+                    match audience {
+                        None => found.push((at.clone(), format!(
+                            "{id}: spec.mcpServer names McpServer `{server}`, which no manifest declares (MF-56)"
+                        ))),
+                        Some(audience) if channel != "internal" && audience != jc_core::kinds::Audience::Public => found.push((at.clone(), format!(
+                            "{id}: spec.mcpServer names McpServer `{server}`, which is `{audience}`; a `{channel}` channel answers people nobody signed in, so it reads a public server only. Name a `public` server or use channel `internal` (MF-56)"
+                        ))),
+                        Some(_) => {}
+                    }
+                }
                 for name in spec
                     .get("sources")
                     .and_then(|v| v.as_array())
