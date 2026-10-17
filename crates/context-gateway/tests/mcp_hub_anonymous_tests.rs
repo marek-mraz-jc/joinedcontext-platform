@@ -304,13 +304,36 @@ async fn the_one_login_scope_adds_the_internal_endpoints_the_person_may_read() {
     );
 }
 
+/// T-4492: a list row says what an agent picks by, in one line; get_endpoint answers the
+/// whole record, URLs included, for the one it picked, by slug, title or space.
 #[tokio::test]
 async fn each_row_says_enough_to_pick_the_endpoint() {
     let realm = common::Realm::new();
     let app = app("http://127.0.0.1:1", &realm);
-    let result = listed(app, None, json!({})).await;
+    let result = listed(app.clone(), None, json!({})).await;
     let row = &result["structuredContent"]["endpoints"][0];
     assert_eq!(row["types"], json!(["AirQualityObserved"]));
+    assert_eq!(row["domains"], json!(["Environment"]));
+    assert!(
+        row.get("surfaces").is_none() && row.get("dcat").is_none(),
+        "{row}"
+    );
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        text.lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with(OPEN)),
+        "{text}"
+    );
+    let (status, _, body) = raw(
+        app,
+        rpc(None, call("get_endpoint", json!({ "endpoint": OPEN }))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("JSON");
+    let row = &answer["result"]["structuredContent"]["endpoint"];
+    assert_eq!(row["slug"], json!(OPEN));
     assert_eq!(
         row["attributes"],
         json!({ "AirQualityObserved": ["location", "name"] })

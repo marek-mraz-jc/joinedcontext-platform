@@ -517,20 +517,12 @@ pub(crate) const SHARE_ALIKE: &str = "http://creativecommons.org/ns#ShareAlike";
 /// The Endpoint's catalogue block, its themes and keywords derived from the Smart Data Models of
 /// the types it holds where the block sets none (T-4498): a theme or keyword set by hand wins.
 /// The types are the space's declared classes, else its models' classes.
-fn classified(endpoint: &Endpoint) -> Catalog {
+pub(crate) fn classified(endpoint: &Endpoint) -> Catalog {
     let mut catalog = endpoint.catalog.as_deref().cloned().unwrap_or_default();
     if !catalog.themes.is_empty() && !catalog.keywords.is_empty() {
         return catalog;
     }
-    let derived = match endpoint.declared_types.as_deref() {
-        Some(declared) => classify(declared.classes.iter().map(String::as_str)),
-        None => classify(
-            endpoint
-                .models
-                .iter()
-                .flat_map(|model| model.classes.iter().map(String::as_str)),
-        ),
-    };
+    let derived = classification(endpoint);
     if catalog.themes.is_empty() {
         catalog.themes = derived.themes.into_iter().collect();
     }
@@ -538,6 +530,20 @@ fn classified(endpoint: &Endpoint) -> Catalog {
         catalog.keywords = derived.keywords;
     }
     catalog
+}
+
+/// The Smart Data Model classification of the types an Endpoint holds: the space's declared
+/// classes, else its models' classes (T-4498).
+pub(crate) fn classification(endpoint: &Endpoint) -> jc_core::classification::Classification {
+    match endpoint.declared_types.as_deref() {
+        Some(declared) => classify(declared.classes.iter().map(String::as_str)),
+        None => classify(
+            endpoint
+                .models
+                .iter()
+                .flat_map(|model| model.classes.iter().map(String::as_str)),
+        ),
+    }
 }
 
 /// What the catalogue block says about the dataset itself (EP-78).
