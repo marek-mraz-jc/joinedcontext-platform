@@ -525,8 +525,13 @@ impl IdMint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutputMode {
-    /// Create or replace complete entity.
+    /// Create the entity, or merge the attributes the record names into it; the rest stay
+    /// (`entityOperations/upsert?options=update`, PL-79).
     Upsert,
+    /// Make the entity exactly the record: an attribute the record does not name is removed
+    /// (`entityOperations/upsert` without options), for a pipeline that alone writes its
+    /// entities (PL-79, T-4406).
+    Replace,
     /// Update or append attributes onto existing entity.
     UpdateAttrs,
 }
@@ -536,6 +541,7 @@ impl OutputMode {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Upsert => "upsert",
+            Self::Replace => "replace",
             Self::UpdateAttrs => "update-attrs",
         }
     }
