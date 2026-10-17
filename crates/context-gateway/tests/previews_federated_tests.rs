@@ -96,3 +96,39 @@ async fn a_missing_or_empty_token_file_asks_the_realm_nothing() {
     }
     assert!(seen.lock().expect("the grants").is_empty());
 }
+
+/// A token endpoint that answers 307 gets the grant back from nobody: the assertion is not resent to
+/// the host the redirect names (T-3591).
+#[tokio::test]
+async fn a_redirecting_token_endpoint_is_not_followed() {
+    let (elsewhere, seen) = realm().await;
+    let app = Router::new().route(
+        "/token",
+        post(move || {
+            let elsewhere = elsewhere.clone();
+            async move {
+                (
+                    axum::http::StatusCode::TEMPORARY_REDIRECT,
+                    [(axum::http::header::LOCATION, elsewhere)],
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let token = WorkloadToken::with_credential(
+        format!("http://{address}/token"),
+        "context-gateway".to_owned(),
+        Credential::Assertion(token_file("redirect", "eyJ.assertion")),
+    );
+    token.get().await.expect_err("a redirect is no token");
+    assert!(
+        seen.lock().expect("the grants").is_empty(),
+        "the grant was resent"
+    );
+}

@@ -242,8 +242,11 @@ impl WorkloadToken {
             token_url,
             client_id,
             credential,
+            // No redirect: a 307 or 308 would resend the grant, assertion or secret included,
+            // to whatever host the answer names (T-3591).
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("a client with a timeout builds"),
             held: tokio::sync::Mutex::new(None),

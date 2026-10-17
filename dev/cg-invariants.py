@@ -11,7 +11,8 @@ or comments never count. Red when:
   - cg says a statement is wrong (`hint:`), or truncated its output.
 
   dev/cg-invariants.py                 query the graph (build it first with a full `cg build --fg`: a
-                                       --reuse graph names other enclosing symbols for GREP hits)
+                                       --reuse graph names other enclosing symbols for GREP hits, and a
+                                       --deps graph is refused)
   dev/cg-invariants.py --from FILE     check saved `cg q` output instead (the self-test does)
   dev/cg-invariants.py --selftest
 
@@ -76,6 +77,10 @@ def allowlist(text: str) -> tuple[dict[tuple[str, str], str], list[str]]:
 
 
 def check(output: str, allowed_text: str) -> list[str]:
+    # A --deps graph indexes the crates' own code, so a dependency's symbols stop being `external`
+    # and its calls become rows: the invariants are written for the plain graph (T-3591).
+    if "/cg/deps/" in output.split("\n", 1)[0]:
+        return ["graph built with --deps: rebuild it with a plain `cg build --fg`"]
     found = sections(output)
     entries, problems = allowlist(allowed_text)
     problems += found.pop("!", [])
@@ -123,6 +128,10 @@ c.rs:3 |  | False | False | format!("SELECT")
     assert check(output + row, ok + "sql-from-text | m::Extracted::truncated | flag\n") == []
     cut = "... truncated at 60 rows; add LIMIT / aggregate, or --max-rows\n"
     assert check(output + cut, ok) == [f"sql-from-text: {cut.strip()}"]
+    deps = "graph: built 2026 [rust:., rust:/home/dev/.cache/cg/deps/axum-0.8.9/src]\n"
+    assert check(deps + output.split("\n", 1)[1], ok) == [
+        "graph built with --deps: rebuild it with a plain `cg build --fg`"
+    ]
     print("cg-invariants selftest: ok")
 
 

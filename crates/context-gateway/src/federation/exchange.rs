@@ -69,8 +69,11 @@ struct Issued {
 impl Exchanger {
     /// An exchanger asking `token_url` as `client_id`, proven by `credential` (PF-47).
     pub fn new(token_url: String, client_id: String, credential: ClientCredential) -> Self {
+        // No redirect: the form carries the caller's token and this client's secret, and a 307
+        // or 308 would send both on to whatever host the answer names (T-3591).
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         Self {
@@ -210,6 +213,38 @@ mod tests {
         );
         assert_eq!(form["client_id"], "context-gateway");
         assert!(!form.contains_key("audience"), "{form:?}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_from_the_token_endpoint_is_refused_and_the_form_goes_nowhere_else() {
+        let (elsewhere, seen) = realm(
+            StatusCode::OK,
+            serde_json::json!({ "access_token": "stolen" }),
+        )
+        .await;
+        let app = Router::new().route(
+            "/token",
+            post(move || {
+                let elsewhere = elsewhere.clone();
+                async move {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, elsewhere)],
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}/token", listener.local_addr().expect("addr"));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let refused = exchanger(url)
+            .exchange("caller-token", &brokers(&["archive"]))
+            .await
+            .expect_err("a redirect is no token");
+        assert_eq!(refused, ExchangeError::Refused(307));
+        assert!(seen.lock().expect("lock").is_empty(), "the form was resent");
     }
 
     #[tokio::test]
