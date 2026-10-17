@@ -62,7 +62,7 @@ T-4451 (2026-10-17): the ratchet had run only as a self-test, so main drifted to
 assistant 2 while context-gateway (39) and jcctl (31) fell below their lines unrecorded. After
 the slice below, on a graph of the branch: agent-proxy 3, assistant 1, context-gateway 39,
 jc-core 46, jcctl 31, wasm-host 6; the baseline holds these. T-4452 then took context-gateway
-from 39 to 31; jcctl, wasm-host and agent-proxy rows are all reasoned below and stay.
+from 39 to 31, and 32 with T-4444's `Reaper::files_walked` (test API) merged meanwhile; jcctl, wasm-host and agent-proxy rows are all reasoned below and stay.
 
 `ci/cg-dead-code-baseline.txt` holds the after column. The check is red when a crate has more
 rows than its line (new code nothing calls, or a caller deleted and its callees kept) and red
@@ -134,6 +134,7 @@ hide them from it.
 - assistant: `worker::sources`.
 - context-gateway: `Gateway::wait_for_writes`, `limit_anonymous_mcp_to` (the tests shorten the
   write wait and the anonymous MCP limit); `pdp::temporal::Window::admits`;
+  `pdp::reaper::Reaper::files_walked` (store_layout_tests and `examples/scale_bench.rs`, T-4444);
   `ServiceAccounts::is_empty`, `with_app`; `Agreements::len`, `is_empty`;
   `Federations::is_federated`; `RateLimiter::len`, `is_empty`; `WorkloadToken::new`;
   `Broker::new` (plain HTTP), `Broker::base`; `SlugResolver::with`, `len`, `is_empty`.
