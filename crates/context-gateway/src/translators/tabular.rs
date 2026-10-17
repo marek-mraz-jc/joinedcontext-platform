@@ -371,6 +371,197 @@ pub enum XlsxError {
     Zip(#[from] zip::result::ZipError),
 }
 
+/// The media type of the Parquet answer (EP-119).
+pub const PARQUET_MEDIA_TYPE: &str = "application/vnd.apache.parquet";
+
+/// The table as one Apache Parquet file: a column per table column, typed by its values, one
+/// row group, no compression, and the export's metadata in the footer (EP-119).
+///
+/// The footer is written last, so the file is assembled in a buffer that refuses to grow past
+/// `maxFileBytes`: a file over the ceiling stops being written the moment it crosses it.
+pub fn parquet(
+    table: &Table,
+    metadata: &[(String, String)],
+    limits: &Limits,
+) -> Result<Vec<u8>, ParquetError> {
+    use parquet::basic::{Compression, LogicalType, Repetition, Type as Physical};
+    use parquet::data_type::{BoolType, ByteArray, ByteArrayType, DoubleType, Int64Type};
+    use parquet::file::metadata::KeyValue;
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use std::sync::Arc;
+
+    let kinds: Vec<Kind> = (0..table.columns.len())
+        .map(|index| Kind::of(table.rows.iter().filter_map(|row| row.get(index))))
+        .collect();
+    let fields = table
+        .columns
+        .iter()
+        .zip(&kinds)
+        .map(|(name, kind)| {
+            let (physical, logical) = match kind {
+                Kind::Integer => (Physical::INT64, None),
+                Kind::Double => (Physical::DOUBLE, None),
+                Kind::Boolean => (Physical::BOOLEAN, None),
+                Kind::Text => (Physical::BYTE_ARRAY, Some(LogicalType::String)),
+            };
+            Type::primitive_type_builder(name, physical)
+                .with_repetition(Repetition::OPTIONAL)
+                .with_logical_type(logical)
+                .build()
+                .map(Arc::new)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()?,
+    );
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::UNCOMPRESSED)
+        .set_max_row_group_row_count(None)
+        .set_key_value_metadata(Some(
+            metadata
+                .iter()
+                .map(|(key, value)| KeyValue::new(key.clone(), value.clone()))
+                .collect(),
+        ))
+        .build();
+    let mut buffer = Bounded {
+        bytes: Vec::new(),
+        max: limits.max_bytes,
+    };
+    let mut writer = SerializedFileWriter::new(&mut buffer, schema, Arc::new(properties))?;
+    let mut group = writer.next_row_group()?;
+    let mut index = 0;
+    while let Some(mut column) = group.next_column()? {
+        let cells = table
+            .rows
+            .iter()
+            .map(|row| row.get(index).unwrap_or(&Value::Null));
+        // Definition level 1 is a value, 0 a null: every column is optional (EP-119).
+        let levels: Vec<i16> = cells
+            .clone()
+            .map(|value| i16::from(!value.is_null()))
+            .collect();
+        let present = cells.filter(|value| !value.is_null());
+        match kinds.get(index) {
+            Some(Kind::Integer) => {
+                let values: Vec<i64> = present.filter_map(Value::as_i64).collect();
+                column
+                    .typed::<Int64Type>()
+                    .write_batch(&values, Some(&levels), None)?;
+            }
+            Some(Kind::Double) => {
+                let values: Vec<f64> = present.filter_map(Value::as_f64).collect();
+                column
+                    .typed::<DoubleType>()
+                    .write_batch(&values, Some(&levels), None)?;
+            }
+            Some(Kind::Boolean) => {
+                let values: Vec<bool> = present.filter_map(Value::as_bool).collect();
+                column
+                    .typed::<BoolType>()
+                    .write_batch(&values, Some(&levels), None)?;
+            }
+            _ => {
+                let values: Vec<ByteArray> = present
+                    .map(|value| cell(value).into_bytes().into())
+                    .collect();
+                column
+                    .typed::<ByteArrayType>()
+                    .write_batch(&values, Some(&levels), None)?;
+            }
+        }
+        column.close()?;
+        index += 1;
+    }
+    group.close()?;
+    writer.close()?;
+    Ok(buffer.bytes)
+}
+
+/// Why no Parquet file was produced (EP-119).
+#[derive(Debug, thiserror::Error)]
+pub enum ParquetError {
+    /// The file is past the endpoint's `maxFileBytes` (EP-44).
+    #[error("the parquet file is larger than the endpoint allows")]
+    TooLarge,
+    /// The writer refused the schema or the data.
+    #[error("the parquet file does not serialize: {0}")]
+    Write(parquet::errors::ParquetError),
+}
+
+impl From<parquet::errors::ParquetError> for ParquetError {
+    fn from(error: parquet::errors::ParquetError) -> Self {
+        // The bounded buffer's refusal reaches here as the writer's I/O error.
+        let refused = match &error {
+            parquet::errors::ParquetError::External(inner) => inner
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::get_ref)
+                .is_some_and(|inner| inner.is::<TooLarge>()),
+            _ => false,
+        };
+        match refused {
+            true => Self::TooLarge,
+            false => Self::Write(error),
+        }
+    }
+}
+
+/// What a Parquet column holds, decided by every value it carries (EP-119).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Integer,
+    Double,
+    Boolean,
+    Text,
+}
+
+impl Kind {
+    /// The narrowest kind every non-null value fits; a column of nulls only is text.
+    fn of<'a>(values: impl Iterator<Item = &'a Value>) -> Self {
+        let mut kind = None;
+        for value in values {
+            let this = match value {
+                Value::Null => continue,
+                Value::Number(number) if number.is_i64() => Self::Integer,
+                Value::Number(_) => Self::Double,
+                Value::Bool(_) => Self::Boolean,
+                _ => return Self::Text,
+            };
+            kind = Some(match (kind, this) {
+                (None, this) => this,
+                (Some(seen), this) if seen == this => this,
+                (Some(Self::Integer | Self::Double), Self::Integer | Self::Double) => Self::Double,
+                _ => return Self::Text,
+            });
+        }
+        kind.unwrap_or(Self::Text)
+    }
+}
+
+/// A buffer that refuses to grow past the download ceiling (EP-44).
+struct Bounded {
+    bytes: Vec<u8>,
+    max: u64,
+}
+
+impl Write for Bounded {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if (self.bytes.len() + data.len()) as u64 > self.max {
+            return Err(std::io::Error::other(TooLarge));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The `data` sheet: the header row, then one row per entity.
 ///
 /// Checked per row like the CSV writer's, so a sheet past the ceiling is refused rather than

@@ -163,6 +163,8 @@ pub enum Representation {
     Csv,
     /// Flat tabular Excel spreadsheet (`/file.xlsx`).
     Xlsx,
+    /// Typed columnar Apache Parquet file (`/file.parquet`, EP-119).
+    Parquet,
     /// JSON array of entities (`/file.json`).
     Json,
     /// Zipped multi-representation export bundle (`/file.zip`).
@@ -188,6 +190,7 @@ impl Representation {
             Self::GeoJson => "geojson",
             Self::Csv => "csv",
             Self::Xlsx => "xlsx",
+            Self::Parquet => "parquet",
             Self::Json => "json",
             Self::Zip => "zip",
             Self::OgcFeatures => "ogc-features",
@@ -198,12 +201,13 @@ impl Representation {
     }
 
     /// Every representation, in the order a record lists them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::NgsiLd,
         Self::Mcp,
         Self::GeoJson,
         Self::Csv,
         Self::Xlsx,
+        Self::Parquet,
         Self::Json,
         Self::Zip,
         Self::OgcFeatures,

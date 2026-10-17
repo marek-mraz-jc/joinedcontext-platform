@@ -15,7 +15,9 @@ use crate::auth::accounts::ServiceAccounts;
 use crate::auth::dataspace_token::{self, Agreements};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
-use crate::handlers::files::{file_csv, file_geojson, file_json, file_xlsx, file_zip, space_dump};
+use crate::handlers::files::{
+    file_csv, file_geojson, file_json, file_parquet, file_xlsx, file_zip, space_dump,
+};
 use crate::handlers::ogc::{odata, ogc_features};
 use crate::handlers::schema_routes::{
     schema_artifact, schema_index, space_schema_artifact, space_schema_index,
@@ -563,6 +565,7 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route("/api/endpoint/{slug}/file.json", get(file_json))
         .route("/api/endpoint/{slug}/file.csv", get(file_csv))
         .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
+        .route("/api/endpoint/{slug}/file.parquet", get(file_parquet))
         .route("/api/endpoint/{slug}/file.zip", get(file_zip))
         // The OGC surface is the broker's view (T-3752), one forward over its resource tree:
         // three spellings of the landing page, because a GIS client stores whichever one it was

@@ -71,6 +71,12 @@ fn served(representation: Representation) -> Served {
             media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             conforms_to: None,
         },
+        Representation::Parquet => Served {
+            path: "file.parquet",
+            title: "Apache Parquet",
+            media_type: "application/vnd.apache.parquet",
+            conforms_to: Some("https://parquet.apache.org/docs/file-format/"),
+        },
         Representation::Json => Served {
             path: "file.json",
             title: "JSON",
@@ -233,6 +239,7 @@ fn file_type_iri(representation: Representation) -> String {
         Representation::GeoJson | Representation::OgcFeatures => "GEOJSON",
         Representation::Csv => "CSV",
         Representation::Xlsx => "XLSX",
+        Representation::Parquet => "PARQUET",
         Representation::Zip => "ZIP",
         Representation::Mcp
         | Representation::Json

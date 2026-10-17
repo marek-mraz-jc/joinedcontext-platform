@@ -1,8 +1,11 @@
 //! The tabular representations of an NGSI-LD answer (T-0157, EP-08, EP-44, EP-45).
 
 use context_gateway::translators::tabular::{
-    csv, flatten, humanize, table, xlsx, Limits, Table, TooLarge, XlsxError,
+    csv, flatten, humanize, parquet, table, xlsx, Limits, ParquetError, Table, TooLarge, XlsxError,
 };
+use parquet::basic::Type as Physical;
+use parquet::file::reader::{FileReader, SerializedFileReader};
+use parquet::record::Field;
 use serde_json::{json, Value};
 use std::io::Read;
 
@@ -599,6 +602,7 @@ async fn the_endpoints_byte_ceiling_refuses_a_workbook_too() {
     for (representation, file) in [
         (Representation::Xlsx, "file.xlsx"),
         (Representation::Csv, "file.csv"),
+        (Representation::Parquet, "file.parquet"),
     ] {
         let broker = BrokerStub::start(vec![json!(full)]).await;
         let (status, _, _) = download(
@@ -611,4 +615,170 @@ async fn the_endpoints_byte_ceiling_refuses_a_workbook_too() {
         .await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{file}");
     }
+}
+
+/// A Parquet file read back: each column's physical type, the rows as fields, the metadata.
+struct ReadBack {
+    columns: Vec<(String, Physical)>,
+    rows: Vec<Vec<Field>>,
+    metadata: Vec<(String, String)>,
+}
+
+fn read_parquet(file: Vec<u8>) -> ReadBack {
+    let reader = SerializedFileReader::new(bytes::Bytes::from(file)).expect("a parquet file");
+    let meta = reader.metadata().file_metadata();
+    let columns = meta
+        .schema_descr()
+        .columns()
+        .iter()
+        .map(|column| (column.name().to_owned(), column.physical_type()))
+        .collect();
+    let metadata = meta
+        .key_value_metadata()
+        .into_iter()
+        .flatten()
+        .map(|kv| (kv.key.clone(), kv.value.clone().unwrap_or_default()))
+        .collect();
+    let rows = reader
+        .get_row_iter(None)
+        .expect("rows")
+        .map(|row| {
+            row.expect("a row")
+                .get_column_iter()
+                .map(|(_, field)| field.clone())
+                .collect()
+        })
+        .collect();
+    ReadBack {
+        columns,
+        rows,
+        metadata,
+    }
+}
+
+/// EP-119: a column is typed by its values, a mixed one is text written as the CSV writes it,
+/// and a missing value is null, never an empty string.
+#[test]
+fn parquet_columns_are_typed_by_their_values() {
+    let answer = json!([
+        {"id": "urn:a", "type": "T", "n": {"type": "Property", "value": 1},
+         "x": {"type": "Property", "value": 1}, "ok": {"type": "Property", "value": true},
+         "mix": {"type": "Property", "value": 7}},
+        {"id": "urn:b", "type": "T", "x": {"type": "Property", "value": 2.5},
+         "ok": {"type": "Property", "value": false}, "mix": {"type": "Property", "value": "seven"}},
+    ]);
+    let table = table(&answer, &Limits::DEFAULT).expect("a table");
+    let metadata = vec![("endpoint".to_owned(), "e1".to_owned())];
+    let file = parquet(&table, &metadata, &Limits::DEFAULT).expect("a parquet file");
+    assert_eq!(&file[..4], b"PAR1");
+
+    let back = read_parquet(file);
+    let typed: Vec<(&str, Physical)> = back
+        .columns
+        .iter()
+        .map(|(name, kind)| (name.as_str(), *kind))
+        .collect();
+    assert_eq!(
+        typed,
+        vec![
+            ("id", Physical::BYTE_ARRAY),
+            ("type", Physical::BYTE_ARRAY),
+            ("mix.value", Physical::BYTE_ARRAY),
+            ("n.value", Physical::INT64),
+            ("ok.value", Physical::BOOLEAN),
+            ("x.value", Physical::DOUBLE),
+        ]
+    );
+    assert_eq!(
+        back.rows,
+        vec![
+            vec![
+                Field::Str("urn:a".into()),
+                Field::Str("T".into()),
+                Field::Str("7".into()),
+                Field::Long(1),
+                Field::Bool(true),
+                Field::Double(1.0),
+            ],
+            vec![
+                Field::Str("urn:b".into()),
+                Field::Str("T".into()),
+                Field::Str("seven".into()),
+                Field::Null,
+                Field::Bool(false),
+                Field::Double(2.5),
+            ],
+        ]
+    );
+    assert_eq!(back.metadata, metadata);
+}
+
+/// EP-119: nothing to show is a valid file with no rows, not an error.
+#[test]
+fn an_empty_answer_is_an_empty_parquet_file() {
+    let table = table(&json!([]), &Limits::DEFAULT).expect("a table");
+    let back = read_parquet(parquet(&table, &[], &Limits::DEFAULT).expect("a parquet file"));
+    assert!(back.columns.is_empty());
+    assert!(back.rows.is_empty());
+}
+
+/// EP-44: a file past `maxFileBytes` is refused whole, with nothing half-written handed back.
+#[test]
+fn a_parquet_file_past_the_byte_ceiling_is_refused() {
+    let answer: Vec<Value> = (0..200).map(reading).collect();
+    let table = table(&json!(answer), &Limits::DEFAULT).expect("a table");
+    let small = Limits {
+        max_rows: 1000,
+        max_bytes: 512,
+    };
+    assert!(matches!(
+        parquet(&table, &[], &small),
+        Err(ParquetError::TooLarge)
+    ));
+}
+
+/// EP-119, EP-43: the file is an attachment under its media type, and the caller's filter is
+/// what the broker is asked.
+#[tokio::test]
+async fn the_parquet_file_is_served_filtered_as_an_attachment() {
+    let broker = BrokerStub::start(vec![json!([reading(1)])]).await;
+    let response = gateway(&broker.url, endpoint(vec![Representation::Parquet], None))
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/file.parquet?type=AirQualityObserved&q=pm10%3E0"
+                ))
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        header(axum::http::header::CONTENT_TYPE).as_deref(),
+        Some("application/vnd.apache.parquet")
+    );
+    assert_eq!(
+        header(axum::http::header::CONTENT_DISPOSITION),
+        Some(format!("attachment; filename=\"{SLUG}.parquet\""))
+    );
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .expect("a readable body");
+    let back = read_parquet(body.to_vec());
+    assert_eq!(back.rows.len(), 1);
+    assert!(back
+        .metadata
+        .iter()
+        .any(|(key, value)| key == "rows" && value == "1"));
+    let hops = broker.hops();
+    assert!(hops[0].query.contains("q=pm10"), "{}", hops[0].query);
 }
