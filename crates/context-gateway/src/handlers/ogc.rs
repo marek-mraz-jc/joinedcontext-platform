@@ -183,7 +183,12 @@ async fn answered(
     let root = format!("/x/views/{}/{}", endpoint.slug, surface.path);
     if answer.status().is_server_error() {
         let (parts, body) = answer.into_parts();
-        return broker_failure(parts.status, body).await;
+        return broker_failure(
+            parts.status,
+            parts.headers.get("retry-after").cloned(),
+            body,
+        )
+        .await;
     }
     if answer.status() == StatusCode::FORBIDDEN {
         return with_platform_slug(answer).await;
@@ -206,7 +211,7 @@ async fn answered(
     // broker failure; stream the rewrite if a `limit` ever reaches that.
     let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
         tracing::error!(slug = %endpoint.slug, surface = surface.name, "the broker's answer is larger than the gateway holds");
-        return broker_failure(StatusCode::BAD_GATEWAY, Body::empty()).await;
+        return broker_failure(StatusCode::BAD_GATEWAY, None, Body::empty()).await;
     };
     caller_links(&mut parts.headers, &from, &to);
     caller_links(&mut parts.headers, &view_from, &view_to);
@@ -460,7 +465,7 @@ async fn key_of(
         Ok(answer) => {
             tracing::error!(%view, status = %answer.status(), "the view's $metadata is unreadable");
             return Err(Box::new(
-                broker_failure(StatusCode::BAD_GATEWAY, Body::empty()).await,
+                broker_failure(StatusCode::BAD_GATEWAY, None, Body::empty()).await,
             ));
         }
         Err(error) => return Err(Box::new(ProblemDetails::from(error).into_response())),
@@ -477,7 +482,7 @@ async fn key_of(
         None => {
             tracing::error!(%view, %set, "the view's $metadata names no key for the set");
             Err(Box::new(
-                broker_failure(StatusCode::BAD_GATEWAY, Body::empty()).await,
+                broker_failure(StatusCode::BAD_GATEWAY, None, Body::empty()).await,
             ))
         }
     }

@@ -1052,6 +1052,49 @@ fn the_attribution_source_and_provenance_become_extras() {
     }
 }
 
+/// T-4436: an original dataset reaches CKAN with its title and description from the Endpoint's
+/// catalogue block, in the space's language (else the one it has), not as a bare IRI.
+#[test]
+fn each_source_carries_its_title_from_the_catalogue_block() {
+    let block = format!(
+        "{PUBLISH}  catalog:
+    source:
+      - url: https://opendata.banskabystrica.sk/datasets/ovzdusie
+        title: {{ sk: Ovzdušie BB, en: Air BB }}
+        description: {{ sk: Merania mesta, en: The city's readings }}
+      - url: https://discomap.eea.europa.eu/map/fme/AirQualityExport.htm
+        title: {{ en: EEA air quality }}
+        description: {{ en: Hourly readings }}
+"
+    );
+    let dataset = package(
+        &endpoint("[ngsi-ld, csv]", &block),
+        &instance(),
+        &catalogued_record(),
+        &Settings::new("data.example.org").in_language("sk"),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    let sources: Value =
+        serde_json::from_str(extra(&dataset, "source").expect("a source extra")).expect("JSON");
+    assert_eq!(
+        sources,
+        json!([
+            { "url": "https://opendata.banskabystrica.sk/datasets/ovzdusie",
+              "title": "Ovzdušie BB", "description": "Merania mesta" },
+            { "url": "https://discomap.eea.europa.eu/map/fme/AirQualityExport.htm",
+              "title": "EEA air quality", "description": "Hourly readings" },
+        ])
+    );
+    let keys: Vec<&Value> = dataset["extras"]
+        .as_array()
+        .expect("extras")
+        .iter()
+        .filter(|e| e["key"] == "source")
+        .collect();
+    assert_eq!(keys.len(), 1, "one source extra");
+}
+
 /// EP-63, EP-78: CKAN harvests the catalogue block, field for field, in the space's language.
 #[test]
 fn the_catalogue_block_becomes_the_ckan_dataset_fields() {

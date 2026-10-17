@@ -149,7 +149,12 @@ async fn through_view(
     match answer.status() {
         status if status.is_server_error() => {
             let (parts, body) = answer.into_parts();
-            broker_failure(parts.status, body).await
+            broker_failure(
+                parts.status,
+                parts.headers.get("retry-after").cloned(),
+                body,
+            )
+            .await
         }
         StatusCode::FORBIDDEN => with_platform_slug(answer).await,
         StatusCode::NOT_FOUND => ProblemDetails::not_found().into_response(),
