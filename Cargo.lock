@@ -3897,7 +3897,7 @@ dependencies = [
  "urlencoding",
  "v_htmlescape",
  "whatlang",
- "zip 9.0.1",
+ "zip 8.6.0",
 ]
 
 [[package]]
