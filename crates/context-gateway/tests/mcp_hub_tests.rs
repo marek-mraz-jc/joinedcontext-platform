@@ -196,8 +196,9 @@ async fn send(app: Router, request: Request<Body>) -> (StatusCode, Value) {
     (status, serde_json::from_str(&body).unwrap_or(Value::Null))
 }
 
-/// The slugs `list_endpoints` answers, and the `endpoint` enum of one tool.
-async fn listed(app: Router, token: &str) -> (Vec<String>, Vec<String>) {
+/// The slugs `list_endpoints` answers, and the `tools/list` body, which names no slug: the
+/// `endpoint` argument is a string, never an enum of the caller's list (T-4491).
+async fn listed(app: Router, token: &str) -> (Vec<String>, String) {
     let (_, answer) = send(
         app.clone(),
         hub(Some(token), call("list_endpoints", json!({}))),
@@ -210,21 +211,12 @@ async fn listed(app: Router, token: &str) -> (Vec<String>, Vec<String>) {
         .map(|entry| entry["slug"].as_str().expect("a slug").to_owned())
         .collect();
     let (_, tools) = send(app, hub(Some(token), list())).await;
-    let enumerated = tools["result"]["tools"]
-        .as_array()
-        .expect("tools")
-        .iter()
-        .find(|tool| tool["name"] == "query_entities")
-        .map(|tool| {
-            tool["inputSchema"]["properties"]["endpoint"]["enum"]
-                .as_array()
-                .expect("an enum")
-                .iter()
-                .map(|slug| slug.as_str().expect("a slug").to_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    (slugs, enumerated)
+    (slugs, tools.to_string())
+}
+
+/// Whether the body names any of the test's slugs.
+fn names_a_slug(body: &str) -> bool {
+    [AIR, BIKES].iter().any(|slug| body.contains(slug))
 }
 
 fn query(endpoint: &str) -> Value {
@@ -244,9 +236,9 @@ async fn an_endpoint_the_token_may_not_read_is_never_listed_and_answers_like_an_
     let app = app(&broker.url, &realm);
     let token = edge(&realm);
 
-    let (slugs, enumerated) = listed(app.clone(), &token).await;
+    let (slugs, tools) = listed(app.clone(), &token).await;
     assert_eq!(slugs, [AIR, BIKES]);
-    assert_eq!(enumerated, [AIR, BIKES]);
+    assert!(!names_a_slug(&tools), "{tools}");
 
     let unknown = raw(app.clone(), hub(Some(&token), query(UNKNOWN))).await;
     assert_eq!(unknown.0, StatusCode::OK);
@@ -552,9 +544,9 @@ async fn a_token_for_one_endpoint_reaches_that_endpoint_only() {
     let app = app(&broker.url, &realm);
     let token = steward(&realm, "0f5a", json!(AIR), "openid");
 
-    let (slugs, enumerated) = listed(app.clone(), &token).await;
+    let (slugs, tools) = listed(app.clone(), &token).await;
     assert_eq!(slugs, [AIR]);
-    assert_eq!(enumerated, [AIR]);
+    assert!(!names_a_slug(&tools), "{tools}");
     let unknown = raw(app.clone(), hub(Some(&token), query(UNKNOWN))).await;
     let bikes = raw(app.clone(), hub(Some(&token), query(BIKES))).await;
     assert_eq!(bikes.2, unknown.2);
@@ -576,9 +568,9 @@ async fn a_hub_token_reaches_only_the_endpoints_its_scopes_pick() {
         &format!("openid endpoint:{BIKES} endpoint:{CLOSED} endpoint:"),
     );
 
-    let (slugs, enumerated) = listed(app.clone(), &token).await;
+    let (slugs, tools) = listed(app.clone(), &token).await;
     assert_eq!(slugs, [BIKES]);
-    assert_eq!(enumerated, [BIKES]);
+    assert!(!names_a_slug(&tools), "{tools}");
     let unknown = raw(app.clone(), hub(Some(&token), query(UNKNOWN))).await;
     let air = raw(app.clone(), hub(Some(&token), query(AIR))).await;
     assert_eq!(air.2, unknown.2, "AIR was not picked");
@@ -589,9 +581,9 @@ async fn a_hub_token_reaches_only_the_endpoints_its_scopes_pick() {
     assert_eq!(broker.hops().len(), 1);
 
     let nothing = steward(&realm, "0f5a", json!("mcp-hub"), "openid");
-    let (slugs, enumerated) = listed(app_limited(&broker.url, &realm, None), &nothing).await;
+    let (slugs, tools) = listed(app_limited(&broker.url, &realm, None), &nothing).await;
     assert!(
-        slugs.is_empty() && enumerated.is_empty(),
+        slugs.is_empty() && !names_a_slug(&tools),
         "no scope picks nothing"
     );
 }
