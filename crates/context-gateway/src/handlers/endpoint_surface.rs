@@ -514,7 +514,6 @@ pub(crate) fn duties(duty: Duty) -> Vec<Value> {
 /// The Creative Commons share-alike requirement, as an ODRL duty action (EP-79).
 pub(crate) const SHARE_ALIKE: &str = "http://creativecommons.org/ns#ShareAlike";
 
-/// What the catalogue block says about the dataset itself (EP-78).
 /// The Endpoint's catalogue block, its themes and keywords derived from the Smart Data Models of
 /// the types it holds where the block sets none (T-4498): a theme or keyword set by hand wins.
 /// The types are the space's declared classes, else its models' classes.
@@ -541,6 +540,7 @@ fn classified(endpoint: &Endpoint) -> Catalog {
     catalog
 }
 
+/// What the catalogue block says about the dataset itself (EP-78).
 fn describe(record: &mut Value, included: &mut Vec<Value>, catalog: &Catalog) {
     if let Some(publisher) = &catalog.publisher {
         let mut agent = json!({
