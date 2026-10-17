@@ -45,7 +45,9 @@ fn served(representation: Representation) -> Served {
         Representation::NgsiLd => Served {
             path: "ngsi-ld/v1/",
             title: "NGSI-LD API",
-            media_type: "application/ld+json",
+            // What a plain GET answers: NGSI-LD sends `application/json` with the `@context` in
+            // the Link header unless Accept asks for ld+json (CIM 009 6.3.6, T-4539).
+            media_type: "application/json",
             conforms_to: Some("https://www.etsi.org/deliver/etsi_gs/CIM/001_099/009/"),
         },
         Representation::Mcp => Served {
