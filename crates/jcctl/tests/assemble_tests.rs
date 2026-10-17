@@ -313,3 +313,47 @@ fn a_misplaced_project_is_refused_and_the_last_render_stays() {
     )
     .is_err());
 }
+
+/// T-4443: only a link is resolved on the way, so the check that no file of a checkout leads out
+/// of it must still hold for a link to a file outside, and for a link reached through a linked
+/// directory inside; a linked directory that stays inside is copied.
+#[cfg(unix)]
+#[test]
+fn a_checkout_that_links_out_is_refused_and_one_that_links_inside_is_copied() {
+    use std::os::unix::fs::symlink;
+    let org = organization("links", &[("ovzdusie", ENTRY)]);
+    let outside = temp_dir("links-outside");
+    write(&outside, "secret.yaml", "not: for the render\n");
+
+    let inside = project_repository("links-inside");
+    write(&inside, "docs/README.md", "notes\n");
+    symlink(inside.join("docs"), inside.join("notes")).expect("a link");
+    let into = temp_dir("links-into").join("render");
+    assemble(&org, &checkouts(&[("ovzdusie", &inside)]), &into, None)
+        .expect("a link that stays inside is followed");
+    assert!(into.join("projects/ovzdusie/notes/README.md").is_file());
+
+    let out = project_repository("links-out");
+    symlink(
+        outside.join("secret.yaml"),
+        out.join("spaces/ovzdusie/leak.yaml"),
+    )
+    .expect("a link");
+    let refused = assemble(&org, &checkouts(&[("ovzdusie", &out)]), &into, None)
+        .expect_err("a link out is refused");
+    assert!(
+        refused.to_string().contains("links out of the repository"),
+        "{refused}"
+    );
+
+    let nested = project_repository("links-nested");
+    std::fs::create_dir_all(nested.join("extra")).expect("a directory");
+    symlink(outside.join("secret.yaml"), nested.join("extra/leak.yaml")).expect("a link");
+    symlink(nested.join("extra"), nested.join("spaces/more")).expect("a link");
+    let refused = assemble(&org, &checkouts(&[("ovzdusie", &nested)]), &into, None)
+        .expect_err("a link out behind a linked directory is refused");
+    assert!(
+        refused.to_string().contains("links out of the repository"),
+        "{refused}"
+    );
+}

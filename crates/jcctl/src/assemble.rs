@@ -208,7 +208,6 @@ pub fn assemble(
         let _ = std::fs::remove_dir_all(&next);
         return Err(conflict);
     }
-    drop(loaded);
 
     let previous = sibling(into, "previous");
     remove(&previous)?;
@@ -220,7 +219,7 @@ pub fn assemble(
 
     Ok(Assembly {
         layout,
-        repository: Repository::load_for(into, environment)?,
+        repository: loaded.moved_to(into),
         entries,
         findings,
     })
@@ -467,8 +466,16 @@ fn copy_tree(from: &Path, to: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<(),
         if skip(rel) {
             continue;
         }
-        let real = item.path().canonicalize().map_err(io(item.path()))?;
-        if !real.starts_with(&root) {
+        // Only a link can lead out: a file reached through a directory link inside the tree is
+        // inside it, and the link itself was checked when the walk reached it. Canonicalising
+        // every file cost a path walk each, seconds over a 10,000-Endpoint tree (T-4443).
+        if item.path_is_symlink()
+            && !item
+                .path()
+                .canonicalize()
+                .map_err(io(item.path()))?
+                .starts_with(&root)
+        {
             return Err(refused(
                 rel.display().to_string(),
                 "links out of the repository, and is not followed",
