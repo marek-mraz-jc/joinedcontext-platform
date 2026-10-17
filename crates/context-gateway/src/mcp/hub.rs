@@ -11,10 +11,10 @@
 use crate::app::{self, anonymous_on, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
-use crate::mcp::describe;
 use crate::mcp::jsonrpc::{self, answered, error, refused, result};
 use crate::mcp::server::{self, McpServer};
 use crate::mcp::tools::{self, HubTool};
+use crate::mcp::{catalog, describe};
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -474,6 +474,16 @@ impl Hub {
         if let Some(refusal) = misrouted(&id, &arguments) {
             return Answer::Json(refusal);
         }
+        // The caller's own catalogue, built from `reach` alone (T-4503).
+        if catalog::names_catalog(&slug) {
+            return Answer::Json(catalog::call(
+                &self.gateway,
+                &self.reach,
+                id,
+                name,
+                &arguments,
+            ));
+        }
 
         // An Endpoint outside the caller's list and one that does not exist are the same answer,
         // byte for byte (SP-20): both are searched for in the caller's list only.
@@ -616,8 +626,6 @@ impl Hub {
     }
 }
 
-/// The refusal of an argument that would choose a space some other way than `endpoint`
-/// (AG-05, SP-14).
 /// The Endpoint of the caller's list that `named` names (T-4491): its slug; else, compared
 /// without case, its title in any language or its context space, when exactly one Endpoint has
 /// it. Only `reach` is searched, so a name never finds an Endpoint the caller may not read
@@ -668,6 +676,8 @@ fn resolve<'a>(
     Err(ranked.iter().take(3).map(|(_, e)| line(e)).collect())
 }
 
+/// The refusal of an argument that would choose a space some other way than `endpoint`
+/// (AG-05, SP-14).
 pub(crate) fn misrouted(id: &Value, arguments: &Map<String, Value>) -> Option<Value> {
     let selector = arguments
         .keys()
