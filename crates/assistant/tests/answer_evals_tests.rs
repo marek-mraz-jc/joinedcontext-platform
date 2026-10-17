@@ -591,8 +591,8 @@ async fn record_one_live_run() {
     );
     let csrf = cookie
         .split(';')
-        .find_map(|c| c.trim().strip_prefix("jc_csrf="))
-        .expect("the Cookie header holds jc_csrf")
+        .find_map(|c| c.trim().strip_prefix("__Host-jc_csrf="))
+        .expect("the Cookie header holds __Host-jc_csrf")
         .to_owned();
     let fixture = fixture();
     let questions = fixture["projects"][&project]["questions"]
@@ -961,8 +961,8 @@ async fn record_the_event_questions_live() {
     );
     let csrf = cookie
         .split(';')
-        .find_map(|c| c.trim().strip_prefix("jc_csrf="))
-        .expect("the Cookie header holds jc_csrf")
+        .find_map(|c| c.trim().strip_prefix("__Host-jc_csrf="))
+        .expect("the Cookie header holds __Host-jc_csrf")
         .to_owned();
     let fixture = events();
     let project = fixture["project"].as_str().expect("project");
@@ -1191,8 +1191,8 @@ async fn record_the_workflow_questions_live() {
     let (portal, cookie) = (var("JC_EVAL_PORTAL"), var("JC_EVAL_COOKIE"));
     let csrf = cookie
         .split(';')
-        .find_map(|c| c.trim().strip_prefix("jc_csrf="))
-        .expect("the Cookie header holds jc_csrf")
+        .find_map(|c| c.trim().strip_prefix("__Host-jc_csrf="))
+        .expect("the Cookie header holds __Host-jc_csrf")
         .to_owned();
     let fixture = workflows();
     let project = fixture["project"].as_str().expect("project");

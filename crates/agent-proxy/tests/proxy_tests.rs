@@ -1159,7 +1159,7 @@ async fn a_header_the_workspace_wrote_never_reaches_the_gateway() {
                 // What a workspace might try: somebody else's session, another tenant, the
                 // edge's own identity headers, and a scope it was never granted.
                 .header("authorization", "Bearer somebody-elses-token")
-                .header("cookie", "jc_session=someone")
+                .header("cookie", "__Host-jc_session=someone")
                 .header("ngsild-tenant", "another-space")
                 .header("x-userinfo", "eyJzdWIiOiJtYWxsb3J5In0=")
                 .header("x-access-token", "another-token")
@@ -1228,7 +1228,7 @@ async fn the_forge_request_is_the_proxys_own_and_carries_nothing_of_the_workspac
                 .header("x-jc-run", "e3b0c442-98fc-1c14-9afb-4c7b2756a120")
                 .header("x-jc-ticket", "secret-ticket-123")
                 .header("authorization", "Bearer somebody-elses-token")
-                .header("cookie", "jc_session=someone")
+                .header("cookie", "__Host-jc_session=someone")
                 .body(Body::empty())
                 .unwrap(),
         )

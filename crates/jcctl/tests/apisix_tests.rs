@@ -313,7 +313,7 @@ fn the_cookie_name_path_and_the_logout_path_follow_the_app_name() {
     for name in ["air-quality-today", "air-quality-map", "hsl-transport"] {
         let oidc = &find(&document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"];
         let session = &oidc["session"];
-        assert_eq!(session["cookie_name"], format!("jc_edge_app_{name}"));
+        assert_eq!(session["cookie_name"], format!("__Host-jc_edge_app_{name}"));
         assert_eq!(
             session["cookie_path"], "/",
             "host-only on its own host (AP-29)"
@@ -397,7 +397,7 @@ fn the_portal_and_the_shared_surface_log_in_at_the_edge() {
         ui["post_logout_redirect_uri"],
         "https://portal.city.example.com/"
     );
-    assert_eq!(ui["session"]["cookie_name"], "jc_edge");
+    assert_eq!(ui["session"]["cookie_name"], "__Host-jc_edge");
     assert_eq!(ui["session"]["cookie_path"], "/");
 
     // A bearer caller passes through and the Portal verifies the token itself.
@@ -409,7 +409,7 @@ fn the_portal_and_the_shared_surface_log_in_at_the_edge() {
         "a bearer token the plugin cannot verify must reach unauth_action, not a 401"
     );
     assert_eq!(api["unauth_action"], "pass");
-    assert_eq!(api["session"]["cookie_name"], "jc_edge");
+    assert_eq!(api["session"]["cookie_name"], "__Host-jc_edge");
     assert_eq!(api["set_access_token_header"], true);
 
     // No App is served on a shared surface any more (ADR-N-037).
@@ -641,7 +641,7 @@ fn two_apps_never_share_a_cookie_callback_or_logout() {
             );
         }
         cookies.insert(
-            text.split("jc_edge_app_")
+            text.split("__Host-jc_edge_app_")
                 .nth(1)
                 .map(|rest| rest.chars().take_while(|c| *c != '"').collect::<String>()),
         );
@@ -859,7 +859,7 @@ fn an_app_host_routes_its_own_endpoint_slugs_only() {
     assert_eq!(map_login["access_token_in_authorization_header"], true);
     assert_eq!(
         map_login["session"]["cookie_name"],
-        "jc_edge_app_air-quality-map"
+        "__Host-jc_edge_app_air-quality-map"
     );
     assert_eq!(hsl["plugins"]["openid-connect"]["unauth_action"], "pass");
     for header in FORGEABLE_HEADERS {
@@ -1077,4 +1077,32 @@ fn a_wasm_apps_server_is_routed_to_the_shard_its_status_names() {
         has(&doc, "routes", "app-fresh"),
         "its interface is routed like any App's"
     );
+}
+
+/// T-4395, AP-29: an App may set a cookie for the parent domain; the browser keeps a `__Host-`
+/// cookie only `Secure`, on `/` and without a `Domain`, so no App plants an edge session of the
+/// same name beside the real one. Every rendered session, the Portal's and each App's.
+#[test]
+fn every_edge_session_cookie_is_host_prefixed() {
+    let dir = repo_with_three_apps("apisix-host-cookies");
+    let document = document(&dir);
+    let sessions: Vec<&Value> = ["routes", "plugin_configs"]
+        .iter()
+        .flat_map(|section| document[*section].as_array().into_iter().flatten())
+        .map(|item| &item["plugins"]["openid-connect"]["session"])
+        .filter(|session| session.is_object())
+        .collect();
+    assert!(
+        sessions.len() > 3,
+        "the Portal's and the three Apps' sessions: {sessions:?}"
+    );
+    for session in sessions {
+        let name = session["cookie_name"].as_str().expect("a cookie name");
+        assert!(name.starts_with("__Host-"), "{session}");
+        assert_eq!(session["cookie_path"], "/", "{session}");
+        assert_eq!(session["cookie_secure"], true, "{session}");
+        assert!(session.get("cookie_domain").is_none(), "{session}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
