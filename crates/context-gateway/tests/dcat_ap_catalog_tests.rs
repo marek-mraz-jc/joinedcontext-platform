@@ -13,7 +13,7 @@
 
 use context_gateway::handlers::endpoint_surface::{dataset, dataset_turtle, feed, feed_turtle};
 use context_gateway::handlers::view_access::odrl;
-use context_gateway::resolver::Endpoint;
+use context_gateway::resolver::{Endpoint, Model};
 use jc_core::kinds::{Audience, Catalog, Licence, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -129,8 +129,28 @@ fn variants() -> Vec<(&'static str, Endpoint)> {
             "public-minimal",
             endpoint(Audience::Public, Some(catalog("license: ODC_PDDL\n"))),
         ),
+        (
+            "public-classified",
+            holding(&["AirQualityObserved", "OffStreetParking"], None),
+        ),
     ]
 }
+
+/// A public Endpoint whose space's model defines `classes` (T-4498).
+fn holding(classes: &[&str], catalog: Option<Catalog>) -> Endpoint {
+    let mut endpoint = endpoint(Audience::Public, catalog);
+    endpoint.models = vec![Model {
+        name: "city".to_owned(),
+        version: "1.0.0".to_owned(),
+        major: 1,
+        classes: classes.iter().map(|c| (*c).to_owned()).collect(),
+        json_schema: None,
+        context: None,
+    }];
+    endpoint
+}
+
+const THEME: &str = "http://publications.europa.eu/resource/authority/data-theme/";
 
 fn record(endpoint: &Endpoint) -> Value {
     dataset(endpoint, None, &index(), BASE)
@@ -444,4 +464,53 @@ fn every_licence_of_the_table_parses_by_its_code() {
         let parsed: Licence = serde_norway::from_str(licence.code()).expect("parses");
         assert_eq!(parsed, licence);
     }
+}
+
+/// T-4498: an Endpoint whose catalogue block sets no theme is themed by the Smart Data Models of
+/// the types it holds, with each theme's label and the domain keywords; a type the table does
+/// not name adds nothing; a theme or keyword set by hand wins.
+#[test]
+fn the_theme_and_keywords_come_from_the_types_unless_set_by_hand() {
+    let derived = record(&holding(
+        &["AirQualityObserved", "OffStreetParking", "Vehicle"],
+        Some(catalog("license: CC_BY_4_0\n")),
+    ));
+    assert_eq!(
+        derived["dcat:theme"],
+        json!([format!("{THEME}ENVI"), format!("{THEME}TRAN")])
+    );
+    let keywords: Vec<(String, String)> = derived["dcat:keyword"]
+        .as_array()
+        .expect("keywords")
+        .iter()
+        .map(|k| {
+            (
+                k["@language"].as_str().unwrap_or_default().to_owned(),
+                k["@value"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    for expected in [
+        ("en", "environment"),
+        ("en", "parking"),
+        ("sk", "životné prostredie"),
+        ("sk", "parkovanie"),
+        ("en", "AirQualityObserved"),
+    ] {
+        assert!(
+            keywords.contains(&(expected.0.to_owned(), expected.1.to_owned())),
+            "{expected:?} in {keywords:?}"
+        );
+    }
+    assert!(!keywords.iter().any(|(_, word)| word == "Vehicle"));
+
+    let by_hand = record(&holding(&["AirQualityObserved"], Some(catalog(FULL))));
+    assert_eq!(
+        by_hand["dcat:theme"],
+        json!([format!("{THEME}TRAN"), format!("{THEME}SOCI")])
+    );
+    assert!(!by_hand["dcat:keyword"].to_string().contains("environment"));
+
+    let unknown = record(&holding(&["Vehicle"], None));
+    assert!(unknown.get("dcat:theme").is_none() && unknown.get("dcat:keyword").is_none());
 }
