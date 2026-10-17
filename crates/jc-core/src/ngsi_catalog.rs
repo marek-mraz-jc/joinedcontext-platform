@@ -344,7 +344,7 @@ mod tests {
                         "@id": format!("{id}/ngsi-ld/v1/"), "@type": "dcat:Distribution",
                         "dcat:accessURL": format!("{id}/ngsi-ld/v1/"),
                         "dct:conformsTo": "https://www.etsi.org/deliver/etsi_gs/CIM/001_099/009/",
-                        "dcat:mediaType": "https://www.iana.org/assignments/media-types/application/ld+json",
+                        "dcat:mediaType": "https://www.iana.org/assignments/media-types/application/json",
                     },
                     {
                         "@type": "dcat:Distribution",
