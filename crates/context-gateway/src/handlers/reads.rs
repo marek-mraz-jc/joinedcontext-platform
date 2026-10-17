@@ -120,7 +120,10 @@ pub(crate) async fn read_entities(
         let narrowed = query::view_read(&windowless, std::slice::from_ref(selector));
         let mut from = 0usize;
         loop {
-            let target = format!("entities?{narrowed}&limit={PAGE}&offset={from}");
+            // No more rows than the window still needs: a short page over a type of thousands
+            // reads its few rows, not the gateway's whole page (T-4288).
+            let ask = PAGE.min(wanted - collected.len());
+            let target = format!("entities?{narrowed}&limit={ask}&offset={from}");
             let (page, narrowed_page, bytes, _) =
                 match view_page(gateway, slug, slug, &target, request.headers()).await {
                     Ok(page) => page,
@@ -142,10 +145,10 @@ pub(crate) async fn read_entities(
             if collected.len() >= wanted {
                 break 'types;
             }
-            if fetched < PAGE {
+            if fetched < ask {
                 break;
             }
-            from += PAGE;
+            from += ask;
         }
     }
     if refused == fallback.len() {

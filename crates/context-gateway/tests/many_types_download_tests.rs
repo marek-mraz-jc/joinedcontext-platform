@@ -59,12 +59,18 @@ fn param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value)
 }
 
+/// The `limit` of every entity query the view was asked, in order.
+type Limits = Arc<Mutex<Vec<usize>>>;
+
 /// The view: `shown` lists the types it answers this caller, every one when `None`.
-async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked) {
+async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked, Limits) {
     let asked: Asked = Arc::default();
+    let limits: Limits = Arc::default();
     let recorder = Arc::clone(&asked);
+    let sizes = Arc::clone(&limits);
     let app = Router::new().fallback(move |request: Request| {
         let recorder = Arc::clone(&recorder);
+        let sizes = Arc::clone(&sizes);
         async move {
             let path = request.uri().path().to_owned();
             let query = request.uri().query().unwrap_or_default().to_owned();
@@ -87,6 +93,11 @@ async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked) 
                 .lock()
                 .expect("no poisoned lock")
                 .push(types.clone());
+            sizes.lock().expect("no poisoned lock").push(
+                param(&query, "limit")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(20),
+            );
             let distinct: BTreeSet<&String> = types.iter().collect();
             let hidden =
                 shown.is_some_and(|shown| types.iter().any(|name| !shown.contains(&name.as_str())));
@@ -122,7 +133,7 @@ async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked) 
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://127.0.0.1:{port}"), asked)
+    (format!("http://127.0.0.1:{port}"), asked, limits)
 }
 
 /// The Helsinki shape: anonymous callers read, and the Policy names `granted` types or none.
@@ -203,7 +214,7 @@ async fn get(app: Router, path: &str) -> (StatusCode, Vec<u8>) {
 #[tokio::test]
 async fn a_download_of_a_space_of_many_types_holds_every_type() {
     for file in ["file.geojson", "file.csv", "file.xlsx", "file.zip"] {
-        let (broker, asked) = view_broker(None).await;
+        let (broker, asked, _) = view_broker(None).await;
         let (status, body) = get(
             gateway(&broker, endpoint(&[])),
             &format!("/api/endpoint/{SLUG}/{file}"),
@@ -245,7 +256,7 @@ async fn a_download_of_a_space_of_many_types_holds_every_type() {
 /// a type it refuses is left out, not a refusal of the whole file (T-3652).
 #[tokio::test]
 async fn a_type_the_view_refuses_is_left_out_of_the_download() {
-    let (broker, asked) = view_broker(Some(&["Type03", "Type17"])).await;
+    let (broker, asked, _) = view_broker(Some(&["Type03", "Type17"])).await;
     let (status, body) = get(
         gateway(&broker, endpoint(&[])),
         &format!("/api/endpoint/{SLUG}/file.geojson"),
@@ -263,7 +274,7 @@ async fn a_type_the_view_refuses_is_left_out_of_the_download() {
 #[tokio::test]
 async fn a_view_refusing_every_type_refuses_the_read() {
     for path in ["file.csv", "sta/v1.1/Things?$top=5"] {
-        let (broker, _) = view_broker(Some(&[])).await;
+        let (broker, _, _) = view_broker(Some(&[])).await;
         let (status, body) = get(
             gateway(&broker, endpoint(&[])),
             &format!("/api/endpoint/{SLUG}/{path}"),
@@ -284,7 +295,7 @@ async fn a_view_refusing_every_type_refuses_the_read() {
 async fn an_endpoint_without_a_view_answers_no_view() {
     let long = "a".repeat(64);
     for path in ["file.csv", "sta/v1.1/Things"] {
-        let (broker, asked) = view_broker(None).await;
+        let (broker, asked, _) = view_broker(None).await;
         let mut endpoint = endpoint(&[]);
         endpoint.slug = long.clone();
         endpoint.base_path = format!("/api/endpoint/{long}");
@@ -309,7 +320,7 @@ async fn an_endpoint_without_a_view_answers_no_view() {
 /// type, and decides.
 #[tokio::test]
 async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
-    let (broker, asked) = view_broker(None).await;
+    let (broker, asked, _) = view_broker(None).await;
     let (status, _) = get(
         gateway(&broker, endpoint(&["Elsewhere"])),
         &format!("/api/endpoint/{SLUG}/file.csv"),
@@ -324,7 +335,7 @@ async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
 /// types read in turn: rows 59 to 63 of 63 span two types and stop at the last one.
 #[tokio::test]
 async fn a_page_of_a_space_of_many_types_spans_the_types_in_order() {
-    let (broker, asked) = view_broker(None).await;
+    let (broker, asked, _) = view_broker(None).await;
     let (status, body) = get(
         gateway(&broker, endpoint(&[])),
         &format!("/api/endpoint/{SLUG}/sta/v1.1/Things?$top=5&$skip=59"),
@@ -342,4 +353,30 @@ async fn a_page_of_a_space_of_many_types_spans_the_types_in_order() {
     // The read stopped at the type that filled the window, the last one: none was asked twice.
     let distinct: BTreeSet<&Vec<String>> = asked.iter().collect();
     assert_eq!(distinct.len(), asked.len(), "{asked:?}");
+}
+
+/// A short page asks each type for no more rows than the page still needs (T-4288): `$top=2` on
+/// a space whose first type holds thousands of rows reads two, not the gateway's whole page,
+/// which on dev timed the STA collections out behind a 4,005-row scan.
+#[tokio::test]
+async fn a_short_page_asks_each_type_for_what_it_still_needs() {
+    let (broker, _, limits) = view_broker(None).await;
+    let (status, body) = get(
+        gateway(&broker, endpoint(&[])),
+        &format!("/api/endpoint/{SLUG}/sta/v1.1/Things?$top=2"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let limits = limits.lock().expect("no poisoned lock").clone();
+    assert_eq!(limits, vec![2], "{limits:?}");
+
+    // Rows 1 to 5 span the first two types (3 rows each): the second is asked for the 3 left.
+    let (broker, _, limits) = view_broker(None).await;
+    let (status, _) = get(
+        gateway(&broker, endpoint(&[])),
+        &format!("/api/endpoint/{SLUG}/sta/v1.1/Things?$top=5&$skip=1"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(*limits.lock().expect("no poisoned lock"), vec![6, 3]);
 }
