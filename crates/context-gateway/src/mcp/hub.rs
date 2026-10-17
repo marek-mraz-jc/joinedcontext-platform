@@ -278,22 +278,36 @@ fn page(
         }
     }
 
-    let rows: Vec<Value> = reach
-        .iter()
-        .map(|(endpoint, subject)| {
-            let mut entry = described(gateway, endpoint, subject);
-            // Each Endpoint names the broker its space lives on (ADR-N-047 §2.3).
-            entry["broker"] = json!(gateway.broker.broker_of_view(&endpoint.slug));
-            entry
-        })
-        .filter(|entry| {
-            wanted
-                .iter()
-                .all(|(name, value)| matches(entry, name, value))
-        })
-        .collect();
-    let total = rows.len();
-    let endpoints: Vec<Value> = rows.into_iter().skip(offset).take(limit).collect();
+    let describe = |(endpoint, subject): &(Arc<Endpoint>, Subject)| {
+        let mut entry = described(gateway, endpoint, subject);
+        // Each Endpoint names the broker its space lives on (ADR-N-047 §2.3).
+        entry["broker"] = json!(gateway.broker.broker_of_view(&endpoint.slug));
+        entry
+    };
+    // No filter: describe the page only, not every Endpoint reached (T-4542: 264 ms at 10,000).
+    let (total, endpoints): (usize, Vec<Value>) = if wanted.is_empty() {
+        let page = reach
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(describe)
+            .collect();
+        (reach.len(), page)
+    } else {
+        let rows: Vec<Value> = reach
+            .iter()
+            .map(describe)
+            .filter(|entry| {
+                wanted
+                    .iter()
+                    .all(|(name, value)| matches(entry, name, value))
+            })
+            .collect();
+        (
+            rows.len(),
+            rows.into_iter().skip(offset).take(limit).collect(),
+        )
+    };
     let mut page = json!({ "endpoints": endpoints, "total": total });
     let next = offset.saturating_add(limit);
     if next < total {
