@@ -1092,6 +1092,12 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
             "Excel",
         ),
         ("/file.json", "JSON", "application/json", "live data"),
+        (
+            "/file.parquet",
+            "PARQUET",
+            "application/vnd.apache.parquet",
+            "DuckDB",
+        ),
         ("/file.zip", "ZIP", "application/zip", "live data"),
         ("/schema/index.json", "JSON", "application/json", "sha256"),
     ] {
@@ -1102,7 +1108,8 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
         let said = description(&dataset, suffix);
         assert!(said.contains(says), "{suffix}: {said}");
     }
-    assert_eq!(resource_urls(&dataset).len(), 11, "{dataset:#}");
+    // T-4287: Parquet is a default file, beside CSV and JSON.
+    assert_eq!(resource_urls(&dataset).len(), 12, "{dataset:#}");
     assert!(!resource_urls(&dataset)
         .iter()
         .any(|url| url.contains("/sta/")));
