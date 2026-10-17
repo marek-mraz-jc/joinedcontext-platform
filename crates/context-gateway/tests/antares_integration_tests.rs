@@ -1330,3 +1330,225 @@ async fn a_projection_window_narrows_a_temporal_read_through_the_view() {
         "only the instance inside the window: {answer}"
     );
 }
+
+/// The ids a surface answered: an NGSI-LD array, a FeatureCollection, a CSV or a Parquet file.
+fn ids_of(file: &str, body: &[u8]) -> Vec<String> {
+    let mut ids: Vec<String> = match file {
+        "file.csv" => {
+            let text = body_text(body);
+            let mut lines = text.trim_start_matches('\u{feff}').lines();
+            let header: Vec<&str> = lines.next().unwrap_or_default().split(',').collect();
+            // No row is a file with no columns to name.
+            let Some(at) = header.iter().position(|h| h.trim_matches('"') == "id") else {
+                assert!(lines.next().is_none(), "rows without an id column: {text}");
+                return Vec::new();
+            };
+            lines
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    line.split(',')
+                        .nth(at)
+                        .unwrap_or_default()
+                        .trim_matches('"')
+                        .to_owned()
+                })
+                .collect()
+        }
+        "file.parquet" => {
+            use parquet::file::reader::{FileReader, SerializedFileReader};
+            let reader = SerializedFileReader::new(bytes::Bytes::from(body.to_vec()))
+                .expect("a parquet file");
+            reader
+                .get_row_iter(None)
+                .expect("rows")
+                .map(|row| {
+                    let row = row.expect("a row");
+                    let id = row
+                        .get_column_iter()
+                        .find(|(name, _)| name.as_str() == "id");
+                    id.map(|(_, field)| field.to_string().trim_matches('"').to_owned())
+                        .expect("an id field")
+                })
+                .collect()
+        }
+        _ => {
+            let answer: Value = serde_json::from_slice(body).expect("JSON");
+            let items = answer.get("features").unwrap_or(&answer);
+            items
+                .as_array()
+                .expect("a list")
+                .iter()
+                .map(|item| item["id"].as_str().expect("an id").to_owned())
+                .collect()
+        }
+    };
+    ids.sort();
+    ids
+}
+
+/// The values a Parquet file carries, as text: its bytes may be compressed.
+fn parquet_text(body: &[u8]) -> String {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    let reader =
+        SerializedFileReader::new(bytes::Bytes::from(body.to_vec())).expect("a parquet file");
+    reader
+        .get_row_iter(None)
+        .expect("rows")
+        .map(|row| row.expect("a row").to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// EP-42 (T-4420): a file download takes the NGSI-LD query parameters under the same Policy
+/// intersection as `/entities`. For q, georel, idPattern and attrs, `file.json`, `file.geojson`,
+/// `file.csv` and `file.parquet` answer the ids the query answers through the view, and no
+/// parameter widens the grant: an attribute outside it is neither returned nor matched, and an
+/// entity outside its idPattern is not counted in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_download_takes_the_query_under_the_policy_as_entities_does() {
+    let Some(antares) = Antares::start() else {
+        return;
+    };
+    let (views, rules) = public_rules();
+    antares.load(&views, rules).await;
+    let at = |name: &str, pm10: f64, point: [f64; 2]| {
+        json!({
+            "id": format!("urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:{name}"),
+            "type": "AirQualityObserved",
+            "pm10": { "type": "Property", "value": pm10 },
+            "pm25": { "type": "Property", "value": 5.0 },
+            // Stored by the pipeline, outside the grant's propertyNames.
+            "operatorPhone": { "type": "Property", "value": "CANARY-PHONE" },
+            "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": point } }
+        })
+    };
+    // Banská Bystrica twice, Bratislava once, and one the grant's idPattern leaves out.
+    let mut outside = at("x", 99.0, [19.15, 48.73]);
+    outside["id"] = json!("urn:ngsi-ld:AirQualityObserved:zvolen.sk:ovzdusie:x");
+    for entity in [
+        at("station-a1", 34.2, [19.15, 48.73]),
+        at("station-a2", 12.0, [19.151, 48.731]),
+        at("station-b1", 50.0, [17.11, 48.15]),
+        outside,
+    ] {
+        antares.seed(&entity).await;
+    }
+
+    let mut served = endpoint(PUBLIC_SLUG, Audience::Public);
+    served.representations = vec![
+        Representation::NgsiLd,
+        Representation::Json,
+        Representation::GeoJson,
+        Representation::Csv,
+        Representation::Parquet,
+    ];
+    let gateway =
+        Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG).serve([served]);
+    let app = router(std::sync::Arc::new(gateway));
+    let id =
+        |name: &str| format!("urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:{name}");
+    let read = |path: String| {
+        Request::builder()
+            .method("GET")
+            .uri(format!("/api/endpoint/{PUBLIC_SLUG}{path}"))
+            .body(Body::empty())
+            .expect("a request")
+    };
+
+    let cases: [(&str, &str, Option<Vec<String>>); 6] = [
+        (
+            "q",
+            "q=pm10%3E30",
+            Some(vec![id("station-a1"), id("station-b1")]),
+        ),
+        (
+            "georel",
+            "georel=near%3BmaxDistance%3D%3D2000&geometry=Point&coordinates=%5B19.15%2C48.73%5D",
+            Some(vec![id("station-a1"), id("station-a2")]),
+        ),
+        (
+            "idPattern",
+            "idPattern=.%2Astation-a.%2A",
+            Some(vec![id("station-a1"), id("station-a2")]),
+        ),
+        (
+            "attrs",
+            "attrs=pm10",
+            Some(vec![id("station-a1"), id("station-a2"), id("station-b1")]),
+        ),
+        // A parameter that names what the grant leaves out widens nothing.
+        ("attrs outside the grant", "attrs=operatorPhone", None),
+        (
+            "q outside the grant",
+            "q=operatorPhone%3D%3D%22CANARY-PHONE%22",
+            Some(vec![]),
+        ),
+    ];
+    for (case, query, expected) in cases {
+        let (status, body) = call(
+            &app,
+            read(format!(
+                "/ngsi-ld/v1/entities?type=AirQualityObserved&{query}"
+            )),
+        )
+        .await;
+        let entities = (status == StatusCode::OK).then(|| ids_of("entities", &body));
+        if let Some(expected) = &expected {
+            assert_eq!(
+                entities.as_ref(),
+                Some(expected),
+                "{case}: /entities {status} {}",
+                body_text(&body)
+            );
+        }
+        assert!(
+            !body_text(&body).contains("CANARY"),
+            "{case}: /entities carried a denied value"
+        );
+        for file in ["file.json", "file.geojson", "file.csv", "file.parquet"] {
+            let (file_status, bytes) = call(
+                &app,
+                read(format!("/{file}?type=AirQualityObserved&{query}")),
+            )
+            .await;
+            let text = if file == "file.parquet" && file_status == StatusCode::OK {
+                parquet_text(&bytes)
+            } else {
+                body_text(&bytes)
+            };
+            assert!(
+                !text.contains("CANARY"),
+                "{case}: {file} carried a denied value: {text}"
+            );
+            assert!(
+                !text.contains("operatorPhone"),
+                "{case}: {file} named a denied attribute: {text}"
+            );
+            assert!(
+                !text.contains("zvolen.sk"),
+                "{case}: {file} counted in an entity outside the idPattern"
+            );
+            if case == "attrs" {
+                assert!(
+                    !text.contains("pm25"),
+                    "{case}: {file} carried an attribute attrs left out: {text}"
+                );
+            }
+            match &entities {
+                Some(entities) => {
+                    assert_eq!(file_status, StatusCode::OK, "{case}: {file}: {text}");
+                    assert_eq!(
+                        &ids_of(file, &bytes),
+                        entities,
+                        "{case}: {file} and /entities differ"
+                    );
+                }
+                // Where `/entities` refuses the query, the file does not answer it either.
+                None => assert!(
+                    file_status.is_client_error() || ids_of(file, &bytes).is_empty(),
+                    "{case}: {file} answered what /entities refused ({status}): {text}"
+                ),
+            }
+        }
+    }
+}
