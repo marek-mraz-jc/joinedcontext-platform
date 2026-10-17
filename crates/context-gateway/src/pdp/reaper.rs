@@ -148,6 +148,8 @@ impl Reaper {
                     endpoints = counts.0,
                     spaces = counts.1,
                     accounts = counts.2,
+                    // What each idle tick stats: a link per linked checkout, else every file.
+                    files_walked = self.files_walked(),
                     dir = %self.dir.display(),
                     "repository reloaded, policy caches purged"
                 );
