@@ -616,8 +616,6 @@ impl Hub {
     }
 }
 
-/// The refusal of an argument that would choose a space some other way than `endpoint`
-/// (AG-05, SP-14).
 /// The Endpoint of the caller's list that `named` names (T-4491): its slug; else, compared
 /// without case, its title in any language or its context space, when exactly one Endpoint has
 /// it. Only `reach` is searched, so a name never finds an Endpoint the caller may not read
@@ -668,6 +666,8 @@ fn resolve<'a>(
     Err(ranked.iter().take(3).map(|(_, e)| line(e)).collect())
 }
 
+/// The refusal of an argument that would choose a space some other way than `endpoint`
+/// (AG-05, SP-14).
 pub(crate) fn misrouted(id: &Value, arguments: &Map<String, Value>) -> Option<Value> {
     let selector = arguments
         .keys()
