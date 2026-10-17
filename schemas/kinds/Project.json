@@ -469,6 +469,13 @@
           ],
           "description": "What the project's Apps may use: a narrower service list and lower quotas than the organization's (AP-163, AP-165)."
         },
+        "domain": {
+          "description": "The internet domain of the body that publishes the project's data, the `did:web` assigner of the Policies compiled for its Apps; absent, the Organization's (PF-108). It describes who publishes and grants, verifies and routes nothing; pipelines keep minting over `JC_ORG_DOMAIN` (PF-44).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "organizationRef": {
           "allOf": [
             {
