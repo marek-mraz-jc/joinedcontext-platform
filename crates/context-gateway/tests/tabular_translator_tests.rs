@@ -252,7 +252,10 @@ fn the_workbook_is_a_readable_ooxml_package() {
     .expect("a workbook");
 
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a zip");
-    let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.expect("an entry name").into_owned())
+        .collect();
     for required in [
         "[Content_Types].xml",
         "_rels/.rels",
