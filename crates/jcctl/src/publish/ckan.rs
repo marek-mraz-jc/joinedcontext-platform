@@ -786,6 +786,23 @@ fn catalog_extras(record: &Value, language: Option<&str>) -> Vec<Value> {
     if let Some(Value::Array(themes)) = record.get("dcat:theme") {
         put("theme", serde_json::to_string(themes).ok());
     }
+    // The credit the licence asks for, which the record carries on every distribution as
+    // `dct:rights`; the original datasets, a list ckanext-dcat reads back as `dct:source`; and the
+    // Pipeline that fills the space (EP-78, T-4417).
+    let rights = record
+        .get("dcat:distribution")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|d| d.pointer("/dct:rights/rdfs:label"));
+    put("rights", text_in(rights, language));
+    if let Some(Value::Array(sources)) = record.get("dct:source") {
+        put("source", serde_json::to_string(sources).ok());
+    }
+    put(
+        "was_generated_by",
+        text(record.pointer("/prov:wasGeneratedBy/rdfs:label")),
+    );
     out
 }
 

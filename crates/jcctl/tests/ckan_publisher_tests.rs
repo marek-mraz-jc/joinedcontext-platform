@@ -947,6 +947,8 @@ fn catalogued_record() -> Value {
         "dct:spatial": ["http://data.europa.eu/nuts/code/SK032"],
         "dct:temporal": { "@type": "dct:PeriodOfTime", "dcat:startDate": "2020-01-01" },
         "dct:accrualPeriodicity": "http://publications.europa.eu/resource/authority/frequency/HOURLY",
+        "dct:source": ["https://opendata.banskabystrica.sk/datasets/ovzdusie"],
+        "prov:wasGeneratedBy": { "@type": "prov:Activity", "rdfs:label": "pipeline public-air" },
         "dcat:distribution": [{
             "@id": "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/v1/model.schema.json",
             "@type": "dcat:Distribution",
@@ -954,9 +956,48 @@ fn catalogued_record() -> Value {
             "dcat:accessURL": "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/v1/model.schema.json",
             "dcat:mediaType": "https://www.iana.org/assignments/media-types/application/schema+json",
             "dcat:byteSize": "812",
-            "spdx:checksum": { "@type": "spdx:Checksum", "spdx:checksumValue": "4a1f" }
+            "spdx:checksum": { "@type": "spdx:Checksum", "spdx:checksumValue": "4a1f" },
+            "dct:rights": { "@type": "dct:RightsStatement", "rdfs:label": [
+                { "@value": "Source: EEA, CC BY 4.0", "@language": "en" },
+                { "@value": "Zdroj: EEA, CC BY 4.0", "@language": "sk" }
+            ] }
         }]
     })
+}
+
+/// EP-78, T-4417: the attribution, the original datasets and the Pipeline reach CKAN, the
+/// attribution in the space's language; a record without them adds no empty extra.
+#[test]
+fn the_attribution_source_and_provenance_become_extras() {
+    let dataset = package(
+        &endpoint("[ngsi-ld, csv]", PUBLISH),
+        &instance(),
+        &catalogued_record(),
+        &Settings::new("data.example.org").in_language("sk"),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert_eq!(extra(&dataset, "rights"), Some("Zdroj: EEA, CC BY 4.0"));
+    assert_eq!(
+        extra(&dataset, "source"),
+        Some(r#"["https://opendata.banskabystrica.sk/datasets/ovzdusie"]"#)
+    );
+    assert_eq!(
+        extra(&dataset, "was_generated_by"),
+        Some("pipeline public-air")
+    );
+
+    let bare = package(
+        &endpoint("[ngsi-ld, csv]", PUBLISH),
+        &instance(),
+        &record(),
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    for key in ["rights", "source", "was_generated_by"] {
+        assert_eq!(extra(&bare, key), None, "{key}");
+    }
 }
 
 /// EP-63, EP-78: CKAN harvests the catalogue block, field for field, in the space's language.
