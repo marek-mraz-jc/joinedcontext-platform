@@ -685,12 +685,7 @@ mod tests {
         /// The filters a change from `previous` to `doc` notifies, decided by `antares-matcher`
         /// on the candidates and by the delta: a filter fires only when an attribute it watches
         /// (any, when it watches none) differs from the previous state.
-        fn notified(
-            &self,
-            doc: &Value,
-            previous: Option<&Value>,
-            ctx: &Context,
-        ) -> Vec<FilterId> {
+        fn notified(&self, doc: &Value, previous: Option<&Value>, ctx: &Context) -> Vec<FilterId> {
             let changed = changed(previous, doc);
             if changed.is_empty() {
                 return Vec::new();
@@ -703,12 +698,7 @@ mod tests {
 
         /// What [`Self::notified`] answers, by running every filter: the loop the index replaces,
         /// kept as the ground truth the index is tested against.
-        fn scanned(
-            &self,
-            doc: &Value,
-            previous: Option<&Value>,
-            ctx: &Context,
-        ) -> Vec<FilterId> {
+        fn scanned(&self, doc: &Value, previous: Option<&Value>, ctx: &Context) -> Vec<FilterId> {
             let changed = changed(previous, doc);
             let mut ids: Vec<FilterId> = self
                 .filters
