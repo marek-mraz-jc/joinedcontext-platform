@@ -58,11 +58,19 @@ slice (after):
 | wasm-host | 6 | 6 |
 | **total** | **145** | **135** |
 
+T-4451 (2026-10-17): the ratchet had run only as a self-test, so main drifted to jc-core 51 and
+assistant 2 while context-gateway (39) and jcctl (31) fell below their lines unrecorded. After
+the slice below, on a graph of the branch: agent-proxy 3, assistant 1, context-gateway 39,
+jc-core 46, jcctl 31, wasm-host 6; the baseline holds these. T-4452 then took context-gateway
+from 39 to 31, and 32 with T-4444's `Reaper::files_walked` (test API) merged meanwhile; jcctl, wasm-host and agent-proxy rows are all reasoned below and stay.
+
 `ci/cg-dead-code-baseline.txt` holds the after column. The check is red when a crate has more
 rows than its line (new code nothing calls, or a caller deleted and its callees kept) and red
 when it has fewer until the line is lowered, so the number only goes down. CI runs the
-self-test (cg is not on the runner, as for `dev/cg-invariants.py`); the full check runs on a
-`cg build --fg` before every merge.
+self-test (cg is not on the runner, as for `dev/cg-invariants.py`). The full check runs in
+`tasks/push`: a batch branch of a repository that carries `dev/cg-dead-code.py`, whose diff
+against main touches Rust or the baseline, is pushed only when the check is green on a fresh
+`cg build --fg` of the branch merged with main (T-4451).
 
 ## 3. Rows and their reasons
 
@@ -84,6 +92,26 @@ Portal's `src/`.
 
 The test assertions on the deleted accessors went with them.
 
+T-4451 deleted these too, each with no production caller:
+
+| Row | Why it was dead |
+|---|---|
+| `jc_core::kinds::assistant::AssistantDeploymentSpec::router_model`, `answer_model`, `DEFAULT_MODEL` | the assistant reads `spec.model` itself and falls back to the worker's configured model (`llm`), a second default |
+| `jc_core::kinds::service_account::ServiceAccountSpec::device_keys` | no reader in this repo or the Portal; `validate` keeps checking the keys |
+| `assistant::chat::routed::answer_messages` | a wrapper only its tests called; the answer call uses `messages_with` |
+| `jc_core::kinds::assistant::KnowledgeSourceSpec::upload_limits` | not deleted: the assistant's upload route repeated its body, and now calls it |
+
+T-4452, context-gateway:
+
+| Row | Why it was dead |
+|---|---|
+| `store::spaces_of`, `store::endpoints_with_models` | no caller, not even a test: the loader builds both tables from one `ModelSet` |
+| `pdp::evaluator::Constraints::in_source_model` | the view-endpoint inversion (DM-51) left with the views for Antares; only its test called it |
+| `federation::Federations::needing_caller_identity` | its test now reads `caller_members`, which the read path uses |
+| `middleware::response::RESULTS_COUNT` | named nothing; the count passes through as the broker sent it |
+| `middleware::response::WARNING` | the scrub passes the broker's warning through without naming it; the const moved into its test |
+| `fanout::Index::notified`, `scanned` | not deleted: the test oracles of the index (the hub runs `candidates` and `decides` itself), moved into the test module |
+
 ### 3.2 Removed by an open delete task
 
 These go with the surface that used them; deleting them here would collide with those tasks.
@@ -92,7 +120,7 @@ These go with the surface that used them; deleting them here would collide with 
 |---|---|
 | `federation/odrl_compiler.rs` (14 rows), `handlers/access_odrl.rs` (7 rows) | T-3650 |
 | `pdp::evaluator::Verdict::constraints`, `pdp::projection::project` | T-3644 |
-| `handlers::schema::Visible::only` | T-3646 |
+| `handlers::schema::Visible::only`, `only_each` | T-3646 |
 | `app::Gateway::limit_hub_to` (the MCP hub's limiter) | T-3648 |
 | `translators::tabular::Table::is_empty`, `translators::view_mapping::ViewMapping::source_of` | T-3652 |
 
@@ -104,13 +132,16 @@ hide them from it.
 
 - agent-proxy: `RunResolver::with_cached`, `with_cached_at`; `DataCredentials::revoke`.
 - assistant: `worker::sources`.
-- context-gateway: `ServiceAccounts::is_empty`, `with_app`; `Agreements::len`, `is_empty`;
+- context-gateway: `Gateway::wait_for_writes`, `limit_anonymous_mcp_to` (the tests shorten the
+  write wait and the anonymous MCP limit); `pdp::temporal::Window::admits`;
+  `pdp::reaper::Reaper::files_walked` (store_layout_tests and `examples/scale_bench.rs`, T-4444);
+  `ServiceAccounts::is_empty`, `with_app`; `Agreements::len`, `is_empty`;
   `Federations::is_federated`; `RateLimiter::len`, `is_empty`; `WorkloadToken::new`;
   `Broker::new` (plain HTTP), `Broker::base`; `SlugResolver::with`, `len`, `is_empty`.
 - jc-core: `ResourceEnvelope::new`, `strip_status`, `without_status`, `resource_path`, `to_yaml`,
   `to_json`, `from_json`; `ProblemDetails::internal_opaque`, `with_instance`;
   `MultiLanguageMap::new`, `insert`, `require_fallback`, `is_empty`, `len`, `iter`;
-  `NativeBlock::new`, `MappingTest::new`; `Did::org_domain`; `kpi::Relationship::to_all`,
+  `NativeBlock::new`, `MappingTest::new`; `Did::org_domain`; `kpi::Provenance::to`, `to_all` (cg names them `kpi::Property::to`),
   `KeyPerformanceIndicator::from_json`; `urn::EntityRef` and its `new`, `space`, `urn`.
 - jcctl: `bento::InputContext::new`, `with_pipeline_spec`; `csr::InMemoryBroker` (6 rows),
   `platform::InMemory` (4 rows), `publish::ckan::InMemoryCkan` (9 rows);

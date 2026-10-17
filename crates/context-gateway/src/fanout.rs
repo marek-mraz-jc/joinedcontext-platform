@@ -556,20 +556,6 @@ impl Index {
         out
     }
 
-    /// The filters a change from `previous` to `doc` notifies, decided by `antares-matcher` on the
-    /// candidates and by the delta: a filter fires only when an attribute it watches (any, when
-    /// it watches none) differs from the previous state.
-    pub fn notified(&self, doc: &Value, previous: Option<&Value>, ctx: &Context) -> Vec<FilterId> {
-        let changed = changed(previous, doc);
-        if changed.is_empty() {
-            return Vec::new();
-        }
-        self.candidates(doc, ctx)
-            .into_iter()
-            .filter(|id| self.decides(*id, doc, &changed, ctx))
-            .collect()
-    }
-
     /// Whether filter `id` notifies a change of `changed` to `doc`, by `antares-matcher`.
     pub fn decides(
         &self,
@@ -582,20 +568,6 @@ impl Index {
             filter.fires_on(changed)
                 && antares_matcher::would_notify(&filter.sub, doc, ctx, &|_| None)
         })
-    }
-
-    /// What [`Self::notified`] answers, by running every filter: the loop the index replaces, kept
-    /// as the ground truth the index is tested against.
-    pub fn scanned(&self, doc: &Value, previous: Option<&Value>, ctx: &Context) -> Vec<FilterId> {
-        let changed = changed(previous, doc);
-        let mut ids: Vec<FilterId> = self
-            .filters
-            .keys()
-            .copied()
-            .filter(|id| self.decides(*id, doc, &changed, ctx))
-            .collect();
-        ids.sort_unstable();
-        ids
     }
 }
 
@@ -706,6 +678,38 @@ fn without_system(value: &Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // The index's test oracles: `notified` is what the hub's own loop does, `scanned` the loop
+    // the index replaces.
+    impl Index {
+        /// The filters a change from `previous` to `doc` notifies, decided by `antares-matcher`
+        /// on the candidates and by the delta: a filter fires only when an attribute it watches
+        /// (any, when it watches none) differs from the previous state.
+        fn notified(&self, doc: &Value, previous: Option<&Value>, ctx: &Context) -> Vec<FilterId> {
+            let changed = changed(previous, doc);
+            if changed.is_empty() {
+                return Vec::new();
+            }
+            self.candidates(doc, ctx)
+                .into_iter()
+                .filter(|id| self.decides(*id, doc, &changed, ctx))
+                .collect()
+        }
+
+        /// What [`Self::notified`] answers, by running every filter: the loop the index replaces,
+        /// kept as the ground truth the index is tested against.
+        fn scanned(&self, doc: &Value, previous: Option<&Value>, ctx: &Context) -> Vec<FilterId> {
+            let changed = changed(previous, doc);
+            let mut ids: Vec<FilterId> = self
+                .filters
+                .keys()
+                .copied()
+                .filter(|id| self.decides(*id, doc, &changed, ctx))
+                .collect();
+            ids.sort_unstable();
+            ids
+        }
+    }
 
     fn ctx() -> Context {
         antares_jsonld::core_context()

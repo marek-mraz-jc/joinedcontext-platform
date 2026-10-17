@@ -788,7 +788,7 @@ async fn upload(
         Ok(spec) => spec,
         Err(refused) => return *refused,
     };
-    let limits = spec.upload.clone().unwrap_or_default();
+    let limits = spec.upload_limits();
     let too_large = || {
         problem(
             413,

@@ -301,10 +301,13 @@ fn a_device_account_with_a_public_ec_key_reads_and_names_it() {
     let account =
         ServiceAccount::from_yaml(&device(&oauth_with(&[ec_key("cam-2026")]))).expect("parses");
     account.validate().expect("a public P-256 key is valid");
-    let keys = account.spec.device_keys().expect("the device's keys");
+    let jwks = |spec: &jc_core::kinds::service_account::ServiceAccountSpec| {
+        spec.credentials.iter().find_map(|c| c.jwks.clone())
+    };
+    let keys = jwks(&account.spec).expect("the device's keys");
     assert_eq!(keys.keys[0].kid, "cam-2026");
     let again = ServiceAccount::from_yaml(&account.to_yaml().expect("yaml")).expect("reads back");
-    assert_eq!(again.spec.device_keys(), Some(keys));
+    assert_eq!(jwks(&again.spec), Some(keys));
 }
 
 #[test]
