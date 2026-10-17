@@ -192,6 +192,15 @@ async fn answered(
     // `public_base`); the caller reaches them under the Endpoint's URL.
     let from = format!("http://{}{root}", authority(gateway.broker.base()));
     let to = format!("{}{prefix}", gateway.base_url());
+    // A feature also links its entity on the view's NGSI-LD surface, which the Endpoint serves
+    // under the same child path: what is left of the view's mount goes under the Endpoint too, so
+    // no answer names the broker (T-4403).
+    let view_from = format!(
+        "http://{}/x/views/{}/",
+        authority(gateway.broker.base()),
+        endpoint.slug
+    );
+    let view_to = format!("{}{}/", gateway.base_url(), endpoint.base_path);
     let (mut parts, body) = answer.into_parts();
     // ponytail: the page is held whole to move its links, so one past MAX_BODY (8 MiB) is a
     // broker failure; stream the rewrite if a `limit` ever reaches that.
@@ -200,10 +209,13 @@ async fn answered(
         return broker_failure(StatusCode::BAD_GATEWAY, Body::empty()).await;
     };
     caller_links(&mut parts.headers, &from, &to);
+    caller_links(&mut parts.headers, &view_from, &view_to);
     if let Some(restricted) = parts.headers.remove(ANTARES_RESTRICTED) {
         parts.headers.insert(RESULTS_RESTRICTED, restricted);
     }
-    let text = String::from_utf8_lossy(&held).replace(&from, &to);
+    let text = String::from_utf8_lossy(&held)
+        .replace(&from, &to)
+        .replace(&view_from, &view_to);
     proxy::with_body(parts, text.into_bytes())
 }
 

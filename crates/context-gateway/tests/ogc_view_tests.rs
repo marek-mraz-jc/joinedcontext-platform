@@ -55,9 +55,12 @@ async fn broker(
                 headers: request.headers().clone(),
             });
             let root = format!("http://{host}/x/views/{SLUG}/ogc/features");
+            // Antares links a feature to its entity on the same view's NGSI-LD surface (T-4403).
+            let entity = format!("http://{host}/x/views/{SLUG}/ngsi-ld/v1/entities/urn%3Angsi-ld%3ACar%3A1");
             let body = json!({
                 "type": "FeatureCollection",
-                "features": [],
+                "features": [{ "type": "Feature", "id": "urn:ngsi-ld:Car:1", "geometry": null, "properties": {},
+                               "links": [{ "rel": "alternate", "href": entity }] }],
                 "links": [{ "rel": "next", "href": format!("{root}/collections/Car/items?next=t1") }],
                 "detail": "postgres://broker:hunter2@db/antares"
             });
@@ -188,6 +191,11 @@ async fn an_items_read_goes_to_the_views_ogc_surface_as_sent() {
     assert_eq!(
         page["links"][0]["href"],
         format!("/api/endpoint/{SLUG}/ogc/features/collections/Car/items?next=t1")
+    );
+    assert_eq!(
+        page["features"][0]["links"][0]["href"],
+        format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn%3Angsi-ld%3ACar%3A1"),
+        "a feature's entity is the Endpoint's NGSI-LD surface (T-4403)"
     );
     assert!(
         !body.contains("/x/views/"),
