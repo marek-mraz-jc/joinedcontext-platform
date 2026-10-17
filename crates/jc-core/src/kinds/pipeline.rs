@@ -553,8 +553,10 @@ impl fmt::Display for OutputMode {
     }
 }
 
-/// A Pipeline output in `replace` whose space and entity type another Pipeline of the project
-/// also writes (PL-79, T-4408): each of its runs would drop every attribute the others wrote.
+/// A Pipeline output in `replace` whose ids another Pipeline of the project can also write into
+/// the same space (PL-79, T-4408): each of its runs would drop every attribute the other wrote
+/// on an entity they share. A replace rewrites only the entities its own batch names, so writing
+/// one type is no conflict while the ids are kept apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceConflict {
     /// The Pipeline whose output says `mode: replace`.
@@ -563,7 +565,7 @@ pub struct ReplaceConflict {
     pub space: String,
     /// The entity type it writes; `None` is every type of the space.
     pub entity_type: Option<String>,
-    /// The other Pipelines writing the same space and type, in name order.
+    /// The other Pipelines whose ids can meet its ids there, in name order.
     pub others: Vec<String>,
 }
 
@@ -575,9 +577,10 @@ impl fmt::Display for ReplaceConflict {
             .map_or_else(|| "every type".to_owned(), |t| format!("type {t}"));
         write!(
             f,
-            "Pipeline {} writes {what} into space {} with mode replace, which Pipeline {} also \
-             writes there: each replace would drop the attributes the other wrote. Only a \
-             pipeline that alone writes its entities may replace them; write upsert (PL-79)",
+            "Pipeline {} writes {what} into space {} with mode replace, and Pipeline {} can write \
+             the same ids there: their id mints are not kept apart by a literal of their own \
+             (a `template` whose text before its first field differs), so each replace would \
+             drop the attributes the other wrote. Keep the ids apart or write upsert (PL-79)",
             self.pipeline,
             self.space,
             self.others.join(", ")
@@ -585,35 +588,77 @@ impl fmt::Display for ReplaceConflict {
     }
 }
 
+/// The literal an id mint's ids start with, when it has one of its own: a `template`'s text
+/// before its first field. A `prefixed` or `keep` mint takes its ids from the record.
+fn literal_head(mint: &IdMint) -> Option<String> {
+    match mint.mint {
+        Mint::Template => match mint.template_parts().ok()?.first() {
+            Some(TemplatePart::Text(text)) => Some(text.clone()),
+            _ => None,
+        },
+        Mint::Prefixed | Mint::Keep => None,
+    }
+}
+
+/// Whether two outputs' ids can be the same. Only a declared id mint is judged: an output without
+/// one has its ids set by its own mapping, as the generated open-data pipelines keep theirs apart
+/// by their slug, and nothing here reads a mapping.
+fn ids_can_meet(a: Option<&IdMint>, b: Option<&IdMint>) -> bool {
+    // ponytail: mapping-set ids are not judged; parse the mapping if two hand-written ones collide.
+    let (Some(a), Some(b)) = (a, b) else {
+        return false;
+    };
+    match (literal_head(a), literal_head(b)) {
+        (Some(a), Some(b)) => a.starts_with(&b) || b.starts_with(&a),
+        _ => true,
+    }
+}
+
 /// Every [`ReplaceConflict`] among `pipelines`, the (name, spec) of every Pipeline of one
 /// project. `space_of_endpoint` answers the space an Endpoint of the project serves, by the
 /// Endpoint's name; an output through an Endpoint it does not know is judged by nothing here.
-/// An output that names no type writes every type of its space, so it meets every other output
-/// into that space.
+/// An output that names no type writes every type of its space.
 pub fn replace_conflicts(
     pipelines: &[(&str, &PipelineSpec)],
     space_of_endpoint: impl Fn(&str) -> Option<String>,
 ) -> Vec<ReplaceConflict> {
-    let writes: Vec<(&str, String, Option<String>, Option<OutputMode>)> = pipelines
+    type Write<'a> = (
+        &'a str,
+        String,
+        Option<String>,
+        Option<OutputMode>,
+        Option<IdMint>,
+    );
+    let writes: Vec<Write> = pipelines
         .iter()
         .flat_map(|(name, spec)| {
-            spec.outputs().into_iter().filter_map(|output| {
-                let space = space_of_endpoint(output.target_endpoint.local_id())?;
-                Some((*name, space, output.entity_type, output.mode))
-            })
+            // Only the first shape's one output declares an id mint (`output.id`).
+            let mint = (!spec.is_second_shape())
+                .then(|| spec.output.as_ref().and_then(|out| out.id.clone()))
+                .flatten();
+            let space_of_endpoint = &space_of_endpoint;
+            spec.outputs()
+                .into_iter()
+                .enumerate()
+                .filter_map(move |(index, output)| {
+                    let space = space_of_endpoint(output.target_endpoint.local_id())?;
+                    let mint = if index == 0 { mint.clone() } else { None };
+                    Some((*name, space, output.entity_type, output.mode, mint))
+                })
         })
         .collect();
     let mut conflicts: Vec<ReplaceConflict> = Vec::new();
-    for (name, space, entity_type, mode) in &writes {
+    for (name, space, entity_type, mode, mint) in &writes {
         if *mode != Some(OutputMode::Replace) {
             continue;
         }
         let mut others: Vec<String> = writes
             .iter()
-            .filter(|(other, other_space, other_type, _)| {
+            .filter(|(other, other_space, other_type, _, other_mint)| {
                 other != name
                     && other_space == space
                     && (entity_type.is_none() || other_type.is_none() || other_type == entity_type)
+                    && ids_can_meet(mint.as_ref(), other_mint.as_ref())
             })
             .map(|(other, ..)| (*other).to_owned())
             .collect();
