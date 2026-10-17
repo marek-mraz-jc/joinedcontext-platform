@@ -248,3 +248,20 @@ fn every_source_and_output_is_checked_like_the_first_versions_one() {
     );
     assert!(refusal(&both).contains("not both"), "{}", refusal(&both));
 }
+
+/// PL-79: the three write modes keep their wire names, and a name outside them is refused.
+#[test]
+fn an_output_mode_is_upsert_replace_or_update_attrs() {
+    for (mode, wire) in [
+        (OutputMode::Upsert, "upsert"),
+        (OutputMode::Replace, "replace"),
+        (OutputMode::UpdateAttrs, "update-attrs"),
+    ] {
+        assert_eq!(mode.as_str(), wire);
+        let written = serde_norway::to_string(&mode).expect("serializes");
+        assert_eq!(written.trim(), wire);
+        let read: OutputMode = serde_norway::from_str(wire).expect("parses");
+        assert_eq!(read, mode);
+    }
+    assert!(serde_norway::from_str::<OutputMode>("overwrite").is_err());
+}
