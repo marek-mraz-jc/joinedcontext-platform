@@ -1099,13 +1099,9 @@ pub(crate) fn reads_anything(gateway: &Gateway, endpoint: &Endpoint, subject: &S
 }
 
 /// The hub's catalogue (ADR-N-025 2.2, 2.8): each tool once, listed when at least one Endpoint of
-/// the caller's list grants it, with the one required `endpoint` argument whose enum is that list.
-/// `tools/list` never multiplies by Endpoint.
+/// the caller's list grants it, with the one required `endpoint` argument: a string, never an
+/// enum of the list, so `tools/list` is the same size for 10 Endpoints and for 10,000 (T-4491).
 pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Vec<Value> {
-    let slugs: Vec<&str> = reach
-        .iter()
-        .map(|(endpoint, _)| endpoint.slug.as_str())
-        .collect();
     TOOLS
         .iter()
         .filter(|tool| {
@@ -1121,9 +1117,10 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                         "endpoint".to_owned(),
                         json!({
                             "type": "string",
-                            "enum": slugs,
-                            "description": "The Endpoint this call reads or writes, by the slug \
-                                            list_endpoints answers. One per call.",
+                            "minLength": 1,
+                            "maxLength": 200,
+                            "description": "The Endpoint: its slug, title or space as \
+                                            list_endpoints answers",
                         }),
                     );
                 }
