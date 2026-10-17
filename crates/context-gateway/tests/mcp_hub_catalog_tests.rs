@@ -82,17 +82,22 @@ fn endpoint(slug: &str, title: &str, space: &str, audience: Audience, role: &str
 }
 
 fn app(realm: &common::Realm, endpoints: Vec<Endpoint>) -> Router {
-    app_with(realm, endpoints, ServiceAccounts::new(), Vec::new())
+    app_on("http://127.0.0.1:1", realm, endpoints)
+}
+
+fn app_on(broker: &str, realm: &common::Realm, endpoints: Vec<Endpoint>) -> Router {
+    app_with(broker, realm, endpoints, ServiceAccounts::new(), Vec::new())
 }
 
 fn app_with(
+    broker: &str,
     realm: &common::Realm,
     endpoints: Vec<Endpoint>,
     accounts: ServiceAccounts,
     servers: Vec<McpServer>,
 ) -> Router {
     let gateway = Gateway::new(
-        Broker::new("http://127.0.0.1:1"),
+        Broker::new(broker),
         Box::new(PolicyPdp),
         "banskabystrica.sk",
     )
@@ -346,7 +351,7 @@ async fn a_page_counts_and_continues_and_a_foreign_argument_or_tool_is_refused()
     .await;
     let structured = &first["result"]["structuredContent"];
     assert_eq!(
-        (structured["count"].as_u64(), ids(&first).len()),
+        (structured["total"].as_u64(), ids(&first).len()),
         (Some(4), 3)
     );
     let rest = call(
@@ -400,7 +405,13 @@ async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
     };
-    let app = app_with(&realm, city(), ServiceAccounts::new(), vec![server]);
+    let app = app_with(
+        "http://127.0.0.1:1",
+        &realm,
+        city(),
+        ServiceAccounts::new(),
+        vec![server],
+    );
     // The same token on the hub reaches the organization's Endpoint too.
     let hub = call(
         app.clone(),
@@ -432,7 +443,7 @@ async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
         ]
     );
     assert_eq!(
-        answer["result"]["structuredContent"]["count"], 2,
+        answer["result"]["structuredContent"]["total"], 2,
         "{answer}"
     );
     let text = answer.to_string();
@@ -460,7 +471,7 @@ async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
     .await;
     assert!(ids(&searched).is_empty(), "{searched}");
     assert_eq!(
-        searched["result"]["structuredContent"]["count"], 0,
+        searched["result"]["structuredContent"]["total"], 0,
         "{searched}"
     );
 }
@@ -518,7 +529,13 @@ async fn a_service_account_grant_shows_its_endpoint_and_the_public_ones_and_noth
     );
     foreign.project = "kraj".to_owned();
     endpoints.push(foreign);
-    let app = app_with(&realm, endpoints, accounts(), Vec::new());
+    let app = app_with(
+        "http://127.0.0.1:1",
+        &realm,
+        endpoints,
+        accounts(),
+        Vec::new(),
+    );
 
     let token = workload(&realm, "mesto-reader", INNER);
     let answer = call(
@@ -633,4 +650,45 @@ async fn ten_thousand_endpoints_answer_a_warm_catalog_query_quickly() {
         "10,000 Endpoints: cold {cold_took:?}, warm p95 {p95:?}, list_endpoints p95 {:?}",
         hub[18]
     );
+}
+
+/// T-4501: the first call names no Endpoint and finds the dataset in the catalogue by the place
+/// as a person writes it; the second reads the Endpoint the Dataset lists.
+#[tokio::test]
+async fn two_calls_find_the_air_dataset_and_read_it_without_a_token() {
+    let broker = common::BrokerStub::start(vec![json!([{
+        "id": "urn:ngsi-ld:AirQualityObserved:eea-SK0263A",
+        "type": "AirQualityObserved",
+        "pm10": { "type": "Property", "value": 10.362 },
+    }])])
+    .await;
+    let realm = common::Realm::new();
+    let app = app_on(&broker.url, &realm, city());
+    let found = call(
+        app.clone(),
+        None,
+        "query_entities",
+        json!({
+            "type": "Dataset", "q": "searchText~=\"Banská Bystrica\"", "format": "keyValues",
+        }),
+    )
+    .await;
+    let datasets = entities(&found);
+    assert_eq!(datasets.len(), 1, "{found}");
+    let endpoint = datasets[0]["dataService"][0]["identifier"]
+        .as_str()
+        .expect("the Dataset names its Endpoint")
+        .to_owned();
+    assert_eq!(endpoint, AIR);
+    let read = call(
+        app,
+        None,
+        "query_entities",
+        json!({
+            "endpoint": endpoint, "type": "AirQualityObserved",
+        }),
+    )
+    .await;
+    assert_eq!(entities(&read)[0]["pm10"]["value"], 10.362, "{read}");
+    assert_eq!(broker.hops().len(), 1, "the catalogue read no broker");
 }

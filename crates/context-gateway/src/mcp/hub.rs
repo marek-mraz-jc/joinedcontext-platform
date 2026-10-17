@@ -463,13 +463,8 @@ impl Hub {
             None if self.server.is_some() && server::FAN_OUT.contains(&name) => {
                 return self.fan_out(id, name, &params, arguments).await;
             }
-            None => {
-                return Answer::Json(error(
-                    id,
-                    -32602,
-                    "`endpoint` is required: an Endpoint list_endpoints answers, by slug, title or space (EP-87)",
-                ))
-            }
+            // Catalogue first: a read that names no Endpoint asks the catalogue (T-4501).
+            None => catalog::NAME.to_owned(),
         };
         if let Some(refusal) = misrouted(&id, &arguments) {
             return Answer::Json(refusal);
@@ -784,7 +779,7 @@ fn attributes_of(
 }
 
 /// The tool that answers the caller's list (ADR-N-025 2.1).
-fn list_endpoints_tool() -> Value {
+pub(crate) fn list_endpoints_tool() -> Value {
     json!({
         "name": "list_endpoints",
         "description": "The Endpoints this connector reaches: open ones without a login, and \

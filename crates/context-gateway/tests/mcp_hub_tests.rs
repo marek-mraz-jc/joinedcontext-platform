@@ -254,7 +254,8 @@ async fn an_endpoint_the_token_may_not_read_is_never_listed_and_answers_like_an_
 }
 
 /// Section 3, row 2: `endpoint` is one string. A list is invalid input, and no other argument
-/// can carry a second slug or a space (AG-05, SP-14).
+/// can carry a second slug or a space (AG-05, SP-14). A read that names none asks the catalogue
+/// (T-4501), which reads no broker.
 #[tokio::test]
 async fn endpoint_is_one_string_and_no_other_argument_routes() {
     let realm = common::Realm::new();
@@ -265,7 +266,6 @@ async fn endpoint_is_one_string_and_no_other_argument_routes() {
     for arguments in [
         json!({ "endpoint": [AIR, BIKES], "type": "AirQualityObserved" }),
         json!({ "endpoint": { "slug": AIR }, "type": "AirQualityObserved" }),
-        json!({ "type": "AirQualityObserved" }),
         json!({ "endpoint": AIR, "slug": BIKES, "type": "AirQualityObserved" }),
         json!({ "endpoint": AIR, "space": "doprava", "type": "AirQualityObserved" }),
         json!({ "endpoint": AIR, "Tenant": "doprava", "type": "AirQualityObserved" }),
@@ -282,6 +282,19 @@ async fn endpoint_is_one_string_and_no_other_argument_routes() {
             "{arguments}: {answer}"
         );
     }
+    let (_, catalogue) = send(
+        app.clone(),
+        hub(
+            Some(&token),
+            call("query_entities", json!({ "type": "AirQualityObserved" })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        catalogue["result"]["structuredContent"]["entities"],
+        json!([]),
+        "{catalogue}"
+    );
 
     let (_, tools) = send(app, hub(Some(&token), list())).await;
     let query = tools["result"]["tools"]
@@ -295,10 +308,10 @@ async fn endpoint_is_one_string_and_no_other_argument_routes() {
         query["inputSchema"]["properties"]["endpoint"]["type"],
         json!("string")
     );
-    assert!(query["inputSchema"]["required"]
+    // A read that names no Endpoint asks the catalogue (T-4501).
+    assert!(!query["inputSchema"]["required"]
         .as_array()
-        .expect("required")
-        .contains(&json!("endpoint")));
+        .is_some_and(|required| required.contains(&json!("endpoint"))));
     assert!(
         broker.hops().is_empty(),
         "a refused call reached the broker"

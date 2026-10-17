@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub(crate) const NAME: &str = "catalog";
 
 /// The tools the catalogue answers; every other one is the dataset's own.
-const TOOLS: &[&str] = &["query_entities", "get_entity", "list_types"];
+pub(crate) const TOOLS: &[&str] = &["query_entities", "get_entity", "list_types"];
 
 /// The arguments `query_entities` takes on the catalogue.
 const ARGUMENTS: &[&str] = &[
@@ -271,8 +271,8 @@ fn query(catalog: &Catalog, arguments: &Map<String, Value>) -> Result<Value, Str
         sub["entities"] = Value::Array(selectors);
     }
     if let Some(q) = text("q") {
-        antares_ql::parse_q(&antares_ql::percent_decode(q.as_bytes()))
-            .map_err(|e| format!("q: {e}"))?;
+        let q = folded_search(&antares_ql::percent_decode(q.as_bytes()));
+        antares_ql::parse_q(&q).map_err(|e| format!("q: {e}"))?;
         sub["q"] = json!(q);
     }
     if let Some(georel) = text("georel") {
@@ -345,10 +345,33 @@ fn query(catalog: &Catalog, arguments: &Map<String, Value>) -> Result<Value, Str
             );
         }
         if arguments.get("count").and_then(Value::as_bool) == Some(true) {
-            structured.insert("count".into(), json!(total));
+            structured.insert("total".into(), json!(total));
         }
     }
     Ok(answer)
+}
+
+/// `q` with each `searchText` pattern folded as `searchText` is, so `"Banská"` finds `banska`:
+/// an agent types the place as it is written.
+fn folded_search(q: &str) -> String {
+    static TERM: OnceLock<regex::Regex> = OnceLock::new();
+    let term = TERM.get_or_init(|| {
+        regex::Regex::new(r#"(searchText!?~=)"([^"]*)""#).expect("a valid pattern")
+    });
+    term.replace_all(q, |found: &regex::Captures<'_>| {
+        // A regex escape (`\D`, `\S`) keeps its case: lowered it would mean its opposite.
+        let mut pattern = String::new();
+        let mut escaped = false;
+        for c in found[2].chars() {
+            match escaped {
+                true => pattern.push(c),
+                false => pattern.push_str(&ngsi_catalog::fold(c.encode_utf8(&mut [0; 4]))),
+            }
+            escaped = !escaped && c == '\\';
+        }
+        format!("{}\"{pattern}\"", &found[1])
+    })
+    .into_owned()
 }
 
 /// Whether `format` asks for keyValues; normalized is the default, as on the broker.
@@ -434,6 +457,15 @@ mod tests {
         assert_eq!(because(&endpoint, &workload), "grant");
         endpoint.audience = Audience::ProjectList;
         assert_eq!(because(&endpoint, &person), "project");
+    }
+
+    #[test]
+    fn a_search_pattern_is_folded_as_search_text_is_but_its_escapes_are_not() {
+        assert_eq!(
+            folded_search(r#"searchText~="Banská \D+";name=="Žilina""#),
+            r#"searchText~="banska \D+";name=="Žilina""#
+        );
+        assert_eq!(folded_search("pm10>40"), "pm10>40");
     }
 
     #[test]

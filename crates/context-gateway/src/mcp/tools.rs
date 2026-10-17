@@ -1119,15 +1119,19 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200,
-                            "description": "The Endpoint: its slug, title or space as \
-                                            list_endpoints answers",
+                            "description": "catalog (the default) to find a Dataset, then the \
+                                            Endpoint its dataService names: identifier, title \
+                                            or space",
                         }),
                     );
                 }
-                match object.get_mut("required") {
-                    Some(Value::Array(required)) => required.push(json!("endpoint")),
-                    _ => {
-                        object.insert("required".to_owned(), json!(["endpoint"]));
+                // The catalogue answers these when no Endpoint is named (T-4501).
+                if !crate::mcp::catalog::TOOLS.contains(&tool.name) {
+                    match object.get_mut("required") {
+                        Some(Value::Array(required)) => required.push(json!("endpoint")),
+                        _ => {
+                            object.insert("required".to_owned(), json!(["endpoint"]));
+                        }
                     }
                 }
             }
