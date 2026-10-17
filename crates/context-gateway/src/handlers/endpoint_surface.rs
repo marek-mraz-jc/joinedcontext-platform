@@ -750,6 +750,8 @@ pub fn dataset(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: 
 /// record would not. Each record's typed nodes move to the catalogue's `@included`, once.
 pub fn feed(records: Vec<Value>, base: &str, org_domain: &str) -> Value {
     let mut included: Vec<Value> = Vec::new();
+    // Each node once, by its text: a linear search per node took 22 s for 10,000 records.
+    let mut seen = std::collections::HashSet::new();
     let mut datasets = Vec::new();
     for mut record in records {
         let Some(object) = record.as_object_mut() else {
@@ -758,8 +760,7 @@ pub fn feed(records: Vec<Value>, base: &str, org_domain: &str) -> Value {
         object.remove("@context");
         if let Some(Value::Array(nodes)) = object.remove("@included") {
             for node in nodes {
-                // ponytail: a linear search per node; a feed of thousands of records wants a set.
-                if !included.contains(&node) {
+                if seen.insert(node.to_string()) {
                     included.push(node);
                 }
             }

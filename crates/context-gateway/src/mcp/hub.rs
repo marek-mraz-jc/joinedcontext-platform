@@ -11,10 +11,10 @@
 use crate::app::{self, anonymous_on, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
-use crate::mcp::describe;
 use crate::mcp::jsonrpc::{self, answered, error, refused, result};
 use crate::mcp::server::{self, McpServer};
 use crate::mcp::tools::{self, HubTool};
+use crate::mcp::{catalog, describe};
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -473,6 +473,16 @@ impl Hub {
         };
         if let Some(refusal) = misrouted(&id, &arguments) {
             return Answer::Json(refusal);
+        }
+        // The caller's own catalogue, built from `reach` alone (T-4503).
+        if catalog::names_catalog(&slug) {
+            return Answer::Json(catalog::call(
+                &self.gateway,
+                &self.reach,
+                id,
+                name,
+                &arguments,
+            ));
         }
 
         // An Endpoint outside the caller's list and one that does not exist are the same answer,
