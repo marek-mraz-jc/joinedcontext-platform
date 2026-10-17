@@ -7,7 +7,8 @@
 //! in parallel, and answers each member apart: nothing is filtered, sorted or counted across two
 //! members' Policies (§2.4).
 
-use crate::app::{authenticate, subject_from, Gateway, EDGE_AUDIENCE, HUB_PATH, MAX_BODY};
+use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::{authenticate, subject_from, EDGE_AUDIENCE, HUB_PATH};
 use crate::auth::token::{self, Claims};
 use crate::mcp::hub::{misrouted, Answer, Hub};
 use crate::mcp::jsonrpc::{self, error, refused, result};

@@ -1,12 +1,10 @@
 //! The reads every export surface shares: the types a dataset holds, one query through the
 //! broker's view, a temporal query, and the capped page walk the downloads are made of.
 
-use crate::app::Gateway;
-use crate::app::MAX_BODY;
-use crate::app::MAX_COLLECTED;
-use crate::app::PAGE;
-use crate::app::{has_view, names_no_tenant, ANTARES_RESTRICTED};
+use crate::app::{Gateway, MAX_BODY, MAX_COLLECTED, PAGE};
+use crate::handlers::ngsi_ld::{has_view, ANTARES_RESTRICTED};
 use crate::handlers::view_access::no_view;
+use crate::handlers::writes::names_no_tenant;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use crate::translators::tabular;

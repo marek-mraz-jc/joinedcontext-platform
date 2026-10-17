@@ -13,8 +13,9 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use context_gateway::app::{router, Gateway, PORTAL_CLIENT, SIMULATE_AUDIENCE};
+use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::auth::subject::{PORTAL_CLIENT, SIMULATE_AUDIENCE};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;

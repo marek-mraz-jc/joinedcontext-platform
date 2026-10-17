@@ -6,7 +6,9 @@
 //! sees one only when every name it reads is in the JSON Schema the broker's view serves that
 //! caller: a Mapping over a hidden slot would name it (EP-47).
 
-use crate::app::{admit, sha256_hex, Gateway};
+use crate::app::Gateway;
+use crate::auth::subject::admit;
+use crate::handlers::respond::sha256_hex;
 use crate::handlers::schema_routes::{revalidated, revalidated_text, view_document};
 use crate::middleware::tenancy;
 use crate::pdp::evaluator::Subject;
@@ -15,6 +17,8 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::Response;
 use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
 use jc_core::kinds::MappingSpec;
 use jc_core::ProblemDetails;
 use serde_json::{json, Value};
@@ -412,4 +416,18 @@ pub(crate) async fn mapping_file(
         Some(found) => revalidated_text(found.bytes.to_vec(), found.media_type, request.headers()),
         None => ProblemDetails::not_found().into_response(),
     }
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        // EP-53: the Mappings published beside a model major, before the broker's surface.
+        .route(
+            "/api/endpoint/{slug}/schema/{version}/mappings/",
+            get(mappings_index),
+        )
+        .route(
+            "/api/endpoint/{slug}/schema/{version}/mappings/{file}",
+            get(mapping_file),
+        )
 }
