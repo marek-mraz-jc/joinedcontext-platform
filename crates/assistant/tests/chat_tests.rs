@@ -3353,3 +3353,142 @@ async fn a_cut_refusal_is_declined_not_cached_and_an_empty_answer_is_counted() {
     assert_eq!(unanswered, [false, true]);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
+
+/// The named server `hronov/air` lends the public Endpoint and the organization's one; it lists
+/// for whoever asks, the gateway deciding what each caller reads (EP-120).
+async fn named_server(gateway: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/api/mcp/hronov/air"))
+        .and(body_string_contains("list_endpoints"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": "2 Endpoints"}],
+                "structuredContent": {"total": 2, "endpoints": [
+                    {"slug": SLUG, "access": "public"},
+                    {"slug": HIDDEN_SLUG, "access": "internal"}
+                ]}
+            }}),
+        ))
+        .mount(gateway)
+        .await;
+}
+
+/// MF-56 (T-4535): an internal deployment with only `mcpServer` answers a data question from the
+/// Endpoints its server lends the person: the server is asked with the person's token, the
+/// public Endpoint without one, the organization's with it, and the read is a cited tool call.
+#[tokio::test]
+async fn an_internal_deployment_reads_its_named_servers_endpoints_as_the_person() {
+    let mut d = internal_deployment(true);
+    d.spec.connectors = Vec::new();
+    d.spec.mcp_server = Some("hronov/air".into());
+    let w = world("chatserverinternal", d).await;
+    named_server(&w.gateway).await;
+    hidden_endpoint(&w.gateway).await;
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                tool_call("c1", &format!("{HIDDEN_SLUG}__query_entities"), json!({})),
+                500,
+            ),
+            completion(
+                json!({"role": "assistant", "content": "Otvorené sú 3 spisy [1]."}),
+                600,
+            ),
+        ],
+    )
+    .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask_in_portal(
+            json!({"message": "Koľko je otvorených spisov?"}),
+            Some(PORTAL_TOKEN),
+            Some("jana"),
+            Some(PERSON_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "tool" && d["endpoint"] == HIDDEN_SLUG && d["status"] == "done"),
+        "{events:?}"
+    );
+    let tools = offered_tools(&model_calls(&w.proxy).await[0].1);
+    for slug in [SLUG, HIDDEN_SLUG] {
+        assert!(
+            tools.contains(&format!("{slug}__query_entities")),
+            "{tools:?}"
+        );
+    }
+    for request in w.gateway.received_requests().await.unwrap_or_default() {
+        let bearer = request
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap_or_default().to_owned());
+        if request.url.path().contains(SLUG) {
+            assert_eq!(bearer, None, "a public Endpoint is called without a token");
+        } else {
+            assert_eq!(
+                bearer.as_deref(),
+                Some(format!("Bearer {PERSON_TOKEN}").as_str()),
+                "{}",
+                request.url
+            );
+        }
+    }
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// MF-56 (T-4535): a public deployment asks its named server as anyone and reaches only what the
+/// server lends a stranger: an Endpoint it lists as internal is never called, and no token
+/// leaves, even when the Portal brings the person's.
+#[tokio::test]
+async fn a_public_deployment_reads_its_named_server_as_anyone() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors = Vec::new();
+    d.spec.mcp_server = Some("hronov/air".into());
+    let w = world("chatserverpublic", d).await;
+    named_server(&w.gateway).await;
+    hidden_endpoint(&w.gateway).await;
+    script(
+        &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": "Neviem."}),
+            300,
+        )],
+    )
+    .await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask_in_portal(
+            json!({"message": "Aké je ovzdušie?"}),
+            Some(PORTAL_TOKEN),
+            Some("jana"),
+            Some(PERSON_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let requests = w.gateway.received_requests().await.unwrap_or_default();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.path() == "/api/mcp/hronov/air"),
+        "the server was not asked"
+    );
+    assert!(
+        requests.iter().any(|r| r.url.path().contains(SLUG)),
+        "the public Endpoint was not connected"
+    );
+    for request in &requests {
+        assert!(!request.url.path().contains(HIDDEN_SLUG), "{}", request.url);
+        assert!(
+            request.headers.get("authorization").is_none(),
+            "{}",
+            request.url
+        );
+    }
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}

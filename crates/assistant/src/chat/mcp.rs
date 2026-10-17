@@ -3,6 +3,10 @@
 //! anonymous channels it is called without a token, so the gateway answers as it answers anyone;
 //! an `internal` deployment's non-public Endpoint is called with the asking person's own token
 //! (API/05 §1.7, AG-115).
+//!
+//! A deployment's `mcpServer` is read once per question through the named server,
+//! `POST /api/mcp/{project}/{name}` (EP-92): its `list_endpoints` names the Endpoints this
+//! asker reads through it, and each becomes a connector of its own Endpoint, as above (MF-56).
 
 use std::time::Duration;
 
@@ -48,6 +52,112 @@ impl std::fmt::Debug for PersonToken {
     }
 }
 
+/// The most Endpoints a named server lends one question, the fan-out bound of a named server
+/// (EP-121): a server that reaches more lends the first of its `list_endpoints` page.
+// ponytail: the first ten in the server's order; a catalogue search by the question (T-4501)
+// when a server's reach is larger than that.
+pub const MAX_SERVER_ENDPOINTS: usize = 10;
+
+/// One JSON-RPC message to the gateway at `url`, as `token` or as anyone; the `result`.
+async fn post(
+    http: &reqwest::Client,
+    url: String,
+    timeout: Duration,
+    token: Option<&PersonToken>,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    let mut request = http
+        .post(url)
+        .timeout(timeout)
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}));
+    if let Some(token) = token {
+        request = request.bearer_auth(&token.0);
+    }
+    let answer = request
+        .send()
+        .await
+        .map_err(|err| err.without_url().to_string())?;
+    let status = answer.status();
+    if !status.is_success() {
+        return Err(format!("the Endpoint answered {status}"));
+    }
+    let body: Value = answer
+        .json()
+        .await
+        .map_err(|err| format!("the Endpoint's answer is not JSON: {}", err.without_url()))?;
+    if let Some(error) = body.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("an error");
+        return Err(format!("the Endpoint refused: {message}"));
+    }
+    body.get("result")
+        .cloned()
+        .ok_or_else(|| "the Endpoint's answer has no result".to_owned())
+}
+
+/// One Endpoint a named server lends: its slug and whether it is public.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lent {
+    pub slug: String,
+    pub public: bool,
+}
+
+/// A named MCP server on the gateway, `{project}/{name}` (EP-92).
+#[derive(Debug, Clone)]
+pub struct Server {
+    pub gateway: String,
+    pub server: String,
+    pub timeout: Duration,
+    /// The person the server lists for; `None` lists as anyone.
+    pub token: Option<PersonToken>,
+}
+
+impl Server {
+    /// The Endpoints the server lends this asker, at most [`MAX_SERVER_ENDPOINTS`], in its order.
+    pub async fn endpoints(&self, http: &reqwest::Client) -> Result<Vec<Lent>, String> {
+        let result = post(
+            http,
+            format!("{}/api/mcp/{}", self.gateway, self.server),
+            self.timeout,
+            self.token.as_ref(),
+            "tools/call",
+            json!({"name": "list_endpoints", "arguments": {"limit": MAX_SERVER_ENDPOINTS}}),
+        )
+        .await?;
+        if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            return Err("the server refused to list its Endpoints".to_owned());
+        }
+        Ok(lent(&result))
+    }
+}
+
+/// The rows of a `list_endpoints` result, each a slug the gateway could serve; a row without
+/// one is dropped.
+fn lent(result: &Value) -> Vec<Lent> {
+    result
+        .pointer("/structuredContent/endpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let slug = row.get("slug").and_then(Value::as_str)?;
+            let valid = !slug.is_empty()
+                && slug.len() <= 64
+                && slug
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+            valid.then(|| Lent {
+                slug: slug.to_owned(),
+                public: row.get("access").and_then(Value::as_str) == Some("public"),
+            })
+        })
+        .take(MAX_SERVER_ENDPOINTS)
+        .collect()
+}
+
 /// The MCP surface of one Endpoint.
 #[derive(Debug, Clone)]
 pub struct Surface {
@@ -66,35 +176,15 @@ impl Surface {
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
-        let mut request = http
-            .post(format!("{}/api/endpoint/{}/mcp", self.gateway, self.slug))
-            .timeout(self.timeout)
-            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}));
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(&token.0);
-        }
-        let answer = request
-            .send()
-            .await
-            .map_err(|err| err.without_url().to_string())?;
-        let status = answer.status();
-        if !status.is_success() {
-            return Err(format!("the Endpoint answered {status}"));
-        }
-        let body: Value = answer
-            .json()
-            .await
-            .map_err(|err| format!("the Endpoint's answer is not JSON: {}", err.without_url()))?;
-        if let Some(error) = body.get("error") {
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("an error");
-            return Err(format!("the Endpoint refused: {message}"));
-        }
-        body.get("result")
-            .cloned()
-            .ok_or_else(|| "the Endpoint's answer has no result".to_owned())
+        post(
+            http,
+            format!("{}/api/endpoint/{}/mcp", self.gateway, self.slug),
+            self.timeout,
+            self.token.as_ref(),
+            method,
+            params,
+        )
+        .await
     }
 
     /// The tools the surface offers that `allowed` names and [`READ_ONLY_TOOLS`] holds, in the
@@ -185,7 +275,30 @@ pub fn cut(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cut;
+    use super::{cut, lent, Lent, MAX_SERVER_ENDPOINTS};
+    use serde_json::json;
+
+    #[test]
+    fn a_server_lends_its_listed_slugs_at_most_ten() {
+        let rows: Vec<_> = (0..12)
+            .map(|i| json!({"slug": format!("s{i:02}"), "access": if i == 0 { "public" } else { "internal" }}))
+            .chain([json!({"slug": "../x"}), json!({"title": "no slug"})])
+            .collect();
+        let got = lent(&json!({"structuredContent": {"endpoints": rows}}));
+        assert_eq!(got.len(), MAX_SERVER_ENDPOINTS);
+        assert_eq!(
+            got[0],
+            Lent {
+                slug: "s00".into(),
+                public: true
+            }
+        );
+        assert!(!got[1].public);
+        let odd =
+            lent(&json!({"structuredContent": {"endpoints": [{"slug": "../x"}, {"slug": "A1"}]}}));
+        assert!(odd.is_empty());
+        assert!(lent(&json!({})).is_empty());
+    }
 
     #[test]
     fn a_long_result_is_cut_on_a_character_and_says_so() {
