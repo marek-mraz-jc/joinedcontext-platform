@@ -194,6 +194,37 @@ async fn an_app_answers_below_its_own_path_and_never_sees_the_callers_credential
     );
 }
 
+/// AP-147: a component reaches nothing but HTTP through the gateway. No environment variable,
+/// no directory, no name lookup, and no socket even to a port that is listening on the host
+/// (T-3588 path 3: an App reaching a socket, the environment or the file system).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_component_reaches_no_environment_file_or_socket() {
+    let listening = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let port = listening.local_addr().expect("the bound address").port();
+    let world = World::new("reach", Limits::default(), None);
+    let app = world.place("prober", guest());
+    let (status, reached) = world
+        .get(&app, &format!("/api/reach?{port}"), None)
+        .await
+        .unwrap();
+    assert_eq!(status, 200, "{reached}");
+    assert!(reached.starts_with("env=0 dirs=0 "), "{reached}");
+    for (what, granted) in [
+        ("lookup", "resolved"),
+        ("tcp", "connected"),
+        ("udp", "bound"),
+    ] {
+        let got = reached
+            .split(' ')
+            .find_map(|part| part.strip_prefix(&format!("{what}=")))
+            .unwrap_or_default();
+        assert!(
+            got.starts_with("refused"),
+            "{what} answered {got:?} ({reached}), not {granted}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_request_is_a_fresh_instance_and_two_apps_share_nothing() {
     let world = World::new("state", Limits::default(), None);

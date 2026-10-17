@@ -1,6 +1,7 @@
 //! A test App: `/api/hello`, `/api/state` (a counter that a fresh instance starts at one),
 //! `/api/loop` (never ends), `/api/alloc` (asks for 128 MiB), `/api/fetch?<url>` (an outgoing
-//! GET, answering the status or the error), `/api/sql` (the host's `jc:app/sql`); and the jobs of
+//! GET, answering the status or the error), `/api/sql` (the host's `jc:app/sql`), `/api/reach`
+//! (what the component gets of the environment, the files and the sockets); and the jobs of
 //! `wit/jobs.wit`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +28,54 @@ fn answer(out: ResponseOutparam, status: u16, text: &str) {
     let _ = stream.blocking_write_and_flush(text.as_bytes());
     drop(stream);
     let _ = OutgoingBody::finish(body, None);
+}
+
+/// Everything WASI would let a component reach beyond HTTP (AP-147): the environment, the
+/// preopened directories, a name lookup, a TCP connection and a UDP bind, each with what it got.
+fn reach(port: u16) -> String {
+    use wasip2::sockets::network::{IpAddressFamily, IpSocketAddress, Ipv4SocketAddress};
+    let env = wasip2::cli::environment::get_environment().len();
+    let dirs = wasip2::filesystem::preopens::get_directories().len();
+    let network = wasip2::sockets::instance_network::instance_network();
+    let lookup = match wasip2::sockets::ip_name_lookup::resolve_addresses(&network, "localhost") {
+        Err(code) => format!("refused {code:?}"),
+        Ok(stream) => {
+            stream.subscribe().block();
+            match stream.resolve_next_address() {
+                Ok(Some(_)) => "resolved".to_owned(),
+                Ok(None) => "empty".to_owned(),
+                Err(code) => format!("refused {code:?}"),
+            }
+        }
+    };
+    let loopback = |port| IpSocketAddress::Ipv4(Ipv4SocketAddress { port, address: (127, 0, 0, 1) });
+    let tcp = match wasip2::sockets::tcp_create_socket::create_tcp_socket(IpAddressFamily::Ipv4) {
+        Err(code) => format!("refused {code:?}"),
+        Ok(socket) => match socket.start_connect(&network, loopback(port)) {
+            Err(code) => format!("refused {code:?}"),
+            Ok(()) => {
+                socket.subscribe().block();
+                match socket.finish_connect() {
+                    Ok(_) => "connected".to_owned(),
+                    Err(code) => format!("refused {code:?}"),
+                }
+            }
+        },
+    };
+    let udp = match wasip2::sockets::udp_create_socket::create_udp_socket(IpAddressFamily::Ipv4) {
+        Err(code) => format!("refused {code:?}"),
+        Ok(socket) => match socket.start_bind(&network, loopback(0)) {
+            Err(code) => format!("refused {code:?}"),
+            Ok(()) => {
+                socket.subscribe().block();
+                match socket.finish_bind() {
+                    Ok(()) => "bound".to_owned(),
+                    Err(code) => format!("refused {code:?}"),
+                }
+            }
+        },
+    };
+    format!("env={env} dirs={dirs} lookup={lookup} tcp={tcp} udp={udp}")
 }
 
 fn fetch(url: &str) -> String {
@@ -71,6 +120,7 @@ impl wasip2::exports::http::incoming_handler::Guest for App {
                 answer(out, 200, &std::hint::black_box(big).len().to_string());
             }
             "/api/fetch" => answer(out, 200, &fetch(query)),
+            "/api/reach" => answer(out, 200, &reach(query.parse().unwrap_or(80))),
             "/api/sql" => match jc::app::sql::query("select 1", &[]) {
                 Ok(rows) => answer(out, 200, &format!("{} rows", rows.values.len())),
                 Err(err) => answer(out, 200, &format!("sql: {err:?}")),
