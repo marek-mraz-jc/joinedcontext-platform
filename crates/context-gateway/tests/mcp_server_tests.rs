@@ -86,6 +86,7 @@ fn server(name: &str, members: &[&str], audience: Audience) -> McpServer {
         title: Some("Mobility".to_owned()),
         description: Some("The city's mobility data.".to_owned()),
         members: members.iter().map(|slug| (*slug).to_owned()).collect(),
+        select: None,
         audience,
         allowed_projects: Vec::new(),
     }
@@ -707,6 +708,249 @@ async fn a_fan_out_asks_each_members_view_and_a_refusing_view_is_a_failed_member
             hop.message["params"]["arguments"],
             json!({ "type": ["AirQualityObserved"] }),
             "the broker's form, no routing argument"
+        );
+    }
+}
+
+// --- T-4530: a server's `select`, `org/all` and the fan-out bound (ADR-N-043 §7, EP-120…EP-122) ---
+
+/// The gateway over `endpoints` with `servers` alone.
+fn serving(
+    broker: &str,
+    realm: &common::Realm,
+    endpoints: Vec<Endpoint>,
+    servers: Vec<McpServer>,
+) -> Router {
+    let gateway = Gateway::new(
+        Broker::new(broker),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(endpoints)
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    );
+    gateway.replace_servers(servers);
+    router(Arc::new(gateway))
+}
+
+/// The steward's five Endpoints of `app`: two granted, one granting nothing, one outside any
+/// member list, one public.
+fn five() -> Vec<Endpoint> {
+    let mut open = endpoint(OPEN, vec![grant("public", "queryEntity")]);
+    open.audience = Audience::Public;
+    vec![
+        endpoint(AIR, vec![grant("steward", "queryEntity")]),
+        endpoint(BIKES, vec![grant("steward", "queryEntity")]),
+        endpoint(CLOSED, vec![grant("auditor", "queryEntity")]),
+        endpoint(OUTSIDE, vec![grant("steward", "queryEntity")]),
+        open,
+    ]
+}
+
+fn selecting(name: &str, select: Value, audience: Audience) -> McpServer {
+    McpServer {
+        select: Some(serde_json::from_value(select).expect("a select")),
+        ..server(name, &[], audience)
+    }
+}
+
+async fn listed(app: &Router, path: &str, token: Option<&str>) -> (Vec<String>, String) {
+    let (status, _, body) = raw(
+        app.clone(),
+        post(path, token, call("list_endpoints", json!({}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    let names = answer["result"]["structuredContent"]["endpoints"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list: {answer}"))
+        .iter()
+        .map(|entry| entry["slug"].as_str().expect("a slug").to_owned())
+        .collect();
+    (names, body)
+}
+
+/// EP-120: a selector reaches the Endpoints the caller reads that it matches, never one the
+/// caller cannot read, and says nothing of the rest; `accessLevel` narrows it further.
+#[tokio::test]
+async fn a_selector_reaches_only_what_the_caller_reads() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = serving(
+        &broker.url,
+        &realm,
+        five(),
+        vec![
+            selecting(
+                "picked",
+                json!({ "projects": ["ovzdusie"] }),
+                Audience::Organization,
+            ),
+            selecting(
+                "open-only",
+                json!({ "accessLevel": ["public"] }),
+                Audience::Organization,
+            ),
+            selecting(
+                "elsewhere",
+                json!({ "projects": ["doprava"] }),
+                Audience::Organization,
+            ),
+        ],
+    );
+    let edge = token(&realm, json!("context-gateway"));
+
+    let (names, body) = listed(&app, "/api/mcp/ovzdusie/picked", Some(&edge)).await;
+    assert_eq!(names, [AIR, BIKES, OUTSIDE, OPEN]);
+    assert!(!body.contains(CLOSED), "{body}");
+    // Each selected Endpoint is one the steward reads at its own URL: the selector added none.
+    for slug in &names {
+        let own = format!("/api/endpoint/{slug}/mcp");
+        let (status, _) = send(
+            app.clone(),
+            post(&own, Some(&edge), call("list_types", json!({}))),
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{slug}");
+    }
+
+    let (names, _) = listed(&app, "/api/mcp/ovzdusie/open-only", Some(&edge)).await;
+    assert_eq!(names, [OPEN]);
+    let (names, _) = listed(&app, "/api/mcp/ovzdusie/elsewhere", Some(&edge)).await;
+    assert!(names.is_empty(), "{names:?}");
+}
+
+/// EP-120: a public server selects public Endpoints only, for a caller with a token too.
+#[tokio::test]
+async fn a_public_server_selects_public_endpoints_only() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = serving(
+        &broker.url,
+        &realm,
+        five(),
+        vec![selecting("everything", json!({}), Audience::Public)],
+    );
+    let edge = token(&realm, json!("context-gateway"));
+    for caller in [None, Some(edge.as_str())] {
+        let (names, body) = listed(&app, "/api/mcp/ovzdusie/everything", caller).await;
+        assert_eq!(names, [OPEN], "{body}");
+        for hidden in [AIR, BIKES, CLOSED, OUTSIDE] {
+            assert!(!body.contains(hidden), "{body}");
+        }
+    }
+}
+
+/// EP-121, EP-122: `org/all` is served without a manifest to an organization member and to
+/// nobody without a token; a read without `endpoint` over more than ten Endpoints is refused,
+/// pointing to list_endpoints and the catalogue, and one naming its Endpoint still answers.
+#[tokio::test]
+async fn org_all_is_served_and_a_fan_out_over_ten_is_refused() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let eleven: Vec<Endpoint> = (0..11)
+        .map(|i| {
+            let mut open = endpoint(
+                &format!("{:a<26}", format!("f{i:02}")),
+                vec![grant("steward", "queryEntity")],
+            );
+            open.audience = Audience::Organization;
+            open
+        })
+        .collect();
+    let first = eleven[0].slug.clone();
+    let app = serving(&broker.url, &realm, eleven, Vec::new());
+    let edge = token(&realm, json!("context-gateway"));
+
+    let (names, _) = listed(&app, "/api/mcp/org/all", Some(&edge)).await;
+    assert_eq!(names.len(), 11);
+    let (status, _) = send(
+        app.clone(),
+        post("/api/mcp/org/all", None, call("list_endpoints", json!({}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (_, answer) = send(
+        app.clone(),
+        post("/api/mcp/org/all", Some(&edge), every_station()),
+    )
+    .await;
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    let text = answer["result"]["content"][0]["text"]
+        .as_str()
+        .expect("a sentence");
+    assert!(
+        text.contains("11 Endpoints")
+            && text.contains("list_endpoints")
+            && text.contains("`catalog`"),
+        "{text}"
+    );
+
+    let one = call(
+        "query_entities",
+        json!({ "endpoint": first, "type": ["AirQualityObserved"] }),
+    );
+    let (_, answer) = send(app.clone(), post("/api/mcp/org/all", Some(&edge), one)).await;
+    assert_ne!(answer["result"]["isError"], true, "{answer}");
+    // Another organization server keeps its own name: org/all is the fallback, not a prefix.
+    let (status, _) = send(
+        app,
+        post(
+            "/api/mcp/org/everything",
+            Some(&edge),
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// EP-121: resolving a selector over 10,000 Endpoints, timed for the task (T-4530):
+/// `cargo test --release -p context-gateway --test mcp_server_tests ten_thousand -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "a timing, run by hand in release"]
+async fn ten_thousand_endpoints_resolve_a_selector() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let endpoints: Vec<Endpoint> = (0..10_000)
+        .map(|i| {
+            let mut one = endpoint(&format!("{i:a>26}"), vec![grant("steward", "queryEntity")]);
+            one.space = format!("space-{}", i % 100);
+            one
+        })
+        .collect();
+    let app = serving(
+        &broker.url,
+        &realm,
+        endpoints,
+        vec![selecting(
+            "tenth",
+            json!({ "spaces": (0..10).map(|i| format!("ovzdusie/space-{i}")).collect::<Vec<_>>() }),
+            Audience::Organization,
+        )],
+    );
+    let edge = token(&realm, json!("context-gateway"));
+    for (path, want) in [
+        ("/api/mcp/org/all", 10_000),
+        ("/api/mcp/ovzdusie/tenth", 1_000),
+    ] {
+        let mut took = Vec::new();
+        for _ in 0..21 {
+            let started = std::time::Instant::now();
+            let (_, body) = listed(&app, path, Some(&edge)).await;
+            took.push(started.elapsed());
+            let answer: Value = serde_json::from_str(&body).expect("json");
+            assert_eq!(answer["result"]["structuredContent"]["total"], want);
+        }
+        took.sort();
+        println!(
+            "{path}: list_endpoints p50 {:?}, p95 {:?}",
+            took[10], took[19]
         );
     }
 }

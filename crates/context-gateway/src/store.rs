@@ -306,6 +306,7 @@ pub fn servers_of(repo: &Repository) -> McpServers {
             description: text("description"),
             name: id.name.clone(),
             members,
+            select: spec.select,
             audience: spec.audience,
             allowed_projects: spec.allowed_projects,
             project,

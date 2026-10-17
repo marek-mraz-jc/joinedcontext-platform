@@ -542,6 +542,7 @@ async fn gateway(realm: &common::Realm, view: &str) -> axum::Router {
         title: None,
         description: None,
         members: vec![SLUG.to_owned()],
+        select: None,
         audience: Audience::ProjectList,
         allowed_projects: Vec::new(),
     }]);

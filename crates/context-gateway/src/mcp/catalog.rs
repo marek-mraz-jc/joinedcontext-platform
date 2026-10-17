@@ -86,7 +86,7 @@ fn is_catalog_space(endpoint: &Endpoint) -> bool {
 }
 
 /// Why the caller sees an Endpoint it reaches.
-fn because(endpoint: &Endpoint, subject: &Subject) -> &'static str {
+pub(crate) fn because(endpoint: &Endpoint, subject: &Subject) -> &'static str {
     match endpoint.audience {
         Audience::Public => "public",
         _ if subject.service_account.is_some() => "grant",

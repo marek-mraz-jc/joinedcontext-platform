@@ -139,6 +139,7 @@ fn gateway(broker: &str, realm: &common::Realm) -> Gateway {
         title: Some("Open data".to_owned()),
         description: None,
         members: vec![OPEN.to_owned()],
+        select: None,
         audience: Audience::Public,
         allowed_projects: Vec::new(),
     }]);
