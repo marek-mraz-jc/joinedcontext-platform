@@ -446,7 +446,7 @@
     },
     "ModelChoice": {
       "additionalProperties": false,
-      "description": "The models a deployment asks `jc-agent-proxy` for; each [`DEFAULT_MODEL`] when absent.",
+      "description": "The models a deployment names for `jc-agent-proxy` (MF-52): the router and answer calls.",
       "properties": {
         "answer": {
           "description": "The model that writes the answer, `vendor/name`.",
