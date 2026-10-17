@@ -7,7 +7,8 @@
 //! ```
 //!
 //! It prints one line of `key=value` wall times in milliseconds: the store load, the reaper's
-//! idle tick and its tick after one Policy changes, a slug lookup in microseconds, and
+//! idle tick (and the files it statted) and its tick after one project is relinked to a commit
+//! that changes one Policy, a slug lookup in microseconds, and
 //! `jcctl validate` over the tree; then the peak RSS in MiB. Not a CI gate.
 
 use context_gateway::app::Gateway;
@@ -41,6 +42,22 @@ fn main() {
         .unwrap_or(100);
     let root = std::env::temp_dir().join(format!("jc-scale-bench-{n}-{}", std::process::id()));
     let tree = jcctl::bench_org::write(&root, n).expect("the tree is written");
+    // The shape `jcctl checkouts` leaves in production: each project a link to a tree named by
+    // its commit under `.cache` (T-4444).
+    let cache = tree.projects.join(".cache");
+    std::fs::create_dir_all(&cache).expect("the cache");
+    for project in std::fs::read_dir(&tree.projects)
+        .expect("the checkouts")
+        .flatten()
+    {
+        let name = project.file_name().into_string().expect("a name");
+        if name.starts_with('.') {
+            continue;
+        }
+        std::fs::rename(project.path(), cache.join(format!("{name}.tree-c1"))).expect("moved");
+        std::os::unix::fs::symlink(format!(".cache/{name}.tree-c1"), project.path())
+            .expect("linked");
+    }
     let checkouts = Checkouts {
         projects: tree.projects.clone(),
         assembly: root.join("assembly"),
@@ -72,15 +89,26 @@ fn main() {
     }
     idle.sort_by(f64::total_cmp);
 
-    let policy = tree
-        .projects
-        .join("p0000/spaces/s00000/policies/r00000.yaml");
+    let idle_files = reaper.files_walked();
+
+    // The next commit of p0000 changes one Policy and is linked in by one rename.
+    let next = cache.join("p0000.tree-c2");
+    std::process::Command::new("cp")
+        .arg("-r")
+        .arg(cache.join("p0000.tree-c1"))
+        .arg(&next)
+        .status()
+        .expect("the next commit");
+    let policy = next.join("spaces/s00000/policies/r00000.yaml");
     let text = std::fs::read_to_string(&policy).expect("the policy");
     std::fs::write(
         &policy,
         text.replace("[retrieveOps]", "[retrieveOps, queryEntity]"),
     )
     .expect("the policy changes");
+    let link = tree.projects.join(".p0000.link");
+    std::os::unix::fs::symlink(".cache/p0000.tree-c2", &link).expect("the next link");
+    std::fs::rename(&link, tree.projects.join("p0000")).expect("relinked");
     let started = Instant::now();
     assert!(reaper.tick(), "the policy changed");
     let changed = ms(started);
@@ -99,6 +127,7 @@ fn main() {
             .expect("the checkouts")
             .flatten()
             .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path())))
+            .filter(|(name, _)| !name.starts_with('.'))
             .collect(),
     );
     let started = Instant::now();
@@ -107,7 +136,7 @@ fn main() {
     assert!(report.is_valid(), "{:?}", report.findings.first());
 
     println!(
-        "endpoints={n} load_ms={load:.1} idle_tick_ms={:.2} policy_tick_ms={changed:.1} \
+        "endpoints={n} load_ms={load:.1} idle_tick_ms={:.3} idle_files={idle_files} policy_tick_ms={changed:.1} \
          resolve_us={resolve_us:.3} validate_ms={validate:.1} peak_mib={:.0}",
         idle[idle.len() / 2],
         peak_mib()

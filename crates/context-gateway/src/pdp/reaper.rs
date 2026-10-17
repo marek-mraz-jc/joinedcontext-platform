@@ -34,6 +34,7 @@ pub struct Reaper {
     checkouts: Option<store::Checkouts>,
     previews: Option<PathBuf>,
     seen: Option<Fingerprint>,
+    walked: usize,
 }
 
 /// What "the repository changed" means without reading every file: the set of manifest
@@ -43,19 +44,27 @@ pub struct Reaper {
 /// not record (same size, same mtime, different bytes) is not distinguished — a rewrite
 /// that fine-grained is a `touch` away from being seen, and the alternative is hashing
 /// every file every second for a case the reconciler does not produce.
+///
+/// A tree linked in by commit is its link instead (T-4444): git-sync's `current` and each
+/// `{projects}/{slug}` of `jcctl checkouts` point at a directory named by its commit, written
+/// once and swapped in by one rename, so the link's target says all its files would. At
+/// 10,000 Endpoints the walk statted some 31,000 files a second; the links are a hundred reads.
 type Fingerprint = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
 
 impl Reaper {
     /// A reaper for the repository the gateway was loaded from.
     pub fn new(gateway: Arc<Gateway>, dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
-        Self {
-            seen: fingerprint(&dir),
+        let mut reaper = Self {
+            seen: None,
             gateway,
             dir,
             checkouts: None,
             previews: None,
-        }
+            walked: 0,
+        };
+        reaper.seen = reaper.fingerprint();
+        reaper
     }
 
     /// Follows the project checkouts of a layout 2 organization too: a project added to or
@@ -153,14 +162,28 @@ impl Reaper {
         }
     }
 
+    /// The files the last fingerprint statted one by one: what an idle tick costs (T-4444).
+    pub fn files_walked(&self) -> usize {
+        self.walked
+    }
+
     /// The organization's fingerprint, then the project checkouts', then the previews'.
-    fn fingerprint(&self) -> Option<Fingerprint> {
-        let projects = self.checkouts.as_ref().map(|c| c.projects.as_path());
-        let mut all = fingerprint(&self.dir)?;
-        for more in [projects, self.previews.as_deref()] {
-            if let Some(more) = more.and_then(fingerprint) {
+    fn fingerprint(&mut self) -> Option<Fingerprint> {
+        self.walked = 0;
+        let mut all = linked(&self.dir)
+            .map(|link| vec![link])
+            .or_else(|| fingerprint(&self.dir, &mut self.walked))?;
+        if let Some(projects) = self.checkouts.as_ref().map(|c| c.projects.clone()) {
+            if let Some(more) = checkouts(&projects, &mut self.walked) {
                 all.extend(more);
             }
+        }
+        if let Some(more) = self
+            .previews
+            .clone()
+            .and_then(|dir| fingerprint(&dir, &mut self.walked))
+        {
+            all.extend(more);
         }
         Some(all)
     }
@@ -176,10 +199,39 @@ impl Reaper {
     }
 }
 
+/// `dir` as the commit it links to, when it is a link: a tree swapped in whole (git-sync's
+/// `current`), never written in place.
+fn linked(dir: &Path) -> Option<(PathBuf, u64, Option<std::time::SystemTime>)> {
+    let target = std::fs::read_link(dir).ok()?;
+    Some((dir.join(target), 0, None))
+}
+
+/// The project checkouts under `projects`: each `{slug}` link by its target, and a project
+/// directory that is not a link (a test, a hand-made tree) walked file by file.
+fn checkouts(projects: &Path, walked: &mut usize) -> Option<Fingerprint> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(projects).ok()?.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with('.'))
+        {
+            continue;
+        }
+        let path = entry.path();
+        match linked(&path) {
+            Some(link) => out.push(link),
+            None => out.extend(fingerprint(&path, walked).unwrap_or_default()),
+        }
+    }
+    out.sort();
+    Some(out)
+}
+
 /// The manifest files under `dir` with their sizes and modification times, or `None` when
 /// the directory cannot be read at all. Checkouts or previews that cannot be read count as
 /// none, so the organization alone still reloads.
-fn fingerprint(dir: &Path) -> Option<Fingerprint> {
+fn fingerprint(dir: &Path, walked: &mut usize) -> Option<Fingerprint> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
@@ -198,6 +250,7 @@ fn fingerprint(dir: &Path) -> Option<Fingerprint> {
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
+            *walked += 1;
             if meta.is_dir() {
                 stack.push(path);
             } else {
