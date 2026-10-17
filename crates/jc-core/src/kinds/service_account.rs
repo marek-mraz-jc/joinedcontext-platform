@@ -488,15 +488,6 @@ impl ServiceAccountSpec {
         Ok(())
     }
 
-    /// The public keys a device signs in with, when one `oauth-client` credential declares them
-    /// (PF-47, T-4015); the first such credential wins, `validate` having refused a mixed one.
-    pub fn device_keys(&self) -> Option<&Jwks> {
-        self.credentials
-            .iter()
-            .filter(|c| c.kind == CredentialKind::OauthClient)
-            .find_map(|c| c.jwks.as_ref())
-    }
-
     /// Returns `true` if this service account registers any credential of kind [`CredentialKind::ApiKey`] (PF-37).
     pub fn has_api_key(&self) -> bool {
         self.credentials
