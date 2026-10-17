@@ -353,6 +353,15 @@ fn check(repo_dir: &Path, organization: bool) -> Report {
         });
     }
 
+    for (location, message) in replacing_shared_writes(&repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in stale_projections(repo_dir, &repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -916,6 +925,53 @@ fn dangling_data_sources(repo: &Repository) -> Vec<(String, Location, String)> {
         }
     }
     dangling
+}
+
+/// Every Pipeline output in `replace` into a space and type another Pipeline of its project also
+/// writes (PL-79, T-4408), on the replacing Pipeline. The Portal refuses the same proposal through
+/// the same jc-core rule. A Pipeline or Endpoint that does not parse is reported on its own.
+fn replacing_shared_writes(repo: &Repository) -> Vec<(Location, String)> {
+    use jc_core::kinds::{replace_conflicts, EndpointSpec, PipelineSpec};
+    let mut spaces: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut pipelines: BTreeMap<String, Vec<(String, PipelineSpec, Location)>> = BTreeMap::new();
+    for (id, resource) in repo.iter() {
+        let project = id.namespace.clone().unwrap_or_default();
+        let spec = resource.manifest.spec.clone();
+        match id.kind.as_str() {
+            "Endpoint" => {
+                if let Ok(spec) = serde_json::from_value::<EndpointSpec>(spec) {
+                    spaces.insert(
+                        (project, id.name.clone()),
+                        spec.context_space_ref.name().to_owned(),
+                    );
+                }
+            }
+            "Pipeline" => {
+                if let Ok(spec) = serde_json::from_value::<PipelineSpec>(spec) {
+                    let location = (resource.path.clone(), resource.document, resource.line);
+                    pipelines
+                        .entry(project)
+                        .or_default()
+                        .push((id.name.clone(), spec, location));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for (project, members) in &pipelines {
+        let specs: Vec<(&str, &PipelineSpec)> =
+            members.iter().map(|(n, s, _)| (n.as_str(), s)).collect();
+        let conflicts = replace_conflicts(&specs, |endpoint| {
+            spaces.get(&(project.clone(), endpoint.to_owned())).cloned()
+        });
+        for conflict in conflicts {
+            if let Some((_, _, location)) = members.iter().find(|(n, ..)| *n == conflict.pipeline) {
+                found.push((location.clone(), conflict.to_string()));
+            }
+        }
+    }
+    found
 }
 
 /// The knowledge assistant's references, each resolved inside its own project (MF-51, MF-52): a

@@ -354,3 +354,35 @@ fn a_pipeline_may_not_take_the_harness_name() {
     near.metadata.name = "pipeline-tests".to_owned();
     near.validate().expect("a name beside it");
 }
+
+/// PL-79, T-4408: an output that names no type writes every type of its space, so a replace
+/// beside it conflicts whatever its own type; a write into another space never does.
+#[test]
+fn a_replace_meets_every_output_into_its_space_that_names_no_type() {
+    let pipeline = |name: &str, endpoint: &str, output: &str| {
+        Pipeline::from_yaml(&format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata:\n  name: {name}\n  namespace: p\nspec:\n  class: scheduled\n  schedule: \"0 * * * *\"\n  source:\n    dataSourceRef: feed\n  targetEndpoint: urn:ngsi-ld:Endpoint:example.org:s:{endpoint}\n{output}"
+        ))
+        .expect("parses")
+    };
+    let replace = pipeline("a", "ep", "  output:\n    type: T\n    mode: replace\n");
+    let untyped = pipeline("b", "ep", "");
+    let elsewhere = pipeline("c", "other", "  output:\n    type: T\n    mode: upsert\n");
+    let space = |endpoint: &str| Some(if endpoint == "ep" { "s" } else { "s2" }.to_owned());
+    let specs = [
+        ("a", &replace.spec),
+        ("b", &untyped.spec),
+        ("c", &elsewhere.spec),
+    ];
+    let conflicts = jc_core::kinds::replace_conflicts(&specs, space);
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    assert_eq!(
+        (conflicts[0].pipeline.as_str(), conflicts[0].others.clone()),
+        ("a", vec!["b".to_owned()])
+    );
+    assert!(conflicts[0].to_string().contains("PL-79"));
+    assert!(
+        jc_core::kinds::replace_conflicts(&specs[..1], space).is_empty(),
+        "a replace alone is valid"
+    );
+}

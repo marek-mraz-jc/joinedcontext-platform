@@ -1540,3 +1540,128 @@ fn an_assistant_reads_another_projects_declared_public_source_only() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A scheduled Pipeline `name` of project ovzdusie writing `entity_type` through Endpoint
+/// `endpoint` in `mode`.
+fn writer(dir: &Path, name: &str, endpoint: &str, entity_type: &str, mode: &str) {
+    data_source(dir, "ovzdusie", "feed");
+    write(
+        dir,
+        &format!("projects/ovzdusie/pipelines/{name}/pipeline.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Pipeline\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  class: scheduled\n  schedule: \"0 * * * *\"\n  source:\n    dataSourceRef: feed\n  targetEndpoint: urn:ngsi-ld:Endpoint:banskabystrica.sk:ovzdusie:{endpoint}\n  output:\n    type: {entity_type}\n    mode: {mode}\n"
+        ),
+    );
+}
+
+/// A second space `verejne` with its Endpoint `verejne-air`.
+fn second_space(dir: &Path) {
+    write(
+        dir,
+        "projects/ovzdusie/spaces/verejne/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: verejne\n  namespace: ovzdusie\nspec:\n  isSandbox: false\n",
+    );
+    write(
+        dir,
+        "projects/ovzdusie/spaces/verejne/endpoints/verejne-air.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: verejne-air\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: verejne\n  slug: k4qm7ge2xdv6ksb3ncf5arw2yz\n  audience: public\n  enabledRepresentations: [\"ngsi-ld\"]\n",
+    );
+}
+
+fn with_pl79(report: &validate::Report) -> Vec<&str> {
+    report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("PL-79"))
+        .map(|f| f.message.as_str())
+        .collect()
+}
+
+/// PL-79, T-4408: a Pipeline in replace drops what another Pipeline writes into the same space
+/// and type, at each of its runs, so the pair is refused on the replacing one, naming both.
+#[test]
+fn a_replace_into_a_type_another_pipeline_writes_is_refused_naming_both() {
+    let dir = valid_repo("pl79-refused");
+    writer(
+        &dir,
+        "stations",
+        "public-air",
+        "AirQualityObserved",
+        "replace",
+    );
+    writer(&dir, "enrich", "public-air", "AirQualityObserved", "upsert");
+
+    let report = validate::run(&dir);
+    let found = with_pl79(&report);
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(
+        found[0].contains("Pipeline stations") && found[0].contains("Pipeline enrich"),
+        "{}",
+        found[0]
+    );
+    assert!(
+        found[0].contains("space ovzdusie") && found[0].contains("AirQualityObserved"),
+        "{}",
+        found[0]
+    );
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.message.contains("PL-79"))
+        .expect("finding");
+    assert_eq!(
+        finding.path,
+        PathBuf::from("projects/ovzdusie/pipelines/stations/pipeline.yaml")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn two_upserts_into_one_type_and_a_replace_alone_are_valid() {
+    let dir = valid_repo("pl79-upserts");
+    writer(
+        &dir,
+        "stations",
+        "public-air",
+        "AirQualityObserved",
+        "upsert",
+    );
+    writer(&dir, "enrich", "public-air", "AirQualityObserved", "upsert");
+    writer(&dir, "weather", "public-air", "WeatherObserved", "replace");
+
+    let report = validate::run(&dir);
+    assert_eq!(
+        with_pl79(&report),
+        Vec::<&str>::new(),
+        "{:?}",
+        report.findings
+    );
+    assert_eq!(report.findings, vec![]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_replace_into_the_same_type_of_another_space_is_valid() {
+    let dir = valid_repo("pl79-spaces");
+    second_space(&dir);
+    writer(
+        &dir,
+        "stations",
+        "public-air",
+        "AirQualityObserved",
+        "replace",
+    );
+    writer(&dir, "copy", "verejne-air", "AirQualityObserved", "replace");
+
+    let report = validate::run(&dir);
+    assert_eq!(
+        with_pl79(&report),
+        Vec::<&str>::new(),
+        "{:?}",
+        report.findings
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

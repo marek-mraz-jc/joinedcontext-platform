@@ -553,6 +553,85 @@ impl fmt::Display for OutputMode {
     }
 }
 
+/// A Pipeline output in `replace` whose space and entity type another Pipeline of the project
+/// also writes (PL-79, T-4408): each of its runs would drop every attribute the others wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceConflict {
+    /// The Pipeline whose output says `mode: replace`.
+    pub pipeline: String,
+    /// The space that output writes into.
+    pub space: String,
+    /// The entity type it writes; `None` is every type of the space.
+    pub entity_type: Option<String>,
+    /// The other Pipelines writing the same space and type, in name order.
+    pub others: Vec<String>,
+}
+
+impl fmt::Display for ReplaceConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let what = self
+            .entity_type
+            .as_deref()
+            .map_or_else(|| "every type".to_owned(), |t| format!("type {t}"));
+        write!(
+            f,
+            "Pipeline {} writes {what} into space {} with mode replace, which Pipeline {} also \
+             writes there: each replace would drop the attributes the other wrote. Only a \
+             pipeline that alone writes its entities may replace them; write upsert (PL-79)",
+            self.pipeline,
+            self.space,
+            self.others.join(", ")
+        )
+    }
+}
+
+/// Every [`ReplaceConflict`] among `pipelines`, the (name, spec) of every Pipeline of one
+/// project. `space_of_endpoint` answers the space an Endpoint of the project serves, by the
+/// Endpoint's name; an output through an Endpoint it does not know is judged by nothing here.
+/// An output that names no type writes every type of its space, so it meets every other output
+/// into that space.
+pub fn replace_conflicts(
+    pipelines: &[(&str, &PipelineSpec)],
+    space_of_endpoint: impl Fn(&str) -> Option<String>,
+) -> Vec<ReplaceConflict> {
+    let writes: Vec<(&str, String, Option<String>, Option<OutputMode>)> = pipelines
+        .iter()
+        .flat_map(|(name, spec)| {
+            spec.outputs().into_iter().filter_map(|output| {
+                let space = space_of_endpoint(output.target_endpoint.local_id())?;
+                Some((*name, space, output.entity_type, output.mode))
+            })
+        })
+        .collect();
+    let mut conflicts: Vec<ReplaceConflict> = Vec::new();
+    for (name, space, entity_type, mode) in &writes {
+        if *mode != Some(OutputMode::Replace) {
+            continue;
+        }
+        let mut others: Vec<String> = writes
+            .iter()
+            .filter(|(other, other_space, other_type, _)| {
+                other != name
+                    && other_space == space
+                    && (entity_type.is_none() || other_type.is_none() || other_type == entity_type)
+            })
+            .map(|(other, ..)| (*other).to_owned())
+            .collect();
+        others.sort();
+        others.dedup();
+        let conflict = ReplaceConflict {
+            pipeline: (*name).to_owned(),
+            space: space.clone(),
+            entity_type: entity_type.clone(),
+            others,
+        };
+        if !conflict.others.is_empty() && !conflicts.contains(&conflict) {
+            conflicts.push(conflict);
+        }
+    }
+    conflicts
+}
+
 /// One step of a `v1alpha2` pipeline (PL-52): a compute kind of PL-33, or one processor the
 /// pinned runner ships, its configuration verbatim in the processor's own field names.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
