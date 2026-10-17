@@ -18,7 +18,6 @@ axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 http-body-util = "0.1"
-hyper = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
 regex = "1"
