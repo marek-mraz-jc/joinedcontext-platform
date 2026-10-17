@@ -20,14 +20,35 @@ use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::sync::Arc;
 
-/// The catalogue of what this endpoint publishes about its data (T-0162, EP-46).
+/// The catalogue of what this endpoint publishes about its data (T-0162, EP-46), linking the
+/// Mappings index of every major that publishes one (EP-53).
 pub(crate) async fn schema_index(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
     request: Request,
 ) -> Response<Body> {
-    endpoint_schema(&gateway, &slug, request).await
+    let mut response = endpoint_schema(&gateway, &slug, request).await;
+    if response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED {
+        let majors: std::collections::BTreeSet<u32> = gateway
+            .mappings(&slug)
+            .iter()
+            .map(|mapping| mapping.major)
+            .collect();
+        for major in majors {
+            let link =
+                format!("</api/endpoint/{slug}/schema/v{major}/mappings/>; rel=\"{MAPPINGS_REL}\"");
+            if let Ok(value) = HeaderValue::from_str(&link) {
+                response
+                    .headers_mut()
+                    .append(axum::http::header::LINK, value);
+            }
+        }
+    }
+    response
 }
+
+/// The relation of a schema index to a major's Mappings index (API/02 §7a).
+pub const MAPPINGS_REL: &str = "https://joinedcontext.com/rel/mappings";
 
 /// The same catalogue under the space prefix, which SP-04 makes a child of every space.
 pub(crate) async fn space_schema_index(
@@ -228,7 +249,11 @@ pub(crate) fn revalidated(
 }
 
 /// The same, for a document that is already the bytes the caller receives (T-0284).
-fn revalidated_text(bytes: Vec<u8>, media_type: &str, headers: &HeaderMap) -> Response<Body> {
+pub(crate) fn revalidated_text(
+    bytes: Vec<u8>,
+    media_type: &str,
+    headers: &HeaderMap,
+) -> Response<Body> {
     let etag = format!("\"{}\"", sha256_hex(&bytes));
 
     let mut response = if matches_etag(headers, &etag) {

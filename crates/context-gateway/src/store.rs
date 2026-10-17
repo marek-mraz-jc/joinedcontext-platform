@@ -37,6 +37,7 @@ pub type Tables = (
     McpServers,
     SpaceBrokers,
     crate::mqtt::Brokers,
+    crate::handlers::mappings::Mappings,
 );
 
 /// The broker each space lives on, by its tenant segment, and each view, by its name: an
@@ -239,6 +240,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
     let models = ModelSet::of(repo, Some(root));
     let endpoints = endpoints_from(repo, Some(root), &models);
     let homes = brokers_of(repo, &endpoints);
+    let mappings = mappings_of(repo, Some(root), &endpoints);
     (
         endpoints,
         spaces_from(repo, &models),
@@ -249,6 +251,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         servers_of(repo),
         homes,
         crate::mqtt::brokers_of(repo),
+        mappings,
     )
 }
 
@@ -330,6 +333,7 @@ pub fn load_with_previews(
         servers,
         homes,
         brokers,
+        mappings,
     ) = load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -375,6 +379,8 @@ pub fn load_with_previews(
         servers,
         homes,
         brokers,
+        // A preview's Mappings are not approved, so none is published (EP-53).
+        mappings,
     ))
 }
 
@@ -515,6 +521,62 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
         });
     }
     endpoints
+}
+
+/// The Mappings each Endpoint publishes beside its model, by slug (EP-53): those of its project
+/// and space whose source is a model it serves, at that major, with both compiled artifacts
+/// committed beside them. One that may not be published ([`PublishedMapping::of`]) is left out
+/// with a line in the log.
+pub fn mappings_of(
+    repo: &Repository,
+    root: Option<&Path>,
+    endpoints: &[Endpoint],
+) -> crate::handlers::mappings::Mappings {
+    use crate::handlers::mappings::PublishedMapping;
+    let mut out = crate::handlers::mappings::Mappings::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "Mapping" {
+            continue;
+        }
+        let Some(spec) = spec_of::<MappingSpec>(&resource.manifest) else {
+            continue;
+        };
+        let read =
+            |relative: &Option<String>| beside_text(root, &resource.path, relative, &id.name);
+        let (Some(bloblang), Some(gateway_ir)) = (
+            read(&spec.artifacts.bloblang),
+            read(&spec.artifacts.gateway_ir),
+        ) else {
+            continue;
+        };
+        let title = resource
+            .manifest
+            .metadata
+            .rest
+            .get("title")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let Some(mapping) = PublishedMapping::of(&id.name, title, &spec, bloblang, gateway_ir)
+        else {
+            tracing::warn!(mapping = %id.name, "the mapping is not published: a native block, a secretRef or an unreadable derivation");
+            continue;
+        };
+        let project = id.namespace.clone().unwrap_or_default();
+        let space = repo.space_segment(&project, &spec.context_space_ref);
+        let mapping = Arc::new(mapping);
+        for endpoint in endpoints {
+            let serves_source = endpoint
+                .models
+                .iter()
+                .any(|model| model.name == mapping.source.0 && model.major == mapping.major);
+            if endpoint.project == project && endpoint.space == space && serves_source {
+                out.entry(endpoint.slug.clone())
+                    .or_default()
+                    .push(Arc::clone(&mapping));
+            }
+        }
+    }
+    out
 }
 
 /// Every `ModelProjection` of the repository, by project and name (MP-01).
@@ -908,6 +970,16 @@ fn beside(
     relative: &Option<String>,
     owner: &str,
 ) -> Option<serde_json::Value> {
+    serde_json::from_str(&beside_text(root, manifest_path, relative, owner)?).ok()
+}
+
+/// The text of the file `relative` names beside the manifest, inside the repository.
+fn beside_text(
+    root: Option<&Path>,
+    manifest_path: &Path,
+    relative: &Option<String>,
+    owner: &str,
+) -> Option<String> {
     let (root, relative) = (root?, relative.as_deref()?);
     let directory = manifest_path.parent().unwrap_or(Path::new(""));
     let path = normalize(&root.join(directory).join(relative))?;
@@ -916,7 +988,7 @@ fn beside(
         return None;
     }
     match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).ok(),
+        Ok(text) => Some(text),
         Err(error) => {
             tracing::warn!(owner, path = %path.display(), %error, "artifact not read");
             None

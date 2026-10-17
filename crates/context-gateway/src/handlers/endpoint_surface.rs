@@ -135,6 +135,12 @@ fn formalism(file_name: &str) -> Option<&'static str> {
         "model.owl.ttl" => Some("https://www.w3.org/TR/owl2-overview/"),
         "model.rdf.ttl" => Some("https://www.w3.org/TR/rdf11-concepts/"),
         "model.md" => Some("https://commonmark.org/"),
+        // A published Mapping's three files (EP-53).
+        name if name.ends_with(".linkml-map.yaml") => Some("https://w3id.org/linkml/mapper/"),
+        name if name.ends_with(".blobl") => {
+            Some("https://warpstreamlabs.github.io/bento/docs/guides/bloblang/about")
+        }
+        name if name.ends_with(".ir.json") => Some("https://joinedcontext.com/ns/mapping-ir"),
         _ => None,
     }
 }
@@ -333,16 +339,23 @@ fn explain_websocket(distribution: &mut Value, endpoint: &Endpoint, url: &str, b
     distribution["dct:conformsTo"] = json!(guide);
 }
 
-/// One distribution per schema artifact, with the digest of the projected document (EP-68).
+/// One distribution per schema artifact, with the digest of the projected document (EP-68),
+/// and one per file of every Mapping the caller may read (EP-53), from the index's `mappings`.
 ///
 /// `index` is the schema catalogue the endpoint already serves, so the digests here and the
 /// ones under `schema/index.json` are the same numbers computed once.
 fn schema_distributions(endpoint: &Endpoint, index: &Value, iri: &str) -> Vec<Value> {
     let mut out = Vec::new();
-    let Some(models) = index.get("models").and_then(Value::as_array) else {
-        return out;
+    let listed = |key| {
+        index
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
     };
-    for model in models {
+    let models = listed("models").map(|model| (model, ""));
+    let mappings = listed("mappings").map(|mapping| (mapping, "mappings/"));
+    for (model, folder) in models.chain(mappings) {
         let Some(major) = crate::handlers::schema_routes::major_of(model) else {
             continue;
         };
@@ -350,7 +363,7 @@ fn schema_distributions(endpoint: &Endpoint, index: &Value, iri: &str) -> Vec<Va
             continue;
         };
         for (file_name, descriptor) in artifacts {
-            let url = format!("{iri}/schema/v{major}/{file_name}");
+            let url = format!("{iri}/schema/v{major}/{folder}{file_name}");
             let mut distribution = json!({
                 "@id": url,
                 "@type": "dcat:Distribution",

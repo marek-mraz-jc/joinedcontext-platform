@@ -696,6 +696,58 @@ fn every_schema_artifact_the_record_lists_becomes_its_own_resource() {
     );
 }
 
+/// EP-53, EP-68 (T-4419): the files of a Mapping the Endpoint publishes become resources of
+/// their own, labelled by what they are and carrying the digest the record declares.
+#[test]
+fn the_published_mappings_files_become_resources_of_their_own() {
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    let mut record = record_with_schema();
+    let listed = record["dcat:distribution"]
+        .as_array_mut()
+        .expect("distributions");
+    for (file, media_type, digest) in [
+        ("air-to-sdm.linkml-map.yaml", "text/yaml", "m1"),
+        ("air-to-sdm.blobl", "text/plain", "m2"),
+        ("air-to-sdm.ir.json", "application/json", "m3"),
+    ] {
+        listed.push(json!({
+            "@type": "dcat:Distribution",
+            "dct:title": format!("air-to-sdm {file}"),
+            "dcat:accessURL": format!("{base}/schema/v2/mappings/{file}"),
+            "dcat:mediaType": media_type,
+            "spdx:checksum": { "@type": "spdx:Checksum", "spdx:checksumValue": digest }
+        }));
+    }
+    let dataset = package(
+        &endpoint("[ngsi-ld]", PUBLISH),
+        &instance(),
+        &record,
+        &settings(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+
+    for (file, format, digest) in [
+        ("air-to-sdm.linkml-map.yaml", "LinkML-Map", "m1"),
+        ("air-to-sdm.blobl", "Bloblang", "m2"),
+        ("air-to-sdm.ir.json", "Mapping IR", "m3"),
+    ] {
+        let found = resource(&dataset, &format!("/schema/v2/mappings/{file}"));
+        assert_eq!(found["format"], json!(format), "{file}");
+        assert_eq!(found["hash"], json!(digest), "{file}");
+        let description = found["description"].as_str().expect("a description");
+        assert!(
+            description.starts_with("A mapping of the data model"),
+            "{description}"
+        );
+    }
+    // The model's own artifacts keep their wording.
+    let shapes = resource(&dataset, "model.shacl.ttl");
+    assert!(shapes["description"]
+        .as_str()
+        .is_some_and(|d| d.starts_with("The data model as SHACL")));
+}
+
 /// EP-68: a model regenerated under the same file names is drift, not a converged run.
 #[test]
 fn a_new_digest_under_the_same_file_name_updates_the_dataset() {

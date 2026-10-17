@@ -55,38 +55,49 @@ async fn main() -> ExitCode {
             projects,
             assembly: config.assembly_dir.clone(),
         });
-    let (endpoints, spaces, accounts, federations, agreements, limits, servers, homes, brokers) =
-        match &config.repo_dir {
-            None => (
-                Vec::new(),
-                Vec::new(),
-                context_gateway::auth::accounts::ServiceAccounts::new(),
-                context_gateway::federation::Federations::new(),
-                context_gateway::auth::dataspace_token::Agreements::new(),
-                store::Limits::default(),
-                Vec::new(),
-                store::SpaceBrokers::default(),
-                context_gateway::mqtt::Brokers::new(),
-            ),
-            Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
-                Ok(loaded) => {
-                    tracing::info!(
-                        endpoints = loaded.0.len(),
-                        spaces = loaded.1.len(),
-                        accounts = loaded.2.len(),
-                        dir = %dir.display(),
-                        "repository loaded"
-                    );
-                    loaded
-                }
-                Err(error) => {
-                    // An unreadable repository is a deployment fault, not a request fault:
-                    // serving an empty table would answer 404 for endpoints that exist.
-                    tracing::error!(%error, dir = %dir.display(), "cannot read the manifest repository");
-                    return ExitCode::FAILURE;
-                }
-            },
-        };
+    let (
+        endpoints,
+        spaces,
+        accounts,
+        federations,
+        agreements,
+        limits,
+        servers,
+        homes,
+        brokers,
+        mappings,
+    ) = match &config.repo_dir {
+        None => (
+            Vec::new(),
+            Vec::new(),
+            context_gateway::auth::accounts::ServiceAccounts::new(),
+            context_gateway::federation::Federations::new(),
+            context_gateway::auth::dataspace_token::Agreements::new(),
+            store::Limits::default(),
+            Vec::new(),
+            store::SpaceBrokers::default(),
+            context_gateway::mqtt::Brokers::new(),
+            Default::default(),
+        ),
+        Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
+            Ok(loaded) => {
+                tracing::info!(
+                    endpoints = loaded.0.len(),
+                    spaces = loaded.1.len(),
+                    accounts = loaded.2.len(),
+                    dir = %dir.display(),
+                    "repository loaded"
+                );
+                loaded
+            }
+            Err(error) => {
+                // An unreadable repository is a deployment fault, not a request fault:
+                // serving an empty table would answer 404 for endpoints that exist.
+                tracing::error!(%error, dir = %dir.display(), "cannot read the manifest repository");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone())
         .budget_writes(config.write_budget_mib);
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
@@ -94,6 +105,7 @@ async fn main() -> ExitCode {
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
     gateway.replace_servers(servers);
+    gateway.replace_mappings(mappings);
     gateway.broker.route(&homes);
     gateway.replace_brokers(brokers);
 
