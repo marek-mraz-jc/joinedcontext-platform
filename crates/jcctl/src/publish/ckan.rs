@@ -614,10 +614,18 @@ fn schema_resources(record: &Value) -> Vec<Value> {
                 .as_str()?;
             let url = distribution.get("dcat:accessURL")?.as_str()?;
             let format = format_of(url);
+            // A published Mapping's file sits under `schema/v{n}/mappings/` (EP-53).
+            let description = if url.contains("/mappings/") {
+                format!(
+                    "A mapping of the data model to another model, as {format}; sha256 {sha256}."
+                )
+            } else {
+                format!("The data model as {format}; sha256 {sha256}.")
+            };
             let mut resource = json!({
                 "name": text(distribution.get("dct:title")).unwrap_or_else(|| url.to_owned()),
                 "url": url,
-                "description": format!("The data model as {format}; sha256 {sha256}."),
+                "description": description,
                 "format": format,
                 "hash": sha256,
                 "hash_algorithm": "sha256",
@@ -650,6 +658,9 @@ fn format_of(url: &str) -> String {
         "model.owl.ttl" => "OWL",
         "model.rdf.ttl" => "RDF",
         "model.md" => "Markdown",
+        name if name.ends_with(".linkml-map.yaml") => "LinkML-Map",
+        name if name.ends_with(".blobl") => "Bloblang",
+        name if name.ends_with(".ir.json") => "Mapping IR",
         _ => return file_name.rsplit('.').next().unwrap_or("").to_uppercase(),
     }
     .to_owned()

@@ -110,6 +110,8 @@ pub struct Gateway {
     agreements: ArcSwap<Agreements>,
     /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
     servers: ArcSwap<crate::mcp::server::McpServers>,
+    /// The Mappings each Endpoint publishes beside its model, by slug (EP-53).
+    mappings: ArcSwap<crate::handlers::mappings::Mappings>,
     /// The MQTT edge brokers, swapped whole with the rest (ADR-N-048, PL-75).
     brokers: ArcSwap<crate::mqtt::Brokers>,
     /// The gateway's public base URL, when the deployment names one.
@@ -195,6 +197,7 @@ impl Gateway {
             federation: ArcSwap::from_pointee(Federations::new()),
             agreements: ArcSwap::from_pointee(Agreements::new()),
             servers: ArcSwap::from_pointee(Vec::new()),
+            mappings: ArcSwap::from_pointee(Default::default()),
             brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
             private_hosts: Vec::new(),
@@ -356,6 +359,19 @@ impl Gateway {
     /// Replaces the named MCP servers (ADR-N-043): from the next request on.
     pub fn replace_servers(&self, servers: crate::mcp::server::McpServers) {
         self.servers.store(Arc::new(servers));
+    }
+
+    /// Replaces the published Mappings (EP-53); a withdrawn one stops answering at once.
+    pub fn replace_mappings(&self, mappings: crate::handlers::mappings::Mappings) {
+        self.mappings.store(Arc::new(mappings));
+    }
+
+    /// The Mappings the Endpoint `slug` publishes, before any caller's narrowing.
+    pub(crate) fn mappings(
+        &self,
+        slug: &str,
+    ) -> Vec<Arc<crate::handlers::mappings::PublishedMapping>> {
+        self.mappings.load().get(slug).cloned().unwrap_or_default()
     }
 
     /// The named server at `/api/mcp/{project}/{name}`, if one is served.
@@ -618,6 +634,15 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .route(
             "/api/endpoint/{slug}/schema/{version}/{artifact}",
             get(schema_artifact),
+        )
+        // EP-53: the Mappings published beside a model major, before the broker's surface.
+        .route(
+            "/api/endpoint/{slug}/schema/{version}/mappings/",
+            get(crate::handlers::mappings::mappings_index),
+        )
+        .route(
+            "/api/endpoint/{slug}/schema/{version}/mappings/{file}",
+            get(crate::handlers::mappings::mapping_file),
         )
         // Every endpoint surface passes the limiter; the two probes do not, so a full
         // bucket can never make a pod look unhealthy (EP-20).
@@ -3652,6 +3677,8 @@ async fn endpoint_record(
 
     // The catalogue the caller's `schema/` routes serve, so the digests are their ETags (EP-68).
     let index = schema_routes::index_for(&gateway, &endpoint, &endpoint.slug, &subject).await;
+    let index =
+        crate::handlers::mappings::with_mappings(&gateway, &endpoint, &subject, index).await;
     let space = gateway.resolver.resolve_space(&endpoint.space);
     let space = space.as_deref();
 
@@ -3691,6 +3718,8 @@ async fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
             continue;
         }
         let index = schema_routes::index_for(gateway, &endpoint, &endpoint.slug, &anonymous).await;
+        let index =
+            crate::handlers::mappings::with_mappings(gateway, &endpoint, &anonymous, index).await;
         let space = gateway.resolver.resolve_space(&endpoint.space);
         records.push(endpoint_surface::dataset(
             &endpoint,

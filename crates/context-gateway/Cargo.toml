@@ -66,9 +66,10 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 rustls-pki-types = "1"
 parquet = { version = "60.0.0", default-features = false }
+# a published Mapping's specification is served as YAML (EP-53); jcctl's loader links it already
+serde_norway = "0.9"
 
 [dev-dependencies]
-serde_norway = "0.9"
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }
 # the workbook is read back part by part, so the test asserts a package rather than bytes
