@@ -701,7 +701,8 @@ const fn distribution(
         Representation::NgsiLd => (
             "/ngsi-ld/v1/",
             "NGSI-LD",
-            "application/ld+json",
+            // What a plain GET answers, as the gateway's own record lists it (T-4539).
+            "application/json",
             "NGSI-LD API",
         ),
         Representation::Mcp => ("/mcp", "MCP", "application/json", "Model Context Protocol"),

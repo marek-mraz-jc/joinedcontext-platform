@@ -598,3 +598,28 @@ async fn the_websocket_distribution_explains_itself_and_links_its_guide() {
         "{html}"
     );
 }
+
+/// T-4539, EP-118: the NGSI-LD distribution lists the media type a plain GET of its URL answers.
+/// The catalogue sweep (`tests/ckan/standards_sweep.py`) found the two apart on every harvested
+/// dataset: listed `application/ld+json`, answered `application/json`.
+#[tokio::test]
+async fn the_ngsi_ld_distribution_lists_what_a_plain_get_of_it_answers() {
+    let record = record(Audience::Public).await;
+    let ngsi = distributions(&record)
+        .into_iter()
+        .find(|d| {
+            d["dcat:accessURL"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/ngsi-ld/v1/"))
+        })
+        .expect("the record lists the NGSI-LD API");
+    let url = ngsi["dcat:accessURL"].as_str().expect("an access URL");
+    let path = &url[url.find("/api/endpoint/").expect("a gateway path")..];
+    let (status, media, body) = get(Audience::Public, path, "*/*").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answered = media.split(';').next().unwrap_or_default().trim();
+    assert_eq!(
+        ngsi["dcat:mediaType"],
+        format!("https://www.iana.org/assignments/media-types/{answered}")
+    );
+}

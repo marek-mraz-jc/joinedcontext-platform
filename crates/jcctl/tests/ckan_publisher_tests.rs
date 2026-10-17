@@ -1214,7 +1214,7 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
 
     let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
     for (suffix, format, mimetype, says) in [
-        ("/ngsi-ld/v1/", "NGSI-LD", "application/ld+json", "curl"),
+        ("/ngsi-ld/v1/", "NGSI-LD", "application/json", "curl"),
         ("/ws", "WebSocket", "application/json", "websocat"),
         ("/mcp", "MCP", "application/json", "mcpServers"),
         ("/ogc/features/", "OGCFEAT", "application/geo+json", "QGIS"),
