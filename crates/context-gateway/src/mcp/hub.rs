@@ -23,7 +23,7 @@ use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
-use jc_core::kinds::{Audience, Operation, Representation};
+use jc_core::kinds::{Audience, EndpointSlug, Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -467,7 +467,7 @@ impl Hub {
                 return Answer::Json(error(
                     id,
                     -32602,
-                    "`endpoint` is required: name one of the slugs list_endpoints answers (EP-87)",
+                    "`endpoint` is required: an Endpoint list_endpoints answers, by slug, title or space (EP-87)",
                 ))
             }
         };
@@ -476,18 +476,32 @@ impl Hub {
         }
 
         // An Endpoint outside the caller's list and one that does not exist are the same answer,
-        // byte for byte (SP-20).
-        let Some((endpoint, subject)) = self
-            .reach
-            .iter()
-            .find(|(endpoint, _)| endpoint.slug == slug)
-        else {
-            // Without a token every slug outside the public ones is the login prompt, an
-            // internal one and one that does not exist alike (SP-20).
-            if self.anonymous {
-                return Answer::Refused(unauthorized(&self.gateway));
+        // byte for byte (SP-20): both are searched for in the caller's list only.
+        let (endpoint, subject) = match resolve(&self.reach, &slug) {
+            Ok(found) => found,
+            // A slug outside the list is answered the same whatever it is, with no suggestion
+            // that would vary with it (SP-20): without a token the login prompt, an internal one
+            // and one that does not exist alike.
+            Err(_) if EndpointSlug::new(&slug).is_ok() => {
+                if self.anonymous {
+                    return Answer::Refused(unauthorized(&self.gateway));
+                }
+                return Answer::Json(error(id, -32602, "unknown endpoint"));
             }
-            return Answer::Json(error(id, -32602, "unknown endpoint"));
+            Err(candidates) => {
+                return Answer::Json(error(
+                    id,
+                    -32602,
+                    &format!(
+                        "no Endpoint of yours is named `{slug}`; closest: {}",
+                        if candidates.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            candidates.join(", ")
+                        }
+                    ),
+                ))
+            }
         };
         match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
             HubTool::Unknown => return Answer::Json(error(id, -32602, "unknown tool")),
@@ -604,6 +618,56 @@ impl Hub {
 
 /// The refusal of an argument that would choose a space some other way than `endpoint`
 /// (AG-05, SP-14).
+/// The Endpoint of the caller's list that `named` names (T-4491): its slug; else, compared
+/// without case, its title in any language or its context space, when exactly one Endpoint has
+/// it. Only `reach` is searched, so a name never finds an Endpoint the caller may not read
+/// (SP-20). On a miss or a name several Endpoints share: up to three `slug (title)` lines,
+/// the ones sharing it, else the closest by name.
+fn resolve<'a>(
+    reach: &'a [(Arc<Endpoint>, Subject)],
+    named: &str,
+) -> Result<(&'a Arc<Endpoint>, &'a Subject), Vec<String>> {
+    if let Some((endpoint, subject)) = reach.iter().find(|(e, _)| e.slug == named) {
+        return Ok((endpoint, subject));
+    }
+    let wanted = named.trim().to_lowercase();
+    let names = |endpoint: &Endpoint| -> Vec<String> {
+        endpoint
+            .title
+            .values()
+            .chain(std::iter::once(&endpoint.space))
+            .map(|name| name.trim().to_lowercase())
+            .collect()
+    };
+    let line = |endpoint: &Endpoint| match endpoint.title.values().next() {
+        Some(title) => format!("{} ({title})", endpoint.slug),
+        None => format!("{} ({})", endpoint.slug, endpoint.space),
+    };
+    let sharing: Vec<&(Arc<Endpoint>, Subject)> = reach
+        .iter()
+        .filter(|(endpoint, _)| !wanted.is_empty() && names(endpoint).contains(&wanted))
+        .collect();
+    if let [(endpoint, subject)] = sharing.as_slice() {
+        return Ok((endpoint, subject));
+    }
+    if !sharing.is_empty() {
+        return Err(sharing.iter().take(3).map(|(e, _)| line(e)).collect());
+    }
+    let mut ranked: Vec<(f64, &Endpoint)> = reach
+        .iter()
+        .map(|(endpoint, _)| {
+            let score = names(endpoint)
+                .iter()
+                .chain(std::iter::once(&endpoint.slug))
+                .map(|name| strsim::normalized_levenshtein(&wanted, name))
+                .fold(0.0, f64::max);
+            (score, endpoint.as_ref())
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.slug.cmp(&b.1.slug)));
+    Err(ranked.iter().take(3).map(|(_, e)| line(e)).collect())
+}
+
 pub(crate) fn misrouted(id: &Value, arguments: &Map<String, Value>) -> Option<Value> {
     let selector = arguments
         .keys()

@@ -462,10 +462,14 @@ async fn reads_may_fan_out_and_writes_name_their_endpoint() {
             .clone()
     };
     let query = tool("query_entities");
+    // A string, never an enum of the members: the list is list_endpoints' (T-4491).
     assert_eq!(
-        query["inputSchema"]["properties"]["endpoint"]["enum"],
-        json!([BIKES, AIR, OPEN])
+        query["inputSchema"]["properties"]["endpoint"]["type"],
+        "string"
     );
+    assert!(query["inputSchema"]["properties"]["endpoint"]
+        .get("enum")
+        .is_none());
     assert!(!query["inputSchema"]["required"]
         .as_array()
         .is_some_and(|required| required.contains(&json!("endpoint"))));

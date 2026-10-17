@@ -32,6 +32,7 @@ antares-matcher = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Cont
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+strsim = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tower = "0.5"
