@@ -1,11 +1,25 @@
-# context-gateway routes: app.rs router() registers `.route("/path", any(handler))` (one line, or
+# context-gateway routes: each surface module's routes() (merged by app.rs router(), T-4472) registers `.route("/path", any(handler))` (one line, or
 # broken by rustfmt to a `)` alone on its line). -> provides "ANY /api/endpoint/{}/ngsi-ld/v1/{}"
 # on handler `ngsi_ld`; an `ANY …/{}` key is a catch-all, which dev/trace-request.py matches by prefix.
 [[link]]
 name = "gateway-routes"
 channel = "http"
 role = "provides"
-files = ["crates/context-gateway/src/app.rs"]
+files = [
+  "crates/context-gateway/src/app.rs",
+  "crates/context-gateway/src/handlers/catalog.rs",
+  "crates/context-gateway/src/handlers/files.rs",
+  "crates/context-gateway/src/handlers/mappings.rs",
+  "crates/context-gateway/src/handlers/ngsi_ld.rs",
+  "crates/context-gateway/src/handlers/ogc.rs",
+  "crates/context-gateway/src/handlers/openapi_doc.rs",
+  "crates/context-gateway/src/handlers/schema_routes.rs",
+  "crates/context-gateway/src/handlers/space_routes.rs",
+  "crates/context-gateway/src/handlers/sta.rs",
+  "crates/context-gateway/src/handlers/view_access.rs",
+  "crates/context-gateway/src/handlers/ws.rs",
+  "crates/context-gateway/src/mcp/mod.rs",
+]
 pattern = '(?s)\.route\(\s*"(?P<key>/[^"]+)"\s*,(?P<body>[^\n]*\)|.*?\n[ \t]*\))[ \t]*,?[ \t]*\r?\n'
 each = '(?P<verb>get|post|put|patch|delete|head|options|any)\(\s*(?P<symbol>[\w:]+)'
 key = "{verb} {key}"

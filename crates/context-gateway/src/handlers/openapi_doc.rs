@@ -5,7 +5,8 @@
 //! schema is the projected JSON Schema of `schema/v{major}/json-schema` (EP-47), so the document
 //! describes nothing the caller could not read and cannot disagree with the data.
 
-use crate::app::{admit, Gateway};
+use crate::app::Gateway;
+use crate::auth::subject::admit;
 use crate::handlers::schema::{self, Visible};
 use crate::handlers::schema_routes::revalidated;
 use crate::middleware::tenancy;
@@ -13,6 +14,8 @@ use crate::resolver::{Endpoint, Model};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::Response;
+use axum::routing::get;
+use axum::Router;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
 
@@ -179,4 +182,11 @@ pub fn document(endpoint: &Endpoint, visible: &Visible) -> Value {
         },
         "components": { "schemas": schemas },
     })
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        // The read surface as OpenAPI, generated per caller (EP-99).
+        .route("/api/endpoint/{slug}/openapi.json", get(openapi))
 }

@@ -1,13 +1,13 @@
 //! The file downloads of an endpoint: GeoJSON, JSON, CSV, XLSX and the ZIP bundle (EP-24, EP-25).
 
-use crate::app::accept_language;
-use crate::app::admit;
-use crate::app::admit_space;
-use crate::app::broker_speaks_json;
-use crate::app::json_response;
 use crate::app::Gateway;
+use crate::auth::subject::admit;
+use crate::auth::subject::admit_space;
 use crate::handlers::reads::paged_entities;
 use crate::handlers::reads::too_large;
+use crate::handlers::respond::accept_language;
+use crate::handlers::respond::broker_speaks_json;
+use crate::handlers::respond::json_response;
 use crate::handlers::{endpoint_surface, schema_routes, space_surface};
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Subject;
@@ -18,6 +18,8 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Response};
 use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
 use jc_core::kinds::Representation;
 use jc_core::ProblemDetails;
 use std::sync::Arc;
@@ -456,4 +458,16 @@ fn workbook_metadata(
         ),
         ("rows".to_owned(), rows.to_string()),
     ]
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        .route("/api/endpoint/{slug}/file.geojson", get(file_geojson))
+        .route("/api/endpoint/{slug}/file.json", get(file_json))
+        .route("/api/endpoint/{slug}/file.csv", get(file_csv))
+        .route("/api/endpoint/{slug}/file.xlsx", get(file_xlsx))
+        .route("/api/endpoint/{slug}/file.parquet", get(file_parquet))
+        .route("/api/endpoint/{slug}/file.zip", get(file_zip))
+        .route("/cs/{space}/dump/", get(space_dump))
 }

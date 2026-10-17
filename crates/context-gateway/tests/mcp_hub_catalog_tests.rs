@@ -8,7 +8,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use context_gateway::app::{router, Gateway};
-use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::auth::accounts::{accounts_of, ServiceAccounts};
+use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{DeclaredTypes, Endpoint};
@@ -25,10 +26,14 @@ const INNER: &str = "iiiiiiiiiiiiiiiiiiiiiiiiii";
 const BBOX: [f64; 4] = [19.05, 48.68, 19.25, 48.8];
 
 fn grant(role: &str) -> PolicySpec {
+    granted("role", role)
+}
+
+fn granted(kind: &str, id: &str) -> PolicySpec {
     serde_norway::from_str(&format!(
         "contextSpaceRef: mesto\n\
          assigner: did:web:banskabystrica.sk\n\
-         assignee: {{ kind: role, id: {role} }}\n\
+         assignee: {{ kind: {kind}, id: {id} }}\n\
          operations: [retrieveOps]\n"
     ))
     .expect("the policy spec parses")
@@ -81,19 +86,29 @@ fn app(realm: &common::Realm, endpoints: Vec<Endpoint>) -> Router {
 }
 
 fn app_on(broker: &str, realm: &common::Realm, endpoints: Vec<Endpoint>) -> Router {
-    router(Arc::new(
-        Gateway::new(
-            Broker::new(broker),
-            Box::new(PolicyPdp),
-            "banskabystrica.sk",
-        )
-        .serve(endpoints)
-        .authenticate(
-            Arc::new(realm.verifier()),
-            ServiceAccounts::new(),
-            Some("https://city.example".to_owned()),
-        ),
-    ))
+    app_with(broker, realm, endpoints, ServiceAccounts::new(), Vec::new())
+}
+
+fn app_with(
+    broker: &str,
+    realm: &common::Realm,
+    endpoints: Vec<Endpoint>,
+    accounts: ServiceAccounts,
+    servers: Vec<McpServer>,
+) -> Router {
+    let gateway = Gateway::new(
+        Broker::new(broker),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(endpoints)
+    .authenticate(
+        Arc::new(realm.verifier()),
+        accounts,
+        Some("https://city.example".to_owned()),
+    );
+    gateway.replace_servers(servers);
+    router(Arc::new(gateway))
 }
 
 /// Two public Endpoints, one of them on a space with an area; one for the organization; and the
@@ -161,9 +176,19 @@ async fn send(app: Router, request: Request<Body>) -> (StatusCode, Value) {
 }
 
 async fn call(app: Router, token: Option<&str>, tool: &str, arguments: Value) -> Value {
+    call_at(app, "/api/mcp", token, tool, arguments).await
+}
+
+async fn call_at(
+    app: Router,
+    path: &str,
+    token: Option<&str>,
+    tool: &str,
+    arguments: Value,
+) -> Value {
     let mut builder = Request::builder()
         .method(Method::POST)
-        .uri("/api/mcp")
+        .uri(path)
         .header("content-type", "application/json");
     if let Some(token) = token {
         builder = builder.header("authorization", format!("Bearer {token}"));
@@ -365,6 +390,199 @@ async fn a_page_counts_and_continues_and_a_foreign_argument_or_tool_is_refused()
             .contains("dataService"),
         "{attributes}"
     );
+}
+
+#[tokio::test]
+async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
+    let realm = common::Realm::new();
+    let token = steward(&realm);
+    let server = McpServer {
+        project: "mesto".to_owned(),
+        name: "air".to_owned(),
+        title: Some("Air".to_owned()),
+        description: None,
+        members: vec![AIR.to_owned()],
+        audience: Audience::Organization,
+        allowed_projects: Vec::new(),
+    };
+    let app = app_with(
+        "http://127.0.0.1:1",
+        &realm,
+        city(),
+        ServiceAccounts::new(),
+        vec![server],
+    );
+    // The same token on the hub reaches the organization's Endpoint too.
+    let hub = call(
+        app.clone(),
+        Some(&token),
+        "query_entities",
+        json!({ "endpoint": "catalog", "type": "DataService", "format": "keyValues" }),
+    )
+    .await;
+    assert!(
+        entities(&hub).iter().any(|e| e["identifier"] == INNER),
+        "{hub}"
+    );
+
+    let answer = call_at(
+        app.clone(),
+        "/api/mcp/mesto/air",
+        Some(&token),
+        "query_entities",
+        json!({ "endpoint": "catalog", "limit": 1000, "count": true }),
+    )
+    .await;
+    let mut listed = ids(&answer);
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            format!("urn:ngsi-ld:DataService:{AIR}"),
+            "urn:ngsi-ld:Dataset:mesto-ovzdusie".to_owned(),
+        ]
+    );
+    assert_eq!(
+        answer["result"]["structuredContent"]["total"], 2,
+        "{answer}"
+    );
+    let text = answer.to_string();
+    for other in [
+        "Internal registry",
+        "Bike stations",
+        INNER,
+        BIKES,
+        "mesto-register",
+        "mesto-doprava",
+    ] {
+        assert!(
+            !text.contains(other),
+            "{other} leaks through the server: {text}"
+        );
+    }
+    // A search for the rest finds nothing rather than a hint of it.
+    let searched = call_at(
+        app,
+        "/api/mcp/mesto/air",
+        Some(&token),
+        "query_entities",
+        json!({ "endpoint": "catalog", "q": "searchText~=\"registry\"", "count": true }),
+    )
+    .await;
+    assert!(ids(&searched).is_empty(), "{searched}");
+    assert_eq!(
+        searched["result"]["structuredContent"]["total"], 0,
+        "{searched}"
+    );
+}
+
+/// A ServiceAccount `reader` of `mesto` and an `auditor` of another project, each with a
+/// client `{project}-{name}` (Architecture/12 section 3); an account without a role is no account.
+fn accounts() -> ServiceAccounts {
+    let dir = std::env::temp_dir().join(format!("catalog-accounts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (project, name) in [("mesto", "reader"), ("kraj", "auditor")] {
+        let folder = dir.join(format!("projects/{project}/access/serviceaccounts"));
+        std::fs::create_dir_all(&folder).expect("the folder");
+        std::fs::write(
+            folder.join(format!("{name}.yaml")),
+            format!(
+                "apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  \
+                 name: {name}\n  namespace: {project}\nspec:\n  owner:\n    user: demo.steward\n  \
+                 purpose: \"catalog test\"\n  roles:\n    - role: reader\n      scope:\n        project: {project}\n  credentials:\n    - kind: oauth-client\n      name: default\n"
+            ),
+        )
+        .expect("the manifest");
+    }
+    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let _ = std::fs::remove_dir_all(&dir);
+    accounts_of(&repo)
+}
+
+fn workload(realm: &common::Realm, azp: &str, aud: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": format!("service-account-{azp}"),
+        "aud": aud,
+        "azp": azp,
+        "scope": "openid",
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+#[tokio::test]
+async fn a_service_account_grant_shows_its_endpoint_and_the_public_ones_and_nothing_foreign() {
+    let realm = common::Realm::new();
+    let mut endpoints = city();
+    endpoints
+        .iter_mut()
+        .find(|e| e.slug == INNER)
+        .expect("the organization's Endpoint")
+        .policies = vec![granted("serviceAccount", "reader")];
+    let mut foreign = endpoint(
+        "ffffffffffffffffffffffffff",
+        "Regional registry",
+        "kraj-register",
+        Audience::Organization,
+        "steward",
+    );
+    foreign.project = "kraj".to_owned();
+    endpoints.push(foreign);
+    let app = app_with(
+        "http://127.0.0.1:1",
+        &realm,
+        endpoints,
+        accounts(),
+        Vec::new(),
+    );
+
+    let token = workload(&realm, "mesto-reader", INNER);
+    let answer = call(
+        app.clone(),
+        Some(&token),
+        "query_entities",
+        json!({ "endpoint": "catalog", "type": "DataService", "format": "keyValues" }),
+    )
+    .await;
+    let seen: BTreeMap<String, String> = entities(&answer)
+        .iter()
+        .map(|e| {
+            (
+                e["identifier"].as_str().unwrap_or_default().to_owned(),
+                e["visibleBecause"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        BTreeMap::from([
+            (AIR.to_owned(), "public".to_owned()),
+            (BIKES.to_owned(), "public".to_owned()),
+            (INNER.to_owned(), "grant".to_owned()),
+        ]),
+        "{answer}"
+    );
+    assert!(
+        !answer.to_string().contains("Regional registry"),
+        "{answer}"
+    );
+
+    // Another project's account, for the same Endpoint, sees only what is public.
+    let outsider = workload(&realm, "kraj-auditor", INNER);
+    let answer = call(
+        app,
+        Some(&outsider),
+        "query_entities",
+        json!({ "endpoint": "catalog", "type": "DataService", "format": "keyValues" }),
+    )
+    .await;
+    let mut seen: Vec<String> = entities(&answer)
+        .iter()
+        .map(|e| e["identifier"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    seen.sort();
+    assert_eq!(seen, [AIR, BIKES], "{answer}");
 }
 
 /// A measurement, run on its own in release:

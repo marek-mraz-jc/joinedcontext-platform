@@ -1,16 +1,18 @@
 //! The Context Space catalogue and the record of one space under `/cs` (SP-03).
 
-use crate::app::admit_space;
-use crate::app::authenticate;
-use crate::app::discoverable;
-use crate::app::json_response;
 use crate::app::Gateway;
+use crate::auth::subject::admit_space;
+use crate::auth::subject::authenticate;
+use crate::auth::subject::discoverable;
+use crate::handlers::respond::json_response;
 use crate::handlers::space_surface;
 use crate::resolver::Space;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Response};
 use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
 use jc_core::ProblemDetails;
 use std::sync::Arc;
 
@@ -72,4 +74,11 @@ pub(crate) async fn space_record(
         Ok(media) => ([(axum::http::header::CONTENT_TYPE, media)], body).into_response(),
         Err(_) => ProblemDetails::internal().into_response(),
     }
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        .route("/cs", get(space_catalog))
+        .route("/cs/{space}", get(space_record))
 }

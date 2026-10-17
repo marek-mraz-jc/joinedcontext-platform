@@ -106,6 +106,11 @@ const DOMAINS: &[(&str, &str, &str)] = &[
     ("Weather", "počasie", "weather"),
 ];
 
+/// Whether `name` is an SDM domain of the table, e.g. `Environment` (MF-55).
+pub fn is_domain(name: &str) -> bool {
+    DOMAINS.iter().any(|(domain, ..)| *domain == name)
+}
+
 /// What a set of entity types says the dataset is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Classification {

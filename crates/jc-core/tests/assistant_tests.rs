@@ -1112,3 +1112,29 @@ fn reasoning_is_set_per_stage_and_low_by_default() {
     let stage = refused(deployment(&with("{ reasoning: { search: low } }")));
     assert!(stage.contains("unknown field `search`"), "{stage}");
 }
+
+/// MF-56: a deployment may answer from a named MCP server alone, named `{project}/{name}` or
+/// `org/{name}`; any other form is refused on `mcpServer`.
+#[test]
+fn a_deployment_may_read_one_named_mcp_server() {
+    let bare = deployment_with("  sources: [bb-web]\n", "").replace(
+        "  connectors:\n    - { endpoint: mesto-verejne, tools: [query_entities], timeoutSeconds: 20 }\n",
+        "",
+    );
+    assert_eq!(refused(deployment(&bare)), "sources");
+    for server in ["org/all", "banskabystrica/mobilita"] {
+        let parsed = deployment(&bare.replace(
+            "  allowedOrigins:",
+            &format!("  mcpServer: {server}\n  allowedOrigins:"),
+        ))
+        .expect(server);
+        assert_eq!(parsed.spec.mcp_server.as_deref(), Some(server));
+    }
+    for server in ["all", "org/All", "/all"] {
+        let yaml = bare.replace(
+            "  allowedOrigins:",
+            &format!("  mcpServer: \"{server}\"\n  allowedOrigins:"),
+        );
+        assert_eq!(refused(deployment(&yaml)), "mcpServer", "{server}");
+    }
+}

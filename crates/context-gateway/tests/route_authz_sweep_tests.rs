@@ -1,7 +1,7 @@
 //! Every route of the gateway, called as each kind of caller (T-3858, found by T-3832).
 //!
-//! The router's routes are read from `src/app.rs` itself, so a route added without a row here is
-//! red. Each row is one concrete request on a project-bound Endpoint (its space and its named MCP
+//! The router's routes are read from the source of `app::router` and of every surface module it
+//! merges (T-4472), so a route added without a row here is red. Each row is one concrete request on a project-bound Endpoint (its space and its named MCP
 //! server), sent as four callers: nobody, a person of another project, a member of the project
 //! the Policy grants nothing, and a member it grants `Device`. The broker behind it is the
 //! narrowing stub, whose view serves the one secret entity to the granted role alone.
@@ -15,10 +15,11 @@ mod common;
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use common::{BrokerStub, View};
-use context_gateway::app::{
-    router, Gateway, EDGE_AUDIENCE, HUB_AUDIENCE, HUB_PATH, PORTAL_CLIENT, SIMULATE_AUDIENCE,
-};
+use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::auth::subject::{
+    EDGE_AUDIENCE, HUB_AUDIENCE, HUB_PATH, PORTAL_CLIENT, SIMULATE_AUDIENCE,
+};
 use context_gateway::handlers::mappings::{MappingFile, PublishedMapping};
 use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
@@ -390,9 +391,57 @@ fn rows() -> Vec<Row> {
     ]
 }
 
-/// Every `.route(path, …)` of `src/app.rs`, the constant `HUB_PATH` resolved.
+/// The source of `app::router` and of each surface module whose `routes()` it merges.
+const SURFACES: &[(&str, &str)] = &[
+    ("app", include_str!("../src/app.rs")),
+    ("catalog", include_str!("../src/handlers/catalog.rs")),
+    ("ngsi_ld", include_str!("../src/handlers/ngsi_ld.rs")),
+    (
+        "view_access",
+        include_str!("../src/handlers/view_access.rs"),
+    ),
+    ("mcp", include_str!("../src/mcp/mod.rs")),
+    ("files", include_str!("../src/handlers/files.rs")),
+    ("ogc", include_str!("../src/handlers/ogc.rs")),
+    ("ws", include_str!("../src/handlers/ws.rs")),
+    ("sta", include_str!("../src/handlers/sta.rs")),
+    (
+        "space_routes",
+        include_str!("../src/handlers/space_routes.rs"),
+    ),
+    (
+        "schema_routes",
+        include_str!("../src/handlers/schema_routes.rs"),
+    ),
+    (
+        "openapi_doc",
+        include_str!("../src/handlers/openapi_doc.rs"),
+    ),
+    ("mappings", include_str!("../src/handlers/mappings.rs")),
+];
+
+/// Every `.route(path, …)` the router serves, the constant `HUB_PATH` resolved. A module
+/// `app::router` merges that `SURFACES` does not read is red, so no surface is swept blind.
 fn served_routes() -> BTreeSet<String> {
-    let source = include_str!("../src/app.rs");
+    let merged: BTreeSet<&str> = SURFACES[0]
+        .1
+        .split(".merge(")
+        .skip(1)
+        .map(|tail| tail.split("::routes()").next().expect("a module name"))
+        .collect();
+    let read: BTreeSet<&str> = SURFACES[1..].iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        merged, read,
+        "app::router merges a surface this sweep does not read"
+    );
+    let mut routes = BTreeSet::new();
+    for (_, source) in SURFACES {
+        routes.extend(routes_in(source));
+    }
+    routes
+}
+
+fn routes_in(source: &str) -> BTreeSet<String> {
     let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
     let mut routes = BTreeSet::new();
     let mut rest = source;

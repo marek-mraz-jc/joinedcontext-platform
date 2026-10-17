@@ -7,7 +7,8 @@
 //! client can read. The connection's filters, their matching and the cut to the caller's grant
 //! are the fan-out's (`crate::fanout`).
 
-use crate::app::{admit, principal_of, Gateway};
+use crate::app::Gateway;
+use crate::auth::subject::{admit, principal_of};
 use crate::handlers::space_surface::escape;
 use crate::middleware::rate_limit::caller_key;
 use crate::middleware::tenancy;
@@ -20,6 +21,8 @@ use axum::http::header::{
 };
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
 use jc_core::kinds::{Audience, Representation};
 use jc_core::ProblemDetails;
 use serde_json::json;
@@ -357,6 +360,13 @@ fn origin_allowed(headers: &HeaderMap, public_url: &str) -> bool {
         .split_once("://")
         .map(|(scheme, rest)| format!("{scheme}://{}", rest.split('/').next().unwrap_or(rest)));
     own.is_some_and(|own| origin.as_bytes().eq_ignore_ascii_case(own.as_bytes()))
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        // Live updates: the broker view's WebSocket, relayed under the caller (EP-106, T-3885).
+        .route("/api/endpoint/{slug}/ws", get(endpoint_ws))
 }
 
 #[cfg(test)]

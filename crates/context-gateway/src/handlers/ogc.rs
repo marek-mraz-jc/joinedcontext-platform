@@ -13,10 +13,13 @@
 //! bound, no hidden attribute named, a minting Endpoint's key left to the broker, the day's
 //! creates counted. The broker's view still decides the operation (ADR-0023).
 
-use crate::app::{
-    admit, broker_failure, caller_links, has_view, principal_of, read_body, read_only,
-    reserve_create, view_request, with_platform_slug, Gateway, MAX_BODY,
+use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::{admit, principal_of};
+use crate::handlers::ngsi_ld::{
+    broker_failure, caller_links, has_view, read_body, reserve_create, view_request,
+    with_platform_slug,
 };
+use crate::handlers::respond::read_only;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::middleware::{rate_limit, tenancy};
 use crate::pdp::evaluator::Subject;
@@ -28,6 +31,8 @@ use axum::extract::{Path, Request, State};
 use axum::http::header::{ACCEPT, ALLOW, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
+use axum::routing::any;
+use axum::Router;
 use jc_core::kinds::{Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::Value;
@@ -550,6 +555,24 @@ fn no_view(surface: &Surface) -> Response<Body> {
             surface.name
         ))
         .into_response()
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        // The OGC surface is the broker's view (T-3752), one forward over its resource tree:
+        // three spellings of the landing page, because a GIS client stores whichever one it was
+        // given (EP-29).
+        .route("/api/endpoint/{slug}/ogc/features", any(ogc_features))
+        .route("/api/endpoint/{slug}/ogc/features/", any(ogc_features))
+        .route(
+            "/api/endpoint/{slug}/ogc/features/{*rest}",
+            any(ogc_features),
+        )
+        // The OData v4 service of the view (EP-104, T-3830), its writes after the Endpoint's write guards (T-3939).
+        .route("/api/endpoint/{slug}/odata/v4", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/", any(odata))
+        .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
 }
 
 #[cfg(test)]

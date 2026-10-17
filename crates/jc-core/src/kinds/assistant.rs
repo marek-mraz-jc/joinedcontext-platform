@@ -841,6 +841,10 @@ pub struct AssistantDeploymentSpec {
     /// The Endpoints of this project whose MCP tools it may call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connectors: Vec<Connector>,
+    /// The named MCP server whose reach it reads, `{project}/{name}` or `org/{name}` (MF-56,
+    /// ADR-N-043 §7.6); on every channel but `internal` a `public` one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server: Option<String>,
     /// The pages it may be placed on, each `https://host[:port]`; no wildcard, no path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_origins: Vec<String>,
@@ -947,12 +951,26 @@ impl AssistantDeploymentSpec {
                 "publicId is a DNS label: lowercase letters, digits and dashes",
             )
         })?;
-        if self.sources.is_empty() && self.connectors.is_empty() {
+        if self.sources.is_empty() && self.connectors.is_empty() && self.mcp_server.is_none() {
             return Err(name(
                 "sources",
                 String::new(),
-                "a deployment answers from at least one source or connector",
+                "a deployment answers from at least one source, connector or mcpServer",
             ));
+        }
+        if let Some(server) = &self.mcp_server {
+            match connector_target(server) {
+                (Some(project), label)
+                    if names::validate_dns1123_label(project).is_ok()
+                        && names::validate_dns1123_label(label).is_ok() => {}
+                _ => {
+                    return Err(name(
+                        "mcpServer",
+                        server.clone(),
+                        "mcpServer names a server as {project}/{name} or org/{name}",
+                    ))
+                }
+            }
         }
         for source in &self.sources {
             let (project, label) = connector_target(source);
@@ -979,11 +997,11 @@ impl AssistantDeploymentSpec {
                     "routes rag answers from the sources; name at least one",
                 ))
             }
-            Routes::Data if self.connectors.is_empty() => {
+            Routes::Data if self.connectors.is_empty() && self.mcp_server.is_none() => {
                 return Err(name(
                     "answer.routes",
                     "data".into(),
-                    "routes data answers from the connectors; name at least one",
+                    "routes data answers from the connectors; name at least one or an mcpServer",
                 ))
             }
             _ => {}
