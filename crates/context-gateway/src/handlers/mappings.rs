@@ -141,8 +141,9 @@ fn names_secret_ref(value: &Value) -> bool {
 /// `class_derivations` (a map by target name, or a list of derivations with a `name`).
 ///
 /// A class derivation reads `populated_from`, or the class of its own name; a slot derivation
-/// reads the first segment of `populated_from`, every `{slot}` of its `expr`, or the slot of its
-/// own name. Anything else in the specification names no source term.
+/// reads the first segment of `populated_from`, every slot its `expr` names ([`expr_reads`]), or
+/// the slot of its own name. Anything else in the specification names no source term; an `expr`
+/// that cannot be read makes the whole transformation unreadable.
 pub fn reads(transformation: &Value) -> Option<BTreeMap<String, BTreeSet<String>>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (target, derivation) in named(transformation.get("class_derivations"))? {
@@ -160,7 +161,7 @@ pub fn reads(transformation: &Value) -> Option<BTreeMap<String, BTreeSet<String>
                 (Some(path), _) => {
                     slots.insert(path.split('.').next().unwrap_or(path).to_owned());
                 }
-                (None, Some(expr)) => slots.extend(braced(expr)),
+                (None, Some(expr)) => slots.extend(expr_reads(expr)?),
                 (None, None) => {
                     slots.insert(slot);
                 }
@@ -188,13 +189,84 @@ fn named(value: Option<&Value>) -> Option<Vec<(String, &Value)>> {
     }
 }
 
-/// The `{name}` references of a LinkML-Map expression.
-fn braced(expr: &str) -> Vec<String> {
-    expr.split('{')
-        .skip(1)
-        .filter_map(|rest| rest.split_once('}').map(|(name, _)| name.trim().to_owned()))
-        .filter(|name| !name.is_empty())
-        .collect()
+/// Words of a LinkML-Map expression that name no slot.
+const EXPR_KEYWORDS: &[&str] = &[
+    "and", "or", "not", "if", "else", "in", "is", "None", "True", "False",
+];
+/// The expression language's functions; a name counts as one only where it is called.
+const EXPR_FUNCTIONS: &[&str] = &[
+    "abs", "bool", "case", "float", "int", "len", "max", "min", "round", "str",
+];
+
+/// Every slot a LinkML-Map expression reads (T-4423, EP-47): each `{name}`, and each bare name
+/// that is not a keyword, a called function or an attribute after a `.`, since LinkML-Map
+/// evaluates bare slot names too. String literals and numbers read nothing. Conservative: an
+/// expression with a character outside that small language, an unclosed string or an unclosed
+/// brace is `None`, so its Mapping is never published rather than published past the filter.
+fn expr_reads(expr: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = expr.chars().collect();
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    let mut after_dot = false;
+    let mut i = 0;
+    while let Some(&c) = chars.get(i) {
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '\'' || c == '"' {
+            let mut j = i + 1;
+            loop {
+                match chars.get(j) {
+                    None => return None,
+                    Some('\\') => j += 2,
+                    Some(&q) if q == c => break,
+                    Some(_) => j += 1,
+                }
+            }
+            i = j + 1;
+            after_dot = false;
+        } else if c == '{' {
+            let close = chars[i..].iter().position(|&d| d == '}')? + i;
+            let name: String = chars[i + 1..close]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_owned();
+            if name.is_empty() || !name.chars().all(word) {
+                return None;
+            }
+            out.push(name);
+            i = close + 1;
+            after_dot = false;
+        } else if c.is_ascii_digit() {
+            while chars.get(i).is_some_and(|&d| word(d) || d == '.') {
+                i += 1;
+            }
+            after_dot = false;
+        } else if word(c) {
+            let start = i;
+            while chars.get(i).is_some_and(|&d| word(d)) {
+                i += 1;
+            }
+            let name: String = chars[start..i].iter().collect();
+            let called = chars[i..].iter().find(|d| !d.is_whitespace()) == Some(&'(');
+            let names_no_slot = after_dot
+                || EXPR_KEYWORDS.contains(&name.as_str())
+                || (called && EXPR_FUNCTIONS.contains(&name.as_str()));
+            if !names_no_slot {
+                out.push(name);
+            }
+            after_dot = false;
+        } else if c == '.' {
+            after_dot = true;
+            i += 1;
+        } else if "+-*/%()<>=!,[]:".contains(c) {
+            after_dot = false;
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 /// The classes and slots of a JSON Schema the broker's view serves (`definitions`).
