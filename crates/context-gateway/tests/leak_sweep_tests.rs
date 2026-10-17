@@ -10,8 +10,8 @@
 //! NGSI-LD is not probed here: since T-3643 the gateway forwards it to the broker's view, and
 //! Antares sweeps that surface itself (`views_read`, `views_q`, `joinedcontext-policy` engine
 //! tests), and since T-3645 so are the schema artifacts (`linkml` surface). The probes cover the
-//! file downloads (`json`, `csv`, `geojson`, `xlsx`, `zip` — the two compressed ones are opened
-//! and their parts read), OGC API Features, SensorThings, the access
+//! file downloads (`json`, `csv`, `geojson`, `xlsx`, `parquet`, `zip` — the two compressed ones
+//! are opened and their parts read, and the parquet one is written uncompressed), OGC API Features, SensorThings, the access
 //! document, the endpoint record and every read-only MCP tool. Two brokers: one that honours
 //! `type` and `attrs`, and one that answers more than it was asked, which is what a federated
 //! source, a registration answering for a neighbour or a defect looks like.
@@ -215,6 +215,7 @@ fn endpoint() -> Endpoint {
             Representation::GeoJson,
             Representation::Csv,
             Representation::Xlsx,
+            Representation::Parquet,
             Representation::Json,
             Representation::Zip,
             Representation::OgcFeatures,
@@ -289,6 +290,7 @@ fn probes() -> Vec<Probe> {
         ),
         get("file geojson", "/file.geojson?type=User,Vehicle"),
         get("file xlsx", "/file.xlsx?type=User,Vehicle"),
+        get("file parquet", "/file.parquet?type=User,Vehicle"),
         get("file zip", "/file.zip?type=User,Vehicle"),
         get("sta root", "/sta/v1.1"),
         get("sta things", "/sta/v1.1/Things"),
@@ -577,6 +579,7 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::GeoJson => "/file.geojson",
             Representation::Csv => "/file.csv",
             Representation::Xlsx => "/file.xlsx",
+            Representation::Parquet => "/file.parquet",
             Representation::Json => "/file.json",
             Representation::Zip => "/file.zip",
             Representation::Sta => "/sta/v1.1",

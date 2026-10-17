@@ -352,6 +352,9 @@ impl Usage<'_> {
             ),
             Representation::Xlsx => file("An Excel spreadsheet that opens in Excel or LibreOffice"),
             Representation::Csv => file("A CSV table"),
+            Representation::Parquet => file(
+                "An Apache Parquet file with typed columns, for pandas, Polars, DuckDB or Spark",
+            ),
             Representation::GeoJson => file("A GeoJSON feature collection that opens in QGIS"),
             Representation::Json => file("The entities as one JSON document"),
             Representation::Zip => file("Every file format of this dataset in one ZIP archive"),
@@ -676,6 +679,12 @@ const fn distribution(
             "XLSX",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "Excel spreadsheet",
+        ),
+        Representation::Parquet => (
+            "/file.parquet",
+            "PARQUET",
+            "application/vnd.apache.parquet",
+            "Apache Parquet",
         ),
         Representation::Json => ("/file.json", "JSON", "application/json", "JSON"),
         Representation::Zip => ("/file.zip", "ZIP", "application/zip", "Export bundle"),

@@ -1301,6 +1301,13 @@
           "type": "string"
         },
         {
+          "description": "Typed columnar Apache Parquet file (`/file.parquet`, EP-119).",
+          "enum": [
+            "parquet"
+          ],
+          "type": "string"
+        },
+        {
           "description": "JSON array of entities (`/file.json`).",
           "enum": [
             "json"

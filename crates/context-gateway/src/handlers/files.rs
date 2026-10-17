@@ -153,7 +153,16 @@ pub(crate) async fn file_xlsx(
     tabular_download(gateway, slug, request, Representation::Xlsx).await
 }
 
-/// The two tabular representations, which differ only in how the same table is written.
+/// `file.parquet`: the same rows as `file.csv`, typed columns in one Parquet file (EP-119).
+pub(crate) async fn file_parquet(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    tabular_download(gateway, slug, request, Representation::Parquet).await
+}
+
+/// The three tabular representations, which differ only in how the same table is written.
 async fn tabular_download(
     gateway: Arc<Gateway>,
     slug: String,
@@ -203,6 +212,17 @@ async fn tabular_download(
                 Err(tabular::XlsxError::TooLarge) => return too_large(),
                 Err(error) => {
                     tracing::error!(%error, "the workbook does not serialize");
+                    return ProblemDetails::internal().into_response();
+                }
+            }
+        }
+        Representation::Parquet => {
+            let metadata = workbook_metadata(&endpoint, &params, table.len());
+            match tabular::parquet(&table, &metadata, &limits) {
+                Ok(bytes) => (Body::from(bytes), tabular::PARQUET_MEDIA_TYPE, "parquet"),
+                Err(tabular::ParquetError::TooLarge) => return too_large(),
+                Err(error) => {
+                    tracing::error!(%error, "the parquet file does not serialize");
                     return ProblemDetails::internal().into_response();
                 }
             }

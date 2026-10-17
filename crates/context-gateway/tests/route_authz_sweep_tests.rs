@@ -222,6 +222,12 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "GET",
+            "/api/endpoint/{slug}/file.parquet",
+            get(ep("/file.parquet")),
+            Data { binary: true },
+        ),
+        row(
+            "GET",
             "/api/endpoint/{slug}/file.zip",
             get(ep("/file.zip")),
             Data { binary: true },
@@ -414,6 +420,7 @@ fn endpoint(base_path: String) -> Endpoint {
             Representation::GeoJson,
             Representation::Csv,
             Representation::Xlsx,
+            Representation::Parquet,
             Representation::Json,
             Representation::Zip,
             Representation::OgcFeatures,

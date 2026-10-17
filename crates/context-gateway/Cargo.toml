@@ -43,6 +43,8 @@ jsonwebtoken = "9"
 ring = "0.17"
 # xlsx is a zip of XML parts: the XML is written here, the container is not worth rewriting
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# the parquet file is read back from memory, which the reader takes as `Bytes`
+bytes = "1"
 
 jsonschema = { version = "0.54", default-features = false }
 
@@ -63,6 +65,7 @@ metrics-exporter-prometheus = { version = "0.17", default-features = false }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 rustls-pki-types = "1"
+parquet = { version = "60.0.0", default-features = false }
 
 [dev-dependencies]
 serde_norway = "0.9"
