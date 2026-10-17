@@ -15,13 +15,12 @@ pub mod units;
 /// token or host.
 pub(crate) const PRIMER: &str = concat!(include_str!("hub_lead.md"), include_str!("primer.md"));
 
-/// The hub's own lines of [`PRIMER`], before the NGSI-LD primer every broker view shares.
-#[cfg(test)]
-pub(crate) const HUB_LEAD: &str = include_str!("hub_lead.md");
-
 #[cfg(test)]
 mod tests {
-    use super::{hub, tools, HUB_LEAD, PRIMER};
+    use super::{hub, tools, PRIMER};
+
+    /// The hub's own lines of [`PRIMER`], before the NGSI-LD primer every broker view shares.
+    const HUB_LEAD: &str = include_str!("hub_lead.md");
     use serde_json::Value;
 
     /// Every argument name of a schema, its nested objects' included.
