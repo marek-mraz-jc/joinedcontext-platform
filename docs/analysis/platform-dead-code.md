@@ -58,11 +58,18 @@ slice (after):
 | wasm-host | 6 | 6 |
 | **total** | **145** | **135** |
 
+T-4451 (2026-10-17): the ratchet had run only as a self-test, so main drifted to jc-core 51 and
+assistant 2 while context-gateway (39) and jcctl (31) fell below their lines unrecorded. After
+the slice below, on a graph of the branch: agent-proxy 3, assistant 1, context-gateway 39,
+jc-core 46, jcctl 31, wasm-host 6; the baseline holds these.
+
 `ci/cg-dead-code-baseline.txt` holds the after column. The check is red when a crate has more
 rows than its line (new code nothing calls, or a caller deleted and its callees kept) and red
 when it has fewer until the line is lowered, so the number only goes down. CI runs the
-self-test (cg is not on the runner, as for `dev/cg-invariants.py`); the full check runs on a
-`cg build --fg` before every merge.
+self-test (cg is not on the runner, as for `dev/cg-invariants.py`). The full check runs in
+`tasks/push`: a batch branch of a repository that carries `dev/cg-dead-code.py`, whose diff
+against main touches Rust or the baseline, is pushed only when the check is green on a fresh
+`cg build --fg` of the branch merged with main (T-4451).
 
 ## 3. Rows and their reasons
 
@@ -83,6 +90,15 @@ Portal's `src/`.
 | `context_gateway::store::endpoints_of` | every caller passes the model root to `endpoints_with_models` |
 
 The test assertions on the deleted accessors went with them.
+
+T-4451 deleted these too, each with no production caller:
+
+| Row | Why it was dead |
+|---|---|
+| `jc_core::kinds::assistant::AssistantDeploymentSpec::router_model`, `answer_model`, `DEFAULT_MODEL` | the assistant reads `spec.model` itself and falls back to the worker's configured model (`llm`), a second default |
+| `jc_core::kinds::service_account::ServiceAccountSpec::device_keys` | no reader in this repo or the Portal; `validate` keeps checking the keys |
+| `assistant::chat::routed::answer_messages` | a wrapper only its tests called; the answer call uses `messages_with` |
+| `jc_core::kinds::assistant::KnowledgeSourceSpec::upload_limits` | not deleted: the assistant's upload route repeated its body, and now calls it |
 
 ### 3.2 Removed by an open delete task
 
@@ -110,7 +126,7 @@ hide them from it.
 - jc-core: `ResourceEnvelope::new`, `strip_status`, `without_status`, `resource_path`, `to_yaml`,
   `to_json`, `from_json`; `ProblemDetails::internal_opaque`, `with_instance`;
   `MultiLanguageMap::new`, `insert`, `require_fallback`, `is_empty`, `len`, `iter`;
-  `NativeBlock::new`, `MappingTest::new`; `Did::org_domain`; `kpi::Relationship::to_all`,
+  `NativeBlock::new`, `MappingTest::new`; `Did::org_domain`; `kpi::Provenance::to`, `to_all` (cg names them `kpi::Property::to`),
   `KeyPerformanceIndicator::from_json`; `urn::EntityRef` and its `new`, `space`, `urn`.
 - jcctl: `bento::InputContext::new`, `with_pipeline_spec`; `csr::InMemoryBroker` (6 rows),
   `platform::InMemory` (4 rows), `publish::ckan::InMemoryCkan` (9 rows);

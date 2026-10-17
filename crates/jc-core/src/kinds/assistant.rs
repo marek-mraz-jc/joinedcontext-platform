@@ -44,8 +44,6 @@ pub const MAX_ORGANIZATIONS: usize = 10;
 pub const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// The most files an `upload` source may hold.
 pub const MAX_UPLOAD_FILES: u32 = 500;
-/// The model a deployment's router and answer calls use when it names none (MF-52).
-pub const DEFAULT_MODEL: &str = "google/gemini-3.8-flash";
 /// The longest model id.
 pub const MAX_MODEL_ID_LEN: usize = 100;
 /// The most providers `model.provider.order` names (T-4292).
@@ -910,22 +908,6 @@ impl Kind for AssistantDeploymentSpec {
 }
 
 impl AssistantDeploymentSpec {
-    /// The model id the router calls use.
-    pub fn router_model(&self) -> &str {
-        self.model
-            .as_ref()
-            .and_then(|model| model.router.as_deref())
-            .unwrap_or(DEFAULT_MODEL)
-    }
-
-    /// The model id the answer call uses.
-    pub fn answer_model(&self) -> &str {
-        self.model
-            .as_ref()
-            .and_then(|model| model.answer.as_deref())
-            .unwrap_or(DEFAULT_MODEL)
-    }
-
     /// The other projects its connectors may reach; empty when it names none.
     ///
     /// A connector names one of their Endpoints as `{project}/{endpoint}` ([`connector_target`]).
