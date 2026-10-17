@@ -5,15 +5,16 @@
 
 pub mod odrl;
 
-use crate::app::admit;
-use crate::app::json_response;
-use crate::app::sha256_hex;
-use crate::app::text_response;
-use crate::app::typed_json_response;
-use crate::app::Gateway;
-use crate::app::{anonymous_on, subject_from, PORTAL_CLIENT, SIMULATE_AUDIENCE};
-use crate::app::{broker_failure, has_view, principal_of, view_of, MAX_BODY};
+use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::admit;
+use crate::auth::subject::principal_of;
+use crate::auth::subject::{anonymous_on, subject_from, PORTAL_CLIENT, SIMULATE_AUDIENCE};
 use crate::auth::token::{self, Claims};
+use crate::handlers::ngsi_ld::{broker_failure, has_view, view_of};
+use crate::handlers::respond::json_response;
+use crate::handlers::respond::sha256_hex;
+use crate::handlers::respond::text_response;
+use crate::handlers::respond::typed_json_response;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use crate::{middleware::tenancy, proxy};
@@ -25,6 +26,8 @@ use axum::http::HeaderMap;
 use axum::http::Response;
 use axum::http::{HeaderValue, Method};
 use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::Router;
 use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
 use serde::Deserialize;
@@ -586,4 +589,15 @@ fn simulated(gateway: &Gateway, endpoint: &Endpoint, who: &Simulated) -> Option<
     }))
     .ok()?;
     subject_from(gateway, endpoint, &claims).ok()
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        .route("/api/endpoint/{slug}/access", get(access))
+        .route("/api/endpoint/{slug}/access/check", post(access_check))
+        .route(
+            "/api/endpoint/{slug}/access/simulate",
+            post(access_simulate),
+        )
 }

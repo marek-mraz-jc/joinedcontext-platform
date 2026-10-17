@@ -4,11 +4,12 @@
 //! verified caller pinned, and the broker narrows every document to what the caller may see
 //! (LK1). Nothing is rendered here (T-3646): an Endpoint no view serves has no schema child.
 
-use crate::app::admit;
-use crate::app::admit_space;
-use crate::app::sha256_hex;
 use crate::app::Gateway;
-use crate::app::{broker_failure, has_view, principal_of, with_platform_slug};
+use crate::auth::subject::admit;
+use crate::auth::subject::admit_space;
+use crate::auth::subject::principal_of;
+use crate::handlers::ngsi_ld::{broker_failure, has_view, with_platform_slug};
+use crate::handlers::respond::sha256_hex;
 use crate::middleware::tenancy;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -16,6 +17,8 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
+use axum::routing::get;
+use axum::Router;
 use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::sync::Arc;
@@ -299,4 +302,22 @@ fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
         .split(',')
         .map(str::trim)
         .any(|candidate| candidate == "*" || candidate.trim_start_matches("W/") == etag)
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        // SP-04: `schema/` is a child of every space, and the record advertises it. The
+        // same two routes as the endpoint surface, because it is the same surface named
+        // by its space (SP-03).
+        .route("/cs/{space}/schema/index.json", get(space_schema_index))
+        .route(
+            "/cs/{space}/schema/{version}/{artifact}",
+            get(space_schema_artifact),
+        )
+        .route("/api/endpoint/{slug}/schema/index.json", get(schema_index))
+        .route(
+            "/api/endpoint/{slug}/schema/{version}/{artifact}",
+            get(schema_artifact),
+        )
 }

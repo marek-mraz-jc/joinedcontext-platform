@@ -1,13 +1,11 @@
 //! The SensorThings API surface of an endpoint, one handler over its own resource tree (T-1474).
 
-use crate::app::admit;
-use crate::app::read_only;
-use crate::app::typed_json_response;
-use crate::app::Gateway;
-use crate::app::MAX_SKIP;
-use crate::app::PAGE;
+use crate::app::{Gateway, MAX_SKIP, PAGE};
+use crate::auth::subject::admit;
 use crate::handlers::reads::query_temporal;
 use crate::handlers::reads::read_entities;
+use crate::handlers::respond::read_only;
+use crate::handlers::respond::typed_json_response;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -17,6 +15,8 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
+use axum::routing::any;
+use axum::Router;
 use jc_core::kinds::Representation;
 use jc_core::ProblemDetails;
 use serde_json::Value;
@@ -409,4 +409,13 @@ fn bad_parameter(problem: &ParamError) -> Response<Body> {
     let _ = HeaderValue::from_str(problem.parameter)
         .map(|value| body.headers_mut().insert("x-parameter", value));
     body
+}
+
+/// This surface's routes; `app::router` merges them under its guards.
+pub(crate) fn routes() -> Router<Arc<Gateway>> {
+    Router::new()
+        // The SensorThings surface, the same shape as OGC: one handler over its own resource tree.
+        .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
+        .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
+        .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))
 }

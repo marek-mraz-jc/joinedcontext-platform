@@ -5,7 +5,7 @@
 //! and the names are compared exactly, so nothing reaches a neighbouring space or project because
 //! its name merely looks similar.
 //!
-//! The one caller (`src/app.rs`, `roles_on(endpoint.audience, account.roles_in(&account.project,
+//! The one caller (`src/auth/subject.rs`, `roles_on(endpoint.audience, account.roles_in(&account.project,
 //! &endpoint.space))`) asks about the account's OWN project and the called endpoint's space, behind
 //! `endpoint.admits(Some(&account.project))`. So a role scoped to a third project can never be
 //! asked for in production; it is still tested here, because this function is public and the day a

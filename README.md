@@ -87,7 +87,7 @@ Report a vulnerability privately through this repository's GitHub security advis
 the contact in [SECURITY.md](SECURITY.md). Please do not open a public issue for one.
 
 Two things are worth knowing before you read the code: the gateway is the enforcement point,
-so a change to `crates/context-gateway/src/pdp/` or `src/app.rs` is a change to who can read
+so a change to `crates/context-gateway/src/pdp/`, `src/app.rs` or a surface module is a change to who can read
 what; and a secret never appears in a manifest, an image or a log — it is named by a
 `secretRef` and resolved by the reconciler.
 

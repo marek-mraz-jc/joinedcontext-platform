@@ -8,7 +8,8 @@
 //! documents its access and schema surfaces serve (SP-16). Nothing is remembered between calls (SP-19):
 //! the agent names the Endpoint on every call, and the list is rebuilt from the token each time.
 
-use crate::app::{self, anonymous_on, principal_of, subject_from, Gateway, HUB_PATH, MAX_BODY};
+use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::{anonymous_on, principal_of, subject_from, HUB_PATH};
 use crate::auth::token;
 use crate::handlers::{endpoint_surface, schema};
 use crate::mcp::describe;
@@ -593,7 +594,7 @@ impl Hub {
             "method": "tools/call",
             "params": forwarded,
         });
-        app::member_call(&self.gateway, endpoint, subject, message).await
+        crate::mcp::endpoint::member_call(&self.gateway, endpoint, subject, message).await
     }
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).
