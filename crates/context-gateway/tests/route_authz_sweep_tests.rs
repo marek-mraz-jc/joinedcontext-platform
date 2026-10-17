@@ -19,6 +19,7 @@ use context_gateway::app::{
     router, Gateway, EDGE_AUDIENCE, HUB_AUDIENCE, HUB_PATH, PORTAL_CLIENT, SIMULATE_AUDIENCE,
 };
 use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::handlers::mappings::{MappingFile, PublishedMapping};
 use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -355,6 +356,19 @@ fn rows() -> Vec<Row> {
             get(ep("/schema/v1/model.shacl.ttl")),
             Member,
         ),
+        // EP-53 (T-4419): the published Mappings of a major, narrowed per caller like the model.
+        row(
+            "GET",
+            "/api/endpoint/{slug}/schema/{version}/mappings/",
+            get(ep("/schema/v1/mappings/")),
+            Member,
+        ),
+        row(
+            "GET",
+            "/api/endpoint/{slug}/schema/{version}/mappings/{file}",
+            get(ep("/schema/v1/mappings/sweep.blobl")),
+            Member,
+        ),
         row(
             "GET",
             "/healthz",
@@ -482,6 +496,27 @@ async fn gateway(realm: &common::Realm, view: &str) -> axum::Router {
         audience: Audience::ProjectList,
         allowed_projects: Vec::new(),
     }]);
+    // One published Mapping, so its file route has something to serve (EP-53). It reads no
+    // source name, so admission alone decides who gets it.
+    gateway.replace_mappings(
+        [(
+            SLUG.to_owned(),
+            vec![Arc::new(PublishedMapping {
+                name: "sweep".to_owned(),
+                title: Value::Null,
+                source: ("alerts".to_owned(), "1".to_owned()),
+                target: ("other".to_owned(), "1".to_owned()),
+                major: 1,
+                files: vec![MappingFile {
+                    name: "sweep.blobl".to_owned(),
+                    media_type: "text/plain",
+                    bytes: Arc::from(b"root = this\n".as_slice()),
+                }],
+                reads: Default::default(),
+            })],
+        )]
+        .into(),
+    );
     router(Arc::new(gateway))
 }
 
