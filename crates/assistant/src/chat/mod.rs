@@ -37,7 +37,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use self::agent::{Ask, Connected, Event, Spent, Turn};
-use self::mcp::{PersonToken, Surface};
+use self::mcp::{PersonToken, Server, Surface};
 use self::model::Model;
 use crate::embed::Embedder;
 use crate::worker::{Deployment, Snapshot};
@@ -444,10 +444,10 @@ pub fn validate(question: &Question, deployment: &Deployment) -> Result<(), Stri
         }
     }
     if let Some(connectors) = &question.connectors {
-        if let Some(unknown) = connectors
-            .iter()
-            .find(|c| !deployment.spec.connectors.iter().any(|d| &d.endpoint == *c))
-        {
+        if let Some(unknown) = connectors.iter().find(|c| {
+            !deployment.spec.connectors.iter().any(|d| &d.endpoint == *c)
+                && deployment.spec.mcp_server.as_ref() != Some(*c)
+        }) {
             return Err(format!(
                 "connectors: this assistant has no connector `{unknown}`"
             ));
@@ -713,8 +713,100 @@ async fn connected(
             }
         }
     }
+    if let Some(server) = deployment
+        .spec
+        .mcp_server
+        .as_deref()
+        .filter(|server| chosen.is_none_or(|chosen| chosen.iter().any(|c| c == server)))
+    {
+        lent(state, deployment, server, person, &mut connected, failed).await;
+    }
     connected
 }
+
+/// The Endpoints the deployment's named server lends this asker, each a connector of its own
+/// Endpoint with every read tool (MF-56, ADR-N-043 §7.6). The server lists them with the same
+/// token rule as a connector: anyone on an anonymous channel, the person on `internal`, whose
+/// token then reaches only the non-public Endpoints the server named for them. A server of
+/// another project than the deployment's own or the organization's is not offered.
+async fn lent(
+    state: &ChatState,
+    deployment: &Deployment,
+    server: &str,
+    person: Option<&PersonToken>,
+    connected: &mut Vec<Connected>,
+    failed: &mut Vec<Event>,
+) {
+    let own = matches!(
+        connector_target(server),
+        (Some(project), _) if project == deployment.project || project == jc_core::envelope::ORG_NAMESPACE
+    );
+    if !own {
+        tracing::warn!(deployment = %deployment.name, %server, "the mcpServer is another project's; not offered");
+        return;
+    }
+    let anonymous = deployment.spec.channel.is_anonymous();
+    let token = if anonymous { None } else { person.cloned() };
+    let listing = Server {
+        gateway: state.gateway.clone(),
+        server: server.to_owned(),
+        timeout: Duration::from_secs(SERVER_SECONDS),
+        token: token.clone(),
+    };
+    let endpoints = match listing.endpoints(&state.http).await {
+        Ok(endpoints) => endpoints,
+        Err(why) => {
+            if !anonymous {
+                failed.push(Event::Tool {
+                    name: "tools/list".into(),
+                    endpoint: Some(server.to_owned()),
+                    status: "failed",
+                });
+            }
+            let key = format!("{}/{}/{server}", deployment.project, deployment.name);
+            if !anonymous || first_this_hour(&FAILED_LISTINGS, &key, std::time::Instant::now()) {
+                tracing::warn!(deployment = %deployment.name, %server, %why, "the mcpServer's Endpoints could not be listed");
+            }
+            return;
+        }
+    };
+    let tools: Vec<String> = mcp::READ_ONLY_TOOLS
+        .iter()
+        .map(|t| (*t).to_owned())
+        .collect();
+    for endpoint in endpoints {
+        if connected.iter().any(|c| c.surface.slug == endpoint.slug) {
+            continue;
+        }
+        let token = match (&token, endpoint.public) {
+            (_, true) => None,
+            (Some(token), false) => Some(token.clone()),
+            // No person behind the question: the server listed it for nobody it can read as.
+            (None, false) => continue,
+        };
+        let surface = Surface {
+            gateway: state.gateway.clone(),
+            slug: endpoint.slug.clone(),
+            timeout: Duration::from_secs(SERVER_SECONDS),
+            token,
+        };
+        match surface.tools(&state.http, &tools).await {
+            Ok(offered) if !offered.is_empty() => connected.push(Connected {
+                endpoint: endpoint.slug,
+                surface,
+                tools: offered,
+            }),
+            Ok(_) => {}
+            Err(why) => {
+                tracing::warn!(%server, endpoint = %endpoint.slug, %why, "a lent Endpoint's tools could not be listed")
+            }
+        }
+    }
+}
+
+/// How long a named server's listing and each lent Endpoint's call may take: a connector's
+/// default `timeoutSeconds` (MF-52).
+const SERVER_SECONDS: u64 = 20;
 
 /// When each public deployment's failing connector was last logged (T-4370); one key per
 /// configured connector, so it stays as small as the deployments.
