@@ -167,11 +167,16 @@ async fn main() -> ExitCode {
     ) {
         tokio::spawn(Arc::clone(&domain_gate).follow(url, token.clone()));
     }
-    let gateway = Arc::new(
-        gateway
-            .deliver_privately_to(config.egress_private_hosts.clone())
-            .gate_writes_on(domain_gate),
-    );
+    let gateway = gateway
+        .deliver_privately_to(config.egress_private_hosts.clone())
+        .gate_writes_on(domain_gate);
+    // A person's own connectors are the Portal's to keep and the gateway's to serve (EP-123).
+    let gateway = Arc::new(match config.connectors_url.clone() {
+        Some(url) => gateway.read_personal_connectors(
+            context_gateway::mcp::personal::Personal::new(url, token.clone()),
+        ),
+        None => gateway,
+    });
     // The repository is a cache of the enforcement point's decisions, so it is followed
     // rather than read once: a revoked Policy or ServiceAccount stops granting within a
     // second, without a restart (R48, EP-19, OPS-45).

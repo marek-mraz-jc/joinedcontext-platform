@@ -64,6 +64,8 @@ pub struct McpServer {
     pub members: Vec<String>,
     /// The Endpoints it selects beside its members (MF-55, ADR-N-043 §7).
     pub select: Option<Select>,
+    /// A personal connector's favourites: only these slugs are selected (UI-98, EP-123).
+    pub endpoints: Option<Vec<String>>,
     /// Who may connect.
     pub audience: Audience,
     /// The projects a `project-list` server admits besides its own.
@@ -88,6 +90,7 @@ impl McpServer {
             ),
             members: Vec::new(),
             select: Some(Select::default()),
+            endpoints: None,
             audience: Audience::Organization,
             allowed_projects: Vec::new(),
         }
@@ -102,6 +105,10 @@ impl McpServer {
         };
         if self.members.contains(&endpoint.slug)
             || breadth(endpoint.audience) < breadth(self.audience)
+            || self
+                .endpoints
+                .as_ref()
+                .is_some_and(|endpoints| !endpoints.contains(&endpoint.slug))
         {
             return false;
         }
@@ -185,9 +192,22 @@ pub async fn message(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
+    if project == super::personal::PROJECT {
+        return super::personal::message(gateway, name, request).await;
+    }
     let Some(server) = gateway.server(&project, &name) else {
         return ProblemDetails::not_found().into_response();
     };
+    serve(gateway, server, request).await
+}
+
+/// One JSON-RPC message to `server`, already resolved: its members and selected Endpoints as
+/// this caller reads them (EP-92, EP-120).
+pub(crate) async fn serve(
+    gateway: Arc<Gateway>,
+    server: McpServer,
+    request: Request,
+) -> Response<Body> {
     // Members in the order the manifest names them, then the selected Endpoints by slug; one
     // that no longer serves MCP is no member.
     let members: Vec<Arc<Endpoint>> = server
@@ -227,7 +247,7 @@ pub async fn message(
                 .collect();
             (format!("anonymous:{caller}"), reach, true)
         }
-        Err(token::Rejected::NoToken) => return unauthorized(&gateway, &server),
+        Err(token::Rejected::NoToken) => return challenge(&gateway, &server),
         Err(rejected) => return ProblemDetails::from(rejected).into_response(),
         Ok(raw) => {
             let Some(verifier) = gateway.verifier.as_ref() else {
@@ -590,7 +610,8 @@ fn failure(slug: &str, refusal: &Value) -> Value {
 }
 
 /// The `401` that names the server's resource metadata (RFC 9728, AG-32).
-fn unauthorized(gateway: &Gateway, server: &McpServer) -> Response<Body> {
+/// `401` with the server's resource metadata named, which is how a client learns to log in.
+pub(crate) fn challenge(gateway: &Gateway, server: &McpServer) -> Response<Body> {
     let mut response = ProblemDetails::new(401, "unauthorized", "Unauthorized")
         .with_detail("this MCP server needs an access token; its authorization server is named by the resource metadata")
         .into_response();
@@ -616,7 +637,13 @@ pub async fn protected_resource(
 ) -> Response<Body> {
     let (Some(issuer), Some(server)) = (
         gateway.verifier.as_ref().map(|verifier| verifier.issuer()),
-        gateway.server(&project, &name),
+        // A personal address answers the same metadata for every name: it says nothing of whose
+        // connectors exist (EP-123).
+        gateway.server(&project, &name).or_else(|| {
+            (project == super::personal::PROJECT && gateway.personal.is_some())
+                .then(|| super::personal::addressed(&name))
+                .flatten()
+        }),
     ) else {
         return ProblemDetails::not_found().into_response();
     };
@@ -643,6 +670,7 @@ mod tests {
             description: None,
             members: vec!["bikes".into()],
             select: None,
+            endpoints: None,
             audience,
             allowed_projects: vec!["espoo".into()],
         }

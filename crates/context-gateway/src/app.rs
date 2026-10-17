@@ -108,6 +108,9 @@ pub struct Gateway {
     pub ws_token_lifetime: std::time::Duration,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
+    /// Where a person's own connectors are read, `/api/mcp/me/{name}` (EP-123); `None` serves
+    /// no personal address.
+    pub personal: Option<Arc<crate::mcp::personal::Personal>>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
     /// spread over many Endpoints is still one subject's burst (ADR-N-025 section 3, EP-87).
     pub hub_rate_limit: RateLimits,
@@ -185,6 +188,7 @@ impl Gateway {
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
+            personal: None,
             hub_rate_limit: HUB_RATE_LIMIT,
             anonymous_mcp_rate_limit: ANONYMOUS_MCP_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
@@ -268,6 +272,12 @@ impl Gateway {
     /// `enforce` refuses a write unless the Organization's domain is verified.
     pub fn gate_writes_on(mut self, gate: Arc<crate::domain_gate::DomainGate>) -> Self {
         self.domain_gate = gate;
+        self
+    }
+
+    /// Serves `/api/mcp/me/{name}` from the connectors `personal` reads (EP-123).
+    pub fn read_personal_connectors(mut self, personal: crate::mcp::personal::Personal) -> Self {
+        self.personal = Some(Arc::new(personal));
         self
     }
 

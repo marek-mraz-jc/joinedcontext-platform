@@ -87,6 +87,7 @@ fn server(name: &str, members: &[&str], audience: Audience) -> McpServer {
         description: Some("The city's mobility data.".to_owned()),
         members: members.iter().map(|slug| (*slug).to_owned()).collect(),
         select: None,
+        endpoints: None,
         audience,
         allowed_projects: Vec::new(),
     }
@@ -953,4 +954,212 @@ async fn ten_thousand_endpoints_resolve_a_selector() {
             took[10], took[19]
         );
     }
+}
+
+// --- T-4538: a person's own connectors at /api/mcp/me/{name} (EP-123, UI-98) ---
+
+/// The Portal's internal read: each `sub`'s list, `down` answering 503, every call counted.
+struct Portal {
+    url: String,
+    down: Arc<std::sync::atomic::AtomicBool>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn portal(lists: Value) -> Portal {
+    use std::sync::atomic::Ordering;
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (is_down, counted) = (Arc::clone(&down), Arc::clone(&calls));
+    let app = Router::new().route(
+        "/internal/connectors/{sub}",
+        axum::routing::get(
+            move |axum::extract::Path(sub): axum::extract::Path<String>| {
+                let (lists, is_down, counted) =
+                    (lists.clone(), Arc::clone(&is_down), Arc::clone(&counted));
+                async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    if is_down.load(Ordering::SeqCst) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({})))
+                            .into_response();
+                    }
+                    let connectors = lists.get(&sub).cloned().unwrap_or_else(|| json!([]));
+                    axum::Json(json!({ "connectors": connectors })).into_response()
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let address = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Portal {
+        url: format!("http://{address}/internal/connectors"),
+        down,
+        calls,
+    }
+}
+use axum::response::IntoResponse;
+
+/// The gateway over `five()` reading connectors from `portal`, held `keep`.
+fn personal(
+    broker: &str,
+    realm: &common::Realm,
+    portal: &Portal,
+    keep: std::time::Duration,
+) -> Router {
+    let gateway = Gateway::new(
+        Broker::new(broker),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(five())
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    )
+    .read_personal_connectors(
+        context_gateway::mcp::personal::Personal::new(portal.url.clone(), None).keeping(keep),
+    );
+    router(Arc::new(gateway))
+}
+
+/// The steward `sub` with the edge audience.
+fn person(realm: &common::Realm, sub: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": sub,
+        "aud": "context-gateway",
+        "preferred_username": sub,
+        "groups": ["/ovzdusie"],
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+/// EP-123: a person's connector serves their favourites as far as they read them; another
+/// person at the same address gets the bytes of an unknown server, and nothing names whose it is.
+#[tokio::test]
+async fn a_personal_connector_answers_its_owner_alone() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let portal = portal(json!({
+        "ana": [{ "name": "my-air", "select": { "endpoints": [AIR, CLOSED, OPEN] } }],
+        "bob": [{ "name": "other", "select": {} }],
+    }))
+    .await;
+    let app = personal(
+        &broker.url,
+        &realm,
+        &portal,
+        std::time::Duration::from_secs(60),
+    );
+    let (ana, bob) = (person(&realm, "ana"), person(&realm, "bob"));
+
+    let (names, body) = listed(&app, "/api/mcp/me/my-air", Some(&ana)).await;
+    assert_eq!(
+        names,
+        [AIR, OPEN],
+        "a favourite the person cannot read is out: {body}"
+    );
+    assert!(!body.contains(CLOSED) && !body.contains(BIKES), "{body}");
+
+    let (status, _, theirs) = raw(
+        app.clone(),
+        post(
+            "/api/mcp/me/my-air",
+            Some(&bob),
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    let (_, _, nobodys) = raw(
+        app.clone(),
+        post(
+            "/api/mcp/me/nothing-here",
+            Some(&bob),
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        theirs, nobodys,
+        "another person's connector answers as an unknown server"
+    );
+
+    // Without a token: a challenge naming the address's metadata, which says nothing of whose.
+    let (status, headers, _) = raw(
+        app.clone(),
+        post(
+            "/api/mcp/me/my-air",
+            None,
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let challenge = headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        challenge.contains("/api/mcp/me/my-air/.well-known/oauth-protected-resource"),
+        "{challenge}"
+    );
+    for name in ["my-air", "nothing-here"] {
+        let request = Request::builder()
+            .uri(format!(
+                "/api/mcp/me/{name}/.well-known/oauth-protected-resource"
+            ))
+            .body(Body::empty())
+            .expect("a request");
+        let (status, metadata) = send(app.clone(), request).await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+        assert_eq!(metadata["resource"], format!("{HOST}/api/mcp/me/{name}"));
+    }
+}
+
+/// EP-123: a list is held at most its hold, a Portal that cannot be read answers 503 and never
+/// an older list.
+#[tokio::test]
+async fn a_held_list_expires_and_an_unreadable_portal_is_a_503() {
+    use std::sync::atomic::Ordering;
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let portal =
+        portal(json!({ "ana": [{ "name": "my-air", "select": { "endpoints": [AIR] } }] })).await;
+    let app = personal(
+        &broker.url,
+        &realm,
+        &portal,
+        std::time::Duration::from_millis(200),
+    );
+    let ana = person(&realm, "ana");
+
+    let (names, _) = listed(&app, "/api/mcp/me/my-air", Some(&ana)).await;
+    assert_eq!(names, [AIR]);
+    let (names, _) = listed(&app, "/api/mcp/me/my-air", Some(&ana)).await;
+    assert_eq!(names, [AIR]);
+    assert_eq!(
+        portal.calls.load(Ordering::SeqCst),
+        1,
+        "the second call is held"
+    );
+
+    portal.down.store(true, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (status, problem) = send(
+        app.clone(),
+        post(
+            "/api/mcp/me/my-air",
+            Some(&ana),
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{problem}");
+    assert_eq!(portal.calls.load(Ordering::SeqCst), 2);
 }

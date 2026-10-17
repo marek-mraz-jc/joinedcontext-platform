@@ -43,6 +43,9 @@ pub struct Config {
     /// The Portal's list of running workspace previews (`JC_GATEWAY_PREVIEWS_URL`, its
     /// internal listener's `/internal/previews`); absent serves `main` alone (CC-78).
     pub previews_url: Option<String>,
+    /// The Portal's read of a person's connectors (`JC_GATEWAY_CONNECTORS_URL`, its internal
+    /// listener's `/internal/connectors`); absent serves no `/api/mcp/me/{name}` (EP-123).
+    pub connectors_url: Option<String>,
     /// Where the previews are written (`JC_GATEWAY_PREVIEWS_DIR`, default
     /// `/tmp/jc-previews`), a scratch directory the pod owns.
     pub previews_dir: PathBuf,
@@ -235,6 +238,9 @@ impl Config {
             previews_url: std::env::var("JC_GATEWAY_PREVIEWS_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
+            connectors_url: std::env::var("JC_GATEWAY_CONNECTORS_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty()),
             previews_dir: std::env::var("JC_GATEWAY_PREVIEWS_DIR")
                 .ok()
                 .filter(|dir| !dir.trim().is_empty())
@@ -337,6 +343,7 @@ mod tests {
             projects_dir: None,
             assembly_dir: PathBuf::from("/tmp/jc-assembly"),
             previews_url: Some("http://portal:8081/internal/previews".to_owned()),
+            connectors_url: None,
             previews_dir: PathBuf::from("/tmp/jc-previews"),
             org_domain: "hel.fi".to_owned(),
             oidc_issuer: Some("https://idm.example/realms/dev".to_owned()),
