@@ -84,6 +84,38 @@ pub struct Publisher {
     pub uri: Option<String>,
 }
 
+/// A Project's `spec.catalog`: the body that publishes its data, which the project's own
+/// catalogue names and every record whose Endpoint names no publisher carries (EP-125, docs
+/// API/08 section 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProjectCatalog {
+    /// The publishing body, with its registry IRI: a catalogue's publisher is an IRI.
+    pub publisher: Publisher,
+    /// The desk that answers for the project's datasets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_point: Option<ContactPoint>,
+}
+
+impl ProjectCatalog {
+    /// Validates as an Endpoint's block does, and refuses a publisher without its IRI.
+    pub fn validate(&self) -> Result<()> {
+        if self.publisher.uri.is_none() {
+            return Err(Error::Name {
+                field: "spec.catalog.publisher.uri",
+                value: String::new(),
+                reason: "name the body's registry IRI, such as https://data.gov.sk/id/legal-subject/{IČO}",
+            });
+        }
+        Catalog {
+            publisher: Some(self.publisher.clone()),
+            contact_point: self.contact_point.clone(),
+            ..Catalog::default()
+        }
+        .validate()
+    }
+}
+
 /// The contact point of a dataset, a `vcard:Kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

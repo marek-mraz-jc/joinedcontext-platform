@@ -113,6 +113,7 @@ impl Reaper {
                 homes,
                 brokers,
                 mappings,
+                publishers,
             )) => {
                 let counts = (endpoints.len(), spaces.len(), accounts.len());
                 // The endpoint table carries the policies, so replacing it purges every
@@ -138,6 +139,8 @@ impl Reaper {
                 self.gateway.replace_servers(servers);
                 // EP-53: a Mapping withdrawn from the repository stops being published.
                 self.gateway.replace_mappings(mappings);
+                // EP-125: a publisher's catalogue follows its Project's spec.catalog.
+                self.gateway.replace_publishers(publishers);
                 // ADR-N-047: a space follows its broker from the next request on.
                 self.gateway.broker.route(&homes);
                 // ADR-N-048: a broker's roles and its pipelines' topics hold from the next

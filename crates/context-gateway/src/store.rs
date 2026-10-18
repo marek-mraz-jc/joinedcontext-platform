@@ -17,7 +17,7 @@ use crate::units::UnitRules;
 use crate::view_mapping::ViewMapping;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
-    McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, Representation,
+    McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, ProjectSpec, Representation,
 };
 use jc_core::Urn;
 use jcctl::loader::{RawManifest, Repository};
@@ -38,7 +38,65 @@ pub type Tables = (
     SpaceBrokers,
     crate::mqtt::Brokers,
     crate::handlers::mappings::Mappings,
+    Publishers,
 );
+
+/// The body that publishes one Project's data, as its own catalogue names it (EP-125).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectPublisher {
+    /// The project's `metadata.title` per locale, the catalogue's title.
+    pub title: BTreeMap<String, String>,
+    /// The project's `metadata.description` per locale.
+    pub description: BTreeMap<String, String>,
+    /// The publishing body's domain, `spec.domain`.
+    pub domain: Option<String>,
+    /// `spec.catalog`: the publisher and the desk.
+    pub catalog: jc_core::kinds::ProjectCatalog,
+}
+
+/// Every Project that names its publisher, by name (EP-125).
+pub type Publishers = BTreeMap<String, Arc<ProjectPublisher>>;
+
+/// The Projects of the repository that name their publisher in `spec.catalog` (EP-125). A
+/// manifest whose spec does not parse is left out with a line in the log, as every kind here.
+pub fn publishers_of(repo: &Repository) -> Publishers {
+    repo.iter()
+        .filter(|(id, _)| id.kind == "Project")
+        .filter_map(|(id, resource)| {
+            let spec = spec_of::<ProjectSpec>(&resource.manifest)?;
+            let catalog = spec.catalog?;
+            let metadata = &resource.manifest.metadata.rest;
+            Some((
+                id.name.clone(),
+                Arc::new(ProjectPublisher {
+                    title: language_map(metadata, "title"),
+                    description: language_map(metadata, "description"),
+                    domain: spec.domain,
+                    catalog,
+                }),
+            ))
+        })
+        .collect()
+}
+
+/// An Endpoint's catalogue block with its Project's publisher and desk where it names none of
+/// its own (EP-125): an Endpoint without a block gets one holding just those two.
+fn with_publisher(
+    catalog: Option<jc_core::kinds::Catalog>,
+    publisher: Option<&ProjectPublisher>,
+) -> Option<jc_core::kinds::Catalog> {
+    let Some(publisher) = publisher else {
+        return catalog;
+    };
+    let mut catalog = catalog.unwrap_or_default();
+    if catalog.publisher.is_none() {
+        catalog.publisher = Some(publisher.catalog.publisher.clone());
+    }
+    if catalog.contact_point.is_none() {
+        catalog.contact_point = publisher.catalog.contact_point.clone();
+    }
+    Some(catalog)
+}
 
 /// The broker each space lives on, by its tenant segment, and each view, by its name: an
 /// Endpoint's slug or `cs-{space}` (PF-111, ADR-N-047). A space whose `brokerRef` names no
@@ -276,6 +334,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         homes,
         crate::mqtt::brokers_of(repo),
         mappings,
+        publishers_of(repo),
     )
 }
 
@@ -360,6 +419,7 @@ pub fn load_with_previews(
         homes,
         brokers,
         mappings,
+        publishers,
     ) = load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -407,6 +467,8 @@ pub fn load_with_previews(
         brokers,
         // A preview's Mappings are not approved, so none is published (EP-53).
         mappings,
+        // A preview's Project publishes no catalogue: only the merged repository's do.
+        publishers,
     ))
 }
 
@@ -426,6 +488,7 @@ fn app_of(repo: &Repository, project: &str, endpoint: &str) -> Option<String> {
 /// commit build the same table in the same order (CC-27).
 fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> Vec<Endpoint> {
     let ModelSet { models, declared } = models;
+    let publishers = publishers_of(repo);
     let policies = policies_by_space(repo);
     let views = view_mappings(repo, root);
     let projections = projections(repo);
@@ -489,6 +552,11 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             }
         });
         let representations = spec.served_representations();
+        let catalog = with_publisher(
+            spec.catalog.clone(),
+            publishers.get(&project).map(Arc::as_ref),
+        )
+        .map(Arc::new);
         endpoints.push(Endpoint {
             roles: match app_client {
                 Some(client) => EndpointRoles::of_app(&project, &id.name, &spec, client),
@@ -515,7 +583,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
                 .unwrap_or_default(),
             projection,
             base_path: format!("/api/endpoint/{}", spec.slug),
-            catalog: spec.catalog.map(Arc::new),
+            catalog,
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
                     view.namespace

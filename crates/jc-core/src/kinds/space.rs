@@ -21,6 +21,10 @@ pub struct ProjectSpec {
     /// `JC_ORG_DOMAIN` (PF-44).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    /// The body that publishes the project's data in a national catalogue: the project's own
+    /// catalogue names it, and so does every record whose Endpoint names none (EP-125).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<crate::kinds::ProjectCatalog>,
     /// Optional resource quotas for this Project (PF-17); the project file's, never a registry
     /// entry's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,9 @@ impl ProjectSpec {
                 reason: e.to_string(),
             })?;
         }
+        if let Some(catalog) = &self.catalog {
+            catalog.validate()?;
+        }
         let entry = self.is_registry_entry();
         let belongs = |field: &str, place: &str| Error::Invalid {
             field: field.to_owned(),
@@ -121,6 +128,9 @@ impl ProjectSpec {
         }
         if entry && self.quotas.is_some() {
             return Err(belongs("spec.quotas", "the project's own project.yaml"));
+        }
+        if entry && self.catalog.is_some() {
+            return Err(belongs("spec.catalog", "the project's own project.yaml"));
         }
         crate::project::validate_parameters(&self.parameters, entry)
     }
