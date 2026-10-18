@@ -12,7 +12,7 @@ aes-gcm = "0.10"
 age = { version = "0.12", default-features = false, features = ["armor"] }
 # A seed entity is checked offline the way the broker checks it on create: NGSI-LD expansion with
 # the pinned core @context (T-3913). The same tag as context-gateway's, so one copy builds.
-antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.2.0", version = "0.2" }
+antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
 base64 = "0.22"
 # The export index stamps when it was taken; jc-core already carries the same clock.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

@@ -521,7 +521,7 @@ impl Hub {
                         "name": "joinedcontext-hub",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": super::PRIMER,
+                    "instructions": super::PRIMER.as_str(),
                 }),
             ),
             "ping" => result(id, json!({})),

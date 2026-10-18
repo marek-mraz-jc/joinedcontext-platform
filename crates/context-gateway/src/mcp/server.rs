@@ -368,7 +368,7 @@ pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
          them and answer each apart in `results`, with `partial` and `failed` when one could \
          not answer; every other tool names one Endpoint in `endpoint`.\n\n",
     );
-    instructions.push_str(super::PRIMER);
+    instructions.push_str(&super::PRIMER);
     json!({
         "protocolVersion": jsonrpc::PROTOCOL_VERSION,
         "capabilities": { "tools": { "listChanged": false } },
