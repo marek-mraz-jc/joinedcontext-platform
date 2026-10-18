@@ -453,11 +453,17 @@ fn rank_of(key: &str, attribute: &Value, plain: &Value, has_unit: bool, asked: &
     }
 }
 
-/// Each column's labels per language from the data model (T-4672).
-pub type Labels = Vec<Option<BTreeMap<String, String>>>;
+/// Each column as the data model shows it, `None` where the model does not order it; empty for a
+/// type without a model class (T-4672).
+pub type ModelColumns = Vec<Option<jc_core::display_order::Field>>;
 
-/// A table's columns, its rows, each column's unit and its model labels.
-pub type Columns = (Vec<String>, Vec<Vec<Value>>, Vec<Option<String>>, Labels);
+/// A table's columns, its rows, each column's unit and how the model shows it.
+pub type Columns = (
+    Vec<String>,
+    Vec<Vec<Value>>,
+    Vec<Option<String>>,
+    ModelColumns,
+);
 
 /// The entities of a `query_entities` answer as a table, by importance (T-4650): `name` (else
 /// `id`), the attributes `asked` names, measured values (a number with a `unitCode` or an
@@ -531,7 +537,12 @@ pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) 
         columns.push("observedAt".to_owned());
         units.push(None);
     }
-    let labels = display.map_or_else(Vec::new, |display| labels_of(&display, &columns));
+    let fields: ModelColumns = display.map_or_else(Vec::new, |display| {
+        columns
+            .iter()
+            .map(|c| display.iter().find(|f| &f.slot == c).cloned())
+            .collect()
+    });
     let rows = shown
         .iter()
         .map(|entity| {
@@ -545,7 +556,7 @@ pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) 
                 .collect()
         })
         .collect();
-    Some((columns, rows, units, labels))
+    Some((columns, rows, units, fields))
 }
 
 /// The display order of the entities' type when the model has a class for it, over the attributes
@@ -569,18 +580,19 @@ fn modelled(
 
 /// Each column's labels in every language the model labels the type in, and English; `None` for
 /// a column the model does not order (`id`, the time column).
-fn labels_of(display: &[jc_core::display_order::Field], columns: &[String]) -> Labels {
-    let mut languages: Vec<&str> = display
+pub fn labels_of(fields: &ModelColumns) -> Vec<Option<BTreeMap<String, String>>> {
+    let mut languages: Vec<&str> = fields
         .iter()
+        .flatten()
         .flat_map(|f| f.labels.keys().map(String::as_str))
         .chain(["en"])
         .collect();
     languages.sort_unstable();
     languages.dedup();
-    columns
+    fields
         .iter()
-        .map(|column| {
-            let field = display.iter().find(|f| &f.slot == column)?;
+        .map(|field| {
+            let field = field.as_ref()?;
             Some(
                 languages
                     .iter()
@@ -1144,7 +1156,7 @@ pub(super) async fn table(
 ) -> Option<Table> {
     let total = total_of(text);
     let model = model_of(ask, connector).await;
-    let (columns, rows, units, labels) = table_of(text, READ_ROWS, asked, model.as_deref())?;
+    let (columns, rows, units, fields) = table_of(text, READ_ROWS, asked, model.as_deref())?;
     let slug = connector.surface.slug.as_str();
     let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
         .await
@@ -1165,7 +1177,11 @@ pub(super) async fn table(
         columns,
         rows,
         units,
-        labels,
+        labels: labels_of(&fields),
+        summary: fields
+            .iter()
+            .map(|f| f.as_ref().is_some_and(|f| f.summary))
+            .collect(),
         total,
         dataset,
         download,
@@ -2355,6 +2371,7 @@ mod tests {
             rows: (0..MODEL_ROWS + 3).map(|i| vec![json!(i)]).collect(),
             units: vec![None],
             labels: Vec::new(),
+            summary: Vec::new(),
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
             download: None,
@@ -3269,8 +3286,9 @@ classes:
       source:
         annotations: { hidden: { tag: hidden, value: "true" } }
 "#;
-        let (columns, rows, units, labels) =
+        let (columns, rows, units, fields) =
             table_of(&air().to_string(), 50, &[], Some(model)).unwrap_or_default();
+        let labels = labels_of(&fields);
         assert_eq!(
             columns,
             [
@@ -3298,14 +3316,14 @@ classes:
         );
 
         let other = model.replace("AirQualityObserved:", "WeatherObserved:");
-        let (columns, _, _, labels) =
+        let (columns, _, _, fields) =
             table_of(&air().to_string(), 50, &[], Some(&other)).unwrap_or_default();
         assert_eq!(
             columns[1..3],
             ["no2", "pm10"],
             "no class: the measured values first"
         );
-        assert!(labels.is_empty());
+        assert!(fields.is_empty());
     }
 
     #[test]

@@ -138,6 +138,10 @@ pub struct Table {
     /// empty for a type without a model class (DM-100, T-4672).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Whether each column is one of the model's key attributes, which a map's popup shows
+    /// (DM-99, T-4672); empty for a type without a model class.
+    #[serde(skip)]
+    pub summary: Vec<bool>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
