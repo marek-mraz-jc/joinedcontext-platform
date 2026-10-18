@@ -11,7 +11,7 @@ use std::sync::Arc;
 use assistant::crawl::{CrawlPolicy, Crawler};
 use assistant::worker::{self, Checkout, Source};
 use assistant::{project_scope, MIGRATOR};
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, SourceType, Visibility};
+use jc_core::kinds::assistant::{KnowledgeSourceSpec, PdfPolicy, SourceType, Visibility};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -125,8 +125,8 @@ fn spec(start: &str, schedule: Option<&str>) -> KnowledgeSourceSpec {
         exclude: Vec::new(),
         max_depth: 2,
         max_pages: 20,
-        pdf: None,
-        off_domain_documents: None,
+        pdf: PdfPolicy::default(),
+        off_domain_documents: false,
         schedule: schedule.map(str::to_owned),
         languages: Vec::new(),
         visibility: Visibility::Public,

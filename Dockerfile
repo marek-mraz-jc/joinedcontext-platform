@@ -8,6 +8,10 @@ WORKDIR /src
 # g++: the tokenizer behind the assistant's embedder links C++ (esaxx, oniguruma; T-3053).
 # libclang-dev: jc-wasm-host reads an App's SQL with libpg_query, whose bindings bindgen makes (T-3364).
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ libclang-dev && rm -rf /var/lib/apt/lists/*
+# The PDFium the assistant crate links, pinned and checked (scripts/ci/pdfium.sh, T-3052).
+COPY scripts/ci/pdfium.sh /tmp/pdfium.sh
+RUN sh /tmp/pdfium.sh /opt/pdfium
+ENV KREUZBERG_PDFIUM_PREBUILT=/opt/pdfium
 # The assistant's embedding model and the ONNX Runtime it loads, pinned and checked (T-3053);
 # only the final image's jc-assistant reads them.
 COPY scripts/ci/e5-small.sh scripts/ci/onnxruntime.sh /tmp/

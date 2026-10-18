@@ -1,14 +1,16 @@
 //! Text out of what the crawler fetched, cut into passages and stored as chunks (T-3052,
 //! ADR-N-040 §3.2).
 //!
-//! `kreuzberg` turns HTML and text into Markdown, detects the language and chunks with overlap;
-//! it reads no PDF or office document (T-4524). [`Indexer`](crate::extract::Indexer) is the
-//! crawl's [`Sink`](crate::crawl::Sink): each included page that changed replaces its own
-//! chunks, without an embedding yet (T-3053 adds those).
+//! `kreuzberg` turns HTML and PDF into Markdown with page markers, detects the language and
+//! chunks with overlap. [`Indexer`](crate::extract::Indexer) is the crawl's [`Sink`](crate::crawl::Sink): each included page or document that
+//! changed replaces its own chunks, without an embedding yet (T-3053 adds those).
 
-use kreuzberg::{ChunkerType, ChunkingConfig, ExtractionConfig, LanguageDetectionConfig};
+use kreuzberg::{
+    ChunkerType, ChunkingConfig, ExtractionConfig, LanguageDetectionConfig, PageConfig,
+};
 use sqlx::PgPool;
 
+use crate::crawl::links::is_document_type;
 use crate::crawl::Sink;
 use crate::Error;
 
@@ -22,11 +24,13 @@ pub const CHUNK_OVERLAP: usize = 200;
 /// The most passages one page or document may become: a cap on what one source can cost.
 pub const MAX_PASSAGES: usize = 2_000;
 
-/// One passage of a page or an uploaded file.
+/// One passage of a page or a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Passage {
     /// Its text, Markdown.
     pub text: String,
+    /// The PDF page it starts on, 1-based; `None` for HTML.
+    pub first_page: Option<u32>,
 }
 
 /// What one page or document became.
@@ -37,14 +41,14 @@ pub struct Extracted {
     pub language: Option<String>,
     /// The passages, in reading order.
     pub passages: Vec<Passage>,
-    /// Whether passages beyond [`MAX_PASSAGES`] were dropped.
+    /// Whether passages beyond `pdf.maxPages` or [`MAX_PASSAGES`] were dropped.
     pub truncated: bool,
 }
 
 fn config() -> ExtractionConfig {
     ExtractionConfig {
         use_cache: false,
-        // OCR would bring ONNX Runtime and its memory.
+        // A scanned PDF yields no text; OCR would bring ONNX Runtime and its memory.
         disable_ocr: true,
         chunking: Some(ChunkingConfig {
             max_characters: CHUNK_CHARS,
@@ -60,6 +64,11 @@ fn config() -> ExtractionConfig {
             enabled: true,
             min_confidence: 0.5,
             detect_multiple: false,
+        }),
+        pages: Some(PageConfig {
+            extract_pages: false,
+            insert_page_markers: false,
+            ..PageConfig::default()
         }),
         ..ExtractionConfig::default()
     }
@@ -78,12 +87,35 @@ fn iso639_1(code: &str) -> Option<&'static str> {
     }
 }
 
-/// Extracts `bytes` of `mime`: HTML, plain text, CSV or Markdown.
+/// Extracts `bytes` of `mime`, keeping passages that start on a page up to `max_pages`.
 pub async fn extract(
     bytes: &[u8],
     mime: &str,
     declared_language: Option<&str>,
+    max_pages: u32,
 ) -> Result<Extracted, Error> {
+    let mut cut = false;
+    let shortened;
+    let bytes = if mime.starts_with("application/pdf") {
+        if max_pages == 0 {
+            // No page is kept: nothing is read at all.
+            return Ok(Extracted {
+                language: None,
+                passages: Vec::new(),
+                truncated: true,
+            });
+        }
+        match first_pages(bytes, max_pages) {
+            Some(fewer) => {
+                cut = true;
+                shortened = fewer;
+                &shortened[..]
+            }
+            None => bytes,
+        }
+    } else {
+        bytes
+    };
     let result = kreuzberg::extract_bytes(bytes, mime, &config())
         .await
         .map_err(|err| Error::Extract(format!("{mime}: {err}")))?;
@@ -97,10 +129,14 @@ pub async fn extract(
         .map(str::to_owned)
         .or_else(|| detected.map(str::to_owned));
 
-    let mut truncated = false;
+    let mut truncated = cut;
     let mut passages = Vec::new();
     for chunk in result.chunks.unwrap_or_default() {
-        if passages.len() == MAX_PASSAGES {
+        let first_page = chunk
+            .metadata
+            .first_page
+            .and_then(|page| u32::try_from(page).ok());
+        if first_page.is_some_and(|page| page > max_pages) || passages.len() == MAX_PASSAGES {
             truncated = true;
             break;
         }
@@ -108,6 +144,7 @@ pub async fn extract(
         if !text.is_empty() && !only_headings(text) {
             passages.push(Passage {
                 text: text.to_owned(),
+                first_page,
             });
         }
     }
@@ -116,6 +153,30 @@ pub async fn extract(
         passages,
         truncated,
     })
+}
+
+/// `bytes`, a PDF, cut to its first `max_pages` pages before PDFium reads it (T-3314), so a
+/// long PDF costs the pages kept and not the whole document. `None` when nothing is beyond the
+/// limit or the file is one this cannot rewrite (encrypted, unreadable): PDFium reads it whole,
+/// and the passages past the limit are still dropped.
+pub(crate) fn first_pages(bytes: &[u8], max_pages: u32) -> Option<Vec<u8>> {
+    let mut document = lopdf::Document::load_mem(bytes).ok()?;
+    if document.is_encrypted() {
+        return None;
+    }
+    let beyond: Vec<u32> = document
+        .get_pages()
+        .into_keys()
+        .filter(|page| *page > max_pages)
+        .collect();
+    if beyond.is_empty() {
+        return None;
+    }
+    document.delete_pages(&beyond);
+    document.prune_objects();
+    let mut cut = Vec::new();
+    document.save_to(&mut cut).ok()?;
+    Some(cut)
 }
 
 /// Whether a passage is headings and nothing else: its body lines empty or repeating a heading.
@@ -166,6 +227,11 @@ pub async fn store(
         .execute(&mut *tx)
         .await?;
     for (ordinal, passage) in extracted.passages.iter().enumerate() {
+        // A PDF passage cites its page, so a reader lands where the text is.
+        let cited = match passage.first_page {
+            Some(page) => format!("{url}#page={page}"),
+            None => url.to_owned(),
+        };
         sqlx::query(
             "INSERT INTO chunks (site_id, project, page_id, document_id, ordinal, url, text, lang, visibility) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -175,7 +241,7 @@ pub async fn store(
         .bind(page_id)
         .bind(document_id)
         .bind(i32::try_from(ordinal).unwrap_or(i32::MAX))
-        .bind(url)
+        .bind(cited)
         .bind(&passage.text)
         .bind(extracted.language.as_deref())
         .bind(visibility)
@@ -193,6 +259,7 @@ pub struct Indexer {
     project: String,
     site_id: i64,
     visibility: String,
+    max_pdf_pages: u32,
     /// Passages stored in this crawl.
     pub passages: usize,
     /// Pages and documents whose passages were cut at a cap.
@@ -203,13 +270,20 @@ pub struct Indexer {
 
 impl Indexer {
     /// An indexer for one site of one project; `visibility` is the source's (`public` or
-    /// `internal`).
-    pub fn new(pool: PgPool, project: &str, site_id: i64, visibility: &str) -> Self {
+    /// `internal`) and `max_pdf_pages` its `pdf.maxPages`.
+    pub fn new(
+        pool: PgPool,
+        project: &str,
+        site_id: i64,
+        visibility: &str,
+        max_pdf_pages: u32,
+    ) -> Self {
         Self {
             pool,
             project: project.to_owned(),
             site_id,
             visibility: visibility.to_owned(),
+            max_pdf_pages,
             passages: 0,
             truncated: 0,
             failures: Vec::new(),
@@ -248,7 +322,7 @@ impl Indexer {
                 return;
             }
         }
-        let outcome = match extract(bytes, mime, language).await {
+        let outcome = match extract(bytes, mime, language, self.max_pdf_pages).await {
             Ok(extracted) => {
                 if extracted.truncated {
                     self.truncated += 1;
@@ -284,11 +358,137 @@ impl Sink for Indexer {
         )
         .await;
     }
+
+    async fn document(&mut self, document_id: i64, url: &str, mime: Option<&str>, bytes: &[u8]) {
+        match document_type(url, mime) {
+            Ok(mime) => {
+                self.index(Owner::Document(document_id), url, &mime, None, bytes)
+                    .await
+            }
+            Err(reason) => self.failures.push(format!("{url}: {reason}")),
+        }
+    }
+}
+
+/// The type a fetched document is read as: the server's, without parameters, when it is one of
+/// the document types the crawl follows ([`is_document_type`]); a PDF when the server names none
+/// and the address ends in `.pdf`; refused otherwise rather than guessed. The crawl picks a
+/// document by its address, so the type is the remote server's word: anything else would let a
+/// site steer kreuzberg into a parser the assistant never reads with, YAML through the
+/// unmaintained `unsafe-libyaml` among them (RUSTSEC-2024-0449, T-4070).
+fn document_type(url: &str, mime: Option<&str>) -> Result<String, String> {
+    let named = mime
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match named {
+        Some(mime) if is_document_type(mime) => Ok(mime.to_ascii_lowercase()),
+        Some(mime) => Err(format!(
+            "the server named {mime:?}, which is not a document type the assistant reads"
+        )),
+        None if url.to_ascii_lowercase().ends_with(".pdf") => Ok("application/pdf".to_owned()),
+        None => Err("the server named no content type".to_owned()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::only_headings;
+    use super::{document_type, first_pages, only_headings};
+
+    /// A PDF of `pages` pages, page n showing "Strana n", with a correct cross-reference table.
+    fn pdf(pages: usize) -> Vec<u8> {
+        let kids: Vec<String> = (0..pages).map(|n| format!("{} 0 R", 4 + 2 * n)).collect();
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+                kids.join(" ")
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        for n in 0..pages {
+            let stream = format!("BT /F1 18 Tf 72 720 Td (Strana {}) Tj ET", n + 1);
+            objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * n));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{stream}\nendstream",
+                stream.len()
+            ));
+        }
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// T-3314: PDFium is handed the pages within `pdf.maxPages` and no more.
+    #[test]
+    fn a_pdf_is_cut_to_its_page_limit_before_it_is_read() {
+        let cut = first_pages(&pdf(5), 2).expect("cut");
+        let document = lopdf::Document::load_mem(&cut).expect("still a PDF");
+        assert_eq!(document.get_pages().len(), 2);
+        assert!(cut.len() < pdf(5).len());
+        assert!(
+            first_pages(&pdf(2), 2).is_none(),
+            "nothing beyond the limit"
+        );
+        assert!(
+            first_pages(b"not a pdf", 2).is_none(),
+            "read whole, as before"
+        );
+    }
+
+    /// T-4070: a document is read only as a type the crawl follows, whatever its server says.
+    #[test]
+    fn a_document_is_read_only_as_a_document_type() {
+        let pdf = "https://bb.example/plan.pdf";
+        assert_eq!(
+            document_type(pdf, Some("Application/PDF; charset=binary")),
+            Ok("application/pdf".to_owned())
+        );
+        assert_eq!(document_type(pdf, None), Ok("application/pdf".to_owned()));
+        assert_eq!(
+            document_type(pdf, Some(" ;x")),
+            Ok("application/pdf".to_owned())
+        );
+        let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        assert_eq!(
+            document_type("https://bb.example/a.docx", Some(docx)),
+            Ok(docx.to_owned())
+        );
+        for steered in [
+            "application/yaml",
+            "application/x-yaml",
+            "text/yaml",
+            "application/zip",
+            "application/x-7z-compressed",
+            "application/octet-stream",
+            "text/html",
+        ] {
+            let refused = document_type(pdf, Some(steered)).expect_err(steered);
+            assert!(refused.contains(steered), "{refused}");
+        }
+        assert_eq!(
+            document_type("https://bb.example/download?id=7", None),
+            Err("the server named no content type".to_owned())
+        );
+    }
 
     #[test]
     fn a_passage_of_headings_alone_is_recognised() {

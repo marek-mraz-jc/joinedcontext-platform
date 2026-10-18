@@ -7,7 +7,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, SourceType, Visibility};
+use jc_core::kinds::assistant::{KnowledgeSourceSpec, PdfPolicyKind, SourceType, Visibility};
 use reqwest::header::{CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -81,8 +81,12 @@ pub struct CrawlReport {
     pub pages_fetched: u32,
     /// Number of pages whose content was unchanged.
     pub pages_unchanged: u32,
-    /// Number of linked documents (PDF, office) recorded as skipped and never read (T-4524).
-    pub documents_skipped: u32,
+    /// Number of documents fetched.
+    pub documents_fetched: u32,
+    /// Number of documents whose content was unchanged.
+    pub documents_unchanged: u32,
+    /// Number of documents excluded by policy or off-domain rules.
+    pub documents_excluded: u32,
     /// Number of links recorded in the database.
     pub links: u32,
     /// Number of URLs disallowed by robots.txt.
@@ -95,7 +99,7 @@ pub struct CrawlReport {
     pub failed: u32,
 }
 
-/// The consumer of crawled pages (T-3052); linked documents are never read (T-4524).
+/// The consumer of crawled pages and documents (T-3052).
 pub trait Sink {
     /// Invoked for an included page whose content is new or changed.
     fn page(
@@ -104,6 +108,15 @@ pub trait Sink {
         url: &str,
         language: Option<&str>,
         html: &str,
+    ) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Invoked for an included document whose content is new or changed.
+    fn document(
+        &mut self,
+        document_id: i64,
+        url: &str,
+        mime: Option<&str>,
+        bytes: &[u8],
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -116,6 +129,16 @@ impl<T: Sink + ?Sized + Send> Sink for &mut T {
         html: &str,
     ) -> impl std::future::Future<Output = ()> + Send {
         (**self).page(page_id, url, language, html)
+    }
+
+    fn document(
+        &mut self,
+        document_id: i64,
+        url: &str,
+        mime: Option<&str>,
+        bytes: &[u8],
+    ) -> impl std::future::Future<Output = ()> + Send {
+        (**self).document(document_id, url, mime, bytes)
     }
 }
 
@@ -224,18 +247,30 @@ pub async fn crawl_site(
     let mut report = CrawlReport::default();
     let run = DocRun {
         pool,
+        crawler,
+        spec,
         site_host: &site_host,
         project,
         site_id,
+        robots: &robots,
     };
 
     for url_str in &spec.start_urls {
         if let Ok(u) = Url::parse(url_str) {
             let canon = canonicalise_url(u);
             // A start address that names a document is one document of the site (T-3293),
-            // recorded as skipped, not a page of its bytes (T-4524).
+            // under the `pdf` policy and its bounds, not a page of its bytes.
             if links::is_document_url(&canon) {
-                skip_document(run, None, &canon, &mut seen_documents, &mut report).await?;
+                handle_document(
+                    run,
+                    None,
+                    &canon,
+                    &mut seen_documents,
+                    &mut report,
+                    sink,
+                    false,
+                )
+                .await?;
                 continue;
             }
             let key = canon.to_string();
@@ -434,12 +469,22 @@ pub async fn crawl_site(
                                     }
                                 }
                                 "document" => {
-                                    skip_document(
-                                        run,
+                                    handle_document(
+                                        DocRun {
+                                            pool,
+                                            crawler,
+                                            spec,
+                                            site_host: &site_host,
+                                            project,
+                                            site_id,
+                                            robots: &robots,
+                                        },
                                         Some(e.id),
                                         &to_url,
                                         &mut seen_documents,
                                         &mut report,
+                                        sink,
+                                        false,
                                     )
                                     .await?;
                                 }
@@ -456,18 +501,22 @@ pub async fn crawl_site(
                 ..
             } => {
                 // An address without a document's name that answers with a document's type
-                // is that document (T-3293): recorded as skipped, never read (T-4524).
+                // is read as that document, fetched again under the `pdf` bounds (T-3293).
+                // ponytail: one extra fetch per such address; pass the body on if they turn common.
                 let mime = headers
                     .get(CONTENT_TYPE)
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.split(';').next().unwrap_or(s).trim());
-                if mime.is_some_and(links::is_document_type) {
-                    skip_document(
+                if let Some(mime) = mime.filter(|m| links::is_document_type(m)) {
+                    let pdf = mime.eq_ignore_ascii_case("application/pdf");
+                    handle_document(
                         run,
                         item.parent_id,
                         &final_url,
                         &mut seen_documents,
                         &mut report,
+                        sink,
+                        pdf,
                     )
                     .await?;
                     continue;
@@ -562,12 +611,22 @@ pub async fn crawl_site(
                             }
                         }
                         links::LinkKind::Document => {
-                            skip_document(
-                                run,
+                            handle_document(
+                                DocRun {
+                                    pool,
+                                    crawler,
+                                    spec,
+                                    site_host: &site_host,
+                                    project,
+                                    site_id,
+                                    robots: &robots,
+                                },
                                 Some(page_id),
                                 &link.url,
                                 &mut seen_documents,
                                 &mut report,
+                                sink,
+                                false,
                             )
                             .await?;
                         }
@@ -582,35 +641,197 @@ pub async fn crawl_site(
     Ok(report)
 }
 
-/// Why a linked document is recorded and never read (T-4524).
-pub const NOT_READ: &str =
-    "not read: the assistant reads HTML and plain text only, no PDF or office documents (T-4524)";
-
-/// Where one crawl records the documents its pages link.
+/// What every document of one crawl shares: where it is stored and what governs it.
 #[derive(Clone, Copy)]
 struct DocRun<'a> {
     pool: &'a PgPool,
+    crawler: &'a Crawler,
+    spec: &'a KnowledgeSourceSpec,
     site_host: &'a str,
     project: &'a str,
     site_id: i64,
+    robots: &'a robots::Robots,
 }
 
-/// Records a linked document once per crawl as `skipped` with [`NOT_READ`] and counts it; it is
-/// never fetched (T-4524), so its bytes never reach a parser.
-async fn skip_document(
+async fn handle_document(
     run: DocRun<'_>,
     page_id: Option<i64>,
     doc_url: &Url,
     seen_documents: &mut HashSet<String>,
     report: &mut CrawlReport,
+    sink: &mut impl Sink,
+    answered_pdf: bool,
 ) -> Result<(), Error> {
-    let canon = canonicalise_url(doc_url.clone());
-    if !seen_documents.insert(canon.to_string()) {
+    let DocRun {
+        pool,
+        crawler,
+        spec,
+        site_host,
+        project,
+        site_id,
+        robots,
+    } = run;
+    let canon_doc_url = canonicalise_url(doc_url.clone());
+    let url_str = canon_doc_url.as_str();
+
+    if !seen_documents.insert(url_str.to_owned()) {
         return Ok(());
     }
-    report.documents_skipped += 1;
-    let off_domain = canon.host_str() != Some(run.site_host);
-    record_skipped_doc(run, page_id, canon.as_str(), off_domain).await
+
+    let off_domain = canon_doc_url.host_str() != Some(site_host);
+    let is_pdf = answered_pdf || canon_doc_url.path().to_ascii_lowercase().ends_with(".pdf");
+
+    let mut included = !off_domain || spec.off_domain_documents;
+    if is_pdf && spec.pdf.policy == PdfPolicyKind::Exclude {
+        included = false;
+    }
+
+    if !included {
+        report.documents_excluded += 1;
+        record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, false).await?;
+        return Ok(());
+    }
+
+    if !fetch::is_url_allowed(&canon_doc_url, crawler.policy.allow_plain_http) {
+        report.refused += 1;
+        record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
+        return Ok(());
+    }
+
+    if canon_doc_url.host_str() == Some(site_host) && !robots.is_allowed(url_str) {
+        report.disallowed += 1;
+        record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
+        return Ok(());
+    }
+
+    let existing = get_existing_doc(pool, project, site_id, url_str).await?;
+    let (stored_etag, stored_last_modified, stored_hash) = match &existing {
+        Some(e) => (
+            e.etag.as_deref(),
+            e.last_modified.as_deref(),
+            e.content_hash.as_deref(),
+        ),
+        None => (None, None, None),
+    };
+
+    let doc_host = canon_doc_url.host_str().unwrap_or(site_host);
+    let outcome = fetch::fetch_url(
+        &crawler.client,
+        &crawler.policy,
+        doc_host,
+        &canon_doc_url,
+        spec.pdf.max_bytes,
+        stored_etag,
+        stored_last_modified,
+    )
+    .await;
+
+    match outcome {
+        fetch::FetchOutcome::Refused => {
+            report.refused += 1;
+            record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
+        }
+        fetch::FetchOutcome::TooLarge => {
+            report.too_large += 1;
+            record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
+        }
+        fetch::FetchOutcome::Failed(ref why) => {
+            report.failed += 1;
+            let failed = Failed {
+                page_id,
+                url: url_str,
+                off_domain,
+                reason: why,
+            };
+            record_failed_doc(pool, project, site_id, &failed).await?;
+        }
+        fetch::FetchOutcome::Status(status) => {
+            report.failed += 1;
+            let reason = format!("HTTP {}", status.as_u16());
+            let failed = Failed {
+                page_id,
+                url: url_str,
+                off_domain,
+                reason: &reason,
+            };
+            record_failed_doc(pool, project, site_id, &failed).await?;
+        }
+        fetch::FetchOutcome::RedirectExternal { .. } => {
+            report.failed += 1;
+            let reason = "a redirect left the site";
+            let failed = Failed {
+                page_id,
+                url: url_str,
+                off_domain,
+                reason,
+            };
+            record_failed_doc(pool, project, site_id, &failed).await?;
+        }
+        fetch::FetchOutcome::NotModified { .. } => {
+            report.documents_unchanged += 1;
+            if let Some(e) = &existing {
+                mark_doc_not_modified(pool, project, e.id).await?;
+            }
+        }
+        fetch::FetchOutcome::Success { headers, body, .. } => {
+            let hash = hex::encode(Sha256::digest(&body));
+            let mime = headers
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.split(';').next().unwrap_or(s).trim());
+            let etag = headers.get(ETAG).and_then(|v| v.to_str().ok());
+            let last_modified = headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok());
+            let bytes_count = body.len() as i64;
+
+            let is_unchanged = stored_hash == Some(&hash);
+            if is_unchanged {
+                report.documents_unchanged += 1;
+                upsert_doc_fetched(
+                    pool,
+                    project,
+                    site_id,
+                    DocFacts {
+                        page_id,
+                        url: url_str,
+                        mime,
+                        off_domain,
+                        bytes: bytes_count,
+                        included: true,
+                    },
+                    Validators {
+                        hash: &hash,
+                        etag,
+                        last_modified,
+                    },
+                )
+                .await?;
+            } else {
+                report.documents_fetched += 1;
+                let doc_id = upsert_doc_fetched(
+                    pool,
+                    project,
+                    site_id,
+                    DocFacts {
+                        page_id,
+                        url: url_str,
+                        mime,
+                        off_domain,
+                        bytes: bytes_count,
+                        included: true,
+                    },
+                    Validators {
+                        hash: &hash,
+                        etag,
+                        last_modified,
+                    },
+                )
+                .await?;
+                sink.document(doc_id, url_str, mime, &body).await;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The site row of a source, created on its first crawl; its id is what [`crate::extract::Indexer`]
@@ -662,6 +883,32 @@ async fn get_existing_page(
     let mut tx = crate::project_scope(pool, project).await?;
     let row = sqlx::query(
         "SELECT id, content_hash, etag, last_modified FROM pages WHERE site_id = $1 AND url = $2",
+    )
+    .bind(site_id)
+    .bind(url)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    match row {
+        Some(r) => Ok(Some(ExistingRow {
+            id: r.try_get("id")?,
+            content_hash: r.try_get("content_hash")?,
+            etag: r.try_get("etag")?,
+            last_modified: r.try_get("last_modified")?,
+        })),
+        None => Ok(None),
+    }
+}
+
+async fn get_existing_doc(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+    url: &str,
+) -> Result<Option<ExistingRow>, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let row = sqlx::query(
+        "SELECT id, content_hash, etag, last_modified FROM documents WHERE site_id = $1 AND url = $2",
     )
     .bind(site_id)
     .bind(url)
@@ -874,30 +1121,147 @@ async fn get_stored_links(
 }
 
 async fn record_skipped_doc(
-    run: DocRun<'_>,
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
     page_id: Option<i64>,
     url: &str,
     off_domain: bool,
-) -> Result<(), Error> {
-    let mut tx = crate::project_scope(run.pool, run.project).await?;
-    sqlx::query(
-        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included, error) \
-         VALUES ($1, $2, $3, $4, $5, 'skipped', false, $6) \
+    included: bool,
+) -> Result<i64, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included) \
+         VALUES ($1, $2, $3, $4, $5, 'skipped', $6) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
              off_domain = EXCLUDED.off_domain, \
              status = 'skipped', \
-             included = false, \
-             error = EXCLUDED.error",
+             included = EXCLUDED.included \
+         RETURNING id",
     )
-    .bind(run.site_id)
-    .bind(run.project)
+    .bind(site_id)
+    .bind(project)
     .bind(page_id)
     .bind(url)
     .bind(off_domain)
-    .bind(NOT_READ)
-    .execute(&mut *tx)
+    .bind(included)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// A document whose read failed, and why.
+struct Failed<'a> {
+    page_id: Option<i64>,
+    url: &'a str,
+    off_domain: bool,
+    reason: &'a str,
+}
+
+async fn record_failed_doc(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+    failed: &Failed<'_>,
+) -> Result<i64, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included, error) \
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7) \
+         ON CONFLICT (site_id, url) DO UPDATE SET \
+             page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
+             off_domain = EXCLUDED.off_domain, \
+             status = 'failed', \
+             included = EXCLUDED.included, \
+             error = EXCLUDED.error \
+         RETURNING id",
+    )
+    .bind(site_id)
+    .bind(project)
+    .bind(failed.page_id)
+    .bind(failed.url)
+    .bind(failed.off_domain)
+    .bind(true)
+    .bind(reason(failed.reason))
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// What a fetched document is, beside its validators.
+#[derive(Clone, Copy)]
+struct DocFacts<'a> {
+    page_id: Option<i64>,
+    url: &'a str,
+    mime: Option<&'a str>,
+    off_domain: bool,
+    bytes: i64,
+    included: bool,
+}
+
+async fn upsert_doc_fetched(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+    facts: DocFacts<'_>,
+    validators: Validators<'_>,
+) -> Result<i64, Error> {
+    let DocFacts {
+        page_id,
+        url,
+        mime,
+        off_domain,
+        bytes,
+        included,
+    } = facts;
+    let Validators {
+        hash,
+        etag,
+        last_modified,
+    } = validators;
+    let mut tx = crate::project_scope(pool, project).await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO documents (site_id, project, page_id, url, mime, off_domain, bytes, content_hash, status, included, etag, last_modified, fetched_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'fetched', $9, $10, $11, now()) \
+         ON CONFLICT (site_id, url) DO UPDATE SET \
+             page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
+             mime = EXCLUDED.mime, \
+             off_domain = EXCLUDED.off_domain, \
+             bytes = EXCLUDED.bytes, \
+             content_hash = EXCLUDED.content_hash, \
+             status = 'fetched', \
+             included = EXCLUDED.included, \
+             etag = EXCLUDED.etag, \
+             last_modified = EXCLUDED.last_modified, \
+             fetched_at = now() \
+         RETURNING id",
+    )
+    .bind(site_id)
+    .bind(project)
+    .bind(page_id)
+    .bind(url)
+    .bind(mime)
+    .bind(off_domain)
+    .bind(bytes)
+    .bind(hash)
+    .bind(included)
+    .bind(etag)
+    .bind(last_modified)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+async fn mark_doc_not_modified(pool: &PgPool, project: &str, doc_id: i64) -> Result<(), Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    sqlx::query("UPDATE documents SET fetched_at = now(), status = 'fetched' WHERE id = $1")
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }

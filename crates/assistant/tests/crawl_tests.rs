@@ -18,9 +18,11 @@ use assistant::crawl::patterns;
 use assistant::crawl::queue;
 use assistant::crawl::robots;
 use assistant::crawl::wordpress;
-use assistant::crawl::{crawl_site, CrawlPolicy, Crawler, Sink, NOT_READ};
+use assistant::crawl::{crawl_site, CrawlPolicy, Crawler, Sink};
 use assistant::{project_scope, MIGRATOR};
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, SourceType, Visibility};
+use jc_core::kinds::assistant::{
+    KnowledgeSourceSpec, PdfPolicy, PdfPolicyKind, SourceType, Visibility,
+};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool, Row};
@@ -62,10 +64,11 @@ impl Resolve for FixtureResolver {
     }
 }
 
-/// Sink implementation that records the page payloads delivered by the crawler.
+/// Sink implementation that records page and document payloads delivered by the crawler.
 #[derive(Default)]
 struct RecordingSink {
     pages: Vec<(i64, String, Option<String>, String)>,
+    documents: Vec<(i64, String, Option<String>, Vec<u8>)>,
 }
 
 impl Sink for RecordingSink {
@@ -81,6 +84,22 @@ impl Sink for RecordingSink {
             url.to_string(),
             language.map(String::from),
             html.to_string(),
+        ));
+        async {}
+    }
+
+    fn document(
+        &mut self,
+        document_id: i64,
+        url: &str,
+        mime: Option<&str>,
+        bytes: &[u8],
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.documents.push((
+            document_id,
+            url.to_string(),
+            mime.map(String::from),
+            bytes.to_vec(),
         ));
         async {}
     }
@@ -158,8 +177,8 @@ fn test_spec(start_url: &str) -> KnowledgeSourceSpec {
         exclude: Vec::new(),
         max_depth: 3,
         max_pages: 100,
-        pdf: None,
-        off_domain_documents: None,
+        pdf: PdfPolicy::default(),
+        off_domain_documents: false,
         schedule: None,
         languages: Vec::new(),
         visibility: Visibility::Public,
@@ -264,7 +283,7 @@ async fn crawl_end_to_end() {
         .mount(&server1)
         .await;
 
-    // On-domain document: /report.pdf, mounted but never requested (T-4524)
+    // On-domain document: /report.pdf
     let pdf_bytes = b"%PDF-1.4 sample pdf content for testing";
     Mock::given(method("GET"))
         .and(path("/report.pdf"))
@@ -276,7 +295,7 @@ async fn crawl_end_to_end() {
         .mount(&server1)
         .await;
 
-    // Off-domain document on server2: must not be downloaded either
+    // Off-domain document on server2: must not be downloaded
     Mock::given(method("GET"))
         .and(path("/annex.pdf"))
         .respond_with(
@@ -303,16 +322,8 @@ async fn crawl_end_to_end() {
             .await
             .unwrap_or_default()
             .is_empty(),
-        "files.other.test must receive no request: no document is fetched"
+        "files.other.test must receive no requests when offDomainDocuments is false"
     );
-    let pdf_requests = server1
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|req| req.url.path() == "/report.pdf")
-        .count();
-    assert_eq!(pdf_requests, 0, "a linked PDF is never fetched (T-4524)");
 
     // Private page on server1 was not fetched
     let private_requests: Vec<_> = server1
@@ -351,8 +362,8 @@ async fn crawl_end_to_end() {
     assert!(pages.contains(&(expected_news.clone(), "fetched".to_string(), true)));
     assert!(pages.contains(&(expected_private.clone(), "skipped".to_string(), true)));
 
-    let documents: Vec<(String, String, bool, bool, Option<String>)> =
-        sqlx::query("SELECT url, status, included, off_domain, error FROM documents ORDER BY url")
+    let documents: Vec<(String, String, bool, bool)> =
+        sqlx::query("SELECT url, status, included, off_domain FROM documents ORDER BY url")
             .fetch_all(&mut *tx)
             .await
             .expect("documents query")
@@ -363,7 +374,6 @@ async fn crawl_end_to_end() {
                     r.get("status"),
                     r.get("included"),
                     r.get("off_domain"),
-                    r.get("error"),
                 )
             })
             .collect();
@@ -371,23 +381,8 @@ async fn crawl_end_to_end() {
     let expected_report = format!("http://www.city.test:{p1}/report.pdf");
     let expected_annex = format!("http://files.other.test:{p2}/annex.pdf");
 
-    let skipped = |url: &str, off_domain: bool| {
-        (
-            url.to_owned(),
-            "skipped".to_owned(),
-            false,
-            off_domain,
-            Some(NOT_READ.to_owned()),
-        )
-    };
-    assert!(
-        documents.contains(&skipped(&expected_report, false)),
-        "{documents:?}"
-    );
-    assert!(
-        documents.contains(&skipped(&expected_annex, true)),
-        "{documents:?}"
-    );
+    assert!(documents.contains(&(expected_report.clone(), "fetched".to_string(), true, false)));
+    assert!(documents.contains(&(expected_annex.clone(), "skipped".to_string(), false, true)));
 
     let links: Vec<(String, String)> =
         sqlx::query("SELECT to_url, kind FROM links ORDER BY to_url")
@@ -409,11 +404,14 @@ async fn crawl_end_to_end() {
 
     // Sink called only for included, changed items
     assert_eq!(sink.pages.len(), 3, "sink received root, about, and news");
+    assert_eq!(sink.documents.len(), 1, "sink received report.pdf only");
 
     // Verify report counts
     assert_eq!(report.pages_fetched, 3);
     assert_eq!(report.pages_unchanged, 0);
-    assert_eq!(report.documents_skipped, 2);
+    assert_eq!(report.documents_fetched, 1);
+    assert_eq!(report.documents_unchanged, 0);
+    assert_eq!(report.documents_excluded, 1);
     assert_eq!(report.disallowed, 1);
     assert_eq!(report.refused, 0);
     assert_eq!(report.too_large, 0);
@@ -433,32 +431,37 @@ async fn crawl_recrawl_change_detection() {
     let resolver = FixtureResolver::new(&[("www.city.test", port)]);
     let crawler = test_crawler(resolver, None);
 
-    let mount = |body: &'static str| {
-        let server = &server;
-        async move {
-            server.reset().await;
-            Mock::given(method("GET"))
-                .and(path("/robots.txt"))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"),
-                )
-                .mount(server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("content-type", "text/html; charset=utf-8")
-                        .set_body_string(body),
-                )
-                .mount(server)
-                .await;
-        }
-    };
-    let page = r#"<html lang="en"><body><a href="/doc.pdf">Doc</a></body></html>"#;
-    mount(page).await;
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(
+                    r#"<html lang="en"><body><a href="/doc.pdf">Doc</a></body></html>"#,
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/doc.pdf"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/pdf")
+                .set_body_bytes(b"%PDF-1.4 version 1".to_vec()),
+        )
+        .mount(&server)
+        .await;
+
     let spec = test_spec(&format!("http://www.city.test:{port}/"));
 
+    // Initial crawl
     let mut sink1 = RecordingSink::default();
     let report1 = crawl_site(
         &pool,
@@ -471,10 +474,12 @@ async fn crawl_recrawl_change_detection() {
     )
     .await
     .expect("initial crawl succeeds");
-    assert_eq!((report1.pages_fetched, report1.documents_skipped), (1, 1));
+    assert_eq!(report1.pages_fetched, 1);
+    assert_eq!(report1.documents_fetched, 1);
     assert_eq!(sink1.pages.len(), 1);
+    assert_eq!(sink1.documents.len(), 1);
 
-    // Second crawl: the body is identical, the document is counted again and never fetched.
+    // Second crawl: bodies are identical
     let mut sink2 = RecordingSink::default();
     let report2 = crawl_site(
         &pool,
@@ -487,15 +492,48 @@ async fn crawl_recrawl_change_detection() {
     )
     .await
     .expect("second crawl succeeds");
-    assert_eq!((report2.pages_fetched, report2.pages_unchanged), (0, 1));
-    assert_eq!(report2.documents_skipped, 1);
+    assert_eq!(report2.pages_fetched, 0);
+    assert_eq!(report2.pages_unchanged, 1);
+    assert_eq!(report2.documents_fetched, 0);
+    assert_eq!(report2.documents_unchanged, 1);
     assert!(
         sink2.pages.is_empty(),
         "no pages emitted on unchanged recrawl"
     );
+    assert!(
+        sink2.documents.is_empty(),
+        "no documents emitted on unchanged recrawl"
+    );
 
-    // Third crawl: the page changed.
-    mount(r#"<html lang="en"><body><p>New text</p><a href="/doc.pdf">Doc</a></body></html>"#).await;
+    // Update the document body on server
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(
+                    r#"<html lang="en"><body><a href="/doc.pdf">Doc</a></body></html>"#,
+                ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/doc.pdf"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/pdf")
+                .set_body_bytes(b"%PDF-1.4 version 2 modified bytes".to_vec()),
+        )
+        .mount(&server)
+        .await;
+
+    // Third crawl: document changed
     let mut sink3 = RecordingSink::default();
     let report3 = crawl_site(
         &pool,
@@ -508,22 +546,21 @@ async fn crawl_recrawl_change_detection() {
     )
     .await
     .expect("third crawl succeeds");
-    assert_eq!((report3.pages_fetched, report3.pages_unchanged), (1, 0));
-    assert_eq!(sink3.pages.len(), 1);
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .all(|r| r.url.path() != "/doc.pdf"),
-        "a linked document is never fetched (T-4524)"
+    assert_eq!(report3.pages_fetched, 0);
+    assert_eq!(report3.pages_unchanged, 1);
+    assert_eq!(report3.documents_fetched, 1);
+    assert_eq!(report3.documents_unchanged, 0);
+    assert!(sink3.pages.is_empty());
+    assert_eq!(sink3.documents.len(), 1);
+    assert_eq!(
+        sink3.documents[0].3,
+        b"%PDF-1.4 version 2 modified bytes".to_vec()
     );
 
     drop_database(admin, pool, &db_name).await;
 }
 
-/// Case 3: Page byte cap enforcement; a linked PDF is skipped without a fetch (T-4524).
+/// Case 3: Page byte cap and document byte cap enforcement.
 #[tokio::test]
 async fn crawl_caps_exceeded() {
     let (admin, pool, db_name) = database("caps").await;
@@ -563,7 +600,19 @@ async fn crawl_caps_exceeded() {
         .mount(&server)
         .await;
 
-    let spec = test_spec(&format!("http://www.city.test:{port}/"));
+    // PDF exceeding pdf.max_bytes
+    Mock::given(method("GET"))
+        .and(path("/big.pdf"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/pdf")
+                .set_body_bytes(vec![0u8; 300]),
+        )
+        .mount(&server)
+        .await;
+
+    let mut spec = test_spec(&format!("http://www.city.test:{port}/"));
+    spec.pdf.max_bytes = 100;
 
     let mut sink = RecordingSink::default();
     let report = crawl_site(
@@ -572,11 +621,7 @@ async fn crawl_caps_exceeded() {
     .await
     .expect("crawl succeeds");
 
-    assert_eq!(report.too_large, 1, "the page exceeded its limit");
-    assert_eq!(
-        report.documents_skipped, 1,
-        "the PDF is skipped, not fetched"
-    );
+    assert_eq!(report.too_large, 2, "both page and doc exceeded limits");
 
     let mut tx = project_scope(&pool, "helsinki")
         .await
@@ -741,10 +786,8 @@ fn the_shipped_intermediates_are_the_pinned_ones() {
 
 /// T-3293: a start address that is a document, by its name or by the content type it answers
 /// with, is read as one document of the site under the `pdf` policy, never as a page of its bytes.
-/// T-3293, T-4524: a start address that is a PDF, by name or by its answer's type, is one
-/// skipped document of the site: no page of its bytes, no text, one count each.
 #[tokio::test]
-async fn a_start_address_that_is_a_pdf_is_recorded_and_not_read() {
+async fn a_start_address_that_is_a_pdf_is_read_as_a_document() {
     let (admin, pool, db_name) = database("start_pdf").await;
     let server = MockServer::start().await;
     let port = server.address().port();
@@ -783,41 +826,54 @@ async fn a_start_address_that_is_a_pdf_is_recorded_and_not_read() {
         "no page of a PDF's bytes: {:?}",
         sink.pages
     );
-    assert_eq!((report.documents_skipped, report.pages_fetched), (2, 0));
-    let by_name = server
-        .received_requests()
-        .await
-        .unwrap_or_default()
+    let mut read: Vec<_> = sink
+        .documents
         .iter()
-        .filter(|r| r.url.path() == "/calendar.pdf")
-        .count();
-    assert_eq!(by_name, 0, "a PDF by its name is never fetched");
+        .map(|(_, url, mime, bytes)| (url.clone(), mime.clone(), bytes.clone()))
+        .collect();
+    read.sort();
+    assert_eq!(
+        read,
+        vec![
+            (
+                format!("http://www.city.test:{port}/calendar.pdf"),
+                Some("application/pdf".into()),
+                pdf.clone()
+            ),
+            (
+                format!("http://www.city.test:{port}/download"),
+                Some("application/pdf".into()),
+                pdf.clone()
+            ),
+        ]
+    );
+    assert_eq!((report.documents_fetched, report.pages_fetched), (2, 0));
     let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
     let pages: i64 = sqlx::query_scalar("SELECT count(*) FROM pages")
         .fetch_one(&mut *tx)
         .await
         .expect("pages");
-    let skipped: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT url, error FROM documents WHERE status = 'skipped' AND NOT included ORDER BY url",
+    let fetched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM documents WHERE status = 'fetched' AND page_id IS NULL",
     )
-    .fetch_all(&mut *tx)
+    .fetch_one(&mut *tx)
     .await
     .expect("documents");
-    assert_eq!(pages, 0);
-    assert_eq!(
-        skipped,
-        vec![
-            (
-                format!("http://www.city.test:{port}/calendar.pdf"),
-                Some(NOT_READ.to_owned())
-            ),
-            (
-                format!("http://www.city.test:{port}/download"),
-                Some(NOT_READ.to_owned())
-            ),
-        ]
-    );
+    assert_eq!((pages, fetched), (0, 2));
     tx.rollback().await.expect("rollback");
+
+    // `pdf.policy: exclude` reads nothing from either, by name or by content type.
+    let mut sink = RecordingSink::default();
+    spec.pdf.policy = PdfPolicyKind::Exclude;
+    let (admin2, pool2, db2) = database("start_pdf_excluded").await;
+    let report = crawl_site(
+        &pool2, &crawler, "hel", "helsinki", "pdf-src", &spec, &mut sink,
+    )
+    .await
+    .expect("crawl succeeds");
+    assert!(sink.pages.is_empty() && sink.documents.is_empty());
+    assert_eq!(report.documents_excluded, 2);
+    drop_database(admin2, pool2, &db2).await;
     drop_database(admin, pool, &db_name).await;
 }
 

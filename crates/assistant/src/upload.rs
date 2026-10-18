@@ -7,8 +7,16 @@ use sqlx::PgPool;
 use crate::extract::{extract, store, Owner};
 use crate::Error;
 
+/// The most an Office file's archive may unpack to, and the most entries it may hold: past
+/// either it is refused before the extractor opens it (a zip bomb).
+pub const MAX_UNPACKED: u64 = 200 * 1024 * 1024;
+pub const MAX_ENTRIES: usize = 5_000;
 /// The longest file name.
 pub const MAX_NAME_CHARS: usize = 200;
+
+pub const PDF: &str = "application/pdf";
+pub const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+pub const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 /// The file name as given, when it is one: 1 to [`MAX_NAME_CHARS`] characters, trimmed, with no
 /// path separator and no control character. It is shown and cited, never used as a path.
@@ -25,17 +33,13 @@ pub fn file_name(name: &str) -> Option<&str> {
 }
 
 /// The type `bytes` are read as, from their content; the name only tells CSV and Markdown from
-/// plain text. Anything else is refused with the reason: a PDF and an Office file (a ZIP
-/// archive) by name, because the assistant no longer reads them (T-4524).
+/// plain text. Anything else is refused with the reason.
 pub fn sniff(name: &str, bytes: &[u8]) -> Result<&'static str, String> {
     if bytes.starts_with(b"%PDF-") {
-        return Err(
-            "a PDF is not read: the assistant reads plain text, CSV and Markdown only (T-4524)"
-                .into(),
-        );
+        return Ok(PDF);
     }
     if bytes.starts_with(b"PK\x03\x04") {
-        return Err("a DOCX, XLSX or other ZIP archive is not read: the assistant reads plain text, CSV and Markdown only (T-4524)".into());
+        return office(bytes);
     }
     let text = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match std::str::from_utf8(text) {
@@ -54,8 +58,68 @@ pub fn sniff(name: &str, bytes: &[u8]) -> Result<&'static str, String> {
                 "text/plain"
             })
         }
-        _ => Err("the file is not UTF-8 text".into()),
+        _ => Err("the file is not a PDF, a DOCX, an XLSX or UTF-8 text".into()),
     }
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// A DOCX or an XLSX, read from the archive's central directory alone: what it holds, how much
+/// it unpacks to and whether any entry is encrypted, before the extractor inflates anything.
+fn office(bytes: &[u8]) -> Result<&'static str, String> {
+    const BROKEN: &str = "the archive is not a readable DOCX or XLSX";
+    // The end-of-central-directory record: 22 bytes and a comment of at most 64 KiB, at the end.
+    let earliest = bytes.len().saturating_sub(22 + 0xFFFF);
+    let end = (earliest..bytes.len().saturating_sub(21))
+        .rev()
+        .find(|&at| bytes[at..].starts_with(b"PK\x05\x06"))
+        .ok_or(BROKEN)?;
+    let entries = usize::from(u16_at(bytes, end + 10).ok_or(BROKEN)?);
+    let start = u32_at(bytes, end + 16).ok_or(BROKEN)?;
+    if entries == 0xFFFF || start == u32::MAX {
+        return Err("a ZIP64 archive is not read".into());
+    }
+    if entries > MAX_ENTRIES {
+        return Err(format!("the archive holds more than {MAX_ENTRIES} entries"));
+    }
+    let (mut at, mut unpacked, mut kind) = (start as usize, 0u64, None);
+    for _ in 0..entries {
+        if !bytes
+            .get(at..)
+            .is_some_and(|b| b.starts_with(b"PK\x01\x02"))
+        {
+            return Err(BROKEN.into());
+        }
+        let flags = u16_at(bytes, at + 8).ok_or(BROKEN)?;
+        let size = u32_at(bytes, at + 24).ok_or(BROKEN)?;
+        let name_len = usize::from(u16_at(bytes, at + 28).ok_or(BROKEN)?);
+        let extra = usize::from(u16_at(bytes, at + 30).ok_or(BROKEN)?);
+        let comment = usize::from(u16_at(bytes, at + 32).ok_or(BROKEN)?);
+        let name = bytes.get(at + 46..at + 46 + name_len).ok_or(BROKEN)?;
+        if flags & 1 == 1 {
+            return Err("an encrypted archive is not read".into());
+        }
+        unpacked += u64::from(size);
+        if unpacked > MAX_UNPACKED {
+            return Err(format!(
+                "the archive unpacks past {} MiB",
+                MAX_UNPACKED / 1024 / 1024
+            ));
+        }
+        match name {
+            b"word/document.xml" => kind = Some(DOCX),
+            b"xl/workbook.xml" => kind = Some(XLSX),
+            _ => {}
+        }
+        at += 46 + name_len + extra + comment;
+    }
+    kind.ok_or_else(|| "the archive is neither a DOCX nor an XLSX".into())
 }
 
 /// One uploaded file as the administration lists it.
@@ -137,6 +201,7 @@ pub struct Target<'a> {
     pub site_id: i64,
     pub visibility: &'a str,
     pub max_files: u32,
+    pub max_pdf_pages: u32,
     pub language: Option<&'a str>,
 }
 
@@ -180,7 +245,7 @@ pub async fn add(
     .await?;
     tx.commit().await?;
 
-    let indexed = match extract(bytes, mime, target.language).await {
+    let indexed = match extract(bytes, mime, target.language, target.max_pdf_pages).await {
         Ok(extracted) => {
             store(
                 pool,
@@ -237,8 +302,55 @@ pub async fn remove(pool: &PgPool, project: &str, site_id: i64, id: i64) -> Resu
 mod tests {
     use super::*;
 
+    /// A stored (uncompressed) ZIP of `entries` (name, declared size), as an Office file is laid out.
+    pub(crate) fn zip(entries: &[(&str, u32)], encrypted: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut directory = Vec::new();
+        for (name, size) in entries {
+            let offset = u32::try_from(out.len()).unwrap_or(0);
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&[0; 26]);
+            out.extend_from_slice(name.as_bytes());
+            directory.extend_from_slice(b"PK\x01\x02");
+            directory.extend_from_slice(&[0; 4]);
+            directory.extend_from_slice(&u16::from(encrypted).to_le_bytes());
+            directory.extend_from_slice(&[0; 14]);
+            directory.extend_from_slice(&size.to_le_bytes());
+            directory.extend_from_slice(&u16::try_from(name.len()).unwrap_or(0).to_le_bytes());
+            directory.extend_from_slice(&[0; 12]);
+            directory.extend_from_slice(&offset.to_le_bytes());
+            directory.extend_from_slice(name.as_bytes());
+        }
+        let start = u32::try_from(out.len()).unwrap_or(0);
+        let count = u16::try_from(entries.len()).unwrap_or(0);
+        out.extend_from_slice(&directory);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&u32::try_from(directory.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&start.to_le_bytes());
+        out.extend_from_slice(&[0; 2]);
+        out
+    }
+
     #[test]
     fn a_file_is_typed_by_its_content_never_its_name() {
+        assert_eq!(sniff("a.txt", b"%PDF-1.7\n..."), Ok(PDF));
+        assert_eq!(
+            sniff(
+                "x",
+                &zip(
+                    &[("[Content_Types].xml", 10), ("word/document.xml", 99)],
+                    false
+                )
+            ),
+            Ok(DOCX)
+        );
+        assert_eq!(
+            sniff("x.pdf", &zip(&[("xl/workbook.xml", 99)], false)),
+            Ok(XLSX)
+        );
         assert_eq!(
             sniff("Rozpočet.CSV", "obec;suma\nBB;1\n".as_bytes()),
             Ok("text/csv")
@@ -263,20 +375,23 @@ mod tests {
         }
     }
 
-    /// T-4524: a PDF, DOCX or XLSX is refused with the reason, whatever its name.
     #[test]
-    fn a_pdf_or_an_office_file_is_refused_by_name_of_its_type() {
-        let pdf = sniff("a.txt", b"%PDF-1.7\n...").expect_err("a PDF");
-        assert!(
-            pdf.contains("a PDF is not read") && pdf.contains("T-4524"),
-            "{pdf}"
+    fn an_archive_is_refused_past_its_limits_or_when_it_is_no_office_file() {
+        let bomb = zip(
+            &[("word/document.xml", u32::MAX), ("word/x.xml", u32::MAX)],
+            false,
         );
-        let docx =
-            sniff("x.md", b"PK\x03\x04\x14\x00\x06\x00word/document.xml").expect_err("a DOCX");
-        assert!(
-            docx.contains("DOCX, XLSX") && docx.contains("T-4524"),
-            "{docx}"
-        );
+        assert!(sniff("x.docx", &bomb).is_err_and(|e| e.contains("unpacks past 200 MiB")));
+        let locked = zip(&[("word/document.xml", 10)], true);
+        assert!(sniff("x.docx", &locked).is_err_and(|e| e.contains("encrypted")));
+        let jar = zip(&[("META-INF/MANIFEST.MF", 10)], false);
+        assert!(sniff("x.docx", &jar).is_err_and(|e| e.contains("neither")));
+        let mut cut = zip(&[("word/document.xml", 10)], false);
+        cut.truncate(cut.len() - 30);
+        assert!(sniff("x.docx", &cut).is_err());
+        let many: Vec<(String, u32)> = (0..=MAX_ENTRIES).map(|n| (format!("f{n}"), 1)).collect();
+        let many: Vec<(&str, u32)> = many.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+        assert!(sniff("x.xlsx", &zip(&many, false)).is_err_and(|e| e.contains("entries")));
     }
 
     #[test]

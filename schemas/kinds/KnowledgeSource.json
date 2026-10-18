@@ -133,12 +133,30 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "offDomainDocuments": {
+          "default": false,
+          "description": "Whether a document linked from another host is read; default false, so a source never grows into somebody else's site.",
+          "type": "boolean"
+        },
         "organizations": {
           "description": "The CKAN organizations a `ckan` source indexes, by name; empty indexes every one.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "pdf": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PdfPolicy"
+            }
+          ],
+          "default": {
+            "maxBytes": 52428800,
+            "maxPages": 500,
+            "policy": "include"
+          },
+          "description": "What happens to linked PDFs."
         },
         "schedule": {
           "description": "When the source is read again, as five-field cron (`minute hour day month weekday`).",
@@ -158,7 +176,7 @@
               "$ref": "#/definitions/SourceType"
             }
           ],
-          "description": "`website` (pages), `ckan` (a catalogue's datasets), `catalogue` (the project's own Endpoints and the models of their spaces), `guide` (the platform's User Guide, AG-118) or `upload` (files an administrator uploads)."
+          "description": "`website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the project's own Endpoints and the models of their spaces), `guide` (the platform's User Guide, AG-118) or `upload` (files an administrator uploads)."
         },
         "startUrls": {
           "description": "Where a website crawl starts: one to twenty absolute `https` URLs. Empty for `ckan`.",
@@ -268,6 +286,55 @@
       ],
       "type": "object"
     },
+    "PdfPolicy": {
+      "additionalProperties": false,
+      "description": "What the crawler does with PDFs, and how large one may be.",
+      "properties": {
+        "maxBytes": {
+          "default": 52428800,
+          "description": "The largest PDF read, in bytes; at most 200 MiB, default 50 MiB.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxPages": {
+          "default": 500,
+          "description": "The most pages of one PDF read; at most 2,000, default 500.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PdfPolicyKind"
+            }
+          ],
+          "default": "include",
+          "description": "`include` (default) or `exclude`."
+        }
+      },
+      "type": "object"
+    },
+    "PdfPolicyKind": {
+      "description": "Whether linked PDFs are read.",
+      "oneOf": [
+        {
+          "description": "PDFs are fetched and their text is read.",
+          "enum": [
+            "include"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "PDFs are skipped.",
+          "enum": [
+            "exclude"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Phase": {
       "description": "Lifecycle phase enumeration.",
       "oneOf": [
@@ -319,7 +386,7 @@
       "description": "Where a source's knowledge comes from.",
       "oneOf": [
         {
-          "description": "Pages, crawled from `startUrls`; the documents they link are recorded, never read (T-4524).",
+          "description": "Pages and the PDFs they link, crawled from `startUrls`.",
           "enum": [
             "website"
           ],
@@ -347,7 +414,7 @@
           "type": "string"
         },
         {
-          "description": "Files an administrator uploads: plain text, CSV or Markdown (MF-51, T-4524).",
+          "description": "Files an administrator uploads: PDF, DOCX, XLSX, CSV, Markdown or plain text (MF-51).",
           "enum": [
             "upload"
           ],

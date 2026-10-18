@@ -17,7 +17,9 @@ use assistant::extract::Indexer;
 use assistant::worker::{Snapshot, Source};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use jc_core::kinds::assistant::{KnowledgeSourceSpec, SourceType, UploadLimits, Visibility};
+use jc_core::kinds::assistant::{
+    KnowledgeSourceSpec, PdfPolicy, SourceType, UploadLimits, Visibility,
+};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -54,8 +56,8 @@ fn source_spec() -> KnowledgeSourceSpec {
         exclude: vec![],
         max_depth: 3,
         max_pages: 100,
-        pdf: None,
-        off_domain_documents: None,
+        pdf: PdfPolicy::default(),
+        off_domain_documents: false,
         schedule: None,
         languages: vec!["sk".into()],
         visibility: Visibility::Public,
@@ -558,7 +560,7 @@ async fn an_administrators_exclusion_removes_passages_and_outlives_the_next_craw
         .await
         .expect("site");
     tx.rollback().await.expect("rollback");
-    let mut indexer = Indexer::new(w.pool.clone(), "hronov", site, "public");
+    let mut indexer = Indexer::new(w.pool.clone(), "hronov", site, "public", 10);
     indexer.page(w.child, "https://hronov.example/odpad", Some("sk"), "<html><body><p>Odpad vyvážame v utorok a vo štvrtok, nádoby vyložte do šiestej.</p></body></html>").await;
     assert_eq!(indexer.passages, 0);
     assert_eq!(passages_left(&w.pool).await, 1);
@@ -780,11 +782,10 @@ async fn passages_of(pool: &PgPool, url: &str) -> Vec<(String, String)> {
     rows
 }
 
-/// T-4184, MF-51, API/05 §3: a Markdown file and a CSV are typed by their content (whatever
+/// T-4184, MF-51, API/05 §3: a Markdown file and a DOCX are typed by their content (whatever
 /// the caller names), indexed with the source's visibility, listed, replaced by name and
-/// removed with their passages; a PDF and a DOCX (T-4524: not read any more), a binary file, a
-/// body past `maxBytes`, a file past `maxFiles`, a name that is a path, and a source that takes
-/// no files are each refused.
+/// removed with their passages; a binary file, a body past `maxBytes`, a file past `maxFiles`,
+/// a name that is a path, and a source that takes no files are each refused.
 #[tokio::test]
 async fn uploaded_files_are_typed_indexed_listed_replaced_and_removed() {
     let w = world("adminupload").await;
@@ -807,31 +808,18 @@ async fn uploaded_files_are_typed_indexed_listed_replaced_and_removed() {
 
     let document = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Zber odpadu je v utorok.</w:t></w:r></w:p></w:body></w:document>"#;
-    let docx = stored_zip(&[("word/document.xml", document)]);
-    for (name, bytes, why) in [
-        ("zber.docx", docx, "DOCX, XLSX"),
-        (
-            "plan.pdf",
-            b"%PDF-1.7\n%%EOF\n".to_vec(),
-            "a PDF is not read",
-        ),
-    ] {
-        let (status, body) = send_file(&w.app, "subory", name, bytes).await;
-        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{name}: {body}");
-        assert!(
-            body.to_string().contains(why) && body.to_string().contains("T-4524"),
-            "{name}: {body}"
-        );
-    }
-
-    let csv = "deň;zber\nutorok;Zber odpadu je v utorok.\n";
-    let (status, table) = send_file(&w.app, "subory", "zber.csv", csv.as_bytes().to_vec()).await;
-    assert_eq!(status, StatusCode::CREATED, "{table}");
-    assert_eq!(table["mime"], "text/csv");
-    let passages = passages_of(&w.pool, "upload:subory/zber.csv").await;
+    let types = br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let docx = stored_zip(&[
+        ("[Content_Types].xml", types),
+        ("word/document.xml", document),
+    ]);
+    let (status, word) = send_file(&w.app, "subory", "zber.txt", docx).await;
+    assert_eq!(status, StatusCode::CREATED, "{word}");
+    assert_eq!(word["mime"], assistant::upload::DOCX);
+    let passages = passages_of(&w.pool, "upload:subory/zber.txt").await;
     assert!(
         passages.iter().any(|(t, _)| t.contains("Zber odpadu")),
-        "{table} {passages:?}"
+        "{word} {passages:?}"
     );
 
     let (status, listed) = call(
@@ -849,7 +837,7 @@ async fn uploaded_files_are_typed_indexed_listed_replaced_and_removed() {
         .flatten()
         .filter_map(|f| f["name"].as_str())
         .collect();
-    assert_eq!(names, ["Návod.md", "zber.csv"]);
+    assert_eq!(names, ["Návod.md", "zber.txt"]);
 
     // Full: a third file is refused, the same name again replaces its file.
     let (status, _) = send_file(&w.app, "subory", "tretí.md", b"# Tri".to_vec()).await;
