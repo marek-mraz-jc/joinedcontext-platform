@@ -550,6 +550,26 @@ mod tests {
     }
 
     #[test]
+    fn the_tool_offers_three_kinds_and_admits_no_other_member() {
+        let offered = tool();
+        assert_eq!(offered["function"]["name"], TOOL);
+        let parameters = &offered["function"]["parameters"];
+        assert_eq!(
+            parameters["properties"]["kind"]["enum"],
+            json!(["map", "line", "bar"])
+        );
+        assert_eq!(parameters["additionalProperties"], json!(false));
+        assert_eq!(
+            parameters["properties"]["title"]["maxLength"],
+            json!(TITLE_CHARS)
+        );
+        assert_eq!(
+            parameters["required"],
+            json!(["kind", "data", "label", "value", "title"])
+        );
+    }
+
+    #[test]
     fn the_domain_is_the_viz_hosts_parent() {
         let viz = url::Url::parse("https://viz.dev.example.org").expect("url");
         assert_eq!(domain(&viz), Some("dev.example.org"));
