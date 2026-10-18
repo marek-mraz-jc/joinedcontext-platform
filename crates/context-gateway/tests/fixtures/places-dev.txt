@@ -1,0 +1,520 @@
+# T-4497: the `name` of every AdministrativeArea on dev (2026-10-18, space bbsk-otvorene-data,
+# the only space of 12 holding the type whose areas carry a name), sorted.
+Abovce
+Babinec
+Babiná
+Bacúch
+Bacúrov
+Badín
+Balog nad Ipľom
+Baláže
+Banskobystrický
+Banská Belá
+Banská Bystrica
+Banská Štiavnica
+Banský Studenec
+Barca
+Bartošova Lehôtka
+Baďan
+Belina
+Beluj
+Belín
+Beňuš
+Biskupice
+Blhovce
+Bottovo
+Boľkovce
+Bratislavský
+Braväcovo
+Brehy
+Breziny
+Breznička
+Brezno
+Brusno
+Brusník
+Budikovany
+Budiná
+Budča
+Bulhary
+Buzitka
+Bušince
+Bystrá
+Bzenica
+Bzovská Lehôtka
+Bzovík
+Bátka
+Bátorová
+Cakov
+Cerovo
+Chanava
+Chrastince
+Chrámec
+Chrťany
+Chvalová
+Chyžné
+Cinobaňa
+Dačov Lom
+Dekýš
+Detva
+Detvianska Huta
+Devičie
+Divín
+Dobroč
+Dobrá Niva
+Dolinka
+Dolná Lehota
+Dolná Mičiná
+Dolná Strehová
+Dolná Trnávka
+Dolná Ves
+Dolná Ždaňa
+Dolné Mladonice
+Dolné Plachtince
+Dolné Strháre
+Dolné Zahorany
+Dolný Badín
+Dolný Harmanec
+Domaníky
+Donovaly
+Dražice
+Drienovo
+Drienčany
+Drábsko
+Drážovce
+Drňa
+Držkovce
+Dubno
+Dubovec
+Dubové
+Dudince
+Dulovo
+Dúbravica
+Dúbravy
+Figa
+Fiľakovo
+Fiľakovské Kováče
+Gemer
+Gemerská Ves
+Gemerské Dechtáre
+Gemerské Michalovce
+Gemerské Teplice
+Gemerský Jablonec
+Gemerský Sad
+Gemerček
+Glabušovce
+Gortva
+Gregorova Vieska
+Hajnáčka
+Halič
+Harmanec
+Heľpa
+Hiadeľ
+Hliník nad Hronom
+Hnúšťa
+Hodejov
+Hodejovec
+Hodruša-Hámre
+Holiša
+Hontianske Moravce
+Hontianske Nemce
+Hontianske Tesáre
+Horná Lehota
+Horná Mičiná
+Horná Strehová
+Horná Ves
+Horná Ždaňa
+Horné Hámre
+Horné Mladonice
+Horné Plachtince
+Horné Pršany
+Horné Strháre
+Horné Zahorany
+Horný Badín
+Horný Tisovník
+Hostice
+Hostišovce
+Hrabičov
+Hrachovo
+Hradište
+Hriňová
+Hrlica
+Hrnčiarska Ves
+Hrnčiarske Zalužany
+Hrochoť
+Hronec
+Hronsek
+Hronská Breznica
+Hronská Dúbrava
+Hronský Beňadik
+Hrušov
+Hrušovo
+Hubovo
+Hucín
+Husiná
+Ihráč
+Ilija
+Ipeľské Predmostie
+Ivanice
+Jalšovík
+Janice
+Janova Lehota
+Jarabá
+Jasenie
+Jastrabá
+Jelšava
+Jelšovec
+Jesenské
+Jestice
+Kalinovo
+Kalonda
+Kaloša
+Kamenné Kosihy
+Kameňany
+Kesovce
+Kiarov
+Klenovec
+Kleňany
+Klokoč
+Kociha
+Kokava nad Rimavicou
+Koláre
+Konrádovce
+Kopernica
+Kordíky
+Korytárky
+Kosihovce
+Kosihy nad Ipľom
+Kosorín
+Kotmanová
+Kováčovce
+Kováčová
+Kozelník
+Kozí Vrbovok
+Košický
+Krahule
+Kraskovo
+Kremnica
+Kremnické Bane
+Kriváň
+Krná
+Krokava
+Krupina
+Kružno
+Králiky
+Kráľ
+Kráľovce-Krnišov
+Kunešov
+Kyjatice
+Kynceľová
+Kľak
+Lackov
+Ladomerská Vieska
+Ladzany
+Lehota nad Rimavicou
+Lehôtka
+Lehôtka pod Brehmi
+Lenartovce
+Lenka
+Lentvora
+Lesenice
+Levkuška
+Leváre
+Lešť (vojenský obvod)
+Licince
+Lieskovec
+Lipovany
+Lipovec
+Litava
+Lišov
+Lom nad Rimavicou
+Lovinobaňa
+Lovča
+Lovčica-Trubín
+Lubeník
+Lukavica
+Lukovištia
+Lupoč
+Lutila
+Lučatín
+Lučenec
+Látky
+Lúčky
+Magnezitovce
+Malachov
+Malá Lehota
+Malá Čalomija
+Malé Straciny
+Malé Zlievce
+Malý Krtíš
+Martinová
+Mašková
+Medovarce
+Medzibrod
+Michalková
+Michalová
+Mikušovce
+Mládzovo
+Modrý Kameň
+Mokrá Lúka
+Motyčky
+Močiar
+Moštenica
+Muránska Dlhá Lúka
+Muránska Huta
+Muránska Lehota
+Muránska Zdychava
+Muráň
+Mučín
+Muľa
+Málinec
+Môlča
+Mýtna
+Mýto pod Ďumbierom
+Nandraž
+Nemce
+Nemecká
+Nenince
+Neporadza
+Nevoľné
+Nitra nad Ipľom
+Nitriansky
+Nižný Skálnik
+Nová Baňa
+Nová Bašta
+Nová Ves
+Nové Hony
+Obeckov
+Olováry
+Opatovská Nová Ves
+Opava
+Oravce
+Orovnica
+Orávka
+Osrblie
+Ostrá Lúka
+Ostrý Grúň
+Otročok
+Ozdín
+Očová
+Ožďany
+Padarovce
+Panické Dravce
+Pavlovce
+Petrovce
+Pinciná
+Pitelová
+Pleš
+Pliešovce
+Ploské
+Podbrezová
+Podhorie
+Podkonice
+Podkriváň
+Podrečany
+Podzámčok
+Pohorelá
+Pohronská Polhora
+Pohronský Bukovec
+Polichno
+Polina
+Polomka
+Poltár
+Poniky
+Poproč
+Potok
+Povrazník
+Počúvadlo
+Praha
+Pravica
+Predajná
+Prenčov
+Prestavlky
+Prešovský
+Priechod
+Prihradzany
+Prochot
+Príbelce
+Prša
+Píla
+Pôtor
+Radnovce
+Radzovce
+Rakytník
+Rapovce
+Ratka
+Ratkovská Lehota
+Ratkovská Suchá
+Ratkovské Bystré
+Ratková
+Rašice
+Repište
+Revúca
+Revúcka Lehota
+Riečka
+Rimavská Baňa
+Rimavská Seč
+Rimavská Sobota
+Rimavské Brezovo
+Rimavské Janovce
+Rimavské Zalužany
+Rovné
+Rovňany
+Rudno nad Hronom
+Rumince
+Ružiná
+Rybník
+Rykynčice
+Rákoš
+Ráztoka
+Sebechleby
+Sebedín-Bečov
+Selce
+Senné
+Senohrad
+Sečianky
+Seľany
+Sielnica
+Sihla
+Sirk
+Skerešovo
+Sklabiná
+Sklené Teplice
+Slaská
+Slatinské Lazy
+Sliač
+Slizké
+Slovenská Ľupča
+Slovenské Kľačany
+Slovenské Ďarmoty
+Stará Bašta
+Stará Halič
+Stará Huta
+Stará Kremnička
+Staré Hory
+Stožok
+Stredné Plachtince
+Strelníky
+Stránska
+Studená
+Sucháň
+Suché Brezovo
+Sudince
+Sušany
+Svätý Anton
+Sása
+Súdovce
+Sútor
+Tachty
+Tajov
+Tekovská Breznica
+Telgárt
+Teplý Vrch
+Terany
+Tisovec
+Tomášovce
+Tornaľa
+Točnica
+Trebeľovce
+Trebušovce
+Trenč
+Trenčiansky
+Trnavský
+Trnavá Hora
+Trpín
+Tuhár
+Turecká
+Turová
+Turčok
+Tŕnie
+Uhorské
+Utekáč
+Uzovská Panica
+Uňatín
+Valaská
+Valice
+Vaľkovňa
+Večelkov
+Veľká Lehota
+Veľká Lúka
+Veľká Ves
+Veľká Ves nad Ipľom
+Veľká nad Ipľom
+Veľká Čalomija
+Veľké Dravce
+Veľké Pole
+Veľké Straciny
+Veľké Teriakovce
+Veľké Zlievce
+Veľký Blh
+Veľký Krtíš
+Veľký Lom
+Vidiná
+Vieska
+Vieska nad Blhom
+Vinica
+Višňové
+Vlkanová
+Vlkyňa
+Voznica
+Vrbovka
+Vyhne
+Vysoká
+Vyšné Valice
+Vyšný Skálnik
+Vígľaš
+Vígľašská Huta-Kalinka
+Včelince
+Zacharovce
+Zemiansky Vrbovok
+Zlatno
+Zombor
+Zvolen
+Zvolenská Slatina
+Zádor
+Záhorce
+Závada
+Závadka nad Hronom
+Ábelová
+Čabradský Vrbovok
+Čakanovce
+Čamovce
+Čebovce
+Čekovce
+Čelovce
+Čeláre
+Čerenčany
+Červeňany
+Čerín
+České Brezovo
+Čierny Balog
+Čierny Potok
+Číž
+Ďubákovo
+Ďurkovce
+Ľubietová
+Ľuboreč
+Ľuboriečka
+Šiatorská Bukovinka
+Šimonovce
+Širkovce
+Širákov
+Šivetice
+Šoltýska
+Špania Dolina
+Španie Pole
+Štiavnické Bane
+Štrkovec
+Šumiac
+Šurice
+Šuľa
+Šávoľ
+Šíd
+Žarnovica
+Železná Breznica
+Želovce
+Žiar
+Žiar nad Hronom
+Žibritov
+Žilinský
+Župkov
+Žíp
