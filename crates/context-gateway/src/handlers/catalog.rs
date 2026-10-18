@@ -13,7 +13,19 @@ use axum::routing::get;
 use axum::Router;
 use jc_core::kinds::Audience;
 use jc_core::ProblemDetails;
+use jc_dcat::profile::{self, Profile};
 use std::sync::Arc;
+
+/// The profile `?profile=` asks for: DCAT-AP when it names none, `None` when it names one this
+/// build does not carry or the Organization does not serve, which answers 404 (API/08
+/// section 5, T-4499).
+fn profile_of(gateway: &Gateway, query: Option<&str>) -> Option<Profile> {
+    let params = crate::query::parse(query.unwrap_or_default());
+    match params.iter().find(|(key, _)| key == "profile") {
+        None => Some(Profile::DcatAp),
+        Some((_, id)) => gateway.dcat_profiles().pick(id),
+    }
+}
 
 /// The DCAT-AP record of one endpoint, in the representation the caller asked for
 /// (T-0337, T-0338, EP-27, EP-68, EP-69).
@@ -32,6 +44,9 @@ pub(crate) async fn endpoint_record(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
+    let Some(profile) = profile_of(&gateway, request.uri().query()) else {
+        return ProblemDetails::not_found().into_response();
+    };
 
     // The catalogue the caller's `schema/` routes serve, so the digests are their ETags (EP-68).
     let index = schema_routes::index_for(&gateway, &endpoint, &endpoint.slug, &subject).await;
@@ -47,13 +62,17 @@ pub(crate) async fn endpoint_record(
     let base = gateway.base_url();
     let format = space_surface::negotiate(accept);
     let body = match format {
-        space_surface::Format::JsonLd => {
-            serde_json::to_string(&endpoint_surface::dataset(&endpoint, space, &index, base))
-                .unwrap_or_default()
-        }
-        space_surface::Format::Turtle => {
-            endpoint_surface::dataset_turtle(&endpoint, space, &index, base)
-        }
+        space_surface::Format::JsonLd => serde_json::to_string(&profile::render(
+            endpoint_surface::dataset(&endpoint, space, &index, base),
+            profile,
+            endpoint.catalog.as_deref(),
+        ))
+        .unwrap_or_default(),
+        space_surface::Format::Turtle => jc_dcat::turtle(&profile::render(
+            endpoint_surface::dataset(&endpoint, space, &index, base),
+            profile,
+            endpoint.catalog.as_deref(),
+        )),
         space_surface::Format::Html => {
             endpoint_surface::dataset_html(&endpoint, space, &index, base)
         }
@@ -68,7 +87,7 @@ pub(crate) async fn endpoint_record(
 /// the feed may carry (EP-84, EP-69): no token is read, so no grant widens what it lists.
 // ponytail: one broker hop per public Endpoint, in turn; join them if the feed's latency
 // ever shows on an organization with many Endpoints.
-async fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
+async fn public_records(gateway: &Gateway, profile: Profile) -> Vec<serde_json::Value> {
     let anonymous = Subject::anonymous();
     let mut records = Vec::new();
     for endpoint in gateway.resolver.endpoints() {
@@ -79,27 +98,32 @@ async fn public_records(gateway: &Gateway) -> Vec<serde_json::Value> {
         let index =
             crate::handlers::mappings::with_mappings(gateway, &endpoint, &anonymous, index).await;
         let space = gateway.resolver.resolve_space(&endpoint.space);
-        records.push(endpoint_surface::dataset(
-            &endpoint,
-            space.as_deref(),
-            &index,
-            gateway.base_url(),
+        records.push(profile::render(
+            endpoint_surface::dataset(&endpoint, space.as_deref(), &index, gateway.base_url()),
+            profile,
+            endpoint.catalog.as_deref(),
         ));
     }
     records
 }
 
-async fn catalog_feed(gateway: &Gateway) -> serde_json::Value {
+async fn catalog_feed(gateway: &Gateway, profile: Profile) -> serde_json::Value {
     endpoint_surface::feed(
-        public_records(gateway).await,
+        public_records(gateway, profile).await,
         gateway.base_url(),
         &gateway.org_domain,
     )
 }
 
 /// `GET /catalog.jsonld`: the organization's DCAT-AP catalogue as JSON-LD (EP-84).
-pub(crate) async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let body = serde_json::to_string(&catalog_feed(&gateway).await).unwrap_or_default();
+pub(crate) async fn catalog_feed_jsonld(
+    State(gateway): State<Arc<Gateway>>,
+    request: Request,
+) -> Response<Body> {
+    let Some(profile) = profile_of(&gateway, request.uri().query()) else {
+        return ProblemDetails::not_found().into_response();
+    };
+    let body = serde_json::to_string(&catalog_feed(&gateway, profile).await).unwrap_or_default();
     (
         [(axum::http::header::CONTENT_TYPE, "application/ld+json")],
         body,
@@ -108,8 +132,14 @@ pub(crate) async fn catalog_feed_jsonld(State(gateway): State<Arc<Gateway>>) -> 
 }
 
 /// `GET /catalog.ttl`: the same catalogue as Turtle (EP-84).
-pub(crate) async fn catalog_feed_turtle(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway).await);
+pub(crate) async fn catalog_feed_turtle(
+    State(gateway): State<Arc<Gateway>>,
+    request: Request,
+) -> Response<Body> {
+    let Some(profile) = profile_of(&gateway, request.uri().query()) else {
+        return ProblemDetails::not_found().into_response();
+    };
+    let body = endpoint_surface::feed_turtle(&catalog_feed(&gateway, profile).await);
     ([(axum::http::header::CONTENT_TYPE, "text/turtle")], body).into_response()
 }
 

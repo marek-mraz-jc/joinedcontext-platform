@@ -229,14 +229,7 @@ pub(crate) async fn index_for(
     }
 }
 
-/// The major of an index's model: a number, or the digits the broker wrote as text before
-/// T-3963.
-pub(crate) fn major_of(model: &Value) -> Option<u64> {
-    let version = model.get("version")?;
-    version
-        .as_u64()
-        .or_else(|| version.as_str().and_then(|text| text.parse().ok()))
-}
+pub(crate) use jc_dcat::major_of;
 
 /// A schema document with the strong `ETag` a client revalidates against (EP-51).
 ///

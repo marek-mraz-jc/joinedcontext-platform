@@ -409,3 +409,25 @@ fn copy(from: &Path, to: &Path) {
         }
     }
 }
+
+/// The Organization's `spec.dcatProfiles` is what the record routes offer (T-4499): a listed
+/// profile is served, an unlisted one is not, and a list that does not parse serves DCAT-AP
+/// alone instead of failing the load.
+#[test]
+fn the_organizations_dcat_profiles_are_read_and_a_broken_list_serves_the_core_alone() {
+    for (listed, sk, cz) in [
+        ("  dcatProfiles: [dcat-ap-sk]\n", true, false),
+        ("  dcatProfiles: [dcat-ap-cz, dcat-ap-sk]\n", true, true),
+        ("", false, false),
+        ("  dcatProfiles: [dcat-ap-xx]\n", false, false),
+        ("  dcatProfiles: dcat-ap-sk\n", false, false),
+    ] {
+        let org = temp_dir("dcat-profiles");
+        write(&org, "org.yaml", &format!("{ORG}{listed}"));
+        let repo = jcctl::loader::Repository::load(&org).expect("the repository loads");
+        let offered = store::limits_of(&repo).dcat_profiles;
+        assert_eq!(offered.pick("dcat-ap-sk").is_some(), sk, "{listed:?}");
+        assert_eq!(offered.pick("dcat-ap-cz").is_some(), cz, "{listed:?}");
+        assert!(offered.pick("dcat-ap").is_some(), "{listed:?}");
+    }
+}

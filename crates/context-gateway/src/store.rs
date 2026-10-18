@@ -112,6 +112,8 @@ pub struct Limits {
     /// The largest request body the gateway reads, in bytes
     /// (`spec.limits.gateway.maxRequestBodyMegabytes`).
     pub max_request_body: usize,
+    /// The national DCAT-AP profiles the records are served in (`spec.dcatProfiles`, T-4499).
+    pub dcat_profiles: jc_dcat::profile::Offered,
 }
 
 impl Default for Limits {
@@ -134,28 +136,41 @@ impl Limits {
         let megabytes = megabytes.min(max.unwrap_or(u32::MAX)).max(min);
         Self {
             max_request_body: megabytes as usize * 1024 * 1024,
+            dcat_profiles: jc_dcat::profile::Offered::default(),
         }
     }
 }
 
-/// The limits the repository's `Organization` sets. Only its `spec.limits` is read, so a field
-/// this gateway does not know yet elsewhere in the manifest never turns them back into the
-/// defaults; limits that do not parse are the defaults, and the log says so.
+/// The limits the repository's `Organization` sets, and the DCAT profiles it serves. Only its
+/// `spec.limits` and `spec.dcatProfiles` are read, so a field this gateway does not know yet
+/// elsewhere in the manifest never turns them back into the defaults; a value that does not
+/// parse is the default, and the log says so.
 pub fn limits_of(repo: &Repository) -> Limits {
-    let Some(limits) = repo
+    let spec = repo
         .iter()
         .find(|(id, _)| id.kind == "Organization")
-        .and_then(|(_, loaded)| loaded.manifest.spec.get("limits"))
-    else {
-        return Limits::default();
+        .map(|(_, loaded)| &loaded.manifest.spec);
+    let mut limits = match spec.and_then(|spec| spec.get("limits")) {
+        None => Limits::default(),
+        Some(limits) => {
+            match serde_json::from_value::<jc_core::kinds::OrganizationLimits>(limits.clone()) {
+                Ok(limits) => Limits::of(limits.gateway.max_request_body_megabytes),
+                Err(error) => {
+                    tracing::warn!(%error, "the Organization's spec.limits do not parse; the defaults apply");
+                    Limits::default()
+                }
+            }
+        }
     };
-    match serde_json::from_value::<jc_core::kinds::OrganizationLimits>(limits.clone()) {
-        Ok(limits) => Limits::of(limits.gateway.max_request_body_megabytes),
-        Err(error) => {
-            tracing::warn!(%error, "the Organization's spec.limits do not parse; the defaults apply");
-            Limits::default()
+    if let Some(listed) = spec.and_then(|spec| spec.get("dcatProfiles")) {
+        match serde_json::from_value::<Vec<jc_core::kinds::DcatProfile>>(listed.clone()) {
+            Ok(listed) => limits.dcat_profiles = jc_dcat::profile::Offered::of(&listed),
+            Err(error) => {
+                tracing::warn!(%error, "the Organization's spec.dcatProfiles do not parse; DCAT-AP alone is served");
+            }
         }
     }
+    limits
 }
 
 /// Where a layout 2 organization's projects are read and assembled (CC-86, ADR-N-029).

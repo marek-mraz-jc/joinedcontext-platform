@@ -19,6 +19,7 @@ RUN sh /tmp/e5-small.sh /opt/e5-small && sh /tmp/onnxruntime.sh /opt/onnxruntime
 # dependency layer first so source edits do not rebuild the world
 COPY Cargo.toml Cargo.lock ./
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml
+COPY crates/jc-dcat/Cargo.toml crates/jc-dcat/Cargo.toml
 COPY crates/context-gateway/Cargo.toml crates/context-gateway/Cargo.toml
 COPY crates/jcctl/Cargo.toml crates/jcctl/Cargo.toml
 COPY crates/agent-proxy/Cargo.toml crates/agent-proxy/Cargo.toml
@@ -28,8 +29,9 @@ COPY crates/token-sidecar/Cargo.toml crates/token-sidecar/Cargo.toml
 COPY crates/wasm-host/Cargo.toml crates/wasm-host/Cargo.toml
 COPY crates/app-sdk/Cargo.toml crates/app-sdk/Cargo.toml
 COPY crates/camera-sim/Cargo.toml crates/camera-sim/Cargo.toml
-RUN mkdir -p crates/jc-core/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src crates/camera-sim/src \
+RUN mkdir -p crates/jc-core/src crates/jc-dcat/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src crates/camera-sim/src \
  && echo 'pub fn _dep_cache() {}' > crates/jc-core/src/lib.rs \
+ && echo 'pub fn _dep_cache() {}' > crates/jc-dcat/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/context-gateway/src/lib.rs \
  && echo 'fn main() {}' > crates/context-gateway/src/main.rs \
  && echo 'fn main() {}' > crates/jcctl/src/main.rs \
