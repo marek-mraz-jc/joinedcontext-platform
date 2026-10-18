@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..bf92d2b
 --- /dev/null
 +++ b/crates/context-gateway/src/cg_fixture.rs
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,40 @@
 +//! dev/cg-invariants/fixture.patch: one violation per statement of dev/security.cypher.
 +
 +/// A token request outside the owners.
@@ -38,6 +38,11 @@ index 0000000..bf92d2b
 +/// A secret out of its wrapper.
 +pub fn cg_fixture_secret(secret: &jc_core::Secret) -> String {
 +    secret.expose().to_owned()
++}
++
++/// Format code back in the gateway (ADR-N-051).
++pub fn cg_fixture_format() -> zip::write::SimpleFileOptions {
++    zip::write::SimpleFileOptions::default()
 +}
 diff --git a/crates/context-gateway/src/lib.rs b/crates/context-gateway/src/lib.rs
 index d10f5ed..28a961d 100644

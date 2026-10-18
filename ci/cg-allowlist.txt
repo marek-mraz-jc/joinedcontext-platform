@@ -89,3 +89,12 @@ route-without-authentication | POST /api/v1/d/{}/chat | assistant::chat::chat | 
 route-without-authentication | POST /api/v1/d/{}/feedback | assistant::chat::feedback | anonymous feedback on a public deployment's answer, rate-limited by Limits::admit
 route-without-authentication | POST /token | token_sidecar::token | the pipeline runner's token service: the deployment's NetworkPolicy admits the runner pod alone to 4180 (pipeline-runner networkpolicies.yaml pipeline-tokens), and it mints only in the pipelines' namespace
 route-without-authentication | ANY /{}/{} | wasm_host::server::Shard::handle | the apps port: the App never sees the caller's Authorization or Cookie (host.rs Host::serve_admitted removes both); the host keeps the bearer token (server.rs only_a_bearer_token_is_carried) and carries it to the gateway, which verifies it on every data call the App makes
+
+gateway-format-call | context_gateway::handlers::files::file_geojson | the GeoJSON download, moving to the broker's encoding (ADR-N-051, T-4478)
+gateway-format-call | context_gateway::handlers::files::file_json | the JSON download, moving to the broker's encoding (ADR-N-051, T-4478)
+gateway-format-call | context_gateway::handlers::files::tabular_download | CSV, XLSX and Parquet downloads, moving to the broker's encodings (ADR-N-051, T-4478, T-4466)
+gateway-format-call | context_gateway::handlers::files::zip_download | the zip export, moving to the broker (ADR-N-051, T-4478)
+gateway-format-call | context_gateway::handlers::sta::sensorthings | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
+gateway-format-call | context_gateway::handlers::sta::sta_items | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
+gateway-format-call | context_gateway::handlers::sta::sta_series | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
+gateway-format-call | context_gateway::store::view_mappings | the load-time parse of a Mapping IR, reduced to a version check (ADR-N-051, T-4547)
