@@ -492,6 +492,18 @@ pub(crate) enum Answer {
 }
 
 impl Hub {
+    /// The knowledge sources this request's `search_documents` searches: the server's own, or
+    /// the hub's (MF-57).
+    fn knowledge_sources<'a>(
+        &'a self,
+        documents: &'a super::documents::Documents,
+    ) -> &'a [super::documents::Source] {
+        match &self.server {
+            Some(server) => &server.knowledge_sources,
+            None => &documents.hub,
+        }
+    }
+
     pub(crate) async fn answer(&self, message: Value) -> Answer {
         let params = message.get("params").cloned().unwrap_or(json!({}));
         let Some(id) = message.get("id").cloned() else {
@@ -531,6 +543,9 @@ impl Hub {
                     list_endpoints_tool(),
                     get_endpoint_tool(),
                 ];
+                if let Some(documents) = &self.gateway.documents {
+                    tools.extend(documents.tool(self.knowledge_sources(documents)).await);
+                }
                 tools.extend(tools::hub_tools(&self.gateway, &self.reach));
                 if self.reads_only {
                     tools::keep_anonymous(&mut tools);
@@ -585,6 +600,16 @@ impl Hub {
         }
         if name == "search" {
             return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments));
+        }
+        if name == super::documents::NAME {
+            if let Some(documents) = &self.gateway.documents {
+                let sources = self.knowledge_sources(documents);
+                return Answer::Json(
+                    documents
+                        .call(&self.gateway, &self.caller, sources, id, &arguments)
+                        .await,
+                );
+            }
         }
 
         // The one routing argument, one string, never a list (ADR-N-025 2.5, 2.6).

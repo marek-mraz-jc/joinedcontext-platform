@@ -584,6 +584,7 @@ async fn gateway(realm: &common::Realm, view: &str) -> axum::Router {
         endpoints: None,
         audience: Audience::ProjectList,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     }]);
     // The project names its publisher, so its catalogue route runs to the Endpoint table (EP-127).
     gateway.replace_publishers(

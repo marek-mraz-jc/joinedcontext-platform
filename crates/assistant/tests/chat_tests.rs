@@ -4011,3 +4011,165 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
         .is_some_and(|v| v.contains("x-jc-visitor")));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
+
+async fn internal_post(
+    app: &axum::Router,
+    uri: &str,
+    body: Value,
+    forwarded: bool,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if forwarded {
+        request = request.header("x-forwarded-for", "203.0.113.7");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(body.to_string()))
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("a body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// T-4659 (AG-119, EP-133): the MCP servers' search answers the public passages of the sources it
+/// is given, best first and at most `limit`, with what their page states of itself; a request
+/// that came through the edge is an unknown path, an internal source is never read, and a
+/// publisher none of the sources has answers nothing.
+#[tokio::test]
+async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_never_through_the_edge(
+) {
+    let w = world("chatdocuments", deployment(Channel::Public, 50_000, 10)).await;
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query("UPDATE chunks SET visibility = 'internal' WHERE url LIKE 'https://intranet.%'")
+        .execute(&mut *tx)
+        .await
+        .expect("internal");
+    sqlx::query(
+        "UPDATE pages SET title = 'Mestská knižnica', description = 'Otváracie hodiny a kontakty', \
+         modified = '2026-09-30T08:12:00Z', language = 'sk' WHERE url = 'https://hronov.example/kniznica'",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("metadata");
+    tx.commit().await.expect("commit");
+    let both = json!([{"project": "hronov", "source": "web"}, {"project": "hronov", "source": "intranet"}]);
+
+    let (status, answer) = internal_post(
+        &w.app,
+        "/internal/v1/search",
+        json!({"query": "Kedy je otvorená knižnica? platové tabuľky", "sources": both, "limit": 2}),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let hits = answer["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty() && hits.len() <= 2, "{answer}");
+    let scores: Vec<f64> = hits
+        .iter()
+        .map(|h| h["score"].as_f64().expect("score"))
+        .collect();
+    assert!(
+        scores.windows(2).all(|p| p[0] >= p[1]),
+        "best first: {scores:?}"
+    );
+    assert!(
+        hits.iter()
+            .all(|h| !h["url"].as_str().unwrap_or_default().contains("intranet")),
+        "{answer}"
+    );
+    let library = hits
+        .iter()
+        .find(|h| h["url"] == "https://hronov.example/kniznica")
+        .expect("the library's page");
+    assert_eq!(library["title"], "Mestská knižnica");
+    assert_eq!(library["description"], "Otváracie hodiny a kontakty");
+    assert_eq!(library["modified"], "2026-09-30T08:12:00Z");
+    assert_eq!(library["published"], Value::Null, "never guessed");
+    assert_eq!(library["publisher"], "hronov");
+    assert_eq!(library["language"], "sk");
+    // The air page has no title of its own: its first heading names it.
+    let (_, air) = internal_post(
+        &w.app,
+        "/internal/v1/search",
+        json!({"query": "ovzdušie meracie stanice", "sources": both, "limit": 1}),
+        false,
+    )
+    .await;
+    assert_eq!(air["hits"][0]["title"], "Ovzdušie v Hronove", "{air}");
+
+    let (status, _) = internal_post(
+        &w.app,
+        "/internal/v1/search",
+        json!({"query": "knižnica", "sources": both}),
+        true,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "through the edge the path does not exist"
+    );
+    let (status, _) = internal_post(
+        &w.app,
+        "/internal/v1/sources",
+        json!({"sources": both}),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, answer) = internal_post(
+        &w.app,
+        "/internal/v1/search",
+        json!({"query": "knižnica", "sources": both, "publisher": "helsinki"}),
+        false,
+    )
+    .await;
+    assert_eq!((status, answer), (StatusCode::OK, json!({"hits": []})));
+    // `lang` keeps that language and the unknown: these pages are all Slovak.
+    let (_, english) = internal_post(
+        &w.app,
+        "/internal/v1/search",
+        json!({"query": "knižnica", "sources": both, "lang": "en"}),
+        false,
+    )
+    .await;
+    assert_eq!(english, json!({"hits": []}));
+    for bad in [
+        json!({"query": "", "sources": both}),
+        json!({"query": "knižnica", "sources": both, "limit": 11}),
+        json!({"query": "knižnica", "sources": []}),
+        json!({"query": "knižnica", "sources": both, "token": "x"}),
+    ] {
+        let (status, _) = internal_post(&w.app, "/internal/v1/search", bad.clone(), false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let (status, held) = internal_post(
+        &w.app,
+        "/internal/v1/sources",
+        json!({"sources": both}),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        held,
+        json!({"passages": 2, "publishers": ["hronov"], "languages": {"sk": 1.0}})
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}

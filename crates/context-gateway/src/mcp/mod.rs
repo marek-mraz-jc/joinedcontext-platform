@@ -8,6 +8,7 @@ use axum::Router;
 use std::sync::{Arc, LazyLock};
 pub mod catalog;
 pub mod describe;
+pub mod documents;
 pub mod endpoint;
 pub mod hub;
 pub mod jsonrpc;
@@ -95,6 +96,7 @@ mod tests {
         names(&hub::list_endpoints_tool()["inputSchema"], &mut arguments);
         names(&hub::get_endpoint_tool()["inputSchema"], &mut arguments);
         names(&super::search::tool()["inputSchema"], &mut arguments);
+        names(&super::documents::tool("")["inputSchema"], &mut arguments);
         arguments.sort();
         arguments.dedup();
         let unexplained: Vec<&String> = arguments

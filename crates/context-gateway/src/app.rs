@@ -111,6 +111,8 @@ pub struct Gateway {
     /// Where a person's own connectors are read, `/api/mcp/me/{name}` (EP-123); `None` serves
     /// no personal address.
     pub personal: Option<Arc<crate::mcp::personal::Personal>>,
+    /// `jc-assistant`'s search for `search_documents` (EP-133); `None` lists the tool nowhere.
+    pub documents: Option<Arc<crate::mcp::documents::Documents>>,
     /// The per-subject bucket every hub request spends on top of the Endpoint's own, so a burst
     /// spread over many Endpoints is still one subject's burst (ADR-N-025 section 3, EP-87).
     pub hub_rate_limit: RateLimits,
@@ -195,6 +197,7 @@ impl Gateway {
                 crate::domain_gate::Mode::Report,
             )),
             personal: None,
+            documents: None,
             hub_rate_limit: HUB_RATE_LIMIT,
             anonymous_mcp_rate_limit: ANONYMOUS_MCP_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
@@ -285,6 +288,13 @@ impl Gateway {
     /// `enforce` refuses a write unless the Organization's domain is verified.
     pub fn gate_writes_on(mut self, gate: Arc<crate::domain_gate::DomainGate>) -> Self {
         self.domain_gate = gate;
+        self
+    }
+
+    /// Offers `search_documents` on the hub and the servers that attach knowledge sources,
+    /// searched by `documents` (EP-133).
+    pub fn search_documents_with(mut self, documents: crate::mcp::documents::Documents) -> Self {
+        self.documents = Some(Arc::new(documents));
         self
     }
 

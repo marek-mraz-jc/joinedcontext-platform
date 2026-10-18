@@ -143,6 +143,7 @@ fn gateway(broker: &str, realm: &common::Realm) -> Gateway {
         endpoints: None,
         audience: Audience::Public,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     }]);
     gateway
 }

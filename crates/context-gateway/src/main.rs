@@ -192,6 +192,16 @@ async fn main() -> ExitCode {
     let gateway = gateway
         .deliver_privately_to(config.egress_private_hosts.clone())
         .gate_writes_on(domain_gate);
+    // The publishers' pages, searched by the assistant for the hub and the servers (EP-133).
+    let gateway = match config.assistant_url.as_deref() {
+        Some(url) => {
+            gateway.search_documents_with(context_gateway::mcp::documents::Documents::new(
+                url,
+                context_gateway::mcp::documents::hub_sources(&config.hub_knowledge_sources),
+            ))
+        }
+        None => gateway,
+    };
     // A person's own connectors are the Portal's to keep and the gateway's to serve (EP-123).
     let gateway = Arc::new(match config.connectors_url.clone() {
         Some(url) => {

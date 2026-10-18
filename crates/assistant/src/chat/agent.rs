@@ -1028,6 +1028,7 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<(String, String)>, cra
             sources: &[],
             public_only: ask.public_only,
             limit: PASSAGES,
+            lang: None,
         },
     )
     .await?;

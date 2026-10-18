@@ -172,6 +172,7 @@ pub fn addressed(name: &str) -> Option<McpServer> {
         endpoints: None,
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     })
 }
 
