@@ -2,8 +2,8 @@
 # Each row's reason: docs/analysis/platform-dead-code.md.
 agent-proxy | 3
 assistant | 1
-context-gateway | 30
-jc-core | 46
+context-gateway | 22
+jc-core | 45
 jc-manifest | 2
 jcctl | 29
 wasm-host | 6
