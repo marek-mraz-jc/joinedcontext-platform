@@ -938,7 +938,32 @@ pub struct AssistantDeploymentSpec {
     /// How the chat picks its language and whether it shows the toggle (T-4343).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget: Option<ChatWidget>,
+    /// How long each turn of a conversation is kept, `P{n}D` with `n` 0 to 365; `P30D` when
+    /// absent, `P0D` keeps none (AG-99, T-4670).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_retention: Option<String>,
+    /// Whom a visitor asks about their data (T-4670).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<Privacy>,
 }
+
+/// Whom a visitor of an assistant asks about their data, shown in the widget's privacy panel
+/// (API/05 §1.6, T-4670).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Privacy {
+    /// An e-mail address, at most 254 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    /// An `https` page of the operator's privacy documents, at most 2,000 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documents_url: Option<String>,
+}
+
+/// The days a turn is kept when `transcriptRetention` is absent (AG-99).
+pub const TRANSCRIPT_DAYS: u32 = 30;
+/// The most days `transcriptRetention` may name.
+pub const MAX_TRANSCRIPT_DAYS: u32 = 365;
 
 impl Kind for AssistantDeploymentSpec {
     const KIND: &'static str = "AssistantDeployment";
@@ -985,6 +1010,15 @@ impl AssistantDeploymentSpec {
             .unwrap_or(10)
     }
 
+    /// The days each turn is kept (AG-99): `transcriptRetention`'s, [`TRANSCRIPT_DAYS`] when
+    /// absent, 0 for `P0D` or a value [`Self::validate`] refuses.
+    pub fn transcript_days(&self) -> u32 {
+        self.transcript_retention
+            .as_deref()
+            .map_or(Some(TRANSCRIPT_DAYS), retention_days)
+            .unwrap_or(0)
+    }
+
     /// The seconds a data question's loop may call tools; 20 when absent.
     pub fn data_seconds(&self) -> u32 {
         self.answer
@@ -1006,7 +1040,51 @@ impl AssistantDeploymentSpec {
         self.text_fields()?;
         self.scope_fields()?;
         self.theme_fields()?;
+        self.privacy_fields()?;
         languages(&self.languages)
+    }
+
+    /// `transcriptRetention` and `privacy` (T-4670).
+    fn privacy_fields(&self) -> Result<()> {
+        if let Some(retention) = &self.transcript_retention {
+            if retention_days(retention).is_none() {
+                return Err(name(
+                    "transcriptRetention",
+                    retention.clone(),
+                    "transcriptRetention is P{n}D with n from 0 to 365",
+                ));
+            }
+        }
+        let Some(privacy) = &self.privacy else {
+            return Ok(());
+        };
+        if let Some(contact) = &privacy.contact {
+            let (local, host) = contact.split_once('@').unwrap_or_default();
+            let plain = |part: &str| {
+                !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
+            };
+            if contact.len() > 254 || !plain(local) || !plain(host) || !host.contains('.') {
+                return Err(name(
+                    "privacy.contact",
+                    contact.clone(),
+                    "privacy.contact is one e-mail address of at most 254 characters",
+                ));
+            }
+        }
+        if let Some(url) = &privacy.documents_url {
+            let host = url.strip_prefix("https://").unwrap_or_default();
+            if url.len() > 2_000 || host.is_empty() || url.chars().any(char::is_whitespace) {
+                return Err(name(
+                    "privacy.documentsUrl",
+                    url.clone(),
+                    "privacy.documentsUrl is an https address of at most 2,000 characters",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The public id, what it answers from, its MCP server and its sources (MF-52).
@@ -1542,6 +1620,17 @@ fn is_ckan_name(value: &str) -> bool {
         && value
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// The days of a `P{n}D` retention with `n` 0 to [`MAX_TRANSCRIPT_DAYS`]; `None` otherwise.
+fn retention_days(value: &str) -> Option<u32> {
+    let days = value.strip_prefix('P')?.strip_suffix('D')?;
+    if days.is_empty() || days.len() > 3 || !days.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    days.parse()
+        .ok()
+        .filter(|days| *days <= MAX_TRANSCRIPT_DAYS)
 }
 
 fn name(field: &'static str, value: String, reason: &'static str) -> Error {
@@ -2134,5 +2223,61 @@ mod deployment_spec_tests {
             refused(with(|s| s["theme"]["greeting"] = json!({"de": "Hallo"})).theme_fields()),
             "theme.greeting"
         );
+    }
+
+    #[test]
+    fn transcripts_keep_thirty_days_unless_told_and_privacy_names_a_real_address() {
+        assert_eq!(with(|_| {}).transcript_days(), TRANSCRIPT_DAYS);
+        for (value, days) in [("P0D", 0), ("P7D", 7), ("P365D", 365)] {
+            let spec = with(|s| s["transcriptRetention"] = json!(value));
+            assert!(spec.privacy_fields().is_ok(), "{value}");
+            assert_eq!(spec.transcript_days(), days, "{value}");
+        }
+        for value in ["P366D", "30", "P30", "PT30D", "P-1D", "P1W", "P0030D", ""] {
+            let spec = with(|s| s["transcriptRetention"] = json!(value));
+            assert_eq!(
+                refused(spec.privacy_fields()),
+                "transcriptRetention",
+                "{value}"
+            );
+            assert_eq!(
+                spec.transcript_days(),
+                0,
+                "a refused value keeps nothing: {value}"
+            );
+        }
+        let ok = with(|s| {
+            s["privacy"] = json!({"contact": "dpo@banskabystrica.sk",
+                "documentsUrl": "https://www.banskabystrica.sk/ochrana-osobnych-udajov/"})
+        });
+        assert!(ok.privacy_fields().is_ok());
+        for contact in ["dpo", "@x.sk", "dpo@sk", "a b@x.sk", "<x>@x.sk"] {
+            let spec = with(|s| s["privacy"] = json!({ "contact": contact }));
+            assert_eq!(
+                refused(spec.privacy_fields()),
+                "privacy.contact",
+                "{contact}"
+            );
+        }
+        for url in [
+            "http://x.sk/p",
+            "https://",
+            "javascript:alert(1)",
+            "https://x.sk/a b",
+        ] {
+            let spec = with(|s| s["privacy"] = json!({ "documentsUrl": url }));
+            assert_eq!(
+                refused(spec.privacy_fields()),
+                "privacy.documentsUrl",
+                "{url}"
+            );
+        }
+        let unknown: std::result::Result<AssistantDeploymentSpec, serde_json::Error> =
+            serde_json::from_value({
+                let mut s = golden();
+                s["privacy"] = json!({"phone": "+421"});
+                s
+            });
+        assert!(unknown.is_err(), "privacy refuses an unknown field");
     }
 }

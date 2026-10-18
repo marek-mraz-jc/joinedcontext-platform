@@ -94,7 +94,81 @@ pub fn router(state: Arc<ChatState>) -> Router {
             "/internal/v1/projects/{project}/knowledge/sources/{source}/files/{id}",
             delete(remove),
         )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/conversations",
+            get(conversations),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/conversations/{conversation}",
+            get(conversation),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/conversations/{conversation}",
+            delete(erase),
+        )
         .with_state(state)
+}
+
+/// The stored conversations of `project`, filtered (API/05 §3.1, T-4670).
+async fn conversations(
+    State(state): State<Arc<ChatState>>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    filter: Result<Query<super::transcript::Filter>, QueryRejection>,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let Query(filter) = match filter {
+        Ok(filter) => filter,
+        Err(rejection) => return problem(400, rejection.body_text()),
+    };
+    if let Some(why) = filter.refusal() {
+        return problem(400, why);
+    }
+    match super::transcript::list(&state.pool, &project, &filter).await {
+        Ok((items, next)) => Json(json!({"items": items, "nextCursor": next})).into_response(),
+        Err(crate::Error::Project(_)) => problem(404, "no such project"),
+        Err(err) => failed(err),
+    }
+}
+
+/// One stored conversation with every turn and its steps (API/05 §3.1, T-4670).
+async fn conversation(
+    State(state): State<Arc<ChatState>>,
+    Path((project, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    if !super::uuid_shaped(&conversation) {
+        return problem(404, "no such conversation");
+    }
+    match super::transcript::detail(&state.pool, &project, &conversation).await {
+        Ok(Some(found)) => Json(found).into_response(),
+        Ok(None) | Err(crate::Error::Project(_)) => problem(404, "no such conversation"),
+        Err(err) => failed(err),
+    }
+}
+
+/// Erases one stored conversation (API/05 §3.1, T-4668, T-4670).
+async fn erase(
+    State(state): State<Arc<ChatState>>,
+    Path((project, conversation)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    if !super::uuid_shaped(&conversation) {
+        return problem(404, "no such conversation");
+    }
+    match super::transcript::erase(&state.pool, &project, &conversation).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) | Err(crate::Error::Project(_)) => problem(404, "no such conversation"),
+        Err(err) => failed(err),
+    }
 }
 
 /// `Err` unless the bearer is the Portal's service account (AG-113).

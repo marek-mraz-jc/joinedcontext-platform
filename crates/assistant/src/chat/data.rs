@@ -226,6 +226,8 @@ pub async fn answer(
                 allow,
             )
             .await;
+        let model = call.model.unwrap_or(ask.model.name());
+        ask.trace.model("data", model, at, stepped.as_ref());
         super::agent::Stages::add(&mut spent.stages.answer, at);
         let completion = match stepped {
             Ok(completion) => completion,
@@ -341,6 +343,8 @@ async fn step(
         .surface
         .call(ask.http, &o.tool.name, arguments.clone())
         .await;
+    ask.trace
+        .tool(&o.tool.name, Some(&endpoint), &arguments, began, &answered);
     let ms = began.elapsed().as_millis() as u64;
     match answered {
         Ok(text) => {
