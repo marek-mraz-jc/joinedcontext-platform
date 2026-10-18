@@ -638,6 +638,9 @@ var JCRender = (function () {
     var name = data && data.stage;
     if (name === "steps" || !Object.prototype.hasOwnProperty.call(words, name)) return null;
     var topic = text(data.topic, 60);
+    // A search names the visitor's own words; a read names its data in words or nothing, never an
+    // Endpoint slug or a type name (T-4682).
+    if (name !== "searching") topic = Object.prototype.hasOwnProperty.call(TYPES, topic) ? word(TYPES, topic, lang) : "";
     if (STEPS.indexOf(name) >= 0) {
       return words[name] + (topic ? ": „" + topic + "“…" : "…");
     }
@@ -652,7 +655,13 @@ var JCRender = (function () {
   function steps(stages, lang) {
     var lines = (Array.isArray(stages) ? stages : [])
       .filter(function (data) { return data && STEPS.indexOf(data.stage) >= 0; })
-      .map(function (data) { return stage(data, lang); })
+      .map(function (data) {
+        var line = stage(data, lang);
+        // Each step with when it began, in seconds after the question (T-4682).
+        var ms = data.ms;
+        if (!line || typeof ms !== "number" || !isFinite(ms) || ms < 0) return line;
+        return line + " (" + new Intl.NumberFormat(YES_NO[lang] ? lang : "en", { maximumFractionDigits: 1 }).format(ms / 1000) + " s)";
+      })
       .filter(Boolean);
     if (lines.length < 2) return null;
     return { summary: (STAGES[lang] || STAGES.en).steps + " (" + lines.length + ")", lines: lines };

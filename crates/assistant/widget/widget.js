@@ -878,7 +878,7 @@
       asked += 1;
       item.turn = asked;
     } else if (name === "stage" && item.status) {
-      (item.stages = item.stages || []).push(data);
+      (item.stages = item.stages || []).push(Object.assign({}, data, { ms: Date.now() - (item.startedMs || Date.now()) }));
       var line = JCRender.stage(data, lang);
       if (line) {
         item.status.textContent = line;
@@ -1062,6 +1062,7 @@
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
     item.appendChild(item.status);
+    item.startedMs = Date.now();
     busy = new AbortController();
     send.hidden = true;
     stop.hidden = false;

@@ -293,7 +293,7 @@ test("a stage is one fixed line, a search and a read name their topic, an unknow
   assert.equal(stage({ stage: "searching", topic: "otváracie hodiny knižnice" }, "sk"),
     "Hľadám v zdrojoch: „otváracie hodiny knižnice“…");
   assert.equal(stage({ stage: "searching" }, "en"), "Searching the sources…");
-  assert.equal(stage({ stage: "reading", topic: "AirQualityObserved" }, "cs"), "Čtu živá data: „AirQualityObserved“…");
+  assert.equal(stage({ stage: "reading", topic: "AirQualityObserved" }, "cs"), "Čtu živá data: „Kvalita ovzduší“…");
   assert.equal(stage({ stage: "answering", topic: "ignored" }, "xx"), "Preparing the answer…");
   assert.equal(stage({ stage: "searching", topic: "x".repeat(100) }, "en").length, "Searching the sources: „“…".length + 60);
   assert.equal(stage({ stage: "__proto__" }, "en"), null);
@@ -541,13 +541,15 @@ test("the speakers, the thumbs and every answer's tools are named by bound words
   assert.match(widget, /iconButton\("jc-copy", "copy", "copy"\)/);
 });
 
-test("the data loop's stages name their topic, and two or more work steps are listed under the answer (T-4294)", () => {
-  assert.equal(stage({ stage: "history", topic: "AirQualityObserved" }, "sk"), "Čítam históriu údajov: „AirQualityObserved“…");
-  assert.equal(stage({ stage: "schema", topic: "bbsk-otvorene-data" }, "en"), "Reading the data's schema: „bbsk-otvorene-data“…");
+test("the data loop's stages name their data in words, never a slug, and two or more work steps are listed with their times (T-4294, T-4682)", () => {
+  assert.equal(stage({ stage: "history", topic: "AirQualityObserved" }, "sk"), "Čítam históriu údajov: „Kvalita ovzdušia“…");
+  assert.equal(stage({ stage: "schema", topic: "bbsk-otvorene-data" }, "en"), "Reading the data's schema…");
+  assert.equal(stage({ stage: "reading", topic: "WasteContainer" }, "en"), "Reading live data…");
+  assert.equal(stage({ stage: "searching", topic: "cyklotrasy v BB" }, "sk"), "Hľadám v zdrojoch: „cyklotrasy v BB“…");
   assert.equal(stage({ stage: "steps" }, "en"), null, "the summary word is no stage");
-  const took = steps([{ stage: "understanding" }, { stage: "reading", topic: "School" }, { stage: "answering" },
-    { stage: "schema", topic: "od" }, { stage: "bogus" }], "sk");
-  assert.deepEqual(took, { summary: "Postup (2)", lines: ["Čítam živé údaje: „School“…", "Čítam schému údajov: „od“…"] });
+  const took = steps([{ stage: "understanding" }, { stage: "reading", topic: "School", ms: 1240 }, { stage: "answering" },
+    { stage: "schema", topic: "od", ms: -5 }, { stage: "bogus" }], "sk");
+  assert.deepEqual(took, { summary: "Postup (2)", lines: ["Čítam živé údaje: „Školy“… (1,2 s)", "Čítam schému údajov…"] });
   assert.equal(steps([{ stage: "reading", topic: "School" }], "en"), null, "one step needs no list");
   assert.equal(steps(undefined, "en"), null);
 });
