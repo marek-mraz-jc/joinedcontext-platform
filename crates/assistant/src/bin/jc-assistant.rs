@@ -55,11 +55,10 @@ async fn main() -> ExitCode {
         tracing::error!("JC_ASSISTANT_DATABASE_URL, JC_ASSISTANT_REPO_DIR, JC_ASSISTANT_ORG_DOMAIN and JC_ASSISTANT_MODEL_DIR are required");
         return ExitCode::FAILURE;
     };
-    let threads = match env("JC_ASSISTANT_EMBED_THREADS").map(|value| value.parse::<usize>()) {
-        None => 2,
-        Some(Ok(threads)) if (1..=16).contains(&threads) => threads,
-        Some(_) => {
-            tracing::error!("JC_ASSISTANT_EMBED_THREADS is a number from 1 to 16");
+    let threads = match embed_threads(&env) {
+        Ok(threads) => threads,
+        Err(why) => {
+            tracing::error!(%why, "the embedding model is not configured");
             return ExitCode::FAILURE;
         }
     };
@@ -95,57 +94,7 @@ async fn main() -> ExitCode {
     };
     let name = env("HOSTNAME").unwrap_or_else(|| "jc-assistant".into());
 
-    let base = |key: &str| -> Result<String, String> {
-        let value = env(key).ok_or_else(|| format!("{key} is required"))?;
-        let parsed = url::Url::parse(&value).map_err(|err| format!("{key}: {err}"))?;
-        if parsed.path() != "/" || parsed.query().is_some() {
-            return Err(format!("{key} is scheme and authority only"));
-        }
-        Ok(value.trim_end_matches('/').to_owned())
-    };
-    let chat_config = (|| -> Result<(String, ModelConfig), String> {
-        let credential = match (
-            env("JC_ASSISTANT_CLIENT_ASSERTION_FILE"),
-            env("JC_ASSISTANT_CLIENT_SECRET_FILE"),
-        ) {
-            (Some(_), Some(_)) => {
-                return Err(
-                    "JC_ASSISTANT_CLIENT_ASSERTION_FILE and JC_ASSISTANT_CLIENT_SECRET_FILE \
-                            are both set; a federated client holds no secret beside it"
-                        .into(),
-                )
-            }
-            (Some(file), None) => ClientCredential::Assertion(file.into()),
-            (None, Some(secret_file)) => {
-                let client_secret = std::fs::read_to_string(&secret_file)
-                    .map_err(|err| {
-                        format!("JC_ASSISTANT_CLIENT_SECRET_FILE could not be read: {err}")
-                    })?
-                    .trim()
-                    .to_owned();
-                if client_secret.is_empty() {
-                    return Err("JC_ASSISTANT_CLIENT_SECRET_FILE is empty".into());
-                }
-                ClientCredential::Secret(jc_core::Secret::new(client_secret))
-            }
-            (None, None) => {
-                return Err("JC_ASSISTANT_CLIENT_ASSERTION_FILE or \
-                            JC_ASSISTANT_CLIENT_SECRET_FILE is required"
-                    .into())
-            }
-        };
-        Ok((
-            base("JC_ASSISTANT_GATEWAY_URL")?,
-            ModelConfig {
-                proxy: base("JC_ASSISTANT_PROXY_URL")?,
-                token_url: env("JC_ASSISTANT_TOKEN_URL")
-                    .ok_or("JC_ASSISTANT_TOKEN_URL is required")?,
-                client_id: env("JC_ASSISTANT_CLIENT_ID").unwrap_or_else(|| "jc-assistant".into()),
-                credential,
-                model: env("JC_ASSISTANT_LLM").ok_or("JC_ASSISTANT_LLM is required")?,
-            },
-        ))
-    })();
+    let chat_config = chat_config(&env);
     let (gateway, model_config) = match chat_config {
         Ok(config) => config,
         Err(why) => {
@@ -169,27 +118,19 @@ async fn main() -> ExitCode {
     let reader = assistant::catalogue::Reader {
         http: http.clone(),
         gateway: url::Url::parse(&format!("{gateway}/")).ok(),
-        endpoint_base: match env("JC_ASSISTANT_ENDPOINT_URL") {
-            None => None,
-            Some(_) => match base("JC_ASSISTANT_ENDPOINT_URL")
-                .and_then(|value| url::Url::parse(&format!("{value}/")).map_err(|e| e.to_string()))
-            {
-                Ok(endpoint) => Some(endpoint),
-                Err(why) => {
-                    tracing::error!(%why, "the public Endpoint address is not usable");
-                    return ExitCode::FAILURE;
-                }
-            },
+        endpoint_base: match endpoint_base(&env) {
+            Ok(endpoint) => endpoint,
+            Err(why) => {
+                tracing::error!(%why, "the public Endpoint address is not usable");
+                return ExitCode::FAILURE;
+            }
         },
-        portal: match env("JC_ASSISTANT_PORTAL_URL") {
-            None => None,
-            Some(_) => match base("JC_ASSISTANT_PORTAL_URL") {
-                Ok(portal) => Some(portal),
-                Err(why) => {
-                    tracing::error!(%why, "the Portal address is not usable");
-                    return ExitCode::FAILURE;
-                }
-            },
+        portal: match optional_base(&env, "JC_ASSISTANT_PORTAL_URL") {
+            Ok(portal) => portal,
+            Err(why) => {
+                tracing::error!(%why, "the Portal address is not usable");
+                return ExitCode::FAILURE;
+            }
         },
     };
     let chat_state = Arc::new(ChatState {
@@ -198,15 +139,12 @@ async fn main() -> ExitCode {
         model: Model::new(model_config, http.clone()),
         http,
         gateway,
-        functions: match env("JC_ASSISTANT_FUNCTIONS_URL") {
-            None => None,
-            Some(_) => match base("JC_ASSISTANT_FUNCTIONS_URL") {
-                Ok(functions) => Some(functions),
-                Err(why) => {
-                    tracing::error!(%why, "the sandbox address is not usable");
-                    return ExitCode::FAILURE;
-                }
-            },
+        functions: match optional_base(&env, "JC_ASSISTANT_FUNCTIONS_URL") {
+            Ok(functions) => functions,
+            Err(why) => {
+                tracing::error!(%why, "the sandbox address is not usable");
+                return ExitCode::FAILURE;
+            }
         },
         portal_client: env("JC_ASSISTANT_PORTAL_CLIENT").unwrap_or_else(|| "portal-api".into()),
         public_origin: env("JC_ASSISTANT_PUBLIC_ORIGIN")
@@ -222,24 +160,7 @@ async fn main() -> ExitCode {
     // Ready once the first look at the manifests went through; alive as long as the loop turns.
     let ready = Arc::new(AtomicBool::new(false));
     let bind = env("JC_ASSISTANT_BIND").unwrap_or_else(|| "0.0.0.0:8080".into());
-    let probe = {
-        let ready = Arc::clone(&ready);
-        chat::router(Arc::clone(&chat_state))
-            .route("/healthz", axum::routing::get(|| async { "ok" }))
-            .route(
-                "/readyz",
-                axum::routing::get(move || {
-                    let ready = ready.load(Ordering::Relaxed);
-                    async move {
-                        if ready {
-                            (axum::http::StatusCode::OK, "ready")
-                        } else {
-                            (axum::http::StatusCode::SERVICE_UNAVAILABLE, "starting")
-                        }
-                    }
-                }),
-            )
-    };
+    let probe = probe(Arc::clone(&chat_state), Arc::clone(&ready));
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -335,3 +256,228 @@ async fn main() -> ExitCode {
 
 /// Passages embedded per project and minute: a few seconds of the model's time.
 const EMBED_PER_MINUTE: i64 = 256;
+
+/// The chat route beside `/healthz` and `/readyz`, which answers 503 until `ready` is set.
+fn probe(chat_state: Arc<ChatState>, ready: Arc<AtomicBool>) -> axum::Router {
+    chat::router(chat_state)
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .route(
+            "/readyz",
+            axum::routing::get(move || {
+                let ready = ready.load(Ordering::Relaxed);
+                async move {
+                    if ready {
+                        (axum::http::StatusCode::OK, "ready")
+                    } else {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "starting")
+                    }
+                }
+            }),
+        )
+}
+
+/// `JC_ASSISTANT_EMBED_THREADS`: 2 when unset, else a number from 1 to 16.
+fn embed_threads(env: &impl Fn(&str) -> Option<String>) -> Result<usize, String> {
+    match env("JC_ASSISTANT_EMBED_THREADS").map(|value| value.parse::<usize>()) {
+        None => Ok(2),
+        Some(Ok(threads)) if (1..=16).contains(&threads) => Ok(threads),
+        Some(_) => Err("JC_ASSISTANT_EMBED_THREADS is a number from 1 to 16".into()),
+    }
+}
+
+/// A service address from `key`: scheme and authority only, returned without its last `/`.
+fn base(env: &impl Fn(&str) -> Option<String>, key: &str) -> Result<String, String> {
+    let value = env(key).ok_or_else(|| format!("{key} is required"))?;
+    let parsed = url::Url::parse(&value).map_err(|err| format!("{key}: {err}"))?;
+    if parsed.path() != "/" || parsed.query().is_some() {
+        return Err(format!("{key} is scheme and authority only"));
+    }
+    Ok(value.trim_end_matches('/').to_owned())
+}
+
+/// [`base`] for an address the deployment may leave out.
+fn optional_base(
+    env: &impl Fn(&str) -> Option<String>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match env(key) {
+        None => Ok(None),
+        Some(_) => base(env, key).map(Some),
+    }
+}
+
+/// `JC_ASSISTANT_ENDPOINT_URL` as the base a `catalogue` page's Endpoint links join onto.
+fn endpoint_base(env: &impl Fn(&str) -> Option<String>) -> Result<Option<url::Url>, String> {
+    optional_base(env, "JC_ASSISTANT_ENDPOINT_URL")?
+        .map(|value| url::Url::parse(&format!("{value}/")).map_err(|e| e.to_string()))
+        .transpose()
+}
+
+/// The chat's Keycloak credential: the pod's projected token or the client secret, never both.
+fn credential(env: &impl Fn(&str) -> Option<String>) -> Result<ClientCredential, String> {
+    match (
+        env("JC_ASSISTANT_CLIENT_ASSERTION_FILE"),
+        env("JC_ASSISTANT_CLIENT_SECRET_FILE"),
+    ) {
+        (Some(_), Some(_)) => Err(
+            "JC_ASSISTANT_CLIENT_ASSERTION_FILE and JC_ASSISTANT_CLIENT_SECRET_FILE \
+             are both set; a federated client holds no secret beside it"
+                .into(),
+        ),
+        (Some(file), None) => Ok(ClientCredential::Assertion(file.into())),
+        (None, Some(secret_file)) => {
+            let client_secret = std::fs::read_to_string(&secret_file)
+                .map_err(|err| format!("JC_ASSISTANT_CLIENT_SECRET_FILE could not be read: {err}"))?
+                .trim()
+                .to_owned();
+            if client_secret.is_empty() {
+                return Err("JC_ASSISTANT_CLIENT_SECRET_FILE is empty".into());
+            }
+            Ok(ClientCredential::Secret(jc_core::Secret::new(
+                client_secret,
+            )))
+        }
+        (None, None) => Err("JC_ASSISTANT_CLIENT_ASSERTION_FILE or \
+                             JC_ASSISTANT_CLIENT_SECRET_FILE is required"
+            .into()),
+    }
+}
+
+/// The connectors' gateway and the model the chat asks through the agent proxy.
+fn chat_config(env: &impl Fn(&str) -> Option<String>) -> Result<(String, ModelConfig), String> {
+    let credential = credential(env)?;
+    Ok((
+        base(env, "JC_ASSISTANT_GATEWAY_URL")?,
+        ModelConfig {
+            proxy: base(env, "JC_ASSISTANT_PROXY_URL")?,
+            token_url: env("JC_ASSISTANT_TOKEN_URL").ok_or("JC_ASSISTANT_TOKEN_URL is required")?,
+            client_id: env("JC_ASSISTANT_CLIENT_ID").unwrap_or_else(|| "jc-assistant".into()),
+            credential,
+            model: env("JC_ASSISTANT_LLM").ok_or("JC_ASSISTANT_LLM is required")?,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |key| map.get(key).cloned()
+    }
+
+    fn chat_env(extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
+        let mut pairs = vec![
+            ("JC_ASSISTANT_CLIENT_ASSERTION_FILE", "/var/run/token"),
+            ("JC_ASSISTANT_GATEWAY_URL", "http://gateway:8080/"),
+            ("JC_ASSISTANT_PROXY_URL", "http://proxy:8080"),
+            ("JC_ASSISTANT_TOKEN_URL", "https://idm.test/token"),
+            ("JC_ASSISTANT_LLM", "a-model"),
+        ];
+        pairs.extend_from_slice(extra);
+        pairs
+    }
+
+    #[test]
+    fn embed_threads_default_to_two_and_stay_between_one_and_sixteen() {
+        assert_eq!(embed_threads(&env(&[])), Ok(2));
+        assert_eq!(
+            embed_threads(&env(&[("JC_ASSISTANT_EMBED_THREADS", "16")])),
+            Ok(16)
+        );
+        for wrong in ["0", "17", "two", "-1"] {
+            assert!(embed_threads(&env(&[("JC_ASSISTANT_EMBED_THREADS", wrong)])).is_err());
+        }
+    }
+
+    #[test]
+    fn a_base_is_scheme_and_authority_only() {
+        let key = "JC_ASSISTANT_GATEWAY_URL";
+        assert_eq!(
+            base(&env(&[(key, "http://gw:8080/")]), key),
+            Ok("http://gw:8080".into())
+        );
+        assert_eq!(base(&env(&[]), key), Err(format!("{key} is required")));
+        for wrong in ["http://gw/mcp", "http://gw/?a=1"] {
+            assert_eq!(
+                base(&env(&[(key, wrong)]), key),
+                Err(format!("{key} is scheme and authority only"))
+            );
+        }
+        assert!(base(&env(&[(key, "not a url")]), key).is_err_and(|e| e.starts_with(key)));
+        assert_eq!(optional_base(&env(&[]), key), Ok(None));
+        assert!(optional_base(&env(&[(key, "http://gw/x")]), key).is_err());
+    }
+
+    #[test]
+    fn the_endpoint_base_ends_with_a_slash_for_joins() {
+        let set = env(&[("JC_ASSISTANT_ENDPOINT_URL", "https://data.city.test")]);
+        let endpoint = endpoint_base(&set).expect("usable").expect("set");
+        assert_eq!(
+            endpoint.join("api/endpoint/air").expect("joins").as_str(),
+            "https://data.city.test/api/endpoint/air"
+        );
+        assert_eq!(endpoint_base(&env(&[])), Ok(None));
+    }
+
+    #[test]
+    fn the_credential_is_one_of_the_token_or_a_non_empty_secret() {
+        let both = chat_env(&[("JC_ASSISTANT_CLIENT_SECRET_FILE", "/x")]);
+        assert!(credential(&env(&both)).is_err_and(|e| e.contains("both set")));
+        assert!(credential(&env(&[])).is_err_and(|e| e.contains("is required")));
+        assert!(matches!(
+            credential(&env(&chat_env(&[]))),
+            Ok(ClientCredential::Assertion(path)) if path == std::path::Path::new("/var/run/token")
+        ));
+
+        let dir = std::env::temp_dir().join(format!("jc-assistant-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let file = dir.join("secret");
+        let path = file.to_str().expect("utf-8 temp dir");
+        std::fs::write(&file, " s3cret\n").expect("written");
+        assert!(matches!(
+            credential(&env(&[("JC_ASSISTANT_CLIENT_SECRET_FILE", path)])),
+            Ok(ClientCredential::Secret(secret)) if secret.expose() == "s3cret"
+        ));
+        std::fs::write(&file, "  \n").expect("written");
+        assert_eq!(
+            credential(&env(&[("JC_ASSISTANT_CLIENT_SECRET_FILE", path)])).err(),
+            Some("JC_ASSISTANT_CLIENT_SECRET_FILE is empty".into())
+        );
+        let missing = dir.join("missing");
+        let missing = missing.to_str().expect("utf-8 temp dir");
+        assert!(
+            credential(&env(&[("JC_ASSISTANT_CLIENT_SECRET_FILE", missing)]))
+                .is_err_and(|e| e.contains("could not be read"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_chat_config_names_what_is_missing() {
+        let (gateway, model) = chat_config(&env(&chat_env(&[]))).expect("configured");
+        assert_eq!(gateway, "http://gateway:8080");
+        assert_eq!(model.proxy, "http://proxy:8080");
+        assert_eq!(model.client_id, "jc-assistant");
+        assert_eq!(model.model, "a-model");
+        for key in [
+            "JC_ASSISTANT_TOKEN_URL",
+            "JC_ASSISTANT_LLM",
+            "JC_ASSISTANT_PROXY_URL",
+        ] {
+            let pairs: Vec<_> = chat_env(&[])
+                .into_iter()
+                .filter(|(k, _)| *k != key)
+                .collect();
+            assert_eq!(
+                chat_config(&env(&pairs)).err(),
+                Some(format!("{key} is required"))
+            );
+        }
+    }
+}
