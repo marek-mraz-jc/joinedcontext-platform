@@ -1,7 +1,7 @@
 //! An assistant's own MCP server, `/api/mcp/d/{publicId}` (T-4691, MF-52): exactly its
 //! connectors' Endpoints and the reach of the named server it reads, `search_documents` only
 //! when it has knowledge sources, read-only for every caller, and a public deployment never
-//! serving an internal Endpoint.
+//! serving an internal Endpoint. A publicId declared twice is nobody's.
 
 mod common;
 
@@ -88,6 +88,16 @@ fn repository() -> std::path::PathBuf {
             ),
         ),
         (
+            "twice-a.yaml",
+            deployment("twice-a", "  channel: public\n  sources: [web]\n")
+                .replace("bbsk-twice-a", "bbsk-twice"),
+        ),
+        (
+            "twice-b.yaml",
+            deployment("twice-b", "  channel: public\n  sources: [web]\n")
+                .replace("bbsk-twice-b", "bbsk-twice"),
+        ),
+        (
             "off.yaml",
             deployment(
                 "off",
@@ -115,7 +125,7 @@ fn the_store_serves_each_enabled_deployment_with_its_connectors_and_sources() {
             "/api/mcp/d/bbsk-internal",
             "/api/mcp/d/bbsk-plain"
         ],
-        "a disabled deployment serves no MCP"
+        "a disabled deployment serves no MCP, nor a publicId two deployments declare"
     );
     let data = &servers[0];
     let mut members = vec![AIR, BIKES, STAFF];

@@ -397,7 +397,18 @@ pub fn servers_of(repo: &Repository) -> McpServers {
             project,
         });
     }
-    let deployments = deployment_servers(repo, &slugs, &servers);
+    let mut deployments = deployment_servers(repo, &slugs, &servers);
+    // A publicId two deployments declare is nobody's: both answer as an unknown server (EP-137).
+    let twice: BTreeSet<String> = deployments
+        .iter()
+        .enumerate()
+        .filter(|(i, d)| deployments[..*i].iter().any(|e| e.name == d.name))
+        .map(|(_, d)| d.name.clone())
+        .collect();
+    for name in &twice {
+        tracing::warn!(public_id = %name, "two AssistantDeployments declare this publicId; neither MCP server is served");
+    }
+    deployments.retain(|d| !twice.contains(&d.name));
     servers.extend(deployments);
     servers
 }
