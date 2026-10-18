@@ -75,7 +75,11 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-cite { font-size: 11px; margin-left: 2px; vertical-align: 2px; line-height: 1; }
 .jc-cite a { display: inline-block; min-width: 18px; padding: 3px 4px; border-radius: var(--pill); background: var(--bg); box-shadow: inset 0 0 0 1px var(--line);
   text-align: center; text-decoration: none; font-weight: 600; }
-.jc-streaming { white-space: pre-wrap; }
+.jc-answer table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0 0 8px; font-size: 13px; }
+.jc-answer th, .jc-answer td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.jc-answer th { background: var(--bg); font-weight: 600; }
+.jc-answer pre { margin: 0 0 8px; padding: 8px 10px; overflow-x: auto; background: var(--bg); border-radius: 8px; }
+.jc-answer pre code { padding: 0; background: none; }
 .jc-status { margin: 0; padding: 8px 2px; font-size: 13px; color: var(--muted); }
 
 /* The empty chat: greeting, then the deployment's questions as compact chips in a wrapping row. */

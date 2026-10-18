@@ -50,6 +50,26 @@ function sse(res, data) {
   res.end();
 }
 
+// T-4649: an answer streamed in three-character deltas, split mid-token, with HTML in it.
+const STREAMED = ["## Doprava", "", "Máme **tri** zdroje [1, 2]:", "", "- **`type`**: typ entity [1]", "- **`q`**: filter [2, 3]", "",
+  "| Zdroj | Stav |", "|---|---|", "| **Parkoviská** | `live` |", "", "```", "GET /ngsi-ld/v1/entities?type=OffStreetParking", "```",
+  "Pozor na <script>alert(1)</script> a <img src=x onerror=alert(1)> [docs](https://example.sk/a).", ""].join("\n");
+let SLOW = false;
+async function slow(res) {
+  res.writeHead(200, { "Content-Type": "text/event-stream" });
+  const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  send("conversation", { id: "c2", at: "2026-10-18T12:00:00Z" });
+  for (let at = 0; at < STREAMED.length; at += 3) {
+    send("delta", { text: STREAMED.slice(at, at + 3) });
+    await new Promise((done) => setTimeout(done, 8));
+  }
+  // A moment for the last frame, so the test can hold it against the final view.
+  await new Promise((done) => setTimeout(done, 100));
+  send("answer", { text: STREAMED });
+  send("citations", [1, 2, 3].map((n) => ({ n, url: `https://example.sk/strana-${n}`, title: `Source ${n}` })));
+  res.end();
+}
+
 let server;
 let base;
 test.beforeAll(async () => {
@@ -62,6 +82,7 @@ test.beforeAll(async () => {
     if (path === "/d/bb/embed.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("embed.js"));
     if (path === "/host") return res.writeHead(200, { "Content-Type": "text/html" }).end(HOST);
     if (path === "/api/v1/d/bb/chat") {
+      if (SLOW) return slow(res);
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
       return req.on("end", () => sse(res, body.includes("ovzdušia")));
@@ -315,4 +336,43 @@ test("fixed mode ignores the browser, and languageToggle false hides the toggle"
   await expect(page.locator(".jc-langs")).toHaveCount(0);
   // Without the toggle the en-US browser still picks English.
   await expect(page.locator("#jc-question")).toHaveAttribute("placeholder", "Type your question");
+});
+
+test("a streamed answer is formatted while it streams, never raw markers, and ends as it streamed (T-4649)", async ({ page }) => {
+  WIDGET = undefined;
+  SLOW = true;
+  await page.goto(`${base}/d/bb?lang=en`);
+  // Every state of the answer while it streams, read on each change of the log.
+  await page.evaluate(() => {
+    window.frames_ = [];
+    new MutationObserver(() => {
+      const streaming = document.querySelector(".jc-streaming");
+      if (!streaming) return;
+      const copy = streaming.cloneNode(true);
+      copy.querySelectorAll("pre").forEach((pre) => pre.remove());
+      window.frames_.push({ text: copy.innerText, html: streaming.innerHTML });
+    }).observe(document.querySelector(".jc-log") || document.body, { subtree: true, childList: true, characterData: true });
+  });
+  await page.locator("#jc-question").fill("Aké dáta máte o doprave?");
+  await page.locator("#jc-question").press("Enter");
+  await expect(page.locator(".jc-answer-tools")).toBeVisible();
+  SLOW = false;
+  const frames = await page.evaluate(() => window.frames_);
+  expect(frames.length, "the answer was seen while streaming").toBeGreaterThan(10);
+  for (const frame of frames) {
+    expect(frame.text, "no frame shows a Markdown marker").not.toMatch(/\*\*|`|^\s*\||^#|\[\d|\]\(/m);
+  }
+  const final = page.locator(".jc-bot .jc-answer").last();
+  expect(await final.locator("script, img").count(), "HTML in the answer is never parsed").toBe(0);
+  await expect(final).toContainText("<script>alert(1)</script>");
+  await expect(final.locator("table th")).toHaveText(["Zdroj", "Stav"]);
+  await expect(final.locator("li strong code")).toHaveText(["type", "q"]);
+  await expect(final.locator("sup.jc-cite a").first()).toBeVisible();
+  const settled = await final.evaluate((answer) => {
+    const copy = answer.cloneNode(true);
+    copy.querySelectorAll("sup.jc-cite").forEach((sup) => sup.remove());
+    return copy.innerHTML.replace(/<sup class="jc-cite"><\/sup>/g, "");
+  });
+  const last = frames[frames.length - 1].html.replace(/<sup class="jc-cite"><\/sup>/g, "");
+  expect(last, "the last streamed frame is the final answer without its markers").toBe(settled);
 });
