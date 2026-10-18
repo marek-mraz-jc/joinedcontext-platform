@@ -809,6 +809,7 @@ async fn connected(
         match surface.tools(&state.http, &connector.tools).await {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
+                title: endpoint.title.clone(),
                 surface,
                 tools,
             }),
@@ -915,6 +916,7 @@ async fn lent(
         };
         match surface.tools(&state.http, &tools).await {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
+                title: None,
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
