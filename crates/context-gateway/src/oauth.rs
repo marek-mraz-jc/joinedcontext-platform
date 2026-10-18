@@ -4,7 +4,7 @@
 //! and takes a token here, and the token it gets is worth exactly a call without one. Nothing is
 //! stored and nobody is identified: the `client_id`, the code and both tokens are HS256 JWTs this
 //! gateway signs with one key from a `secretRef`, so each request proves itself by what it
-//! carries, and the gateway's own tokens are taken off a request in [`admit`] before anything
+//! carries, and the gateway's own tokens are taken off a request in `admit` before anything
 //! else reads it, so every handler, the rate limiter included, sees an anonymous caller.
 
 use crate::app::Gateway;
