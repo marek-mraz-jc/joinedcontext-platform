@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 pub enum Profile {
     /// DCAT-AP 3.0.0, the record as written: the default.
     DcatAp,
-    /// DCAT-AP-SK 2.0.1 over DCAT-AP 2.1.1 (API/08 section 2).
+    /// DCAT-AP-SK 3.0.0 over DCAT-AP 3.0.0 (API/08 section 2).
     #[cfg(feature = "dcat-ap-sk")]
     DcatApSk,
     /// DCAT-AP-CZ 2026-09-23 over DCAT-AP 3.0.0 (API/08 section 3).
@@ -168,20 +168,48 @@ fn czech_personal(statement: PersonalData) -> &'static str {
     }
 }
 
-/// DCAT-AP-SK 2.0.1: `leg:termsOfUse` on every distribution (API/08 section 2); no checksum,
-/// because the DCAT-AP 2.1.1 base takes SHA-1 alone, and `dcat:byteSize` as `xsd:decimal`
-/// (API/08 section 5).
+/// A plain string under `key` as a text in `language`: what the gateway names itself, a
+/// representation's or an artifact's title or a desk's name, is one string, and the Slovak shapes
+/// ask for a language-tagged one, the Czech shapes for a `rdf:langString` (API/08 section 5).
+#[cfg(any(feature = "dcat-ap-sk", feature = "dcat-ap-cz"))]
+fn tag(node: &mut Map<String, Value>, key: &str, language: &str) {
+    if let Some(Value::String(text)) = node.get(key) {
+        let tagged = json!([{ "@value": text, "@language": language }]);
+        node.insert(key.to_owned(), tagged);
+    }
+}
+
+/// The EU file-type code of a file whose record names only its media type: the schema artifacts.
+#[cfg(feature = "dcat-ap-sk")]
+fn file_type_of(media_type: &str) -> Option<&'static str> {
+    let bare = media_type
+        .rsplit("/media-types/")
+        .next()
+        .unwrap_or(media_type);
+    Some(match bare {
+        "text/turtle" => "RDF_TURTLE",
+        "application/ld+json" => "JSON_LD",
+        "application/json" | "application/schema+json" => "JSON",
+        "application/geo+json" => "GEOJSON",
+        "text/yaml" | "application/yaml" => "YAML",
+        "text/markdown" => "MARKDOWN",
+        "text/csv" => "CSV",
+        _ => return None,
+    })
+}
+
+/// DCAT-AP-SK 3.0.0 (API/08 sections 2 and 5): `leg:termsOfUse` on every distribution; a file is
+/// a download whose access URL is its download URL, an interface has a data service of its own
+/// whose endpoint is its access URL; the names the gateway writes as one string are `@sk`; the
+/// contact is a `vcard:Organization`; another publisher's source dataset is no `dcat:Dataset`.
 #[cfg(feature = "dcat-ap-sk")]
 fn slovak(mut record: Value, licence: Option<&str>, personal: Option<PersonalData>) -> Value {
     let personal = personal.map(|p| ("leg:personalDataContainmentType", slovak_personal(p)));
+    let dataset = record.get("@id").cloned().unwrap_or(Value::Null);
+    let rights = record.get("dct:accessRights").cloned();
+    let mut services = Vec::new();
+    let mut formats = Vec::new();
     for distribution in distributions(&mut record) {
-        distribution.remove("spdx:checksum");
-        if let Some(Value::String(bytes)) = distribution.remove("dcat:byteSize") {
-            distribution.insert(
-                "dcat:byteSize".to_owned(),
-                json!({ "@value": bytes, "@type": "xsd:decimal" }),
-            );
-        }
         if let Some(node) = terms(
             "leg:TermsOfUse",
             [
@@ -194,9 +222,82 @@ fn slovak(mut record: Value, licence: Option<&str>, personal: Option<PersonalDat
         ) {
             distribution.insert("leg:termsOfUse".to_owned(), node);
         }
+        tag(distribution, "dct:title", "sk");
+        let Some(url) = distribution
+            .get("dcat:accessURL")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let file = !distribution.contains_key("dcat:accessService")
+            || url
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("file."));
+        if file {
+            distribution.remove("dcat:accessService");
+            distribution.insert("dcat:downloadURL".to_owned(), json!(url));
+            if !distribution.contains_key("dct:format") {
+                let code = distribution
+                    .get("dcat:mediaType")
+                    .and_then(Value::as_str)
+                    .and_then(file_type_of);
+                if let Some(code) = code {
+                    let format = format!(
+                        "http://publications.europa.eu/resource/authority/file-type/{code}"
+                    );
+                    distribution.insert("dct:format".to_owned(), json!(format));
+                    formats.push(format);
+                }
+            }
+            continue;
+        }
+        let iri = format!("{url}#service");
+        let mut service = json!({
+            "@id": iri,
+            "@type": "dcat:DataService",
+            "dct:title": distribution.get("dct:title").cloned().unwrap_or(Value::Null),
+            "dcat:endpointURL": url,
+            "dcat:servesDataset": dataset,
+        });
+        for key in ["dct:conformsTo", "dct:license"] {
+            if let Some(value) = distribution.get(key) {
+                service[key] = value.clone();
+            }
+        }
+        if let Some(rights) = &rights {
+            service["dct:accessRights"] = rights.clone();
+        }
+        distribution.insert("dcat:accessService".to_owned(), json!(iri));
+        services.push(service);
     }
+    if let Some(contact) = record
+        .get_mut("dcat:contactPoint")
+        .and_then(Value::as_object_mut)
+    {
+        tag(contact, "vcard:fn", "sk");
+    }
+    let sources: Vec<Value> = record
+        .get("dct:source")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if let Some(included) = record.get_mut("@included").and_then(Value::as_array_mut) {
-        included.retain(|node| node["@id"] != "spdx:checksumAlgorithm_sha256");
+        for node in included.iter_mut() {
+            if node["@type"] == "dcat:Dataset" && sources.contains(&node["@id"]) {
+                if let Some(node) = node.as_object_mut() {
+                    node.remove("@type");
+                }
+            }
+        }
+        included.extend(services);
+        for format in formats {
+            let node = json!({ "@id": format, "@type": "dct:MediaTypeOrExtent" });
+            if !included.contains(&node) {
+                included.push(node);
+            }
+        }
     }
     record
 }
@@ -240,8 +341,81 @@ fn czech(mut record: Value, licence: Option<&str>, personal: Option<PersonalData
         for document in licence.into_iter().chain(personal) {
             included.push(json!({ "@id": document, "@type": "dct:LicenseDocument" }));
         }
+        for node in included.iter_mut() {
+            if node["@type"] == "dcat:DataService" {
+                one_language(node, "dct:title");
+            }
+        }
+    }
+    for key in ["dct:title", "dct:description"] {
+        one_language(&mut record, key);
+    }
+    for distribution in distributions(&mut record) {
+        if let Some(Value::Array(texts)) = distribution.get("dct:description") {
+            let kept = pick_language(texts);
+            distribution.insert("dct:description".to_owned(), kept);
+        }
+        tag(distribution, "dct:title", "cs");
+    }
+    if let Some(contact) = record
+        .get_mut("dcat:contactPoint")
+        .and_then(Value::as_object_mut)
+    {
+        tag(contact, "vcard:fn", "cs");
     }
     record
+}
+
+/// The one text DCAT-AP-CZ takes where its shapes give a `rdf:langString` `sh:maxCount 1`
+/// (API/08 section 3): the Czech one, else the English one, else the first.
+#[cfg(feature = "dcat-ap-cz")]
+fn pick_language(texts: &[Value]) -> Value {
+    ["cs", "en"]
+        .iter()
+        .find_map(|language| texts.iter().find(|t| t["@language"] == *language))
+        .or_else(|| texts.first())
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+#[cfg(feature = "dcat-ap-cz")]
+fn one_language(node: &mut Value, key: &str) {
+    if let Some(Value::Array(texts)) = node.get(key) {
+        node[key] = pick_language(texts);
+    }
+}
+
+/// A publisher's catalogue of [`crate::publisher_feed`], its records already rendered in
+/// `profile`, with what the profile asks of the catalogue node itself (API/08 sections 2, 3).
+pub fn render_catalog(feed: Value, profile: Profile) -> Value {
+    match profile {
+        Profile::DcatAp => feed,
+        #[cfg(feature = "dcat-ap-sk")]
+        Profile::DcatApSk => {
+            let mut feed = feed;
+            if let Some(contact) = feed
+                .get_mut("dcat:contactPoint")
+                .and_then(Value::as_object_mut)
+            {
+                tag(contact, "vcard:fn", "sk");
+            }
+            feed
+        }
+        #[cfg(feature = "dcat-ap-cz")]
+        Profile::DcatApCz => {
+            let mut feed = feed;
+            for key in ["dct:title", "dct:description"] {
+                one_language(&mut feed, key);
+            }
+            if let Some(contact) = feed
+                .get_mut("dcat:contactPoint")
+                .and_then(Value::as_object_mut)
+            {
+                tag(contact, "vcard:fn", "cs");
+            }
+            feed
+        }
+    }
 }
 
 #[cfg(test)]
@@ -328,20 +502,75 @@ mod tests {
         assert_eq!(render(core.clone(), Profile::DcatAp, Some(&catalog)), core);
     }
 
+    /// A record with a file, an interface, a schema artifact, a source and a desk: every shape
+    /// of distribution the Slovak rendering splits.
+    #[cfg(feature = "dcat-ap-sk")]
+    fn full_record(catalog: &Catalog) -> Value {
+        let title = BTreeMap::from([
+            ("en".to_owned(), "Air".to_owned()),
+            ("sk".to_owned(), "Ovzdušie".to_owned()),
+        ]);
+        let none = BTreeMap::new();
+        let subject = Subject {
+            slug: "ovzdusie",
+            space: "ovzdusie",
+            base_path: "/api/endpoint/ovzdusie",
+            title: &title,
+            description: &none,
+            space_title: None,
+            space_description: None,
+            audience: Audience::Public,
+            representations: &[Representation::NgsiLd, Representation::Csv],
+            catalog: Some(catalog),
+            classes: &["AirQualityObserved"],
+            assigners: &[],
+        };
+        dataset(&subject, &index(), BASE)
+    }
+
+    #[cfg(feature = "dcat-ap-sk")]
+    fn slovak_catalog() -> Catalog {
+        let mut catalog = catalog(Some(Licence::CcBy4));
+        catalog.contact_point = Some(jc_core::kinds::ContactPoint {
+            name: "Oddelenie informatiky".into(),
+            email: "opendata@example.org".into(),
+        });
+        catalog.source = vec![jc_core::kinds::Source {
+            url: "https://data.example.sk/dataset/ovzdusie".into(),
+            title: BTreeMap::from([("sk".to_owned(), "Ovzdušie".to_owned())]),
+            description: BTreeMap::new(),
+        }];
+        catalog
+    }
+
+    #[cfg(feature = "dcat-ap-sk")]
+    fn by_url<'a>(record: &'a Value, suffix: &str) -> &'a Value {
+        record["dcat:distribution"]
+            .as_array()
+            .and_then(|all| {
+                all.iter().find(|d| {
+                    d["dcat:accessURL"]
+                        .as_str()
+                        .is_some_and(|u| u.ends_with(suffix))
+                })
+            })
+            .unwrap_or_else(|| panic!("no distribution at {suffix}"))
+    }
+
     #[cfg(feature = "dcat-ap-sk")]
     #[test]
-    fn a_slovak_record_carries_terms_of_use_and_no_sha256() {
+    fn a_slovak_record_carries_terms_of_use_and_keeps_its_sha256() {
         let catalog = catalog(Some(Licence::CcBy4));
         let core = record(&catalog);
         let sk = render(core.clone(), Profile::DcatApSk, Some(&catalog));
         let licence = Licence::CcBy4.iri();
 
-        let schema = schema_distribution(&sk);
-        assert!(schema.get("spdx:checksum").is_none());
+        // DCAT-AP-SK 3 stands on DCAT-AP 3.0: the checksum and the size stay as the core writes them.
         assert_eq!(
-            schema["dcat:byteSize"],
-            json!({ "@value": "120", "@type": "xsd:decimal" })
+            schema_distribution(&sk)["spdx:checksum"],
+            schema_distribution(&core)["spdx:checksum"]
         );
+        assert_eq!(schema_distribution(&sk)["dcat:byteSize"], json!("120"));
         for distribution in sk["dcat:distribution"].as_array().into_iter().flatten() {
             let terms = &distribution["leg:termsOfUse"];
             assert_eq!(terms["@type"], "leg:TermsOfUse");
@@ -354,7 +583,6 @@ mod tests {
             }
             assert!(terms.get("leg:personalDataContainmentType").is_none());
         }
-        assert!(!sk.to_string().contains("checksumAlgorithm_sha256"));
         // the core values do not move
         for key in [
             "@id",
@@ -373,13 +601,82 @@ mod tests {
 
     #[cfg(feature = "dcat-ap-sk")]
     #[test]
-    fn a_slovak_record_without_a_licence_names_no_terms_and_its_turtle_types_the_size() {
+    fn a_slovak_file_is_a_download_and_an_interface_has_its_own_service() {
+        let catalog = slovak_catalog();
+        let sk = render(full_record(&catalog), Profile::DcatApSk, Some(&catalog));
+
+        for suffix in ["/file.csv", "/schema/v1/schema.json"] {
+            let file = by_url(&sk, suffix);
+            assert_eq!(file["dcat:downloadURL"], file["dcat:accessURL"], "{suffix}");
+            assert!(file.get("dcat:accessService").is_none(), "{suffix}");
+            assert!(file["dct:format"].as_str().is_some(), "{suffix}");
+        }
+        assert_eq!(
+            by_url(&sk, "/schema/v1/schema.json")["dct:format"],
+            "http://publications.europa.eu/resource/authority/file-type/JSON"
+        );
+
+        let api = by_url(&sk, "/ngsi-ld/v1/");
+        assert!(api.get("dcat:downloadURL").is_none());
+        let service_iri = api["dcat:accessService"].as_str().expect("its own service");
+        assert_eq!(
+            service_iri,
+            format!(
+                "{}#service",
+                api["dcat:accessURL"].as_str().unwrap_or_default()
+            )
+        );
+        let included = sk["@included"].as_array().expect("@included");
+        let service = included
+            .iter()
+            .find(|n| n["@id"] == service_iri)
+            .expect("the service node");
+        assert_eq!(service["@type"], "dcat:DataService");
+        assert_eq!(service["dcat:endpointURL"], api["dcat:accessURL"]);
+        assert_eq!(service["dcat:servesDataset"], sk["@id"]);
+        assert_eq!(
+            service["dct:title"],
+            json!([{ "@value": "NGSI-LD API", "@language": "sk" }])
+        );
+        assert_eq!(api["dct:title"], service["dct:title"]);
+
+        // the desk is an Organization named in Slovak, the source no dataset of this publisher
+        let contact = &sk["dcat:contactPoint"];
+        assert_eq!(
+            contact["@type"],
+            json!(["vcard:Organization", "vcard:Kind"])
+        );
+        assert_eq!(
+            contact["vcard:fn"],
+            json!([{ "@value": "Oddelenie informatiky", "@language": "sk" }])
+        );
+        let source = included
+            .iter()
+            .find(|n| n["@id"] == "https://data.example.sk/dataset/ovzdusie")
+            .expect("the source node");
+        assert!(source.get("@type").is_none(), "{source}");
+
+        let turtle = turtle(&sk);
+        assert!(
+            turtle.contains(
+                "dcat:downloadURL <https://data.example.sk/api/endpoint/ovzdusie/file.csv>"
+            ),
+            "{turtle}"
+        );
+        assert!(turtle.contains("\"NGSI-LD API\"@sk"), "{turtle}");
+    }
+
+    #[cfg(feature = "dcat-ap-sk")]
+    #[test]
+    fn a_slovak_record_without_a_licence_names_no_terms() {
         let catalog = catalog(None);
         let sk = render(record(&catalog), Profile::DcatApSk, Some(&catalog));
         assert!(!sk.to_string().contains("leg:termsOfUse"));
         let turtle = turtle(&sk);
-        assert!(turtle.contains("\"120\"^^xsd:decimal"), "{turtle}");
-        assert!(!turtle.contains("nonNegativeInteger"), "{turtle}");
+        assert!(
+            turtle.contains("\"120\"^^xsd:nonNegativeInteger"),
+            "{turtle}"
+        );
     }
 
     #[cfg(feature = "dcat-ap-cz")]
@@ -483,6 +780,180 @@ mod tests {
             let turtle = turtle(&cz);
             assert!(turtle.contains(&format!("<{code}>")), "{turtle}");
         }
+    }
+
+    #[cfg(feature = "dcat-ap-cz")]
+    #[test]
+    fn a_czech_record_keeps_one_text_per_property_czech_first() {
+        let mut catalog = catalog(Some(Licence::Cc0));
+        catalog.contact_point = Some(jc_core::kinds::ContactPoint {
+            name: "Odbor informatiky".into(),
+            email: "opendata@example.org".into(),
+        });
+        let titled = |pairs: &[(&str, &str)]| {
+            let title: BTreeMap<String, String> = pairs
+                .iter()
+                .map(|(l, t)| ((*l).to_owned(), (*t).to_owned()))
+                .collect();
+            let subject = Subject {
+                slug: "kola",
+                space: "kola",
+                base_path: "/api/endpoint/kola",
+                title: &title,
+                description: &title,
+                space_title: None,
+                space_description: None,
+                audience: Audience::Public,
+                representations: &[Representation::NgsiLd],
+                catalog: Some(&catalog),
+                classes: &[],
+                assigners: &[],
+            };
+            render(
+                dataset(&subject, &index(), BASE),
+                Profile::DcatApCz,
+                Some(&catalog),
+            )
+        };
+        let cz = titled(&[("cs", "Kola"), ("en", "Bikes"), ("sk", "Bicykle")]);
+        assert_eq!(
+            cz["dct:title"],
+            json!({ "@value": "Kola", "@language": "cs" })
+        );
+        assert_eq!(
+            cz["dct:description"],
+            json!({ "@value": "Kola", "@language": "cs" })
+        );
+        let service = cz["@included"]
+            .as_array()
+            .and_then(|all| all.iter().find(|n| n["@type"] == "dcat:DataService"))
+            .expect("the service");
+        assert_eq!(service["dct:title"], cz["dct:title"]);
+        // The names the gateway writes as one string are `rdf:langString`s too.
+        assert_eq!(
+            cz["dcat:contactPoint"]["vcard:fn"],
+            json!([{ "@value": "Odbor informatiky", "@language": "cs" }])
+        );
+        for distribution in cz["dcat:distribution"].as_array().expect("distributions") {
+            assert!(
+                distribution["dct:title"][0]["@language"] == "cs",
+                "{distribution}"
+            );
+        }
+        let en = titled(&[("en", "Bikes"), ("sk", "Bicykle")]);
+        assert_eq!(
+            en["dct:title"],
+            json!({ "@value": "Bikes", "@language": "en" })
+        );
+        let sk = titled(&[("sk", "Bicykle")]);
+        assert_eq!(
+            sk["dct:title"],
+            json!({ "@value": "Bicykle", "@language": "sk" })
+        );
+    }
+
+    fn owner_catalog() -> jc_core::kinds::ProjectCatalog {
+        jc_core::kinds::ProjectCatalog {
+            publisher: jc_core::kinds::Publisher {
+                name: BTreeMap::from([("sk".to_owned(), "Mesto Banská Bystrica".to_owned())]),
+                uri: Some("https://data.gov.sk/id/legal-subject/00313271".into()),
+            },
+            contact_point: Some(jc_core::kinds::ContactPoint {
+                name: "Oddelenie informatiky".into(),
+                email: "opendata@example.org".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_publishers_catalogue_names_the_publisher_desk_and_home_and_lists_the_records() {
+        let catalog = catalog(Some(Licence::CcBy4));
+        let owned = owner_catalog();
+        let title = BTreeMap::from([
+            ("en".to_owned(), "City of Banská Bystrica".to_owned()),
+            ("sk".to_owned(), "Mesto Banská Bystrica".to_owned()),
+        ]);
+        let none = BTreeMap::new();
+        let owner = crate::CatalogueOwner {
+            project: "banskabystrica",
+            title: &title,
+            description: &none,
+            domain: Some("banskabystrica.sk"),
+            catalog: &owned,
+        };
+        let feed = crate::publisher_feed(vec![record(&catalog)], BASE, &owner);
+        assert_eq!(feed["@id"], format!("{BASE}/catalog/banskabystrica"));
+        assert_eq!(feed["@type"], "dcat:Catalog");
+        assert_eq!(
+            feed["dct:publisher"]["@id"],
+            "https://data.gov.sk/id/legal-subject/00313271"
+        );
+        assert_eq!(
+            feed["dcat:contactPoint"]["vcard:hasEmail"],
+            "mailto:opendata@example.org"
+        );
+        assert_eq!(feed["foaf:homepage"], "https://banskabystrica.sk/");
+        // no description of its own: the title stands in, in every language
+        assert_eq!(feed["dct:description"], feed["dct:title"]);
+        assert_eq!(feed["dct:title"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            feed["dcat:dataset"],
+            json!([{ "@id": format!("{BASE}/api/endpoint/ovzdusie") }])
+        );
+        let turtle = turtle(&feed);
+        assert!(
+            turtle.contains("foaf:homepage <https://banskabystrica.sk/>"),
+            "{turtle}"
+        );
+        assert!(
+            turtle.contains("dct:publisher <https://data.gov.sk/id/legal-subject/00313271>"),
+            "{turtle}"
+        );
+
+        // a project with no title of its own is titled by its publisher; an empty one lists nothing
+        let untitled = crate::CatalogueOwner {
+            title: &none,
+            domain: None,
+            ..owner
+        };
+        let empty = crate::publisher_feed(Vec::new(), BASE, &untitled);
+        assert_eq!(
+            empty["dct:title"],
+            json!([{ "@value": "Mesto Banská Bystrica", "@language": "sk" }])
+        );
+        assert_eq!(empty["dcat:dataset"], json!([]));
+        assert!(empty.get("foaf:homepage").is_none());
+        assert_eq!(render_catalog(empty.clone(), Profile::DcatAp), empty);
+    }
+
+    #[cfg(all(feature = "dcat-ap-sk", feature = "dcat-ap-cz"))]
+    #[test]
+    fn a_catalogue_takes_what_each_profile_asks_of_it() {
+        let owned = owner_catalog();
+        let title = BTreeMap::from([
+            ("cs".to_owned(), "Banská Bystrica".to_owned()),
+            ("sk".to_owned(), "Mesto Banská Bystrica".to_owned()),
+        ]);
+        let owner = crate::CatalogueOwner {
+            project: "banskabystrica",
+            title: &title,
+            description: &title,
+            domain: None,
+            catalog: &owned,
+        };
+        let feed = crate::publisher_feed(Vec::new(), BASE, &owner);
+        let sk = render_catalog(feed.clone(), Profile::DcatApSk);
+        assert_eq!(
+            sk["dcat:contactPoint"]["vcard:fn"],
+            json!([{ "@value": "Oddelenie informatiky", "@language": "sk" }])
+        );
+        assert_eq!(sk["dct:title"], feed["dct:title"]);
+        let cz = render_catalog(feed, Profile::DcatApCz);
+        assert_eq!(
+            cz["dct:title"],
+            json!({ "@value": "Banská Bystrica", "@language": "cs" })
+        );
+        assert_eq!(cz["dct:description"], cz["dct:title"]);
     }
 
     /// Without a national profile the statement is never written: DCAT-AP 3.0 has no term for

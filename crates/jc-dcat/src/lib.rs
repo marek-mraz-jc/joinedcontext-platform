@@ -20,7 +20,7 @@ pub mod profile;
 
 use jc_core::classification::classify;
 use jc_core::kinds::catalog::spatial_iri;
-use jc_core::kinds::{Audience, Catalog, Duty, Representation};
+use jc_core::kinds::{Audience, Catalog, ContactPoint, Duty, ProjectCatalog, Representation};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -195,9 +195,10 @@ const PREFIXES: [(&str, &str); 15] = [
 ///
 /// The record keeps compact keys and plain strings, which is what a reader that reads keys
 /// expects; the `@context` built from this list is what makes an RDF reader see IRIs.
-const IRI_KEYS: [&str; 23] = [
+const IRI_KEYS: [&str; 26] = [
     "dct:accessRights",
     "foaf:page",
+    "foaf:homepage",
     "dct:conformsTo",
     "dct:format",
     "dct:license",
@@ -205,9 +206,11 @@ const IRI_KEYS: [&str; 23] = [
     "dct:accrualPeriodicity",
     "dct:source",
     "dcat:accessURL",
+    "dcat:downloadURL",
     "dcat:mediaType",
     "dcat:theme",
     "dcat:endpointURL",
+    "dcat:endpointDescription",
     "dcat:servesDataset",
     "dcat:accessService",
     "dcatap:applicableLegislation",
@@ -540,6 +543,16 @@ pub fn classification(endpoint: &Subject<'_>) -> jc_core::classification::Classi
     classify(endpoint.classes.iter().copied())
 }
 
+/// A desk as a `vcard:Organization` (EP-80), a `vcard:Kind` stated for a validator that runs
+/// without RDFS inference.
+fn contact_point(contact: &ContactPoint) -> Value {
+    json!({
+        "@type": ["vcard:Organization", "vcard:Kind"],
+        "vcard:fn": contact.name,
+        "vcard:hasEmail": format!("mailto:{}", contact.email),
+    })
+}
+
 /// What the catalogue block says about the dataset itself (EP-78).
 fn describe(record: &mut Value, included: &mut Vec<Value>, catalog: &Catalog) {
     if let Some(publisher) = &catalog.publisher {
@@ -553,11 +566,7 @@ fn describe(record: &mut Value, included: &mut Vec<Value>, catalog: &Catalog) {
         record["dct:publisher"] = agent;
     }
     if let Some(contact) = &catalog.contact_point {
-        record["dcat:contactPoint"] = json!({
-            "@type": "vcard:Kind",
-            "vcard:fn": contact.name,
-            "vcard:hasEmail": format!("mailto:{}", contact.email),
-        });
+        record["dcat:contactPoint"] = contact_point(contact);
     }
     if let Some(licence) = catalog.license {
         // DCAT-AP licenses distributions; the dataset carries it too, for a reader of keys.
@@ -723,6 +732,9 @@ pub fn dataset(endpoint: &Subject<'_>, index: &Value, base: &str) -> Value {
         "@type": "dcat:DataService",
         "dct:title": record["dct:title"].clone(),
         "dcat:endpointURL": format!("{iri}/"),
+        // The OpenAPI document the Endpoint serves of its read surface (EP-99), which DCAT-AP-CZ
+        // requires of every data service.
+        "dcat:endpointDescription": format!("{iri}/openapi.json"),
         "dcat:servesDataset": iri,
         "dct:accessRights": access_rights(endpoint.audience),
     });
@@ -730,6 +742,7 @@ pub fn dataset(endpoint: &Subject<'_>, index: &Value, base: &str) -> Value {
         service["dct:license"] = json!(licence.iri());
     }
     included.push(json!({ "@id": format!("{iri}/"), "@type": "rdfs:Resource" }));
+    included.push(json!({ "@id": format!("{iri}/openapi.json"), "@type": "rdfs:Resource" }));
     included.push(service);
     if let Some(distributions) = record["dcat:distribution"].as_array() {
         typed_values(distributions, &mut included);
@@ -749,6 +762,83 @@ pub fn dataset(endpoint: &Subject<'_>, index: &Value, base: &str) -> Value {
 /// public Endpoint; this only gathers them, so the feed says nothing a public read of each
 /// record would not. Each record's typed nodes move to the catalogue's `@included`, once.
 pub fn feed(records: Vec<Value>, base: &str, org_domain: &str) -> Value {
+    catalogue(
+        records,
+        json!({
+            "@id": format!("{base}/catalog"),
+            "dct:title": format!("Open data of {org_domain}"),
+            "dct:description": format!(
+                "Every dataset {org_domain} serves to anyone, one record per public endpoint."
+            ),
+            "dct:publisher": {
+                "@id": format!("https://{org_domain}/"),
+                "@type": "foaf:Agent",
+                "foaf:name": org_domain,
+            },
+        }),
+    )
+}
+
+/// Who a publisher's catalogue belongs to: a Project that names its publisher (EP-127, docs
+/// API/08 section 6).
+#[derive(Debug, Clone, Copy)]
+pub struct CatalogueOwner<'a> {
+    /// The project's name, the last segment of the catalogue's IRI.
+    pub project: &'a str,
+    /// The project's title per locale, the catalogue's title.
+    pub title: &'a BTreeMap<String, String>,
+    /// The project's description per locale; its title stands in when it has none.
+    pub description: &'a BTreeMap<String, String>,
+    /// The publishing body's domain, its home page.
+    pub domain: Option<&'a str>,
+    /// The publisher and the desk.
+    pub catalog: &'a ProjectCatalog,
+}
+
+/// One publisher's catalogue: the records of its project's public Endpoints, under its own
+/// publisher, contact point and home page (EP-127). As [`feed`], it only gathers the records.
+pub fn publisher_feed(records: Vec<Value>, base: &str, owner: &CatalogueOwner<'_>) -> Value {
+    let publisher = &owner.catalog.publisher;
+    let title = if owner.title.is_empty() {
+        &publisher.name
+    } else {
+        owner.title
+    };
+    let description = if owner.description.is_empty() {
+        title
+    } else {
+        owner.description
+    };
+    let mut agent = json!({
+        "@type": "foaf:Agent",
+        "foaf:name": language_values(&publisher.name),
+    });
+    if let Some(uri) = &publisher.uri {
+        agent["@id"] = json!(uri);
+    }
+    let mut header = json!({
+        "@id": format!("{base}/catalog/{}", owner.project),
+        "dct:title": localized(title, owner.project),
+        "dct:description": localized(description, owner.project),
+        "dct:publisher": agent,
+    });
+    if let Some(contact) = &owner.catalog.contact_point {
+        header["dcat:contactPoint"] = contact_point(contact);
+    }
+    let mut feed = catalogue(records, header);
+    if let Some(domain) = owner.domain {
+        let home = format!("https://{domain}/");
+        feed["foaf:homepage"] = json!(home);
+        if let Some(included) = feed["@included"].as_array_mut() {
+            included.push(json!({ "@id": home, "@type": "foaf:Document" }));
+        }
+    }
+    feed
+}
+
+/// A `dcat:Catalog` of `records` under `header`, its `@id`, texts and publisher: each record's
+/// typed nodes move to the catalogue's `@included`, once.
+fn catalogue(records: Vec<Value>, mut header: Value) -> Value {
     let mut included: Vec<Value> = Vec::new();
     // Each node once, by its text: a linear search per node took 22 s for 10,000 records.
     let mut seen = std::collections::HashSet::new();
@@ -770,22 +860,11 @@ pub fn feed(records: Vec<Value>, base: &str, org_domain: &str) -> Value {
             included.push(record);
         }
     }
-    json!({
-        "@context": context(),
-        "@id": format!("{base}/catalog"),
-        "@type": "dcat:Catalog",
-        "dct:title": format!("Open data of {org_domain}"),
-        "dct:description": format!(
-            "Every dataset {org_domain} serves to anyone, one record per public endpoint."
-        ),
-        "dct:publisher": {
-            "@id": format!("https://{org_domain}/"),
-            "@type": "foaf:Agent",
-            "foaf:name": org_domain,
-        },
-        "dcat:dataset": datasets,
-        "@included": included,
-    })
+    header["@context"] = context();
+    header["@type"] = json!("dcat:Catalog");
+    header["dcat:dataset"] = Value::Array(datasets);
+    header["@included"] = Value::Array(included);
+    header
 }
 
 /// [`feed`] as Turtle: the same graph, written by the record's own writer (EP-84).

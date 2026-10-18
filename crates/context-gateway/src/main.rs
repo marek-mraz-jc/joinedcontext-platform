@@ -67,6 +67,7 @@ async fn main() -> ExitCode {
         homes,
         brokers,
         mappings,
+        publishers,
     ) = match &config.repo_dir {
         None => (
             Vec::new(),
@@ -78,6 +79,7 @@ async fn main() -> ExitCode {
             Vec::new(),
             store::SpaceBrokers::default(),
             context_gateway::mqtt::Brokers::new(),
+            Default::default(),
             Default::default(),
         ),
         Some(dir) => match store::load_from(dir, checkouts.as_ref()) {
@@ -107,6 +109,7 @@ async fn main() -> ExitCode {
     gateway.replace_limits(limits);
     gateway.replace_servers(servers);
     gateway.replace_mappings(mappings);
+    gateway.replace_publishers(publishers);
     gateway.broker.route(&homes);
     gateway.replace_brokers(brokers);
 
