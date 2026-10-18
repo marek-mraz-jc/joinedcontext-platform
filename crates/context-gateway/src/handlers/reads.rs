@@ -240,32 +240,24 @@ async fn paged_view(
             return Err(Box::new(too_large()));
         }
     }
-    let (limit, offset) = window;
-    let rows = rows.into_iter().skip(offset);
-    let rows: Vec<Value> = match limit {
-        Some(limit) => rows.take(limit).collect(),
-        None => rows.collect(),
-    };
+    let (offset, limit) = window;
+    let rows: Vec<Value> = rows.into_iter().skip(offset).take(limit).collect();
     Ok((Value::Array(rows), restricted))
 }
 
-/// The `limit` and `offset` a download asks for (T-4591): none is the whole answer from its
-/// start; a value that is no whole number is the caller's mistake, said, never a silent default.
-fn window(params: &[(String, String)]) -> Result<(Option<usize>, usize), Box<Response<Body>>> {
-    let read = |name: &str| -> Result<Option<usize>, Box<Response<Body>>> {
-        query::first(params, name)
-            .map(|value| {
-                value.parse::<usize>().map_err(|_| {
-                    Box::new(
-                        ProblemDetails::new(400, "bad-request", "Bad Request")
-                            .with_detail(format!("{name} must be a whole number, not `{value}`"))
-                            .into_response(),
-                    )
-                })
-            })
-            .transpose()
+/// The `offset` and `limit` a download asks for (T-4591), none the whole answer; a value that is
+/// no whole number is the caller's mistake, said, never a silent default.
+fn window(params: &[(String, String)]) -> Result<(usize, usize), Box<Response<Body>>> {
+    let read = |name: &str, none: usize| match query::first(params, name).map(str::parse) {
+        Some(Err(_)) => Err(Box::new(
+            ProblemDetails::new(400, "bad-request", "Bad Request")
+                .with_detail(format!("{name} must be a whole number"))
+                .into_response(),
+        )),
+        Some(Ok(value)) => Ok(value),
+        None => Ok(none),
     };
-    Ok((read("limit")?, read("offset")?.unwrap_or(0)))
+    Ok((read("offset", 0)?, read("limit", usize::MAX)?))
 }
 
 /// The type list of an Endpoint as its reads show the caller (CIM 009 5.7.1, T-4080): every
