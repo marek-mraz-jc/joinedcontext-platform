@@ -403,6 +403,7 @@ async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
         description: None,
         members: vec![AIR.to_owned()],
         select: None,
+        endpoints: None,
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
     };

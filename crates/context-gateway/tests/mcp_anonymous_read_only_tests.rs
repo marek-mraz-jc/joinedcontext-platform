@@ -140,6 +140,7 @@ fn gateway(broker: &str, realm: &common::Realm) -> Gateway {
         description: None,
         members: vec![OPEN.to_owned()],
         select: None,
+        endpoints: None,
         audience: Audience::Public,
         allowed_projects: Vec::new(),
     }]);

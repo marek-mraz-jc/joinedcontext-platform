@@ -11,6 +11,7 @@ pub mod describe;
 pub mod endpoint;
 pub mod hub;
 pub mod jsonrpc;
+pub mod personal;
 pub mod search;
 pub mod server;
 pub mod tools;

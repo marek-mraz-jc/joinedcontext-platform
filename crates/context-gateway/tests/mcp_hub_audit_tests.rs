@@ -103,6 +103,7 @@ async fn the_audit_line_names_the_endpoint_the_tool_and_the_subject() {
         description: None,
         members: vec![SLUG.to_owned()],
         select: None,
+        endpoints: None,
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
     }]);
