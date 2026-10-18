@@ -149,7 +149,7 @@ spec:
   contextSpaceRef: ovzdusie
   slug: zt4qm7ge2xdv6ksb3ncf5arw2y
   audience: public
-  enabledRepresentations: ["ngsi-ld", "geojson"]
+  enabledRepresentations: ["ngsi-ld", "csv"]
 "#;
 
 #[test]

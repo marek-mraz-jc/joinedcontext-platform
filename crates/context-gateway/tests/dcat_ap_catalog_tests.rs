@@ -74,11 +74,7 @@ fn endpoint(audience: Audience, catalog: Option<Catalog>) -> Endpoint {
         },
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Csv,
-            Representation::Xlsx,
-            Representation::Json,
-            Representation::Zip,
             Representation::OgcFeatures,
             Representation::Sta,
             Representation::Mcp,
@@ -294,7 +290,7 @@ fn a_full_catalogue_block_is_rendered_as_dcat_ap_terms() {
 fn every_distribution_carries_the_licence_the_attribution_and_the_data_service() {
     let record = record(&endpoint(Audience::Public, Some(catalog(FULL))));
     let licence = "http://publications.europa.eu/resource/authority/licence/CC_BY_4_0";
-    assert_eq!(distributions(&record).len(), 11, "{record:#}");
+    assert_eq!(distributions(&record).len(), 7, "{record:#}");
     for distribution in distributions(&record) {
         assert_eq!(distribution["dct:license"], licence, "{distribution:#}");
         assert_eq!(distribution["dct:rights"]["@type"], "dct:RightsStatement");

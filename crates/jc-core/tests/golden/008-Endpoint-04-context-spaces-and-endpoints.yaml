@@ -12,7 +12,6 @@ spec:
   enabledRepresentations:
     - ngsi-ld
     - mcp
-    - geojson
     - csv
     - ogc-features
     - sta

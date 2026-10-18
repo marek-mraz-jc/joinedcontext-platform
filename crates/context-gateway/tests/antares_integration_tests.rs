@@ -311,8 +311,8 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Mcp,
+            Representation::Csv,
         ],
         rate_limit: None,
         creates: None,
@@ -520,30 +520,20 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     );
     assert!(!String::from_utf8_lossy(&body).contains("pm10"));
 
-    // DEMO step 4: the same data, several ways. The map reads the FeatureCollection and
-    // sees exactly the attributes the grant allows (EP-09, EP-07).
+    // DEMO step 4: the same data as a file, with exactly the attributes the grant allows
+    // (EP-09, EP-07).
     let (status, body) = call(
         &app,
         Request::builder()
-            .uri(format!("/api/endpoint/{PUBLIC_SLUG}/file.geojson"))
+            .uri(format!("/api/endpoint/{PUBLIC_SLUG}/file.csv"))
             .body(Body::empty())
             .expect("a request"),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "geojson: {}",
-        String::from_utf8_lossy(&body)
-    );
-    let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
-    assert_eq!(collection["type"], json!("FeatureCollection"));
-    let features = collection["features"].as_array().expect("features");
-    assert_eq!(features.len(), 1);
-    assert_eq!(features[0]["id"], json!(STATION));
-    assert_eq!(features[0]["geometry"]["type"], json!("Point"));
-    assert_eq!(features[0]["properties"]["pm10"], json!(34.2));
-    assert!(features[0]["properties"].get("operatorPhone").is_none());
+    assert_eq!(status, StatusCode::OK, "csv: {}", body_text(&body));
+    assert_eq!(ids_of("file.csv", &body), [STATION]);
+    assert!(body_text(&body).contains("34.2"), "{}", body_text(&body));
+    assert!(!body_text(&body).contains("operatorPhone"));
 
     // T-0379: the same bare download on the endpoint whose grant narrows nothing, which is
     // the shape the dev cluster seeds. Against a real broker this was a 400 under CIM 009
@@ -551,7 +541,7 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     let (status, body) = call(
         &app,
         Request::builder()
-            .uri(format!("/api/endpoint/{OPEN_SLUG}/file.geojson"))
+            .uri(format!("/api/endpoint/{OPEN_SLUG}/file.csv"))
             .body(Body::empty())
             .expect("a request"),
     )
@@ -559,14 +549,14 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "bare geojson on an unrestricted grant: {}",
-        String::from_utf8_lossy(&body)
+        "bare csv on an unrestricted grant: {}",
+        body_text(&body)
     );
-    let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
     assert_eq!(
-        collection["features"].as_array().map(Vec::len),
-        Some(1),
-        "the dataset is the selection: {collection}"
+        ids_of("file.csv", &body).len(),
+        1,
+        "the dataset is the selection: {}",
+        body_text(&body)
     );
 
     // The NGSI-LD surface of the very same endpoint keeps the broker's refusal, so the
@@ -1331,7 +1321,7 @@ async fn a_projection_window_narrows_a_temporal_read_through_the_view() {
     );
 }
 
-/// The ids a surface answered: an NGSI-LD array, a FeatureCollection, a CSV or a Parquet file.
+/// The ids a surface answered: an NGSI-LD array or a CSV file.
 fn ids_of(file: &str, body: &[u8]) -> Vec<String> {
     let mut ids: Vec<String> = match file {
         "file.csv" => {
@@ -1354,23 +1344,6 @@ fn ids_of(file: &str, body: &[u8]) -> Vec<String> {
                 })
                 .collect()
         }
-        "file.parquet" => {
-            use parquet::file::reader::{FileReader, SerializedFileReader};
-            let reader = SerializedFileReader::new(bytes::Bytes::from(body.to_vec()))
-                .expect("a parquet file");
-            reader
-                .get_row_iter(None)
-                .expect("rows")
-                .map(|row| {
-                    let row = row.expect("a row");
-                    let id = row
-                        .get_column_iter()
-                        .find(|(name, _)| name.as_str() == "id");
-                    id.map(|(_, field)| field.to_string().trim_matches('"').to_owned())
-                        .expect("an id field")
-                })
-                .collect()
-        }
         _ => {
             let answer: Value = serde_json::from_slice(body).expect("JSON");
             let items = answer.get("features").unwrap_or(&answer);
@@ -1386,22 +1359,9 @@ fn ids_of(file: &str, body: &[u8]) -> Vec<String> {
     ids
 }
 
-/// The values a Parquet file carries, as text: its bytes may be compressed.
-fn parquet_text(body: &[u8]) -> String {
-    use parquet::file::reader::{FileReader, SerializedFileReader};
-    let reader =
-        SerializedFileReader::new(bytes::Bytes::from(body.to_vec())).expect("a parquet file");
-    reader
-        .get_row_iter(None)
-        .expect("rows")
-        .map(|row| row.expect("a row").to_string())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// EP-42 (T-4420): a file download takes the NGSI-LD query parameters under the same Policy
-/// intersection as `/entities`. For q, georel, idPattern and attrs, `file.json`, `file.geojson`,
-/// `file.csv` and `file.parquet` answer the ids the query answers through the view, and no
+/// intersection as `/entities`. For q, georel, idPattern and attrs, `file.csv` answers the ids
+/// the query answers through the view, and no
 /// parameter widens the grant: an attribute outside it is neither returned nor matched, and an
 /// entity outside its idPattern is not counted in.
 #[tokio::test(flavor = "multi_thread")]
@@ -1435,13 +1395,7 @@ async fn a_file_download_takes_the_query_under_the_policy_as_entities_does() {
     }
 
     let mut served = endpoint(PUBLIC_SLUG, Audience::Public);
-    served.representations = vec![
-        Representation::NgsiLd,
-        Representation::Json,
-        Representation::GeoJson,
-        Representation::Csv,
-        Representation::Parquet,
-    ];
+    served.representations = vec![Representation::NgsiLd, Representation::Csv];
     let gateway =
         Gateway::new(Broker::new(antares.url()), Box::new(PolicyPdp), ORG).serve([served]);
     let app = router(std::sync::Arc::new(gateway));
@@ -1505,50 +1459,45 @@ async fn a_file_download_takes_the_query_under_the_policy_as_entities_does() {
             !body_text(&body).contains("CANARY"),
             "{case}: /entities carried a denied value"
         );
-        for file in ["file.json", "file.geojson", "file.csv", "file.parquet"] {
-            let (file_status, bytes) = call(
-                &app,
-                read(format!("/{file}?type=AirQualityObserved&{query}")),
-            )
-            .await;
-            let text = if file == "file.parquet" && file_status == StatusCode::OK {
-                parquet_text(&bytes)
-            } else {
-                body_text(&bytes)
-            };
+        let file = "file.csv";
+        let (file_status, bytes) = call(
+            &app,
+            read(format!("/{file}?type=AirQualityObserved&{query}")),
+        )
+        .await;
+        let text = body_text(&bytes);
+        assert!(
+            !text.contains("CANARY"),
+            "{case}: {file} carried a denied value: {text}"
+        );
+        assert!(
+            !text.contains("operatorPhone"),
+            "{case}: {file} named a denied attribute: {text}"
+        );
+        assert!(
+            !text.contains("zvolen.sk"),
+            "{case}: {file} counted in an entity outside the idPattern"
+        );
+        if case == "attrs" {
             assert!(
-                !text.contains("CANARY"),
-                "{case}: {file} carried a denied value: {text}"
+                !text.contains("pm25"),
+                "{case}: {file} carried an attribute attrs left out: {text}"
             );
-            assert!(
-                !text.contains("operatorPhone"),
-                "{case}: {file} named a denied attribute: {text}"
-            );
-            assert!(
-                !text.contains("zvolen.sk"),
-                "{case}: {file} counted in an entity outside the idPattern"
-            );
-            if case == "attrs" {
-                assert!(
-                    !text.contains("pm25"),
-                    "{case}: {file} carried an attribute attrs left out: {text}"
+        }
+        match &entities {
+            Some(entities) => {
+                assert_eq!(file_status, StatusCode::OK, "{case}: {file}: {text}");
+                assert_eq!(
+                    &ids_of(file, &bytes),
+                    entities,
+                    "{case}: {file} and /entities differ"
                 );
             }
-            match &entities {
-                Some(entities) => {
-                    assert_eq!(file_status, StatusCode::OK, "{case}: {file}: {text}");
-                    assert_eq!(
-                        &ids_of(file, &bytes),
-                        entities,
-                        "{case}: {file} and /entities differ"
-                    );
-                }
-                // Where `/entities` refuses the query, the file does not answer it either.
-                None => assert!(
-                    file_status.is_client_error() || ids_of(file, &bytes).is_empty(),
-                    "{case}: {file} answered what /entities refused ({status}): {text}"
-                ),
-            }
+            // Where `/entities` refuses the query, the file does not answer it either.
+            None => assert!(
+                file_status.is_client_error() || ids_of(file, &bytes).is_empty(),
+                "{case}: {file} answered what /entities refused ({status}): {text}"
+            ),
         }
     }
 }

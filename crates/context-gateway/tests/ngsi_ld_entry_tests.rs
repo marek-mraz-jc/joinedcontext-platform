@@ -106,7 +106,7 @@ fn app() -> axum::Router {
             endpoint(
                 FILES_ONLY,
                 Audience::Public,
-                vec![Representation::GeoJson],
+                vec![Representation::Csv],
                 &["AirQualityObserved"],
             ),
         ])

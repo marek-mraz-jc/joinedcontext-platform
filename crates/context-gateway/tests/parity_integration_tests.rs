@@ -85,7 +85,6 @@ fn endpoint(
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Csv,
             Representation::Mcp,
             Representation::OgcFeatures,
@@ -207,34 +206,7 @@ async fn every_representation_of_one_endpoint_shows_the_same_attributes() {
         let broker = viewed(slug, &entity).await;
         let expected: BTreeSet<String> = expected.iter().map(|name| (*name).to_owned()).collect();
 
-        // 2. GeoJSON: `location` becomes the geometry, so it is a property no more.
-        let (status, body) = get(
-            app(&broker.url),
-            &format!("/api/endpoint/{slug}/file.geojson"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let collection: Value = serde_json::from_slice(&body).expect("JSON");
-        let mut geojson: BTreeSet<String> = collection["features"][0]["properties"]
-            .as_object()
-            .expect("a properties object")
-            .keys()
-            .filter(|name| name.as_str() != "type")
-            .cloned()
-            .collect();
-        assert!(
-            collection["features"][0]["geometry"]["type"]
-                .as_str()
-                .is_some(),
-            "the geometry is where `location` went"
-        );
-        geojson.insert("location".to_owned());
-        assert_eq!(
-            geojson, expected,
-            "GeoJSON shows what the grants and the endpoint leave"
-        );
-
-        // 3. CSV: one column per leaf, and the stems are the same attributes.
+        // 2. CSV: one column per leaf, and the stems are the same attributes.
         let (status, body) = get(app(&broker.url), &format!("/api/endpoint/{slug}/file.csv")).await;
         assert_eq!(status, StatusCode::OK);
         let csv = String::from_utf8(body).expect("UTF-8");
@@ -258,18 +230,14 @@ async fn an_attribute_the_endpoint_hides_is_absent_from_every_representation() {
     ] {
         let broker = viewed(slug, &entity).await;
 
-        for uri in [
-            format!("/api/endpoint/{slug}/file.geojson"),
-            format!("/api/endpoint/{slug}/file.csv"),
-        ] {
-            let (status, body) = get(app(&broker.url), &uri).await;
-            assert_eq!(status, StatusCode::OK, "{uri}");
-            let text = String::from_utf8(body).expect("UTF-8");
-            assert!(
-                !text.contains(hidden),
-                "{hidden} is hidden by the endpoint and must not appear in {uri}"
-            );
-        }
+        let uri = format!("/api/endpoint/{slug}/file.csv");
+        let (status, body) = get(app(&broker.url), &uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let text = String::from_utf8(body).expect("UTF-8");
+        assert!(
+            !text.contains(hidden),
+            "{hidden} is hidden by the endpoint and must not appear in {uri}"
+        );
 
         // The broker was asked for the whole entity: the narrowing is the gateway's, and
         // that is exactly why it has to hold in every encoding.

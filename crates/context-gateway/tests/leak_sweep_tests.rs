@@ -10,8 +10,7 @@
 //! NGSI-LD is not probed here: since T-3643 the gateway forwards it to the broker's view, and
 //! Antares sweeps that surface itself (`views_read`, `views_q`, `joinedcontext-policy` engine
 //! tests), and since T-3645 so are the schema artifacts (`linkml` surface). The probes cover the
-//! file downloads (`json`, `csv`, `geojson`, `xlsx`, `parquet`, `zip` — the two compressed ones
-//! are opened and their parts read, and the parquet one is written uncompressed), OGC API Features, the access
+//! file download (`file.csv`, the one left after T-4597), OGC API Features, the access
 //! document, the endpoint record and every read-only MCP tool. Two brokers: one that honours
 //! `type` and `attrs`, and one that answers more than it was asked, which is what a federated
 //! source, a registration answering for a neighbour or a defect looks like.
@@ -212,12 +211,7 @@ fn endpoint() -> Endpoint {
         representations: vec![
             Representation::NgsiLd,
             Representation::Mcp,
-            Representation::GeoJson,
             Representation::Csv,
-            Representation::Xlsx,
-            Representation::Parquet,
-            Representation::Json,
-            Representation::Zip,
             Representation::OgcFeatures,
             Representation::Sta,
         ],
@@ -279,19 +273,14 @@ fn mcp(label: &'static str, tool: &str, arguments: Value) -> Probe {
 /// MCP surface); what the gateway still answers itself is probed here.
 fn probes() -> Vec<Probe> {
     vec![
-        get("file json", "/file.json"),
-        get("file json two types", "/file.json?type=User,Vehicle"),
-        get("file json q foreign", "/file.json?type=Vehicle&q=age%3E30"),
+        get("file csv bare", "/file.csv"),
+        get("file csv q foreign", "/file.csv?type=Vehicle&q=age%3E30"),
         get("file csv", "/file.csv?type=User,Vehicle"),
         get("file csv one type", "/file.csv?type=Vehicle"),
         get(
             "file csv attrs foreign",
             "/file.csv?type=Vehicle&attrs=age,odometer",
         ),
-        get("file geojson", "/file.geojson?type=User,Vehicle"),
-        get("file xlsx", "/file.xlsx?type=User,Vehicle"),
-        get("file parquet", "/file.parquet?type=User,Vehicle"),
-        get("file zip", "/file.zip?type=User,Vehicle"),
         // SensorThings is the broker's view since T-4463: Antares' `antares-sta` tests sweep it.
         get("access", "/access"),
         get("endpoint record", ""),
@@ -435,28 +424,9 @@ fn oracle(hops: &[String], probe: &Probe) -> Vec<String> {
     found
 }
 
-/// Everything readable in an answer, with a compressed one opened.
-///
-/// `file.xlsx` and `file.zip` are ZIP containers, and a canary inside a worksheet part is as much
-/// a leak as one in a JSON body. The parts are read with the same crate the exporter writes them
-/// with, so a leak cannot hide behind the compression (TS-19).
+/// Everything readable in an answer: its headers and its body.
 fn readable(headers: &str, bytes: &[u8]) -> String {
-    let mut text = format!("{headers}\n{}", String::from_utf8_lossy(bytes));
-    if bytes.starts_with(b"PK") {
-        let mut archive =
-            zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("a ZIP container");
-        for index in 0..archive.len() {
-            let mut part = archive.by_index(index).expect("a part of the container");
-            let name = part.name().expect("a part name").into_owned();
-            let mut content = Vec::new();
-            std::io::Read::read_to_end(&mut part, &mut content).expect("the part reads");
-            text.push_str(&format!(
-                "\n--- {name}\n{}",
-                String::from_utf8_lossy(&content)
-            ));
-        }
-    }
-    text
+    format!("{headers}\n{}", String::from_utf8_lossy(bytes))
 }
 
 /// MP-02, EP-26: no surface of an Endpoint serves more than (projection ∩ grants − hidden), per
@@ -530,8 +500,9 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    // 14 since T-4463: the seven SensorThings probes went with the gateway's own STA.
-    assert!(probed >= 14, "the sweep stopped after {probed} probes");
+    // 14 since T-4463, when the seven SensorThings probes went with the gateway's own STA; 9
+    // since T-4597, when the files other than `file.csv` went.
+    assert!(probed >= 9, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -570,12 +541,7 @@ async fn every_representation_and_tool_has_a_probe() {
             | Representation::Sta
             | Representation::Ical => continue,
             Representation::Mcp => "/mcp",
-            Representation::GeoJson => "/file.geojson",
             Representation::Csv => "/file.csv",
-            Representation::Xlsx => "/file.xlsx",
-            Representation::Parquet => "/file.parquet",
-            Representation::Json => "/file.json",
-            Representation::Zip => "/file.zip",
             Representation::WebSocket => "/ws",
         };
         assert!(

@@ -86,40 +86,10 @@ fn served(representation: Representation) -> Served {
             media_type: "application/json",
             conforms_to: Some("https://modelcontextprotocol.io/specification"),
         },
-        Representation::GeoJson => Served {
-            path: "file.geojson",
-            title: "GeoJSON",
-            media_type: "application/geo+json",
-            conforms_to: Some("https://www.rfc-editor.org/rfc/rfc7946"),
-        },
         Representation::Csv => Served {
             path: "file.csv",
             title: "CSV",
             media_type: "text/csv",
-            conforms_to: None,
-        },
-        Representation::Xlsx => Served {
-            path: "file.xlsx",
-            title: "Excel workbook",
-            media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            conforms_to: None,
-        },
-        Representation::Parquet => Served {
-            path: "file.parquet",
-            title: "Apache Parquet",
-            media_type: "application/vnd.apache.parquet",
-            conforms_to: Some("https://parquet.apache.org/docs/file-format/"),
-        },
-        Representation::Json => Served {
-            path: "file.json",
-            title: "JSON",
-            media_type: "application/json",
-            conforms_to: None,
-        },
-        Representation::Zip => Served {
-            path: "file.zip",
-            title: "Bundle of every representation",
-            media_type: "application/zip",
             conforms_to: None,
         },
         Representation::OgcFeatures => Served {
@@ -287,14 +257,10 @@ fn media_type_iri(media_type: &str) -> String {
 fn file_type_iri(representation: Representation) -> String {
     let code = match representation {
         Representation::NgsiLd => "JSON_LD",
-        Representation::GeoJson | Representation::OgcFeatures => "GEOJSON",
+        Representation::OgcFeatures => "GEOJSON",
         Representation::Csv => "CSV",
-        Representation::Xlsx => "XLSX",
-        Representation::Parquet => "PARQUET",
-        Representation::Zip => "ZIP",
         Representation::Ical => "ICS",
         Representation::Mcp
-        | Representation::Json
         | Representation::Sta
         | Representation::Odata
         | Representation::WebSocket => "JSON",

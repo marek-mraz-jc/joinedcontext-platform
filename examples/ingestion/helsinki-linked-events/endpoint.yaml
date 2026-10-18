@@ -12,7 +12,7 @@ spec:
   contextSpaceRef: { kind: ContextSpace, name: events }
   slug: cckiljht7afxj2ltj26fysronb
   audience: public
-  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  enabledRepresentations: [ngsi-ld, csv, ogc-features, sta, mcp]
   # The organizer's contact line is free text and often a named person with a mobile number. The
   # space keeps it, because the city's own event coordination reads it; this Endpoint removes it
   # from every representation it serves, including the catalogue mirror (EP-61). A projection

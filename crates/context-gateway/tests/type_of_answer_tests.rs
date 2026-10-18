@@ -102,7 +102,6 @@ fn endpoint(granted_types: &[&str]) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::Json,
             Representation::OgcFeatures,
             Representation::Sta,
         ],

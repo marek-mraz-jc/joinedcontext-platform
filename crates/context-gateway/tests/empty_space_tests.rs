@@ -46,7 +46,6 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::Json,
             Representation::Csv,
             Representation::Sta,
         ],
@@ -222,13 +221,9 @@ async fn a_refused_caller_and_an_unknown_endpoint_get_their_errors_never_an_empt
 #[tokio::test]
 async fn a_download_of_a_space_with_no_tenant_is_empty() {
     let (upstream, hits) = broker("NonexistentTenant").await;
-    for rest in ["file.json", "file.json?type=KeyPerformanceIndicator"] {
+    for rest in ["file.csv", "file.csv?type=KeyPerformanceIndicator"] {
         let (status, body) = call(&upstream, &format!("/api/endpoint/{OPEN}/{rest}")).await;
         assert_eq!(status, StatusCode::OK, "{rest}: {body}");
-        let rows = body.get("value").unwrap_or(&body);
-        assert_eq!(rows, &json!([]), "{rest}: {body}");
     }
-    let (status, csv) = call(&upstream, &format!("/api/endpoint/{OPEN}/file.csv")).await;
-    assert_eq!(status, StatusCode::OK, "{csv}");
     assert!(hits.load(Ordering::SeqCst) > 0, "the broker was asked");
 }

@@ -52,7 +52,7 @@ fn a_platform_that_matches_the_repository_is_clean() {
 fn a_changed_member_is_an_update_carrying_its_field_diff() {
     let dir = demo_repo("plan-update");
     let live = ENDPOINT.replace(
-        r#"enabledRepresentations: ["ngsi-ld", "geojson"]"#,
+        r#"enabledRepresentations: ["ngsi-ld", "csv"]"#,
         r#"enabledRepresentations: ["ngsi-ld"]"#,
     );
     let platform = InMemory::new()

@@ -69,7 +69,7 @@ spec:
           contextSpaceRef: { kind: ContextSpace, name: "{{ space }}" }
           slug: "{{ endpointSlug }}"
           audience: public
-          enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features]
+          enabledRepresentations: [ngsi-ld, csv, ogc-features]
           catalog:
             publisher: { name: { en: "{{ publisher }}" } }
             contactPoint: { name: "{{ contactName }}", email: "{{ contactEmail }}" }
