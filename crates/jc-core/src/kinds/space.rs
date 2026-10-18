@@ -310,7 +310,7 @@ pub enum QualityOutcome {
 pub struct QualityRule {
     /// A DNS-1123 label, unique in the space: it names the rule in a refusal and the metric.
     pub name: String,
-    /// A class of the space's Data Model, or `*` for the space's default (DM-97).
+    /// A class of the space's Data Model.
     pub entity_type: String,
     /// What the rule checks.
     pub kind: QualityKind,

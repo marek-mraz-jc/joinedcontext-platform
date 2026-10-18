@@ -362,7 +362,7 @@
           ]
         },
         "entityType": {
-          "description": "A class of the space's Data Model, or `*` for the space's default (DM-97).",
+          "description": "A class of the space's Data Model.",
           "type": "string"
         },
         "kind": {
