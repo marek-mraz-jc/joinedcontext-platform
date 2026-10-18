@@ -74,10 +74,22 @@ var JCRender = (function () {
     }
   }
 
+  var FENCE = /^\s{0,3}(```|~~~)/;
+  var ROW = /^\s*\|.*\|\s*$/;
+  var RULE = /^\s*\|?(\s*:?-+:?\s*\|)+\s*(:?-+:?\s*)?$/;
+
+  // A table row's cells: the text between its pipes, a `\|` kept as a pipe.
+  function cells(line, tag, known, linkable) {
+    return line.trim().replace(/\\\|/g, "\u0000").replace(/^\|/, "").replace(/\|$/, "").split("|").map(function (cell) {
+      return { tag: tag, children: inline(cell.trim().replace(/\u0000/g, "|"), known, linkable) };
+    });
+  }
+
   /**
    * The answer as blocks: paragraphs (lines joined by line breaks), bullet and numbered lists,
-   * headings read as bold paragraphs. `known(n)` says whether citation n exists, `linkable(url)`
-   * whether a link to `url` stays a link (none does without it).
+   * headings read as bold paragraphs, pipe tables (T-4649) and fenced code. `known(n)` says
+   * whether citation n exists, `linkable(url)` whether a link to `url` stays a link (none does
+   * without it).
    */
   function markdown(text, known, linkable) {
     known = known || function () { return false; };
@@ -85,7 +97,35 @@ var JCRender = (function () {
     var blocks = [];
     var paragraph = null;
     var list = null;
+    var table = null;
+    var fence = null;
     String(text || "").replace(/\r\n?/g, "\n").split("\n").forEach(function (line) {
+      if (fence) {
+        if (FENCE.test(line)) fence = null;
+        else fence.lines.push(line);
+        return;
+      }
+      if (FENCE.test(line)) {
+        fence = { tag: "pre", children: [{ tag: "code", children: [] }], lines: [] };
+        blocks.push(fence);
+        paragraph = list = table = null;
+        return;
+      }
+      if (ROW.test(line) || (table && RULE.test(line))) {
+        paragraph = list = null;
+        if (table && table.children.length === 1 && RULE.test(line)) {
+          // The rule under the first row makes it the header.
+          table.children[0].children.forEach(function (cell) { cell.tag = "th"; });
+          return;
+        }
+        if (!table) {
+          table = { tag: "table", children: [] };
+          blocks.push(table);
+        }
+        table.children.push({ tag: "tr", children: cells(line, "td", known, linkable) });
+        return;
+      }
+      table = null;
       var item = BULLET.exec(line);
       var number = item ? null : NUMBERED.exec(line);
       var heading = HEADING.exec(line);
@@ -120,9 +160,40 @@ var JCRender = (function () {
       }
     });
     blocks.forEach(function (block) {
+      if (block.lines) {
+        block.children[0].children = [block.lines.join("\n")];
+        delete block.lines;
+      }
       if (block.tag === "ul" || block.tag === "ol") collapseCites(block);
     });
     return blocks;
+  }
+
+  /**
+   * The text so far of an answer still streaming, cut where `markdown` would show a marker the
+   * model has not closed yet (T-4649): an open fence is closed, and of the unfinished last line a
+   * table row or a bare `#`/`-` waits for its line, an unpaired `**`, `` ` `` or `*` is dropped,
+   * a half link shows its words and a half citation nothing. What is complete is untouched, so
+   * the streamed view and the final view are the same render of the same lines.
+   */
+  function streamable(text) {
+    text = String(text || "").replace(/\r\n?/g, "\n");
+    var lines = text.split("\n");
+    var open = lines.filter(function (line) { return FENCE.test(line); }).length % 2 === 1;
+    var last = lines.pop();
+    if (open) return lines.concat([last, "```"]).join("\n");
+    if (ROW.test(last) || /^\s*\|/.test(last) || /^\s{0,3}(#{1,6}|[-*+]|\d{1,3}[.)]?)?\s*$/.test(last) || /^\s{0,3}(`{1,3}|~{1,3})/.test(last)) {
+      last = "";
+    } else {
+      last = last.replace(/\[([^\]\n]*)\]\([^)\s]*$/, "$1").replace(/\[[\d,\s]*$/, "").replace(/\[([^\]\n]*)$/, "$1");
+      if ((last.match(/\*\*/g) || []).length % 2 === 1) last = last.replace(/\*\*(?!.*\*\*)/, "");
+      if ((last.match(/`/g) || []).length % 2 === 1) last = last.replace(/`(?!.*`)/, "");
+      var bullet = /^(\s*[-*+]\s+)?(.*)$/.exec(last);
+      if ((bullet[2].replace(/\*\*/g, "").match(/\*/g) || []).length % 2 === 1) {
+        last = (bullet[1] || "") + bullet[2].replace(/\*(?!.*\*)/, "");
+      }
+    }
+    return lines.concat([last]).join("\n");
   }
 
   function domain(url) {
@@ -640,7 +711,7 @@ var JCRender = (function () {
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
-    markdown: markdown, sources: sources, label: label, linkHost: linkHost,
+    markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
     suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry
   };
