@@ -716,6 +716,20 @@
     var p = el("p", "", w[word]);
     p.setAttribute("role", "alert");
     item.appendChild(p);
+    if (word === "full") {
+      // A used-up conversation offers a new one that asks the same question again (T-4660).
+      var resend = JCRender.retry(history);
+      if (resend) {
+        var anew = button("jc-retry", "fresh");
+        anew.addEventListener("click", function () {
+          if (busy) return;
+          fresh.click();
+          submit(resend.question);
+        });
+        item.appendChild(anew);
+      }
+      return;
+    }
     if (!JCRender.retryable(word)) return;
     var again = button("jc-retry", "retry");
     again.addEventListener("click", function () {

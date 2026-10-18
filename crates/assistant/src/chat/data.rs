@@ -21,6 +21,17 @@ use super::model::{Call, CallError};
 /// The most of one tool result the model reads in the loop: ten of them stay within a prompt.
 const STEP_RESULT_CHARS: usize = 8_000;
 
+/// The most tokens one question's calls may take before the loop answers from what it has
+/// (T-4660, T-4651): each step sends its earlier results again, so a long loop, not the
+/// conversation, is what spends a share.
+pub const QUESTION_TOKENS: u64 = 60_000;
+
+/// Whether one more call keeps the question within its tokens: what it spent and the call's
+/// estimate.
+pub fn within_question(spent: u64, estimate: u64) -> bool {
+    spent + estimate <= QUESTION_TOKENS
+}
+
 /// What the answering model is told beside the routed answer's rules: when to call a tool, how
 /// NGSI-LD is asked, and that every number comes from a result. Fixed, so it is cached.
 pub const DATA_RULES: &str = "\n\nYou may read more live data before you answer, with the tools you are given. Call a tool only when the data tables you have do not answer the question; when they do, answer at once without a tool.\n\
@@ -28,6 +39,7 @@ pub const DATA_RULES: &str = "\n\nYou may read more live data before you answer,
 - Every number in your answer comes from a table or a tool result you were given, with its [n]. For \"how many\" ask with `count: true` and give `total`.\n\
 - query_entities takes `type` (a list), `q` (conditions joined with `;` for AND and `|` for OR; == != > >= < <= ~= for a regular expression; a member of a structured value as `address[addressLocality]==\"X\"`), `idPattern` (a regular expression over ids), `georel` (`near;maxDistance==1000`) with `geometry` and `coordinates` (longitude first), `limit` and `count`.\n\
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
+- A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
 - get_type, list_attributes and describe_schema tell you a type's attributes when you do not know which one holds what you need.\n\
 - When a tool refuses, correct the arguments once; when it still refuses, answer from what you have and say which data you could not find.";
 
@@ -103,6 +115,17 @@ fn stage_of(tool: &str, endpoint: &str, arguments: &Value) -> (&'static str, Opt
     }
 }
 
+/// One call's tokens as the loop counts them before it: its messages a token per four
+/// characters, and the most it may write.
+fn estimate(messages: &[Value], output: u64) -> u64 {
+    (messages
+        .iter()
+        .map(|m| m.to_string().chars().count())
+        .sum::<usize>()
+        / 4) as u64
+        + output
+}
+
 /// Whether the loop may still call a tool: steps left of `most` and time left of `time`.
 pub fn may_call(steps: usize, elapsed: Duration, most: usize, time: Duration) -> bool {
     steps < most && elapsed < time
@@ -152,19 +175,15 @@ pub async fn answer(
         }
         let allow = !tools.is_empty()
             && !forced
-            && may_call(steps, started.elapsed(), ask.data_steps, ask.data_time);
+            && may_call(steps, started.elapsed(), ask.data_steps, ask.data_time)
+            && within_question(spent.total, estimate(&messages, ask.output_tokens));
         if !allow && !tools.is_empty() && !forced {
             // `tool_choice: none` alone is not obeyed (T-3205): the last call is told as well.
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
             forced = true;
         }
-        let estimate = (messages
-            .iter()
-            .map(|m| m.to_string().chars().count())
-            .sum::<usize>()
-            / 4) as u64
-            + ask.output_tokens;
-        if ask.spent_before + spent.total + estimate > ask.tokens_per_conversation {
+        let next = estimate(&messages, ask.output_tokens);
+        if ask.spent_before + spent.total + next > ask.tokens_per_conversation {
             send(
                 events,
                 Event::Error {
@@ -351,6 +370,26 @@ async fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_answers_from_what_it_has_past_its_tokens_and_never_points_to_the_api() {
+        // T-4660: the cap is per question, so the loop answers instead of spending the
+        // conversation's share.
+        assert!(within_question(0, QUESTION_TOKENS));
+        assert!(within_question(40_000, 20_000));
+        assert!(!within_question(40_000, 20_001));
+        let messages = vec![json!({"role": "user", "content": "x".repeat(4_000)})];
+        // The JSON of the message, a token per four characters, and the most it may write.
+        let chars = messages[0].to_string().chars().count() as u64;
+        assert_eq!(estimate(&messages, 1_000), chars / 4 + 1_000);
+        // A history question gets the values, or one sentence when they cannot be read.
+        assert!(DATA_RULES.contains(
+            "call query_temporal for the entities the tables and the earlier turns name"
+        ));
+        assert!(DATA_RULES
+            .contains("Never tell the person to call an API, an address or a query themselves."));
+        assert!(DATA_RULES.contains("say in one sentence that it is not available right now"));
+    }
 
     #[test]
     fn a_scoped_endpoint_is_named_with_dashes_and_long_names_are_not_offered() {
