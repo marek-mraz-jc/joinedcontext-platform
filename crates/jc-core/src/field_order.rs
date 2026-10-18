@@ -100,7 +100,7 @@ fn in_lang(texts: Option<&BTreeMap<String, String>>, lang: &str) -> Option<Strin
 
 /// The innermost named part of a flattened column, without `value`, `object`, `languageMap`,
 /// the language after it and array indexes.
-fn leaf(column: &str) -> &str {
+pub fn leaf(column: &str) -> &str {
     let mut parts = column.split('.').map(|p| p.split('[').next().unwrap_or(p));
     let mut found = attribute(column);
     while let Some(part) = parts.next() {

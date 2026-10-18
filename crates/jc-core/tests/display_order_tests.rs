@@ -184,6 +184,10 @@ fn a_type_without_a_model_class_is_ordered_by_the_heuristic() {
         let fields = display_order(model, "Unmodelled", &served, None).expect("parses");
         assert_eq!(slots(&fields), ["name", "startDate", "benzene", "remark"]);
         assert_eq!(fields[0].label("sk"), "Názov");
+        assert!(
+            fields.iter().all(|f| !f.summary),
+            "no class, no key attributes"
+        );
     }
     assert!(display_order(Some("classes: ["), "Event", &served, None).is_err());
 }

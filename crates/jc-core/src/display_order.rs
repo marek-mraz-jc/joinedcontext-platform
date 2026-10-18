@@ -101,7 +101,8 @@ struct Slot {
 }
 
 /// The attributes of `class` the caller is served, in display order, each with its labels and
-/// whether it is a key attribute (DM-98…DM-102).
+/// whether it is a key attribute (DM-98…DM-102). A type the model has no class for is ordered by
+/// the heuristic and has key attributes only when `view` names them.
 ///
 /// `linkml` is the DataModel's source (`None` for a type without one); `attributes` are the
 /// attribute names the caller receives, each with whether it holds numbers (the fallback puts an
@@ -132,6 +133,8 @@ pub fn display_order(
         let place = written.iter().position(|w| w == name);
         let fallback = field_order::rank(name, served.get(name).copied().unwrap_or(false));
         match (slot.and_then(|s| s.rank), place) {
+            // A type without a model class is ordered by the heuristic alone (DM-98).
+            _ if written.is_empty() => (2, 0, 0, fallback),
             (Some(rank), _) => (0, rank, place.unwrap_or(usize::MAX), fallback),
             _ if SYSTEM.contains(&name) => {
                 (3, 0, SYSTEM.iter().position(|s| *s == name).unwrap_or(0), 0)
@@ -162,8 +165,12 @@ pub fn display_order(
             .collect(),
     };
     let first: Vec<&str> = order.iter().copied().take(FIRST).collect();
+    // A type without a model class has no key attributes of its own: its columns come and go
+    // with the cells its rows fill, so "the first four" would move under its consumer.
     let summary = if chosen.iter().any(|name| order.contains(name)) {
         chosen
+    } else if written.is_empty() {
+        Vec::new()
     } else {
         first
     };

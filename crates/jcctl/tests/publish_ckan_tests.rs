@@ -99,6 +99,7 @@ fn answer(csv: &str) -> Rows {
     Rows {
         csv: csv.to_owned(),
         schema: None,
+        linkml: None,
     }
 }
 
@@ -1140,6 +1141,7 @@ fn every_entity_type_gets_its_own_table_with_every_model_attribute() {
     let rows = Rows {
         csv: MIXED.to_owned(),
         schema: Some(mixed_schema()),
+        linkml: None,
     };
 
     let line = publish_one(
