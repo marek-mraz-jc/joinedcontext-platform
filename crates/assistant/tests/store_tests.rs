@@ -13,8 +13,8 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    dataset_page, endpoint_page, hybrid_search, project_scope, search_projects, sources_by_project,
-    titles, Search, DIMENSIONS, MIGRATOR,
+    dataset_page, dataset_page_projects, endpoint_page, hybrid_search, project_scope,
+    search_projects, sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -498,11 +498,16 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
         .await
         .expect("page");
     assert_eq!(typed.as_deref(), Some("https://hel-ckan.example/#0"));
-    for (slugs, kind) in [(&siblings[..], "B"), (&siblings[..1], "A")] {
-        let none = dataset_page(&mut tx, slugs, kind, &both, true)
+    let projects = [("helsinki".to_owned(), both.to_vec())];
+    for (slugs, kind, found) in [
+        (&siblings[..], "A", Some("https://hel-ckan.example/#0")),
+        (&siblings[..], "B", None),
+        (&siblings[..1], "A", None),
+    ] {
+        let page = dataset_page_projects(&pool, slugs, kind, &projects, true)
             .await
             .expect("page");
-        assert_eq!(none, None, "{slugs:?} {kind}");
+        assert_eq!(page.as_deref(), found, "{slugs:?} {kind}");
     }
     tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
