@@ -48,6 +48,15 @@ pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_TEXT_CHARS: usize = 4_000;
 /// The most turns of `history` (AG-98).
 pub const MAX_TURNS: usize = 6;
+/// The longest turn of `history` an anonymous channel keeps (T-4653): the visitor writes the
+/// history, so a longer turn is cut, not paid for as input on every question.
+pub const ANONYMOUS_TURN_CHARS: usize = 1_000;
+/// The share of a deployment's `requestsPerMinute` that callers without an `Origin` share
+/// (T-4653): a script is not a browser on an allowed site, so it may not take the whole pool.
+const UNPLACED_SHARE: u32 = 6;
+/// The share of a deployment's `costPerDayUsd` one visitor, or all callers without an `Origin`
+/// together, may spend before their answers go on as search (T-4653).
+const VISITOR_COST_SHARE: f64 = 0.10;
 /// How long a conversation may be continued; migration 0006's policy deletes it after as long.
 const CONVERSATION_HOURS: i64 = 24;
 /// The most questions answered at once, whatever the deployments' rate limits allow (T-3059):
@@ -112,6 +121,8 @@ pub struct Limits {
     salt: std::hash::RandomState,
     /// The deployments whose cost cap was reached, and on which day it was first.
     capped: HashMap<String, u64>,
+    /// What each visitor's answers cost today, in millionths of a US dollar, and the day.
+    spent: HashMap<String, (u64, u64)>,
 }
 
 impl Limits {
@@ -126,9 +137,22 @@ impl Limits {
             self.windows
                 .retain(|_, (started, _, window)| now.duration_since(*started) < *window);
             if self.windows.len() + new_keys > MAX_KEYS {
-                // A full table refuses a new key rather than grow or forget a counted one: a
-                // reset would hand every key already at its limit a fresh window.
-                return Err(60);
+                // A full table forgets the oldest of its longest windows, months then days, a
+                // hundredth at a time (T-4653): refusing new keys instead let ten thousand
+                // addresses lock every new visitor out for the month their keys live. A
+                // forgotten month or day starts afresh; the minute windows that pace everyone
+                // are the last to go.
+                let mut oldest: Vec<(Duration, Instant, String)> = self
+                    .windows
+                    .iter()
+                    .filter(|(key, _)| !windows.iter().any(|(k, ..)| k == key))
+                    .map(|(key, (started, _, window))| (*window, *started, key.clone()))
+                    .collect();
+                oldest.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+                let room = (self.windows.len() + new_keys - MAX_KEYS).max(MAX_KEYS / 100);
+                for (_, _, key) in oldest.into_iter().take(room) {
+                    self.windows.remove(&key);
+                }
             }
         }
         let wait = windows
@@ -170,6 +194,29 @@ impl Limits {
             .is_some_and(|(started, count, window)| {
                 now.duration_since(*started) < *window && *count >= limit
             })
+    }
+
+    /// Counts `micros` against `visitor` on `day`; a visitor of an earlier day starts again.
+    pub fn spend(&mut self, visitor: &str, day: u64, micros: u64) {
+        if self.spent.len() >= MAX_KEYS {
+            self.spent.retain(|_, (on, _)| *on == day);
+        }
+        if self.spent.len() >= MAX_KEYS && !self.spent.contains_key(visitor) {
+            // ponytail: fifty thousand visitors who all spent today; the deployment's cap holds.
+            return;
+        }
+        let entry = self.spent.entry(visitor.to_owned()).or_insert((day, 0));
+        if entry.0 != day {
+            *entry = (day, 0);
+        }
+        entry.1 = entry.1.saturating_add(micros);
+    }
+
+    /// Whether `visitor`'s answers on `day` cost their share of `cap_usd` (T-4653).
+    pub fn over_share(&self, visitor: &str, day: u64, cap_usd: f64) -> bool {
+        self.spent.get(visitor).is_some_and(|(on, micros)| {
+            *on == day && over_cost_cap(*micros, cap_usd * VISITOR_COST_SHARE)
+        })
     }
 
     /// Takes one of `visitor`'s `limit` streams; `false` when all are taken.
@@ -611,6 +658,21 @@ async fn spent_today(pool: &PgPool, deployment: &Deployment) -> Result<u64, crat
     Ok(cost.map_or(0, |c| u64::try_from(c).unwrap_or(0)))
 }
 
+/// The requests a minute callers without an `Origin` share: a sixth of the deployment's, one at
+/// least (T-4653).
+pub fn unplaced_limit(requests_per_minute: u32) -> u32 {
+    (requests_per_minute / UNPLACED_SHARE).max(1)
+}
+
+/// Cuts each visitor-written turn to [`ANONYMOUS_TURN_CHARS`] (T-4653).
+pub fn clamp_history(history: &mut [Turn]) {
+    for turn in history {
+        if let Some((at, _)) = turn.text.char_indices().nth(ANONYMOUS_TURN_CHARS) {
+            turn.text.truncate(at);
+        }
+    }
+}
+
 /// Whether today's spend has reached the deployment's `budget.costPerDayUsd`.
 pub fn over_cost_cap(spent_micros: u64, cap_usd: f64) -> bool {
     spent_micros as f64 >= cap_usd * 1_000_000.0
@@ -972,6 +1034,7 @@ async fn chat(
         &client,
         None,
         started_at.as_deref(),
+        origin.is_none(),
     )
     .await;
     with_cors(response, origin)
@@ -1138,11 +1201,11 @@ async fn chat_in_portal(
         &format!("person:{person}"),
         token,
         None,
+        false,
     )
     .await
 }
 
-/// One question to `deployment` from `client`, answered as Server-Sent Events.
 /// The visitor as the edge saw them (T-3059): `X-Forwarded-For` read from the right, past the
 /// cluster's own proxies (private, loopback and link-local hops), to the first address the edge
 /// appended. The leftmost entry is whatever the caller wrote, so a per-client limit keyed on it
@@ -1183,6 +1246,8 @@ fn internal(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// One question to `deployment` from `client`, answered as Server-Sent Events. `unplaced` is a
+/// request that named no `Origin`: not a browser on an allowed site (T-4653).
 async fn ask(
     state: &Arc<ChatState>,
     deployment: Deployment,
@@ -1190,8 +1255,9 @@ async fn ask(
     client: &str,
     person: Option<PersonToken>,
     origin: Option<&str>,
+    unplaced: bool,
 ) -> Response {
-    let question = match body {
+    let mut question = match body {
         Ok(Json(question)) => question,
         Err(rejection) => return body_refused(&rejection),
     };
@@ -1203,6 +1269,9 @@ async fn ask(
     }
     if let Err(why) = validate(&question, &deployment) {
         return problem(400, why);
+    }
+    if deployment.spec.channel.is_anonymous() {
+        clamp_history(&mut question.history);
     }
     let Some(budget) = deployment.spec.budget.clone() else {
         if deployment.spec.channel.is_anonymous() {
@@ -1230,6 +1299,13 @@ async fn ask(
         "{key}\u{0}{}",
         state.limits.lock().await.visitor(client, today())
     );
+    // Callers without an `Origin` share one small pool and one share of the day's cost.
+    let unplaced_key = format!("{key}\u{0}unplaced");
+    let spender = if unplaced {
+        unplaced_key.clone()
+    } else {
+        visitor.clone()
+    };
     let (month, resets) = month_of(time::OffsetDateTime::now_utc());
     // A visitor past their month is answered as search, with links (T-4286): the other windows
     // still count, so the search itself stays paced.
@@ -1253,6 +1329,13 @@ async fn ask(
         ];
         if !month_spent {
             windows.push((monthly.as_str(), rate.per_client_per_month, MONTH));
+        }
+        if unplaced {
+            windows.push((
+                unplaced_key.as_str(),
+                unplaced_limit(rate.requests_per_minute),
+                MINUTE,
+            ));
         }
         let admitted = limits.admit(&windows, now);
         drop(limits);
@@ -1310,20 +1393,27 @@ async fn ask(
             );
         }
     }
-    let day_spent = match spent_today(&state.pool, &deployment).await {
-        Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
-        Err(err) => {
-            // Unknown spend is spend: the chat goes on as search rather than past the cap.
-            tracing::error!(%err, "today's cost could not be read; answering as search");
-            true
-        }
-    };
+    let share_spent =
+        state
+            .limits
+            .lock()
+            .await
+            .over_share(&spender, today(), budget.cost_per_day_usd);
+    let day_spent = share_spent
+        || match spent_today(&state.pool, &deployment).await {
+            Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
+            Err(err) => {
+                // Unknown spend is spend: the chat goes on as search rather than past the cap.
+                tracing::error!(%err, "today's cost could not be read; answering as search");
+                true
+            }
+        };
     let search_only = if month_spent {
         Some(routed::Cap::Month { resets })
     } else {
         day_spent.then_some(routed::Cap::Day)
     };
-    if day_spent && state.limits.lock().await.first_cap_today(&key, today()) {
+    if day_spent && !share_spent && state.limits.lock().await.first_cap_today(&key, today()) {
         tracing::warn!(
             deployment = %key,
             cap_usd = budget.cost_per_day_usd,
@@ -1455,9 +1545,12 @@ async fn ask(
         {
             tracing::error!(%err, "a question's tokens were not recorded");
         }
+        let mut limits = state.limits.lock().await;
+        limits.spend(&spender, today(), spent.cost_micros);
         if streams.is_some() {
-            state.limits.lock().await.close_stream(&visitor);
+            limits.close_stream(&visitor);
         }
+        drop(limits);
         let _ = tx.send(Event::Done(spent, total_ms)).await;
     });
 
@@ -1754,29 +1847,117 @@ mod tests {
         );
     }
 
-    /// T-3314: within one minute, a flood of new keys stops at [`MAX_KEYS`]; the keys already
-    /// counted keep their windows, and an expired window makes room again.
+    /// T-3314, T-4653: the table stays bounded, and a full one forgets the oldest of its longest
+    /// windows instead of refusing every new visitor for as long as those windows live.
     #[test]
-    fn the_table_of_keys_stays_bounded() {
+    fn a_full_table_of_keys_forgets_its_oldest_months_and_admits_a_new_visitor() {
         let mut limits = Limits::default();
         let start = Instant::now();
-        for n in 0..MAX_KEYS {
-            assert!(limits.admit(&one(&n.to_string(), 2), start).is_ok());
+        for n in 0..MAX_KEYS - 1 {
+            let at = start + Duration::from_millis(n as u64);
+            assert!(limits.admit(&[(&format!("mo{n}"), 5, MONTH)], at).is_ok());
         }
-        assert_eq!(limits.admit(&one("one more", 2), start), Err(60));
-        assert_eq!(limits.windows.len(), MAX_KEYS);
+        assert!(limits.admit(&one("pace", 2), start).is_ok());
+        // Still inside the minute of "pace": nothing has run out, so only forgetting makes room.
+        let later = start + Duration::from_secs(30);
         assert!(
-            limits.admit(&one("7", 2), start).is_ok(),
-            "a counted key still counts"
+            limits.admit(&one("a new visitor", 2), later).is_ok(),
+            "admitted, not Err(60)"
+        );
+        assert!(limits.windows.len() <= MAX_KEYS);
+        assert!(
+            !limits.windows.contains_key("mo0"),
+            "the oldest month went first"
         );
         assert!(
-            limits.admit(&one("7", 2), start).is_err(),
-            "and keeps its limit"
+            limits.windows.contains_key(&format!("mo{}", MAX_KEYS - 2)),
+            "the newest stays"
         );
-        assert!(limits
-            .admit(&one("one more", 2), start + Duration::from_secs(60))
-            .is_ok());
-        assert_eq!(limits.windows.len(), 1);
+        assert!(limits.admit(&one("pace", 2), later).is_ok());
+        assert!(
+            limits.admit(&one("pace", 2), later).is_err(),
+            "a counted key keeps its limit"
+        );
+    }
+
+    /// T-4653: callers without an `Origin` share a sixth of the deployment's minute, so a script
+    /// on five addresses stops there while a browser on the allowed site still asks.
+    #[test]
+    fn callers_without_an_origin_share_a_small_pool() {
+        assert_eq!(unplaced_limit(30), 5);
+        assert_eq!(unplaced_limit(3), 1, "one at least");
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        let pool = unplaced_limit(30);
+        for n in 0..pool {
+            let visitor = format!("script{n}");
+            assert!(limits
+                .admit(
+                    &[
+                        ("d", 30, MINUTE),
+                        (&visitor, 10, MINUTE),
+                        ("d\u{0}unplaced", pool, MINUTE)
+                    ],
+                    now
+                )
+                .is_ok());
+        }
+        assert!(
+            limits
+                .admit(
+                    &[
+                        ("d", 30, MINUTE),
+                        ("script9", 10, MINUTE),
+                        ("d\u{0}unplaced", pool, MINUTE)
+                    ],
+                    now
+                )
+                .is_err(),
+            "the sixth unplaced call waits"
+        );
+        assert!(
+            limits
+                .admit(&[("d", 30, MINUTE), ("browser", 10, MINUTE)], now)
+                .is_ok(),
+            "a browser's question still counts in the deployment's pool"
+        );
+    }
+
+    /// T-4653: one visitor's answers stop at a tenth of the day's cost, another's go on, and the
+    /// next day starts again.
+    #[test]
+    fn a_visitor_stops_at_their_share_of_the_day_s_cost() {
+        let mut limits = Limits::default();
+        limits.spend("a", 20_000, 60_000);
+        assert!(!limits.over_share("a", 20_000, 1.0));
+        limits.spend("a", 20_000, 40_000);
+        assert!(limits.over_share("a", 20_000, 1.0), "0.10 of 1 USD spent");
+        limits.spend("b", 20_000, 99_999);
+        assert!(
+            !limits.over_share("b", 20_000, 1.0),
+            "another visitor still asks"
+        );
+        assert!(!limits.over_share("a", 20_001, 1.0), "a new day");
+        limits.spend("a", 20_001, 1);
+        assert_eq!(limits.spent["a"], (20_001, 1));
+    }
+
+    /// T-4653: an anonymous history turn is cut to a thousand characters, on a character boundary.
+    #[test]
+    fn an_anonymous_history_turn_is_clamped() {
+        let mut history = vec![
+            Turn {
+                role: "user".into(),
+                text: "ž".repeat(4_000),
+            },
+            Turn {
+                role: "assistant".into(),
+                text: "short".into(),
+            },
+        ];
+        clamp_history(&mut history);
+        assert_eq!(history[0].text.chars().count(), ANONYMOUS_TURN_CHARS);
+        assert_eq!(history[1].text, "short");
     }
 
     /// T-4149: at most two answers stream to one visitor at once; one that ends frees its place,
