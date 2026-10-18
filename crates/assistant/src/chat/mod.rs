@@ -616,6 +616,39 @@ pub fn over_cost_cap(spent_micros: u64, cap_usd: f64) -> bool {
     spent_micros as f64 >= cap_usd * 1_000_000.0
 }
 
+/// Whether a [`warm_types`] runs, so a slow minute never stacks a second one on it.
+static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Warms routing's type lists for every deployment's connectors that anyone may read, ahead of
+/// the first question (T-4611). Called after each read of the manifests; a run still going when
+/// the next one is due is left to finish.
+pub async fn warm_types(state: Arc<ChatState>) {
+    use std::sync::atomic::Ordering;
+    if WARMING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let snapshot = state
+        .snapshot
+        .read()
+        .map(|snapshot| snapshot.clone())
+        .unwrap_or_default();
+    let mut connectors = Vec::new();
+    for deployment in &snapshot.deployments {
+        // No person: only what a visitor may read is listed, with no token.
+        let mut failed = Vec::new();
+        for connector in connected(&state, deployment, None, None, &mut failed).await {
+            if !connectors
+                .iter()
+                .any(|c: &Connected| c.surface.slug == connector.surface.slug)
+            {
+                connectors.push(connector);
+            }
+        }
+    }
+    routed::warm(&state.answers, &state.http, &connectors).await;
+    WARMING.store(false, Ordering::Release);
+}
+
 /// The connectors switched on for this question whose Endpoint the asker may reach, with their
 /// tools: a public Endpoint without a token; on an `internal` deployment, any other Endpoint
 /// with the person's token, when there is one (AG-106, AG-115). A connector whose tools cannot be

@@ -76,6 +76,13 @@ const MAX_Q_CHARS: usize = 256;
 /// How long an Endpoint's type list is reused.
 const TYPES_LIFE: Duration = Duration::from_secs(600);
 
+/// How long routing waits for an Endpoint's type list: the connector's own timeout is for real
+/// reads, and one slow Endpoint must not hold the question (T-4611).
+pub const ROUTING_DEADLINE: Duration = Duration::from_secs(3);
+
+/// How long an Endpoint whose type list did not come is skipped by routing (T-4611).
+const UNAVAILABLE_LIFE: Duration = Duration::from_secs(60);
+
 /// What the router is told. It never changes, so it is the cached prefix of every router call.
 const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Reply with one JSON object and nothing else:\n\
 {\"route\": \"rag\" | \"data\" | \"both\", \"queries\": [\"...\"], \"data\": [{\"endpoint\": \"...\", \"type\": \"...\", \"q\": \"...\"}], \"followups\": [\"...\"]}\n\
@@ -513,6 +520,9 @@ pub struct AnswerCache {
     types: Mutex<HashMap<String, (Instant, Vec<String>)>>,
     /// Each deployment's source languages, by name, for [`TYPES_LIFE`] (T-4259).
     languages: Mutex<HashMap<String, (Instant, Vec<String>)>>,
+    /// The Endpoints, by slug, whose type list failed or did not come in time, for
+    /// [`UNAVAILABLE_LIFE`] (T-4611).
+    unavailable: Mutex<HashMap<String, Instant>>,
 }
 
 /// When an answer was stored, its text and its citations.
@@ -550,10 +560,33 @@ impl AnswerCache {
             .map(|(_, listed)| listed.clone())
     }
 
-    fn keep_types(&self, slug: &str, listed: Vec<String>) {
+    pub fn keep_types(&self, slug: &str, listed: Vec<String>) {
         if let Ok(mut types) = self.types.lock() {
             // One entry per connector's Endpoint, so it is bounded by the manifests.
             types.insert(slug.to_owned(), (Instant::now(), listed));
+        }
+        if let Ok(mut unavailable) = self.unavailable.lock() {
+            unavailable.remove(slug);
+        }
+    }
+
+    /// Whether routing knows the Endpoint's type list, fresh.
+    pub fn has_types(&self, slug: &str) -> bool {
+        self.types_of(slug).is_some()
+    }
+
+    fn is_unavailable(&self, slug: &str) -> bool {
+        self.unavailable
+            .lock()
+            .ok()
+            .and_then(|unavailable| unavailable.get(slug).copied())
+            .is_some_and(|at| at.elapsed() < UNAVAILABLE_LIFE)
+    }
+
+    pub fn keep_unavailable(&self, slug: &str) {
+        if let Ok(mut unavailable) = self.unavailable.lock() {
+            // One entry per connector's Endpoint, like the type lists.
+            unavailable.insert(slug.to_owned(), Instant::now());
         }
     }
 
@@ -630,31 +663,52 @@ fn offers(connector: &Connected, tool: &str) -> bool {
     connector.tools.iter().any(|t| t.name == tool)
 }
 
-/// What the router may name: each connector that can list and query its types, with its types.
-async fn live(ask: &Ask<'_>) -> Live {
-    let mut out = Vec::new();
-    for connector in ask.connectors {
-        if !offers(connector, "list_types") || !offers(connector, "query_entities") {
-            continue;
-        }
-        let slug = &connector.surface.slug;
-        let types = match ask.cache.types_of(slug) {
-            Some(types) => types,
-            None => match connector
-                .surface
-                .call(ask.http, "list_types", json!({}))
-                .await
-            {
-                Ok(text) => {
+/// What the router may name: each connector that can list and query its types, with its types;
+/// and the connectors whose list did not come, by endpoint name. The lists are asked for at once,
+/// each given [`ROUTING_DEADLINE`]; one that fails or does not come in time is skipped for
+/// [`UNAVAILABLE_LIFE`] (T-4611).
+async fn live(ask: &Ask<'_>) -> (Live, Vec<String>) {
+    let listings = ask
+        .connectors
+        .iter()
+        .filter(|connector| offers(connector, "list_types") && offers(connector, "query_entities"))
+        .map(|connector| async move {
+            let slug = &connector.surface.slug;
+            if let Some(types) = ask.cache.types_of(slug) {
+                return (connector, Some(types));
+            }
+            if ask.cache.is_unavailable(slug) {
+                return (connector, None);
+            }
+            let listed = tokio::time::timeout(
+                ROUTING_DEADLINE,
+                connector.surface.call(ask.http, "list_types", json!({})),
+            )
+            .await;
+            match listed {
+                Ok(Ok(text)) => {
                     let types = type_names(&text);
                     ask.cache.keep_types(slug, types.clone());
-                    types
+                    (connector, Some(types))
                 }
-                Err(why) => {
-                    tracing::warn!(deployment = %ask.deployment, endpoint = %connector.endpoint, %why, "a connector's types could not be listed");
-                    Vec::new()
+                Ok(Err(why)) => {
+                    tracing::warn!(deployment = %ask.deployment, endpoint = %connector.endpoint, %why, "a connector's types could not be listed; skipped for a minute");
+                    ask.cache.keep_unavailable(slug);
+                    (connector, None)
                 }
-            },
+                Err(_) => {
+                    tracing::warn!(deployment = %ask.deployment, endpoint = %connector.endpoint, deadline_ms = ROUTING_DEADLINE.as_millis() as u64, "a connector's types did not come in time; skipped for a minute");
+                    ask.cache.keep_unavailable(slug);
+                    (connector, None)
+                }
+            }
+        });
+    let mut out = Vec::new();
+    let mut missing = Vec::new();
+    for (connector, types) in futures_util::future::join_all(listings).await {
+        let Some(types) = types else {
+            missing.push(connector.endpoint.clone());
+            continue;
         };
         if !types.is_empty() {
             let attributes = connector
@@ -670,7 +724,41 @@ async fn live(ask: &Ask<'_>) -> Live {
             });
         }
     }
-    out
+    (out, missing)
+}
+
+/// Lists the types of every connector routing does not know yet, at once and with the connector's
+/// own timeout, so no visitor pays the first, slow listing (T-4611): run in the background each
+/// time the manifests are read. One that fails is skipped by routing for [`UNAVAILABLE_LIFE`].
+pub async fn warm(cache: &AnswerCache, http: &reqwest::Client, connectors: &[Connected]) {
+    let listings = connectors
+        .iter()
+        .filter(|connector| offers(connector, "list_types") && offers(connector, "query_entities"))
+        .filter(|connector| !cache.has_types(&connector.surface.slug))
+        .map(|connector| async move {
+            let slug = &connector.surface.slug;
+            match connector.surface.call(http, "list_types", json!({})).await {
+                Ok(text) => cache.keep_types(slug, type_names(&text)),
+                Err(why) => {
+                    tracing::warn!(endpoint = %connector.endpoint, %why, "a connector's types could not be listed ahead of a question");
+                    cache.keep_unavailable(slug);
+                }
+            }
+        });
+    futures_util::future::join_all(listings).await;
+}
+
+/// What the answer call is told about the data sources that did not answer, so the answer says
+/// so rather than reading as if they held nothing (T-4611).
+fn unanswered(missing: &[String]) -> String {
+    if missing.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nThese data sources did not answer in time and are not in what you are given: {}. \
+         When the question needs them, say in one sentence that they could not be reached now.",
+        missing.join(", ")
+    )
 }
 
 /// The attribute names a `query_entities` schema lets a read pick, which are the names a `q` can
@@ -1145,7 +1233,7 @@ pub async fn answer(
         reasoning: ask.reasoning.judge.unwrap_or_default(),
         ..router
     };
-    let live = live(ask).await;
+    let (live, missing) = live(ask).await;
     let languages = languages(ask).await;
     let messages = router_messages(history, question, &live, &languages, &now);
     if !within(&spent, &messages, ROUTER_TOKENS) {
@@ -1373,13 +1461,15 @@ pub async fn answer(
             "endpointUrl": table.download,
         }));
     }
+    let mut more = if routing.data {
+        super::data::DATA_RULES.to_owned()
+    } else {
+        String::new()
+    };
+    more.push_str(&unanswered(&missing));
     let messages = messages_with(
         ask.system_prompt,
-        if routing.data {
-            super::data::DATA_RULES
-        } else {
-            ""
-        },
+        &more,
         history,
         question,
         &now,
@@ -1494,6 +1584,58 @@ mod tests {
     use super::*;
 
     const NOW: &str = "Now: Friday 2026-10-16 12:05 UTC (2026-10-16T12:05Z).";
+
+    /// T-4611: warming waits as long as the connector allows, past routing's deadline, so a slow
+    /// Endpoint is known before anyone asks; one that fails is skipped by routing for a minute.
+    #[tokio::test]
+    async fn warming_keeps_a_slow_list_and_marks_a_failing_one() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        let types = json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{\"typeList\": [\"Event\"]}"}]}});
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/slow/mcp"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(types)
+                    .set_delay(ROUTING_DEADLINE + Duration::from_millis(300)),
+            )
+            .mount(&gateway)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/down/mcp"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&gateway)
+            .await;
+        let tool = |name: &str| super::super::mcp::Tool {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let connector = |slug: &str| Connected {
+            endpoint: slug.into(),
+            surface: super::super::mcp::Surface {
+                gateway: gateway.uri(),
+                slug: slug.into(),
+                timeout: Duration::from_secs(10),
+                token: None,
+            },
+            tools: vec![tool("list_types"), tool("query_entities")],
+        };
+        let cache = AnswerCache::default();
+        let connectors = [connector("slow"), connector("down")];
+
+        warm(&cache, &reqwest::Client::new(), &connectors).await;
+
+        assert_eq!(cache.types_of("slow"), Some(vec!["Event".to_owned()]));
+        assert!(!cache.is_unavailable("slow"));
+        assert!(cache.is_unavailable("down"));
+        assert!(!cache.has_types("down"));
+
+        // Known now, so a second warming asks neither: one call each in all.
+        warm(&cache, &reqwest::Client::new(), &connectors[..1]).await;
+        assert_eq!(gateway.received_requests().await.map(|r| r.len()), Some(2));
+    }
 
     fn hit(chunk: i64, score: f64) -> Hit {
         Hit {
