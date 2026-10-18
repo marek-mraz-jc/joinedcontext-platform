@@ -46,6 +46,12 @@ pub struct Config {
     /// The Portal's read of a person's connectors (`JC_GATEWAY_CONNECTORS_URL`, its internal
     /// listener's `/internal/connectors`); absent serves no `/api/mcp/me/{name}` (EP-123).
     pub connectors_url: Option<String>,
+    /// `jc-assistant`, scheme and authority, for `search_documents` (`JC_GATEWAY_ASSISTANT_URL`,
+    /// e.g. `http://jc-assistant.assistant:8080`, EP-133); absent offers the tool nowhere.
+    pub assistant_url: Option<String>,
+    /// The knowledge sources the hub's `search_documents` searches
+    /// (`JC_GATEWAY_HUB_KNOWLEDGE_SOURCES`, comma-separated `{project}/{source}`, MF-57).
+    pub hub_knowledge_sources: String,
     /// Where the previews are written (`JC_GATEWAY_PREVIEWS_DIR`, default
     /// `/tmp/jc-previews`), a scratch directory the pod owns.
     pub previews_dir: PathBuf,
@@ -277,6 +283,11 @@ impl Config {
             connectors_url: std::env::var("JC_GATEWAY_CONNECTORS_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
+            assistant_url: std::env::var("JC_GATEWAY_ASSISTANT_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty()),
+            hub_knowledge_sources: std::env::var("JC_GATEWAY_HUB_KNOWLEDGE_SOURCES")
+                .unwrap_or_default(),
             previews_dir: std::env::var("JC_GATEWAY_PREVIEWS_DIR")
                 .ok()
                 .filter(|dir| !dir.trim().is_empty())
@@ -378,6 +389,8 @@ mod tests {
             assembly_dir: PathBuf::from("/tmp/jc-assembly"),
             previews_url: Some("http://portal:8081/internal/previews".to_owned()),
             connectors_url: None,
+            assistant_url: None,
+            hub_knowledge_sources: String::new(),
             previews_dir: PathBuf::from("/tmp/jc-previews"),
             org_domain: "hel.fi".to_owned(),
             oidc_issuer: Some("https://idm.example/realms/dev".to_owned()),

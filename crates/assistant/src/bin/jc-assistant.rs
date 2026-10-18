@@ -18,7 +18,8 @@
 //! `JC_ASSISTANT_ENDPOINT_URL` (the public origin `/api/endpoint/{slug}` is served under, which a
 //! `catalogue` source's pages cite when the Endpoint publishes no CKAN dataset, AG-116) and
 //! `JC_ASSISTANT_PORTAL_URL` (`https://portal.{domain}`, which a `guide` source's sections link
-//! into, AG-118).
+//! into, AG-118) and `JC_ASSISTANT_VIZ_URL` (`https://viz.{domain}`, the renderer a data answer's
+//! maps and charts are drawn on, T-4657; none without it).
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -185,6 +186,7 @@ fn chat_state(
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
         endpoint_base: reader.endpoint_base.clone(),
+        viz: viz_url(env).map_err(fail("the chart renderer's address is not usable"))?,
         organization: organization.to_owned(),
     });
     Ok((chat_state, reader))
@@ -335,6 +337,19 @@ fn endpoint_base(env: &impl Fn(&str) -> Option<String>) -> Result<Option<url::Ur
         .transpose()
 }
 
+/// `JC_ASSISTANT_VIZ_URL`, the chart renderer `https://viz.{domain}` (T-4657): a host that is
+/// not `viz.` of a domain would leave the maps without their basemap's domain.
+fn viz_url(env: &impl Fn(&str) -> Option<String>) -> Result<Option<url::Url>, String> {
+    let Some(value) = optional_base(env, "JC_ASSISTANT_VIZ_URL")? else {
+        return Ok(None);
+    };
+    let url = url::Url::parse(&value).map_err(|e| e.to_string())?;
+    match (url.scheme(), assistant::chat::viz::domain(&url)) {
+        ("https", Some(_)) => Ok(Some(url)),
+        _ => Err("JC_ASSISTANT_VIZ_URL is https://viz.{domain}".into()),
+    }
+}
+
 /// The chat's Keycloak credential: the pod's projected token or the client secret, never both.
 fn credential(env: &impl Fn(&str) -> Option<String>) -> Result<ClientCredential, String> {
     match (
@@ -434,6 +449,32 @@ mod startup_tests {
         assert!(base(&env(&[(key, "not a url")]), key).is_err_and(|e| e.starts_with(key)));
         assert_eq!(optional_base(&env(&[]), key), Ok(None));
         assert!(optional_base(&env(&[(key, "http://gw/x")]), key).is_err());
+    }
+
+    #[test]
+    fn the_viz_url_is_https_on_a_viz_host_or_unset() {
+        let ok = viz_url(&env(&[(
+            "JC_ASSISTANT_VIZ_URL",
+            "https://viz.dev.city.test",
+        )]));
+        assert_eq!(
+            ok.ok()
+                .flatten()
+                .map(|u| u.origin().ascii_serialization())
+                .as_deref(),
+            Some("https://viz.dev.city.test")
+        );
+        assert_eq!(viz_url(&env(&[])), Ok(None));
+        for bad in [
+            "http://viz.dev.city.test",
+            "https://charts.dev.city.test",
+            "https://viz.dev.city.test/x",
+        ] {
+            assert!(
+                viz_url(&env(&[("JC_ASSISTANT_VIZ_URL", bad)])).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

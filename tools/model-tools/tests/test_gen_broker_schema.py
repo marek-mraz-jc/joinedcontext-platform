@@ -25,6 +25,8 @@ SLOT_KEYS = {
     "unit",
     "annotations",
     "description",
+    "rank",
+    "title",
 }
 UNIT_KEYS = {"ucum_code", "symbol", "exact_mappings"}
 ENUM_KEYS = {"name", "description", "permissible_values"}
@@ -199,3 +201,35 @@ def test_the_command_line_writes_the_document_and_reports_a_refusal(senzor, tmp_
     bad.write_text(NARROWED.replace("typeof: float\n    uri: xsd:float\n  Reading", "uri: xsd:float\n  Reading"))
     assert main([str(bad)]) == 1
     assert "range 'Reading'" in capsys.readouterr().err
+
+
+def test_the_display_order_rank_title_and_label_reach_the_broker():
+    """T-4672 (DM-98, DM-100): `rank` stays a number, `title` text, a label's language map JSON text."""
+    model = """
+id: https://example.org/ns/events
+name: events
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+imports: [linkml:types]
+slots:
+  name:
+    title: Name
+  startDate: {}
+classes:
+  Event:
+    slots: [name, startDate]
+    slot_usage:
+      startDate:
+        rank: 1
+        annotations:
+          summary: true
+          label: { tag: label, value: { sk: "Začiatok", en: "Start" } }
+"""
+    document = compile_broker_schema(model)
+    check_subset(document)
+    usage = document["classes"]["Event"]["slot_usage"]["startDate"]
+    assert usage["rank"] == 1 and isinstance(usage["rank"], int)
+    assert usage["annotations"]["summary"]["value"] == "true"
+    assert json.loads(usage["annotations"]["label"]["value"]) == {"sk": "Začiatok", "en": "Start"}
+    assert document["slots"]["name"]["title"] == "Name"

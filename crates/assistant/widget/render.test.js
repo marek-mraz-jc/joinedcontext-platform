@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, lasting, recalled, privacyLines, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -648,6 +648,18 @@ test("the table's labels are jc-core's field-order.json, the CKAN publisher's an
   }
 });
 
+test("the data model's labels win where the table carries them, as text (T-4672)", () => {
+  const shown = table({
+    columns: ["name", "pm10", "url"],
+    units: [null, "µg/m³", null],
+    labels: [{ sk: "Názov stanice", en: "Station" }, { en: "PM10 <b>dust</b>" }, null],
+    rows: [["A", 21.5, "https://x.sk"]]
+  }, "sk");
+  // sk where the model has it, else its English, else the shared table's.
+  assert.deepEqual(shown.columns, ["Názov stanice", "PM10 <b>dust</b> (µg/m³)", "Odkaz"]);
+  assert.deepEqual(table({ columns: ["url"], labels: "nope", rows: [] }, "sk").columns, ["Odkaz"]);
+});
+
 test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
   assert.deepEqual(markdown("| Stanica | NO₂ |\n|:---|---:|\n| **Centrum** | 12 \\| 14 |\nend"), [
     { tag: "table", children: [
@@ -717,6 +729,24 @@ test("HTML in an answer, streamed or not, stays text", () => {
     assert.ok(tags.every((t) => /"(p|table|tr|td)"/.test(t)), JSON.stringify(tree));
     assert.ok(shown(tree).includes("<"), "the angle brackets are shown as typed");
   }
+});
+
+test("a chart or a map reaches only the viz origin, in the visitor's language, map first when every row has a place (T-4657)", () => {
+  assert.equal(vizOrigin("https://viz.dev.joinedcontext.com"), "https://viz.dev.joinedcontext.com");
+  for (const bad of ["http://viz.dev.joinedcontext.com", "https://viz.dev.joinedcontext.com/", "https://evil.example", "javascript:alert(1)", null, 7]) {
+    assert.equal(vizOrigin(bad), null, String(bad));
+  }
+  const map = { $schema: "urn:joinedcontext:map:v1", label: "name", popup: [{ field: "pm10", label: "pm10", unit: "µg/m³" }, { field: "temperature", label: "temperature" }],
+    data: { type: "FeatureCollection", features: [{}, {}] } };
+  const shown = vizSpec(map, "sk");
+  assert.deepEqual(shown.popup.map((f) => f.label), ["PM10", "Teplota"]);
+  assert.equal(map.popup[0].label, "pm10", "the event's spec stays as it came");
+  const bar = { encoding: { x: { field: "value", title: "no2 (µg/m³)" }, y: { field: "label", title: null } } };
+  assert.equal(vizSpec(bar, "en").encoding.x.title, "NO₂ (µg/m³)");
+  assert.equal(vizSpec(bar, "en").encoding.y.title, null);
+  assert.equal(mapFirst({ rows: [[1], [2]], map }), true);
+  assert.equal(mapFirst({ rows: [[1], [2], [3]], map }), false, "a row without a place: the table first");
+  assert.equal(mapFirst({ rows: [[1]] }), false);
 });
 
 test("the close message goes to the framing page's origin alone, never to any (T-4654)", () => {

@@ -2,7 +2,9 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    # A batch branch runs the fast gate on its own head, which tasks/automerge reads before it
+    # merges a low-risk reviewed branch (T-4675). Public repository: the minutes are free.
+    branches: [main, "agent/**"]
 permissions: { contents: read }
 # On main a run is never cancelled: merges land minutes apart, and each one used to cancel the
 # run before it, so main went without a finished run. One run finishes, the newest push waits

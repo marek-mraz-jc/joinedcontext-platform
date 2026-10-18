@@ -384,6 +384,10 @@ pub fn servers_of(repo: &Repository) -> McpServers {
                 .or_else(|| texts.values().next())
                 .cloned()
         };
+        let knowledge_sources = spec
+            .knowledge_source_ids(&project)
+            .map(|(project, source)| (project.to_owned(), source.to_owned()))
+            .collect();
         servers.push(McpServer {
             title: text("title"),
             description: text("description"),
@@ -392,6 +396,7 @@ pub fn servers_of(repo: &Repository) -> McpServers {
             select: spec.select,
             endpoints: None,
             audience: spec.audience,
+            knowledge_sources,
             allowed_projects: spec.allowed_projects,
             project,
         });

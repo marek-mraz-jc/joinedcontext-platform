@@ -541,9 +541,13 @@ mod tests {
                 columns: vec!["name".into()],
                 rows: vec![vec![json!("Donovaly")]],
                 units: vec![None],
+                labels: vec![None],
+                summary: vec![false],
                 total: None,
                 dataset: None,
                 download: None,
+                map: None,
+                geometries: vec![],
             }),
             Event::Citations(vec![Citation {
                 n: 1,

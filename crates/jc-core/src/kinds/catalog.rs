@@ -61,6 +61,11 @@ pub struct Catalog {
     /// `pu:osobní-údaje` (API/08 section 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personal_data: Option<PersonalData>,
+    /// Charts on the dataset, Vega-Lite 5 or Vega 5 over the Endpoint's own sources, published as
+    /// CKAN `jc_visualization` views (ADR-N-053, EP-130); validated by the Endpoint, which knows
+    /// what it serves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visualizations: Vec<crate::kinds::visualization::Visualization>,
 }
 
 /// The publisher's statement about personal data in a dataset (API/08 section 5).

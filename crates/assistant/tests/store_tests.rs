@@ -144,6 +144,7 @@ async fn search(
             sources: &sources,
             public_only,
             limit: 10,
+            lang: None,
         },
     )
     .await
@@ -626,19 +627,30 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
                     sources: &[],
                     public_only: true,
                     limit: 10,
+                    lang: None,
                 },
             )
             .await
             .expect("search");
-            hits.iter().map(|h| h.chunk).collect::<Vec<_>>()
+            hits.iter()
+                .map(|h| (h.chunk, h.site.clone()))
+                .collect::<Vec<_>>()
         }
     };
+    let chunks = |hits: Vec<(i64, String)>| hits.into_iter().map(|(c, _)| c).collect::<Vec<_>>();
     let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    let both = found(sources_by_project(
+    let sited = found(sources_by_project(
         "banskabystrica",
         &names(&["web", "bbsk/web"]),
     ))
     .await;
+    // T-4680: each passage names the source it is from, its project's own.
+    assert!(
+        sited.contains(&(city[0], "banskabystrica/web".to_owned()))
+            && sited.contains(&(region[0], "bbsk/web".to_owned())),
+        "{sited:?}"
+    );
+    let both = chunks(sited);
     assert_eq!(both.len(), 2, "{both:?}");
     assert!(
         both.contains(&city[0]) && both.contains(&region[0]),
@@ -648,9 +660,9 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
     // The closer vector ranks first across the two projects' rankings.
     assert_eq!(both[0], city[0]);
 
-    let own = found(sources_by_project("banskabystrica", &names(&["web"]))).await;
+    let own = chunks(found(sources_by_project("banskabystrica", &names(&["web"]))).await);
     assert_eq!(own, city);
-    let theirs = found(sources_by_project("banskabystrica", &names(&["bbsk/web"]))).await;
+    let theirs = chunks(found(sources_by_project("banskabystrica", &names(&["bbsk/web"]))).await);
     assert_eq!(theirs, region);
     app.close().await;
     drop_database(admin, pool, &name).await;

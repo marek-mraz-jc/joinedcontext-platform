@@ -11,6 +11,7 @@ pub mod agent;
 pub mod cards;
 pub mod clock;
 pub mod data;
+pub mod documents;
 pub mod mcp;
 pub mod model;
 pub mod redact;
@@ -19,6 +20,7 @@ pub mod script;
 pub mod trace;
 pub mod transcript;
 pub mod visitor;
+pub mod viz;
 pub mod widget;
 
 use std::collections::HashMap;
@@ -96,6 +98,9 @@ pub struct ChatState {
     /// The public origin `/api/endpoint/{slug}` is served under (`JC_ASSISTANT_ENDPOINT_URL`):
     /// a data table's download link; `None` offers none.
     pub endpoint_base: Option<url::Url>,
+    /// The chart renderer's origin, `https://viz.{domain}` (`JC_ASSISTANT_VIZ_URL`, T-4657): data
+    /// answers get maps and charts, and the widget may frame it; `None` offers neither.
+    pub viz: Option<url::Url>,
     /// The organization the service answers for, the `sites` row an upload creates (T-4184).
     pub organization: String,
 }
@@ -350,7 +355,8 @@ pub fn check_feedback(feedback: &Feedback) -> Result<Option<String>, String> {
     Ok(Some(note.to_owned()))
 }
 
-/// The chat route with its body limit, and the Portal's administration paths (admin.rs).
+/// The chat route with its body limit, the MCP servers' search (documents.rs) and the Portal's
+/// administration paths (admin.rs).
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
@@ -373,6 +379,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(Arc::clone(&state))
         .merge(widget::router(Arc::clone(&state)))
+        .merge(documents::router(Arc::clone(&state)))
         .merge(admin::router(state))
 }
 
@@ -1002,6 +1009,7 @@ fn sse(event: &Event, anonymous: bool) -> SseEvent {
             }
             ("data", data)
         }
+        Event::Visualization(shown) => ("visualization", shown.clone()),
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Followups(questions) => ("followups", json!({"questions": questions})),
@@ -1661,6 +1669,17 @@ async fn ask(
         } else {
             crate::sources_by_project(&deployment.project, &deployment.spec.sources)
         };
+        let websites = state
+            .snapshot
+            .read()
+            .map(|snapshot| {
+                crate::website_sources(
+                    &deployment.project,
+                    &deployment.spec.sources,
+                    &snapshot.sources,
+                )
+            })
+            .unwrap_or_default();
         // The token reached the surfaces that need it; nothing else holds it past this point.
         drop(person);
         for event in failed {
@@ -1676,6 +1695,7 @@ async fn ask(
             deployment: &name,
             system_prompt: deployment.spec.system_prompt.as_deref(),
             sources: &sources,
+            websites: &websites,
             public_only: deployment.spec.channel.is_anonymous(),
             connectors: &connectors,
             tokens_per_day,
@@ -1709,6 +1729,7 @@ async fn ask(
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),
+            viz: state.viz.as_ref(),
             search_only,
             data_steps: deployment.spec.data_steps() as usize,
             data_time: Duration::from_secs(u64::from(deployment.spec.data_seconds())),
@@ -1888,9 +1909,13 @@ mod tests {
             columns: vec!["name".into()],
             rows: vec![vec![json!("Žilina")]],
             units: vec![None],
+            labels: Vec::new(),
+            summary: Vec::new(),
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,
+            map: None,
+            geometries: Vec::new(),
         });
         for event in [&tool, &table] {
             let shown = |anonymous| format!("{:?}", sse(event, anonymous));

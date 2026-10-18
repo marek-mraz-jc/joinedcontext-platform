@@ -1,0 +1,91 @@
+{
+  "bar": {
+    "required": ["x", "y"],
+    "spec": {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"name": "source"},
+      "mark": "bar",
+      "encoding": {
+        "y": {"field": "{x}", "type": "nominal", "sort": "-x", "title": null},
+        "x": {"field": "{y}", "type": "quantitative"},
+        "color": {"field": "{color}", "type": "nominal"},
+        "tooltip": [{"field": "{x}", "type": "nominal"}, {"field": "{y}", "type": "quantitative", "format": ".1f"}]
+      }
+    }
+  },
+  "line": {
+    "required": ["x", "y"],
+    "spec": {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"name": "source"},
+      "mark": {"type": "line", "point": true},
+      "encoding": {
+        "x": {"field": "{x}", "type": "temporal", "title": null},
+        "y": {"field": "{y}", "type": "quantitative", "scale": {"zero": false}},
+        "color": {"field": "{color}", "type": "nominal", "title": null},
+        "tooltip": [{"field": "{x}", "type": "temporal"}, {"field": "{y}", "type": "quantitative", "format": ".1f"}, {"field": "{color}", "type": "nominal"}]
+      }
+    }
+  },
+  "heatmap": {
+    "required": ["x", "y", "color"],
+    "spec": {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"name": "source"},
+      "mark": "rect",
+      "encoding": {
+        "x": {"field": "{x}", "type": "ordinal", "title": null},
+        "y": {"field": "{y}", "type": "nominal", "title": null},
+        "color": {"field": "{color}", "type": "quantitative", "aggregate": "mean"},
+        "tooltip": [{"field": "{x}", "type": "ordinal"}, {"field": "{y}", "type": "nominal"}, {"field": "{color}", "type": "quantitative", "aggregate": "mean", "format": ".1f"}]
+      }
+    }
+  },
+  "small-multiples": {
+    "required": ["x", "y", "facet"],
+    "spec": {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"name": "source"},
+      "facet": {"field": "{facet}", "type": "nominal", "title": null},
+      "columns": 3,
+      "spec": {
+        "width": 180,
+        "height": 120,
+        "mark": "line",
+        "encoding": {
+          "x": {"field": "{x}", "type": "temporal", "title": null},
+          "y": {"field": "{y}", "type": "quantitative", "scale": {"zero": false}}
+        }
+      }
+    }
+  },
+  "linked-brush": {
+    "required": ["x", "y"],
+    "spec": {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"name": "source"},
+      "vconcat": [
+        {
+          "width": 560,
+          "height": 200,
+          "mark": "line",
+          "encoding": {
+            "x": {"field": "{x}", "type": "temporal", "scale": {"domain": {"param": "brush"}}, "title": null},
+            "y": {"field": "{y}", "type": "quantitative", "scale": {"zero": false}},
+            "color": {"field": "{color}", "type": "nominal", "title": null}
+          }
+        },
+        {
+          "width": 560,
+          "height": 60,
+          "params": [{"name": "brush", "select": {"type": "interval", "encodings": ["x"]}}],
+          "mark": "area",
+          "encoding": {
+            "x": {"field": "{x}", "type": "temporal", "title": null},
+            "y": {"field": "{y}", "type": "quantitative", "aggregate": "mean", "title": null}
+          }
+        }
+      ]
+    }
+  }
+}

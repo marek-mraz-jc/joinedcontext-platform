@@ -361,6 +361,39 @@ var JCRender = (function () {
     return entry ? entry[lang] || entry.en : spelt(key);
   }
 
+  /** The chart renderer the widget frames (T-4657): `https://viz.{domain}` exactly, else null. */
+  function vizOrigin(value) {
+    return typeof value === "string" && /^https:\/\/viz(\.[a-z0-9-]+)+$/.test(value) ? value : null;
+  }
+
+  /**
+   * A spec as the visitor reads it (T-4657): a map's popup labels and a chart's axis titles in
+   * `lang`, a unit in brackets kept. A copy; the renderer checks it again and sets it as text.
+   */
+  function vizSpec(spec, lang) {
+    var copy = JSON.parse(JSON.stringify(spec || {}));
+    if (Array.isArray(copy.popup)) {
+      copy.popup.forEach(function (f) {
+        if (f && typeof f.field === "string") f.label = word(LABELS, f.field, lang);
+      });
+    }
+    var encoding = copy.encoding && typeof copy.encoding === "object" ? copy.encoding : {};
+    Object.keys(encoding).forEach(function (channel) {
+      var title = encoding[channel] && encoding[channel].title;
+      if (typeof title !== "string") return;
+      var parts = /^(.*?)( \([^()]*\))?$/.exec(title);
+      encoding[channel].title = word(LABELS, parts[1], lang) + (parts[2] || "");
+    });
+    return copy;
+  }
+
+  /** Whether a data card opens on its map (T-4657): every row of the table has a place. */
+  function mapFirst(data) {
+    var features = data && data.map && data.map.data && data.map.data.features;
+    var rows = data && Array.isArray(data.rows) ? data.rows.length : 0;
+    return Array.isArray(features) && rows > 0 && features.length >= rows;
+  }
+
   /** A time as "pred 5 min.", "dnes 18:40" or "17. 10. 2026 18:40" in `lang`. */
   function when(stamp, lang, now) {
     var t = Date.parse(stamp);
@@ -406,8 +439,11 @@ var JCRender = (function () {
         return row[i] === null || row[i] === undefined || typeof row[i] === "number";
       });
     });
+    // The data model's labels where the table carries them (T-4672), else the shared table's.
+    var modelled = Array.isArray(data.labels) ? data.labels : [];
     var columns = data.columns.map(function (c, i) {
-      var label = word(LABELS, String(c), lang);
+      var own = modelled[i] && typeof modelled[i] === "object" ? entry(modelled[i], lang) || entry(modelled[i], "en") : "";
+      var label = own || word(LABELS, String(c), lang);
       return typeof units[i] === "string" && units[i] ? label + " (" + units[i] + ")" : label;
     });
     var count = typeof data.total === "number" && data.total > rows.length
@@ -833,7 +869,8 @@ var JCRender = (function () {
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
-    suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry
+    suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry,
+    vizOrigin: vizOrigin, vizSpec: vizSpec, mapFirst: mapFirst
   };
 })();
 if (typeof module !== "undefined") module.exports = JCRender;

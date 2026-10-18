@@ -3,7 +3,7 @@
 //! most [`MAX_CALLS`] model calls. The tools are `search` and the switched-on connectors' allowed
 //! tools; a name the model makes up is refused here and never called.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -116,6 +116,8 @@ pub enum Event {
     Delta(String),
     /// Rows a data round read from a connector, for the person to see as a table (T-4140).
     Data(Table),
+    /// A chart or a map the model asked for, built by code from a table's rows (T-4657).
+    Visualization(Value),
     /// Up to three questions to offer after the answer (T-4174).
     Followups(Vec<String>),
     /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
@@ -132,6 +134,14 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
     /// The unit symbol of each column (`µg/m³`), `null` where it has none (T-4650).
     pub units: Vec<Option<String>>,
+    /// Each column's labels per language from the data model, `null` where the model names none;
+    /// empty for a type without a model class (DM-100, T-4672).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Whether each column is one of the model's key attributes, which a map's popup shows
+    /// (DM-99, T-4672); empty for a type without a model class.
+    #[serde(skip)]
+    pub summary: Vec<bool>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -139,6 +149,12 @@ pub struct Table {
     pub dataset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<String>,
+    /// The map spec of the located rows (ADR-N-053 §2.9), when the deployment has a renderer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map: Option<Value>,
+    /// Each row's location, checked and rounded, for the maps; never sent as it is (T-4657).
+    #[serde(skip)]
+    pub geometries: Vec<Option<Value>>,
 }
 
 /// Everything one question is answered with.
@@ -154,6 +170,8 @@ pub struct Ask<'a> {
     /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
     /// `answer.routes` is `data`.
     pub sources: &'a [(String, Vec<String>)],
+    /// The sources above that crawl a website, `{project}/{source}` ([`crate::website_sources`]).
+    pub websites: &'a [String],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,
@@ -176,6 +194,8 @@ pub struct Ask<'a> {
     pub cache: &'a super::routed::AnswerCache,
     /// The public origin `/api/endpoint/{slug}` is served under: a data table's download link.
     pub endpoint_base: Option<&'a url::Url>,
+    /// The chart renderer's origin (T-4657); `None` draws no chart and offers no tool for one.
+    pub viz: Option<&'a url::Url>,
     /// The most tool calls of a data question's loop (`answer.maxDataSteps`, T-4294).
     pub data_steps: usize,
     /// How long after the question the loop may still call a tool (`answer.maxDataSeconds`).
@@ -1041,6 +1061,7 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<(String, String)>, cra
             sources: &[],
             public_only: ask.public_only,
             limit: PASSAGES,
+            lang: None,
         },
     )
     .await?;
