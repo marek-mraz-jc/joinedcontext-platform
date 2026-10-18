@@ -3674,7 +3674,11 @@ async fn a_public_deployment_reads_its_named_server_as_anyone() {
 #[tokio::test]
 async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
     use sha2::{Digest, Sha256};
-    let w = world("chatvisitor", deployment(Channel::Public, 50_000, 2)).await;
+    let mut published = deployment(Channel::Public, 50_000, 2);
+    if let Some(rate) = published.spec.rate_limit.as_mut() {
+        rate.per_client_per_month = 4;
+    }
+    let w = world("chatvisitor", published).await;
     for token in [
         "",
         "a.b.c",
@@ -3760,11 +3764,11 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
         assert_eq!(status, StatusCode::OK);
         token["token"].as_str().expect("a token").to_owned()
     };
-    let (first, second) = (earn().await, earn().await);
+    let (first, second, third) = (earn().await, earn().await, earn().await);
 
     script(
         &w.proxy,
-        vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 3],
+        vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 4],
     )
     .await;
     let with = |token: &str| {
@@ -3785,7 +3789,18 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
     assert_eq!(
         answer_of(&w.app, with(&second)).await.0,
         StatusCode::OK,
-        "a second visitor behind the same address has their own"
+        "a second visitor behind the same address has their own minute"
+    );
+    // The month is the address's (integrator review): the fourth question of the address spends
+    // it, and a token minted after is answered as search, with no model call.
+    assert_eq!(answer_of(&w.app, with(&second)).await.0, StatusCode::OK);
+    assert_eq!(model_calls(&w.proxy).await.len(), 4);
+    let (status, body, _) = answer_of(&w.app, with(&third)).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        model_calls(&w.proxy).await.len(),
+        4,
+        "a fresh token buys no fresh month"
     );
 
     // The preflight lets the widget send its token.

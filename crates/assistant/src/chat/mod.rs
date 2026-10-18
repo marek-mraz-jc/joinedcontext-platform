@@ -1043,42 +1043,26 @@ async fn chat(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
-    // Limits count the visitor token's id, so people behind one address each have their own;
-    // the address keeps only a high backstop (T-4653).
-    let now = unix_now();
+    // A question carries a visitor token (T-4653); its id only adds a minute of its own beside
+    // the address's windows, so minting tokens never buys a fresh month or cost share.
     let token = headers
         .get(VISITOR_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let address = client_of(&headers);
-    let checked = {
-        let mut limits = state.limits.lock().await;
-        let backstop = format!(
-            "{}/{}\u{0}address\u{0}{}",
-            deployment.project,
-            deployment.name,
-            limits.visitor(&address, today())
+    let verified = state
+        .limits
+        .lock()
+        .await
+        .signer
+        .visitor(&public_id, token, unix_now());
+    let Some(id) = verified else {
+        let refused = problem(
+            401,
+            "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
         );
-        match limits.signer.visitor(&public_id, token, now) {
-            None => Err(problem(
-                401,
-                "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
-            )),
-            Some(id) => limits
-                .admit(&[(&backstop, ADDRESS_PER_MINUTE, MINUTE)], Instant::now())
-                .map(|()| format!("visitor:{id}"))
-                .map_err(|retry| {
-                    too_many(
-                        retry,
-                        "Z tejto siete prišlo veľa otázok za krátky čas. Počkajte chvíľu a skúste to znova.",
-                    )
-                }),
-        }
+        return with_cors(refused, origin);
     };
-    let client = match checked {
-        Ok(client) => client,
-        Err(refused) => return with_cors(refused, origin),
-    };
+    let client = client_of(&headers);
     let started_at = origin
         .as_ref()
         .and_then(|o| o.to_str().ok())
@@ -1088,6 +1072,7 @@ async fn chat(
         deployment,
         body,
         &client,
+        Some(&id),
         None,
         started_at.as_deref(),
         origin.is_none(),
@@ -1098,8 +1083,12 @@ async fn chat(
 
 /// The visitor token's header (API/05 §1.2.1).
 pub const VISITOR_HEADER: &str = "x-jc-visitor";
-/// The questions one address may ask a deployment in a minute, whoever is behind it (T-4653).
-pub const ADDRESS_PER_MINUTE: u32 = 300;
+/// How many visitors' minutes one address may fill at once: people behind one network each have
+/// their own minute, up to this many of them (T-4653).
+pub const ADDRESS_MINUTES: u32 = 5;
+/// The visitor tokens one address may redeem from a deployment in a minute; a browser needs one
+/// an hour (T-4653).
+pub const TOKENS_PER_MINUTE: u32 = 10;
 
 fn unix_now() -> u64 {
     u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0)
@@ -1127,6 +1116,8 @@ async fn challenge(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
+    // A challenge is a signed string and keeps no state, so the edge's per-address limit (Class 1)
+    // is all it needs; redeeming one is counted per address below.
     let now = unix_now();
     let limits = state.limits.lock().await;
     let key = format!("{}/{}", deployment.project, deployment.name);
@@ -1181,17 +1172,27 @@ async fn token(
         Err(rejection) => body_refused(&rejection),
         Ok(Json(proof)) => {
             let now = unix_now();
-            let earned = state.limits.lock().await.signer.redeem(
-                &public_id,
-                &proof.challenge,
-                &proof.nonce,
-                now,
+            let mut limits = state.limits.lock().await;
+            let key = format!(
+                "{}/{}\u{0}{}\u{0}token",
+                deployment.project,
+                deployment.name,
+                limits.visitor(&client_of(&headers), today())
             );
-            match earned {
-                Some((token, until)) => {
+            let admitted = limits.admit(&[(&key, TOKENS_PER_MINUTE, MINUTE)], Instant::now());
+            let earned = limits
+                .signer
+                .redeem(&public_id, &proof.challenge, &proof.nonce, now);
+            drop(limits);
+            match (admitted, earned) {
+                (Err(retry), _) => too_many(
+                    retry,
+                    "Z tejto siete prišlo veľa overení za krátky čas. Počkajte chvíľu a skúste to znova.",
+                ),
+                (Ok(()), Some((token, until))) => {
                     Json(json!({"token": token, "expiresAt": utc_of(until)})).into_response()
                 }
-                None => problem(
+                (Ok(()), None) => problem(
                     400,
                     "challenge: not a solved, current challenge of this assistant",
                 ),
@@ -1360,6 +1361,7 @@ async fn chat_in_portal(
         deployment,
         body,
         &format!("person:{person}"),
+        None,
         token,
         None,
         false,
@@ -1407,13 +1409,17 @@ fn internal(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// One question to `deployment` from `client`, answered as Server-Sent Events. `unplaced` is a
-/// request that named no `Origin`: not a browser on an allowed site (T-4653).
+/// One question to `deployment` from `client`, answered as Server-Sent Events. `token` is the
+/// id of the visitor token the question carries, which counts its own minute and streams beside
+/// `client`'s windows; `unplaced` is a request that named no `Origin`: not a browser on an
+/// allowed site (T-4653).
+#[allow(clippy::too_many_arguments)]
 async fn ask(
     state: &Arc<ChatState>,
     deployment: Deployment,
     body: Result<Json<Question>, JsonRejection>,
     client: &str,
+    token: Option<&str>,
     person: Option<PersonToken>,
     origin: Option<&str>,
     unplaced: bool,
@@ -1467,6 +1473,8 @@ async fn ask(
     } else {
         visitor.clone()
     };
+    // The token's own minute and streams; the address's with none.
+    let holder = token.map_or_else(|| visitor.clone(), |id| format!("{key}\u{0}visitor:{id}"));
     let (month, resets) = month_of(time::OffsetDateTime::now_utc());
     // A visitor past their month is answered as search, with links (T-4286): the other windows
     // still count, so the search itself stays paced.
@@ -1477,19 +1485,29 @@ async fn ask(
             format!("{visitor}\u{0}h"),
             format!("{visitor}\u{0}d"),
         );
+        let own_minute = format!("{holder}\u{0}m");
         let mut limits = state.limits.lock().await;
         // Keyed by the month, not the day, so the count survives the visitor's day changing.
         let monthly = format!("{key}\u{0}{}\u{0}mo", limits.visitor(client, month));
         let now = Instant::now();
         month_spent = limits.full(&monthly, rate.per_client_per_month, now);
+        // With a token, the address's minute is a backstop over several visitors' minutes.
+        let address_minute = if token.is_some() {
+            rate.per_client_per_minute.saturating_mul(ADDRESS_MINUTES)
+        } else {
+            rate.per_client_per_minute
+        };
         let mut windows = vec![
             (key.as_str(), rate.requests_per_minute, MINUTE),
-            (minute.as_str(), rate.per_client_per_minute, MINUTE),
+            (minute.as_str(), address_minute, MINUTE),
             (hour.as_str(), rate.per_client_per_hour, HOUR),
             (day.as_str(), rate.per_client_per_day, DAY),
         ];
         if !month_spent {
             windows.push((monthly.as_str(), rate.per_client_per_month, MONTH));
+        }
+        if token.is_some() {
+            windows.push((own_minute.as_str(), rate.per_client_per_minute, MINUTE));
         }
         if unplaced {
             windows.push((
@@ -1547,7 +1565,7 @@ async fn ask(
     }
     let streams = rate.as_ref().map(|rate| rate.streams_per_client);
     if let Some(limit) = streams {
-        if !state.limits.lock().await.open_stream(&visitor, limit) {
+        if !state.limits.lock().await.open_stream(&holder, limit) {
             return too_many(
                 5,
                 "Ešte odpovedám na vaše predchádzajúce otázky. Počkajte, kým dopíšem, a skúste to znova.",
@@ -1709,7 +1727,7 @@ async fn ask(
         let mut limits = state.limits.lock().await;
         limits.spend(&spender, today(), spent.cost_micros);
         if streams.is_some() {
-            limits.close_stream(&visitor);
+            limits.close_stream(&holder);
         }
         drop(limits);
         let _ = tx.send(Event::Done(spent, total_ms)).await;
