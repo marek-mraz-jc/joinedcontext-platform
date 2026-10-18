@@ -812,8 +812,13 @@ mod tests {
         );
         assert!(with("response_type", "token").is_err());
         assert!(with("resource", "https://elsewhere.example/api/mcp").is_err());
-        let mut tampered = client_id.clone();
-        tampered.replace_range(tampered.len() - 2.., "AA");
+        // One character inside the signature, where every bit counts, set to another: writing
+        // "AA" over the last two left the id whole when it already ended so (ci-full, T-4673).
+        let mut tampered = client_id.clone().into_bytes();
+        let at = tampered.len() - 10;
+        tampered[at] = if tampered[at] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(tampered).expect("base64url is ASCII");
+        assert_ne!(tampered, client_id);
         assert!(
             with("client_id", &tampered).is_err(),
             "a tampered client_id"
