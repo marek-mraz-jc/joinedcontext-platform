@@ -13,7 +13,9 @@ use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{DeclaredTypes, Endpoint, Model};
-use jc_core::kinds::{Audience, PolicySpec, QualityRule, RateLimits, Representation};
+use jc_core::kinds::{
+    Audience, Catalog, PolicySpec, Publisher, QualityRule, RateLimits, Representation,
+};
 use jc_core::ngsi_catalog::{self, Place};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1127,6 +1129,151 @@ async fn an_endpoint_advertises_only_the_types_the_caller_reads() {
     assert_eq!(broker.hops().len(), 1, "the query reached the broker");
 }
 
+/// T-4568: dev's catalogue in small. A question naming Banská Bystrica gets only its Datasets
+/// although Žilina's, Prague's and Helsinki's hold AirQualityObserved too; each hit says why; a
+/// place no Dataset of the asked type names gets the others, said so; a place nobody publishes
+/// for is a word like any other.
+#[tokio::test]
+async fn a_place_in_the_question_ranks_that_place_first() {
+    let realm = common::Realm::new();
+    let published = |e: Endpoint, by: &str| {
+        let mut e = e;
+        e.catalog = Some(Arc::new(Catalog {
+            publisher: Some(Publisher {
+                name: [("en".to_owned(), by.to_owned())].into_iter().collect(),
+                uri: None,
+            }),
+            ..Catalog::default()
+        }));
+        e
+    };
+    let air = |slug: &str, title: &str, space: &str| {
+        holding(
+            endpoint(slug, title, space, Audience::Public, "public"),
+            "AirQualityObserved",
+            title,
+        )
+    };
+    let mut parking = holding(
+        endpoint(
+            "pppppppppppppppppppppppppp",
+            "Park and ride car parks",
+            "praha-mesto",
+            Audience::Public,
+            "public",
+        ),
+        "OffStreetParking",
+        "Parkoviská P+R",
+    );
+    parking.models = vec![model(&["OffStreetParking"])];
+    let app = app(
+        &realm,
+        vec![
+            published(
+                air(
+                    AIR,
+                    "Air quality in Banská Bystrica, EEA station",
+                    "bb-ovzdusie",
+                ),
+                "City of Banská Bystrica",
+            ),
+            air(
+                BIKES,
+                "Air quality in Banská Bystrica, city sensors",
+                "bb-verejne",
+            ),
+            published(
+                air(
+                    "zzzzzzzzzzzzzzzzzzzzzzzzzz",
+                    "Railway stations",
+                    "zilina-verejne",
+                ),
+                "The Žilina project",
+            ),
+            published(
+                air(
+                    "hhhhhhhhhhhhhhhhhhhhhhhhhh",
+                    "Compare districts",
+                    "helsinki",
+                ),
+                "City of Helsinki",
+            ),
+            published(parking, "City of Prague"),
+        ],
+    );
+    let hits = |answer: &Value| {
+        answer["result"]["structuredContent"]["hits"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let local = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality Banská Bystrica" }),
+    )
+    .await;
+    let slugs: BTreeSet<String> = hits(&local)
+        .iter()
+        .filter_map(|h| h["endpoint"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        slugs,
+        BTreeSet::from([AIR.to_owned(), BIKES.to_owned()]),
+        "only Banská Bystrica's: {local}"
+    );
+    for hit in hits(&local) {
+        assert_eq!(
+            hit["why"],
+            json!("place; title; type AirQualityObserved"),
+            "{hit}"
+        );
+    }
+    assert!(local["result"]["structuredContent"]
+        .get("elsewhere")
+        .is_none());
+
+    // Prague publishes parking, not air: the air question gets the other places, said so.
+    let other = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality Prague", "type": "AirQualityObserved" }),
+    )
+    .await;
+    assert_eq!(
+        other["result"]["structuredContent"]["elsewhere"],
+        json!(true),
+        "{other}"
+    );
+    assert_eq!(hits(&other).len(), 4, "{other}");
+    assert!(other["result"]["content"][0]["text"]
+        .as_str()
+        .is_some_and(|t| t.contains("from other places")));
+
+    // Nobody publishes for Košice: the question ranks as words, as before.
+    let words = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality Košice" }),
+    )
+    .await;
+    assert_eq!(hits(&words).len(), 4, "{words}");
+    assert!(words["result"]["structuredContent"]
+        .get("elsewhere")
+        .is_none());
+    // A publisher's organisation words are no place: "city" is a word like "air", so Prague's
+    // parking matches it and nothing is filtered.
+    let city = call(app, None, "search", json!({ "query": "city air quality" })).await;
+    assert_eq!(hits(&city).len(), 5, "{city}");
+    assert!(city["result"]["structuredContent"]
+        .get("elsewhere")
+        .is_none());
+}
+
 /// T-4497: a catalogue of `n` Datasets a person would search, one Endpoint each: an SDM topic
 /// in sk and en, a place read from dev's AdministrativeArea entities (`fixtures/places-dev.txt`),
 /// a year and a publisher, so near-duplicates differ by a year or a place only. Seeded: the
@@ -1263,6 +1410,13 @@ mod scale {
                     "en".to_owned(),
                     format!("{en} in {at}, {year}, published by {by}."),
                 );
+                e.catalog = Some(Arc::new(Catalog {
+                    publisher: Some(Publisher {
+                        name: [("sk".to_owned(), by)].into_iter().collect(),
+                        uri: None,
+                    }),
+                    ..Catalog::default()
+                }));
                 Generated {
                     endpoint: e,
                     about: (topic, place, year),
@@ -1414,6 +1568,35 @@ async fn ten_thousand_generated_datasets_are_found_fast() {
     let search = scale::percentiles(took);
     let relevance = scale::top3_rate(&answers[..30]);
     let relevance_all = scale::top3_rate(&answers);
+    // T-4568: a question that names a place gets that place's Datasets first, whatever else
+    // matches its topic words.
+    let bystrica = places
+        .iter()
+        .position(|p| *p == "Banská Bystrica")
+        .expect("the fixture names Banská Bystrica");
+    for question in [
+        "Kvalita ovzdušia Banská Bystrica",
+        "air quality banska bystrica",
+        "parking Banská Bystrica",
+    ] {
+        let (_, answer) = timed("search", json!({ "query": question })).await;
+        let hits = answer["result"]["structuredContent"]["hits"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(hits.len() >= 5, "{question}: {answer}");
+        for hit in &hits[..5] {
+            let at = hit["endpoint"]
+                .as_str()
+                .and_then(|slug| slug.parse::<usize>().ok())
+                .map(|i| generated[i].about.1);
+            assert_eq!(at, Some(bystrica), "{question}: {hit}");
+            assert!(
+                hit["why"].as_str().is_some_and(|w| w.starts_with("place")),
+                "{hit}"
+            );
+        }
+    }
     let mut first = Vec::new();
     let mut deep = Vec::new();
     for i in 0..200 {
