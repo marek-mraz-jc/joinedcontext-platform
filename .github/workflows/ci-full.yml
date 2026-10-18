@@ -86,6 +86,15 @@ jobs:
         with: { tool: "cargo-audit,cargo-deny" }
       - run: cargo audit
       - run: cargo deny check advisories bans licenses sources
+      # Never fails: says when a kreuzberg or calamine release drops the zip 8 cap behind the
+      # RUSTSEC-2026-0367/0368/0369 ignore in .cargo/audit.toml and deny.toml (T-4524).
+      - name: zip 9 watch (kreuzberg, calamine)
+        continue-on-error: true
+        run: |
+          for c in kreuzberg calamine; do
+            v=$(curl -fsS -A joinedcontext-ci "https://crates.io/api/v1/crates/$c" | jq -r .crate.max_stable_version)
+            echo "$c $v: $(curl -fsS -A joinedcontext-ci "https://crates.io/api/v1/crates/$c/$v/dependencies" | jq -r '[.dependencies[] | select(.crate_id == "zip" or .crate_id == "calamine") | "\(.crate_id) \(.req)"] | join(", ")')"
+          done
   trivy-fs:
     runs-on: ubuntu-latest
     timeout-minutes: 10

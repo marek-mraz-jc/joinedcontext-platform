@@ -1,0 +1,16 @@
+[advisories]
+ignore = [
+  # zip 8.6.0 (crates/assistant: kreuzberg 4.10.4 -> zip, and -> calamine 0.36.1 -> zip "^8.6"):
+  # RUSTSEC-2026-0367 (SUID/SGID bits kept), -0368 (symlink targets outside the destination) and
+  # -0369 (permissions applied through symlinks) are all in ZipArchive::extract /
+  # extract_unwrapped_root_dir / ZipStreamReader::extract, which unpack an archive to disk.
+  # Nothing here calls them: `grep -rnE '\bextract(_unwrapped_root_dir)?\(|ZipStreamReader'` over
+  # kreuzberg-4.10.4/src and calamine-0.36.1/src finds no call (both read entries in memory
+  # through ZipArchive: 84 and 21 uses), and our own zip use is zip 9 in context-gateway.
+  # Uploads (zip, DOCX, XLSX, PDF, CSV) stay readable by owner decision on T-4524 (2026-10-18).
+  # ci-full's supply-chain job prints the newest kreuzberg/calamine zip requirement.
+  # Remove when kreuzberg accepts zip >= 9. Same list in deny.toml.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]
