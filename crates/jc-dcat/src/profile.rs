@@ -278,6 +278,24 @@ fn slovak(mut record: Value, licence: Option<&str>, personal: Option<PersonalDat
     {
         tag(contact, "vcard:fn", "sk");
     }
+    untype_sources(&mut record);
+    if let Some(included) = record.get_mut("@included").and_then(Value::as_array_mut) {
+        included.extend(services);
+        for format in formats {
+            let node = json!({ "@id": format, "@type": "dct:MediaTypeOrExtent" });
+            if !included.contains(&node) {
+                included.push(node);
+            }
+        }
+    }
+    record
+}
+
+/// Another publisher's original dataset, named in `dct:source`, stays an IRI without the
+/// `dcat:Dataset` type, so a national catalogue never harvests it as this publisher's and its
+/// shapes ask nothing of it (API/08 section 5).
+#[cfg(any(feature = "dcat-ap-sk", feature = "dcat-ap-cz"))]
+fn untype_sources(record: &mut Value) {
     let sources: Vec<Value> = record
         .get("dct:source")
         .and_then(Value::as_array)
@@ -291,22 +309,16 @@ fn slovak(mut record: Value, licence: Option<&str>, personal: Option<PersonalDat
                 }
             }
         }
-        included.extend(services);
-        for format in formats {
-            let node = json!({ "@id": format, "@type": "dct:MediaTypeOrExtent" });
-            if !included.contains(&node) {
-                included.push(node);
-            }
-        }
     }
-    record
 }
 
 /// DCAT-AP-CZ 2026-09-23: `pu:specifikace` on every distribution, its licences typed
-/// `dct:LicenseDocument`, and the dataset's `r5r:applicableLegislation` repeated on each
-/// distribution and on the data service (API/08 section 3).
+/// `dct:LicenseDocument`, the dataset's `r5r:applicableLegislation` repeated on each
+/// distribution and on the data service, and another publisher's source no `dcat:Dataset`
+/// (API/08 sections 3 and 5).
 #[cfg(feature = "dcat-ap-cz")]
 fn czech(mut record: Value, licence: Option<&str>, personal: Option<PersonalData>) -> Value {
+    untype_sources(&mut record);
     let personal = personal.map(czech_personal);
     let legislation = record.get("dcatap:applicableLegislation").cloned();
     for distribution in distributions(&mut record) {
@@ -676,6 +688,37 @@ mod tests {
         assert!(
             turtle.contains("\"120\"^^xsd:nonNegativeInteger"),
             "{turtle}"
+        );
+    }
+
+    /// T-4596: the Czech shapes asked a title, a publisher and a theme of every Golemio and ČHMÚ
+    /// original the Prague records name, because the CZ rendering kept them `dcat:Dataset`s.
+    #[cfg(feature = "dcat-ap-cz")]
+    #[test]
+    fn a_czech_record_names_its_source_as_no_dataset_of_this_publisher() {
+        let mut catalog = catalog(Some(Licence::Cc0));
+        catalog.source = vec![jc_core::kinds::Source {
+            url: "https://data.example.sk/dataset/ovzdusie".into(),
+            title: BTreeMap::from([("cs".to_owned(), "Ovzduší".to_owned())]),
+            description: BTreeMap::from([("cs".to_owned(), "Hodinové průměry".to_owned())]),
+        }];
+        let core = record(&catalog);
+        let typed = |record: &Value| {
+            record["@included"]
+                .as_array()
+                .expect("@included")
+                .iter()
+                .find(|n| n["@id"] == "https://data.example.sk/dataset/ovzdusie")
+                .expect("the source node")
+                .get("@type")
+                .cloned()
+        };
+        assert_eq!(typed(&core), Some(json!("dcat:Dataset")));
+        let cz = render(core, Profile::DcatApCz, Some(&catalog));
+        assert_eq!(typed(&cz), None, "{cz}");
+        assert_eq!(
+            cz["dct:source"],
+            json!(["https://data.example.sk/dataset/ovzdusie"])
         );
     }
 
