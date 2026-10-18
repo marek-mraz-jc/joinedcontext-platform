@@ -208,6 +208,8 @@ async fn main() -> ExitCode {
         if let Ok(mut held) = chat_state.snapshot.write() {
             *held = Arc::clone(&snapshot);
         }
+        // Routing's type lists, ahead of the first question (T-4611).
+        tokio::spawn(chat::warm_types(Arc::clone(&chat_state)));
         let sources = &snapshot.sources;
         ready.store(true, Ordering::Relaxed);
         let now = time::OffsetDateTime::now_utc()
