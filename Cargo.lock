@@ -2350,7 +2350,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
- "context-gateway",
  "jc-core",
  "jsonwebtoken",
  "reqwest",
@@ -3540,8 +3539,11 @@ dependencies = [
 name = "jc-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "chrono",
+ "hyper-util",
+ "jsonwebtoken",
  "regex",
  "schemars",
  "serde",
@@ -3549,6 +3551,7 @@ dependencies = [
  "serde_norway",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",

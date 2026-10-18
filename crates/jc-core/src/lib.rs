@@ -8,6 +8,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "auth")]
+pub mod auth;
 pub mod classification;
 pub mod cron;
 pub mod envelope;

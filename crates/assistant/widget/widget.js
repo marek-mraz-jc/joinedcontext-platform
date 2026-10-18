@@ -71,7 +71,6 @@
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
-  var framed = window.parent !== window;
   var page = document.body.classList.contains("jc-page");
   var offered = JCRender.ordered((config.languages || []).filter(function (l) { return WORDS[l]; }));
   // How the chat picks its language and whether it shows the toggle, the deployment's
@@ -970,37 +969,5 @@
     box.appendChild(group);
     log.appendChild(box);
     group.firstChild.focus();
-  }
-
-  // T-4283: the page that framed the panel sizes it to this content (Architecture/22 §4), so a
-  // short conversation leaves no empty panel. The message carries one number and nothing else.
-  var reported = 0;
-  var measuring = false;
-  // The conversation's own height, its items and their margins, not the space the panel gives
-  // it (the first item's automatic top margin is that space).
-  function measure() {
-    var style = getComputedStyle(log);
-    var list = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
-    Array.prototype.forEach.call(log.children, function (item) {
-      list += item.offsetHeight + parseFloat(getComputedStyle(item).marginBottom);
-    });
-    return Math.ceil(head.offsetHeight + (tools ? tools.offsetHeight : 0) + list + foot.offsetHeight);
-  }
-  function report() {
-    measuring = false;
-    var height = measure();
-    if (height === reported) return;
-    reported = height;
-    window.parent.postMessage({ type: "jc-assistant-height", height: height }, "*");
-  }
-  function schedule() {
-    if (measuring) return;
-    measuring = true;
-    requestAnimationFrame(report);
-  }
-  if (framed) {
-    new MutationObserver(schedule).observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
-    window.addEventListener("resize", schedule);
-    schedule();
   }
 })();

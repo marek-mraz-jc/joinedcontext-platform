@@ -33,12 +33,14 @@
     "display:flex;align-items:center;justify-content:center;padding:0}" +
     ".jc-launch:focus-visible{outline:3px solid var(--jc-accent);outline-offset:3px}" +
     ".jc-launch svg{width:28px;height:28px;fill:currentColor}" +
-    // The chat says how tall its content is (--jc-h, T-4283); never taller than 640 px or the window.
-    ".jc-panel{position:fixed;right:20px;bottom:88px;z-index:2147483000;width:400px;height:min(var(--jc-h,640px),640px,calc(100vh - 108px));" +
+    // One tall height, 760 px, never more than the window less the launcher (T-4592); vh first for
+    // a browser without dvh.
+    ".jc-panel{position:fixed;right:20px;bottom:88px;z-index:2147483000;width:420px;max-width:calc(100vw - 40px);" +
+    "height:min(760px,calc(100vh - 108px));height:min(760px,calc(100dvh - 108px));" +
     "border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);background:#fff}" +
     ".jc-panel[hidden]{display:none}" +
     ".jc-panel iframe{width:100%;height:100%;border:0;display:block}" +
-    "@media (max-width:640px){.jc-panel{inset:0;width:100%;height:100%;border-radius:0}" +
+    "@media (max-width:640px){.jc-panel{inset:0;width:100%;max-width:none;height:100%;height:100dvh;border-radius:0}" +
     ".jc-open .jc-launch{display:none}}" +
     "@media (prefers-reduced-motion:no-preference){.jc-launch{transition:transform .15s}.jc-launch:hover{transform:scale(1.05)}}";
 
@@ -137,11 +139,6 @@
     if (frame && event.source === frame.contentWindow && event.origin === src.origin &&
         event.data && event.data.type === "jc-assistant-close") {
       close();
-    }
-    if (frame && event.source === frame.contentWindow && event.origin === src.origin &&
-        event.data && event.data.type === "jc-assistant-height") {
-      var height = Number(event.data.height);
-      if (isFinite(height) && height > 0) wrap.style.setProperty("--jc-h", Math.ceil(height) + "px");
     }
   });
 
