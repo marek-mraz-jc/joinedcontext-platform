@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod model;
 pub mod routed;
 pub mod script;
+pub mod visitor;
 pub mod widget;
 
 use std::collections::HashMap;
@@ -27,7 +28,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use jc_core::kinds::assistant::connector_target;
 use jc_core::kinds::Routes;
@@ -123,6 +124,8 @@ pub struct Limits {
     capped: HashMap<String, u64>,
     /// What each visitor's answers cost today, in millionths of a US dollar, and the day.
     spent: HashMap<String, (u64, u64)>,
+    /// Signs the visitor tokens these limits count by (T-4653).
+    pub signer: visitor::Signer,
 }
 
 impl Limits {
@@ -185,6 +188,16 @@ impl Limits {
     pub fn visitor(&self, client: &str, day: u64) -> String {
         use std::hash::BuildHasher;
         format!("{:016x}", self.salt.hash_one((day, client)))
+    }
+
+    /// Whether `key`'s window counts 80 % of `limit` or more at `now` (T-4653).
+    pub fn busy(&self, key: &str, limit: u32, now: Instant) -> bool {
+        self.windows
+            .get(key)
+            .is_some_and(|(started, count, window)| {
+                now.duration_since(*started) < *window
+                    && u64::from(*count) * 5 >= u64::from(limit) * 4
+            })
     }
 
     /// Whether `key`'s window already counts `limit` requests at `now`; counts nothing (T-4286).
@@ -339,6 +352,14 @@ pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
         .route(
+            "/api/v1/d/{public_id}/challenge",
+            get(challenge).options(preflight),
+        )
+        .route(
+            "/api/v1/d/{public_id}/token",
+            post(token).options(preflight),
+        )
+        .route(
             "/api/v1/d/{public_id}/feedback",
             post(feedback).options(preflight),
         )
@@ -454,11 +475,11 @@ async fn preflight(
             let h = response.headers_mut();
             h.insert(
                 header::ACCESS_CONTROL_ALLOW_METHODS,
-                HeaderValue::from_static("POST"),
+                HeaderValue::from_static("GET, POST"),
             );
             h.insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                HeaderValue::from_static("content-type"),
+                HeaderValue::from_static("content-type, x-jc-visitor"),
             );
             h.insert(
                 header::ACCESS_CONTROL_MAX_AGE,
@@ -1022,7 +1043,42 @@ async fn chat(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
-    let client = client_of(&headers);
+    // Limits count the visitor token's id, so people behind one address each have their own;
+    // the address keeps only a high backstop (T-4653).
+    let now = unix_now();
+    let token = headers
+        .get(VISITOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let address = client_of(&headers);
+    let checked = {
+        let mut limits = state.limits.lock().await;
+        let backstop = format!(
+            "{}/{}\u{0}address\u{0}{}",
+            deployment.project,
+            deployment.name,
+            limits.visitor(&address, today())
+        );
+        match limits.signer.visitor(&public_id, token, now) {
+            None => Err(problem(
+                401,
+                "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
+            )),
+            Some(id) => limits
+                .admit(&[(&backstop, ADDRESS_PER_MINUTE, MINUTE)], Instant::now())
+                .map(|()| format!("visitor:{id}"))
+                .map_err(|retry| {
+                    too_many(
+                        retry,
+                        "Z tejto siete prišlo veľa otázok za krátky čas. Počkajte chvíľu a skúste to znova.",
+                    )
+                }),
+        }
+    };
+    let client = match checked {
+        Ok(client) => client,
+        Err(refused) => return with_cors(refused, origin),
+    };
     let started_at = origin
         .as_ref()
         .and_then(|o| o.to_str().ok())
@@ -1037,6 +1093,111 @@ async fn chat(
         origin.is_none(),
     )
     .await;
+    with_cors(response, origin)
+}
+
+/// The visitor token's header (API/05 §1.2.1).
+pub const VISITOR_HEADER: &str = "x-jc-visitor";
+/// The questions one address may ask a deployment in a minute, whoever is behind it (T-4653).
+pub const ADDRESS_PER_MINUTE: u32 = 300;
+
+fn unix_now() -> u64 {
+    u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0)
+}
+
+fn utc_of(unix: u64) -> String {
+    let at = i64::try_from(unix)
+        .ok()
+        .and_then(|at| time::OffsetDateTime::from_unix_timestamp(at).ok())
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    utc_second(at)
+}
+
+/// A challenge whose proof earns a visitor token; harder while the deployment is busy (T-4653).
+async fn challenge(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let now = unix_now();
+    let limits = state.limits.lock().await;
+    let key = format!("{}/{}", deployment.project, deployment.name);
+    let busy = deployment
+        .spec
+        .rate_limit
+        .as_ref()
+        .is_some_and(|rate| limits.busy(&key, rate.requests_per_minute, Instant::now()));
+    let difficulty = if busy {
+        visitor::BUSY_DIFFICULTY
+    } else {
+        visitor::DIFFICULTY
+    };
+    let text = limits.signer.challenge(&public_id, difficulty, now);
+    drop(limits);
+    let mut response = Json(json!({
+        "challenge": text,
+        "difficulty": difficulty,
+        "expiresAt": utc_of(now + visitor::CHALLENGE_SECS),
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    with_cors(response, origin)
+}
+
+/// A solved challenge (API/05 §1.2.1).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proof {
+    pub challenge: String,
+    pub nonce: String,
+}
+
+/// The visitor token a solved challenge earns (T-4653).
+async fn token(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<Proof>, JsonRejection>,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let response = match body {
+        Err(rejection) => body_refused(&rejection),
+        Ok(Json(proof)) => {
+            let now = unix_now();
+            let earned = state.limits.lock().await.signer.redeem(
+                &public_id,
+                &proof.challenge,
+                &proof.nonce,
+                now,
+            );
+            match earned {
+                Some((token, until)) => {
+                    Json(json!({"token": token, "expiresAt": utc_of(until)})).into_response()
+                }
+                None => problem(
+                    400,
+                    "challenge: not a solved, current challenge of this assistant",
+                ),
+            }
+        }
+    };
     with_cors(response, origin)
 }
 
@@ -1940,6 +2101,23 @@ mod tests {
         assert!(!limits.over_share("a", 20_001, 1.0), "a new day");
         limits.spend("a", 20_001, 1);
         assert_eq!(limits.spent["a"], (20_001, 1));
+    }
+
+    /// T-4653: the challenge gets harder from four fifths of the deployment's minute on, and
+    /// easy again when the minute is over.
+    #[test]
+    fn a_busy_minute_raises_the_challenge() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        for _ in 0..7 {
+            assert!(limits.admit(&one("d", 10), now).is_ok());
+        }
+        assert!(!limits.busy("d", 10, now), "7 of 10");
+        assert!(limits.admit(&one("d", 10), now).is_ok());
+        assert!(limits.busy("d", 10, now), "8 of 10");
+        assert!(!limits.busy("d", 10, now + MINUTE), "a new minute");
+        assert!(!limits.busy("never", 10, now));
+        const { assert!(visitor::BUSY_DIFFICULTY > visitor::DIFFICULTY) };
     }
 
     /// T-4653: an anonymous history turn is cut to a thousand characters, on a character boundary.

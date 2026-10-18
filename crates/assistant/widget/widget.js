@@ -796,6 +796,41 @@
     return JCRender.trouble(status, title);
   }
 
+  // The visitor token every question carries (T-4653, API/05 §1.2.1): a Web Worker proves the
+  // service's challenge as soon as the chat opens, so the first question seldom waits for it.
+  var visitor = null;
+  function visitorToken(fresh) {
+    if (fresh || !visitor) {
+      visitor = earn().catch(function (error) {
+        visitor = null;
+        throw error;
+      });
+    }
+    return visitor;
+  }
+
+  async function earn() {
+    var base = "/api/v1/d/" + encodeURIComponent(config.publicId);
+    var asked = await fetch(base + "/challenge", { credentials: "omit" });
+    if (!asked.ok) throw new TypeError("no challenge");
+    var challenge = await asked.json();
+    var nonce = await new Promise(function (done, failed) {
+      var worker = new Worker("/d/visitor.js");
+      worker.onmessage = function (event) { worker.terminate(); done(event.data); };
+      worker.onerror = function () { worker.terminate(); failed(new TypeError("no proof")); };
+      worker.postMessage({ challenge: challenge.challenge, difficulty: challenge.difficulty });
+    });
+    var earned = await fetch(base + "/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "omit",
+      body: JSON.stringify({ challenge: challenge.challenge, nonce: nonce })
+    });
+    if (!earned.ok) throw new TypeError("no token");
+    var token = await earned.json();
+    return { token: token.token, until: Date.parse(token.expiresAt) || 0 };
+  }
+
   async function ask(question, item, signal) {
     var body = { message: question, history: history.slice(-6) };
     if (conversation) body.conversation = conversation;
@@ -803,13 +838,20 @@
       body.connectors = toggles.filter(function (b) { return b.checked; }).map(function (b) { return b.value; });
     }
     history.push({ role: "user", text: question });
-    var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-      credentials: "omit",
-      body: JSON.stringify(body),
-      signal: signal
-    });
+    var post = function (held) {
+      return fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream", "X-JC-Visitor": held.token },
+        credentials: "omit",
+        body: JSON.stringify(body),
+        signal: signal
+      });
+    };
+    var held = await visitorToken();
+    if (Date.now() > held.until - 60000) held = await visitorToken(true);
+    var response = await post(held);
+    // A token the service no longer knows (a restart, an hour gone) is earned again, once.
+    if (response.status === 401) response = await post(await visitorToken(true));
     if (!response.ok || !response.body) {
       var problem = await response.json().catch(function () { return {}; });
       fail(item, refusal(response.status, problem.title));
@@ -948,6 +990,7 @@
     form.hidden = true;
     fresh.hidden = true;
   }
+  if (config.enabled) visitorToken().catch(function () {});
   if (JCRender.asksLanguage({ mode: mode, offered: offered, stored: stored, kept: Boolean(kept && kept.turns.length > 0),
     enabled: config.enabled, page: page, requested: params.get("lang") })) {
     choose();
