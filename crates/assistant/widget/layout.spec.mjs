@@ -110,6 +110,34 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return greeting.y - (top.y + top.height);
     }, { message: "the greeting sits under the header" }).toBeLessThanOrEqual(24);
 
+    // T-4635 option C: a labelled send button inside the bar, no circle in the footer, the
+    // disclaimer's sentence whole with a "More" link that opens the rest.
+    const bar = await frame.locator(".jc-form").boundingBox();
+    const send = frame.locator(".jc-form .jc-submit");
+    await expect(send).toHaveText("Send");
+    const sendBox = await send.boundingBox();
+    expect(inside({ x: sendBox.x - bar.x, y: sendBox.y - bar.y, width: sendBox.width, height: sendBox.height }, bar.width, bar.height),
+      "the send button lies inside the bar").toBe(true);
+    const circles = await frame.locator(".jc-foot").evaluate((foot) => [...foot.querySelectorAll("*")].filter((el) => {
+      const box = el.getBoundingClientRect();
+      const radius = parseFloat(getComputedStyle(el).borderTopLeftRadius);
+      return box.width > 4 && Math.abs(box.width - box.height) < 2 && radius >= box.width / 2 - 1;
+    }).map((el) => el.className));
+    expect(circles, "no circle in the footer").toEqual([]);
+    const lead = await frame.locator(".jc-notice .jc-disclaimer").evaluate((span) => ({
+      text: span.textContent, wraps: getComputedStyle(span.parentElement).whiteSpace !== "nowrap",
+      cut: getComputedStyle(span.parentElement).textOverflow === "ellipsis" }));
+    expect(lead, "the disclaimer's sentence is whole").toEqual({ text: "Answers are written by AI from the city's and the region's websites.", wraps: true, cut: false });
+    const more = frame.locator(".jc-notice .jc-more");
+    await expect(more).toHaveText("More");
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
+    await more.click();
+    await expect(more).toHaveAttribute("aria-expanded", "true");
+    await expect(frame.locator("#jc-disclaimer-rest")).toHaveText("They may contain mistakes; check them in the sources. Do not enter personal data.");
+    await more.click();
+    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
+
     // The name and its subtitle keep one line each, whole, at every size.
     const header = await frame.locator(".jc-title").evaluate((title) => {
       const name = title.querySelector(".jc-name");

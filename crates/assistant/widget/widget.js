@@ -241,13 +241,18 @@
   var label = words(el("label", "jc-sr"), "ask");
   label.htmlFor = "jc-question";
   words(input, "ask", "placeholder");
-  // One rounded field with its send button inside (T-4283); the box grows with the question.
-  var send = el("button", "jc-icon-button jc-send");
+  // One bar: the field and, inside its border, a labelled send button (T-4635 option C); the bar
+  // grows with the question. Stop takes the button's place while an answer streams.
+  function labelled(cls, key, name) {
+    var b = el("button", "jc-send " + cls);
+    b.appendChild(words(el("span"), key));
+    b.appendChild(icon(name));
+    return b;
+  }
+  var send = labelled("jc-submit", "send", "send");
   send.type = "submit";
-  send.appendChild(icon("send"));
-  words(send, "send", "ariaLabel");
-  words(send, "send", "title");
-  var stop = iconButton("jc-stop", "stop", "stop");
+  var stop = labelled("jc-stop", "stop", "stop");
+  stop.type = "button";
   stop.hidden = true;
   input.addEventListener("input", grow);
   function grow() {
@@ -259,21 +264,27 @@
   form.appendChild(send);
   form.appendChild(stop);
   var foot = el("footer", "jc-foot");
-  // The disclaimer as one line, the rest behind "More" (T-4283).
-  var notice = el("div", "jc-notice");
-  var disclaimer = el("p", "jc-disclaimer");
-  disclaimer.id = "jc-disclaimer";
+  // The disclaimer's first sentence, whole and wrapping, then a "More" link that opens the rest
+  // (T-4635); no button of its own shape.
+  var notice = el("p", "jc-notice");
+  var lead = el("span", "jc-disclaimer");
+  var rest = el("span", "jc-disclaimer-rest");
+  rest.id = "jc-disclaimer-rest";
+  rest.hidden = true;
   var more = el("button", "jc-more");
   more.type = "button";
-  more.setAttribute("aria-controls", "jc-disclaimer");
+  more.setAttribute("aria-controls", "jc-disclaimer-rest");
   more.setAttribute("aria-expanded", "false");
   more.addEventListener("click", function () {
     var open = more.getAttribute("aria-expanded") !== "true";
     more.setAttribute("aria-expanded", String(open));
-    notice.classList.toggle("jc-open", open);
+    rest.hidden = !open;
     more.textContent = open ? w.lessInfo : w.moreInfo;
   });
-  notice.appendChild(disclaimer);
+  notice.appendChild(lead);
+  notice.appendChild(document.createTextNode(" "));
+  notice.appendChild(rest);
+  notice.appendChild(document.createTextNode(" "));
   notice.appendChild(more);
   foot.appendChild(form);
   foot.appendChild(notice);
@@ -343,8 +354,11 @@
       Array.prototype.forEach.call(picker.children, function (b) { b.setAttribute("aria-pressed", String(b.value === code)); });
     }
     if (named) retitle();
-    disclaimer.textContent = perLanguage(config.disclaimer) || "";
-    notice.hidden = !disclaimer.textContent;
+    var parts = JCRender.notice(perLanguage(config.disclaimer));
+    lead.textContent = parts.lead;
+    rest.textContent = parts.rest;
+    notice.hidden = !parts.lead;
+    more.hidden = !parts.rest;
     more.textContent = more.getAttribute("aria-expanded") === "true" ? w.lessInfo : w.moreInfo;
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
