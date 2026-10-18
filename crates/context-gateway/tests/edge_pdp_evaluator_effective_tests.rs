@@ -61,6 +61,7 @@ fn jana() -> Subject {
         did: Some("did:web:banskabystrica.sk:agents:kpi".to_owned()),
         agreement: None,
         via: None,
+        client: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn a_principal_kind_matches_only_its_own_field() {
         agreement: None,
         // The account a delegated call came through is never a principal of it (AG-95).
         via: Some("shared-name".to_owned()),
+        client: Some("shared-name".to_owned()),
     };
 
     assert_eq!(

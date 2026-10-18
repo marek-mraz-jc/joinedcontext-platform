@@ -653,6 +653,31 @@ fn federated_refusal(
     )
 }
 
+/// A delete of context data names why in `JC-Reason` (ADR-N-054 2.3, DM-113); without it the
+/// answer is `400 reason-required`. DM-113's other half, every write from the Portal's UI,
+/// turns on with T-4667, which gives the Portal's forms their reason field: enforced before
+/// that, it would refuse every form the Portal sends today.
+fn reason_refusal(operation: Operation, headers: &axum::http::HeaderMap) -> Option<Response<Body>> {
+    let deletes = matches!(
+        operation,
+        Operation::DeleteAttrs
+            | Operation::DeleteEntity
+            | Operation::DeleteBatch
+            | Operation::DeleteAttrsTemporal
+            | Operation::DeleteAttrInstanceTemporal
+            | Operation::DeleteTemporal
+    );
+    let given = headers
+        .get(tenancy::REASON)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|r| !r.trim().is_empty());
+    (deletes && !given).then(|| {
+        ProblemDetails::new(400, "reason-required", "Reason required")
+            .with_detail("a delete names why in JC-Reason")
+            .into_response()
+    })
+}
+
 pub(crate) async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -681,6 +706,10 @@ pub(crate) async fn view_request(
         if let Err(refusal) = write_guard::check_identifier(&query::decode(raw), None) {
             return Err(Box::new(ProblemDetails::from(refusal).into_response()));
         }
+    }
+    if let Some(refusal) = reason_refusal(operation, request.headers()) {
+        tracing::info!(slug = %endpoint.slug, %operation, "write refused: no reason given");
+        return Err(Box::new(refusal));
     }
     tenancy::pin_caller(request, &endpoint.space, subject).map_err(|problem| {
         tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");

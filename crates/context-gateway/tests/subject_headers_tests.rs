@@ -373,3 +373,149 @@ async fn a_tool_call_reenters_with_the_verified_subject_and_not_the_token() {
         assert_verified(&hop.headers, &["ovzdusie"]);
     }
 }
+
+/// A person's token issued to `azp`, `portal-ui` being the Portal's UI.
+fn token_of(realm: &common::Realm, azp: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": "context-gateway",
+        "azp": azp,
+        "preferred_username": "jana",
+        "groups": ["/ovzdusie"],
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+/// What a client writes to pass for another writer (ADR-N-054 2.3, DM-112).
+const FORGED_PROVENANCE: &[(&str, &str)] = &[
+    ("jc-provenance-actor", "pipeline:other"),
+    ("JC-Provenance-Channel", "pipeline"),
+    ("jc-provenance-operation", "erase"),
+    ("jc-read-versions", "true"),
+];
+
+async fn answer(app: Router, request: Request<Body>) -> (StatusCode, Value) {
+    let response = app.oneshot(request).await.expect("the gateway answers");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn a_write_names_the_verified_writer_and_drops_the_one_the_client_typed() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::POST,
+            &format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities"),
+            Some(&token(&realm, json!(["/ovzdusie"]))),
+            FORGED_PROVENANCE,
+            Some(entity),
+        ),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert_eq!(
+        values(headers, "jc-provenance-channel"),
+        ["api"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values(headers, "jc-provenance-actor"),
+        ["user%3Ajana"],
+        "{headers:?}"
+    );
+    assert!(
+        values(headers, "jc-provenance-operation").is_empty(),
+        "{headers:?}"
+    );
+    assert!(
+        values(headers, "jc-read-versions").is_empty(),
+        "{headers:?}"
+    );
+}
+
+/// A person's write through the Portal's UI is channel `ui`, and the reason they gave reaches
+/// the broker as written. (Refusing a UI write without one turns on with T-4667, DM-113.)
+#[tokio::test]
+async fn a_write_from_the_portal_ui_is_channel_ui_and_carries_its_reason() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::POST,
+            &format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities"),
+            Some(&token_of(&realm, "portal-ui")),
+            &[("jc-reason", "Sensor%20stuck")],
+            Some(entity),
+        ),
+    )
+    .await;
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert_eq!(
+        values(headers, "jc-provenance-channel"),
+        ["ui"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values(headers, "jc-provenance-actor"),
+        ["user%3Ajana"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values(headers, "jc-reason"),
+        ["Sensor%20stuck"],
+        "{headers:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_delete_without_a_reason_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let path = format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities/{ENTITY}");
+    let edge = token(&realm, json!(["/ovzdusie"]));
+
+    let (code, problem) = answer(
+        app(&broker.url, &realm),
+        request(Method::DELETE, &path, Some(&edge), &[], None),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(problem["code"], "reason-required", "{problem}");
+    assert!(broker.hops().is_empty());
+
+    let (code, _) = answer(
+        app(&broker.url, &realm),
+        request(
+            Method::DELETE,
+            &path,
+            Some(&edge),
+            &[("jc-reason", "duplicate")],
+            None,
+        ),
+    )
+    .await;
+    assert_ne!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(broker.hops().len(), 1);
+}

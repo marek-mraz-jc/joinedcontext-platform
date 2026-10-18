@@ -41,6 +41,9 @@ pub struct Subject {
     /// their token (ADR-N-038, AG-95). The audit line names it; it grants nothing, so it is
     /// never matched as a principal.
     pub via: Option<String>,
+    /// The Keycloak client a person's token was issued to (`azp`): `portal-ui` makes a write's
+    /// channel `ui` (ADR-N-054 2.3). Grants nothing.
+    pub client: Option<String>,
 }
 
 impl Subject {

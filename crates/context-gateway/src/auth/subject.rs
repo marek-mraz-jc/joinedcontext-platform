@@ -259,6 +259,7 @@ pub(crate) fn subject_of(
                 did: None,
                 agreement: None,
                 via: None,
+                client: None,
             });
         }
         if via.is_none() && claims.preferred_username.is_none() {
@@ -298,6 +299,7 @@ pub(crate) fn subject_of(
         did: None,
         agreement: None,
         via,
+        client: claims.azp.clone(),
     })
 }
 
