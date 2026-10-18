@@ -601,6 +601,18 @@ test("the disclaimer shows its first sentence and keeps the rest for More (T-463
   for (const empty of ["", "   ", null, undefined, 3]) assert.deepEqual(notice(empty), { lead: "", rest: "" });
 });
 
+test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4653)", async () => {
+  const { solve, zeroBits } = require("./visitor.js");
+  const { createHash } = require("node:crypto");
+  assert.equal(zeroBits(Uint8Array.from([0, 0x0f, 0xff])), 12);
+  assert.equal(zeroBits(Uint8Array.from([0x80])), 0);
+  assert.equal(zeroBits(Uint8Array.from([0, 0])), 16);
+  const challenge = "3a1f.1760792400.10.9f2c";
+  const nonce = await solve(challenge, 10);
+  assert.match(nonce, /^\d+$/);
+  assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
+});
+
 test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
   assert.deepEqual(markdown("| Stanica | NO₂ |\n|:---|---:|\n| **Centrum** | 12 \\| 14 |\nend"), [
     { tag: "table", children: [

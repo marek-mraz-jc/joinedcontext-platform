@@ -4,6 +4,7 @@
 //   cd crates/assistant/widget && npm i --no-save @playwright/test@1.62.1 && npx playwright test -c layout.config.mjs
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
@@ -43,6 +44,9 @@ function sse(res) {
   res.end();
 }
 
+// The visitor tokens the stand-in has issued (T-4653).
+let TOKENS = 0;
+
 // T-4649: an answer streamed in three-character deltas, split mid-token, with HTML in it.
 const STREAMED = ["## Doprava", "", "Máme **tri** zdroje [1, 2]:", "", "- **`type`**: typ entity [1]", "- **`q`**: filter [2, 3]", "",
   "| Zdroj | Stav |", "|---|---|", "| **Parkoviská** | `live` |", "", "```", "GET /ngsi-ld/v1/entities?type=OffStreetParking", "```",
@@ -74,7 +78,27 @@ test.beforeAll(async () => {
     if (path === "/d/bb") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE().replace("<body>", '<body class="jc-page">'));
     if (path === "/d/bb/embed.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("embed.js"));
     if (path === "/host") return res.writeHead(200, { "Content-Type": "text/html" }).end(HOST);
-    if (path === "/api/v1/d/bb/chat") return SLOW ? slow(res) : sse(res);
+    if (path === "/d/visitor.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("visitor.js"));
+    if (path === "/api/v1/d/bb/challenge") {
+      return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ challenge: "c0ffee.1.8.5a", difficulty: 8, expiresAt: "2099-01-01T00:00:00Z" }));
+    }
+    if (path === "/api/v1/d/bb/token") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        const { challenge, nonce } = JSON.parse(body);
+        const ok = challenge === "c0ffee.1.8.5a" && createHash("sha256").update(`${challenge}:${nonce}`).digest()[0] === 0;
+        if (!ok) return res.writeHead(400).end();
+        TOKENS += 1;
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ token: `visitor-${TOKENS}`, expiresAt: "2099-01-01T00:00:00Z" }));
+      });
+      return;
+    }
+    if (path === "/api/v1/d/bb/chat") {
+      // T-4653: every question carries the token the worker's proof earned; the newest alone holds.
+      if (req.headers["x-jc-visitor"] !== `visitor-${TOKENS}`) return res.writeHead(401, { "Content-Type": "application/json" }).end("{}");
+      return SLOW ? slow(res) : sse(res);
+    }
     res.writeHead(404).end();
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
@@ -306,6 +330,19 @@ test("fixed mode ignores the browser, and languageToggle false hides the toggle"
   await expect(page.locator(".jc-langs")).toHaveCount(0);
   // Without the toggle the en-US browser still picks English.
   await expect(page.locator("#jc-question")).toHaveAttribute("placeholder", "Type your question");
+});
+
+test("a token the service forgot is earned again once, and the question is answered (T-4653)", async ({ page }) => {
+  WIDGET = undefined;
+  await page.goto(`${base}/d/bb?lang=en`);
+  await expect.poll(() => TOKENS, { message: "the worker earned a token on open" }).toBeGreaterThan(0);
+  const before = TOKENS;
+  TOKENS += 1; // a restart: the token the page holds is no longer known
+  await page.locator("#jc-question").fill("When is the client centre open?");
+  await page.locator("#jc-question").press("Enter");
+  await expect(page.locator(".jc-answer-tools")).toBeVisible();
+  expect(TOKENS, "one new token, after the 401").toBe(before + 2);
+  await expect(page.locator(".jc-error")).toHaveCount(0);
 });
 
 test("a streamed answer is formatted while it streams, never raw markers, and ends as it streamed (T-4649)", async ({ page }) => {
