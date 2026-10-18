@@ -1,11 +1,12 @@
-//! The importance order and the readable names of NGSI-LD attributes (T-4661, T-4650).
+//! The importance order and the readable names of NGSI-LD attributes by their names alone
+//! (T-4661, T-4650): the fallback of [`crate::display_order`] (DM-98, T-4672).
 //!
 //! One table, `data/field-order.json`, says in which order a person reads an entity's
 //! attributes (name, main time, values, category, place, link, the rest, the record's
-//! metadata, coordinates, identifier) and what each is called in a language. The CKAN
-//! publisher orders and labels DataStore fields from it, the assistant widget labels its table
-//! columns from it, and the CKAN theme keeps a byte copy for the map popup, so the three never
-//! drift. The enumeration names in the table are the theme's alone (the map popup).
+//! metadata, coordinates, identifier) and what each is called in a language. The data model
+//! says it first; this places what a type without a model class carries, and what a model
+//! lists without a rank, and labels what it does not name. The assistant widget reads the
+//! same file for its labels. The enumeration names are the CKAN theme's (its own copy).
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -144,22 +145,6 @@ mod tests {
                 assert!(TABLE.labels.contains_key(a), "{a} has no label");
             }
         }
-    }
-
-    /// The CKAN theme serves a byte copy (joinedcontext-deployment
-    /// charts/ckan/files/jc_theme/public__jc-field-order.json, whose test pins the same hash): a
-    /// change here lands there too, with both hashes.
-    #[test]
-    fn the_table_is_the_one_the_ckan_theme_copies() {
-        use sha2::{Digest, Sha256};
-        let hash: String = Sha256::digest(JSON.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        assert_eq!(
-            hash,
-            "4e949e7dc19acbe9d53a689f88ef07805d018a26791f7d52f631b925fa21c325"
-        );
     }
 
     #[test]
