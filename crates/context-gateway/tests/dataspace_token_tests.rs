@@ -21,7 +21,7 @@ use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;

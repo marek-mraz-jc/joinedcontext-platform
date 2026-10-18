@@ -498,7 +498,7 @@ fn accounts() -> ServiceAccounts {
         )
         .expect("the manifest");
     }
-    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
     let _ = std::fs::remove_dir_all(&dir);
     accounts_of(&repo)
 }

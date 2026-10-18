@@ -1,7 +1,7 @@
 //! A space's quality rules on every write through an Endpoint (DM-87..DM-93, ADR-N-046 2.5),
 //! and its model's slot constraints (DM-86).
 //!
-//! The constraints are `jcctl::model_schema`'s, the compilation the Portal's pipeline stage
+//! The constraints are `jc_manifest::model_schema`'s, the compilation the Portal's pipeline stage
 //! checks a record against: a write breaking one is refused as `quality-rule` naming the SHACL
 //! component and the attribute, never the value.
 //!
@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use jc_core::error::ProblemDetails;
 use jc_core::kinds::{QualityOutcome, QualityRule};
 use jc_core::quality::{mark, on_write, rejection, QUARANTINED_AT, QUARANTINE_RULES};
-use jcctl::model_schema::{ModelSchema, Problem};
+use jc_manifest::model_schema::{ModelSchema, Problem};
 use serde_json::{json, Map, Value};
 
 /// Every quality check, by space, type, rule and outcome (DM-93).

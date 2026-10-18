@@ -4,10 +4,10 @@
 //! the tests are about is the judgement in front of it: what is fetched, what is refused, and
 //! what a second run does when the peer has published something new.
 
-use jcctl::foreign_models::{
+use jc_manifest::foreign_models::{
     self, FetchError, Mirror, MirrorError, Outcome, SchemaApi, CONTEXT, EXAMPLE, LINKML,
 };
-use jcctl::loader::{RawManifest, Repository};
+use jc_manifest::loader::{RawManifest, Repository};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;

@@ -6,20 +6,23 @@ context-gateway | 16 | 17
 jc-app-sdk | 0 | 1
 jc-core | 19 | 19
 jc-dcat | 0 | 1
-jcctl | 14 | 15
+jc-manifest | 5 | 0
+jcctl | 9 | 15
 token-sidecar | 0 | 1
 wasm-host | 3 | 1
 # Workspace crate edges outside dev-dependencies; only ever removed. A new edge is red.
-# To go: assistant -> jcctl and context-gateway -> jcctl (a server on the CLI crate, T-4604).
 edge | agent-proxy -> jc-core
 edge | assistant -> agent-proxy
 edge | assistant -> jc-core
-edge | assistant -> jcctl
+# T-4604: the servers and the CLI share the manifest library instead of the servers linking jcctl.
+edge | assistant -> jc-manifest
 edge | context-gateway -> jc-core
 edge | context-gateway -> jc-dcat
-edge | context-gateway -> jcctl
+edge | context-gateway -> jc-manifest
 edge | functions -> jc-core
 edge | jc-dcat -> jc-core
+edge | jc-manifest -> jc-core
 edge | jcctl -> jc-core
+edge | jcctl -> jc-manifest
 edge | token-sidecar -> jc-core
 edge | wasm-host -> jc-core
