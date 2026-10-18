@@ -13,8 +13,8 @@ use crate::federation::{federations_of, Federations};
 use crate::mcp::server::{McpServer, McpServers};
 use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
-use crate::translators::view_mapping::ViewMapping;
 use crate::units::UnitRules;
+use crate::view_mapping::ViewMapping;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
     McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, Representation,

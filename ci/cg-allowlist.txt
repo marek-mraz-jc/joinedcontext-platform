@@ -97,4 +97,3 @@ gateway-format-call | context_gateway::handlers::files::zip_download | the zip e
 gateway-format-call | context_gateway::handlers::sta::sensorthings | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
 gateway-format-call | context_gateway::handlers::sta::sta_items | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
 gateway-format-call | context_gateway::handlers::sta::sta_series | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
-gateway-format-call | context_gateway::store::view_mappings | the load-time parse of a Mapping IR, reduced to a version check (ADR-N-051, T-4547)

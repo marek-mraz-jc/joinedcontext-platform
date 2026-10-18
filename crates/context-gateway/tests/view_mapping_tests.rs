@@ -4,7 +4,8 @@
 //! target model (`crates/antares-views/tests/views/views_mapped.rs` in Antares: the target-model
 //! answer, the filter in the source model, a non-invertible or unserved filter and a write
 //! refused, `pick`/`omit` and `attrs` of a computed slot). What is left in the gateway is the
-//! request-level case and the parser that decides which IR a gateway loads (T-4361).
+//! request-level case and the version check that decides which IR a gateway loads (T-4361,
+//! T-4547); every slot rule is the broker's, tested in Antares `antares-ops/src/mapping/tests.rs`.
 
 mod common;
 
@@ -17,7 +18,7 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
-use context_gateway::translators::view_mapping::{InvalidIr, ViewMapping};
+use context_gateway::view_mapping::{InvalidIr, ViewMapping};
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -185,57 +186,116 @@ fn an_ir_from_a_newer_model_tools_is_refused_rather_than_half_understood() {
 }
 
 #[test]
-fn a_slot_kind_this_gateway_does_not_run_is_refused() {
-    let refused = ViewMapping::parse(&json!({
-        "version": 2,
-        "sourceClass": "A",
-        "targetClass": "B",
-        "slots": [{ "target": "x", "source": "y", "kind": "join", "filterable": true }]
-    }));
-    assert!(
-        matches!(refused, Err(InvalidIr::Slot { index: 0, ref reason }) if reason.contains("join")),
-        "{refused:?}"
-    );
-}
-
-fn slot_of(target: &str, expression: Value) -> Value {
-    json!({ "target": target, "kind": "expr", "filterable": false, "expression": expression })
-}
-
-#[test]
-fn a_computed_slot_without_its_expression_is_refused_rather_than_served_empty() {
-    let refused = ViewMapping::parse(&json!({
-        "version": 2,
-        "sourceClass": "A",
-        "targetClass": "B",
-        "slots": [{ "target": "label", "kind": "expr", "filterable": false }]
-    }));
-    assert!(
-        matches!(refused, Err(InvalidIr::Slot { index: 0, ref reason })
-                 if reason.contains("no expression")),
-        "{refused:?}"
-    );
-}
-
-#[test]
-fn an_expression_node_this_gateway_does_not_evaluate_is_refused() {
-    for node in [
-        json!({ "call": "upper", "operand": { "slot": "a" } }),
-        json!({ "binary": "**", "left": { "slot": "a" }, "right": { "const": 2 } }),
-        json!({ "binary": "+", "left": { "slot": "a" } }),
-        json!({ "boolean": "xor", "operands": [] }),
-        json!({ "unary": "~", "operand": { "slot": "a" } }),
-        json!("a"),
-    ] {
-        let refused = ViewMapping::parse(&json!({
-            "version": 2,
-            "sourceClass": "A",
-            "targetClass": "B",
-            "slots": [slot_of("label", node.clone())]
-        }));
-        assert!(
-            matches!(refused, Err(InvalidIr::Slot { index: 0, .. })),
-            "{node} was accepted: {refused:?}"
+fn a_document_without_a_version_is_refused() {
+    for document in [json!([]), json!({}), json!({ "version": "2" })] {
+        assert_eq!(
+            ViewMapping::parse(&document),
+            Err(InvalidIr::Malformed),
+            "{document}"
         );
     }
+    assert!(ViewMapping::parse(&ir()).is_ok());
+}
+
+/// The slug of the Endpoint `repository` writes, as a manifest must spell one (base32).
+const LOADED: &str = "zt4qm7ge2xdv6ksb3ncf5arw2y";
+
+/// A repository whose Endpoint names a Mapping with its gateway IR at `version`.
+fn repository(version: u64) -> std::path::PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after the epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("gw-view-mapping-{version}-{now}"));
+    std::fs::create_dir_all(dir.join("mappings")).expect("create the repository");
+    let mut document = ir();
+    document["version"] = json!(version);
+    for (name, body) in [
+        (
+            "space.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\n\
+             metadata: { name: ovzdusie, namespace: banskabystrica }\n\
+             spec: { isSandbox: false, urnSegment: ovzdusie }\n"
+                .to_owned(),
+        ),
+        (
+            "endpoint.yaml",
+            format!(
+                "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\n\
+                 metadata: {{ name: air-sdm, namespace: banskabystrica }}\n\
+                 spec:\n  contextSpaceRef: ovzdusie\n  slug: {LOADED}\n  audience: public\n\
+                 \x20 enabledRepresentations: [\"ngsi-ld\"]\n\
+                 \x20 viewMappingRef: {{ kind: Mapping, name: air-to-sdm }}\n"
+            ),
+        ),
+        (
+            "mapping.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Mapping\n\
+             metadata: { name: air-to-sdm, namespace: banskabystrica }\n\
+             spec:\n  contextSpaceRef: ovzdusie\n\
+             \x20 source: { kind: DataModel, name: ovzdusie-air, version: \"1\" }\n\
+             \x20 target: { kind: DataModel, name: sdm-air, version: \"1\" }\n\
+             \x20 transformation: { class_derivations: {} }\n\
+             \x20 artifacts: { bloblang: mappings/air-to-sdm.blobl, gatewayIr: mappings/air-to-sdm.ir.json }\n\
+             \x20 tests: [{ input: examples/in.jsonld, expect: examples/out.jsonld }]\n"
+                .to_owned(),
+        ),
+        ("mappings/air-to-sdm.blobl", "root = this\n".to_owned()),
+        ("mappings/air-to-sdm.ir.json", document.to_string()),
+    ] {
+        std::fs::write(dir.join(name), body).expect("write a file");
+    }
+    dir
+}
+
+/// Everything the gateway logs while `run` runs.
+fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("a poisoned log"))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Log::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, run);
+    let text = String::from_utf8_lossy(&log.0.lock().expect("the log")).into_owned();
+    (out, text)
+}
+
+/// T-4547: the gateway checks the IR's version when the repository loads and hands the rest to
+/// the broker; an IR from a newer Model Tools is left out with the warning, and the Endpoint
+/// stays as the space's own, never the source model under the target's name.
+#[test]
+fn an_unknown_ir_version_leaves_the_mapping_out_with_a_warning_and_version_2_loads() {
+    let (loaded, log) = logged(|| context_gateway::store::load(&repository(3)));
+    let (endpoints, ..) = loaded.expect("the repository loads");
+    let endpoint = endpoints
+        .iter()
+        .find(|e| e.slug == LOADED)
+        .unwrap_or_else(|| panic!("the Endpoint stays: {log}"));
+    assert!(endpoint.view_mapping.is_none());
+    assert!(log.contains("version 3"), "{log}");
+    assert!(log.contains("not usable"), "{log}");
+
+    let (loaded, log) = logged(|| context_gateway::store::load(&repository(2)));
+    let (endpoints, ..) = loaded.expect("the repository loads");
+    let endpoint = endpoints
+        .iter()
+        .find(|e| e.slug == LOADED)
+        .expect("the Endpoint");
+    assert!(endpoint.view_mapping.is_some(), "{log}");
+    assert!(!log.contains("not usable"), "{log}");
 }
