@@ -1,64 +1,14 @@
-//! Text, language and passages out of HTML and PDF, and the indexer that stores them (T-3052).
+//! Text, language and passages out of HTML and text, and the indexer that stores them (T-3052);
+//! no PDF is read (T-4524).
 //!
-//! The PDF cases run the real PDFium the crate links (`KREUZBERG_PDFIUM_PREBUILT`, see
-//! crates/assistant/README.md); the indexer cases need `JC_ASSISTANT_TEST_DATABASE_URL` like the
-//! store tests and fail saying so when it is missing.
+//! The indexer cases need `JC_ASSISTANT_TEST_DATABASE_URL` like the store tests and fail saying
+//! so when it is missing.
 
 use assistant::crawl::Sink;
 use assistant::extract::{extract, Indexer, CHUNK_CHARS};
 use assistant::{project_scope, MIGRATOR};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
-
-/// A one-page PDF whose page shows `text` in Helvetica.
-fn pdf(text: &str) -> Vec<u8> {
-    pages(&[text])
-}
-
-/// A PDF whose page n shows `texts[n]` in Helvetica, with a correct cross-reference table.
-fn pages(texts: &[&str]) -> Vec<u8> {
-    let kids: Vec<String> = (0..texts.len())
-        .map(|n| format!("{} 0 R", 4 + 2 * n))
-        .collect();
-    let mut objects = vec![
-        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
-        format!(
-            "<< /Type /Pages /Kids [{}] /Count {} >>",
-            kids.join(" "),
-            texts.len()
-        ),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
-    ];
-    for (n, text) in texts.iter().enumerate() {
-        let stream = format!("BT /F1 18 Tf 72 720 Td ({text}) Tj ET");
-        objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * n));
-        objects.push(format!(
-            "<< /Length {} >>\nstream\n{stream}\nendstream",
-            stream.len()
-        ));
-    }
-    let mut out = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::new();
-    for (i, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
-    }
-    let xref = out.len();
-    out.extend_from_slice(
-        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-    );
-    for offset in offsets {
-        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
-    );
-    out
-}
 
 fn long_slovak_page() -> String {
     // Numbered, so every sentence is distinct and an overlap is visible.
@@ -71,7 +21,7 @@ fn long_slovak_page() -> String {
 #[tokio::test]
 async fn a_long_page_becomes_overlapping_passages_in_its_declared_language() {
     let html = long_slovak_page();
-    let extracted = extract(html.as_bytes(), "text/html", Some("sk"), 500)
+    let extracted = extract(html.as_bytes(), "text/html", Some("sk"))
         .await
         .expect("html extracts");
     assert_eq!(extracted.language.as_deref(), Some("sk"));
@@ -83,7 +33,7 @@ async fn a_long_page_becomes_overlapping_passages_in_its_declared_language() {
     assert!(extracted
         .passages
         .iter()
-        .all(|p| p.text.chars().count() <= CHUNK_CHARS && p.first_page.is_none()));
+        .all(|p| p.text.chars().count() <= CHUNK_CHARS));
     assert!(!extracted.truncated);
     // Overlap: the last whole sentence of one passage reappears in the next.
     let first = &extracted.passages[0].text;
@@ -110,71 +60,51 @@ async fn a_long_page_becomes_overlapping_passages_in_its_declared_language() {
 async fn an_undeclared_language_is_detected() {
     let html = "<html><body><p>Helsingin kaupunki avaa uusia pyöräteitä keskustan ja lähiöiden välille. \
                 Kaupunkipyörät ovat käytössä huhtikuusta lokakuuhun, ja asemia on yli kolmesataa.</p></body></html>";
-    let extracted = extract(html.as_bytes(), "text/html", None, 500)
+    let extracted = extract(html.as_bytes(), "text/html", None)
         .await
         .expect("html extracts");
     assert_eq!(extracted.language.as_deref(), Some("fi"));
     // A lang attribute that is not a two-letter code is ignored, not trusted.
-    let extracted = extract(html.as_bytes(), "text/html", Some("finnish"), 500)
+    let extracted = extract(html.as_bytes(), "text/html", Some("finnish"))
         .await
         .expect("html extracts");
     assert_eq!(extracted.language.as_deref(), Some("fi"));
 }
 
+/// T-4524: the build carries no PDF or office extractor, so a PDF handed to `extract` is an
+/// error a person can read, never text.
 #[tokio::test]
-async fn a_pdf_page_becomes_a_passage_that_knows_its_page() {
-    let bytes = pdf("Cultural events in Banska Bystrica this summer");
-    let extracted = extract(&bytes, "application/pdf", None, 500)
+async fn a_pdf_is_not_read() {
+    let err = extract(b"%PDF-1.4\n%%EOF\n", "application/pdf", None)
         .await
-        .expect("pdf extracts");
-    let all: String = extracted.passages.iter().map(|p| p.text.as_str()).collect();
-    assert!(
-        all.contains("Cultural events in Banska Bystrica"),
-        "{all:?}"
-    );
-    assert_eq!(extracted.passages[0].first_page, Some(1));
-    // `pdf.maxPages` 0: nothing of page 1 is kept.
-    let capped = extract(&bytes, "application/pdf", None, 0)
-        .await
-        .expect("pdf extracts");
-    assert!(capped.passages.is_empty() && capped.truncated);
-}
-
-/// T-3314: a PDF longer than `pdf.maxPages` keeps the passages of its first pages and says it
-/// was cut.
-#[tokio::test]
-async fn a_long_pdf_keeps_its_first_pages() {
-    let bytes = pages(&[
-        "Prva strana o doprave",
-        "Druha strana o skolach",
-        "Tretia strana o parkoch",
-    ]);
-    let extracted = extract(&bytes, "application/pdf", None, 2)
-        .await
-        .expect("pdf extracts");
-    let all: String = extracted.passages.iter().map(|p| p.text.as_str()).collect();
-    assert!(
-        all.contains("Prva strana") && all.contains("Druha strana"),
-        "{all:?}"
-    );
-    assert!(!all.contains("Tretia"), "{all:?}");
-    assert!(extracted.truncated);
-    let whole = extract(&bytes, "application/pdf", None, 3)
-        .await
-        .expect("pdf extracts");
-    assert!(!whole.truncated);
-}
-
-#[tokio::test]
-async fn something_that_is_not_what_it_claims_is_an_error_a_person_can_read() {
-    let err = extract(b"not a pdf at all", "application/pdf", None, 500)
-        .await
-        .expect_err("refused");
+        .expect_err("no PDF extractor");
     assert!(
         err.to_string()
             .starts_with("the text could not be read: application/pdf"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn csv_and_markdown_are_read_as_text() {
+    let csv = extract(
+        "obec;suma\nBanská Bystrica;1200\n".as_bytes(),
+        "text/csv",
+        Some("sk"),
+    )
+    .await
+    .expect("csv extracts");
+    let all: String = csv.passages.iter().map(|p| p.text.as_str()).collect();
+    assert!(all.contains("Banská Bystrica"), "{all:?}");
+    let md = extract(
+        "# Návod\n\nPrihláška sa podáva v podateľni.\n".as_bytes(),
+        "text/markdown",
+        Some("sk"),
+    )
+    .await
+    .expect("markdown extracts");
+    let all: String = md.passages.iter().map(|p| p.text.as_str()).collect();
+    assert!(all.contains("podateľni"), "{all:?}");
 }
 
 async fn database(test: &str) -> (PgPool, PgPool, String) {
@@ -215,17 +145,15 @@ async fn drop_database(admin: PgPool, pool: PgPool, name: &str) {
     .expect("drop");
 }
 
-/// A site with one page and one document of `project`, their ids.
-async fn rows(pool: &PgPool, project: &str) -> (i64, i64, i64) {
+/// A site with one page of `project`, their ids.
+async fn rows(pool: &PgPool, project: &str) -> (i64, i64) {
     let mut tx = project_scope(pool, project).await.expect("scope");
     let site: i64 = sqlx::query_scalar("INSERT INTO sites (organization, project, source, visibility) VALUES ('bb', $1, 'web', 'public') RETURNING id")
         .bind(project).fetch_one(&mut *tx).await.expect("site");
     let page: i64 = sqlx::query_scalar("INSERT INTO pages (site_id, project, url, depth) VALUES ($1, $2, 'https://bb.example/', 0) RETURNING id")
         .bind(site).bind(project).fetch_one(&mut *tx).await.expect("page");
-    let document: i64 = sqlx::query_scalar("INSERT INTO documents (site_id, project, page_id, url) VALUES ($1, $2, $3, 'https://bb.example/plan.pdf') RETURNING id")
-        .bind(site).bind(project).bind(page).fetch_one(&mut *tx).await.expect("document");
     tx.commit().await.expect("commit");
-    (site, page, document)
+    (site, page)
 }
 
 async fn chunks(
@@ -240,10 +168,10 @@ async fn chunks(
 }
 
 #[tokio::test]
-async fn the_indexer_replaces_a_pages_chunks_and_cites_a_pdfs_page() {
+async fn the_indexer_replaces_a_pages_chunks() {
     let (admin, pool, name) = database("indexer").await;
-    let (site, page, document) = rows(&pool, "banskabystrica").await;
-    let mut indexer = Indexer::new(pool.clone(), "banskabystrica", site, "public", 500);
+    let (site, page) = rows(&pool, "banskabystrica").await;
+    let mut indexer = Indexer::new(pool.clone(), "banskabystrica", site, "public");
 
     indexer
         .page(page, "https://bb.example/", Some("sk"), &long_slovak_page())
@@ -263,32 +191,9 @@ async fn the_indexer_replaces_a_pages_chunks_and_cites_a_pdfs_page() {
         .await;
     assert_eq!(chunks(&pool, "banskabystrica").await.len(), first.len());
 
-    indexer
-        .document(
-            document,
-            "https://bb.example/plan.pdf",
-            Some("application/pdf; charset=binary"),
-            &pdf("Zoning plan of the city"),
-        )
-        .await;
     let all = chunks(&pool, "banskabystrica").await;
-    let pdf_chunk = all
-        .iter()
-        .find(|c| c.1 == Some(document))
-        .expect("a document chunk");
-    assert_eq!(pdf_chunk.2, "https://bb.example/plan.pdf#page=1");
+    assert!(all.iter().all(|c| c.2 == "https://bb.example/"), "{all:?}");
     assert!(indexer.failures.is_empty(), "{:?}", indexer.failures);
-    assert_eq!(indexer.passages, first.len() * 2 + 1);
-
-    // Without a content type and with no .pdf in its address, nothing is guessed.
-    indexer
-        .document(document, "https://bb.example/download?id=7", None, b"%PDF")
-        .await;
-    assert_eq!(indexer.failures.len(), 1);
-    assert!(
-        indexer.failures[0].contains("named no content type"),
-        "{:?}",
-        indexer.failures
-    );
+    assert_eq!(indexer.passages, first.len() * 2);
     drop_database(admin, pool, &name).await;
 }

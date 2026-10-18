@@ -23,10 +23,6 @@ pub const MAX_PATTERN_LEN: usize = 256;
 pub const MAX_DEPTH: u8 = 10;
 /// The most pages one source may hold.
 pub const MAX_PAGES: u32 = 50_000;
-/// The largest PDF a source may fetch: 200 MiB.
-pub const MAX_PDF_BYTES: u64 = 200 * 1024 * 1024;
-/// The most pages of one PDF a source may extract.
-pub const MAX_PDF_PAGES: u32 = 2_000;
 /// The longest system prompt.
 pub const MAX_PROMPT_LEN: usize = 8_000;
 /// The longest greeting.
@@ -63,7 +59,7 @@ pub const MAX_SCOPE_PROJECTS: usize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceType {
-    /// Pages and the PDFs they link, crawled from `startUrls`.
+    /// Pages, crawled from `startUrls`; the documents they link are recorded, never read (T-4524).
     Website,
     /// The datasets of a `CkanInstance` of the project.
     Ckan,
@@ -73,7 +69,7 @@ pub enum SourceType {
     /// The platform's User Guide as jc-assistant ships it: one passage per section, its Portal
     /// paths pointing into the source's own project (AG-118).
     Guide,
-    /// Files an administrator uploads: PDF, DOCX, XLSX, CSV, Markdown or plain text (MF-51).
+    /// Files an administrator uploads: plain text, CSV or Markdown (MF-51, T-4524).
     Upload,
 }
 
@@ -88,48 +84,20 @@ pub enum Visibility {
     Internal,
 }
 
-/// Whether linked PDFs are read.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum PdfPolicyKind {
-    /// PDFs are fetched and their text is read.
-    #[default]
-    Include,
-    /// PDFs are skipped.
-    Exclude,
-}
+/// A field `KnowledgeSource` no longer has (T-4524): a manifest that still names it is refused
+/// with the reason, not with serde's bare "unknown field".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Removed;
 
-/// What the crawler does with PDFs, and how large one may be.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct PdfPolicy {
-    /// `include` (default) or `exclude`.
-    #[serde(default)]
-    pub policy: PdfPolicyKind,
-    /// The largest PDF read, in bytes; at most 200 MiB, default 50 MiB.
-    #[serde(default = "default_pdf_bytes")]
-    pub max_bytes: u64,
-    /// The most pages of one PDF read; at most 2,000, default 500.
-    #[serde(default = "default_pdf_pages")]
-    pub max_pages: u32,
-}
-
-impl Default for PdfPolicy {
-    fn default() -> Self {
-        Self {
-            policy: PdfPolicyKind::default(),
-            max_bytes: default_pdf_bytes(),
-            max_pages: default_pdf_pages(),
-        }
+impl<'de> Deserialize<'de> for Removed {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> std::result::Result<Self, D::Error> {
+        Err(serde::de::Error::custom(
+            "`pdf` and `offDomainDocuments` were removed: the assistant reads HTML and plain \
+             text only, no PDF or office documents (T-4524); delete the field",
+        ))
     }
 }
 
-fn default_pdf_bytes() -> u64 {
-    50 * 1024 * 1024
-}
-fn default_pdf_pages() -> u32 {
-    500
-}
 fn default_true() -> bool {
     true
 }
@@ -198,7 +166,7 @@ impl Default for UploadLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct KnowledgeSourceSpec {
-    /// `website` (pages and their PDFs), `ckan` (a catalogue's datasets), `catalogue` (the
+    /// `website` (pages), `ckan` (a catalogue's datasets), `catalogue` (the
     /// project's own Endpoints and the models of their spaces), `guide` (the platform's User
     /// Guide, AG-118) or `upload` (files an administrator uploads).
     pub source: SourceType,
@@ -236,13 +204,14 @@ pub struct KnowledgeSourceSpec {
     /// The most pages the source holds; 1 to 50,000, default 1,000.
     #[serde(default = "default_pages")]
     pub max_pages: u32,
-    /// What happens to linked PDFs.
-    #[serde(default)]
-    pub pdf: PdfPolicy,
-    /// Whether a document linked from another host is read; default false, so a source never
-    /// grows into somebody else's site.
-    #[serde(default)]
-    pub off_domain_documents: bool,
+    /// Removed (T-4524); naming it is refused with the reason.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub pdf: Option<Removed>,
+    /// Removed (T-4524); naming it is refused with the reason.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub off_domain_documents: Option<Removed>,
     /// When the source is read again, as five-field cron (`minute hour day month weekday`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
@@ -481,20 +450,6 @@ impl KnowledgeSourceSpec {
                 "maxPages",
                 self.max_pages.to_string(),
                 "maxPages is 1 to 50000",
-            ));
-        }
-        if !(1..=MAX_PDF_BYTES).contains(&self.pdf.max_bytes) {
-            return Err(name(
-                "pdf.maxBytes",
-                self.pdf.max_bytes.to_string(),
-                "pdf.maxBytes is 1 byte to 200 MiB (209715200)",
-            ));
-        }
-        if !(1..=MAX_PDF_PAGES).contains(&self.pdf.max_pages) {
-            return Err(name(
-                "pdf.maxPages",
-                self.pdf.max_pages.to_string(),
-                "pdf.maxPages is 1 to 2000",
             ));
         }
         if let Some(schedule) = &self.schedule {

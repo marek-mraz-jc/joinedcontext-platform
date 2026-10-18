@@ -837,7 +837,6 @@ async fn upload(
             jc_core::kinds::assistant::Visibility::Internal => "internal",
         },
         max_files: limits.max_files,
-        max_pdf_pages: spec.pdf.max_pages,
         language: match spec.languages.as_slice() {
             [one] => Some(one.as_str()),
             _ => None,

@@ -6,8 +6,7 @@
 use jc_core::error::Error;
 use jc_core::kinds::assistant::{SourceType, UploadLimits};
 use jc_core::kinds::{
-    AssistantDeployment, Channel, KnowledgeSource, PdfPolicyKind, ProviderRouting, ReasoningEffort,
-    Visibility,
+    AssistantDeployment, Channel, KnowledgeSource, ProviderRouting, ReasoningEffort, Visibility,
 };
 use jc_core::registry;
 
@@ -51,7 +50,6 @@ fn deployment_with(from: &str, to: &str) -> String {
 fn the_documented_examples_validate_and_round_trip() {
     let parsed = source(SOURCE).expect("the documented source");
     assert_eq!(parsed.spec.visibility, Visibility::Public);
-    assert_eq!(parsed.spec.pdf.policy, PdfPolicyKind::Include);
     let again: KnowledgeSource =
         serde_norway::from_str(&serde_norway::to_string(&parsed).expect("yaml")).expect("parse");
     assert_eq!(again, parsed);
@@ -89,13 +87,26 @@ fn a_minimal_source_takes_the_safe_defaults() {
         Visibility::Internal,
         "a source is internal until somebody says otherwise"
     );
-    assert!(!spec.off_domain_documents);
     assert!(spec.sitemap);
     assert_eq!((spec.max_depth, spec.max_pages), (3, 1_000));
-    assert_eq!(
-        (spec.pdf.max_bytes, spec.pdf.max_pages),
-        (50 * 1024 * 1024, 500)
-    );
+}
+
+/// T-4524: the assistant reads no PDF or office document, so a manifest that still names the
+/// removed `pdf` or `offDomainDocuments` is refused with the reason, not a bare unknown field.
+#[test]
+fn a_source_naming_the_removed_pdf_settings_is_refused_with_the_reason() {
+    for removed in [
+        "  pdf: { policy: include, maxBytes: 52428800, maxPages: 500 }\n",
+        "  pdf: { maxPages: 500 }\n",
+        "  offDomainDocuments: false\n",
+    ] {
+        let yaml = source_with("  maxDepth: 3\n", &format!("  maxDepth: 3\n{removed}"));
+        let refused = refused(source(&yaml));
+        assert!(
+            refused.contains("were removed") && refused.contains("T-4524"),
+            "{removed}: {refused}"
+        );
+    }
 }
 
 #[test]
@@ -129,8 +140,6 @@ fn a_source_is_refused_with_the_field_to_change() {
         ("maxDepth: 3", "maxDepth: 0", "maxDepth"),
         ("maxDepth: 3", "maxDepth: 11", "maxDepth"),
         ("maxPages: 2000", "maxPages: 50001", "maxPages"),
-        ("maxBytes: 52428800", "maxBytes: 209715201", "pdf.maxBytes"),
-        ("maxPages: 500 }", "maxPages: 2001 }", "pdf.maxPages"),
         (
             "schedule: \"0 3 * * *\"",
             "schedule: \"every night\"",

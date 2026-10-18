@@ -349,13 +349,7 @@ pub async fn work_one(
         jc_core::kinds::assistant::Visibility::Public => "public",
         jc_core::kinds::assistant::Visibility::Internal => "internal",
     };
-    let mut indexer = Indexer::new(
-        pool.clone(),
-        &source.project,
-        site,
-        visibility,
-        source.spec.pdf.max_pages,
-    );
+    let mut indexer = Indexer::new(pool.clone(), &source.project, site, visibility);
     let outcome = match source.spec.source {
         SourceType::Website => crawl_site(
             pool,
@@ -369,8 +363,8 @@ pub async fn work_one(
         .await
         .map(|report| {
             format!(
-                "{} pages fetched, {} unchanged, {} documents",
-                report.pages_fetched, report.pages_unchanged, report.documents_fetched
+                "{} pages fetched, {} unchanged, {} documents skipped",
+                report.pages_fetched, report.pages_unchanged, report.documents_skipped
             )
         }),
         SourceType::Ckan => match &source.ckan_url {

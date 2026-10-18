@@ -38,7 +38,6 @@ impl Sink for Pages {
     async fn page(&mut self, _id: i64, url: &str, _language: Option<&str>, html: &str) {
         self.0.push((url.to_owned(), html.to_owned()));
     }
-    async fn document(&mut self, _id: i64, _url: &str, _mime: Option<&str>, _bytes: &[u8]) {}
 }
 
 fn dataset(name: &str, modified: &str) -> Value {

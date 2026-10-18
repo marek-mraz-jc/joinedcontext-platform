@@ -68,7 +68,7 @@ async fn every_project_finds_the_catalogue_page_that_answers_its_question() {
         .await
         .expect("page");
         tx.commit().await.expect("commit");
-        let mut indexer = Indexer::new(pool.clone(), &project, site, "public", 1);
+        let mut indexer = Indexer::new(pool.clone(), &project, site, "public");
         indexer.page(page_id, &url, lang, &text(page, "html")).await;
         assert!(indexer.failures.is_empty(), "{url}: {:?}", indexer.failures);
     }

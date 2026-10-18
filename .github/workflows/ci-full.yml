@@ -18,9 +18,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with: { targets: wasm32-wasip2 }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
-      # otherwise fetch the newest release unchecked (T-3052).
-      - run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
       # The assistant's embedding model and the ONNX Runtime it runs on, both pinned and checked
       # (T-3053): the embedder and retrieval eval suites load them.
       - run: >-
