@@ -938,10 +938,13 @@ pub struct AssistantDeploymentSpec {
     /// How the chat picks its language and whether it shows the toggle (T-4343).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget: Option<ChatWidget>,
-    /// How long each turn of a conversation is kept, `P{n}D` with `n` 0 to 365; `P30D` when
-    /// absent, `P0D` keeps none (AG-99, T-4670).
+    /// How long each turn of a conversation is kept, `P{n}D` with `n` 0 to 365; `P90D` when
+    /// absent, `P0D` keeps none (AG-99, T-4670, T-4681).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_retention: Option<String>,
+    /// What is masked in a turn before it is stored; `secrets` when absent (AG-99, T-4681).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_redaction: Option<TranscriptRedaction>,
     /// Whom a visitor asks about their data (T-4670).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Privacy>,
@@ -960,8 +963,19 @@ pub struct Privacy {
     pub documents_url: Option<String>,
 }
 
-/// The days a turn is kept when `transcriptRetention` is absent (AG-99).
-pub const TRANSCRIPT_DAYS: u32 = 30;
+/// What a stored turn has masked (AG-99, T-4681).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptRedaction {
+    /// Access tokens, API keys, passwords, private keys and card numbers; the rest verbatim.
+    #[default]
+    Secrets,
+    /// Those and e-mail addresses, phone numbers, IBANs and birth numbers.
+    Personal,
+}
+
+/// The days a turn is kept when `transcriptRetention` is absent (AG-99, T-4681).
+pub const TRANSCRIPT_DAYS: u32 = 90;
 /// The most days `transcriptRetention` may name.
 pub const MAX_TRANSCRIPT_DAYS: u32 = 365;
 
@@ -2226,8 +2240,16 @@ mod deployment_spec_tests {
     }
 
     #[test]
-    fn transcripts_keep_thirty_days_unless_told_and_privacy_names_a_real_address() {
-        assert_eq!(with(|_| {}).transcript_days(), TRANSCRIPT_DAYS);
+    fn transcripts_keep_ninety_days_unless_told_and_privacy_names_a_real_address() {
+        assert_eq!(with(|_| {}).transcript_days(), 90);
+        assert_eq!(
+            with(|_| {}).transcript_redaction.unwrap_or_default(),
+            TranscriptRedaction::Secrets
+        );
+        assert_eq!(
+            with(|s| s["transcriptRedaction"] = json!("personal")).transcript_redaction,
+            Some(TranscriptRedaction::Personal)
+        );
         for (value, days) in [("P0D", 0), ("P7D", 7), ("P365D", 365)] {
             let spec = with(|s| s["transcriptRetention"] = json!(value));
             assert!(spec.privacy_fields().is_ok(), "{value}");

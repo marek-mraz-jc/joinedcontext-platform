@@ -1086,6 +1086,7 @@ mod tests {
             provider: None,
             reasoning: None,
             finish: None,
+            ..Default::default()
         };
         Spent::default().add(&completion);
         let so_far = std::sync::Arc::new(std::sync::Mutex::new(Spent::default()));
