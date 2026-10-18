@@ -1187,6 +1187,53 @@ async fn searched(ask: &Ask<'_>, events: &Sender<Event>, query: &str) -> Option<
     hits
 }
 
+/// The router call beside the question's first search round (T-4293), and whether the route is
+/// `direct`. A direct message drops the round (T-4655): its search is stopped, its passages never
+/// reach the answer, and the widget is shown no step of it, which is why the round searches
+/// quietly and its step is shown here, once the route needs it.
+async fn route_beside_search(
+    q: Question<'_, '_>,
+    spent: &Spent,
+    (router, judge): (&Call<'_>, &Call<'_>),
+    messages: &[Value],
+    live: &[Shown],
+    reserve: u64,
+) -> (
+    (Result<Completion, CallError>, Duration),
+    (Option<Vec<Hit>>, Duration, Judged),
+    bool,
+) {
+    let ask = q.ask;
+    let route = async {
+        let at = Instant::now();
+        let reply = ask
+            .model
+            .ask(ask.deployment, ask.tokens_per_day, router, messages)
+            .await;
+        (reply, at.elapsed())
+    };
+    let search = search_first(q, spent, judge, reserve);
+    tokio::pin!(route, search);
+    let mut first = None;
+    let routed = tokio::select! {
+        out = &mut route => out,
+        out = &mut search => {
+            first = Some(out);
+            (&mut route).await
+        }
+    };
+    let direct = matches!(&routed.0, Ok(reply) if routing(&reply.text, q.question, live).direct);
+    let first = match first {
+        Some(out) => out,
+        None if direct => (None, Duration::ZERO, None),
+        None => search.await,
+    };
+    if !direct {
+        search_steps(q.events, q.question, first.0.is_some()).await;
+    }
+    (routed, first, direct)
+}
+
 /// The steps of a search that already ran, as `searched` shows them while it runs.
 async fn search_steps(events: &Sender<Event>, query: &str, found: bool) {
     let tool = |status| Event::Tool {
@@ -1323,39 +1370,8 @@ pub async fn answer(
     // (T-4293): the first round costs no wait of its own, and when it covers the question the
     // router's queries only add to it. The judgement keeps room for the router's own call.
     let reserve = tokens_of(&messages) + ROUTER_TOKENS;
-    let route = async {
-        let at = Instant::now();
-        let reply = ask
-            .model
-            .ask(ask.deployment, ask.tokens_per_day, &router, &messages)
-            .await;
-        (reply, at.elapsed())
-    };
-    // A message that needs nothing the city publishes drops the first round when the route says
-    // so (T-4655): its search is stopped, its passages never reach the answer, and the widget is
-    // shown no step of it, which is why the round searches quietly and its step is shown here.
-    let ((routed, route_took), (first_hits, first_took, judged), direct) = {
-        let search = search_first(q, &spent, &judge, reserve);
-        tokio::pin!(route, search);
-        let mut first = None;
-        let routed = tokio::select! {
-            out = &mut route => out,
-            out = &mut search => {
-                first = Some(out);
-                (&mut route).await
-            }
-        };
-        let direct = matches!(&routed.0, Ok(reply) if routing(&reply.text, question, &live).direct);
-        let first = match first {
-            Some(out) => out,
-            None if direct => (None, Duration::ZERO, None),
-            None => search.await,
-        };
-        (routed, first, direct)
-    };
-    if !direct {
-        search_steps(events, question, first_hits.is_some()).await;
-    }
+    let ((routed, route_took), (first_hits, first_took, judged), direct) =
+        route_beside_search(q, &spent, (&router, &judge), &messages, &live, reserve).await;
     spent.stages.route = Some(millis(route_took));
     spent.stages.search = (!direct).then(|| millis(first_took));
     let first_covers = first_hits.as_deref().is_some_and(covers);
