@@ -383,3 +383,72 @@ test("a streamed answer is formatted while it streams, never raw markers, and en
   const last = frames[frames.length - 1].html.replace(/<sup class="jc-cite"><\/sup>/g, "");
   expect(last, "the last streamed frame is the final answer without its markers").toBe(settled);
 });
+
+test("the panel expands to the window and back: button, Escape, focus kept, the page held still (T-4658)", async ({ page }) => {
+  WIDGET = undefined;
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${base}/host`);
+  // A message that is not our frame's, from the page itself and from a frame of another origin.
+  await page.evaluate((other) => {
+    const foreign = document.createElement("iframe");
+    foreign.src = other + "/d/bb/widget";
+    document.body.prepend(foreign);
+  }, base.replace("127.0.0.1", "localhost"));
+  const panel = page.locator("[data-jc-assistant] .jc-panel");
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  const chat = page.frameLocator("[data-jc-assistant] iframe");
+  const size = chat.locator(".jc-size");
+  await expect(size).toHaveAttribute("aria-label", "Expand");
+  await page.evaluate(() => window.postMessage({ type: "jc-assistant-size", size: "full" }, "*"));
+  await page.frames().find((f) => f.url().startsWith("http://localhost")).evaluate(() =>
+    window.parent.postMessage({ type: "jc-assistant-size", size: "full" }, "*"));
+  await page.waitForTimeout(200);
+  await expect(panel).not.toHaveClass(/jc-full/);
+
+  await size.click();
+  await expect(panel).toHaveClass(/jc-full/);
+  await expect(size).toHaveAttribute("aria-label", "Collapse");
+  await expect(size).toHaveAttribute("aria-pressed", "true");
+  const box = await panel.boundingBox();
+  expect(box.width).toBe(960);
+  expect(Math.round(box.x)).toBe(160);
+  expect(box.y).toBe(20);
+  expect(box.height).toBe(760);
+  await expect(page.locator("[data-jc-assistant] .jc-launch")).toBeHidden();
+  // The page behind is inert and does not scroll.
+  expect(await page.evaluate(() => [document.querySelector("p").inert, document.documentElement.style.overflow])).toEqual([true, "hidden"]);
+  // Focus stays in the chat: Tab from its last control does not reach the page.
+  await chat.locator("textarea").focus();
+  for (let i = 0; i < 12; i++) await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement && document.activeElement.hasAttribute("data-jc-assistant"))).toBe(true);
+  // The state survives a reload of the frame in this tab.
+  expect(await page.frames().find((f) => f.url().includes("127.0.0.1") && f.url().includes("/widget")).evaluate(() =>
+    sessionStorage.getItem("jc-chat-size:bb"))).toBe("full");
+
+  // Escape collapses first, then closes.
+  await chat.locator("textarea").press("Escape");
+  await expect(panel).not.toHaveClass(/jc-full/);
+  await expect(panel).toBeVisible();
+  expect((await panel.boundingBox()).width).toBe(420);
+  expect(await page.evaluate(() => [document.querySelector("p").inert, document.documentElement.style.overflow])).toEqual([false, ""]);
+  await expect(size).toHaveAttribute("aria-label", "Expand");
+  await chat.locator("textarea").press("Escape");
+  await expect(panel).toBeHidden();
+
+  // Opened again expanded by the button and collapsed by it.
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  await size.click();
+  await expect(panel).toHaveClass(/jc-full/);
+  await size.click();
+  await expect(panel).not.toHaveClass(/jc-full/);
+});
+
+test("on a phone the panel already fills the screen and offers no expand button (T-4658)", async ({ page }) => {
+  WIDGET = undefined;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${base}/host`);
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  const chat = page.frameLocator("[data-jc-assistant] iframe");
+  await expect(chat.locator(".jc-close")).toBeVisible();
+  await expect(chat.locator(".jc-size")).toHaveCount(0);
+});

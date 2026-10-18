@@ -213,6 +213,11 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   .jc-more { padding: 14px 12px; margin: -14px -8px; }
   .jc-notice { margin-bottom: 8px; }
 }
+/* With the expand button (T-4658, never on a phone) four controls share a 420 px header: 34 px
+   targets and a slimmer toggle keep the name whole. */
+.jc-actions:has(.jc-size) { gap: 2px; }
+.jc-actions:has(.jc-size) .jc-icon-button { min-width: 34px; min-height: 36px; }
+.jc-actions:has(.jc-size) .jc-langs button { min-width: 34px; min-height: 32px; padding: 0 8px; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
 }
