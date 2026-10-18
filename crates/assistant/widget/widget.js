@@ -767,7 +767,8 @@
         item.staged = true;
       }
     } else if (name === "tool" && data.status === "started" && item.status && !item.staged) {
-      item.status.textContent = w.reading + " " + (data.endpoint || data.name) + "…";
+      // A visitor's stream names no Endpoint (T-4654), and a tool's own name is no word for them.
+      item.status.textContent = w.reading + (data.endpoint ? " " + data.endpoint : "") + "…";
     } else if (name === "script") {
       var details = el("details", "jc-script");
       details.appendChild(el("summary", "", w.script));
@@ -919,8 +920,11 @@
 
   function closePanel() {
     // The launcher on the host page closes the panel and puts focus back on its button; the
-    // message carries no data.
-    if (embedded) window.parent.postMessage({ type: "jc-assistant-close" }, "*");
+    // message carries no data and goes to the framing page's origin alone (T-4654).
+    if (!embedded) return;
+    JCRender.closeTargets(location.ancestorOrigins, config.frameOrigins).forEach(function (origin) {
+      window.parent.postMessage({ type: "jc-assistant-close" }, origin);
+    });
   }
 
   form.addEventListener("submit", function (event) {

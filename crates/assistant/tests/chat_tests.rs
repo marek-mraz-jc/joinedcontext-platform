@@ -1751,6 +1751,13 @@ async fn the_portal_asks_an_internal_assistant_as_the_person() {
             .any(|(n, d)| n == "tool" && d["endpoint"] == "interne" && d["status"] == "done"),
         "{events:?}"
     );
+    // T-4654: a signed-in person's stream keeps what the answer spent, which a visitor's leaves out.
+    let (_, done) = events.last().expect("a done event");
+    assert_eq!(done["modelCalls"], 3, "{done}");
+    assert!(
+        done["tokensIn"].as_u64().is_some_and(|n| n > 0) && done["providers"].is_object(),
+        "{done}"
+    );
     let (_, citations) = events
         .iter()
         .find(|(n, _)| n == "citations")
@@ -2097,12 +2104,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(citations[0]["url"], first);
 
     let done = &events[15].1;
-    assert_eq!(done["tokensIn"], 120 + 900);
-    assert_eq!(done["tokensOut"], 10 + 40);
-    assert_eq!(done["tokens"], 130 + 940);
-    assert_eq!(done["modelCalls"], 2);
-    assert_eq!(done["judgeSkipped"], true);
-    assert_eq!(done["providers"], json!({}), "no reply named its provider");
+    without_internals(done);
     assert_eq!(done["cached"], false);
     assert!(done["firstTokenMs"].as_u64().is_some() && done["totalMs"].as_u64().is_some());
 
@@ -2122,8 +2124,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(again[1].1["text"], answer);
     assert_eq!(again[2].1, events[13].1);
     assert_eq!(again[3].1["cached"], true);
-    assert_eq!(again[3].1["tokensIn"], 0);
-    assert_eq!(again[3].1["modelCalls"], 0);
+    without_internals(&again[3].1);
     // The skip is counted, so the eval shows how often the judgement is saved (T-4360).
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
@@ -2141,6 +2142,24 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
 /// A row of `answer_timings`: deployment, cached, model calls, then the first token, the total
 /// and the route, search, judge and answer stages in milliseconds, whether the judgement was
 /// skipped.
+/// T-4654: what an anonymous visitor's `done` leaves out; the usage and the timings keep it.
+const INTERNALS: [&str; 8] = [
+    "tokens",
+    "tokensIn",
+    "tokensOut",
+    "modelCalls",
+    "judgeSkipped",
+    "providers",
+    "reasoningTokens",
+    "costUsd",
+];
+
+fn without_internals(done: &Value) {
+    for key in INTERNALS {
+        assert!(done.get(key).is_none(), "{key} reached a visitor: {done}");
+    }
+}
+
 type Timing = (
     String,
     bool,
@@ -2212,17 +2231,9 @@ async fn the_first_round_is_judged_while_the_router_runs_and_its_times_are_kept(
         stages["search"].as_u64().is_some() && stages["answer"].as_u64().is_some(),
         "{done}"
     );
-    assert_eq!(done["modelCalls"], 3);
-    // T-4360: the provider that served each stage and the reasoning tokens it spent.
-    assert_eq!(done["judgeSkipped"], false);
-    assert_eq!(
-        done["providers"],
-        json!({"route": "Google Vertex", "judge": "Groq", "answer": "DeepInfra"})
-    );
-    assert_eq!(
-        done["reasoningTokens"],
-        json!({"route": 6, "judge": 6, "answer": 0})
-    );
+    // T-4360: the provider that served each stage and the reasoning tokens it spent are kept in
+    // the timings below; a visitor's stream carries neither (T-4654).
+    without_internals(done);
     // The judgement reads the passages' text as data, from this deployment's sources only.
     let calls = model_calls(&w.proxy).await;
     // T-4360: a deployment without `model` asks for OpenRouter's fastest provider, with fallbacks,
@@ -2558,9 +2569,9 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
     .await;
     let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
     assert_eq!(status, StatusCode::OK);
-    // T-4178: the answer reports what its calls cost, for the eval's cost per answer.
+    // T-4178, T-4654: the day's cost is kept below; a visitor's stream does not carry it.
     let done = &first.last().expect("a done event").1;
-    assert_eq!(done["costUsd"], json!(0.012), "{first:?}");
+    without_internals(done);
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
         .expect("scope");
@@ -2597,8 +2608,7 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
             .is_some_and(|u| u.starts_with("http")));
         assert!(answer.contains(&format!("[{}]", at + 1)), "{answer}");
     }
-    assert_eq!(events[3].1["modelCalls"], 0);
-    assert_eq!(events[3].1["costUsd"], json!(0.0), "no call, no cost");
+    without_internals(&events[3].1);
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         before,
@@ -2715,10 +2725,11 @@ async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4178: a provider that reports no cost leaves `costUsd` out of `done`, so a sum that misses
-/// a call never reads as the answer's price.
+/// T-4654: a visitor's `done` carries the timings and nothing the answer spent, so a page cannot
+/// read the deployment's cost, tokens or providers off the stream. (A signed-in stream keeps them,
+/// and a cost a provider did not report stays out of it, T-4178: `chat::tests` in the crate.)
 #[tokio::test]
-async fn an_answer_whose_cost_was_not_reported_has_no_cost_in_done() {
+async fn a_visitor_s_done_carries_timings_and_nothing_the_answer_spent() {
     let w = world("chatnocost", deployment(Channel::Public, 1_000_000, 10)).await;
     script(
         &w.proxy,
@@ -2733,8 +2744,11 @@ async fn an_answer_whose_cost_was_not_reported_has_no_cost_in_done() {
     assert_eq!(status, StatusCode::OK);
     let (name, done) = events.last().expect("a done event");
     assert_eq!(name, "done");
-    assert_eq!(done["tokensIn"], 40, "{events:?}");
-    assert!(done.get("costUsd").is_none(), "{done}");
+    without_internals(done);
+    assert!(
+        done["totalMs"].as_u64().is_some() && done["stagesMs"].is_object(),
+        "{done}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
