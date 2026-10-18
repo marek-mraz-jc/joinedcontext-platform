@@ -3375,6 +3375,56 @@ async fn a_deployments_max_data_steps_ends_its_loop() {
     let answers = calls_of(&all, None);
     assert_eq!(answers.len(), 2);
     assert_eq!(answers[1]["tool_choice"], "none");
+    // T-4651: the rules name the deployment's two steps, the model reads what is left before the
+    // call, and the visitor never sees that line.
+    let first = answers[0]["messages"].to_string();
+    assert!(first.contains("At most 2 tool calls"), "{first}");
+    assert!(
+        first.contains("Budget: 1 of 2 tool steps")
+            && first.contains("Prepare the final answer now"),
+        "{first}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|(_, d)| d.to_string().contains("Budget:")),
+        "{events:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4651: a question whose loop spent its tokens answers with what it has: the call after the
+/// costly step is told to answer and offered no tool, though steps and seconds are left.
+#[tokio::test]
+async fn a_question_that_spent_its_tokens_answers_from_what_it_has() {
+    let mut d = deployment(Channel::Public, 500_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chattokens", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let read = json!({"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":1}"}});
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [read]}), assistant::chat::data::QUESTION_TOKENS),
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [1]."}), 1_000),
+    ]).await;
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Ako sa mení NO2?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "answer" && d["text"] == "NO2 je 21 [1]."),
+        "{events:?}"
+    );
+    let all = model_calls(&w.proxy).await;
+    let answers = calls_of(&all, None);
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[1]["tool_choice"], "none");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 

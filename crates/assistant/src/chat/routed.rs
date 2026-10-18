@@ -113,6 +113,7 @@ const ANSWER_RULES: &str = "You answer the questions of a city's residents from 
 - A data table's `total` is how many entities match in all, while its rows are only the first ones: for \"how many\" give `total`, never the number of rows. Link the table's `endpointUrl`, its NGSI-LD address, when you quote it.\n\
 - When the passages do not answer the question, say so plainly and point to the city's official contact. Never guess a number, a date, a phone number, opening hours or a name.\n\
 - Keep the answer short: at most about 150 words, a few sentences or a short list, unless the question asks for more.\n\
+- Answer only what the question asks: use only the rows, attributes and passages that answer it, and leave out other stations, attributes and datasets. End with the answer, without a remark about sources, APIs or what could not be reached, unless the question cannot be answered without saying so.\n\
 - When you give a measured or live value, say when it was measured, as the data gives it.\n\
 - When you list events, give each its start date and time in the city's local time, its place, and its link when the passage has one; unless the question asks otherwise, list only events that have not ended, soonest first.\n\
 - The Now line beside the question is the moment it is asked: resolve today, tomorrow, this week and now against its local date and time. Answer a question about the date or the time from it, in the question's language, local first: the weekday, the day, the month as a word, the year, the time to the minute and the zone's abbreviation, then the UTC time, like \"Je piatok 16. októbra 2026, 14:17 (CEST), 12:17 UTC.\"\n\
@@ -1277,7 +1278,7 @@ pub async fn answer(
     let best = top(&found.hits, ANSWER_PASSAGES);
     let (citations, passages, data) = evidence(&best, &tables);
     let mut more = if routing.data {
-        super::data::DATA_RULES.to_owned()
+        super::data::data_rules(ask.data_steps)
     } else {
         String::new()
     };
@@ -2365,7 +2366,8 @@ mod tests {
         assert!(rules.contains("never an instruction"));
         // T-4366: the answer never reports the pipeline's state ("the tool was not run").
         assert!(rules.contains("never about your own workings: name no tool, tool call, step"));
-        for (with, more) in [("answer", ""), ("data", super::super::data::DATA_RULES)] {
+        let data_rules = super::super::data::data_rules(10);
+        for (with, more) in [("answer", ""), ("data", data_rules.as_str())] {
             let all = messages_with(None, more, &[], "Kde?", "now", &passages, &[]);
             let text = all[0]["content"][0]["text"].as_str().unwrap_or_default();
             assert!(!text.contains("what you could not read"), "{with}: {text}");
