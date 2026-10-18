@@ -666,6 +666,17 @@ pub async fn protected_resource(
 mod tests {
     use super::*;
 
+    /// EP-122, MF-57: the organization's built-in server selects everything an organization
+    /// member reads and attaches no knowledge sources, so it lists no `search_documents`.
+    #[test]
+    fn org_all_is_an_organization_server_with_no_knowledge_sources() {
+        let all = McpServer::org_all();
+        assert_eq!((all.project.as_str(), all.name.as_str()), ("org", ORG_ALL));
+        assert_eq!(all.audience, Audience::Organization);
+        assert_eq!(all.select, Some(Select::default()));
+        assert!(all.members.is_empty() && all.knowledge_sources.is_empty());
+    }
+
     fn server(audience: Audience) -> McpServer {
         McpServer {
             project: "helsinki".into(),
