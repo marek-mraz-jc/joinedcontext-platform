@@ -170,6 +170,8 @@ pub struct Ask<'a> {
     /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
     /// `answer.routes` is `data`.
     pub sources: &'a [(String, Vec<String>)],
+    /// The sources above that crawl a website, `{project}/{source}` ([`crate::website_sources`]).
+    pub websites: &'a [String],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,
