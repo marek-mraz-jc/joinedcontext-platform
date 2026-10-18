@@ -73,6 +73,12 @@ pub struct Config {
     /// client *id* is not a secret and stays readable, because a log that cannot say which client
     /// was refused is no use to an operator.
     pub oidc_client: Option<(String, Credential)>,
+    /// The key the anonymous OAuth server signs with (`JC_GATEWAY_OAUTH_KEY`, from a `secretRef`,
+    /// at least 32 bytes, ADR-N-052 §2.2.6); absent serves no `/oauth/*`. It needs `public_url`.
+    pub oauth_key: Option<jc_core::Secret>,
+    /// The hosts that server redirects to (`JC_GATEWAY_OAUTH_REDIRECT_HOSTS`, comma-separated,
+    /// default [`crate::oauth::DEFAULT_REDIRECT_HOSTS`], ADR-N-052 §2.3).
+    pub oauth_redirect_hosts: Vec<String>,
     /// The gateway's own public base URL (`JC_GATEWAY_PUBLIC_URL`), which makes the full
     /// RFC 8707 resource URI an acceptable token audience alongside the endpoint slug.
     pub public_url: Option<String>,
@@ -214,7 +220,37 @@ impl Config {
             _ => crate::app::WRITE_BUDGET_MIB,
         };
 
+        let public_url = std::env::var("JC_GATEWAY_PUBLIC_URL")
+            .ok()
+            .map(|url| url.trim_end_matches('/').to_owned())
+            .filter(|url| !url.is_empty());
+        let oauth_key = non_empty("JC_GATEWAY_OAUTH_KEY").map(jc_core::Secret::new);
+        if let Some(key) = &oauth_key {
+            if key.expose().len() < crate::oauth::MIN_KEY_BYTES {
+                return Err(ConfigError::Invalid {
+                    name: "JC_GATEWAY_OAUTH_KEY",
+                    reason: format!("needs at least {} bytes", crate::oauth::MIN_KEY_BYTES),
+                });
+            }
+            if public_url.is_none() {
+                return Err(ConfigError::Missing("JC_GATEWAY_PUBLIC_URL"));
+            }
+        }
+        let oauth_redirect_hosts = match non_empty("JC_GATEWAY_OAUTH_REDIRECT_HOSTS") {
+            Some(hosts) => hosts
+                .split(',')
+                .map(|host| host.trim().to_ascii_lowercase())
+                .filter(|host| !host.is_empty())
+                .collect(),
+            None => crate::oauth::DEFAULT_REDIRECT_HOSTS
+                .iter()
+                .map(|host| (*host).to_owned())
+                .collect(),
+        };
+
         Ok(Self {
+            oauth_key,
+            oauth_redirect_hosts,
             write_budget_mib,
             domain_verification,
             domain_verifications_url,
@@ -252,9 +288,7 @@ impl Config {
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
             oidc_client: non_empty("JC_OIDC_CLIENT_ID").zip(credential),
-            public_url: std::env::var("JC_GATEWAY_PUBLIC_URL")
-                .ok()
-                .map(|url| url.trim_end_matches('/').to_owned()),
+            public_url,
             egress_ca_bundle: std::env::var("JC_GATEWAY_EGRESS_CA_BUNDLE")
                 .ok()
                 .filter(|path| !path.trim().is_empty())
@@ -355,7 +389,11 @@ mod tests {
                 "context-gateway".to_owned(),
                 Credential::Secret(jc_core::Secret::new("Kx7-the-realms-client-secret-9fQ")),
             )),
-            public_url: None,
+            public_url: Some("https://api.dev.example".to_owned()),
+            oauth_key: Some(jc_core::Secret::new(
+                "Zq4-the-anonymous-oauth-signing-key-7Wm",
+            )),
+            oauth_redirect_hosts: vec!["claude.ai".to_owned()],
             egress_ca_bundle: None,
             egress_private_hosts: Vec::new(),
             domain_verification: crate::domain_gate::Mode::Report,
@@ -375,6 +413,10 @@ mod tests {
             assert!(
                 !rendered.contains("Kx7"),
                 "the client secret reached a formatted configuration: {rendered}",
+            );
+            assert!(
+                !rendered.contains("Zq4") && !rendered.contains("oauth-signing-key"),
+                "the OAuth signing key reached a formatted configuration (T-4631): {rendered}",
             );
             assert!(
                 !rendered.contains("realms-client-secret"),
