@@ -381,7 +381,7 @@ fn chat_config(env: &impl Fn(&str) -> Option<String>) -> Result<(String, ModelCo
 }
 
 #[cfg(test)]
-mod tests {
+mod startup_tests {
     use super::*;
     use std::collections::HashMap;
 
