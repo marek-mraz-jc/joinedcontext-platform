@@ -181,7 +181,8 @@ pub fn table_fields(
 /// [`display_order`]) narrowed by the Endpoint's `display` entry, the columns of one attribute
 /// together in the heuristic's order. A column whose attribute the model hides or the `display`
 /// leaves out is not among them; the primary key always is. Each kept field's `info` gets the
-/// model's label in `language` and `summary` on a key attribute's columns (DM-99…DM-101).
+/// model's label in `language`, its labels in every language the model names as `labels`, and
+/// `summary` on a key attribute's columns (DM-99…DM-101, T-4648).
 pub fn arrange(
     fields: &mut [Value],
     model: Option<&str>,
@@ -230,6 +231,12 @@ pub fn arrange(
             order.push(key);
         }
     }
+    // Every language the model labels the type in, for a page in another one (T-4648).
+    let mut languages: BTreeSet<&str> = shown
+        .iter()
+        .flat_map(|f| f.labels.keys().map(String::as_str))
+        .collect();
+    languages.extend([language, "en"]);
     for &index in &order {
         let column = column(&fields[index]);
         let attribute = field_order::attribute(&column);
@@ -238,6 +245,11 @@ pub fn arrange(
         };
         if field_order::leaf(&column) == attribute {
             fields[index]["info"]["label"] = json!(shown.label(language));
+            let labels: Map<String, Value> = languages
+                .iter()
+                .map(|lang| ((*lang).to_owned(), json!(shown.label(lang))))
+                .collect();
+            fields[index]["info"]["labels"] = Value::Object(labels);
         }
         if shown.summary {
             fields[index]["info"]["summary"] = json!(true);
@@ -502,8 +514,9 @@ pub fn ensure(
             .iter()
             .find(|live| live["id"] == field["id"])
             .is_some_and(|live| {
-                live["info"]["label"] != field["info"]["label"]
-                    || live["info"]["summary"] != field["info"]["summary"]
+                ["label", "labels", "summary"]
+                    .iter()
+                    .any(|key| live["info"][key] != field["info"][key])
             })
     });
     if retyped || reordered || relabelled {

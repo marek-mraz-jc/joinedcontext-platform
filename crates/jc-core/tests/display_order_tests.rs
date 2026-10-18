@@ -191,3 +191,32 @@ fn a_type_without_a_model_class_is_ordered_by_the_heuristic() {
     }
     assert!(display_order(Some("classes: ["), "Event", &served, None).is_err());
 }
+
+/// The broker's schema surface (`schema/v1/model.linkml.yaml`) serves annotations as text, as
+/// Model Tools compiled them: `"true"`, and a label's language map as JSON text.
+#[test]
+fn the_brokers_form_of_the_annotations_reads_the_same() {
+    let served = r#"
+classes:
+  Event:
+    slots: [name, startDate, source]
+    slot_usage:
+      startDate:
+        annotations:
+          summary: { tag: summary, value: "true" }
+          label: { tag: label, value: '{"sk": "Za\u010diatok", "en": "Start"}' }
+      source:
+        annotations:
+          hidden: { tag: hidden, value: "true" }
+"#;
+    let fields = display_order(
+        Some(served),
+        "Event",
+        &[("name", false), ("startDate", false), ("source", false)],
+        None,
+    )
+    .expect("parses");
+    assert_eq!(slots(&fields), ["name", "startDate"]);
+    assert!(fields[1].summary && !fields[0].summary);
+    assert_eq!(fields[1].label("sk"), "Začiatok");
+}

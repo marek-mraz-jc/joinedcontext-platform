@@ -269,11 +269,16 @@ fn slot(sources: &[Option<&Value>]) -> Slot {
 }
 
 /// An annotation's value, written plain (`summary: true`) or as LinkML's tag/value pair
-/// (`summary: { tag: summary, value: true }`).
+/// (`summary: { tag: summary, value: true }`). The broker's schema surface serves every value as
+/// text (`"true"`, a label's language map as JSON text), so a text is read back as YAML.
 fn annotation(node: &Value, name: &str) -> Option<Value> {
     let value = node.get("annotations")?.get(name)?;
-    match (value.get("tag"), value.get("value")) {
-        (Some(_), Some(inner)) => Some(inner.clone()),
-        _ => Some(value.clone()),
+    let inner = match (value.get("tag"), value.get("value")) {
+        (Some(_), Some(inner)) => inner,
+        _ => value,
+    };
+    match inner.as_str() {
+        Some(text) => Some(serde_norway::from_str(text).unwrap_or_else(|_| inner.clone())),
+        None => Some(inner.clone()),
     }
 }

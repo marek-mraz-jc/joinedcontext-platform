@@ -1165,6 +1165,14 @@ fn a_tables_columns_follow_the_models_display_order_with_its_labels_and_key_flag
     );
     let start = &fields[order[0]]["info"];
     assert_eq!(start["label"], "Starts");
+    // Every language the model names, for the map popup on a page in another one (T-4648).
+    assert_eq!(start["labels"], json!({ "en": "Starts", "sk": "Začína" }));
+    let name = &fields[order[1]]["info"]["labels"];
+    assert_eq!(
+        name,
+        &json!({ "en": "Name", "sk": "Názov" }),
+        "no model label: the heuristic's"
+    );
     assert_eq!(start["summary"], true);
     // A sub-part keeps the heuristic's label; no model label reaches it.
     assert_eq!(fields[order[2]]["info"]["label"], "Ulica");
