@@ -444,7 +444,7 @@
     },
     "RetentionRule": {
       "additionalProperties": false,
-      "description": "One type's retention in a space (DM-82, ADR-N-046): both durations absent keeps it forever.",
+      "description": "One type's retention in a space (DM-82, ADR-N-046): `current` absent keeps its current state; `history` absent leaves its history to the space's `*` rule, then the platform's (DM-97).",
       "properties": {
         "current": {
           "description": "How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).",
@@ -454,7 +454,7 @@
           ]
         },
         "entityType": {
-          "description": "A class of the space's Data Model.",
+          "description": "A class of the space's Data Model, or `*` for the space's default (DM-97).",
           "type": "string"
         },
         "history": {
