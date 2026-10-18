@@ -583,6 +583,13 @@ impl ContextSpaceSpec {
                                  state is removed per type (DM-97)",
                     });
                 }
+                if rule.history.is_none() {
+                    return Err(Error::Name {
+                        field: "spec.retention.history",
+                        value: rule.entity_type.clone(),
+                        reason: "the \"*\" rule names the space's default history (DM-97)",
+                    });
+                }
             } else {
                 names::validate_entity_type(&rule.entity_type)?;
             }
