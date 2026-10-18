@@ -3,7 +3,8 @@
 //! Contract, in one sentence: the grants' filters always reach the broker, each in its own
 //! parentheses, and the caller's own filter is only ever added as one parenthesized operand — so
 //! nothing a caller writes can regroup, weaken or escape a grant's term (ADR 006, R12, R13), and a
-//! filter whose parentheses do not balance is dropped instead of being wrapped.
+//! filter the broker's own parser (`antares-ql`) refuses is dropped instead of being wrapped
+//! (T-4479).
 //!
 //! `pdp_tests.rs` holds the happy path (a caller's `q` conjoined with one grant). These are the
 //! strings written to break out of the parentheses.
@@ -28,8 +29,7 @@ fn a_filter_that_closes_its_own_wrapper_is_dropped_and_the_grant_stands() {
         "pm10>0))|(1==1",
         "a==1)|(b==2",
         ")|(",
-        "pm10>0;\"unclosed",
-        "pm10>0;'unclosed",
+        "name=='Depot (north)'",
     ] {
         let conjoined = conjoin(Some(hostile), &grants);
 
@@ -42,6 +42,23 @@ fn a_filter_that_closes_its_own_wrapper_is_dropped_and_the_grant_stands() {
             !conjoined.as_deref().unwrap_or_default().contains("1==1"),
             "{hostile:?} reached the broker"
         );
+    }
+}
+
+/// A quote at the start of a name is part of the name in the broker's grammar, not an open string:
+/// the filter is kept, and the broker reads the grant as a conjunct of the whole expression.
+#[test]
+fn a_quote_in_a_name_cannot_swallow_the_grant() {
+    let grant = antares_ql::parse_q("pm10>=0").expect("the grant parses");
+    for odd in ["pm10>0;\"unclosed", "pm10>0;'unclosed"] {
+        let conjoined = conjoin(Some(odd), &filters(&["(pm10>=0)"])).expect("a grant is kept");
+
+        match antares_ql::parse_q(&conjoined) {
+            Ok(antares_ql::QNode::And(terms)) => {
+                assert_eq!(terms.last(), Some(&grant), "{odd:?} regrouped the grant")
+            }
+            other => panic!("{odd:?} conjoined to {conjoined:?}, read as {other:?}"),
+        }
     }
 }
 
@@ -60,7 +77,6 @@ fn a_balanced_filter_is_one_operand_beside_the_grant() {
 fn parentheses_inside_a_quoted_value_are_data() {
     for legitimate in [
         r#"name=="Depot (north)""#,
-        r#"name=='Depot (north)'"#,
         r#"name=="a\"b""#,
         r#"name=="(((""#,
     ] {
@@ -92,16 +108,17 @@ fn a_caller_in_front_of_several_grants_faces_their_union() {
 }
 
 /// No grant and no caller is no filter at all; a caller alone is its own term, and a dropped
-/// caller with no grant leaves nothing rather than an empty expression the broker would reject.
+/// caller with no grant (an empty one included) leaves nothing rather than an expression the
+/// broker would reject.
 #[test]
 fn the_empty_cases_answer_none_and_never_an_empty_expression() {
     assert_eq!(conjoin(None, &[]), None);
-    assert_eq!(conjoin(Some(""), &[]).as_deref(), Some("()"));
+    assert_eq!(conjoin(Some(""), &[]), None);
     assert_eq!(conjoin(Some("pm10>50"), &[]).as_deref(), Some("(pm10>50)"));
     assert_eq!(
         conjoin(Some("pm10>0)"), &[]),
         None,
-        "an unbalanced filter with no grant is no filter"
+        "an unreadable filter with no grant is no filter"
     );
 }
 
@@ -123,7 +140,7 @@ fn a_grant_is_never_dropped() {
 fn a_control_character_stays_inside_the_callers_own_operand() {
     let hostile = "pm10>0\r\nX-Injected: 1";
 
-    let conjoined = conjoin(Some(hostile), &filters(&["(pm10>=0)"])).expect("balanced, so kept");
+    let conjoined = conjoin(Some(hostile), &filters(&["(pm10>=0)"])).expect("readable, so kept");
 
     assert!(conjoined.starts_with("(pm10>0\r\nX-Injected: 1)"));
     assert!(
@@ -132,15 +149,17 @@ fn a_control_character_stays_inside_the_callers_own_operand() {
     );
 }
 
-/// A very long filter is not a way to push the grant out: whatever the caller sends, the grant is
-/// the suffix of the expression.
+/// A very long filter is not a way to push the grant out: one the parser still reads keeps the
+/// grant as the suffix, and one over its 4096 bytes is dropped, so the grant stands alone.
 #[test]
 fn a_long_filter_cannot_push_the_grant_out() {
-    let long = format!("pm10>{}", "0".repeat(4096));
-
-    let conjoined = conjoin(Some(&long), &filters(&["(pm10>=0)"])).expect("balanced, so kept");
-
+    let long = format!("pm10>{}", "0".repeat(4000));
+    let conjoined = conjoin(Some(&long), &filters(&["(pm10>=0)"])).expect("readable, so kept");
     assert!(conjoined.ends_with(";((pm10>=0))"));
+
+    let too_long = format!("pm10>{}", "0".repeat(4096));
+    let conjoined = conjoin(Some(&too_long), &filters(&["(pm10>=0)"]));
+    assert_eq!(conjoined.as_deref(), Some("((pm10>=0))"));
 }
 
 /// The same inputs always produce the same expression, byte for byte: a verdict has to be

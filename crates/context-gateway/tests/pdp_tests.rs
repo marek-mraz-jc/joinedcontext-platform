@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use context_gateway::pdp::evaluator::{evaluate, Request, Subject, Verdict};
+use context_gateway::pdp::evaluator::{evaluate, Request, Subject, Verdict, NOTHING};
 use jc_core::kinds::{Operation, PolicySpec};
 use std::collections::BTreeSet;
 
@@ -397,6 +397,45 @@ fn a_caller_filter_cannot_break_out_of_its_parentheses() {
         "the unbalanced filter was dropped, not conjoined"
     );
     assert!(!q.contains("pm10<0"));
+}
+
+/// A rewrite only narrows (T-4479): a policy whose own `q` the broker's parser refuses grants
+/// nothing rather than everything its selectors reach, and the caller's filter, read by the same
+/// parser, travels beside it as an AND the broker evaluates.
+#[test]
+fn an_unreadable_policy_filter_grants_nothing_instead_of_everything() {
+    let mut broken = public_read();
+    broken.q = Some("pm10>=0)|(1==1".to_owned());
+    let asked = Request {
+        q: Some("pm10 > 50".to_owned()),
+        ..Request::default()
+    };
+
+    let verdict = evaluate(
+        &Subject::anonymous(),
+        Operation::QueryEntity,
+        &asked,
+        "ovzdusie",
+        &[broken],
+        now(),
+    );
+    let q = verdict
+        .constraints()
+        .expect("a rewrite")
+        .q
+        .clone()
+        .expect("a filter");
+
+    assert_eq!(
+        q,
+        format!(r#"(pm10 > 50);(({NOTHING};scope~="^/geo/SK/BB(/.*)?$"))"#)
+    );
+    assert!(
+        !q.contains("1==1"),
+        "the broken policy filter reached the broker"
+    );
+    let read = antares_ql::parse_q(&q).expect("the broker reads the rewrite");
+    assert!(read.attribute_paths().contains(&"jcUnreadablePolicyQ"));
 }
 
 /// GW10: grants are OR-ed with each other and AND-ed with the caller, so holding two

@@ -59,8 +59,8 @@ pub fn first<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> 
 }
 
 /// Why a query of entities is one the specification refuses, before any grant narrows it
-/// (GW31): a `type` that is no NGSI-LD name or type expression, or a `q` whose tokens do not
-/// lex. `None` for a well-formed query.
+/// (GW31): a `type` that is no NGSI-LD name or type expression, or a `q` the broker's own
+/// parser (`antares-ql`) refuses. `None` for a well-formed query.
 pub fn malformed(params: &[(String, String)]) -> Option<String> {
     // The reason names the parameter, never its value: an agent reads it back (AG-21).
     if let Some(types) = first(params, "type") {
@@ -70,38 +70,8 @@ pub fn malformed(params: &[(String, String)]) -> Option<String> {
         }
     }
     first(params, "q")
-        .filter(|q| !lexes(q))
+        .filter(|q| antares_ql::parse_q(q).is_err())
         .map(|_| "q is not an NGSI-LD query".to_owned())
-}
-
-/// Whether a `q` is made of the query language's tokens: outside a double-quoted string no
-/// whitespace, no single quote and nothing else the grammar has no use for, every string
-/// closed and every parenthesis matched. A lexer, not the broker's parser.
-fn lexes(q: &str) -> bool {
-    let mut depth = 0usize;
-    let mut chars = q.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => loop {
-                match chars.next() {
-                    Some('"') => break,
-                    Some('\\') => {
-                        chars.next();
-                    }
-                    Some(_) => {}
-                    None => return false,
-                }
-            },
-            '(' => depth += 1,
-            ')' => match depth.checked_sub(1) {
-                Some(open) => depth = open,
-                None => return false,
-            },
-            c if c.is_ascii_alphanumeric() || "_-.:/#[]=!<>~;|,+*@%$^&".contains(c) => {}
-            _ => return false,
-        }
-    }
-    depth == 0
 }
 
 /// What the caller asked for, in the dimensions a grant can narrow (GW11).
@@ -153,36 +123,21 @@ pub fn referenced_attributes(params: &[(String, String)]) -> BTreeSet<String> {
     names
 }
 
-/// The attribute names one `q` uses, whatever shape the terms have (CIM 009 4.9).
+/// The attribute names one `q` uses, read from the broker's own parse of it (`antares-ql`,
+/// CIM 009 4.9): each term's top-level attribute, or the relationship a linked-entity term
+/// follows. Only the path side of a term is a reference; a value that looks like a name is not.
 ///
-/// Terms are separated by `;`, `|` and parentheses; a term is `path op value`, a bare path
-/// (an existence check) or `!path` (a non-existence check). Only the path side is a reference:
-/// the value side is the caller's own, and a value that happens to look like a name is not one.
+/// A `q` the parser refuses references [`UNREADABLE`], a name no grant shows, so the filter can
+/// only narrow: no entity is let through on a query the gateway could not read.
 fn q_attributes(q: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for term in q.split([';', '|', '(', ')']) {
-        let term = term.trim();
-        if term.is_empty() {
-            continue;
-        }
-        // Everything up to the first comparison character is the path; a term with none is a
-        // bare existence check and is a path whole.
-        let path = term
-            .split(['=', '!', '<', '>', '~'])
-            .next()
-            .unwrap_or_default()
-            .trim();
-        let path = if path.is_empty() {
-            // `!age`: the negation is the first character, so the path follows it.
-            term.trim_start_matches('!').trim()
-        } else {
-            path
-        };
-        names.insert(head_of(path));
+    match antares_ql::parse_q(q) {
+        Ok(node) => node.attribute_paths().into_iter().map(head_of).collect(),
+        Err(_) => BTreeSet::from([UNREADABLE.to_owned()]),
     }
-    names.remove("");
-    names
 }
+
+/// The reference of a `q` the parser refuses: no NGSI-LD attribute name can contain a space.
+pub(crate) const UNREADABLE: &str = "unreadable q";
 
 /// The attribute a path names: its head, compacted.
 ///
@@ -597,10 +552,13 @@ mod tests {
             "dateObserved>=2026-09-01T00:00:00Z",
             "refStation==urn:ngsi-ld:Station:hel.fi:helsinki:001",
             "a.b[c]==1..9",
+            // The broker's parser decides (T-4479): it reads spaces around an operator, so the
+            // gateway does not refuse what the broker answers.
+            "a%20==%201",
         ] {
             assert!(refused(&format!("type=A&q={q}")).is_none(), "{q}");
         }
-        for q in ["a==1)", "(a==1", "name==%22open", "a%20==%201"] {
+        for q in ["a==1)", "(a==1", "name==%22open"] {
             assert!(refused(&format!("type=A&q={q}")).is_some(), "{q}");
         }
     }

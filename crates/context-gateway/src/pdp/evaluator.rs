@@ -434,11 +434,15 @@ pub fn id_patterns(policy: &PolicySpec) -> BTreeSet<String> {
 /// filter with another policy's area.
 fn policy_filter(policy: &PolicySpec) -> Option<String> {
     let parts: Vec<String> = [
-        policy
-            .q
-            .as_deref()
-            .filter(|filter| is_balanced(filter))
-            .map(|filter| format!("({filter})")),
+        // A filter the broker's parser refuses grants nothing: dropping it would widen the
+        // policy to everything its selectors reach (T-4479).
+        policy.q.as_deref().map(|filter| {
+            if parses(filter) {
+                format!("({filter})")
+            } else {
+                NOTHING.to_owned()
+            }
+        }),
         policy.scope_q.as_deref().and_then(scope_folding::fold),
     ]
     .into_iter()
@@ -531,9 +535,9 @@ pub fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
 /// (`;` is AND, `|` is OR, and parentheses group).
 ///
 /// Every operand is parenthesized, so no operand can reach outside itself and change how
-/// its neighbours are grouped. That only holds if the caller's filter is balanced, which
-/// `is_balanced` establishes: an unbalanced filter is dropped rather than conjoined,
-/// leaving the grants alone in force.
+/// its neighbours are grouped. That only holds if the caller's filter is one the broker's own
+/// parser reads ([`parses`]): any other is dropped rather than conjoined, leaving the grants
+/// alone in force.
 pub fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
     let union = match filters.len() {
         0 => None,
@@ -548,40 +552,19 @@ pub fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
         )),
     };
 
-    match (requested.filter(|filter| is_balanced(filter)), union) {
+    match (requested.filter(|filter| parses(filter)), union) {
         (Some(caller), Some(grants)) => Some(format!("({caller});{grants}")),
         (Some(caller), None) => Some(format!("({caller})")),
         (None, grants) => grants,
     }
 }
 
-/// Whether a filter's parentheses are balanced, ignoring those inside a quoted value.
-///
-/// A caller's filter is wrapped in parentheses before it is conjoined with the grants. An
-/// unbalanced filter would consume that wrapping and change the grouping of what follows,
-/// which is exactly the cross-policy bleed ADR 006 is about, so it never gets wrapped.
-fn is_balanced(filter: &str) -> bool {
-    let mut depth: i32 = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-
-    for character in filter.chars() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' if quoted => escaped = true,
-            '"' | '\'' => quoted = !quoted,
-            '(' if !quoted => depth += 1,
-            ')' if !quoted => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    depth == 0 && !quoted
+/// Whether the broker's own `q` parser (`antares-ql`) reads a filter whole (T-4479): a filter
+/// that closes the parenthesis it is about to be put in, or leaves a string open, is no query.
+fn parses(filter: &str) -> bool {
+    antares_ql::parse_q(filter).is_ok()
 }
+
+/// A filter no entity satisfies, whether it has the attribute or not: what a policy whose own
+/// `q` does not parse grants.
+pub const NOTHING: &str = "(jcUnreadablePolicyQ==0;jcUnreadablePolicyQ!=0)";
