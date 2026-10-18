@@ -7,6 +7,9 @@
 //! admits the caller, keeps the representation read-only (EP-39) and moves the broker's links
 //! under the caller's URL.
 //!
+//! The SensorThings API surface (`sta/v1.1`, EP-12, T-4463) is the same read-only forward to the
+//! broker's `antares-sta` surface of the view; the gateway's own translation is gone.
+//!
 //! The OData v4 surface (`odata/v4`, EP-104, T-3830) is the same forward to the broker's
 //! `antares-odata` surface of the view. Its reads go as OGC's do; its writes pass the guards the
 //! NGSI-LD view forward applies first (T-3939): the domain gate, the caller pinned, the body
@@ -56,6 +59,12 @@ const OGC: Surface = Surface {
     name: "OGC API Features",
 };
 
+const STA: Surface = Surface {
+    representation: Representation::Sta,
+    path: "sta/v1.1",
+    name: "SensorThings API",
+};
+
 const ODATA: Surface = Surface {
     representation: Representation::Odata,
     path: "odata/v4",
@@ -75,6 +84,15 @@ pub(crate) async fn ogc_features(
     request: Request,
 ) -> Response<Body> {
     read_surface(&gateway, &params, request, &OGC).await
+}
+
+/// Every SensorThings API request of one endpoint (EP-12, EP-13).
+pub(crate) async fn sensorthings(
+    State(gateway): State<Arc<Gateway>>,
+    Path(params): Path<HashMap<String, String>>,
+    request: Request,
+) -> Response<Body> {
+    read_surface(&gateway, &params, request, &STA).await
 }
 
 /// Every OData v4 request of one endpoint (EP-104): a read as OGC's, a write after the
@@ -558,6 +576,7 @@ fn authority(base: &str) -> &str {
 /// is the broker's alone, so there is no other answer (ADR-0029 decision 3).
 fn no_view(surface: &Surface) -> Response<Body> {
     // One literal slug per surface: the catalogue test reads them from the source (API/00 §4).
+    // SensorThings is an OGC standard too, so it answers the OGC slug.
     let problem = match surface.representation {
         Representation::Odata => {
             ProblemDetails::new(501, "odata-view-unavailable", "Not Implemented")
@@ -588,6 +607,10 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
             "/api/endpoint/{slug}/ogc/features/{*rest}",
             any(ogc_features),
         )
+        // The SensorThings API of the view (T-4463), the same read-only forward.
+        .route("/api/endpoint/{slug}/sta/v1.1", any(sensorthings))
+        .route("/api/endpoint/{slug}/sta/v1.1/", any(sensorthings))
+        .route("/api/endpoint/{slug}/sta/v1.1/{*rest}", any(sensorthings))
         // The OData v4 service of the view (EP-104, T-3830), its writes after the Endpoint's write guards (T-3939).
         .route("/api/endpoint/{slug}/odata/v4", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/", any(odata))

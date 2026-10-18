@@ -410,7 +410,6 @@ const SURFACES: &[(&str, &str)] = &[
     ("files", include_str!("../src/handlers/files.rs")),
     ("ogc", include_str!("../src/handlers/ogc.rs")),
     ("ws", include_str!("../src/handlers/ws.rs")),
-    ("sta", include_str!("../src/handlers/sta.rs")),
     (
         "space_routes",
         include_str!("../src/handlers/space_routes.rs"),

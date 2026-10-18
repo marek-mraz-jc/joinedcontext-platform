@@ -717,7 +717,7 @@ async fn the_engines_refusal_carries_the_platforms_slug_and_hint() {
     );
 }
 
-/// T-3651: the file and SensorThings translators read the slug's view with the caller pinned
+/// T-3651: the file translators read the slug's view with the caller pinned
 /// and their own selector as sent, and an Endpoint no view serves (a mapped one, G18) still
 /// reads the plain root through the gateway's PDP, with the grant's type folded in.
 #[tokio::test]
@@ -726,11 +726,11 @@ async fn the_translators_read_the_view_and_what_no_view_serves_reads_the_plain_r
         representations: vec![
             Representation::NgsiLd,
             Representation::Json,
-            Representation::Sta,
+            Representation::GeoJson,
         ],
         ..endpoint()
     };
-    // A SensorThings Thing is an entity with a place (T-1889).
+    // An entity with a place, so the GeoJSON download holds it.
     let located = json!([{ "id": STATION, "type": "AirQualityObserved",
         "pm10": { "type": "Property", "value": 1.0 },
         "location": { "type": "GeoProperty",
@@ -739,7 +739,7 @@ async fn the_translators_read_the_view_and_what_no_view_serves_reads_the_plain_r
     // not answer (that hop, `dataset_download_tests`).
     for rest in [
         "file.json?type=AirQualityObserved",
-        "sta/v1.1/Things?$filter=pm10%20gt%200",
+        "file.geojson?type=AirQualityObserved",
     ] {
         let (upstream, hops) = broker(StatusCode::OK, &[], located.clone()).await;
         let (status, _, body) = call(

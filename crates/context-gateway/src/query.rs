@@ -291,19 +291,6 @@ pub fn view_read(params: &[(String, String)], fallback_types: &[String]) -> Stri
     render(&out)
 }
 
-/// [`view_read`] for the history of one entity by id: no `type` beside an id (CIM 009
-/// 6.19.3.1), which the broker refuses.
-pub fn view_read_by_id(params: &[(String, String)]) -> String {
-    let mut out = kept(params);
-    out.extend(
-        params
-            .iter()
-            .filter(|(name, _)| name != "type" && VIEW_SELECTORS.contains(&name.as_str()))
-            .cloned(),
-    );
-    render(&out)
-}
-
 /// The caller's own parameters that survive, in the order they were sent.
 fn kept(params: &[(String, String)]) -> Vec<(String, String)> {
     params
@@ -512,15 +499,6 @@ mod tests {
         for owned in ["Tenant", "roles", "admin"] {
             assert!(!forged.contains(owned), "{owned} passed: {forged}");
         }
-        // The history of one entity by id never carries a `type` beside the id.
-        let by_id = view_read_by_id(&parse(
-            "type=A&attrs=pm10&timerel=after&timeAt=2026-01-01T00:00:00Z",
-        ));
-        assert!(!by_id.contains("type="), "{by_id}");
-        assert!(
-            by_id.contains("attrs=pm10") && by_id.contains("timerel=after"),
-            "{by_id}"
-        );
     }
 
     #[test]
