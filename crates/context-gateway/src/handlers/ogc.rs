@@ -62,6 +62,12 @@ const ODATA: Surface = Surface {
     name: "OData",
 };
 
+const ICAL: Surface = Surface {
+    representation: Representation::Ical,
+    path: "ical/v1",
+    name: "iCalendar",
+};
+
 /// Every OGC API - Features request of one endpoint (EP-29, EP-39, EP-40).
 pub(crate) async fn ogc_features(
     State(gateway): State<Arc<Gateway>>,
@@ -83,6 +89,15 @@ pub(crate) async fn odata(
     } else {
         odata_write(&gateway, &params, request).await
     }
+}
+
+/// The iCalendar feed of the view's Events (EP-125): read-only, the broker's alone.
+pub(crate) async fn ical(
+    State(gateway): State<Arc<Gateway>>,
+    Path(params): Path<HashMap<String, String>>,
+    request: Request,
+) -> Response<Body> {
+    read_surface(&gateway, &params, request, &ICAL).await
 }
 
 /// The caller admitted to the Endpoint for `surface`, with the client's own platform headers
@@ -543,10 +558,14 @@ fn authority(base: &str) -> &str {
 /// is the broker's alone, so there is no other answer (ADR-0029 decision 3).
 fn no_view(surface: &Surface) -> Response<Body> {
     // One literal slug per surface: the catalogue test reads them from the source (API/00 §4).
-    let problem = if surface.representation == Representation::Odata {
-        ProblemDetails::new(501, "odata-view-unavailable", "Not Implemented")
-    } else {
-        ProblemDetails::new(501, "ogc-view-unavailable", "Not Implemented")
+    let problem = match surface.representation {
+        Representation::Odata => {
+            ProblemDetails::new(501, "odata-view-unavailable", "Not Implemented")
+        }
+        Representation::Ical => {
+            ProblemDetails::new(501, "ical-view-unavailable", "Not Implemented")
+        }
+        _ => ProblemDetails::new(501, "ogc-view-unavailable", "Not Implemented"),
     };
     problem
         .with_detail(format!(
@@ -573,6 +592,8 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         .route("/api/endpoint/{slug}/odata/v4", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/", any(odata))
         .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
+        // The iCalendar feed of the view's Events (EP-125, T-4573), served by the broker.
+        .route("/api/endpoint/{slug}/ical/v1/{*rest}", any(ical))
 }
 
 #[cfg(test)]

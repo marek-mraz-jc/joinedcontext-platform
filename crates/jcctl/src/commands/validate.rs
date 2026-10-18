@@ -8,7 +8,9 @@
 
 use crate::assemble::{assemble, AssembleError, Assembly, Directories, Resolver};
 use crate::loader::{LoadError, Repository};
-use jc_core::kinds::{ContextSpaceSpec, DataModelLifecycle, DataModelSpec, ModelProjectionSpec};
+use jc_core::kinds::{
+    ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, ModelProjectionSpec,
+};
 use jc_core::registry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -378,6 +380,15 @@ fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
     }
 
     for (location, message) in stale_projections(repo_dir, &repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
+    for (location, message) in surfaces_without_their_model(repo_dir, &repo) {
         report.findings.push(Finding {
             path: location.0,
             document: location.1,
@@ -1469,6 +1480,85 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
         ));
     }
     stale
+}
+
+/// An Endpoint that lists a domain-standard representation needs, in its space's data model,
+/// the type that standard maps with every mandatory source attribute marked required (EP-125).
+fn surfaces_without_their_model(repo_dir: &Path, repo: &Repository) -> Vec<(Location, String)> {
+    let mut refused = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "Endpoint" {
+            continue;
+        }
+        // An Endpoint the typed parse refused is already a finding above.
+        let Ok(spec) = serde_json::from_value::<EndpointSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        let space = spec.context_space_ref.name();
+        let wanted: Vec<_> = spec
+            .served_representations()
+            .into_iter()
+            .filter(|r| r.requirement().is_some())
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
+        let linkml = repo
+            .iter()
+            .filter(|(model, _)| model.kind == "DataModel" && model.namespace == id.namespace)
+            .filter_map(|(_, model)| {
+                serde_json::from_value::<DataModelSpec>(model.manifest.spec.clone())
+                    .ok()
+                    .map(|spec| (spec, model.path.clone()))
+            })
+            .find(|(model, _)| {
+                model.context_space_ref.as_deref() == Some(space)
+                    && model.lifecycle != DataModelLifecycle::Mirrored
+                    && model.validate().is_ok()
+            })
+            .map(|(model, path)| {
+                let file = repo_dir
+                    .join(&path)
+                    .parent()
+                    .map(|dir| dir.join(&model.linkml))
+                    .unwrap_or_else(|| repo_dir.join(&model.linkml));
+                std::fs::read_to_string(&file).map_err(|err| {
+                    format!(
+                        "its LinkML source cannot be read at `{}`: {err}",
+                        file.display()
+                    )
+                })
+            });
+        for representation in wanted {
+            let gap = match &linkml {
+                // A space without a model has no type at all.
+                None => Ok(representation
+                    .requirement()
+                    .map(|need| format!("the type {}", need.entity_type))),
+                Some(Err(err)) => Err(err.clone()),
+                Some(Ok(text)) => representation.model_gap(text),
+            };
+            let message = match gap {
+                Ok(None) => continue,
+                Ok(Some(gap)) => format!(
+                    "Endpoint {}/{}: `{representation}` needs {gap} in the data model of space {space} (EP-125)",
+                    id.namespace.as_deref().unwrap_or_default(),
+                    id.name
+                ),
+                Err(err) => format!(
+                    "Endpoint {}/{}: `{representation}` cannot be checked against the data model of space {space}: {err} (EP-125)",
+                    id.namespace.as_deref().unwrap_or_default(),
+                    id.name
+                ),
+            };
+            refused.push((
+                (resource.path.clone(), resource.document, resource.line),
+                message,
+            ));
+        }
+    }
+    refused
 }
 
 /// A Context Space has one data model, and names it (DM-61, DM-62, ADR-N-033).

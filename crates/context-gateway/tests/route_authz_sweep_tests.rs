@@ -290,6 +290,12 @@ fn rows() -> Vec<Row> {
             DATA,
         ),
         row(
+            "ANY",
+            "/api/endpoint/{slug}/ical/v1/{*rest}",
+            get(ep("/ical/v1/events.ics")),
+            DATA,
+        ),
+        row(
             "GET",
             "/catalog.jsonld",
             get("/catalog.jsonld".to_owned()),
@@ -490,6 +496,7 @@ fn endpoint(base_path: String) -> Endpoint {
             Representation::Sta,
             Representation::Odata,
             Representation::WebSocket,
+            Representation::Ical,
         ],
         rate_limit: None,
         creates: None,

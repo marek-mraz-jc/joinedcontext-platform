@@ -67,6 +67,7 @@ fn representation_variants_serialize_to_expected_wire_names() {
         (Representation::Sta, "sta"),
         (Representation::Odata, "odata"),
         (Representation::WebSocket, "websocket"),
+        (Representation::Ical, "ical"),
     ];
 
     let expected_names: Vec<&str> = representations.iter().map(|(_, name)| *name).collect();
@@ -84,7 +85,8 @@ fn representation_variants_serialize_to_expected_wire_names() {
             "ogc-features",
             "sta",
             "odata",
-            "websocket"
+            "websocket",
+            "ical"
         ]
     );
 
@@ -656,7 +658,7 @@ fn an_endpoint_that_lists_nothing_serves_every_standard_but_sta() {
             R::Odata,
             R::WebSocket
         ],
-        "EP-104: SensorThings is opt-in"
+        "EP-104, EP-125: SensorThings and iCalendar are opt-in"
     );
     let narrowed =
         defaulted("  disabledRepresentations: [odata, xlsx, websocket]\n").expect("parses");
@@ -734,4 +736,68 @@ fn disabled_representations_are_checked() {
         defaulted("  disabledRepresentation: [csv]\n").is_err(),
         "an unknown field (deny_unknown_fields)"
     );
+}
+
+/// EP-125 (T-4573): what `ical` needs of the space's model, read from its LinkML source.
+#[test]
+fn ical_needs_event_with_start_date_and_name_required_and_nothing_else_needs_a_model() {
+    use Representation as R;
+    for generic in R::ALL.into_iter().filter(|r| *r != R::Ical) {
+        assert_eq!(generic.requirement(), None, "{generic}");
+        assert_eq!(generic.model_gap("classes: {}").unwrap(), None, "{generic}");
+    }
+    let need = R::Ical.requirement().expect("ical declares its model");
+    assert_eq!(need.entity_type, "Event");
+    let mandatory: Vec<_> = need
+        .fields
+        .iter()
+        .filter(|f| f.3)
+        .map(|f| (f.0, f.2))
+        .collect();
+    assert_eq!(
+        mandatory,
+        [
+            ("UID", "id"),
+            ("DTSTAMP", "modifiedAt"),
+            ("DTSTART", "startDate"),
+            ("SUMMARY", "name")
+        ]
+    );
+
+    // Required as class attributes counts the same as required slots.
+    let attributes = "classes:\n  Event:\n    attributes:\n      name: { required: true }\n      startDate: { required: true }\n";
+    assert_eq!(R::Ical.model_gap(attributes).unwrap(), None);
+    // A slot required globally but not listed by the class is not the class's.
+    let unlisted = "slots:\n  startDate: { required: true }\n  name: { required: true }\nclasses:\n  Event:\n    slots: [name]\n";
+    assert_eq!(
+        R::Ical.model_gap(unlisted).unwrap().as_deref(),
+        Some("the type Event with the required attribute(s) startDate")
+    );
+    assert_eq!(
+        R::Ical.model_gap("classes: {}").unwrap().as_deref(),
+        Some("the type Event")
+    );
+    assert!(
+        R::Ical.model_gap("classes: [").is_err(),
+        "an unreadable model is an error, not a pass"
+    );
+}
+
+/// The committed `schemas/surface-requirements.md` is what the code declares (EP-125, T-4573).
+/// `UPDATE_SCHEMAS=1` writes it.
+#[test]
+fn the_committed_surface_requirements_are_the_generated_ones() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .join("schemas/surface-requirements.md");
+    let generated = jc_core::kinds::SurfaceRequirement::markdown();
+    if std::env::var("UPDATE_SCHEMAS").is_ok() {
+        std::fs::write(&path, &generated).expect("written");
+    }
+    let committed = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{}: {e} — run with UPDATE_SCHEMAS=1", path.display()));
+    assert_eq!(committed, generated, "{} is stale", path.display());
+    assert!(committed.contains("| `DTSTART` | §3.6.1, §3.8.2.4 | `startDate` | yes |"));
 }
