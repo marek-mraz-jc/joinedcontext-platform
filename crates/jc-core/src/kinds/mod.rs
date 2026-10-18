@@ -113,9 +113,9 @@ pub use service_account::{
     ServiceAccountLimits, ServiceAccountSpec, Workload,
 };
 pub use space::{
-    duration_seconds, retention_seconds, urn_segment, ContextSpaceSpec, MissingUnitCode,
-    ProjectApps, ProjectSpec, QualityKind, QualityOutcome, QualityRule, Quotas, RetentionRule,
-    MAX_QUALITY_RULES,
+    duration_seconds, retention_seconds, urn_segment, AttributeRecording, ContextSpaceSpec,
+    MissingUnitCode, ProjectApps, ProjectSpec, QualityKind, QualityOutcome, QualityRule, Quotas,
+    RetentionRule, MAX_QUALITY_RULES, RECORD_EVERY, RECORD_ON_CHANGE,
 };
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,

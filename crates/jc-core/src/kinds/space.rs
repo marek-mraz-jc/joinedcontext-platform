@@ -462,7 +462,7 @@ impl QualityRule {
 
 /// One type's retention in a space (DM-82, ADR-N-046): `current` absent keeps its current state;
 /// `history` absent leaves its history to the space's `*` rule, then the platform's (DM-97).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RetentionRule {
     /// A class of the space's Data Model, or `*` for the space's default (DM-97).
@@ -477,6 +477,128 @@ pub struct RetentionRule {
     /// Why the type keeps its whole history: required with `history: forever` (T-4275).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// How the type records history: `every` (the default) or `onChange` (DM-108).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+    /// With `onChange`, the longest gap between two rows of an attribute, PT1M to P3650D (DM-109).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<String>,
+    /// With `onChange`, the numeric move a row needs, in the attribute's `unitCode` (DM-108).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadband: Option<serde_json::Number>,
+    /// With `onChange`, the move in metres a GeoProperty row needs (DM-108).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_distance: Option<serde_json::Number>,
+    /// Per attribute of the type, its own recording over the type's (DM-108).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attributes: BTreeMap<String, AttributeRecording>,
+}
+
+/// One attribute's recording under its type's retention rule (DM-108, ADR-N-054 2.2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AttributeRecording {
+    /// `every` or `onChange`; absent takes the type's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+    /// As the type's, for this attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<String>,
+    /// As the type's, for this attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadband: Option<serde_json::Number>,
+    /// As the type's, for this attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_distance: Option<serde_json::Number>,
+}
+
+/// `record` of a rule that writes a row for every new `observedAt` (DM-108).
+pub const RECORD_EVERY: &str = "every";
+/// `record` of a rule that writes a row on a change and once per `heartbeat` (DM-109).
+pub const RECORD_ON_CHANGE: &str = "onChange";
+
+/// What is wrong with one level of a recording, the type's or an attribute's, whose `record` is
+/// `record` once the type's is taken in: a name other than the two, an `onChange` without a
+/// heartbeat of PT1M to P3650D, a negative threshold, or a setting `every` has no use for.
+fn recording_problem(
+    record: Option<&str>,
+    heartbeat: Option<&str>,
+    thresholds: [Option<&serde_json::Number>; 2],
+) -> Option<&'static str> {
+    if record.is_some_and(|r| r != RECORD_EVERY && r != RECORD_ON_CHANGE) {
+        return Some("record is every or onChange (DM-108)");
+    }
+    let on_change = record == Some(RECORD_ON_CHANGE);
+    if on_change && !heartbeat.is_some_and(|h| retention_seconds(h).is_some()) {
+        return Some("onChange needs a heartbeat of PT1M to P3650D, as PT15M or PT1H (DM-109)");
+    }
+    let set = heartbeat.is_some() || thresholds.iter().any(Option::is_some);
+    if !on_change && set {
+        return Some("heartbeat, deadband and minDistance apply to onChange only (DM-108)");
+    }
+    if thresholds
+        .iter()
+        .flatten()
+        .any(|n| n.as_f64().is_none_or(|n| n < 0.0))
+    {
+        return Some("deadband and minDistance are numbers of zero or more (DM-108)");
+    }
+    None
+}
+
+impl RetentionRule {
+    /// The recording of the rule and of each of its attributes, as DM-108 allows it: none on the
+    /// `*` rule or under `history: off`, where nothing is recorded.
+    fn validate_recording(&self) -> Result<()> {
+        let refuse = |reason: &'static str| Error::Name {
+            field: "spec.retention.record",
+            value: self.entity_type.clone(),
+            reason,
+        };
+        let recorded = self.record.is_some()
+            || self.heartbeat.is_some()
+            || self.deadband.is_some()
+            || self.min_distance.is_some()
+            || !self.attributes.is_empty();
+        if recorded
+            && (self.entity_type == RETENTION_ANY_TYPE
+                || self.history.as_deref() == Some(HISTORY_OFF))
+        {
+            return Err(refuse(
+                "a recording belongs to a type that keeps history, never to the \"*\" rule or \
+                 history: off (DM-108)",
+            ));
+        }
+        let own = self.record.as_deref();
+        if let Some(reason) = recording_problem(
+            own,
+            self.heartbeat.as_deref(),
+            [self.deadband.as_ref(), self.min_distance.as_ref()],
+        ) {
+            return Err(refuse(reason));
+        }
+        for (name, attribute) in &self.attributes {
+            let record = attribute.record.as_deref().or(own);
+            // An onChange attribute takes the type's heartbeat unless it names its own.
+            let heartbeat = match record == Some(RECORD_ON_CHANGE) {
+                true => attribute.heartbeat.as_deref().or(self.heartbeat.as_deref()),
+                false => attribute.heartbeat.as_deref(),
+            };
+            let thresholds = [attribute.deadband.as_ref(), attribute.min_distance.as_ref()];
+            let problem = match name.trim().is_empty() {
+                true => Some("an attribute of a recording has a name (DM-108)"),
+                false => recording_problem(record, heartbeat, thresholds),
+            };
+            if let Some(reason) = problem {
+                return Err(Error::Name {
+                    field: "spec.retention.attributes",
+                    value: format!("{}.{name}", self.entity_type),
+                    reason,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The `entityType` of the space's default rule: the history of every type without a history
@@ -584,6 +706,7 @@ impl ContextSpaceSpec {
 
         let mut ruled = std::collections::BTreeSet::new();
         for rule in &self.retention {
+            rule.validate_recording()?;
             if rule.entity_type == RETENTION_ANY_TYPE {
                 if rule.current.is_some() {
                     return Err(Error::Name {

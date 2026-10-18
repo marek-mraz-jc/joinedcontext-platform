@@ -2,6 +2,41 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AttributeRecording": {
+      "additionalProperties": false,
+      "description": "One attribute's recording under its type's retention rule (DM-108, ADR-N-054 2.2).",
+      "properties": {
+        "deadband": {
+          "description": "As the type's, for this attribute.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "heartbeat": {
+          "description": "As the type's, for this attribute.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minDistance": {
+          "description": "As the type's, for this attribute.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "record": {
+          "description": "`every` or `onChange`; absent takes the type's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -446,6 +481,13 @@
       "additionalProperties": false,
       "description": "One type's retention in a space (DM-82, ADR-N-046): `current` absent keeps its current state; `history` absent leaves its history to the space's `*` rule, then the platform's (DM-97).",
       "properties": {
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AttributeRecording"
+          },
+          "description": "Per attribute of the type, its own recording over the type's (DM-108).",
+          "type": "object"
+        },
         "current": {
           "description": "How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).",
           "type": [
@@ -453,9 +495,23 @@
             "null"
           ]
         },
+        "deadband": {
+          "description": "With `onChange`, the numeric move a row needs, in the attribute's `unitCode` (DM-108).",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "entityType": {
           "description": "A class of the space's Data Model, or `*` for the space's default (DM-97).",
           "type": "string"
+        },
+        "heartbeat": {
+          "description": "With `onChange`, the longest gap between two rows of an attribute, PT1M to P3650D (DM-109).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "history": {
           "description": "How long a temporal instance is kept, in the same form (DM-84); `off` keeps the current state only and records no history, `forever` keeps it all and needs a `reason` (T-4275).",
@@ -464,8 +520,22 @@
             "null"
           ]
         },
+        "minDistance": {
+          "description": "With `onChange`, the move in metres a GeoProperty row needs (DM-108).",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "reason": {
           "description": "Why the type keeps its whole history: required with `history: forever` (T-4275).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "record": {
+          "description": "How the type records history: `every` (the default) or `onChange` (DM-108).",
           "type": [
             "string",
             "null"
