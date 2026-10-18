@@ -373,6 +373,7 @@ fn retention_rules_round_trip_and_refuse_what_the_broker_cannot_run_dm_81() {
             "{ entityType: \"*\", current: PT5M, history: P7D }",
             "spec.retention.current",
         ),
+        ("{ entityType: \"*\" }", "spec.retention.history"),
         (
             "{ entityType: \"*\", history: 7d }",
             "spec.retention.history",
