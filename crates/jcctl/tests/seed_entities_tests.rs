@@ -383,10 +383,12 @@ fn an_unreadable_seed_directory_is_reported_by_path_not_a_panic() {
     }
 }
 
-/// CC-04: an id is the entity's name, never a path: slashes and dots in it stay as written.
+/// CC-04: an id is the entity's name, never a path: slashes and dots in it stay as written. A
+/// `..` segment is the one exception: the broker refuses it on create (it would climb out of
+/// `/entities/{id}` on a forwarded request), so the seed check refuses it first (T-3913).
 #[test]
 fn an_entity_id_containing_path_segments_is_kept_as_an_opaque_string() {
-    let id = "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:../../etc/passwd";
+    let id = "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:a/b.c/d";
     let body = json!({ "id": id, "type": "AirQualityObserved" }).to_string();
     let root = checkout(
         "seed-path-id",
@@ -395,6 +397,21 @@ fn an_entity_id_containing_path_segments_is_kept_as_an_opaque_string() {
     let found = seed_entities(&root).expect("an opaque id");
     assert_eq!(found[0].id, id);
     assert_eq!(found[0].body["id"], Value::String(id.to_owned()));
+
+    let climbing = json!({
+        "id": "urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:../../etc/passwd",
+        "type": "AirQualityObserved"
+    })
+    .to_string();
+    let root = checkout(
+        "seed-dot-segment-id",
+        &[(&format!("projects/p/spaces/s/{SEED}/x.json"), &climbing)],
+    );
+    let said = seed_entities(&root).expect_err("a dot segment").to_string();
+    assert!(
+        said.contains("x.json") && said.contains("not a valid NGSI-LD entity"),
+        "{said}"
+    );
 }
 
 /// CC-72: an empty checkout directory for a space seeds nothing.
@@ -446,5 +463,80 @@ fn a_symlinked_seed_file_pointing_outside_the_repo_is_refused() {
     match seed_entities(&root) {
         Err(SeedError::Outside { path }) => assert!(path.ends_with("linked.json"), "{path}"),
         other => panic!("a linked seed file was not refused: {other:?}"),
+    }
+}
+
+/// T-3913: a seed entity is checked offline with the broker's own NGSI-LD expansion
+/// (antares-jsonld), so `apply` never sends one the broker answers 400 to. Three good files (a
+/// Property, a Relationship with a sub-Property, a GeoProperty under a remote `@context` that
+/// is not fetched) read; three bad ones are refused by name.
+#[test]
+fn a_seed_entity_the_broker_would_refuse_is_refused_offline() {
+    let good = [
+        ("property.json", air("1")),
+        (
+            "relationship.json",
+            json!({
+                "id": "urn:ngsi-ld:Vehicle:bb.sk:s:A1",
+                "type": "Vehicle",
+                "isParked": {
+                    "type": "Relationship",
+                    "object": "urn:ngsi-ld:OffStreetParking:bb.sk:s:P1",
+                    "observedAt": "2026-10-12T00:00:00Z",
+                    "providedBy": {"type": "Property", "value": "camera"}
+                }
+            })
+            .to_string(),
+        ),
+        (
+            "geo.json",
+            json!({
+                "id": "urn:ngsi-ld:Building:bb.sk:s:B1",
+                "type": "Building",
+                "location": {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [17.1, 48.1]}},
+                "@context": ["https://example.org/unreachable-context.jsonld"]
+            })
+            .to_string(),
+        ),
+    ];
+    let files: Vec<(String, &str)> = good
+        .iter()
+        .map(|(f, c)| (format!("projects/p/spaces/s/{SEED}/{f}"), c.as_str()))
+        .collect();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), *c)).collect();
+    let root = checkout("seed-ngsild-good", &refs);
+    assert_eq!(seed_entities(&root).expect("valid NGSI-LD reads").len(), 3);
+
+    for (file, contents, expected) in [
+        (
+            "valueless.json",
+            r#"{"id":"urn:ngsi-ld:X:bb.sk:s:1","type":"X","pm10":{"type":"Property"}}"#,
+            "not a valid NGSI-LD entity",
+        ),
+        (
+            "objectless.json",
+            r#"{"id":"urn:ngsi-ld:X:bb.sk:s:1","type":"X","owner":{"type":"Relationship"}}"#,
+            "not a valid NGSI-LD entity",
+        ),
+        (
+            "no-uri.json",
+            r#"{"id":"just-a-name","type":"X"}"#,
+            "not a valid NGSI-LD entity",
+        ),
+    ] {
+        let root = checkout(
+            &format!("seed-ngsild-{}", file.trim_end_matches(".json")),
+            &[(&format!("projects/p/spaces/s/{SEED}/{file}"), contents)],
+        );
+        let error = seed_entities(&root).expect_err(file);
+        assert!(
+            matches!(error, SeedError::Malformed { .. }),
+            "{file}: {error:?}"
+        );
+        let said = error.to_string();
+        assert!(
+            said.contains(file) && said.contains(expected),
+            "{file}: {said}"
+        );
     }
 }
