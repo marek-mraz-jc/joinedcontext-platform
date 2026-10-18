@@ -102,6 +102,8 @@ pub struct Line {
     /// The published record lists a model without its LinkML artifact, so the dataset links the
     /// schema index for it (EP-68).
     pub no_linkml: bool,
+    /// What happened to the dataset's visualization views (EP-132).
+    pub views: ckan::Views,
 }
 
 impl fmt::Display for Line {
@@ -124,6 +126,14 @@ impl fmt::Display for Line {
                 write!(f, ", {} gone", mirror.removed)?;
             }
             write!(f, ")")?;
+        }
+        let views = &self.views;
+        if *views != ckan::Views::default() {
+            write!(
+                f,
+                ", views {} created, {} updated, {} deleted",
+                views.created, views.updated, views.deleted
+            )?;
         }
         if self.no_linkml {
             write!(
@@ -501,12 +511,17 @@ pub fn publish_one(
         }
         (None, _) => None,
     };
+    let views = match outcome {
+        Outcome::NotPublished => ckan::Views::default(),
+        _ => ckan::publish_views(api, &target.manifest, &settings)?,
+    };
     Ok(Line {
         endpoint: target.id.clone(),
         dataset: target.dataset_name().to_owned(),
         outcome,
         mirror,
         no_linkml: outcome != Outcome::NotPublished && ckan::missing_linkml(record),
+        views,
     })
 }
 
@@ -540,6 +555,7 @@ pub fn withdraw_one(api: &mut impl CkanApi, target: &Target) -> Result<Line, Err
         outcome,
         mirror,
         no_linkml: false,
+        views: ckan::Views::default(),
     })
 }
 

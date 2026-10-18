@@ -11,7 +11,7 @@ use jcctl::commands::publish_ckan::{
     TokenSource,
 };
 use jcctl::loader::Repository;
-use jcctl::publish::ckan::{self, CkanApi, CkanError, InMemoryCkan, Outcome, Settings};
+use jcctl::publish::ckan::{self, CkanApi, CkanError, InMemoryCkan, Outcome, Settings, Views};
 use jcctl::publish::ckan_datastore;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -187,6 +187,7 @@ fn a_second_run_over_an_unchanged_repository_writes_nothing() {
             mirror: None,
             // The record lists no model, so no LinkML is missing (T-3886, EP-68).
             no_linkml: false,
+            views: Views::default(),
         }
     );
     assert_eq!(
