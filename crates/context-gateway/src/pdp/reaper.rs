@@ -193,14 +193,33 @@ impl Reaper {
         Some(all)
     }
 
-    /// Polls until the process ends. Started once, next to the server.
-    pub async fn run(mut self) {
-        let mut ticker = tokio::time::interval(INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            self.tick();
-        }
+    /// Polls until the process ends, or answers the panic that stopped a tick: the caller ends
+    /// the process then, so revocation never stops silently (T-4591). Started once, next to the
+    /// server.
+    pub async fn run(self) -> tokio::task::JoinError {
+        ticking(self, |reaper| {
+            reaper.tick();
+        })
+        .await
+    }
+}
+
+/// `step` once per [`INTERVAL`] on the blocking pool, since a fingerprint walks the file system,
+/// until a step panics.
+async fn ticking<T: Send + 'static>(mut state: T, step: fn(&mut T)) -> tokio::task::JoinError {
+    let mut ticker = tokio::time::interval(INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        state = match tokio::task::spawn_blocking(move || {
+            step(&mut state);
+            state
+        })
+        .await
+        {
+            Ok(state) => state,
+            Err(error) => return error,
+        };
     }
 }
 
@@ -265,4 +284,26 @@ fn fingerprint(dir: &Path, walked: &mut usize) -> Option<Fingerprint> {
     }
     out.sort();
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ticking;
+
+    /// T-4591: a step that panics ends the loop with the panic, for the caller to act on, and
+    /// every step runs off the async worker.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_panicking_tick_is_answered_not_swallowed() {
+        let error = ticking(0u32, |n| {
+            let thread = std::thread::current();
+            assert!(!thread
+                .name()
+                .unwrap_or_default()
+                .contains("a_panicking_tick"));
+            *n += 1;
+            assert!(*n < 3, "the third tick fails");
+        })
+        .await;
+        assert!(error.is_panic());
+    }
 }
