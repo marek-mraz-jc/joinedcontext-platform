@@ -645,6 +645,13 @@ impl Hub {
             }
         };
         match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
+            // The types list_endpoints already names this caller, when the Policy grants no
+            // retrieveEntityTypes: a reader of an Endpoint may ask what it reads (T-4567).
+            HubTool::Unknown | HubTool::Ungranted(_) if name == "list_types" => {
+                let visible = schema::visible(subject, endpoint, crate::pdp::now());
+                let types = schema::visible_types(endpoint, &visible);
+                return Answer::Json(result(id, answered(&json!(types), "entityTypes")));
+            }
             HubTool::Unknown => return Answer::Json(error(id, -32602, "unknown tool")),
             HubTool::Ungranted(refusal) => return Answer::Json(result(id, refusal)),
             HubTool::Granted => {}
@@ -1008,7 +1015,9 @@ fn described(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Value
     });
     // What the dataset is about (T-4498), where and when, for the one-line list (T-4492).
     let catalog = endpoint_surface::classified(endpoint);
-    entry["domains"] = json!(endpoint_surface::classification(endpoint).domains);
+    // The domains of the types this caller reads, as search counts them (T-4567).
+    entry["domains"] =
+        json!(jc_core::classification::classify(types.iter().map(String::as_str)).domains);
     entry["themes"] = json!(catalog
         .themes
         .iter()

@@ -15,7 +15,7 @@
 
 use super::jsonrpc::{answered, error, refused, result};
 use crate::app::Gateway;
-use crate::handlers::endpoint_surface;
+use crate::handlers::{endpoint_surface, schema};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use antares_jsonld::{expand_entity, expand_types, Context, ExpandOpts};
@@ -120,10 +120,12 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
         .filter(|(endpoint, _)| !is_catalog_space(endpoint))
         .map(|(endpoint, subject)| (endpoint, subject))
         .collect();
+    // The subject is in the key because the types each Endpoint lists are the caller's own
+    // (T-4567). ponytail: a catalogue outlives a Policy's time window until the next reload.
     let mut hasher = DefaultHasher::new();
     for (endpoint, subject) in &listed {
         endpoint.slug.hash(&mut hasher);
-        because(endpoint, subject).hash(&mut hasher);
+        subject.hash(&mut hasher);
     }
     let key = hasher.finish();
     let cached = cache()
@@ -146,17 +148,16 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
     let mut records = Vec::with_capacity(listed.len());
     let mut places = BTreeMap::new();
     let mut facts = HashMap::new();
+    let now = crate::pdp::now();
     for (endpoint, subject) in &listed {
-        let classified = endpoint_surface::classification(endpoint);
+        // The types list_endpoints names and a query answers, not the space's declared ones
+        // (T-4567).
+        let types = schema::visible_types(endpoint, &schema::visible(subject, endpoint, now));
+        let classified = jc_core::classification::classify(types.iter().map(String::as_str));
         facts.insert(
             endpoint.slug.clone(),
             super::search::Facts {
-                types: classified
-                    .subjects
-                    .iter()
-                    .map(|s| (*s).to_owned())
-                    .chain(classified.unclassified.iter().cloned())
-                    .collect(),
+                types,
                 domains: classified.domains.iter().map(|d| (*d).to_owned()).collect(),
                 themes: endpoint_surface::classified(endpoint)
                     .themes
