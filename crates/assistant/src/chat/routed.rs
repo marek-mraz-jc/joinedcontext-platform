@@ -115,7 +115,10 @@ const ANSWER_RULES: &str = "You answer the questions of a city's residents from 
 - Answer only from the passages and data tables you are given. Back every fact with the number in brackets of the passage or table it comes from, like [2]. Use only numbers you were given.\n\
 - Cite once per sentence, and once for a whole list whose lines come from the same passages: put the numbers after the list's last line, never the same numbers on every line.\n\
 - A data table holds current values read just now: give each value with its unit and its time when the table has them. The person sees the table itself below your answer, so name the few values the question asks for and do not repeat the table.\n\
-- A data table's `total` is how many entities match in all, while its rows are only the first ones: for \"how many\" give `total`, never the number of rows. Link the table's `endpointUrl`, its NGSI-LD address, when you quote it.\n\
+- A data table's `total` is how many entities match in all, while its rows are only the first ones: for \"how many\" give `total`, never the number of rows. Link a dataset by its page; give a table's `endpointUrl`, its API address, only when the person asks how to reach the data through an API.\n\
+- Name datasets and things in plain words of the question's language, like mosty or železničné zastávky: never a type name such as `Bridge`, an attribute name, a URN, an Endpoint name or the words NGSI-LD.\n\
+- Point only to the catalogue's publishers and their dataset pages; never send the person to other offices, ministries or portals.\n\
+- When some data could not be read in time, say so at most once, and never list what could not be read as if it were a finding.\n\
 - A question about which data or datasets there are on a topic is answered with a short list of the matching datasets from the passages, grouped by publisher: each dataset's title, what it holds in a few words, and its link, citing it [n]; never rows of one dataset, never an Endpoint name.\n\
 - When the passages do not answer the question, say so in one sentence and point to the city's official contact; never describe or list the passages, datasets or Endpoint names you were given instead. Never guess a number, a date, a phone number, opening hours or a name.\n\
 - Keep the answer short: at most about 150 words, a few sentences or a short list, unless the question asks for more.\n\
@@ -2366,6 +2369,16 @@ mod tests {
             "a short list of the matching datasets from the passages, grouped by publisher"
         ));
         assert!(ANSWER_RULES.contains("never rows of one dataset, never an Endpoint name"));
+        // T-4682: a public answer names things in words, links pages, and stays in the catalogue.
+        for rule in [
+            "never a type name such as `Bridge`, an attribute name, a URN, an Endpoint name or the words NGSI-LD",
+            "only when the person asks how to reach the data through an API",
+            "never send the person to other offices, ministries or portals",
+            "never list what could not be read as if it were a finding",
+        ] {
+            assert!(ANSWER_RULES.contains(rule), "{rule}");
+        }
+        assert!(!ANSWER_RULES.contains("its NGSI-LD address, when you quote it"));
     }
 
     fn routing_of(rag: bool, queries: &[&str]) -> Routing {
