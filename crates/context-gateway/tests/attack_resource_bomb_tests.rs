@@ -119,13 +119,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         project: DOMAIN.to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![
-            Representation::NgsiLd,
-            Representation::Csv,
-            Representation::Json,
-            Representation::GeoJson,
-            Representation::Xlsx,
-        ],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit,
         creates: None,
         file_limits: Some(FileLimits {
@@ -178,22 +172,17 @@ async fn a_download_of_a_dataset_that_never_ends_is_refused_at_the_row_ceiling()
     );
 }
 
-/// The ceiling belongs to the endpoint, not to the representation: a caller cannot walk the
-/// list of file types until one of them holds the whole space.
-///
-/// `file.json` is not in the list because the router does not serve it, although an endpoint
-/// record advertises it for a `json` representation — T-2382, found here.
+/// The ceiling stops the file before it holds the whole space, and the broker is never read
+/// past it (`file.csv`, the one file since T-4597).
 #[tokio::test]
-async fn every_file_representation_stops_at_the_same_ceiling() {
-    for file in ["/file.csv", "/file.geojson", "/file.xlsx"] {
-        let (status, asked) = ask(file).await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{file}");
-        assert!(
-            asked.len() <= (MAX_ROWS as usize).div_ceil(PAGE),
-            "{file} read {} pages",
-            asked.len()
-        );
-    }
+async fn the_file_stops_at_the_endpoints_ceiling() {
+    let (status, asked) = ask("/file.csv").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        asked.len() <= (MAX_ROWS as usize).div_ceil(PAGE),
+        "file.csv read {} pages",
+        asked.len()
+    );
 }
 
 /// The caller's own `limit` is a ceiling on the download and never a lift of the endpoint's.
@@ -247,7 +236,7 @@ async fn a_dataset_inside_the_ceiling_is_served() {
 
 /// The other half of the same rule: a dataset larger than one broker page is served whole, not
 /// as the first page with nothing to say it was cut (EP-44, T-1700). Until this was fixed
-/// `file.geojson` asked the broker once and rendered whatever came back.
+/// `file.geojson` (removed by T-4597) asked the broker once and rendered whatever came back.
 #[tokio::test]
 async fn a_download_larger_than_one_broker_page_is_served_whole() {
     let pages = Arc::new(Mutex::new(0usize));
@@ -287,7 +276,7 @@ async fn a_download_larger_than_one_broker_page_is_served_whole() {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri(format!("/api/endpoint/{SLUG}/file.geojson"))
+                .uri(format!("/api/endpoint/{SLUG}/file.csv"))
                 .body(Body::empty())
                 .expect("a request"),
         )
@@ -297,12 +286,11 @@ async fn a_download_larger_than_one_broker_page_is_served_whole() {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("a body");
-    let collection: Value = serde_json::from_slice(&bytes).expect("a FeatureCollection");
+    let text = String::from_utf8_lossy(&bytes);
     assert_eq!(
-        collection["features"]
-            .as_array()
-            .map(Vec::len)
-            .unwrap_or_default(),
+        text.lines()
+            .filter(|line| line.contains("urn:ngsi-ld:"))
+            .count(),
         PAGE * 2 + 3,
         "the download stopped at a page boundary and said nothing about it"
     );

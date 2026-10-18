@@ -168,10 +168,7 @@ impl CkanPublication {
                         "the mirror reads a representation the endpoint does not enable (EP-65)",
                 });
             }
-            if !matches!(
-                datastore.representation,
-                Representation::Csv | Representation::Xlsx | Representation::Json
-            ) {
+            if datastore.representation != Representation::Csv {
                 return Err(Error::Name {
                     field: "publish.ckan.datastore.representation",
                     value: datastore.representation.as_str().to_string(),

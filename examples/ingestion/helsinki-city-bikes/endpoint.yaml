@@ -13,7 +13,7 @@ spec:
   contextSpaceRef: { kind: ContextSpace, name: bikes }
   slug: qaa2dub4omnxk7uhszlmntvf3a
   audience: public
-  enabledRepresentations: [ngsi-ld, geojson, csv, mcp]
+  enabledRepresentations: [ngsi-ld, csv, mcp]
   publish:
     ckan:
       instanceRef: { kind: CkanInstance, name: open-data }

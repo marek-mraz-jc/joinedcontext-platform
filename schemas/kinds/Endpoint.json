@@ -1084,7 +1084,7 @@
       "description": "Reference to another resource, either bare name or typed reference (MF-07)."
     },
     "Representation": {
-      "description": "Supported representation formats served under an endpoint (EP-05, Architecture/04).\n\nNote: `schema` (EP-46) and `access` (EP-55) are not variants: they are unconditional surfaces on every endpoint and cannot be toggled off.",
+      "description": "Supported representation formats served under an endpoint (EP-05, Architecture/04).\n\nNote: `schema` (EP-46) and `access` (EP-55) are not variants: they are unconditional surfaces on every endpoint and cannot be toggled off. `file.csv` is the one file an Endpoint publishes; the names of the removed files are refused by name ([`REMOVED_REPRESENTATIONS`]).",
       "oneOf": [
         {
           "description": "Canonical NGSI-LD representation (`/ngsi-ld/v1/`).",
@@ -1101,44 +1101,9 @@
           "type": "string"
         },
         {
-          "description": "GeoJSON feature collection (`/file.geojson`).",
-          "enum": [
-            "geojson"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Flat tabular CSV (`/file.csv`).",
+          "description": "Flat tabular CSV (`/file.csv`), the one file an Endpoint publishes.",
           "enum": [
             "csv"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Flat tabular Excel spreadsheet (`/file.xlsx`).",
-          "enum": [
-            "xlsx"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Typed columnar Apache Parquet file (`/file.parquet`, EP-119).",
-          "enum": [
-            "parquet"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "JSON array of entities (`/file.json`).",
-          "enum": [
-            "json"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Zipped multi-representation export bundle (`/file.zip`).",
-          "enum": [
-            "zip"
           ],
           "type": "string"
         },

@@ -431,7 +431,7 @@ fn representations(assembly: &Assembly) -> serde_json::Value {
 }
 
 const ONE: &str = r#"enabledRepresentations: ["ngsi-ld"]"#;
-const BOTH: &str = r#"enabledRepresentations: ["ngsi-ld", "geojson"]"#;
+const BOTH: &str = r#"enabledRepresentations: ["ngsi-ld", "csv"]"#;
 
 /// T-4460: a linked project whose tree did not move is taken from the last assembly, not
 /// rendered again, and stays on disk; relinked to another tree, it renders that tree.
@@ -452,7 +452,7 @@ fn a_linked_project_renders_again_only_when_its_link_moves() {
     .expect("assembles");
     assert_eq!(
         representations(&first),
-        serde_json::json!(["ngsi-ld", "geojson"])
+        serde_json::json!(["ngsi-ld", "csv"])
     );
     assert!(!first.entries[0].reused, "nothing was kept yet");
 
@@ -473,7 +473,7 @@ fn a_linked_project_renders_again_only_when_its_link_moves() {
     .expect("assembles");
     assert_eq!(
         representations(&again),
-        serde_json::json!(["ngsi-ld", "geojson"])
+        serde_json::json!(["ngsi-ld", "csv"])
     );
     assert!(again.entries[0].reused);
     assert!(

@@ -92,7 +92,6 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Csv,
             Representation::OgcFeatures,
             Representation::Sta,
@@ -177,7 +176,6 @@ async fn every_data_representation_names_its_schema() {
     for uri in [
         format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"),
         format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:station-01"),
-        format!("/api/endpoint/{SLUG}/file.geojson"),
         format!("/api/endpoint/{SLUG}/file.csv"),
         format!("/api/endpoint/{SLUG}/ogc/features/collections/AirQualityObserved/items"),
         format!("/api/endpoint/{SLUG}/sta/v1.1/Things"),

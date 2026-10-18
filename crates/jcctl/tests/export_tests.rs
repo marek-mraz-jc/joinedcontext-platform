@@ -27,7 +27,7 @@ spec:
   contextSpaceRef: ovzdusie
   slug: zt4qm7ge2xdv6ksb3ncf5arw2y
   audience: public
-  enabledRepresentations: ["ngsi-ld", "geojson"]
+  enabledRepresentations: ["ngsi-ld", "csv"]
 "#;
 
 /// A space somebody else's project owns, which must not come out with ours.

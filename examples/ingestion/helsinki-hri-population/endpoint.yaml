@@ -17,7 +17,7 @@ spec:
   contextSpaceRef: { kind: ContextSpace, name: statistics }
   slug: qedxosyniewu7qyy536rkxdgvn
   audience: public
-  enabledRepresentations: [ngsi-ld, csv, xlsx, json, mcp]
+  enabledRepresentations: [ngsi-ld, csv, mcp]
   publish:
     ckan:
       instanceRef: { kind: CkanInstance, name: open-data }

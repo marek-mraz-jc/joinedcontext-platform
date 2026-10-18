@@ -1,6 +1,6 @@
 //! A large download through the view reads its pages a few at a time (T-4082).
 //!
-//! On dev a 25 000-entity Endpoint (praha-mesto) took 20-28 s for file.csv and .geojson and
+//! On dev a 25 000-entity Endpoint (praha-mesto) took 20-28 s for file.csv and
 //! sometimes passed the edge's timeout: the gateway read 1000-entity pages one after another
 //! from a broker answering each in about 0.9 s. The stub view here answers slowly, counts the
 //! requests in flight, and sends `NGSILD-Results-Count` only when asked to.
@@ -78,19 +78,33 @@ async fn view(counts: bool) -> (String, Arc<Seen>) {
                 });
                 return (StatusCode::FORBIDDEN, axum::Json(problem)).into_response();
             }
-            let name = param(&query, "type").unwrap_or_default().to_owned();
-            let total = HELD
+            // The gateway asks every type in one query (`type=A,B`); the view answers them
+            // one type after another, each in id order.
+            let asked = param(&query, "type")
+                .unwrap_or_default()
+                .replace("%2C", ",");
+            let asked: Vec<&str> = asked.split(',').collect();
+            let all: Vec<(&str, usize)> = asked
                 .iter()
-                .find(|(held, _)| *held == name)
-                .map_or(0, |(_, n)| *n);
+                .flat_map(|name| {
+                    let n = HELD
+                        .iter()
+                        .find(|(held, _)| held == name)
+                        .map_or(0, |(_, n)| *n);
+                    (0..n).map(move |i| (*name, i))
+                })
+                .collect();
+            let total = all.len();
             let number = |key: &str| {
                 param(&query, key)
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0)
             };
-            let rows: Vec<Value> = (number("offset")..total)
+            let rows: Vec<Value> = all
+                .iter()
+                .skip(number("offset"))
                 .take(number("limit"))
-                .map(|n| {
+                .map(|(name, n)| {
                     json!({
                         "id": format!("urn:ngsi-ld:{name}:praha.eu:praha-mesto:{n:05}"),
                         "type": name,
@@ -132,11 +146,7 @@ fn endpoint(max_file_rows: Option<u32>) -> Endpoint {
         project: "praha".to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![
-            Representation::NgsiLd,
-            Representation::GeoJson,
-            Representation::Csv,
-        ],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: max_file_rows.map(|rows| FileLimits {
@@ -160,18 +170,18 @@ fn endpoint(max_file_rows: Option<u32>) -> Endpoint {
     }
 }
 
-async fn download(broker: &str, endpoint: Endpoint) -> (StatusCode, Value) {
+async fn download(broker: &str, endpoint: Endpoint) -> (StatusCode, String) {
     download_with(broker, endpoint, "").await
 }
 
-async fn download_with(broker: &str, endpoint: Endpoint, query: &str) -> (StatusCode, Value) {
+async fn download_with(broker: &str, endpoint: Endpoint, query: &str) -> (StatusCode, String) {
     let app = router(Arc::new(
         Gateway::new(Broker::new(broker), Box::new(PolicyPdp), "praha.eu").serve([endpoint]),
     ));
     let response = app
         .oneshot(
             HttpRequest::builder()
-                .uri(format!("/api/endpoint/{SLUG}/file.geojson{query}"))
+                .uri(format!("/api/endpoint/{SLUG}/file.csv{query}"))
                 .body(Body::empty())
                 .expect("a request"),
         )
@@ -181,19 +191,19 @@ async fn download_with(broker: &str, endpoint: Endpoint, query: &str) -> (Status
     let body = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
         .await
         .expect("a readable body");
-    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
-fn ids(collection: &Value) -> Vec<String> {
-    collection["features"]
-        .as_array()
-        .map(|features| {
-            features
-                .iter()
-                .filter_map(|f| f["id"].as_str().map(str::to_owned))
-                .collect()
+/// The ids of the CSV's rows, in the order they were written.
+fn ids(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            line.split(',')
+                .map(|cell| cell.trim_matches('"'))
+                .find(|cell| cell.starts_with("urn:ngsi-ld:"))
+                .map(str::to_owned)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 fn expected() -> Vec<String> {
@@ -216,8 +226,8 @@ async fn a_large_download_reads_its_pages_a_few_at_a_time_and_misses_none() {
     assert!((2..=4).contains(&most), "pages in flight at once: {most}");
     assert_eq!(
         seen.asked.lock().expect("no poisoned lock").len(),
-        5,
-        "3 + 2 pages"
+        4,
+        "3700 entities of both types asked in one query, 1000 a page"
     );
 }
 
@@ -276,5 +286,6 @@ async fn the_brokers_scan_ceiling_is_payload_too_large_not_forbidden() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{problem}");
+    let problem: Value = serde_json::from_str(&problem).expect("a problem document");
     assert_eq!(problem["status"], 413, "{problem}");
 }

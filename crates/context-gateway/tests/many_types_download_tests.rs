@@ -146,10 +146,7 @@ fn endpoint(granted: &[&str]) -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Csv,
-            Representation::Xlsx,
-            Representation::Zip,
             Representation::Sta,
         ],
         rate_limit: None,
@@ -200,38 +197,33 @@ async fn get(app: Router, path: &str) -> (StatusCode, Vec<u8>) {
 /// request that names all of them (T-4456).
 #[tokio::test]
 async fn a_download_of_a_space_of_many_types_holds_every_type() {
-    for file in ["file.geojson", "file.csv", "file.xlsx", "file.zip"] {
-        let (broker, asked) = view_broker(None).await;
-        let (status, body) = get(
-            gateway(&broker, endpoint(&[])),
-            &format!("/api/endpoint/{SLUG}/{file}"),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "{file}: {}",
-            String::from_utf8_lossy(&body)
+    let file = "file.csv";
+    let (broker, asked) = view_broker(None).await;
+    let (status, body) = get(
+        gateway(&broker, endpoint(&[])),
+        &format!("/api/endpoint/{SLUG}/{file}"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{file}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let asked = asked.lock().expect("no poisoned lock").clone();
+    assert_eq!(asked.len(), 1, "{file}: {asked:?}");
+    assert_eq!(asked[0].len(), TYPES, "{file}: {asked:?}");
+    let text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        text.lines().count(),
+        1 + TYPES * 3,
+        "a header and every row: {text}"
+    );
+    for n in [0, 15, 16, 20] {
+        assert!(
+            text.contains(&format!("{} 2", type_name(n))),
+            "{file}: {text}"
         );
-        let asked = asked.lock().expect("no poisoned lock").clone();
-        assert_eq!(asked.len(), 1, "{file}: {asked:?}");
-        assert_eq!(asked[0].len(), TYPES, "{file}: {asked:?}");
-        if file == "file.geojson" {
-            let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
-            assert_eq!(
-                collection["features"].as_array().map(Vec::len),
-                Some(TYPES * 3)
-            );
-        }
-        if file == "file.csv" {
-            let text = String::from_utf8_lossy(&body);
-            for n in [0, 15, 16, 20] {
-                assert!(
-                    text.contains(&format!("{} 2", type_name(n))),
-                    "{file}: {text}"
-                );
-            }
-        }
     }
 }
 
@@ -242,34 +234,37 @@ async fn a_type_the_view_refuses_is_left_out_of_the_download() {
     let (broker, asked) = view_broker(Some(&["Type03", "Type17"])).await;
     let (status, body) = get(
         gateway(&broker, endpoint(&[])),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let text = String::from_utf8_lossy(&body);
+    assert_eq!(status, StatusCode::OK, "{text}");
     let asked = asked.lock().expect("no poisoned lock").clone();
     assert_eq!(asked.len(), 1, "{asked:?}");
-    let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
-    assert_eq!(collection["features"].as_array().map(Vec::len), Some(6));
+    assert_eq!(
+        text.lines().count(),
+        1 + 6,
+        "a header and the six rows: {text}"
+    );
 }
 
 /// A view that refuses the caller every type refuses the download, as it refuses the caller's
 /// own query.
 #[tokio::test]
 async fn a_view_refusing_every_type_refuses_the_read() {
-    for path in ["file.csv", "file.geojson"] {
-        let (broker, _) = view_broker(Some(&[])).await;
-        let (status, body) = get(
-            gateway(&broker, endpoint(&[])),
-            &format!("/api/endpoint/{SLUG}/{path}"),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "{path}: {}",
-            String::from_utf8_lossy(&body)
-        );
-    }
+    let path = "file.csv";
+    let (broker, _) = view_broker(Some(&[])).await;
+    let (status, body) = get(
+        gateway(&broker, endpoint(&[])),
+        &format!("/api/endpoint/{SLUG}/{path}"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "{path}: {}",
+        String::from_utf8_lossy(&body)
+    );
 }
 
 /// An Endpoint whose slug no view id can hold has no view, and nothing decides for it: its
@@ -277,26 +272,25 @@ async fn a_view_refusing_every_type_refuses_the_read() {
 #[tokio::test]
 async fn an_endpoint_without_a_view_answers_no_view() {
     let long = "a".repeat(64);
-    for path in ["file.csv", "file.geojson"] {
-        let (broker, asked) = view_broker(None).await;
-        let mut endpoint = endpoint(&[]);
-        endpoint.slug = long.clone();
-        endpoint.base_path = format!("/api/endpoint/{long}");
-        let (status, body) = get(
-            gateway(&broker, endpoint),
-            &format!("/api/endpoint/{long}/{path}"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
-        let problem: Value = serde_json::from_slice(&body).expect("a problem");
-        assert!(
-            problem["type"]
-                .as_str()
-                .is_some_and(|t| t.ends_with("no-view")),
-            "{path}: {problem}"
-        );
-        assert!(asked.lock().expect("no poisoned lock").is_empty(), "{path}");
-    }
+    let path = "file.csv";
+    let (broker, asked) = view_broker(None).await;
+    let mut endpoint = endpoint(&[]);
+    endpoint.slug = long.clone();
+    endpoint.base_path = format!("/api/endpoint/{long}");
+    let (status, body) = get(
+        gateway(&broker, endpoint),
+        &format!("/api/endpoint/{long}/{path}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+    let problem: Value = serde_json::from_slice(&body).expect("a problem");
+    assert!(
+        problem["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("no-view")),
+        "{path}: {problem}"
+    );
+    assert!(asked.lock().expect("no poisoned lock").is_empty(), "{path}");
 }
 
 /// A Policy that names no type the space holds narrows nothing: the view is still asked, once,

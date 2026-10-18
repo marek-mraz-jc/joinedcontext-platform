@@ -53,7 +53,7 @@ Analysts visualize municipal data on geospatial canvases, filter entity distribu
 3. Select the **Endpoint** `helsinki-bikes`, choose **Style** `circle`, and set **Colour by** to `availableBikeNumber`.
 4. Click **Propose change** to submit the dashboard for approval.
 5. Open `/projects/helsinki/explore` to read the live records, and narrow them to an area by drawing a box on the map.
-6. Open `/projects/helsinki/endpoints` to locate endpoint `helsinki-bikes`, copy the GeoJSON link, and paste it into QGIS.
+6. Open `/projects/helsinki/endpoints` to locate endpoint `helsinki-bikes`, copy the OGC API Features link, and add it in QGIS as an OGC API Features connection.
 You should see vector points render on your map canvas reflecting current bike availability across Helsinki.
 
 The live journey `share.spec.ts` replays these steps.

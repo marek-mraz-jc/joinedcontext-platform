@@ -1,14 +1,15 @@
 //! A file download of an endpoint whose grant narrows nothing (T-0379, EP-07, EP-09).
 //!
-//! `DEMO.md` offers `file.geojson` with no query string, and on the dev cluster that was a
+//! `DEMO.md` offered `file.geojson` with no query string, and on the dev cluster that was a
 //! `400`: the demo's `public-read` Policy names no entity type, so the gateway forwarded a
 //! query that selected nothing and a conformant broker refused it under CIM 009 5.7.2. Every
 //! test that covered the download used a grant that *did* name a type, so the case the demo
 //! actually exercises had no test at all.
 //!
-//! What a download means is the fix. `file.geojson` names a dataset, not a query, so when
+//! What a download means is the fix. A file names a dataset, not a query, so when
 //! nothing else selects, the selector is every type the space holds. It can only narrow: the
-//! broker's view decides what this caller may see and leaves the rest out (T-3651).
+//! broker's view decides what this caller may see and leaves the rest out (T-3651). The one
+//! file left after T-4597 is `file.csv`, so the cases are told on it.
 
 mod common;
 
@@ -40,11 +41,7 @@ fn unrestricted_endpoint() -> Endpoint {
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![
-            Representation::NgsiLd,
-            Representation::GeoJson,
-            Representation::Csv,
-        ],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -111,18 +108,23 @@ async fn get(app: axum::Router, path: &str) -> (StatusCode, String) {
 /// The URL `DEMO.md` prints. Before the fix this was the broker's `400`, because the gateway
 /// forwarded `/entities?` with nothing in it.
 #[tokio::test]
-async fn a_bare_geojson_download_selects_the_types_the_space_holds() {
+async fn a_bare_download_selects_the_types_the_space_holds() {
     let broker = BrokerStub::start(vec![json!([station()])]).await;
     let (status, body) = get(
         gateway(&broker.url, unrestricted_endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    let collection: Value = serde_json::from_str(&body).expect("a FeatureCollection");
-    assert_eq!(collection["type"], json!("FeatureCollection"));
-    assert_eq!(collection["features"].as_array().map(Vec::len), Some(1));
+    assert!(body.contains("pm10"), "{body}");
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.contains("station-01"))
+            .count(),
+        1,
+        "{body}"
+    );
 
     // The selector came from the broker's own answer to "what is in here", and the entity
     // query that followed carries it. Neither hop is unselected.
@@ -165,72 +167,33 @@ async fn a_bare_geojson_download_selects_the_types_the_space_holds() {
     );
 }
 
-/// The same rule for the tabular downloads, which page through the broker separately.
-#[tokio::test]
-async fn a_bare_csv_download_selects_the_same_way() {
-    let broker = BrokerStub::start(vec![json!([station()])]).await;
-    let (status, body) = get(
-        gateway(&broker.url, unrestricted_endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.csv"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("pm10"), "{body}");
-    assert!(
-        broker
-            .hops()
-            .iter()
-            .any(|hop| hop.query.contains("type=AirQualityObserved")),
-        "{:?}",
-        broker.hops()
-    );
-}
-
 /// The caller's `Accept` names what it wants back, not what the broker speaks: `jcctl publish
 /// ckan` asks `file.csv` with `Accept: text/csv`, and forwarded to the broker that was a `406`.
 #[tokio::test]
 async fn the_callers_accept_never_reaches_the_broker() {
-    for (path, accept) in [
-        ("file.csv", "text/csv"),
-        (
-            "file.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ),
-        ("file.geojson", "application/geo+json"),
-        ("file.zip", "application/zip"),
-    ] {
-        let broker = BrokerStub::start(vec![json!([station()])]).await;
-        let mut endpoint = unrestricted_endpoint();
-        endpoint
-            .representations
-            .extend([Representation::Xlsx, Representation::Zip]);
-        let response = gateway(&broker.url, endpoint)
-            .oneshot(
-                HttpRequest::builder()
-                    .uri(format!("/api/endpoint/{SLUG}/{path}"))
-                    .header("Accept", accept)
-                    .body(Body::empty())
-                    .expect("a request"),
-            )
-            .await
-            .expect("the gateway answers");
-        assert_eq!(response.status(), StatusCode::OK, "{path}");
-        let hops = broker.hops();
-        assert!(!hops.is_empty(), "{path}: no hop");
-        // The data hops ask for JSON; the bundle's schema hops to the view's LinkML surface
-        // (T-3646) name their document by path and carry no `Accept` of the caller's either.
-        assert!(
-            hops.iter()
-                .filter(|hop| hop.path.starts_with("/ngsi-ld/"))
-                .all(|hop| hop.accept == "application/json"),
-            "{path}: {hops:?}"
-        );
-        assert!(
-            hops.iter().all(|hop| hop.accept != accept),
-            "{path}: {hops:?}"
-        );
-    }
+    let (path, accept) = ("file.csv", "text/csv");
+    let broker = BrokerStub::start(vec![json!([station()])]).await;
+    let response = gateway(&broker.url, unrestricted_endpoint())
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/endpoint/{SLUG}/{path}"))
+                .header("Accept", accept)
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
+    let hops = broker.hops();
+    assert!(!hops.is_empty(), "{path}: no hop");
+    assert!(
+        hops.iter().all(|hop| hop.accept == "application/json"),
+        "{path}: {hops:?}"
+    );
+    assert!(
+        hops.iter().all(|hop| hop.accept != accept),
+        "{path}: {hops:?}"
+    );
 }
 
 /// A space with nothing in it is an empty file. Asking the broker for "no types at all"
@@ -240,13 +203,12 @@ async fn an_empty_space_is_an_empty_file_and_not_a_second_question() {
     let broker = BrokerStub::start(vec![json!([])]).await;
     let (status, body) = get(
         gateway(&broker.url, unrestricted_endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    let collection: Value = serde_json::from_str(&body).expect("a FeatureCollection");
-    assert_eq!(collection["features"].as_array().map(Vec::len), Some(0));
+    assert!(!body.contains("urn:ngsi-ld:"), "{body}");
     let hops = broker.hops();
     assert_eq!(
         hops.iter()
@@ -305,7 +267,7 @@ async fn a_grant_that_narrows_is_never_widened_by_the_fallback() {
     .await;
     let (status, body) = get(
         gateway(&broker.url, unrestricted_endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
@@ -327,34 +289,32 @@ async fn a_type_the_caller_may_not_read_is_never_listed_for_them() {
         "type": "Depot",
         "capacity": { "type": "Property", "value": 7 },
     });
-    let mut endpoint = unrestricted_endpoint();
-    endpoint.representations.push(Representation::Json);
-    for file in ["file.geojson", "file.csv", "file.json"] {
-        let broker = BrokerStub::narrowing(
-            vec![json!([station(), depot.clone()])],
-            View::of(SLUG, "public", &["AirQualityObserved"], None),
+    let endpoint = unrestricted_endpoint();
+    let file = "file.csv";
+    let broker = BrokerStub::narrowing(
+        vec![json!([station(), depot.clone()])],
+        View::of(SLUG, "public", &["AirQualityObserved"], None),
+    )
+    .await;
+    let response = gateway(&broker.url, endpoint.clone())
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/endpoint/{SLUG}/{file}"))
+                .body(Body::empty())
+                .expect("a request"),
         )
-        .await;
-        let response = gateway(&broker.url, endpoint.clone())
-            .oneshot(
-                HttpRequest::builder()
-                    .uri(format!("/api/endpoint/{SLUG}/{file}"))
-                    .body(Body::empty())
-                    .expect("a request"),
-            )
-            .await
-            .expect("the gateway answers");
-        let status = response.status();
-        let headers = format!("{:?}", response.headers());
-        let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
-            .await
-            .expect("a readable body");
-        let body = String::from_utf8_lossy(&body);
-        assert_eq!(status, StatusCode::OK, "{file}: {body}");
-        assert!(body.contains("station-01"), "{file}: {body}");
-        for trace in ["Depot", "capacity", "north"] {
-            assert!(!body.contains(trace), "{file} names {trace}: {body}");
-            assert!(!headers.contains(trace), "{file} names {trace}: {headers}");
-        }
+        .await
+        .expect("the gateway answers");
+    let status = response.status();
+    let headers = format!("{:?}", response.headers());
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .expect("a readable body");
+    let body = String::from_utf8_lossy(&body);
+    assert_eq!(status, StatusCode::OK, "{file}: {body}");
+    assert!(body.contains("station-01"), "{file}: {body}");
+    for trace in ["Depot", "capacity", "north"] {
+        assert!(!body.contains(trace), "{file} names {trace}: {body}");
+        assert!(!headers.contains(trace), "{file} names {trace}: {headers}");
     }
 }

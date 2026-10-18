@@ -1,11 +1,11 @@
-//! Edge cases of `app::file_geojson`, `GET /api/endpoint/{slug}/file.geojson` (T-1884, EP-26,
-//! MP-02).
+//! Edge cases of `files::file_csv`, `GET /api/endpoint/{slug}/file.csv` (T-1884, EP-26, MP-02),
+//! the one file an endpoint publishes since T-4597; these cases guarded `file.csv` before.
 //!
-//! Contract, in one sentence: it answers a `FeatureCollection` of exactly the entities this caller
+//! Contract, in one sentence: it answers a table of exactly the entities this caller
 //! is granted — the endpoint's own tenant, the grant's types, the grant's attributes minus the
 //! endpoint's hidden ones, inside the granted areas — and for every caller it does not serve it
 //! answers the one `404` that says nothing about whether the endpoint, the representation or the
-//! grant was missing (EP-05, EP-09, EP-61, GW11, R9).
+//! grant was missing (EP-05, EP-08, EP-61, GW11, R9).
 
 mod common;
 
@@ -41,7 +41,7 @@ fn endpoint() -> Endpoint {
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -124,18 +124,18 @@ async fn get(app: axum::Router, path: &str) -> (StatusCode, String) {
     send(app, at(path)).await
 }
 
-/// The first case: an endpoint that does not serve GeoJSON is not an endpoint at this URL, and the
+/// The first case: an endpoint that does not serve CSV is not an endpoint at this URL, and the
 /// broker is never asked — a caller must not be able to tell a representation apart from a grant by
 /// what the gateway does upstream (EP-05).
 #[tokio::test]
-async fn an_endpoint_that_does_not_serve_geojson_is_not_found_and_the_broker_is_not_asked() {
+async fn an_endpoint_that_does_not_serve_csv_is_not_found_and_the_broker_is_not_asked() {
     let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
     let mut only_ngsi = endpoint();
     only_ngsi.representations = vec![Representation::NgsiLd];
 
     let (status, body) = get(
         gateway(&broker.url, only_ngsi),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
@@ -153,12 +153,12 @@ async fn an_unknown_slug_and_a_representation_not_served_answer_the_same_bytes()
 
     let (unknown_status, unknown_body) = get(
         gateway(&broker.url, endpoint()),
-        "/api/endpoint/xxxxxxxxxxxxxxxxxxxxxxxxxx/file.geojson",
+        "/api/endpoint/xxxxxxxxxxxxxxxxxxxxxxxxxx/file.csv",
     )
     .await;
     let (unserved_status, unserved_body) = get(
         gateway(&broker.url, only_ngsi),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
@@ -188,7 +188,7 @@ async fn no_other_spelling_of_the_slug_is_that_slug() {
     ] {
         let (status, body) = get(
             gateway(&broker.url, endpoint()),
-            &format!("/api/endpoint/{slug}/file.geojson"),
+            &format!("/api/endpoint/{slug}/file.csv"),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{slug}: {body}");
@@ -202,7 +202,7 @@ async fn no_other_spelling_of_the_slug_is_that_slug() {
 async fn a_tenant_the_caller_forged_never_reaches_the_broker() {
     let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
     let request = HttpRequest::builder()
-        .uri(format!("/api/endpoint/{SLUG}/file.geojson"))
+        .uri(format!("/api/endpoint/{SLUG}/file.csv"))
         .header("NGSILD-Tenant", "somebody-elses-space")
         .header("ngsild-tenant", "another-space")
         .body(Body::empty())
@@ -221,10 +221,10 @@ async fn a_tenant_the_caller_forged_never_reaches_the_broker() {
 }
 
 /// The download reads through the Endpoint's view (T-3651, plan 5.7): an entity of a type the
-/// view does not show the public is not in the collection, and the hop carried the caller the
-/// engine narrows for.
+/// view does not show the public is not in the table, and the hop carried the caller the engine
+/// narrows for.
 #[tokio::test]
-async fn an_entity_of_an_ungranted_type_is_not_in_the_collection() {
+async fn an_entity_of_an_ungranted_type_is_not_in_the_table() {
     let mut intruder = station("station-02", 19.15, 48.74);
     intruder["type"] = json!("WaterQualityObserved");
     intruder["id"] =
@@ -237,7 +237,7 @@ async fn an_entity_of_an_ungranted_type_is_not_in_the_collection() {
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
@@ -253,10 +253,10 @@ async fn an_entity_of_an_ungranted_type_is_not_in_the_collection() {
     assert_eq!(query.headers["x-jc-roles"], "public");
 }
 
-/// An attribute the view withholds is in no feature (EP-61): the Portal writes the endpoint's
-/// hidden names into the view's rules, and the collection holds what the view answers.
+/// An attribute the view withholds is in no column (EP-61): the Portal writes the endpoint's
+/// hidden names into the view's rules, and the table holds what the view answers.
 #[tokio::test]
-async fn a_hidden_attribute_is_in_no_feature() {
+async fn a_hidden_attribute_is_in_no_column() {
     let broker = BrokerStub::narrowing(
         vec![json!([station("station-01", 19.14, 48.73)])],
         View::of(
@@ -270,7 +270,7 @@ async fn a_hidden_attribute_is_in_no_feature() {
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson?type=AirQualityObserved"),
+        &format!("/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"),
     )
     .await;
 
@@ -316,7 +316,7 @@ async fn a_filter_goes_to_the_view_as_the_caller_wrote_it() {
 
         let (status, body) = get(
             gateway(&broker.url, endpoint()),
-            &format!("/api/endpoint/{SLUG}/file.geojson?{query}"),
+            &format!("/api/endpoint/{SLUG}/file.csv?{query}"),
         )
         .await;
 
@@ -347,7 +347,7 @@ async fn no_grant_is_folded_into_the_query_and_the_callers_area_goes_as_drawn() 
 
         let (status, body) = get(
             gateway(&broker.url, with_geo_grant()),
-            &format!("/api/endpoint/{SLUG}/file.geojson?{asked}"),
+            &format!("/api/endpoint/{SLUG}/file.csv?{asked}"),
         )
         .await;
 
@@ -374,7 +374,7 @@ async fn a_caller_the_view_does_not_serve_is_refused() {
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson"),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
     )
     .await;
 
@@ -383,34 +383,32 @@ async fn a_caller_the_view_does_not_serve_is_refused() {
     assert!(!body.contains("urn:antares"), "{body}");
 }
 
-/// A non-spatial answer is a `200` collection whose Features carry a `null` geometry: every
-/// endpoint serves GeoJSON and none advertises a surface that refuses (EP-10, T-2939).
+/// A non-spatial answer is a `200` table: an entity without a location is a row without a
+/// location column, never a refusal (EP-08, T-2939).
 #[tokio::test]
-async fn an_answer_with_no_geometry_at_all_is_a_collection_of_null_geometries() {
+async fn an_answer_with_no_geometry_is_a_table_without_location_columns() {
     let mut flat = station("station-01", 0.0, 0.0);
     flat.as_object_mut().expect("an object").remove("location");
     let broker = BrokerStub::start(vec![json!([flat])]).await;
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson?type=AirQualityObserved"),
+        &format!("/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    let collection: Value = serde_json::from_str(&body).expect("a GeoJSON document");
-    let features = collection["features"].as_array().expect("features");
-    assert_eq!(features.len(), 1);
-    assert_eq!(features[0]["geometry"], json!(null));
-    assert!(features[0]["id"]
-        .as_str()
-        .is_some_and(|id| id.ends_with("station-01")));
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines.len(), 2, "a header and one row: {body}");
+    assert!(lines[0].starts_with("id,type"), "{body}");
+    assert!(!lines[0].contains("location"), "{body}");
+    assert!(lines[1].contains("station-01"), "{body}");
 }
 
-/// The answer's media type is GeoJSON's own, and the caller's `Accept` decides nothing about it:
+/// The answer's media type is CSV's own, and the caller's `Accept` decides nothing about it:
 /// this route is one document in one format.
 #[tokio::test]
-async fn the_answer_is_geojson_whatever_the_caller_accepts() {
+async fn the_answer_is_csv_whatever_the_caller_accepts() {
     for accept in [
         "application/geo+json",
         "text/csv",
@@ -420,7 +418,7 @@ async fn the_answer_is_geojson_whatever_the_caller_accepts() {
     ] {
         let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
         let request = HttpRequest::builder()
-            .uri(format!("/api/endpoint/{SLUG}/file.geojson"))
+            .uri(format!("/api/endpoint/{SLUG}/file.csv"))
             .header("Accept", accept)
             .body(Body::empty())
             .expect("a request");
@@ -435,7 +433,7 @@ async fn the_answer_is_geojson_whatever_the_caller_accepts() {
                 .headers()
                 .get("content-type")
                 .and_then(|value| value.to_str().ok()),
-            Some("application/geo+json"),
+            Some("text/csv; charset=utf-8; header=present"),
             "{accept:?}"
         );
         assert!(
@@ -449,9 +447,9 @@ async fn the_answer_is_geojson_whatever_the_caller_accepts() {
     }
 }
 
-/// A type the view holds nothing of is an empty collection, not an error.
+/// A type the view holds nothing of is an empty table, not an error.
 #[tokio::test]
-async fn a_type_the_view_holds_nothing_of_is_an_empty_collection() {
+async fn a_type_the_view_holds_nothing_of_is_an_empty_table() {
     let broker = BrokerStub::narrowing(
         vec![json!([station("station-01", 19.14, 48.73)])],
         View::of(SLUG, "public", &["AirQualityObserved"], None),
@@ -460,14 +458,13 @@ async fn a_type_the_view_holds_nothing_of_is_an_empty_collection() {
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson?type=NothingLikeThis"),
+        &format!("/api/endpoint/{SLUG}/file.csv?type=NothingLikeThis"),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
-    let collection: Value = serde_json::from_str(&body).expect("a FeatureCollection");
-    assert_eq!(collection["type"], json!("FeatureCollection"));
-    assert_eq!(collection["features"].as_array().map(Vec::len), Some(0));
+    assert!(!body.contains("station-01"), "{body}");
+    assert!(body.lines().count() <= 1, "no row: {body}");
 }
 
 /// A refusal says nothing about what is behind it: no address, no tenant, no file path, not the
@@ -482,7 +479,7 @@ async fn a_refusal_names_nothing_internal() {
 
     let (status, body) = get(
         gateway(&broker.url, endpoint()),
-        &format!("/api/endpoint/{SLUG}/file.geojson?type=AirQualityObserved"),
+        &format!("/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"),
     )
     .await;
 
@@ -507,7 +504,7 @@ async fn a_write_method_on_a_download_is_refused() {
         let broker = BrokerStub::start(vec![json!([station("station-01", 19.14, 48.73)])]).await;
         let request = HttpRequest::builder()
             .method(method)
-            .uri(format!("/api/endpoint/{SLUG}/file.geojson"))
+            .uri(format!("/api/endpoint/{SLUG}/file.csv"))
             .body(Body::empty())
             .expect("a request");
         let (status, body) = send(gateway(&broker.url, endpoint()), request).await;
@@ -535,7 +532,7 @@ async fn a_narrowed_download_says_so_to_a_caller_who_asked() {
             View::of(SLUG, "public", &["AirQualityObserved"], attrs),
         )
         .await;
-        let mut request = HttpRequest::builder().uri(format!("/api/endpoint/{SLUG}/file.geojson"));
+        let mut request = HttpRequest::builder().uri(format!("/api/endpoint/{SLUG}/file.csv"));
         if asked {
             request = request.header("NGSILD-Results-Restricted", "true");
         }
