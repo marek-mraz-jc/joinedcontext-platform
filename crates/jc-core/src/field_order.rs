@@ -146,6 +146,22 @@ mod tests {
         }
     }
 
+    /// The CKAN theme serves a byte copy (joinedcontext-deployment
+    /// charts/ckan/files/jc_theme/public__jc-field-order.json, whose test pins the same hash): a
+    /// change here lands there too, with both hashes.
+    #[test]
+    fn the_table_is_the_one_the_ckan_theme_copies() {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(JSON.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hash,
+            "4e949e7dc19acbe9d53a689f88ef07805d018a26791f7d52f631b925fa21c325"
+        );
+    }
+
     #[test]
     fn name_comes_first_coordinates_and_id_last() {
         let mut columns = vec![
