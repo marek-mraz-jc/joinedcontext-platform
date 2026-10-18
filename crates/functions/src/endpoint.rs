@@ -27,12 +27,10 @@ pub struct Endpoint {
     pub proxy: Option<String>,
 }
 
-/// An endpoint slug as the Portal mints them (EP-02): base32, 26 to 32 characters.
+/// An endpoint slug as the Portal mints them (EP-02, the kind's own rule), at most 32 characters:
+/// the ceiling bounds what a function can address (T-1193).
 pub fn is_slug(slug: &str) -> bool {
-    (26..=32).contains(&slug.len())
-        && slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+    slug.len() <= 32 && jc_core::kinds::EndpointSlug::new(slug).is_ok()
 }
 
 fn id_byte(b: u8) -> bool {
