@@ -93,6 +93,8 @@ pub struct ChatState {
     pub questions: Arc<tokio::sync::Semaphore>,
     /// Answers to first questions asked before (T-4139).
     pub answers: routed::AnswerCache,
+    /// Public Endpoints' tool listings (T-4680).
+    pub listings: mcp::Listings,
     /// The public origin `/api/endpoint/{slug}` is served under (`JC_ASSISTANT_ENDPOINT_URL`):
     /// a data table's download link; `None` offers none.
     pub endpoint_base: Option<url::Url>,
@@ -763,7 +765,7 @@ async fn connected(
         .iter()
         .map(|t| (*t).to_owned())
         .collect();
-    let mut connected = Vec::new();
+    let mut reachable = Vec::new();
     for resolved in snapshot.reach(deployment).endpoints {
         // The name a connector gives it: `{project}/{endpoint}` for a project of `scope.projects`.
         let named = if resolved.project == deployment.project {
@@ -808,9 +810,19 @@ async fn connected(
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
             token,
         };
-        match surface.tools(&state.http, &connector.tools).await {
+        reachable.push((connector, endpoint.title.clone(), surface));
+    }
+    // Every listing at once, so a question waits for the slowest connector, not their sum (T-4680).
+    let listed = futures_util::future::join_all(reachable.iter().map(|(connector, _, surface)| {
+        surface.tools(&state.http, &state.listings, &connector.tools)
+    }))
+    .await;
+    let mut connected = Vec::new();
+    for ((connector, title, surface), listed) in reachable.into_iter().zip(listed) {
+        match listed {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
+                title,
                 surface,
                 tools,
             }),
@@ -915,8 +927,9 @@ async fn lent(
             timeout: Duration::from_secs(SERVER_SECONDS),
             token,
         };
-        match surface.tools(&state.http, &tools).await {
+        match surface.tools(&state.http, &state.listings, &tools).await {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
+                title: None,
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,

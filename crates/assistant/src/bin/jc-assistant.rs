@@ -185,6 +185,7 @@ fn chat_state(
         limits: tokio::sync::Mutex::default(),
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
+        listings: Default::default(),
         endpoint_base: reader.endpoint_base.clone(),
         viz: viz_url(env).map_err(fail("the chart renderer's address is not usable"))?,
         organization: organization.to_owned(),
