@@ -427,15 +427,31 @@ fn hit(doc: &Doc, score: f64, lang: &str, asked: &Asked<'_>) -> Value {
         .cloned()
         .unwrap_or(Value::Null);
     let named = |t: &String| kind.is_some_and(|k| t.to_lowercase() == k);
+    // A type the question says in words: "events" is Event (T-4570).
+    let spoken = |t: &String| terms(t).iter().any(|w| asked.words.contains(w));
     let (endpoint, types) = doc
         .served
         .iter()
         .find(|(_, types)| types.iter().any(named))
+        .or_else(|| {
+            // The Endpoint most about it: of those serving a spoken type, the one serving fewest.
+            doc.served
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, types))| types.iter().any(spoken))
+                .min_by_key(|(at, (_, types))| (types.len(), *at))
+                .map(|(_, served)| served)
+        })
         .or_else(|| doc.served.iter().find(|(_, types)| !types.is_empty()))
         .map(|(slug, types)| (slug.clone(), types.as_slice()))
         .unwrap_or_else(|| (doc.slugs.first().cloned().unwrap_or_default(), &[]));
     let mut arguments = json!({ "endpoint": endpoint, "limit": 10 });
-    if let Some(first) = types.iter().find(|t| named(t)).or(types.first()) {
+    if let Some(first) = types
+        .iter()
+        .find(|t| named(t))
+        .or_else(|| types.iter().find(|t| spoken(t)))
+        .or(types.first())
+    {
         arguments["type"] = json!([first]);
     }
     let why = reason(doc, types, asked);
