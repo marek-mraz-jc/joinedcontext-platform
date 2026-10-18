@@ -4,6 +4,7 @@
 //   cd crates/assistant/widget && npm i --no-save @playwright/test@1.62.1 && npx playwright test -c layout.config.mjs
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
@@ -33,15 +34,25 @@ const HOST = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 // About three screens of answer, five sources on four sites, and follow-ups.
 const LONG = ["The client centre is open on weekdays; the details by service follow.", "",
   ...Array.from({ length: 30 }, (_, i) => `- Answer line ${i + 1} with enough words to wrap at a phone's width [${(i % 5) + 1}]`)].join("\n");
-function sse(res) {
+// T-4650: a data answer, the shape src/chat/routed.rs sends: the name first, the values with units, the time last.
+const DATA = {
+  type: "AirQualityObserved", total: 12, columns: ["name", "pm10", "no2", "observedAt"], units: [null, "µg/m³", "µg/m³", null],
+  rows: [["Banská Bystrica, Štefánikovo nábrežie, stanica merania kvality ovzdušia", 21.5, 14, "2026-10-16T12:00:00Z"],
+    ["Zvolen, J. Alexyho", null, 9.25, "2026-10-16T11:00:00Z"]],
+};
+function sse(res, data) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   send("conversation", { id: "c1", at: "2026-10-16T12:17:05Z" });
+  if (data) send("data", DATA);
   send("answer", { text: LONG });
   send("citations", [1, 2, 3, 4, 5].map((n) => ({ n, url: `https://${n < 3 ? "example" : "site" + n}.sk/strana-${n}`, title: `Source ${n}` })));
   send("followups", { questions: ["Where is the client centre?", "Do I need an appointment?"] });
   res.end();
 }
+
+// The visitor tokens the stand-in has issued (T-4653).
+let TOKENS = 0;
 
 // T-4649: an answer streamed in three-character deltas, split mid-token, with HTML in it.
 const STREAMED = ["## Doprava", "", "Máme **tri** zdroje [1, 2]:", "", "- **`type`**: typ entity [1]", "- **`q`**: filter [2, 3]", "",
@@ -74,7 +85,30 @@ test.beforeAll(async () => {
     if (path === "/d/bb") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE().replace("<body>", '<body class="jc-page">'));
     if (path === "/d/bb/embed.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("embed.js"));
     if (path === "/host") return res.writeHead(200, { "Content-Type": "text/html" }).end(HOST);
-    if (path === "/api/v1/d/bb/chat") return SLOW ? slow(res) : sse(res);
+    if (path === "/d/visitor.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("visitor.js"));
+    if (path === "/api/v1/d/bb/challenge") {
+      return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ challenge: "c0ffee.1.8.5a", difficulty: 8, expiresAt: "2099-01-01T00:00:00Z" }));
+    }
+    if (path === "/api/v1/d/bb/token") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        const { challenge, nonce } = JSON.parse(body);
+        const ok = challenge === "c0ffee.1.8.5a" && createHash("sha256").update(`${challenge}:${nonce}`).digest()[0] === 0;
+        if (!ok) return res.writeHead(400).end();
+        TOKENS += 1;
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ token: `visitor-${TOKENS}`, expiresAt: "2099-01-01T00:00:00Z" }));
+      });
+      return;
+    }
+    if (path === "/api/v1/d/bb/chat") {
+      // T-4653: every question carries the token the worker's proof earned; the newest alone holds.
+      if (req.headers["x-jc-visitor"] !== `visitor-${TOKENS}`) return res.writeHead(401, { "Content-Type": "application/json" }).end("{}");
+      if (SLOW) return slow(res);
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      return req.on("end", () => sse(res, body.includes("ovzdušia")));
+    }
     res.writeHead(404).end();
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
@@ -261,6 +295,24 @@ test("the full page that names ?lang= does not ask", async ({ page }) => {
   await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
 });
 
+// T-4650: at a phone's width the table reads from the left: the name, then the first value whole.
+test("a data table at 400 px shows the name and the first value", async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 800 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await page.locator("#jc-question").fill("Aká je kvalita ovzdušia?");
+  await page.locator(".jc-form .jc-submit").click();
+  const table = page.locator(".jc-data");
+  await expect(table.locator("th").first()).toHaveText("Názov");
+  await expect(table.locator("th").nth(1)).toHaveText("PM10 (µg/m³)");
+  await expect(table.locator("th").last()).toHaveText("Čas merania");
+  await expect(table.locator("tbody tr").first().locator("td").nth(1)).toHaveText("21,5");
+  await expect(table.locator("tbody tr").nth(1).locator("td").nth(1)).toHaveText("–");
+  const scroll = await table.locator(".jc-data-scroll").boundingBox();
+  const value = await table.locator("tbody tr").first().locator("td").nth(1).boundingBox();
+  expect(value.x + value.width, "the first value lies in view without scrolling").toBeLessThanOrEqual(scroll.x + scroll.width + 0.5);
+  expect(await table.locator("td.jc-num").count(), "values align as numbers").toBeGreaterThan(0);
+});
+
 // T-4343: the deployment's widget.language decides; the browser's languages never leave the page.
 test("a Slovak browser opens in Slovak with no question", async ({ browser }) => {
   WIDGET = { language: "browser" };
@@ -308,6 +360,19 @@ test("fixed mode ignores the browser, and languageToggle false hides the toggle"
   await expect(page.locator("#jc-question")).toHaveAttribute("placeholder", "Type your question");
 });
 
+test("a token the service forgot is earned again once, and the question is answered (T-4653)", async ({ page }) => {
+  WIDGET = undefined;
+  await page.goto(`${base}/d/bb?lang=en`);
+  await expect.poll(() => TOKENS, { message: "the worker earned a token on open" }).toBeGreaterThan(0);
+  const before = TOKENS;
+  TOKENS += 1; // a restart: the token the page holds is no longer known
+  await page.locator("#jc-question").fill("When is the client centre open?");
+  await page.locator("#jc-question").press("Enter");
+  await expect(page.locator(".jc-answer-tools")).toBeVisible();
+  expect(TOKENS, "one new token, after the 401").toBe(before + 2);
+  await expect(page.locator(".jc-error")).toHaveCount(0);
+});
+
 test("a streamed answer is formatted while it streams, never raw markers, and ends as it streamed (T-4649)", async ({ page }) => {
   WIDGET = undefined;
   SLOW = true;
@@ -345,4 +410,73 @@ test("a streamed answer is formatted while it streams, never raw markers, and en
   });
   const last = frames[frames.length - 1].html.replace(/<sup class="jc-cite"><\/sup>/g, "");
   expect(last, "the last streamed frame is the final answer without its markers").toBe(settled);
+});
+
+test("the panel expands to the window and back: button, Escape, focus kept, the page held still (T-4658)", async ({ page }) => {
+  WIDGET = undefined;
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`${base}/host`);
+  // A message that is not our frame's, from the page itself and from a frame of another origin.
+  await page.evaluate((other) => {
+    const foreign = document.createElement("iframe");
+    foreign.src = other + "/d/bb/widget";
+    document.body.prepend(foreign);
+  }, base.replace("127.0.0.1", "localhost"));
+  const panel = page.locator("[data-jc-assistant] .jc-panel");
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  const chat = page.frameLocator("[data-jc-assistant] iframe");
+  const size = chat.locator(".jc-size");
+  await expect(size).toHaveAttribute("aria-label", "Expand");
+  await page.evaluate(() => window.postMessage({ type: "jc-assistant-size", size: "full" }, "*"));
+  await page.frames().find((f) => f.url().startsWith("http://localhost")).evaluate(() =>
+    window.parent.postMessage({ type: "jc-assistant-size", size: "full" }, "*"));
+  await page.waitForTimeout(200);
+  await expect(panel).not.toHaveClass(/jc-full/);
+
+  await size.click();
+  await expect(panel).toHaveClass(/jc-full/);
+  await expect(size).toHaveAttribute("aria-label", "Collapse");
+  await expect(size).toHaveAttribute("aria-pressed", "true");
+  const box = await panel.boundingBox();
+  expect(box.width).toBe(960);
+  expect(Math.round(box.x)).toBe(160);
+  expect(box.y).toBe(20);
+  expect(box.height).toBe(760);
+  await expect(page.locator("[data-jc-assistant] .jc-launch")).toBeHidden();
+  // The page behind is inert and does not scroll.
+  expect(await page.evaluate(() => [document.querySelector("p").inert, document.documentElement.style.overflow])).toEqual([true, "hidden"]);
+  // Focus stays in the chat: Tab from its last control does not reach the page.
+  await chat.locator("textarea").focus();
+  for (let i = 0; i < 12; i++) await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement && document.activeElement.hasAttribute("data-jc-assistant"))).toBe(true);
+  // The state survives a reload of the frame in this tab.
+  expect(await page.frames().find((f) => f.url().includes("127.0.0.1") && f.url().includes("/widget")).evaluate(() =>
+    sessionStorage.getItem("jc-chat-size:bb"))).toBe("full");
+
+  // Escape collapses first, then closes.
+  await chat.locator("textarea").press("Escape");
+  await expect(panel).not.toHaveClass(/jc-full/);
+  await expect(panel).toBeVisible();
+  expect((await panel.boundingBox()).width).toBe(420);
+  expect(await page.evaluate(() => [document.querySelector("p").inert, document.documentElement.style.overflow])).toEqual([false, ""]);
+  await expect(size).toHaveAttribute("aria-label", "Expand");
+  await chat.locator("textarea").press("Escape");
+  await expect(panel).toBeHidden();
+
+  // Opened again expanded by the button and collapsed by it.
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  await size.click();
+  await expect(panel).toHaveClass(/jc-full/);
+  await size.click();
+  await expect(panel).not.toHaveClass(/jc-full/);
+});
+
+test("on a phone the panel already fills the screen and offers no expand button (T-4658)", async ({ page }) => {
+  WIDGET = undefined;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${base}/host`);
+  await page.locator("[data-jc-assistant] .jc-launch").click();
+  const chat = page.frameLocator("[data-jc-assistant] iframe");
+  await expect(chat.locator(".jc-close")).toBeVisible();
+  await expect(chat.locator(".jc-size")).toHaveCount(0);
 });

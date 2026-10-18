@@ -24,11 +24,14 @@ const SCRIPT: &str = concat!(
 const STYLE: &str = include_str!("../../widget/widget.css");
 /// The launcher a site includes; it reads its deployment from its own address.
 const LAUNCHER: &str = include_str!("../../widget/embed.js");
+/// The Web Worker that proves the visitor token's challenge (T-4653).
+const VISITOR: &str = include_str!("../../widget/visitor.js");
 
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/d/widget.js", get(script))
         .route("/d/widget.css", get(style))
+        .route("/d/visitor.js", get(visitor))
         .route("/d/{public_id}", get(full_page))
         .route("/d/{public_id}/widget", get(page))
         .route("/d/{public_id}/embed.js", get(launcher))
@@ -49,6 +52,10 @@ fn asset(body: &'static str, content_type: &'static str) -> Response {
 
 async fn script() -> Response {
     asset(SCRIPT, "text/javascript; charset=utf-8")
+}
+
+async fn visitor() -> Response {
+    asset(VISITOR, "text/javascript; charset=utf-8")
 }
 
 async fn style() -> Response {
@@ -114,6 +121,8 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
     let spec = &deployment.spec;
     json!({
         "linkHosts": link_hosts,
+        // The page's `frame-ancestors`, already in its header: where its close message may go (T-4654).
+        "frameOrigins": spec.allowed_origins,
         "publicId": spec.public_id,
         "title": spec.theme.as_ref().and_then(|t| t.title.clone()),
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
@@ -405,6 +414,15 @@ mod tests {
             ]
         );
         assert_eq!(config(&public, &hosts)["linkHosts"], json!(hosts));
+        // The close message's targets are the page's own frame-ancestors (T-4654).
+        assert_eq!(
+            config(&public, &hosts)["frameOrigins"],
+            json!(public.spec.allowed_origins)
+        );
+        assert!(!public.spec.allowed_origins.is_empty());
+        for origin in &public.spec.allowed_origins {
+            assert!(policy(&public).contains(origin.as_str()), "{origin}");
+        }
     }
 
     #[test]

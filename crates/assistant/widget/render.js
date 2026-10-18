@@ -202,8 +202,9 @@ var JCRender = (function () {
   }
 
   /**
-   * Whether `url` goes to one of `hosts` or a host under one, `www.` aside (T-4149). A host with
-   * anything but letters, digits, dots and dashes (a `user@host`, a backslash) never matches.
+   * Whether `url` goes to one of `hosts` itself, `www.` aside (T-4149): never a host under one, as
+   * a city's subdomains are not all the city's own pages (T-4654). A host with anything but
+   * letters, digits, dots and dashes (a `user@host`, a backslash) never matches.
    */
   function linkHost(url, hosts) {
     var match = /^https?:\/\/([^/?#]+)(?:[/?#]|$)/i.exec(String(url || ""));
@@ -213,7 +214,7 @@ var JCRender = (function () {
     host = host.replace(/^www\./, "");
     return (hosts || []).some(function (h) {
       h = String(h || "").toLowerCase().replace(/^www\./, "");
-      return h !== "" && (host === h || host.slice(-(h.length + 1)) === "." + h);
+      return h !== "" && host === h;
     });
   }
 
@@ -330,22 +331,116 @@ var JCRender = (function () {
    * A `data` event as a table to show (T-4138, T-4140): its columns and at most 50 rows of
    * text, and its dataset and download links when they are http(s); null when nothing to show.
    */
-  function table(data) {
+  // Headers a person reads (T-4650): the common Smart Data Models attributes and types in the
+  // widget's languages; any other key is spelt out from its camelCase.
+  var LABELS = {
+    name: { sk: "Názov", cs: "Název", en: "Name", de: "Name" },
+    id: { sk: "Identifikátor", cs: "Identifikátor", en: "Identifier", de: "Kennung" },
+    observedAt: { sk: "Čas merania", cs: "Čas měření", en: "Measured", de: "Gemessen" },
+    temperature: { sk: "Teplota", cs: "Teplota", en: "Temperature", de: "Temperatur" },
+    relativeHumidity: { sk: "Vlhkosť", cs: "Vlhkost", en: "Humidity", de: "Luftfeuchte" },
+    atmosphericPressure: { sk: "Tlak", cs: "Tlak", en: "Pressure", de: "Luftdruck" },
+    precipitation: { sk: "Zrážky", cs: "Srážky", en: "Precipitation", de: "Niederschlag" },
+    windSpeed: { sk: "Rýchlosť vetra", cs: "Rychlost větru", en: "Wind speed", de: "Windgeschwindigkeit" },
+    windDirection: { sk: "Smer vetra", cs: "Směr větru", en: "Wind direction", de: "Windrichtung" },
+    pm10: { sk: "PM10", cs: "PM10", en: "PM10", de: "PM10" },
+    pm25: { sk: "PM2,5", cs: "PM2,5", en: "PM2.5", de: "PM2,5" },
+    no2: { sk: "NO₂", cs: "NO₂", en: "NO₂", de: "NO₂" },
+    o3: { sk: "O₃", cs: "O₃", en: "O₃", de: "O₃" },
+    so2: { sk: "SO₂", cs: "SO₂", en: "SO₂", de: "SO₂" },
+    co: { sk: "CO", cs: "CO", en: "CO", de: "CO" },
+    airQualityIndex: { sk: "Index kvality ovzdušia", cs: "Index kvality ovzduší", en: "Air quality index", de: "Luftqualitätsindex" },
+    airQualityLevel: { sk: "Kvalita ovzdušia", cs: "Kvalita ovzduší", en: "Air quality", de: "Luftqualität" },
+    category: { sk: "Kategória", cs: "Kategorie", en: "Category", de: "Kategorie" },
+    status: { sk: "Stav", cs: "Stav", en: "Status", de: "Status" },
+    description: { sk: "Popis", cs: "Popis", en: "Description", de: "Beschreibung" },
+    addressLocality: { sk: "Obec", cs: "Obec", en: "Locality", de: "Ort" },
+    dateObserved: { sk: "Dátum pozorovania", cs: "Datum pozorování", en: "Date observed", de: "Beobachtet" },
+    dateModified: { sk: "Zmenené", cs: "Změněno", en: "Modified", de: "Geändert" },
+    dateCreated: { sk: "Vytvorené", cs: "Vytvořeno", en: "Created", de: "Erstellt" },
+    source: { sk: "Zdroj", cs: "Zdroj", en: "Source", de: "Quelle" },
+    dataProvider: { sk: "Poskytovateľ", cs: "Poskytovatel", en: "Provider", de: "Anbieter" }
+  };
+  var TYPES = {
+    AirQualityObserved: { sk: "Kvalita ovzdušia", cs: "Kvalita ovzduší", en: "Air quality", de: "Luftqualität" },
+    WeatherObserved: { sk: "Počasie", cs: "Počasí", en: "Weather", de: "Wetter" },
+    School: { sk: "Školy", cs: "Školy", en: "Schools", de: "Schulen" },
+    PointOfInterest: { sk: "Miesta", cs: "Místa", en: "Places", de: "Orte" },
+    OffStreetParking: { sk: "Parkoviská", cs: "Parkoviště", en: "Car parks", de: "Parkplätze" },
+    WaterQualityObserved: { sk: "Kvalita vody", cs: "Kvalita vody", en: "Water quality", de: "Wasserqualität" },
+    TrafficFlowObserved: { sk: "Doprava", cs: "Doprava", en: "Traffic", de: "Verkehr" },
+    KeyPerformanceIndicator: { sk: "Ukazovatele", cs: "Ukazatele", en: "Indicators", de: "Kennzahlen" }
+  };
+  var YES_NO = { sk: ["Áno", "Nie"], cs: ["Ano", "Ne"], en: ["Yes", "No"], de: ["Ja", "Nein"] };
+  var OF = { sk: "z", cs: "z", en: "of", de: "von" };
+
+  // `dateObserved` → "Date observed", `AirQualityObserved` → "Air quality observed".
+  function spelt(key) {
+    var words = String(key).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim().toLowerCase();
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
+
+  function word(map, key, lang) {
+    var entry = Object.prototype.hasOwnProperty.call(map, key) ? map[key] : null;
+    return entry ? entry[lang] || entry.en : spelt(key);
+  }
+
+  /** A time as "pred 5 min.", "dnes 18:40" or "17. 10. 2026 18:40" in `lang`. */
+  function when(stamp, lang, now) {
+    var t = Date.parse(stamp);
+    if (!isFinite(t)) return String(stamp);
+    var minutes = Math.round((t - now) / 60000);
+    var day = function (x) { var d = new Date(x); d.setHours(0, 0, 0, 0); return d.getTime(); };
+    var clock = new Intl.DateTimeFormat(lang, { hour: "2-digit", minute: "2-digit" }).format(t);
+    if (minutes <= 0 && minutes > -60) return new Intl.RelativeTimeFormat(lang, { numeric: "auto", style: "short" }).format(minutes, "minute");
+    var days = Math.round((day(t) - day(now)) / 86400000);
+    if (days === 0 || days === -1) return new Intl.RelativeTimeFormat(lang, { numeric: "auto" }).format(days, "day") + " " + clock;
+    return new Intl.DateTimeFormat(lang, { day: "numeric", month: "numeric", year: "numeric" }).format(t) + " " + clock;
+  }
+
+  /**
+   * A `data` event as the table the widget shows (T-4650): the caption is the type's name and the
+   * row count, each header its label and unit, each cell text in `lang` — numbers with the
+   * locale's separator and at most three decimals, times as `when` says, booleans as words, an
+   * empty cell as "–". Everything is text; nothing here becomes HTML.
+   */
+  function table(data, lang, now) {
     if (!data || !Array.isArray(data.columns) || data.columns.length === 0) return null;
-    var cell = function (v) {
-      if (v === null || v === undefined) return "";
-      return typeof v === "object" ? JSON.stringify(v) : String(v);
-    };
+    lang = YES_NO[lang] ? lang : "en";
+    now = typeof now === "number" ? now : Date.now();
+    var numbers = new Intl.NumberFormat(lang, { maximumFractionDigits: 3 });
+    var units = Array.isArray(data.units) ? data.units : [];
     var width = data.columns.length;
+    var cell = function (v, column) {
+      if (v === null || v === undefined || v === "") return "–";
+      if (typeof v === "number") return isFinite(v) ? numbers.format(v) : "–";
+      if (typeof v === "boolean") return YES_NO[lang][v ? 0 : 1];
+      if (typeof v === "object") return JSON.stringify(v);
+      if (column === "observedAt" || (TIME.test(v) && v.length > 10)) return when(v, lang, now);
+      return String(v);
+    };
     var rows = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, 50)
       .map(function (row) {
-        var out = row.slice(0, width).map(cell);
-        while (out.length < width) out.push("");
+        var out = [];
+        for (var i = 0; i < width; i += 1) out.push(cell(row[i], data.columns[i]));
         return out;
       });
+    var numeric = data.columns.map(function (_, i) {
+      return rows.length > 0 && (data.rows || []).filter(Array.isArray).slice(0, 50).every(function (row) {
+        return row[i] === null || row[i] === undefined || typeof row[i] === "number";
+      });
+    });
+    var columns = data.columns.map(function (c, i) {
+      var label = word(LABELS, String(c), lang);
+      return typeof units[i] === "string" && units[i] ? label + " (" + units[i] + ")" : label;
+    });
+    var count = typeof data.total === "number" && data.total > rows.length
+      ? numbers.format(rows.length) + " " + OF[lang] + " " + numbers.format(data.total)
+      : numbers.format(rows.length);
     return {
-      caption: typeof data.type === "string" ? data.type : "",
-      columns: data.columns.map(cell),
+      caption: typeof data.type === "string" && data.type ? word(TYPES, data.type, lang) + " (" + count + ")" : "",
+      columns: columns,
+      numeric: numeric,
       rows: rows,
       dataset: safeUrl(data.dataset),
       download: safeUrl(data.download)
@@ -706,8 +801,23 @@ var JCRender = (function () {
     return split ? { lead: split[1], rest: split[2] } : { lead: whole, rest: "" };
   }
 
+  /**
+   * The origins the chat's close message goes to, never `*` (T-4654): the framing page's own,
+   * where the browser records it (`ancestorOrigins`), else each origin the deployment may be
+   * framed by (its `frame-ancestors`); a target that is not the parent drops the message.
+   * Anything but an http(s) origin is left out.
+   */
+  function closeTargets(ancestors, frameOrigins) {
+    var origin = function (value) {
+      var match = /^(https?:\/\/[a-z0-9.-]+(?::\d{1,5})?)\/?$/i.exec(String(value || ""));
+      return match ? match[1].toLowerCase() : null;
+    };
+    var listed = ancestors && ancestors.length ? [ancestors[0]] : frameOrigins || [];
+    return Array.prototype.map.call(listed, origin).filter(Boolean);
+  }
+
   return {
-    notice: notice,
+    notice: notice, closeTargets: closeTargets,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,

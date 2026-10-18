@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod model;
 pub mod routed;
 pub mod script;
+pub mod visitor;
 pub mod widget;
 
 use std::collections::HashMap;
@@ -27,7 +28,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use jc_core::kinds::assistant::connector_target;
 use jc_core::kinds::Routes;
@@ -48,6 +49,15 @@ pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_TEXT_CHARS: usize = 4_000;
 /// The most turns of `history` (AG-98).
 pub const MAX_TURNS: usize = 6;
+/// The longest turn of `history` an anonymous channel keeps (T-4653): the visitor writes the
+/// history, so a longer turn is cut, not paid for as input on every question.
+pub const ANONYMOUS_TURN_CHARS: usize = 1_000;
+/// The share of a deployment's `requestsPerMinute` that callers without an `Origin` share
+/// (T-4653): a script is not a browser on an allowed site, so it may not take the whole pool.
+const UNPLACED_SHARE: u32 = 6;
+/// The share of a deployment's `costPerDayUsd` one visitor, or all callers without an `Origin`
+/// together, may spend before their answers go on as search (T-4653).
+const VISITOR_COST_SHARE: f64 = 0.10;
 /// How long a conversation may be continued; migration 0006's policy deletes it after as long.
 const CONVERSATION_HOURS: i64 = 24;
 /// The most questions answered at once, whatever the deployments' rate limits allow (T-3059):
@@ -112,6 +122,10 @@ pub struct Limits {
     salt: std::hash::RandomState,
     /// The deployments whose cost cap was reached, and on which day it was first.
     capped: HashMap<String, u64>,
+    /// What each visitor's answers cost today, in millionths of a US dollar, and the day.
+    spent: HashMap<String, (u64, u64)>,
+    /// Signs the visitor tokens these limits count by (T-4653).
+    pub signer: visitor::Signer,
 }
 
 impl Limits {
@@ -126,9 +140,22 @@ impl Limits {
             self.windows
                 .retain(|_, (started, _, window)| now.duration_since(*started) < *window);
             if self.windows.len() + new_keys > MAX_KEYS {
-                // A full table refuses a new key rather than grow or forget a counted one: a
-                // reset would hand every key already at its limit a fresh window.
-                return Err(60);
+                // A full table forgets the oldest of its longest windows, months then days, a
+                // hundredth at a time (T-4653): refusing new keys instead let ten thousand
+                // addresses lock every new visitor out for the month their keys live. A
+                // forgotten month or day starts afresh; the minute windows that pace everyone
+                // are the last to go.
+                let mut oldest: Vec<(Duration, Instant, String)> = self
+                    .windows
+                    .iter()
+                    .filter(|(key, _)| !windows.iter().any(|(k, ..)| k == key))
+                    .map(|(key, (started, _, window))| (*window, *started, key.clone()))
+                    .collect();
+                oldest.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+                let room = (self.windows.len() + new_keys - MAX_KEYS).max(MAX_KEYS / 100);
+                for (_, _, key) in oldest.into_iter().take(room) {
+                    self.windows.remove(&key);
+                }
             }
         }
         let wait = windows
@@ -163,6 +190,16 @@ impl Limits {
         format!("{:016x}", self.salt.hash_one((day, client)))
     }
 
+    /// Whether `key`'s window counts 80 % of `limit` or more at `now` (T-4653).
+    pub fn busy(&self, key: &str, limit: u32, now: Instant) -> bool {
+        self.windows
+            .get(key)
+            .is_some_and(|(started, count, window)| {
+                now.duration_since(*started) < *window
+                    && u64::from(*count) * 5 >= u64::from(limit) * 4
+            })
+    }
+
     /// Whether `key`'s window already counts `limit` requests at `now`; counts nothing (T-4286).
     pub fn full(&self, key: &str, limit: u32, now: Instant) -> bool {
         self.windows
@@ -170,6 +207,29 @@ impl Limits {
             .is_some_and(|(started, count, window)| {
                 now.duration_since(*started) < *window && *count >= limit
             })
+    }
+
+    /// Counts `micros` against `visitor` on `day`; a visitor of an earlier day starts again.
+    pub fn spend(&mut self, visitor: &str, day: u64, micros: u64) {
+        if self.spent.len() >= MAX_KEYS {
+            self.spent.retain(|_, (on, _)| *on == day);
+        }
+        if self.spent.len() >= MAX_KEYS && !self.spent.contains_key(visitor) {
+            // ponytail: fifty thousand visitors who all spent today; the deployment's cap holds.
+            return;
+        }
+        let entry = self.spent.entry(visitor.to_owned()).or_insert((day, 0));
+        if entry.0 != day {
+            *entry = (day, 0);
+        }
+        entry.1 = entry.1.saturating_add(micros);
+    }
+
+    /// Whether `visitor`'s answers on `day` cost their share of `cap_usd` (T-4653).
+    pub fn over_share(&self, visitor: &str, day: u64, cap_usd: f64) -> bool {
+        self.spent.get(visitor).is_some_and(|(on, micros)| {
+            *on == day && over_cost_cap(*micros, cap_usd * VISITOR_COST_SHARE)
+        })
     }
 
     /// Takes one of `visitor`'s `limit` streams; `false` when all are taken.
@@ -292,6 +352,14 @@ pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
         .route(
+            "/api/v1/d/{public_id}/challenge",
+            get(challenge).options(preflight),
+        )
+        .route(
+            "/api/v1/d/{public_id}/token",
+            post(token).options(preflight),
+        )
+        .route(
             "/api/v1/d/{public_id}/feedback",
             post(feedback).options(preflight),
         )
@@ -407,11 +475,11 @@ async fn preflight(
             let h = response.headers_mut();
             h.insert(
                 header::ACCESS_CONTROL_ALLOW_METHODS,
-                HeaderValue::from_static("POST"),
+                HeaderValue::from_static("GET, POST"),
             );
             h.insert(
                 header::ACCESS_CONTROL_ALLOW_HEADERS,
-                HeaderValue::from_static("content-type"),
+                HeaderValue::from_static("content-type, x-jc-visitor"),
             );
             h.insert(
                 header::ACCESS_CONTROL_MAX_AGE,
@@ -609,6 +677,21 @@ async fn spent_today(pool: &PgPool, deployment: &Deployment) -> Result<u64, crat
     .await?;
     tx.rollback().await?;
     Ok(cost.map_or(0, |c| u64::try_from(c).unwrap_or(0)))
+}
+
+/// The requests a minute callers without an `Origin` share: a sixth of the deployment's, one at
+/// least (T-4653).
+pub fn unplaced_limit(requests_per_minute: u32) -> u32 {
+    (requests_per_minute / UNPLACED_SHARE).max(1)
+}
+
+/// Cuts each visitor-written turn to [`ANONYMOUS_TURN_CHARS`] (T-4653).
+pub fn clamp_history(history: &mut [Turn]) {
+    for turn in history {
+        if let Some((at, _)) = turn.text.char_indices().nth(ANONYMOUS_TURN_CHARS) {
+            turn.text.truncate(at);
+        }
+    }
 }
 
 /// Whether today's spend has reached the deployment's `budget.costPerDayUsd`.
@@ -881,7 +964,10 @@ fn utc_second(at: time::OffsetDateTime) -> String {
     )
 }
 
-fn sse(event: &Event) -> SseEvent {
+/// One event as the stream sends it. An anonymous channel's visitor gets no internals (T-4654):
+/// no Endpoint slug on a tool or a table, and a `done` without tokens, calls, providers or cost;
+/// those stay in the log, the usage and the timings (`record`).
+fn sse(event: &Event, anonymous: bool) -> SseEvent {
     let (name, data) = match event {
         Event::Tool {
             name,
@@ -889,7 +975,7 @@ fn sse(event: &Event) -> SseEvent {
             status,
         } => {
             let mut data = json!({"name": name, "status": status});
-            if let Some(endpoint) = endpoint {
+            if let Some(endpoint) = endpoint.as_ref().filter(|_| !anonymous) {
                 data["endpoint"] = json!(endpoint);
             }
             ("tool", data)
@@ -902,7 +988,15 @@ fn sse(event: &Event) -> SseEvent {
             ("stage", data)
         }
         Event::Delta(text) => ("delta", json!({"text": text})),
-        Event::Data(table) => ("data", json!(table)),
+        Event::Data(table) => {
+            let mut data = json!(table);
+            if anonymous {
+                if let Some(table) = data.as_object_mut() {
+                    table.remove("endpoint");
+                }
+            }
+            ("data", data)
+        }
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Followups(questions) => ("followups", json!({"questions": questions})),
@@ -921,29 +1015,41 @@ fn sse(event: &Event) -> SseEvent {
                 Err(error) => json!({"code": code, "error": error}),
             },
         ),
-        Event::Done(spent, total_ms) => {
-            let mut done = json!({
-                "tokens": spent.total,
-                "tokensIn": spent.input,
-                "tokensOut": spent.output,
-                "modelCalls": spent.calls,
-                "firstTokenMs": spent.first_token_ms,
-                "totalMs": total_ms,
-                "cached": spent.cached,
-                "stagesMs": spent.stages.json(),
-                "judgeSkipped": spent.stages.judge_skipped,
-                "providers": spent.providers.json(),
-                "reasoningTokens": spent.reasoning.json(),
-            });
-            // Present only when every call reported its cost (T-4178): a missing one would make
-            // the sum look cheaper than the answer was.
-            if let Some(cost) = spent.cost_usd() {
-                done["costUsd"] = json!(cost);
-            }
-            ("done", done)
-        }
+        Event::Done(spent, total_ms) => ("done", done(spent, *total_ms, anonymous)),
     };
     SseEvent::default().event(name).data(data.to_string())
+}
+
+/// The `done` event: the timings for everyone, and what the answer spent only off an anonymous
+/// channel (T-4654).
+fn done(spent: &Spent, total_ms: u64, anonymous: bool) -> serde_json::Value {
+    if anonymous {
+        return json!({
+            "firstTokenMs": spent.first_token_ms,
+            "totalMs": total_ms,
+            "cached": spent.cached,
+            "stagesMs": spent.stages.json(),
+        });
+    }
+    let mut done = json!({
+        "tokens": spent.total,
+        "tokensIn": spent.input,
+        "tokensOut": spent.output,
+        "modelCalls": spent.calls,
+        "firstTokenMs": spent.first_token_ms,
+        "totalMs": total_ms,
+        "cached": spent.cached,
+        "stagesMs": spent.stages.json(),
+        "judgeSkipped": spent.stages.judge_skipped,
+        "providers": spent.providers.json(),
+        "reasoningTokens": spent.reasoning.json(),
+    });
+    // Present only when every call reported its cost (T-4178): a missing one would make the sum
+    // look cheaper than the answer was.
+    if let Some(cost) = spent.cost_usd() {
+        done["costUsd"] = json!(cost);
+    }
+    done
 }
 
 async fn chat(
@@ -960,6 +1066,25 @@ async fn chat(
         Placed::Allowed(origin) => Some(origin),
         Placed::Refused => return not_placed_here(),
     };
+    // A question carries a visitor token (T-4653); its id only adds a minute of its own beside
+    // the address's windows, so minting tokens never buys a fresh month or cost share.
+    let token = headers
+        .get(VISITOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let verified = state
+        .limits
+        .lock()
+        .await
+        .signer
+        .visitor(&public_id, token, unix_now());
+    let Some(id) = verified else {
+        let refused = problem(
+            401,
+            "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
+        );
+        return with_cors(refused, origin);
+    };
     let client = client_of(&headers);
     let started_at = origin
         .as_ref()
@@ -970,10 +1095,133 @@ async fn chat(
         deployment,
         body,
         &client,
+        Some(&id),
         None,
         started_at.as_deref(),
+        origin.is_none(),
     )
     .await;
+    with_cors(response, origin)
+}
+
+/// The visitor token's header (API/05 §1.2.1).
+pub const VISITOR_HEADER: &str = "x-jc-visitor";
+/// How many visitors' minutes one address may fill at once: people behind one network each have
+/// their own minute, up to this many of them (T-4653).
+pub const ADDRESS_MINUTES: u32 = 5;
+/// The visitor tokens one address may redeem from a deployment in a minute; a browser needs one
+/// an hour (T-4653).
+pub const TOKENS_PER_MINUTE: u32 = 10;
+
+fn unix_now() -> u64 {
+    u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap_or(0)
+}
+
+fn utc_of(unix: u64) -> String {
+    let at = i64::try_from(unix)
+        .ok()
+        .and_then(|at| time::OffsetDateTime::from_unix_timestamp(at).ok())
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    utc_second(at)
+}
+
+/// A challenge whose proof earns a visitor token; harder while the deployment is busy (T-4653).
+async fn challenge(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    // A challenge is a signed string and keeps no state, so the edge's per-address limit (Class 1)
+    // is all it needs; redeeming one is counted per address below.
+    let now = unix_now();
+    let limits = state.limits.lock().await;
+    let key = format!("{}/{}", deployment.project, deployment.name);
+    let busy = deployment
+        .spec
+        .rate_limit
+        .as_ref()
+        .is_some_and(|rate| limits.busy(&key, rate.requests_per_minute, Instant::now()));
+    let difficulty = if busy {
+        visitor::BUSY_DIFFICULTY
+    } else {
+        visitor::DIFFICULTY
+    };
+    let text = limits.signer.challenge(&public_id, difficulty, now);
+    drop(limits);
+    let mut response = Json(json!({
+        "challenge": text,
+        "difficulty": difficulty,
+        "expiresAt": utc_of(now + visitor::CHALLENGE_SECS),
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    with_cors(response, origin)
+}
+
+/// A solved challenge (API/05 §1.2.1).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proof {
+    pub challenge: String,
+    pub nonce: String,
+}
+
+/// The visitor token a solved challenge earns (T-4653).
+async fn token(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<Proof>, JsonRejection>,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let response = match body {
+        Err(rejection) => body_refused(&rejection),
+        Ok(Json(proof)) => {
+            let now = unix_now();
+            let mut limits = state.limits.lock().await;
+            let key = format!(
+                "{}/{}\u{0}{}\u{0}token",
+                deployment.project,
+                deployment.name,
+                limits.visitor(&client_of(&headers), today())
+            );
+            let admitted = limits.admit(&[(&key, TOKENS_PER_MINUTE, MINUTE)], Instant::now());
+            let earned = limits
+                .signer
+                .redeem(&public_id, &proof.challenge, &proof.nonce, now);
+            drop(limits);
+            match (admitted, earned) {
+                (Err(retry), _) => too_many(
+                    retry,
+                    "Z tejto siete prišlo veľa overení za krátky čas. Počkajte chvíľu a skúste to znova.",
+                ),
+                (Ok(()), Some((token, until))) => {
+                    Json(json!({"token": token, "expiresAt": utc_of(until)})).into_response()
+                }
+                (Ok(()), None) => problem(
+                    400,
+                    "challenge: not a solved, current challenge of this assistant",
+                ),
+            }
+        }
+    };
     with_cors(response, origin)
 }
 
@@ -1136,13 +1384,14 @@ async fn chat_in_portal(
         deployment,
         body,
         &format!("person:{person}"),
+        None,
         token,
         None,
+        false,
     )
     .await
 }
 
-/// One question to `deployment` from `client`, answered as Server-Sent Events.
 /// The visitor as the edge saw them (T-3059): `X-Forwarded-For` read from the right, past the
 /// cluster's own proxies (private, loopback and link-local hops), to the first address the edge
 /// appended. The leftmost entry is whatever the caller wrote, so a per-client limit keyed on it
@@ -1183,15 +1432,22 @@ fn internal(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// One question to `deployment` from `client`, answered as Server-Sent Events. `token` is the
+/// id of the visitor token the question carries, which counts its own minute and streams beside
+/// `client`'s windows; `unplaced` is a request that named no `Origin`: not a browser on an
+/// allowed site (T-4653).
+#[allow(clippy::too_many_arguments)]
 async fn ask(
     state: &Arc<ChatState>,
     deployment: Deployment,
     body: Result<Json<Question>, JsonRejection>,
     client: &str,
+    token: Option<&str>,
     person: Option<PersonToken>,
     origin: Option<&str>,
+    unplaced: bool,
 ) -> Response {
-    let question = match body {
+    let mut question = match body {
         Ok(Json(question)) => question,
         Err(rejection) => return body_refused(&rejection),
     };
@@ -1203,6 +1459,9 @@ async fn ask(
     }
     if let Err(why) = validate(&question, &deployment) {
         return problem(400, why);
+    }
+    if deployment.spec.channel.is_anonymous() {
+        clamp_history(&mut question.history);
     }
     let Some(budget) = deployment.spec.budget.clone() else {
         if deployment.spec.channel.is_anonymous() {
@@ -1230,6 +1489,15 @@ async fn ask(
         "{key}\u{0}{}",
         state.limits.lock().await.visitor(client, today())
     );
+    // Callers without an `Origin` share one small pool and one share of the day's cost.
+    let unplaced_key = format!("{key}\u{0}unplaced");
+    let spender = if unplaced {
+        unplaced_key.clone()
+    } else {
+        visitor.clone()
+    };
+    // The token's own minute and streams; the address's with none.
+    let holder = token.map_or_else(|| visitor.clone(), |id| format!("{key}\u{0}visitor:{id}"));
     let (month, resets) = month_of(time::OffsetDateTime::now_utc());
     // A visitor past their month is answered as search, with links (T-4286): the other windows
     // still count, so the search itself stays paced.
@@ -1240,19 +1508,36 @@ async fn ask(
             format!("{visitor}\u{0}h"),
             format!("{visitor}\u{0}d"),
         );
+        let own_minute = format!("{holder}\u{0}m");
         let mut limits = state.limits.lock().await;
         // Keyed by the month, not the day, so the count survives the visitor's day changing.
         let monthly = format!("{key}\u{0}{}\u{0}mo", limits.visitor(client, month));
         let now = Instant::now();
         month_spent = limits.full(&monthly, rate.per_client_per_month, now);
+        // With a token, the address's minute is a backstop over several visitors' minutes.
+        let address_minute = if token.is_some() {
+            rate.per_client_per_minute.saturating_mul(ADDRESS_MINUTES)
+        } else {
+            rate.per_client_per_minute
+        };
         let mut windows = vec![
             (key.as_str(), rate.requests_per_minute, MINUTE),
-            (minute.as_str(), rate.per_client_per_minute, MINUTE),
+            (minute.as_str(), address_minute, MINUTE),
             (hour.as_str(), rate.per_client_per_hour, HOUR),
             (day.as_str(), rate.per_client_per_day, DAY),
         ];
         if !month_spent {
             windows.push((monthly.as_str(), rate.per_client_per_month, MONTH));
+        }
+        if token.is_some() {
+            windows.push((own_minute.as_str(), rate.per_client_per_minute, MINUTE));
+        }
+        if unplaced {
+            windows.push((
+                unplaced_key.as_str(),
+                unplaced_limit(rate.requests_per_minute),
+                MINUTE,
+            ));
         }
         let admitted = limits.admit(&windows, now);
         drop(limits);
@@ -1303,27 +1588,34 @@ async fn ask(
     }
     let streams = rate.as_ref().map(|rate| rate.streams_per_client);
     if let Some(limit) = streams {
-        if !state.limits.lock().await.open_stream(&visitor, limit) {
+        if !state.limits.lock().await.open_stream(&holder, limit) {
             return too_many(
                 5,
                 "Ešte odpovedám na vaše predchádzajúce otázky. Počkajte, kým dopíšem, a skúste to znova.",
             );
         }
     }
-    let day_spent = match spent_today(&state.pool, &deployment).await {
-        Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
-        Err(err) => {
-            // Unknown spend is spend: the chat goes on as search rather than past the cap.
-            tracing::error!(%err, "today's cost could not be read; answering as search");
-            true
-        }
-    };
+    let share_spent =
+        state
+            .limits
+            .lock()
+            .await
+            .over_share(&spender, today(), budget.cost_per_day_usd);
+    let day_spent = share_spent
+        || match spent_today(&state.pool, &deployment).await {
+            Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
+            Err(err) => {
+                // Unknown spend is spend: the chat goes on as search rather than past the cap.
+                tracing::error!(%err, "today's cost could not be read; answering as search");
+                true
+            }
+        };
     let search_only = if month_spent {
         Some(routed::Cap::Month { resets })
     } else {
         day_spent.then_some(routed::Cap::Day)
     };
-    if day_spent && state.limits.lock().await.first_cap_today(&key, today()) {
+    if day_spent && !share_spent && state.limits.lock().await.first_cap_today(&key, today()) {
         tracing::warn!(
             deployment = %key,
             cap_usd = budget.cost_per_day_usd,
@@ -1332,6 +1624,7 @@ async fn ask(
     }
     let (tokens_per_day, tokens_per_conversation) =
         (budget.tokens_per_day, budget.tokens_per_conversation);
+    let anonymous = deployment.spec.channel.is_anonymous();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
     // One moment for the question: every model call is told it and the chat shows it (T-4339).
     let asked_at = time::OffsetDateTime::now_utc();
@@ -1455,9 +1748,12 @@ async fn ask(
         {
             tracing::error!(%err, "a question's tokens were not recorded");
         }
+        let mut limits = state.limits.lock().await;
+        limits.spend(&spender, today(), spent.cost_micros);
         if streams.is_some() {
-            state.limits.lock().await.close_stream(&visitor);
+            limits.close_stream(&holder);
         }
+        drop(limits);
         let _ = tx.send(Event::Done(spent, total_ms)).await;
     });
 
@@ -1468,9 +1764,9 @@ async fn ask(
                 .data(json!({"id": conversation, "at": utc_second(asked_at)}).to_string()),
         )
     });
-    let rest = futures_util::stream::unfold(rx, |mut rx| async move {
+    let rest = futures_util::stream::unfold(rx, move |mut rx| async move {
         let event = rx.recv().await?;
-        Some((Ok::<_, Infallible>(sse(&event)), rx))
+        Some((Ok::<_, Infallible>(sse(&event, anonymous)), rx))
     });
     let stream = futures_util::StreamExt::chain(first, rest);
     let mut response = Sse::new(stream)
@@ -1486,6 +1782,73 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_visitor_s_stream_carries_no_slug_and_no_spending_but_a_signed_in_one_does() {
+        let spent = Spent {
+            total: 50,
+            input: 40,
+            output: 10,
+            calls: 1,
+            cost_micros: 12_000,
+            ..Spent::default()
+        };
+        let visitor = done(&spent, 900, true);
+        assert_eq!(
+            visitor.as_object().map(|o| {
+                let mut keys: Vec<String> = o.keys().cloned().collect();
+                keys.sort();
+                keys
+            }),
+            Some(
+                ["cached", "firstTokenMs", "stagesMs", "totalMs"]
+                    .map(String::from)
+                    .to_vec()
+            ),
+            "{visitor}"
+        );
+        let person = done(&spent, 900, false);
+        assert_eq!(
+            (
+                &person["tokensIn"],
+                &person["modelCalls"],
+                &person["costUsd"]
+            ),
+            (&json!(40), &json!(1), &json!(0.012))
+        );
+        assert!(person["providers"].is_object() && person["reasoningTokens"].is_object());
+        // T-4178: a call whose provider reported no cost leaves the sum out, never a floor.
+        let uncosted = Spent {
+            uncosted: 1,
+            ..spent
+        };
+        assert!(done(&uncosted, 900, false).get("costUsd").is_none());
+
+        let tool = Event::Tool {
+            name: "query_entities".into(),
+            endpoint: Some("ovzdusie-sk".into()),
+            status: "started",
+        };
+        let table = Event::Data(agent::Table {
+            endpoint: "ovzdusie-sk".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["name".into()],
+            rows: vec![vec![json!("Žilina")]],
+            units: vec![None],
+            total: None,
+            dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
+            download: None,
+        });
+        for event in [&tool, &table] {
+            let shown = |anonymous| format!("{:?}", sse(event, anonymous));
+            assert!(!shown(true).contains("ovzdusie-sk"), "{}", shown(true));
+            assert!(shown(false).contains("ovzdusie-sk"), "{}", shown(false));
+        }
+        assert!(
+            format!("{:?}", sse(&table, true)).contains("ovzdusie"),
+            "the dataset link stays"
+        );
+    }
 
     /// T-3059: the per-client key is the address the edge appended, past the cluster's own
     /// proxies, never one the caller wrote in front of it.
@@ -1754,29 +2117,134 @@ mod tests {
         );
     }
 
-    /// T-3314: within one minute, a flood of new keys stops at [`MAX_KEYS`]; the keys already
-    /// counted keep their windows, and an expired window makes room again.
+    /// T-3314, T-4653: the table stays bounded, and a full one forgets the oldest of its longest
+    /// windows instead of refusing every new visitor for as long as those windows live.
     #[test]
-    fn the_table_of_keys_stays_bounded() {
+    fn a_full_table_of_keys_forgets_its_oldest_months_and_admits_a_new_visitor() {
         let mut limits = Limits::default();
         let start = Instant::now();
-        for n in 0..MAX_KEYS {
-            assert!(limits.admit(&one(&n.to_string(), 2), start).is_ok());
+        for n in 0..MAX_KEYS - 1 {
+            let at = start + Duration::from_millis(n as u64);
+            assert!(limits.admit(&[(&format!("mo{n}"), 5, MONTH)], at).is_ok());
         }
-        assert_eq!(limits.admit(&one("one more", 2), start), Err(60));
-        assert_eq!(limits.windows.len(), MAX_KEYS);
+        assert!(limits.admit(&one("pace", 2), start).is_ok());
+        // Still inside the minute of "pace": nothing has run out, so only forgetting makes room.
+        let later = start + Duration::from_secs(30);
         assert!(
-            limits.admit(&one("7", 2), start).is_ok(),
-            "a counted key still counts"
+            limits.admit(&one("a new visitor", 2), later).is_ok(),
+            "admitted, not Err(60)"
+        );
+        assert!(limits.windows.len() <= MAX_KEYS);
+        assert!(
+            !limits.windows.contains_key("mo0"),
+            "the oldest month went first"
         );
         assert!(
-            limits.admit(&one("7", 2), start).is_err(),
-            "and keeps its limit"
+            limits.windows.contains_key(&format!("mo{}", MAX_KEYS - 2)),
+            "the newest stays"
         );
-        assert!(limits
-            .admit(&one("one more", 2), start + Duration::from_secs(60))
-            .is_ok());
-        assert_eq!(limits.windows.len(), 1);
+        assert!(limits.admit(&one("pace", 2), later).is_ok());
+        assert!(
+            limits.admit(&one("pace", 2), later).is_err(),
+            "a counted key keeps its limit"
+        );
+    }
+
+    /// T-4653: callers without an `Origin` share a sixth of the deployment's minute, so a script
+    /// on five addresses stops there while a browser on the allowed site still asks.
+    #[test]
+    fn callers_without_an_origin_share_a_small_pool() {
+        assert_eq!(unplaced_limit(30), 5);
+        assert_eq!(unplaced_limit(3), 1, "one at least");
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        let pool = unplaced_limit(30);
+        for n in 0..pool {
+            let visitor = format!("script{n}");
+            assert!(limits
+                .admit(
+                    &[
+                        ("d", 30, MINUTE),
+                        (&visitor, 10, MINUTE),
+                        ("d\u{0}unplaced", pool, MINUTE)
+                    ],
+                    now
+                )
+                .is_ok());
+        }
+        assert!(
+            limits
+                .admit(
+                    &[
+                        ("d", 30, MINUTE),
+                        ("script9", 10, MINUTE),
+                        ("d\u{0}unplaced", pool, MINUTE)
+                    ],
+                    now
+                )
+                .is_err(),
+            "the sixth unplaced call waits"
+        );
+        assert!(
+            limits
+                .admit(&[("d", 30, MINUTE), ("browser", 10, MINUTE)], now)
+                .is_ok(),
+            "a browser's question still counts in the deployment's pool"
+        );
+    }
+
+    /// T-4653: one visitor's answers stop at a tenth of the day's cost, another's go on, and the
+    /// next day starts again.
+    #[test]
+    fn a_visitor_stops_at_their_share_of_the_day_s_cost() {
+        let mut limits = Limits::default();
+        limits.spend("a", 20_000, 60_000);
+        assert!(!limits.over_share("a", 20_000, 1.0));
+        limits.spend("a", 20_000, 40_000);
+        assert!(limits.over_share("a", 20_000, 1.0), "0.10 of 1 USD spent");
+        limits.spend("b", 20_000, 99_999);
+        assert!(
+            !limits.over_share("b", 20_000, 1.0),
+            "another visitor still asks"
+        );
+        assert!(!limits.over_share("a", 20_001, 1.0), "a new day");
+        limits.spend("a", 20_001, 1);
+        assert_eq!(limits.spent["a"], (20_001, 1));
+    }
+
+    /// T-4653: the challenge gets harder from four fifths of the deployment's minute on, and
+    /// easy again when the minute is over.
+    #[test]
+    fn a_busy_minute_raises_the_challenge() {
+        let mut limits = Limits::default();
+        let now = Instant::now();
+        for _ in 0..7 {
+            assert!(limits.admit(&one("d", 10), now).is_ok());
+        }
+        assert!(!limits.busy("d", 10, now), "7 of 10");
+        assert!(limits.admit(&one("d", 10), now).is_ok());
+        assert!(limits.busy("d", 10, now), "8 of 10");
+        assert!(!limits.busy("d", 10, now + MINUTE), "a new minute");
+        assert!(!limits.busy("never", 10, now));
+        const { assert!(visitor::BUSY_DIFFICULTY > visitor::DIFFICULTY) };
+    }
+
+    /// T-4653: an anonymous history turn is cut to a thousand characters, on a character boundary.
+    #[test]
+    fn an_anonymous_history_turn_is_clamped() {
+        let mut history = vec![
+            Turn {
+                role: "user".into(),
+                text: "ž".repeat(4_000),
+            },
+            Turn {
+                role: "assistant".into(),
+                text: "short".into(),
+            },
+        ];
+        clamp_history(&mut history);
+        assert_eq!(history[0].text.chars().count(), ANONYMOUS_TURN_CHARS);
+        assert_eq!(history[1].text, "short");
     }
 
     /// T-4149: at most two answers stream to one visitor at once; one that ends frees its place,
