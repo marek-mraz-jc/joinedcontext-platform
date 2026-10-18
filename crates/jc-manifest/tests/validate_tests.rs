@@ -1,4 +1,4 @@
-use jcctl::commands::validate;
+use jc_manifest::validate;
 use std::path::{Path, PathBuf};
 
 fn temp_repo(test_name: &str) -> PathBuf {

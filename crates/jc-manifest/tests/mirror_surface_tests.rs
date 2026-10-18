@@ -7,8 +7,8 @@
 //! DM-48 is explicit that the last case is not an error — the reference stands without a
 //! model — so it comes back as a sentence a reviewer reads, not as a failure.
 
-use jcctl::foreign_models::{self, Surface};
-use jcctl::loader::{RawManifest, Repository};
+use jc_manifest::foreign_models::{self, Surface};
+use jc_manifest::loader::{RawManifest, Repository};
 use std::path::{Path, PathBuf};
 
 const HERE: &str = "https://portal.banskabystrica.sk";

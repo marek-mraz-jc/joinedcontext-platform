@@ -2,9 +2,9 @@
 """Code no production entry point reaches, per crate, as a ratchet (T-3918, GOAL point 11).
 
 Entry points: every binary's `main` (`src/main.rs`, `src/bin/*.rs`, `build.rs`), every pub item
-of `jc-app-sdk` (the Apps' SDK), and every pub item of `jc-core` and `jcctl` that the Portal's
-source names (a method only when its type is named too); the Portal links those two crates, and
-`context-gateway` only in its tests. A symbol is reached through CALLS, DISPATCHES and REFERENCES
+of `jc-app-sdk` (the Apps' SDK), and every pub item of `jc-core`, `jcctl` and `jc-manifest` (which
+jcctl re-exports) that the Portal's source names (a method only when its type is named too); the
+Portal links those crates, and `context-gateway` only in its tests. A symbol is reached through CALLS, DISPATCHES and REFERENCES
 from an entry point; a type reached also reaches its trait impls (derives, `From` through `?`,
 `Display` in `format!`), which the graph has no call edge for, and its fields and variants, so
 the types a reached type holds are reached. What is left, outside tests,
@@ -58,7 +58,8 @@ SERDE_FN = re.compile(
     r'\b(?:default|skip_serializing_if|deserialize_with|serialize_with)\s*=\s*"(?:[\w:]*?(\w+)::)?(\w+)(?:::<[^"]*>)?"')
 # A const named only as an inline format capture (`"{PAGE_LIMIT}"`) has no edge in the graph.
 CAPTURE = re.compile(r'\{([A-Z][A-Z0-9_]*)[}:]')
-PORTAL_LINKS = ("jc-core", "jcctl")
+# jc-manifest too: the Portal names its modules through jcctl's re-exports (T-4604).
+PORTAL_LINKS = ("jc-core", "jcctl", "jc-manifest")
 
 
 def table(text: str) -> list[dict[str, str]]:

@@ -4,29 +4,24 @@
 #![warn(missing_docs)]
 
 pub mod apisix;
-pub mod assemble;
+pub use jc_manifest::bento;
+pub use jc_manifest::{assemble, foreign_models, loader, model_schema, pipeline_identity, roles};
 pub mod bench_org;
-pub mod bento;
 pub mod blueprints;
 pub mod commands;
 pub mod csr;
 pub mod diff;
 pub mod entities;
-pub mod foreign_models;
 pub mod gateway;
 pub mod lanes;
-pub mod loader;
 pub mod login;
 pub mod model;
-pub mod model_schema;
-pub mod pipeline_identity;
 pub mod pipeline_test;
 pub mod pipelines;
 pub mod pipelines_derived;
 pub mod platform;
 pub mod portal;
 pub mod publish;
-pub mod roles;
 pub mod secrets;
 pub mod service_accounts;
 pub mod sync;

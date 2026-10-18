@@ -1,8 +1,8 @@
 //! A pipeline mints ids of the space it runs in: `env("JC_SPACE")` is rendered per stream,
 //! and a mapping that types its space in is a finding (PL-57, CC-83, T-1445).
 
-use jcctl::bento::{inject_space, literal_names, space_var, SPACE_VAR};
-use jcctl::commands::validate;
+use jc_manifest::bento::{inject_space, literal_names, space_var, SPACE_VAR};
+use jc_manifest::validate;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 

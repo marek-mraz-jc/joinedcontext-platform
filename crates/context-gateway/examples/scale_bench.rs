@@ -16,7 +16,7 @@ use context_gateway::pdp::reaper::Reaper;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::store::{self, Checkouts};
-use jcctl::assemble::Directories;
+use jc_manifest::assemble::Directories;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -132,7 +132,7 @@ fn main() {
             .collect(),
     );
     let started = Instant::now();
-    let report = jcctl::commands::validate::run_assembled(&tree.org, &directories);
+    let report = jc_manifest::validate::run_assembled(&tree.org, &directories);
     let validate = ms(started);
     assert!(report.is_valid(), "{:?}", report.findings.first());
 

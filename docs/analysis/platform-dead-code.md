@@ -143,7 +143,8 @@ hide them from it.
   `MultiLanguageMap::new`, `insert`, `require_fallback`, `is_empty`, `len`, `iter`;
   `NativeBlock::new`, `MappingTest::new`; `Did::org_domain`; `kpi::Provenance::to`, `to_all` (cg names them `kpi::Property::to`),
   `KeyPerformanceIndicator::from_json`; `urn::EntityRef` and its `new`, `space`, `urn`.
-- jcctl: `bento::InputContext::new`, `with_pipeline_spec`; `csr::InMemoryBroker` (6 rows),
+- jc-manifest (moved from jcctl, T-4604): `bento::InputContext::new`, `with_pipeline_spec`.
+- jcctl: `csr::InMemoryBroker` (6 rows),
   `platform::InMemory` (4 rows), `publish::ckan::InMemoryCkan` (9 rows);
   `commands::drift::write_adoptions`; `csr::forwards_caller_identity`;
   `ckan_datastore::missing_attributes`; `HttpBao::with_ca_file`; `SecretValue::len`,

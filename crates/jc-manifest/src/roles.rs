@@ -25,9 +25,9 @@ pub const ROLES_TEST_REGO: &str = "policies/tests/roles_test.rego";
 /// The workflow that runs validation and the gate on every merge request.
 pub const WORKFLOW: &str = ".gitea/workflows/ci.yaml";
 
-const REGO: &str = include_str!("../templates/org/policies/roles.rego");
-const REGO_TESTS: &str = include_str!("../templates/org/policies/tests/roles_test.rego");
-const WORKFLOW_YAML: &str = include_str!("../templates/org/.gitea/workflows/ci.yaml");
+const REGO: &str = include_str!("../../jcctl/templates/org/policies/roles.rego");
+const REGO_TESTS: &str = include_str!("../../jcctl/templates/org/policies/tests/roles_test.rego");
+const WORKFLOW_YAML: &str = include_str!("../../jcctl/templates/org/.gitea/workflows/ci.yaml");
 
 /// Paths only an organization-scoped approver may own: whoever could edit them could widen
 /// their own rights below the red lane (CC-42, CC-70).

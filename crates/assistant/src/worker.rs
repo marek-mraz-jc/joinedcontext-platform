@@ -83,9 +83,9 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
             }
         }
     }
-    let assembly = jcctl::assemble::assemble(
+    let assembly = jc_manifest::assemble::assemble(
         &checkout.organization,
-        &jcctl::assemble::Directories(directories),
+        &jc_manifest::assemble::Directories(directories),
         &checkout.assembly,
         None,
     )

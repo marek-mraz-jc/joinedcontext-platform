@@ -3,7 +3,7 @@
 
 use jc_core::envelope::ResourceEnvelope;
 use jc_core::kinds::{DataSourceSpec, IdMint, Mint, PipelineSpec};
-use jcctl::bento::{id_processor, render, InputContext, RenderError};
+use jc_manifest::bento::{id_processor, render, InputContext, RenderError};
 
 const SOURCE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: DataSource

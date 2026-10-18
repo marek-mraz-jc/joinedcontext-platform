@@ -12,5 +12,5 @@ pub mod plan;
 pub mod publish_ckan;
 pub mod seed;
 pub mod sync;
-pub mod validate;
+pub use jc_manifest::validate;
 pub mod workspace;

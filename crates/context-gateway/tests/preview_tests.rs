@@ -111,7 +111,7 @@ fn a_running_preview_answers_on_its_own_slug_beside_main() {
         .unwrap();
 
     let (endpoints, spaces, ..) = store::load_with_previews(&main, None, Some(&previews)).unwrap();
-    let minted = jcctl::loader::preview_slug("ws-air-", ORIGIN_SLUG);
+    let minted = jc_manifest::loader::preview_slug("ws-air-", ORIGIN_SLUG);
     let origin = endpoints
         .iter()
         .find(|e| e.slug == ORIGIN_SLUG)
@@ -138,7 +138,7 @@ fn the_reaper_picks_up_a_preview_and_drops_it_when_it_stops() {
     let previews = scratch("reaper-previews");
     let gateway = gateway();
     let mut reaper = Reaper::new(Arc::clone(&gateway), &main).with_previews(&previews);
-    let minted = jcctl::loader::preview_slug("ws-air-", ORIGIN_SLUG);
+    let minted = jc_manifest::loader::preview_slug("ws-air-", ORIGIN_SLUG);
     let mut mirror = Mirror::new(&previews);
 
     mirror
@@ -225,7 +225,7 @@ fn a_preview_that_does_not_render_leaves_main_serving() {
 /// out and the caller of that slug keeps reaching main's tenant.
 #[test]
 fn a_preview_never_takes_over_a_slug_main_already_serves() {
-    let minted = jcctl::loader::preview_slug("ws-air-", ORIGIN_SLUG);
+    let minted = jc_manifest::loader::preview_slug("ws-air-", ORIGIN_SLUG);
     let mut theirs = files();
     theirs.insert("endpoints/public-air.yaml".to_owned(), endpoint(&minted));
     let main = repo_of("slug-taken-main", theirs);
