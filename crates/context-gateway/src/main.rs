@@ -132,6 +132,24 @@ async fn main() -> ExitCode {
         }
     };
 
+    // The anonymous OAuth server (ADR-N-052 §2.2): config checked the key and the public URL.
+    let gateway = match (&config.oauth_key, &config.public_url) {
+        (Some(key), Some(public_url)) => {
+            match context_gateway::oauth::Issuer::new(
+                public_url,
+                key,
+                config.oauth_redirect_hosts.clone(),
+            ) {
+                Ok(issuer) => gateway.issue_anonymous_tokens(issuer),
+                Err(error) => {
+                    tracing::error!(%error, "cannot start the anonymous OAuth server");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        _ => gateway,
+    };
+
     // A read over a space with `identity: caller` registrations exchanges the caller's token,
     // as the gateway's own client, for the member brokers' audiences (T-3999, ADR-N-047 §2.4).
     // Without a client such a read answers 503; it is never forwarded as anyone else.

@@ -635,23 +635,24 @@ pub async fn protected_resource(
     State(gateway): State<Arc<Gateway>>,
     Path((project, name)): Path<(String, String)>,
 ) -> Response<Body> {
-    let (Some(issuer), Some(server)) = (
-        gateway.verifier.as_ref().map(|verifier| verifier.issuer()),
-        // A personal address answers the same metadata for every name: it says nothing of whose
-        // connectors exist (EP-123).
-        gateway.server(&project, &name).or_else(|| {
-            (project == super::personal::PROJECT && gateway.personal.is_some())
-                .then(|| super::personal::addressed(&name))
-                .flatten()
-        }),
-    ) else {
+    // A personal address answers the same metadata for every name: it says nothing of whose
+    // connectors exist (EP-123).
+    let Some(server) = gateway.server(&project, &name).or_else(|| {
+        (project == super::personal::PROJECT && gateway.personal.is_some())
+            .then(|| super::personal::addressed(&name))
+            .flatten()
+    }) else {
         return ProblemDetails::not_found().into_response();
     };
+    let servers = crate::oauth::authorization_servers(&gateway, server.admits(None));
+    if servers.is_empty() {
+        return ProblemDetails::not_found().into_response();
+    }
     jsonrpc::json_response(
         StatusCode::OK,
         &json!({
             "resource": format!("{}{}", gateway.base_url(), server.path()),
-            "authorization_servers": [issuer],
+            "authorization_servers": servers,
             "bearer_methods_supported": ["header"],
             "resource_name": server.title.as_deref().unwrap_or(&server.name),
         }),

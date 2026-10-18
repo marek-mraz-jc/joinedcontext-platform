@@ -1157,14 +1157,21 @@ fn unauthorized(gateway: &Gateway) -> Response<Body> {
 
 /// The hub's protected-resource metadata (RFC 9728, ADR-N-025 section 4).
 pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
-    let Some(issuer) = gateway.verifier.as_ref().map(|verifier| verifier.issuer()) else {
+    // The hub answers an anonymous caller whenever one Endpoint is public (ADR-N-052 §2.2).
+    let readable = gateway
+        .resolver
+        .endpoints()
+        .iter()
+        .any(|endpoint| endpoint.admits(None));
+    let servers = crate::oauth::authorization_servers(&gateway, readable);
+    if servers.is_empty() {
         return ProblemDetails::not_found().into_response();
-    };
+    }
     jsonrpc::json_response(
         StatusCode::OK,
         &json!({
             "resource": format!("{}{HUB_PATH}", gateway.base_url()),
-            "authorization_servers": [issuer],
+            "authorization_servers": servers,
             "bearer_methods_supported": ["header"],
             // The one-login scope (ADR-N-025 4b); `endpoint:{slug}` stays a narrower choice.
             "scopes_supported": ["endpoint:*"],

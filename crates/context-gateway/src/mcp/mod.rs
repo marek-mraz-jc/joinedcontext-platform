@@ -41,6 +41,20 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
             "/api/mcp/.well-known/oauth-protected-resource",
             get(hub::protected_resource),
         )
+        // RFC 9728 §3.1 places the metadata before the resource's path; a client that builds
+        // it so (Gemini, ADR-N-052) finds the same documents (T-4631).
+        .route(
+            "/.well-known/oauth-protected-resource/api/endpoint/{slug}/mcp",
+            get(endpoint::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/api/mcp",
+            get(hub::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/api/mcp/{project}/{name}",
+            get(server::protected_resource),
+        )
         // A named server over chosen Endpoints (EP-92, ADR-N-043).
         .route("/api/mcp/{project}/{name}", post(server::message))
         .route(
