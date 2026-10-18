@@ -103,6 +103,8 @@ pub struct Gateway {
     /// Each Endpoint's WebSocket fan-out: one broker subscription, its entities, its clients'
     /// filters (ADR-N-049, EP-114).
     pub hubs: crate::fanout::socket::Hubs,
+    /// What each caller reached a moment ago, by token (T-4528).
+    pub(crate) reaches: crate::mcp::hub::Reaches,
     /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
     /// bounded only by the broker's own lifetime.
     pub ws_token_lifetime: std::time::Duration,
@@ -187,6 +189,7 @@ impl Gateway {
             creates: Default::default(),
             ws_open: Default::default(),
             hubs: Default::default(),
+            reaches: Default::default(),
             ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,

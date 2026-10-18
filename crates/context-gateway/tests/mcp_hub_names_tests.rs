@@ -158,8 +158,9 @@ async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
     // The six read tools of this grant measured 12,162 bytes once the enum went (73,369 for the
     // fourteen tools of dev with it): a ceiling that only comes down, to 12,000 with T-4491's
     // schema trim measured by the agent benchmark. With get_endpoint and search (T-4492, T-4493)
-    // and no copy of each description in its outputSchema it measured 12,831.
-    assert!(sizes[0] < 12_900, "{sizes:?}");
+    // and no copy of each description in its outputSchema it measured 12,831; with the `endpoint`
+    // sentence and the output members' meanings said once in the instructions, 11,546 (T-4506).
+    assert!(sizes[0] < 12_000, "{sizes:?}");
 }
 
 #[tokio::test]

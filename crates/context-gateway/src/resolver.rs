@@ -318,6 +318,11 @@ impl SlugResolver {
         self.table.store(Arc::new(table));
     }
 
+    /// The table as it is now; a reload replaces it, so a different one means a reload.
+    pub(crate) fn table(&self) -> Arc<HashMap<String, Arc<Endpoint>>> {
+        self.table.load_full()
+    }
+
     /// Every endpoint the table holds, sorted by slug, for the organization's feed (EP-84).
     pub fn endpoints(&self) -> Vec<Arc<Endpoint>> {
         let mut endpoints: Vec<Arc<Endpoint>> =

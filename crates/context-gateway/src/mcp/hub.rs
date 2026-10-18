@@ -9,8 +9,9 @@
 //! the agent names the Endpoint on every call, and the list is rebuilt from the token each time.
 
 use crate::app::{Gateway, MAX_BODY};
+use crate::auth::accounts::ServiceAccounts;
 use crate::auth::subject::{anonymous_on, principal_of, subject_from, HUB_PATH};
-use crate::auth::token;
+use crate::auth::token::{self, Claims};
 use crate::handlers::{endpoint_surface, schema};
 use crate::mcp::jsonrpc::{self, answered, error, refused, result};
 use crate::mcp::server::{self, McpServer};
@@ -27,8 +28,9 @@ use axum::response::IntoResponse;
 use jc_core::kinds::{Audience, EndpointSlug, Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Arguments that would choose a space some other way than `endpoint` (AG-05, SP-14).
 pub(crate) const SELECTORS: &[&str] = &["space", "tenant", "contextspace", "slug"];
@@ -38,6 +40,66 @@ const PAGE: usize = 50;
 
 /// The key the per-subject bucket is kept under. It holds a `/`, so no Endpoint slug is it.
 const HUB_BUCKET: &str = HUB_PATH;
+
+/// How long a caller's reach is reused (T-4528). Every tool call is decided again by the
+/// Endpoint it goes to, so this bounds only how late a list shows a Policy's validity window
+/// opening or closing.
+const KEPT_FOR: Duration = Duration::from_secs(10);
+
+/// Reaches kept at once; past it the cache starts again empty.
+const KEPT: usize = 256;
+
+/// One caller's reach, with the Endpoint table and the accounts it was decided against.
+pub(crate) struct Kept {
+    table: Arc<HashMap<String, Arc<Endpoint>>>,
+    accounts: Arc<ServiceAccounts>,
+    at: Instant,
+    reach: Arc<[(Arc<Endpoint>, Subject)]>,
+}
+
+/// The reaches of the callers of a moment ago, by what their verified token says (T-4528).
+pub(crate) type Reaches = Mutex<HashMap<String, Arc<Kept>>>;
+
+/// What a reach depends on in a verified token: everything but its lifetime, so a refreshed
+/// token of the same caller finds it. `None` for a data space transfer token, whose reach
+/// follows its agreement and the clock, and is decided every time.
+fn kept_as(claims: Option<&Claims>, serving: Option<Representation>) -> Option<String> {
+    let Some(claims) = claims else {
+        return Some(format!("{serving:?} anonymous"));
+    };
+    if claims.agreement_id.is_some() || claims.participant.is_some() {
+        return None;
+    }
+    let sorted = |items: &[String]| {
+        let mut items = items.to_vec();
+        items.sort_unstable();
+        items
+    };
+    let mut clients: Vec<(&String, Vec<String>)> = claims
+        .resource_access
+        .iter()
+        .map(|(client, access)| (client, sorted(&access.roles)))
+        .collect();
+    clients.sort_unstable();
+    // Debug quotes every string, so no value can pass for the next field.
+    Some(format!(
+        "{serving:?} {:?}",
+        (
+            &claims.sub,
+            &claims.iss,
+            &claims.azp,
+            &claims.preferred_username,
+            claims
+                .realm_access
+                .as_ref()
+                .map(|access| sorted(&access.roles)),
+            sorted(&claims.groups),
+            clients,
+            sorted(&claims.aud),
+            &claims.scope,
+        )
+    ))
+}
 
 /// One JSON-RPC message to the hub (EP-87).
 pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) -> Response<Body> {
@@ -89,7 +151,7 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
 pub(crate) struct Reached {
     pub(crate) principal: String,
     /// Every Endpoint the token reaches, admits and grants a read on, in slug order.
-    pub(crate) reach: Vec<(Arc<Endpoint>, Subject)>,
+    pub(crate) reach: Arc<[(Arc<Endpoint>, Subject)]>,
     /// The per-subject bucket after this request spent from it (ADR-N-025 section 3).
     pub(crate) decision: rate_limit::Decision,
     /// No token was presented: `reach` is the public Endpoints alone (T-4114).
@@ -164,6 +226,30 @@ pub(crate) fn reached(
         )));
     }
 
+    // The same caller a moment ago, against the same Endpoints and accounts (T-4528).
+    let key = kept_as(claims.as_ref(), serving);
+    let table = gateway.resolver.table();
+    let accounts = gateway.accounts.load_full();
+    let kept = key.as_ref().and_then(|key| {
+        let reaches = gateway.reaches.lock().ok()?;
+        let kept = reaches.get(key)?;
+        (Arc::ptr_eq(&kept.table, &table)
+            && Arc::ptr_eq(&kept.accounts, &accounts)
+            && kept.at.elapsed() < KEPT_FOR)
+            .then(|| Arc::clone(&kept.reach))
+    });
+    let principal = claims
+        .as_ref()
+        .map_or_else(|| "anonymous".to_owned(), |claims| claims.sub.clone());
+    if let Some(reach) = kept {
+        return Ok(Reached {
+            principal,
+            reach,
+            decision,
+            anonymous: raw.is_none(),
+        });
+    }
+
     // What the token reaches as its own caller; a public Endpoint it does not reach, as the
     // anonymous caller the Endpoint's URL would see. Nothing internal without a token.
     let mut reach: Vec<(Arc<Endpoint>, Subject)> = served
@@ -183,8 +269,23 @@ pub(crate) fn reached(
         })
         .collect();
     reach.sort_by(|(a, _), (b, _)| a.slug.cmp(&b.slug));
+    let reach: Arc<[(Arc<Endpoint>, Subject)]> = reach.into();
+    if let (Some(key), Ok(mut reaches)) = (key, gateway.reaches.lock()) {
+        if reaches.len() >= KEPT {
+            reaches.clear();
+        }
+        reaches.insert(
+            key,
+            Arc::new(Kept {
+                table,
+                accounts,
+                at: Instant::now(),
+                reach: Arc::clone(&reach),
+            }),
+        );
+    }
     Ok(Reached {
-        principal: claims.map_or_else(|| "anonymous".to_owned(), |claims| claims.sub),
+        principal,
         reach,
         decision,
         anonymous: raw.is_none(),
@@ -371,7 +472,7 @@ pub(crate) struct Hub {
     pub(crate) gateway: Arc<Gateway>,
     /// The caller's Endpoints and who the caller is on each: in slug order on the hub, in the
     /// order of `spec.members` on a named server.
-    pub(crate) reach: Vec<(Arc<Endpoint>, Subject)>,
+    pub(crate) reach: Arc<[(Arc<Endpoint>, Subject)]>,
     /// The key the Endpoint's own `(slug, caller)` bucket is spent under, the middleware's own.
     pub(crate) caller: String,
     /// The named server this request came in by, `None` on the hub (ADR-N-043).
