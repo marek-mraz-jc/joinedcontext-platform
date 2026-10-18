@@ -657,6 +657,18 @@ test("the table's labels are jc-core's field-order.json, the CKAN publisher's an
   }
 });
 
+test("the data model's labels win where the table carries them, as text (T-4672)", () => {
+  const shown = table({
+    columns: ["name", "pm10", "url"],
+    units: [null, "µg/m³", null],
+    labels: [{ sk: "Názov stanice", en: "Station" }, { en: "PM10 <b>dust</b>" }, null],
+    rows: [["A", 21.5, "https://x.sk"]]
+  }, "sk");
+  // sk where the model has it, else its English, else the shared table's.
+  assert.deepEqual(shown.columns, ["Názov stanice", "PM10 <b>dust</b> (µg/m³)", "Odkaz"]);
+  assert.deepEqual(table({ columns: ["url"], labels: "nope", rows: [] }, "sk").columns, ["Odkaz"]);
+});
+
 test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
   assert.deepEqual(markdown("| Stanica | NO₂ |\n|:---|---:|\n| **Centrum** | 12 \\| 14 |\nend"), [
     { tag: "table", children: [

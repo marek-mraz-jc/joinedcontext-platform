@@ -169,8 +169,11 @@ fn points_elsewhere(table: &Table, column: usize) -> bool {
 /// the table leads with and `observedAt`.
 pub fn default_map(table: &Table, domain: &str) -> Option<Value> {
     let time = table.columns.iter().position(|c| c == "observedAt");
+    // The model's key attributes where it marks them (DM-99, T-4672), else the first columns.
+    let key = |i: usize| table.summary.get(i).copied().unwrap_or(false);
+    let keyed = table.summary.iter().skip(1).any(|k| *k);
     let popup: Vec<usize> = (1..table.columns.len())
-        .filter(|&i| Some(i) != time && !points_elsewhere(table, i))
+        .filter(|&i| Some(i) != time && !points_elsewhere(table, i) && (!keyed || key(i)))
         .take(POPUP)
         .collect();
     map_of(table, 0, &popup, time, None, domain)
@@ -381,6 +384,8 @@ mod tests {
                 ],
             ],
             units: vec![None, Some("µg/m³".into()), Some("µg/m³".into()), None, None],
+            labels: Vec::new(),
+            summary: Vec::new(),
             total: None,
             dataset: Some("https://data.dev.example.org/dataset/ovzdusie".into()),
             download: None,
@@ -469,6 +474,27 @@ mod tests {
         let mut nowhere = air();
         nowhere.geometries = vec![None, None, None];
         assert_eq!(default_map(&nowhere, "dev.example.org"), None);
+    }
+
+    /// T-4672 (DM-99): a model that marks key attributes puts only those in the popup.
+    #[test]
+    fn the_default_maps_popup_shows_the_models_key_attributes() {
+        let mut keyed = air();
+        keyed.summary = vec![true, false, true, false, false];
+        let spec = default_map(&keyed, "dev.example.org").expect("a map");
+        let fields: Vec<&Value> = spec["popup"]
+            .as_array()
+            .expect("a popup")
+            .iter()
+            .map(|f| &f["field"])
+            .collect();
+        assert_eq!(fields, [&json!("pm10")]);
+        let spec = default_map(&air(), "dev.example.org").expect("a map");
+        assert_eq!(
+            spec["popup"].as_array().map(Vec::len),
+            Some(2),
+            "no key attributes: the first columns"
+        );
     }
 
     #[test]
