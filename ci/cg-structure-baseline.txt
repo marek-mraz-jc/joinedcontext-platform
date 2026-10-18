@@ -4,7 +4,7 @@ agent-proxy | 3 | 1
 assistant | 8 | 14
 context-gateway | 16 | 17
 jc-app-sdk | 0 | 1
-jc-core | 18 | 18
+jc-core | 17 | 18
 jc-dcat | 0 | 1
 jcctl | 14 | 15
 token-sidecar | 0 | 1

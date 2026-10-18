@@ -993,8 +993,24 @@ impl AssistantDeploymentSpec {
             .unwrap_or(20)
     }
 
-    /// Every rule of MF-52 that one manifest can be judged by.
+    /// Every rule of MF-52 that one manifest can be judged by, field group by field group, in the
+    /// order a manifest is read: the first broken rule is the one reported.
     pub fn validate(&self) -> Result<()> {
+        self.identity_fields()?;
+        self.answer_fields()?;
+        self.connector_fields()?;
+        self.channel_fields()?;
+        self.rate_limit_fields()?;
+        self.budget_fields()?;
+        self.model_fields()?;
+        self.text_fields()?;
+        self.scope_fields()?;
+        self.theme_fields()?;
+        languages(&self.languages)
+    }
+
+    /// The public id, what it answers from, its MCP server and its sources (MF-52).
+    fn identity_fields(&self) -> Result<()> {
         names::validate_dns1123_label(&self.public_id).map_err(|_| {
             name(
                 "publicId",
@@ -1040,6 +1056,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// What an answer may use, and the data loop's bounds.
+    fn answer_fields(&self) -> Result<()> {
         match self.routes() {
             Routes::Rag if self.sources.is_empty() => {
                 return Err(name(
@@ -1075,6 +1096,11 @@ impl AssistantDeploymentSpec {
                 return Err(name(field, value.to_string(), reason));
             }
         }
+        Ok(())
+    }
+
+    /// Each connector: its Endpoint in scope, its tools and its timeout.
+    fn connector_fields(&self) -> Result<()> {
         for connector in &self.connectors {
             let (project, endpoint) = connector_target(&connector.endpoint);
             names::validate_dns1123_label(endpoint).map_err(|_| {
@@ -1108,6 +1134,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Its origins, and what a deployment anyone may reach must carry.
+    fn channel_fields(&self) -> Result<()> {
         for origin in &self.allowed_origins {
             if !is_origin(origin) {
                 return Err(name(
@@ -1140,6 +1171,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// The rate limit's windows, each within its bounds.
+    fn rate_limit_fields(&self) -> Result<()> {
         if let Some(limit) = &self.rate_limit {
             if !(1..=600).contains(&limit.requests_per_minute) {
                 return Err(name(
@@ -1188,6 +1224,11 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The budget: tokens, cost and the bounds of one answer.
+    fn budget_fields(&self) -> Result<()> {
         if let Some(budget) = &self.budget {
             if !(1..=100_000_000).contains(&budget.tokens_per_day) {
                 return Err(name(
@@ -1237,6 +1278,11 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The system prompt's length and the models and providers it names.
+    fn model_fields(&self) -> Result<()> {
         if self
             .system_prompt
             .as_deref()
@@ -1288,6 +1334,11 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Suggestions and disclaimers per known language, and no credential in any visible text.
+    fn text_fields(&self) -> Result<()> {
         for (language, questions) in &self.suggestions {
             self.known_language("suggestions", language)?;
             if questions.len() > MAX_SUGGESTIONS {
@@ -1344,6 +1395,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// scope.projects: at most ten, each a DNS label, named once, never `*`.
+    fn scope_fields(&self) -> Result<()> {
         let projects = self.scope_projects();
         if projects.len() > MAX_SCOPE_PROJECTS {
             return Err(name(
@@ -1375,6 +1431,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// The theme's colour, greeting and title.
+    fn theme_fields(&self) -> Result<()> {
         if let Some(theme) = &self.theme {
             if let Some(colour) = &theme.primary_color {
                 let hex = colour.strip_prefix('#').unwrap_or_default();
@@ -1426,7 +1487,7 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
-        languages(&self.languages)
+        Ok(())
     }
 }
 
@@ -1796,6 +1857,283 @@ mod knowledge_source_tests {
                     .crawl_limit_fields()
             ),
             "schedule"
+        );
+    }
+}
+
+#[cfg(test)]
+mod deployment_spec_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// The documented deployment's spec, as JSON to change one field of.
+    fn golden() -> Value {
+        let manifest: Value = serde_norway::from_str(include_str!(
+            "../../tests/golden/029-AssistantDeployment-22-knowledge-assistant.yaml"
+        ))
+        .expect("the golden manifest");
+        manifest["spec"].clone()
+    }
+
+    fn with(change: impl FnOnce(&mut Value)) -> AssistantDeploymentSpec {
+        let mut spec = golden();
+        change(&mut spec);
+        serde_json::from_value(spec).expect("an AssistantDeployment spec")
+    }
+
+    fn refused(result: Result<()>) -> &'static str {
+        match result {
+            Err(Error::Name { field, .. }) => field,
+            other => panic!("expected a refused field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_piece_passes_the_documented_deployment() {
+        let spec = with(|_| {});
+        for check in [
+            AssistantDeploymentSpec::identity_fields,
+            AssistantDeploymentSpec::answer_fields,
+            AssistantDeploymentSpec::connector_fields,
+            AssistantDeploymentSpec::channel_fields,
+            AssistantDeploymentSpec::rate_limit_fields,
+            AssistantDeploymentSpec::budget_fields,
+            AssistantDeploymentSpec::model_fields,
+            AssistantDeploymentSpec::text_fields,
+            AssistantDeploymentSpec::scope_fields,
+            AssistantDeploymentSpec::theme_fields,
+        ] {
+            assert!(check(&spec).is_ok());
+        }
+    }
+
+    #[test]
+    fn identity_needs_a_label_something_to_answer_from_and_sources_in_scope() {
+        assert_eq!(
+            refused(with(|s| s["publicId"] = json!("BB Public")).identity_fields()),
+            "publicId"
+        );
+        let nothing = with(|s| {
+            s["sources"] = json!([]);
+            s["connectors"] = json!([]);
+        });
+        assert_eq!(refused(nothing.identity_fields()), "sources");
+        assert_eq!(
+            refused(with(|s| s["mcpServer"] = json!("no-slash")).identity_fields()),
+            "mcpServer"
+        );
+        assert!(with(|s| s["mcpServer"] = json!("org/hub"))
+            .identity_fields()
+            .is_ok());
+        assert_eq!(
+            refused(with(|s| s["sources"] = json!(["bbsk/web"])).identity_fields()),
+            "sources"
+        );
+        assert!(with(|s| {
+            s["sources"] = json!(["bbsk/web"]);
+            s["scope"] = json!({"projects": ["bbsk"]});
+        })
+        .identity_fields()
+        .is_ok());
+    }
+
+    #[test]
+    fn answer_routes_need_what_they_read_and_the_loop_is_bounded() {
+        let rag = with(|s| {
+            s["sources"] = json!([]);
+            s["answer"] = json!({"routes": "rag"});
+        });
+        assert_eq!(refused(rag.answer_fields()), "answer.routes");
+        let data = with(|s| {
+            s["connectors"] = json!([]);
+            s["answer"] = json!({"routes": "data"});
+        });
+        assert_eq!(refused(data.answer_fields()), "answer.routes");
+        assert_eq!(
+            refused(with(|s| s["answer"] = json!({"maxDataSteps": 26})).answer_fields()),
+            "answer.maxDataSteps"
+        );
+        assert_eq!(
+            refused(with(|s| s["answer"] = json!({"maxDataSeconds": 0})).answer_fields()),
+            "answer.maxDataSeconds"
+        );
+    }
+
+    #[test]
+    fn a_connector_names_an_endpoint_in_scope_its_tools_and_a_timeout() {
+        let one = |c: Value| with(|s| s["connectors"] = json!([c]));
+        assert_eq!(
+            refused(
+                one(json!({"endpoint": "Mesto", "tools": ["query_entities"]})).connector_fields()
+            ),
+            "connectors[].endpoint"
+        );
+        assert_eq!(
+            refused(
+                one(json!({"endpoint": "bbsk/kraj", "tools": ["query_entities"]}))
+                    .connector_fields()
+            ),
+            "connectors[].endpoint"
+        );
+        assert_eq!(
+            refused(one(json!({"endpoint": "mesto", "tools": [" "]})).connector_fields()),
+            "connectors[].tools"
+        );
+        assert_eq!(
+            refused(one(json!({"endpoint": "mesto", "tools": ["q"], "timeoutSeconds": MAX_TIMEOUT_SECONDS + 1})).connector_fields()),
+            "connectors[].timeoutSeconds"
+        );
+    }
+
+    #[test]
+    fn an_anonymous_channel_carries_origins_a_rate_limit_and_a_budget() {
+        assert_eq!(
+            refused(with(|s| s["allowedOrigins"] = json!(["https://*.example"])).channel_fields()),
+            "allowedOrigins"
+        );
+        assert_eq!(
+            refused(with(|s| s["allowedOrigins"] = json!([])).channel_fields()),
+            "allowedOrigins"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s
+                    .as_object_mut()
+                    .map(|o| o.remove("rateLimit"))
+                    .map(drop)
+                    .unwrap_or_default())
+                .channel_fields()
+            ),
+            "rateLimit"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s
+                    .as_object_mut()
+                    .map(|o| o.remove("budget"))
+                    .map(drop)
+                    .unwrap_or_default())
+                .channel_fields()
+            ),
+            "budget"
+        );
+        let internal = with(|s| {
+            s["channel"] = json!("internal");
+            s["allowedOrigins"] = json!([]);
+        });
+        assert!(internal.channel_fields().is_ok());
+    }
+
+    #[test]
+    fn rate_limits_and_budgets_hold_their_bounds() {
+        let limit = |l: Value| with(|s| s["rateLimit"] = l);
+        assert_eq!(
+            refused(
+                limit(json!({"requestsPerMinute": 601, "perClientPerMinute": 1}))
+                    .rate_limit_fields()
+            ),
+            "rateLimit.requestsPerMinute"
+        );
+        assert_eq!(
+            refused(
+                limit(json!({"requestsPerMinute": 5, "perClientPerMinute": 6})).rate_limit_fields()
+            ),
+            "rateLimit.perClientPerMinute"
+        );
+        assert_eq!(
+            refused(
+                limit(
+                    json!({"requestsPerMinute": 5, "perClientPerMinute": 5, "streamsPerClient": 11})
+                )
+                .rate_limit_fields()
+            ),
+            "rateLimit.streamsPerClient"
+        );
+        let budget = |b: Value| with(|s| s["budget"] = b);
+        assert_eq!(
+            refused(budget(json!({"tokensPerDay": 0, "tokensPerConversation": 1})).budget_fields()),
+            "budget.tokensPerDay"
+        );
+        assert_eq!(
+            refused(
+                budget(json!({"tokensPerDay": 10, "tokensPerConversation": 11})).budget_fields()
+            ),
+            "budget.tokensPerConversation"
+        );
+        assert_eq!(
+            refused(
+                budget(
+                    json!({"tokensPerDay": 10, "tokensPerConversation": 5, "costPerDayUsd": 0.0})
+                )
+                .budget_fields()
+            ),
+            "budget.costPerDayUsd"
+        );
+        assert_eq!(
+            refused(
+                budget(
+                    json!({"tokensPerDay": 10, "tokensPerConversation": 5, "questionChars": 99})
+                )
+                .budget_fields()
+            ),
+            "budget.questionChars"
+        );
+    }
+
+    #[test]
+    fn models_texts_scope_and_theme_are_checked() {
+        assert_eq!(
+            refused(
+                with(|s| s["systemPrompt"] = json!("x".repeat(MAX_PROMPT_LEN + 1))).model_fields()
+            ),
+            "systemPrompt"
+        );
+        assert_eq!(
+            refused(with(|s| s["model"] = json!({"router": "No Spaces Allowed"})).model_fields()),
+            "model.router"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s["model"] = json!({"provider": {"allowFallbacks": true}}))
+                    .model_fields()
+            ),
+            "model.provider"
+        );
+        assert_eq!(
+            refused(with(|s| s["suggestions"] = json!({"de": ["Wie?"]})).text_fields()),
+            "suggestions"
+        );
+        assert_eq!(
+            refused(with(|s| s["disclaimer"] = json!({"sk": " "})).text_fields()),
+            "disclaimer"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s["systemPrompt"] =
+                    json!("use sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef"))
+                .text_fields()
+            ),
+            "systemPrompt"
+        );
+        assert_eq!(
+            refused(with(|s| s["scope"] = json!({"projects": ["*"]})).scope_fields()),
+            "scope.projects"
+        );
+        assert_eq!(
+            refused(with(|s| s["scope"] = json!({"projects": ["bbsk", "bbsk"]})).scope_fields()),
+            "scope.projects"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["primaryColor"] = json!("blue")).theme_fields()),
+            "theme.primaryColor"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["title"] = json!(" ")).theme_fields()),
+            "theme.title"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["greeting"] = json!({"de": "Hallo"})).theme_fields()),
+            "theme.greeting"
         );
     }
 }
