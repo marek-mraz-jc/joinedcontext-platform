@@ -15,7 +15,6 @@ files = [
   "crates/context-gateway/src/handlers/openapi_doc.rs",
   "crates/context-gateway/src/handlers/schema_routes.rs",
   "crates/context-gateway/src/handlers/space_routes.rs",
-  "crates/context-gateway/src/handlers/sta.rs",
   "crates/context-gateway/src/handlers/view_access.rs",
   "crates/context-gateway/src/handlers/ws.rs",
   "crates/context-gateway/src/mcp/mod.rs",

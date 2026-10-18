@@ -175,42 +175,22 @@ async fn ask(uri: &str) -> (StatusCode, Value, Vec<String>) {
     (status, body, asked)
 }
 
-/// EP-12, EP-61: SensorThings takes its filter in `$filter`, compiled into the same `q`, and since
-/// T-3651 it reads through the Endpoint's view: the filter on a hidden attribute goes to the view,
-/// whose engine considers no entity for it (Antares `addons/joinedcontext-policy/tests/engine.rs`
+/// EP-12, EP-61: SensorThings is the broker's `antares-sta` surface of the Endpoint's view since
+/// T-4463: a `$filter` on a hidden attribute goes to that view as sent, whose engine considers no
+/// entity for it (Antares `addons/joinedcontext-policy/tests/engine.rs`
 /// `bisecting_a_hidden_value_learns_nothing`), and never to the broker's plain root.
 #[tokio::test]
 async fn a_sensorthings_filter_on_a_hidden_attribute_goes_to_the_view_alone() {
     for value in ["4321", "9999"] {
-        let (status, _, asked) = ask(&format!(
+        let (_, _, asked) = ask(&format!(
             "/sta/v1.1/Things?$filter=secretPin%20eq%20%27{value}%27"
         ))
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(asked.len(), 1, "{asked:?}");
-        assert!(
-            asked[0].starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/entities?")),
-            "{asked:?}"
+        assert_eq!(
+            asked,
+            [format!(
+                "/x/views/{SLUG}/sta/v1.1/Things?$filter=secretPin%20eq%20%27{value}%27"
+            )]
         );
     }
-}
-
-/// The SensorThings control.
-#[tokio::test]
-async fn a_sensorthings_filter_the_endpoint_serves_is_compiled_and_forwarded() {
-    let (status, body, asked) = ask("/sta/v1.1/Things?$filter=weight%20gt%20100").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(asked.len(), 1, "the broker was asked {asked:?}");
-    assert!(
-        asked[0].starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/entities?"))
-            && asked[0].contains("q=weight%3E100"),
-        "the compiled filter did not reach the view: {}",
-        asked[0]
-    );
-    assert!(
-        body["value"]
-            .as_array()
-            .is_some_and(|value| !value.is_empty()),
-        "the control returned nothing, so the other cases prove nothing: {body}"
-    );
 }

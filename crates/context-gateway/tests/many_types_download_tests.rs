@@ -1,11 +1,10 @@
-//! A download of a space holding many types (T-4078).
+//! A download of a space holding many types (T-4078, T-4456).
 //!
-//! An unselected download asks the Endpoint's view for every type the space holds, and the
-//! broker's view refuses a query whose types compose past its rule bound: on dev the 21 types
-//! of the Helsinki space were a `403` for file.csv, .geojson, .xlsx and .zip of
-//! helsinki-transport and helsinki-all, while every NGSI-LD read answered. The stub here is that
-//! view: 21 types, and a refusal of any query naming 16 or more of them. The view, not the
-//! gateway, decides which types a caller reads (T-3652): a type it refuses is left out.
+//! An unselected download asks the Endpoint's view for every type the space holds, in one
+//! request: since T-4079 and T-4455 the broker's view composes per type and leaves out a type
+//! it refuses the caller, refusing the read only when it refuses every type named. The stub here
+//! is that view, over the 21 types of the Helsinki space. The view, not the gateway, decides
+//! which types a caller reads (T-3652).
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -24,8 +23,6 @@ use tower::ServiceExt;
 
 const SLUG: &str = "ajaezssvx3bwqgejgepmq4ig3frgan4e";
 const TYPES: usize = 21;
-/// The fewest distinct types the stub's view refuses in one query, as dev's did.
-const BOUND: usize = 16;
 
 fn type_name(n: usize) -> String {
     format!("Type{n:02}")
@@ -87,10 +84,11 @@ async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked) 
                 .lock()
                 .expect("no poisoned lock")
                 .push(types.clone());
-            let distinct: BTreeSet<&String> = types.iter().collect();
-            let hidden =
-                shown.is_some_and(|shown| types.iter().any(|name| !shown.contains(&name.as_str())));
-            if distinct.len() >= BOUND || hidden {
+            let read: Vec<&String> = types
+                .iter()
+                .filter(|name| shown.is_none_or(|shown| shown.contains(&name.as_str())))
+                .collect();
+            if read.is_empty() {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(json!({
@@ -106,7 +104,7 @@ async fn view_broker(shown: Option<&'static [&'static str]>) -> (String, Asked) 
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(default)
             };
-            let rows: Vec<Value> = types
+            let rows: Vec<Value> = read
                 .iter()
                 .flat_map(|name| entities_of(name))
                 .skip(number("offset", 0))
@@ -198,8 +196,8 @@ async fn get(app: Router, path: &str) -> (StatusCode, Vec<u8>) {
     (status, body.to_vec())
 }
 
-/// Every download of the 21-type space answers, with the rows of every type, and no query the
-/// view was asked names more than one type.
+/// Every download of the 21-type space answers with the rows of every type, read in one
+/// request that names all of them (T-4456).
 #[tokio::test]
 async fn a_download_of_a_space_of_many_types_holds_every_type() {
     for file in ["file.geojson", "file.csv", "file.xlsx", "file.zip"] {
@@ -216,12 +214,8 @@ async fn a_download_of_a_space_of_many_types_holds_every_type() {
             String::from_utf8_lossy(&body)
         );
         let asked = asked.lock().expect("no poisoned lock").clone();
-        assert!(
-            asked.iter().all(|types| types.len() == 1),
-            "{file}: {asked:?}"
-        );
-        let covered: BTreeSet<&String> = asked.iter().flatten().collect();
-        assert_eq!(covered.len(), TYPES, "{file}: {asked:?}");
+        assert_eq!(asked.len(), 1, "{file}: {asked:?}");
+        assert_eq!(asked[0].len(), TYPES, "{file}: {asked:?}");
         if file == "file.geojson" {
             let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
             assert_eq!(
@@ -241,8 +235,8 @@ async fn a_download_of_a_space_of_many_types_holds_every_type() {
     }
 }
 
-/// A view that shows 2 of the 21 types is asked for each, and the download holds the 2 it shows:
-/// a type it refuses is left out, not a refusal of the whole file (T-3652).
+/// A view that shows 2 of the 21 types is asked once, and the download holds the 2 it shows: a
+/// type it refuses is left out, not a refusal of the whole file (T-3652).
 #[tokio::test]
 async fn a_type_the_view_refuses_is_left_out_of_the_download() {
     let (broker, asked) = view_broker(Some(&["Type03", "Type17"])).await;
@@ -253,16 +247,16 @@ async fn a_type_the_view_refuses_is_left_out_of_the_download() {
     .await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let asked = asked.lock().expect("no poisoned lock").clone();
-    assert_eq!(asked.len(), TYPES, "{asked:?}");
+    assert_eq!(asked.len(), 1, "{asked:?}");
     let collection: Value = serde_json::from_slice(&body).expect("a FeatureCollection");
     assert_eq!(collection["features"].as_array().map(Vec::len), Some(6));
 }
 
-/// A view that refuses the caller every type refuses the download and the page, as it refuses
-/// the caller's own query.
+/// A view that refuses the caller every type refuses the download, as it refuses the caller's
+/// own query.
 #[tokio::test]
 async fn a_view_refusing_every_type_refuses_the_read() {
-    for path in ["file.csv", "sta/v1.1/Things?$top=5"] {
+    for path in ["file.csv", "file.geojson"] {
         let (broker, _) = view_broker(Some(&[])).await;
         let (status, body) = get(
             gateway(&broker, endpoint(&[])),
@@ -279,11 +273,11 @@ async fn a_view_refusing_every_type_refuses_the_read() {
 }
 
 /// An Endpoint whose slug no view id can hold has no view, and nothing decides for it: its
-/// downloads and pages answer `503 no-view` and the broker is not asked (T-3652).
+/// downloads answer `503 no-view` and the broker is not asked (T-3652).
 #[tokio::test]
 async fn an_endpoint_without_a_view_answers_no_view() {
     let long = "a".repeat(64);
-    for path in ["file.csv", "sta/v1.1/Things"] {
+    for path in ["file.csv", "file.geojson"] {
         let (broker, asked) = view_broker(None).await;
         let mut endpoint = endpoint(&[]);
         endpoint.slug = long.clone();
@@ -305,8 +299,8 @@ async fn an_endpoint_without_a_view_answers_no_view() {
     }
 }
 
-/// A Policy that names no type the space holds narrows nothing: the view is still asked, type by
-/// type, and decides.
+/// A Policy that names no type the space holds narrows nothing: the view is still asked, once,
+/// and decides.
 #[tokio::test]
 async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
     let (broker, asked) = view_broker(None).await;
@@ -317,29 +311,5 @@ async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let asked = asked.lock().expect("no poisoned lock").clone();
-    assert_eq!(asked.len(), TYPES, "{asked:?}");
-}
-
-/// A single page through the view (the STA surface's read) cuts the caller's window out of the
-/// types read in turn: rows 59 to 63 of 63 span two types and stop at the last one.
-#[tokio::test]
-async fn a_page_of_a_space_of_many_types_spans_the_types_in_order() {
-    let (broker, asked) = view_broker(None).await;
-    let (status, body) = get(
-        gateway(&broker, endpoint(&[])),
-        &format!("/api/endpoint/{SLUG}/sta/v1.1/Things?$top=5&$skip=59"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let asked = asked.lock().expect("no poisoned lock").clone();
-    assert!(asked.iter().all(|types| types.len() == 1), "{asked:?}");
-    let answer: Value = serde_json::from_slice(&body).expect("an STA collection");
-    assert_eq!(
-        answer["value"].as_array().map(Vec::len),
-        Some(4),
-        "{answer}"
-    );
-    // The read stopped at the type that filled the window, the last one: none was asked twice.
-    let distinct: BTreeSet<&Vec<String>> = asked.iter().collect();
-    assert_eq!(distinct.len(), asked.len(), "{asked:?}");
+    assert_eq!(asked.len(), 1, "{asked:?}");
 }

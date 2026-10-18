@@ -30,7 +30,6 @@ GATEWAY = "crates/context-gateway"
 FORMAT_CRATES = {"zip", "parquet", "csv", "rust_xlsxwriter", "calamine", "geojson", "geo-types", "wkb"}
 # The modules ADR-N-051 section 3 moves out besides translators/.
 FORMAT_MODULES = [
-    "src/handlers/sta.rs",
     "src/handlers/files.rs",
     "src/handlers/reads.rs",
     "src/query.rs",
