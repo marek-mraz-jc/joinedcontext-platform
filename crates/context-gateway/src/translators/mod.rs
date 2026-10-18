@@ -3,5 +3,4 @@
 pub mod geojson;
 pub mod sta;
 pub mod tabular;
-pub mod view_mapping;
 pub mod zip_export;
