@@ -272,101 +272,132 @@ impl KnowledgeSourceSpec {
         self.upload.clone().unwrap_or_default()
     }
 
-    /// Every rule of MF-51 that one manifest can be judged by.
+    /// Every rule of MF-51 that one manifest can be judged by, field group by field group, in the
+    /// order a manifest is read: the first broken rule is the one reported.
     pub fn validate(&self) -> Result<()> {
         match self.source {
-            SourceType::Website => {
-                if self.start_urls.is_empty() || self.start_urls.len() > MAX_START_URLS {
-                    return Err(name(
-                        "startUrls",
-                        self.start_urls.len().to_string(),
-                        "a website source names one to twenty start URLs",
-                    ));
-                }
-                if self.ckan_instance_ref.is_some() {
-                    return Err(name(
-                        "ckanInstanceRef",
-                        String::new(),
-                        "a website source names no CkanInstance; use source: ckan",
-                    ));
-                }
-                for url in &self.start_urls {
-                    https_url(url).ok_or_else(|| {
-                        name(
-                            "startUrls",
-                            url.clone(),
-                            "a start URL is an absolute https:// address with a host",
-                        )
-                    })?;
-                }
-            }
-            SourceType::Ckan => {
-                let instance = self.ckan_instance_ref.as_deref().unwrap_or_default();
-                if names::validate_dns1123_label(instance).is_err() {
-                    return Err(name(
-                        "ckanInstanceRef",
-                        instance.to_owned(),
-                        "a ckan source names the CkanInstance of this project it reads",
-                    ));
-                }
-                if !self.start_urls.is_empty() {
-                    return Err(name(
-                        "startUrls",
-                        self.start_urls.join(", "),
-                        "a ckan source reads its CkanInstance and names no start URLs",
-                    ));
-                }
-            }
-            SourceType::Catalogue => {
-                if !self.start_urls.is_empty() || self.ckan_instance_ref.is_some() {
-                    return Err(name(
-                        "source",
-                        "catalogue".to_owned(),
-                        "a catalogue source reads the project's own Endpoints and names no start URLs and no CkanInstance",
-                    ));
-                }
-                for space in &self.context_spaces {
-                    names::validate_space_name(space).map_err(|_| {
-                        name(
-                            "contextSpaces",
-                            space.clone(),
-                            "a context space of this project, by its name",
-                        )
-                    })?;
-                }
-            }
-            SourceType::Guide => {
-                if !self.start_urls.is_empty()
-                    || self.ckan_instance_ref.is_some()
-                    || !self.context_spaces.is_empty()
-                {
-                    return Err(name(
-                        "source",
-                        "guide".to_owned(),
-                        "a guide source reads the User Guide jc-assistant ships and names no start URLs, no CkanInstance and no context spaces",
-                    ));
-                }
-            }
-            SourceType::Upload => {
-                if !self.start_urls.is_empty()
-                    || self.ckan_instance_ref.is_some()
-                    || !self.context_spaces.is_empty()
-                {
-                    return Err(name(
-                        "source",
-                        "upload".to_owned(),
-                        "an upload source holds the files an administrator uploads and names no start URLs, no CkanInstance and no context spaces",
-                    ));
-                }
-                if self.schedule.is_some() {
-                    return Err(name(
-                        "schedule",
-                        String::new(),
-                        "an upload source has nothing to fetch on a schedule; its files are read as they are uploaded",
-                    ));
-                }
-            }
+            SourceType::Website => self.website_fields()?,
+            SourceType::Ckan => self.ckan_fields()?,
+            SourceType::Catalogue => self.catalogue_fields()?,
+            SourceType::Guide => self.guide_fields()?,
+            SourceType::Upload => self.upload_source_fields()?,
         }
+        self.organization_fields()?;
+        self.upload_limit_fields()?;
+        self.wordpress_fields()?;
+        self.space_and_pattern_fields()?;
+        self.crawl_limit_fields()?;
+        languages(&self.languages)
+    }
+
+    /// A website source: one to twenty https start URLs and no CkanInstance.
+    fn website_fields(&self) -> Result<()> {
+        if self.start_urls.is_empty() || self.start_urls.len() > MAX_START_URLS {
+            return Err(name(
+                "startUrls",
+                self.start_urls.len().to_string(),
+                "a website source names one to twenty start URLs",
+            ));
+        }
+        if self.ckan_instance_ref.is_some() {
+            return Err(name(
+                "ckanInstanceRef",
+                String::new(),
+                "a website source names no CkanInstance; use source: ckan",
+            ));
+        }
+        for url in &self.start_urls {
+            https_url(url).ok_or_else(|| {
+                name(
+                    "startUrls",
+                    url.clone(),
+                    "a start URL is an absolute https:// address with a host",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A ckan source: its CkanInstance by name and no start URLs.
+    fn ckan_fields(&self) -> Result<()> {
+        let instance = self.ckan_instance_ref.as_deref().unwrap_or_default();
+        if names::validate_dns1123_label(instance).is_err() {
+            return Err(name(
+                "ckanInstanceRef",
+                instance.to_owned(),
+                "a ckan source names the CkanInstance of this project it reads",
+            ));
+        }
+        if !self.start_urls.is_empty() {
+            return Err(name(
+                "startUrls",
+                self.start_urls.join(", "),
+                "a ckan source reads its CkanInstance and names no start URLs",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A catalogue source: the project's own context spaces, no start URLs and no CkanInstance.
+    fn catalogue_fields(&self) -> Result<()> {
+        if !self.start_urls.is_empty() || self.ckan_instance_ref.is_some() {
+            return Err(name(
+                "source",
+                "catalogue".to_owned(),
+                "a catalogue source reads the project's own Endpoints and names no start URLs and no CkanInstance",
+            ));
+        }
+        for space in &self.context_spaces {
+            names::validate_space_name(space).map_err(|_| {
+                name(
+                    "contextSpaces",
+                    space.clone(),
+                    "a context space of this project, by its name",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A guide source names nothing to fetch.
+    fn guide_fields(&self) -> Result<()> {
+        if !self.start_urls.is_empty()
+            || self.ckan_instance_ref.is_some()
+            || !self.context_spaces.is_empty()
+        {
+            return Err(name(
+                "source",
+                "guide".to_owned(),
+                "a guide source reads the User Guide jc-assistant ships and names no start URLs, no CkanInstance and no context spaces",
+            ));
+        }
+        Ok(())
+    }
+
+    /// An upload source names nothing to fetch and has no schedule.
+    fn upload_source_fields(&self) -> Result<()> {
+        if !self.start_urls.is_empty()
+            || self.ckan_instance_ref.is_some()
+            || !self.context_spaces.is_empty()
+        {
+            return Err(name(
+                "source",
+                "upload".to_owned(),
+                "an upload source holds the files an administrator uploads and names no start URLs, no CkanInstance and no context spaces",
+            ));
+        }
+        if self.schedule.is_some() {
+            return Err(name(
+                "schedule",
+                String::new(),
+                "an upload source has nothing to fetch on a schedule; its files are read as they are uploaded",
+            ));
+        }
+        Ok(())
+    }
+
+    /// CKAN organizations: only on a ckan source, at most ten, each a CKAN name.
+    fn organization_fields(&self) -> Result<()> {
         if self.source != SourceType::Ckan && !self.organizations.is_empty() {
             return Err(name(
                 "organizations",
@@ -390,6 +421,11 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Upload limits: only on an upload source, each within its bounds.
+    fn upload_limit_fields(&self) -> Result<()> {
         if let Some(upload) = &self.upload {
             if self.source != SourceType::Upload {
                 return Err(name(
@@ -413,6 +449,11 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// WordPress REST bases: only on a website source, at most forty, each a plain base.
+    fn wordpress_fields(&self) -> Result<()> {
         if self.source != SourceType::Website && !self.wordpress_types.is_empty() {
             return Err(name(
                 "wordpressTypes",
@@ -441,6 +482,11 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Context spaces only on a catalogue source; include and exclude path patterns.
+    fn space_and_pattern_fields(&self) -> Result<()> {
         if self.source != SourceType::Catalogue && !self.context_spaces.is_empty() {
             return Err(name(
                 "contextSpaces",
@@ -469,6 +515,11 @@ impl KnowledgeSourceSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Crawl depth and pages, PDF limits and the schedule.
+    fn crawl_limit_fields(&self) -> Result<()> {
         if !(1..=MAX_DEPTH).contains(&self.max_depth) {
             return Err(name(
                 "maxDepth",
@@ -506,7 +557,7 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
-        languages(&self.languages)
+        Ok(())
     }
 }
 
@@ -1488,4 +1539,263 @@ fn languages(codes: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod knowledge_source_tests {
+    use super::*;
+
+    fn spec(value: serde_json::Value) -> KnowledgeSourceSpec {
+        serde_json::from_value(value).expect("a KnowledgeSource spec")
+    }
+
+    /// The field a refusal names, so each piece is judged by what it reports.
+    fn refused(result: Result<()>) -> &'static str {
+        match result {
+            Err(Error::Name { field, .. }) => field,
+            other => panic!("expected a refused field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_website_needs_one_to_twenty_https_start_urls_and_no_ckan_instance() {
+        let ok = spec(
+            serde_json::json!({"source": "website", "startUrls": ["https://hronov.example/"]}),
+        );
+        assert!(ok.website_fields().is_ok());
+        let none = spec(serde_json::json!({"source": "website"}));
+        assert_eq!(refused(none.website_fields()), "startUrls");
+        let many: Vec<String> = (0..=MAX_START_URLS)
+            .map(|i| format!("https://h{i}.example/"))
+            .collect();
+        let many = spec(serde_json::json!({"source": "website", "startUrls": many}));
+        assert_eq!(refused(many.website_fields()), "startUrls");
+        let plain =
+            spec(serde_json::json!({"source": "website", "startUrls": ["http://hronov.example/"]}));
+        assert_eq!(refused(plain.website_fields()), "startUrls");
+        let both = spec(
+            serde_json::json!({"source": "website", "startUrls": ["https://h.example/"], "ckanInstanceRef": "open"}),
+        );
+        assert_eq!(refused(both.website_fields()), "ckanInstanceRef");
+    }
+
+    #[test]
+    fn a_ckan_source_names_its_instance_and_no_start_urls() {
+        assert!(
+            spec(serde_json::json!({"source": "ckan", "ckanInstanceRef": "open"}))
+                .ckan_fields()
+                .is_ok()
+        );
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "ckan"})).ckan_fields()),
+            "ckanInstanceRef"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "ckanInstanceRef": "Open Data"}))
+                    .ckan_fields()
+            ),
+            "ckanInstanceRef"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "ckanInstanceRef": "open", "startUrls": ["https://h.example/"]}))
+                    .ckan_fields()
+            ),
+            "startUrls"
+        );
+    }
+
+    #[test]
+    fn a_catalogue_guide_and_upload_source_name_nothing_to_fetch() {
+        assert!(
+            spec(serde_json::json!({"source": "catalogue", "contextSpaces": ["air"]}))
+                .catalogue_fields()
+                .is_ok()
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "catalogue", "contextSpaces": ["Air Space"]}))
+                    .catalogue_fields()
+            ),
+            "contextSpaces"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "catalogue", "ckanInstanceRef": "open"}))
+                    .catalogue_fields()
+            ),
+            "source"
+        );
+        assert!(spec(serde_json::json!({"source": "guide"}))
+            .guide_fields()
+            .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "guide", "contextSpaces": ["air"]}))
+                    .guide_fields()
+            ),
+            "source"
+        );
+        assert!(spec(serde_json::json!({"source": "upload"}))
+            .upload_source_fields()
+            .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "upload", "schedule": "0 3 * * *"}))
+                    .upload_source_fields()
+            ),
+            "schedule"
+        );
+    }
+
+    #[test]
+    fn organizations_and_upload_limits_belong_to_their_own_source() {
+        let ten: Vec<String> = (0..MAX_ORGANIZATIONS).map(|i| format!("org-{i}")).collect();
+        assert!(spec(
+            serde_json::json!({"source": "ckan", "ckanInstanceRef": "open", "organizations": ten})
+        )
+        .organization_fields()
+        .is_ok());
+        let eleven: Vec<String> = (0..=MAX_ORGANIZATIONS)
+            .map(|i| format!("org-{i}"))
+            .collect();
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "organizations": eleven}))
+                    .organization_fields()
+            ),
+            "organizations"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "organizations": ["mesto"]}))
+                    .organization_fields()
+            ),
+            "organizations"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "organizations": ["Mesto!"]}))
+                    .organization_fields()
+            ),
+            "organizations"
+        );
+        assert!(spec(serde_json::json!({"source": "upload", "upload": {"maxBytes": MAX_UPLOAD_BYTES, "maxFiles": MAX_UPLOAD_FILES}}))
+            .upload_limit_fields()
+            .is_ok());
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "website", "upload": {"maxBytes": 1, "maxFiles": 1}})).upload_limit_fields()),
+            "upload"
+        );
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "upload", "upload": {"maxBytes": 0, "maxFiles": 1}})).upload_limit_fields()),
+            "upload.maxBytes"
+        );
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "upload", "upload": {"maxBytes": 1, "maxFiles": MAX_UPLOAD_FILES + 1}})).upload_limit_fields()),
+            "upload.maxFiles"
+        );
+    }
+
+    #[test]
+    fn wordpress_types_spaces_and_patterns_are_bounded() {
+        assert!(spec(
+            serde_json::json!({"source": "website", "wordpressTypes": ["pages", "news_2"]})
+        )
+        .wordpress_fields()
+        .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "wordpressTypes": ["pages"]}))
+                    .wordpress_fields()
+            ),
+            "wordpressTypes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "wordpressTypes": ["Pages"]}))
+                    .wordpress_fields()
+            ),
+            "wordpressTypes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "wordpressTypes": [""]}))
+                    .wordpress_fields()
+            ),
+            "wordpressTypes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "contextSpaces": ["air"]}))
+                    .space_and_pattern_fields()
+            ),
+            "contextSpaces"
+        );
+        assert!(spec(
+            serde_json::json!({"source": "website", "include": ["/sk/"], "exclude": ["/en/"]})
+        )
+        .space_and_pattern_fields()
+        .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "exclude": ["en/"]}))
+                    .space_and_pattern_fields()
+            ),
+            "exclude"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "include": ["/a b"]}))
+                    .space_and_pattern_fields()
+            ),
+            "include"
+        );
+        let long = format!("/{}", "a".repeat(MAX_PATTERN_LEN));
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "include": [long]}))
+                    .space_and_pattern_fields()
+            ),
+            "include"
+        );
+    }
+
+    #[test]
+    fn crawl_limits_hold_their_bounds_and_the_schedule_is_cron() {
+        assert!(spec(serde_json::json!({"source": "website", "maxDepth": MAX_DEPTH, "maxPages": MAX_PAGES, "schedule": "0 3 * * *"}))
+            .crawl_limit_fields()
+            .is_ok());
+        for (field, value) in [
+            ("maxDepth", 0),
+            ("maxDepth", u32::from(MAX_DEPTH) + 1),
+            ("maxPages", 0),
+            ("maxPages", MAX_PAGES + 1),
+        ] {
+            let mut json = serde_json::json!({"source": "website"});
+            json[field] = serde_json::json!(value);
+            assert_eq!(
+                refused(spec(json).crawl_limit_fields()),
+                field,
+                "{field} {value}"
+            );
+        }
+        assert_eq!(
+            refused(
+                spec(
+                    serde_json::json!({"source": "website", "pdf": {"maxBytes": 0, "maxPages": 1}})
+                )
+                .crawl_limit_fields()
+            ),
+            "pdf.maxBytes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "schedule": "every night"}))
+                    .crawl_limit_fields()
+            ),
+            "schedule"
+        );
+    }
 }
