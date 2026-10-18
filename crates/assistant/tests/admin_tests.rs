@@ -173,6 +173,7 @@ async fn world(test: &str) -> World {
         limits: tokio::sync::Mutex::default(),
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
+        listings: Default::default(),
         endpoint_base: None,
         viz: None,
         organization: "hronov".into(),
