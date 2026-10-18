@@ -1280,6 +1280,7 @@ mod tests {
             schedule: None,
             languages: Vec::new(),
             visibility: Visibility::Public,
+            categories: Vec::new(),
         }
     }
 

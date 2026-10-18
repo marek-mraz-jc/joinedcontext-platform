@@ -70,6 +70,9 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
                 },
             ],
             mcp_server: None,
+            select: None,
+            exclude: Vec::new(),
+            categories: Vec::new(),
             allowed_origins: vec![ORIGIN.into()],
             rate_limit: Some(RateLimit {
                 requests_per_minute: 100,
@@ -232,6 +235,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
         viz: None,
         organization: "hronov".into(),
+        contexts: Default::default(),
     });
     World {
         admin,

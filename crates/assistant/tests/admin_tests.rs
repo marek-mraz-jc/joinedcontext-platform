@@ -61,6 +61,7 @@ fn source_spec() -> KnowledgeSourceSpec {
         schedule: None,
         languages: vec!["sk".into()],
         visibility: Visibility::Public,
+        categories: Vec::new(),
     }
 }
 
@@ -176,6 +177,7 @@ async fn world(test: &str) -> World {
         endpoint_base: None,
         viz: None,
         organization: "hronov".into(),
+        contexts: Default::default(),
     });
     World {
         admin,

@@ -188,6 +188,7 @@ fn chat_state(
         endpoint_base: reader.endpoint_base.clone(),
         viz: viz_url(env).map_err(fail("the chart renderer's address is not usable"))?,
         organization: organization.to_owned(),
+        contexts: Default::default(),
     });
     Ok((chat_state, reader))
 }
