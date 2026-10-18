@@ -54,6 +54,9 @@ pub const ORG_ALL: &str = "all";
 /// AssistantDeployment's reach, read-only for every caller (T-4691).
 pub const DEPLOYMENTS: &str = "d";
 
+/// The scheme of an assistant's `context` resource, `context://{publicId}`.
+pub const CONTEXT_SCHEME: &str = "context://";
+
 /// One named server as the gateway serves it (MF-53).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
@@ -135,6 +138,17 @@ impl McpServer {
             .as_ref()
             .and_then(|select| select.access_level.as_ref())
             .is_none_or(|levels| levels.contains(&level))
+    }
+
+    /// Whether it offers the resource `context` (EP-136, API/05 §1.9): an assistant's server on
+    /// an anonymous channel, whose context the assistant answers any visitor.
+    pub fn has_context(&self) -> bool {
+        self.project == DEPLOYMENTS && self.audience == Audience::Public
+    }
+
+    /// The URI of its `context` resource.
+    pub fn context_uri(&self) -> String {
+        format!("{CONTEXT_SCHEME}{}", self.name)
     }
 
     /// Its address under the gateway's base URL (EP-92).
@@ -374,9 +388,17 @@ pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
          not answer; every other tool names one Endpoint in `endpoint`.\n\n",
     );
     instructions.push_str(&super::PRIMER);
+    let mut capabilities = json!({ "tools": { "listChanged": false } });
+    if server.is_some_and(McpServer::has_context) {
+        instructions.push_str(
+            "\n\nThe resource `context` says what this assistant knows: its categories, its \
+             Endpoints with their counts and its knowledge sources. Read it first.",
+        );
+        capabilities["resources"] = json!({ "listChanged": false });
+    }
     json!({
         "protocolVersion": jsonrpc::PROTOCOL_VERSION,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": capabilities,
         "serverInfo": {
             "name": name,
             "title": title.unwrap_or(name),

@@ -167,11 +167,13 @@ fn the_store_serves_each_enabled_deployment_with_its_connectors_and_sources() {
     );
 }
 
-/// A stand-in `jc-assistant` answering the sources summary and one search hit.
+/// A stand-in `jc-assistant` answering the sources summary, one search and `bbsk-data`'s context.
 async fn assistant() -> String {
     let stub = Router::new().fallback(|request: axum::extract::Request| async move {
         axum::Json(if request.uri().path() == "/internal/v1/sources" {
             json!({"passages": 3, "publishers": ["bbsk"], "languages": {"sk": 1.0}})
+        } else if request.uri().path() == "/api/v1/d/bbsk-data/context" {
+            json!({"publicId": "bbsk-data", "endpoints": [{"slug": AIR}], "sources": [], "omitted": 0})
         } else {
             json!({"hits": []})
         })
@@ -400,4 +402,68 @@ async fn an_internal_deployment_asks_for_a_token_and_an_unknown_one_is_404() {
     assert_eq!(status, StatusCode::NOT_FOUND, "a disabled deployment");
     let (status, _) = rpc(&app, "/api/mcp/d/nobody", None, list()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// EP-136, API/05 §5: a public assistant's server offers the resource `context`, the
+/// assistant's own document; an internal one and any other URI offer nothing.
+#[tokio::test]
+async fn a_public_assistant_offers_its_context_as_a_resource() {
+    let realm = common::Realm::new();
+    let app = app(&realm).await;
+    let (_, initialized) = rpc(
+        &app,
+        "/api/mcp/d/bbsk-data",
+        None,
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}),
+    )
+    .await;
+    assert!(
+        initialized["result"]["capabilities"]["resources"].is_object(),
+        "{initialized}"
+    );
+    let (_, listed) = rpc(
+        &app,
+        "/api/mcp/d/bbsk-data",
+        None,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["resources"][0]["uri"], "context://bbsk-data",
+        "{listed}"
+    );
+    let read = |uri: &str| json!({"jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": {"uri": uri}});
+    let (_, answer) = rpc(
+        &app,
+        "/api/mcp/d/bbsk-data",
+        None,
+        read("context://bbsk-data"),
+    )
+    .await;
+    let text = answer["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no contents: {answer}"));
+    let context: Value = serde_json::from_str(text).expect("the document");
+    assert_eq!(context["endpoints"][0]["slug"], AIR);
+    let (_, other) = rpc(
+        &app,
+        "/api/mcp/d/bbsk-data",
+        None,
+        read("context://bbsk-plain"),
+    )
+    .await;
+    assert_eq!(
+        other["error"]["code"], -32002,
+        "another assistant's context: {other}"
+    );
+
+    let token = steward(&realm);
+    let (_, internal) = rpc(
+        &app,
+        "/api/mcp/d/bbsk-internal",
+        Some(&token),
+        json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+    )
+    .await;
+    assert_eq!(internal["result"]["resources"], json!([]), "{internal}");
 }

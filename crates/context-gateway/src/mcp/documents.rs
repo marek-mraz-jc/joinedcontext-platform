@@ -112,6 +112,30 @@ impl Documents {
             .map_err(|err| err.without_url().to_string())
     }
 
+    /// What assistant `public_id` knows, as its context route answers any visitor (API/05
+    /// §1.9); the assistant holds it a minute, so nothing is held here.
+    pub(crate) async fn context(&self, public_id: &str) -> Result<Value, String> {
+        if !public_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err("not a publicId".into());
+        }
+        let answer = self
+            .http
+            .get(format!("{}/api/v1/d/{public_id}/context", self.url))
+            .send()
+            .await
+            .map_err(|err| err.without_url().to_string())?;
+        if !answer.status().is_success() {
+            return Err(format!("the assistant answered {}", answer.status()));
+        }
+        answer
+            .json()
+            .await
+            .map_err(|err| err.without_url().to_string())
+    }
+
     /// What `sources` hold in public, held [`KEEP`]; `None` when the assistant could not say,
     /// which is held too, so a down assistant is not asked on every `tools/list`.
     async fn held(&self, sources: &[Source]) -> Option<Value> {
