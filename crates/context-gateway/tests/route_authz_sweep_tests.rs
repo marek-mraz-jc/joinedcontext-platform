@@ -22,6 +22,7 @@ use context_gateway::auth::subject::{
 };
 use context_gateway::handlers::mappings::{MappingFile, PublishedMapping};
 use context_gateway::mcp::server::McpServer;
+use context_gateway::oauth::Issuer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{Endpoint, Space};
@@ -83,6 +84,9 @@ enum Guard {
     Listing(&'static str),
     /// Answers everyone on purpose (the reason).
     Open(&'static str),
+    /// The anonymous OAuth server (ADR-N-052, T-4631): served to every caller alike, whatever
+    /// token it carries, never a server error (the reason).
+    Oauth(&'static str),
     /// Lists public Endpoints only (the reason): with none but the project-bound one, every
     /// caller, its granted member included, gets the same 404.
     Withheld(&'static str),
@@ -170,6 +174,58 @@ fn rows() -> Vec<Row> {
             "/api/mcp/.well-known/oauth-protected-resource",
             get("/api/mcp/.well-known/oauth-protected-resource".to_owned()),
             Open("RFC 9728 metadata: the resource URL and the realm, for every caller"),
+        ),
+        row(
+            "GET",
+            "/.well-known/oauth-protected-resource/api/mcp",
+            get("/.well-known/oauth-protected-resource/api/mcp".to_owned()),
+            Open("RFC 9728 metadata at the RFC's own place (T-4631), for every caller"),
+        ),
+        row(
+            "GET",
+            "/.well-known/oauth-protected-resource/api/mcp/{project}/{name}",
+            get(format!(
+                "/.well-known/oauth-protected-resource/api/mcp/{PROJECT}/{SERVER}"
+            )),
+            Open("RFC 9728 metadata at the RFC's own place (T-4631), for every caller"),
+        ),
+        row(
+            "GET",
+            "/.well-known/oauth-protected-resource/api/endpoint/{slug}/mcp",
+            get(format!(
+                "/.well-known/oauth-protected-resource/api/endpoint/{SLUG}/mcp"
+            )),
+            Open("RFC 9728 metadata at the RFC's own place (T-4631), for every caller"),
+        ),
+        row(
+            "GET",
+            "/.well-known/oauth-authorization-server",
+            get("/.well-known/oauth-authorization-server".to_owned()),
+            Open("RFC 8414 metadata of the anonymous OAuth server (ADR-N-052)"),
+        ),
+        row(
+            "POST",
+            "/oauth/register",
+            post(
+                "/oauth/register".to_owned(),
+                json!({ "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"] }),
+            ),
+            Open("a registration stores nothing and names only redirect URIs (ADR-N-052)"),
+        ),
+        row(
+            "GET",
+            "/oauth/authorize",
+            get("/oauth/authorize?client_id=forged&response_type=code".to_owned()),
+            Oauth("a forged client_id is refused on this host, never redirected"),
+        ),
+        row(
+            "POST",
+            "/oauth/token",
+            post(
+                "/oauth/token".to_owned(),
+                json!({ "grant_type": "password" }),
+            ),
+            Oauth("a token request that is no form is an OAuth error"),
         ),
         row(
             "POST",
@@ -395,6 +451,7 @@ const SURFACES: &[(&str, &str)] = &[
         include_str!("../src/handlers/openapi_doc.rs"),
     ),
     ("mappings", include_str!("../src/handlers/mappings.rs")),
+    ("oauth", include_str!("../src/oauth.rs")),
 ];
 
 /// Every `.route(path, …)` the router serves, the constant `HUB_PATH` resolved. A module
@@ -508,6 +565,14 @@ async fn gateway(realm: &common::Realm, view: &str) -> axum::Router {
             Arc::new(realm.verifier()),
             ServiceAccounts::new(),
             Some(HOST.to_owned()),
+        )
+        .issue_anonymous_tokens(
+            Issuer::new(
+                HOST,
+                &jc_core::Secret::new("sweep-oauth-key-".repeat(2)),
+                vec!["claude.ai".to_owned()],
+            )
+            .expect("a long enough key"),
         );
     gateway.replace_servers(vec![McpServer {
         project: PROJECT.to_owned(),
@@ -657,6 +722,7 @@ fn broken(
     let anonymous_401 = route.starts_with("/api/endpoint/");
     let ok = match (guard, caller) {
         (Guard::Open(_), _) => status.is_success(),
+        (Guard::Oauth(_), _) => status != StatusCode::NOT_FOUND && !status.is_server_error(),
         (Guard::Withheld(_), _) => status == StatusCode::NOT_FOUND,
         (Guard::Portal, Caller::Portal) => !refused(status, body),
         // The Portal's token is bound to the simulator alone: everywhere else it is a token for
@@ -712,9 +778,10 @@ async fn every_route_refuses_whom_the_policy_does_not_admit() {
             let (status, challenged, body) = send(app.clone(), &row, token(&realm, caller)).await;
             if let Some(why) = broken(row.route, row.guard, caller, status, &body) {
                 let promise = match row.guard {
-                    Guard::Listing(reason) | Guard::Open(reason) | Guard::Withheld(reason) => {
-                        reason
-                    }
+                    Guard::Listing(reason)
+                    | Guard::Open(reason)
+                    | Guard::Oauth(reason)
+                    | Guard::Withheld(reason) => reason,
                     _ => "",
                 };
                 failures.push(format!(

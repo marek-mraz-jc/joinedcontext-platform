@@ -540,14 +540,19 @@ pub(crate) async fn protected_resource(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
 ) -> Response<Body> {
-    let Some(issuer) = gateway.verifier.as_ref().map(|verifier| verifier.issuer()) else {
-        // No realm configured is a deployment that serves public endpoints only; there is
-        // no authorization server to point a client at.
+    let readable = gateway
+        .resolver
+        .resolve(&slug)
+        .is_some_and(|endpoint| endpoint.admits(None));
+    let servers = crate::oauth::authorization_servers(&gateway, readable);
+    if servers.is_empty() {
+        // No realm and no anonymous OAuth server: there is no authorization server to point a
+        // client at.
         return ProblemDetails::not_found().into_response();
-    };
+    }
     json_response(&serde_json::json!({
         "resource": format!("{}/api/endpoint/{slug}/mcp", gateway.base_url()),
-        "authorization_servers": [issuer],
+        "authorization_servers": servers,
         "bearer_methods_supported": ["header"],
         "resource_documentation": format!("{}/api/endpoint/{slug}/", gateway.base_url()),
     }))

@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod middleware;
 pub mod mqtt;
 pub(crate) mod notification_target;
+pub mod oauth;
 pub mod operations;
 pub mod pdp;
 pub mod previews;

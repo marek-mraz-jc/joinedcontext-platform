@@ -15,7 +15,7 @@ use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::Pdp;
 use crate::proxy::Broker;
 use crate::resolver::{Endpoint, SlugResolver, Space};
-use crate::{mcp, telemetry};
+use crate::{mcp, oauth, telemetry};
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::http::{HeaderValue, Response};
@@ -87,6 +87,9 @@ pub struct Gateway {
     brokers: ArcSwap<crate::mqtt::Brokers>,
     /// The gateway's public base URL, when the deployment names one.
     pub public_url: Option<String>,
+    /// The stateless authorization server for anonymous MCP (ADR-N-052 §2.2, EP-129); absent
+    /// serves no `/oauth/*` and takes no token of its own.
+    pub oauth: Option<Arc<oauth::Issuer>>,
     /// Hosts inside the platform's networks a notification may be delivered to (T-1302).
     pub private_hosts: Vec<String>,
     /// One token bucket per endpoint and caller (EP-20).
@@ -180,6 +183,7 @@ impl Gateway {
             mappings: ArcSwap::from_pointee(Default::default()),
             brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
+            oauth: None,
             private_hosts: Vec::new(),
             rate_limiter: RateLimiter::new(),
             creates: Default::default(),
@@ -268,6 +272,12 @@ impl Gateway {
         self.verifier = Some(verifier);
         self.accounts.store(Arc::new(accounts));
         self.public_url = public_url;
+        self
+    }
+
+    /// Serves the stateless authorization server for anonymous MCP (ADR-N-052 §2.2, EP-129).
+    pub fn issue_anonymous_tokens(mut self, issuer: oauth::Issuer) -> Self {
+        self.oauth = Some(Arc::new(issuer));
         self
     }
 
@@ -570,11 +580,18 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .merge(schema_routes::routes())
         .merge(openapi_doc::routes())
         .merge(mappings::routes())
+        .merge(oauth::routes())
         // Every endpoint surface passes the limiter; the two probes do not, so a full
         // bucket can never make a pod look unhealthy (EP-20).
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&gateway),
             rate_limit::enforce,
+        ))
+        // Outside the limiter: the gateway's own anonymous token is taken off before the
+        // limiter picks a bucket, so minting tokens never buys one (ADR-N-052 §2.2.5).
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&gateway),
+            oauth::admit,
         ))
         .route("/healthz", get(ok))
         .route("/livez", get(ok))

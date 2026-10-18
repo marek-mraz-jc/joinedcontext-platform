@@ -60,6 +60,17 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/endpoint/s/schema/1/model.json"),
     ("GET", "/api/endpoint/s/schema/1/mappings/"),
     ("GET", "/api/endpoint/s/schema/1/mappings/m.yaml"),
+    // T-4631, ADR-N-052: the anonymous OAuth server and RFC 9728's own metadata places.
+    ("GET", "/.well-known/oauth-authorization-server"),
+    ("POST", "/oauth/register"),
+    ("GET", "/oauth/authorize"),
+    ("POST", "/oauth/token"),
+    ("GET", "/.well-known/oauth-protected-resource/api/mcp"),
+    ("GET", "/.well-known/oauth-protected-resource/api/mcp/p/n"),
+    (
+        "GET",
+        "/.well-known/oauth-protected-resource/api/endpoint/s/mcp",
+    ),
     ("GET", "/healthz"),
     ("GET", "/livez"),
     ("GET", "/metrics"),
