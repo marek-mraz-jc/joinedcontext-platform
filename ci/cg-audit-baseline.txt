@@ -1,4 +1,4 @@
-# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 47aeb92, portal c80ef247, antares e67f07f2
+# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 988d01a, portal c80ef247, antares e67f07f2
 antares | links-unmatched | 0
 antares | memory-body-copy | 17
 antares | memory-per-request-build | 0
@@ -14,7 +14,7 @@ platform | memory-body-copy | 19
 platform | memory-per-request-build | 0
 platform | memory-unbounded-global | 6
 platform | memory-uncapped-read | 20
-platform | modularity-file-cycle | 27
+platform | modularity-file-cycle | 26
 platform | modularity-server-as-library | 4
 platform | security-fetch-from-route | 24
 platform | security-log-secret-field | 0
