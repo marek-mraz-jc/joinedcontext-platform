@@ -1,4 +1,4 @@
-use jcctl::loader::{LoadError, RawMetadata, Repository, ResourceId};
+use jc_manifest::loader::{LoadError, RawMetadata, Repository, ResourceId};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -971,7 +971,7 @@ spec:
         .collect();
     assert_eq!(written, ["owner==\"dev.banskabystrica.sk\""], "{written:?}");
 
-    let report = jcctl::commands::validate::run(&dir);
+    let report = jc_manifest::validate::run(&dir);
     assert!(
         report
             .warnings
@@ -1132,7 +1132,7 @@ spec:
         "an agreement nobody else claims is not contested"
     );
 
-    let report = jcctl::commands::validate::run(&dir);
+    let report = jc_manifest::validate::run(&dir);
     let named: Vec<&str> = report
         .findings
         .iter()

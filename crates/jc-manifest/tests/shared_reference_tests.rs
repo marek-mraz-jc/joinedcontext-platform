@@ -1,8 +1,8 @@
 //! The loader resolves an `endpointRef` to the slug this environment minted, and never to a
 //! slug the referring project may not use (EP-77, EP-15, T-1448).
 
-use jcctl::commands::validate;
-use jcctl::loader::{Repository, ResourceId};
+use jc_manifest::loader::{Repository, ResourceId};
+use jc_manifest::validate;
 use std::path::{Path, PathBuf};
 
 const SLUG: &str = "scsd2eehkx42n53z2zyd6vshfh7s7irf";

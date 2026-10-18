@@ -1,7 +1,7 @@
 //! T-0563: `jcctl validate` refuses a `ModelProjection` naming a class or a slot the referenced
 //! DataModel version does not have, every offending name listed at once (MP-01).
 
-use jcctl::commands::validate;
+use jc_manifest::validate;
 use std::path::{Path, PathBuf};
 
 fn temp_repo(test_name: &str) -> PathBuf {

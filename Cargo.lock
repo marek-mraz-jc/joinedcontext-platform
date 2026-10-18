@@ -3605,7 +3605,6 @@ dependencies = [
  "serde_norway",
  "sha2 0.10.9",
  "thiserror 2.0.20",
- "tracing",
  "walkdir",
  "zeroize",
 ]
