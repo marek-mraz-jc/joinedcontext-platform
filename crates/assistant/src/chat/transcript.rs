@@ -56,7 +56,10 @@ impl Seen {
                 title,
                 detail,
             } => self.error = Some(json!({"status": status, "title": title, "detail": detail})),
-            Event::Stage { .. } | Event::Tool { .. } | Event::Followups(_) | Event::Done(..) => {}
+            // Progress, follow-ups and the totals are not what the answer showed; an event added
+            // later (T-4657's visualization) is stored once it is named here, and never breaks
+            // the build of a branch that lands before it.
+            _ => {}
         }
     }
 
