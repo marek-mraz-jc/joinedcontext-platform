@@ -412,6 +412,35 @@ fn measured_at(entity: &Value) -> Option<Value> {
     newest.or_else(|| entity.get("dateObserved").and_then(cell))
 }
 
+/// The symbol (else the name) of the unit an attribute's `unitCode` names.
+fn unit_of(attribute: &Value) -> Option<String> {
+    let unit = jc_core::units::lookup(attribute.get("unitCode")?.as_str()?)?;
+    Some(
+        if unit.symbol.is_empty() {
+            unit.name
+        } else {
+            unit.symbol
+        }
+        .to_owned(),
+    )
+}
+
+/// Where an attribute stands in a table's order; `plain` is its value, `has_unit` whether its
+/// `unitCode` names a known unit.
+fn rank_of(key: &str, attribute: &Value, plain: &Value, has_unit: bool, asked: &[String]) -> Rank {
+    if asked.iter().any(|a| a == key) {
+        Rank::Asked
+    } else if plain.is_number() && (has_unit || attribute.get("observedAt").is_some()) {
+        Rank::Measured
+    } else if attribute.get("object").is_some() || metadata(key, plain) {
+        Rank::Metadata
+    } else if plain.is_number() {
+        Rank::Number
+    } else {
+        Rank::Category
+    }
+}
+
 /// A table's columns, its rows and each column's unit.
 pub type Columns = (Vec<String>, Vec<Vec<Value>>, Vec<Option<String>>);
 
@@ -436,30 +465,8 @@ pub fn table_of(text: &str, most: usize, asked: &[String]) -> Option<Columns> {
             let Some(plain) = cell(attribute).filter(|_| !skip) else {
                 continue;
             };
-            let unit = attribute
-                .get("unitCode")
-                .and_then(Value::as_str)
-                .and_then(jc_core::units::lookup)
-                .map(|u| {
-                    if u.symbol.is_empty() {
-                        u.name
-                    } else {
-                        u.symbol
-                    }
-                    .to_owned()
-                });
-            let rank = if asked.contains(key) {
-                Rank::Asked
-            } else if plain.is_number() && (unit.is_some() || attribute.get("observedAt").is_some())
-            {
-                Rank::Measured
-            } else if attribute.get("object").is_some() || metadata(key, &plain) {
-                Rank::Metadata
-            } else if plain.is_number() {
-                Rank::Number
-            } else {
-                Rank::Category
-            };
+            let unit = unit_of(attribute);
+            let rank = rank_of(key, attribute, &plain, unit.is_some(), asked);
             match found.iter_mut().find(|(k, ..)| k == key) {
                 Some(entry) => {
                     entry.1 += 1;
