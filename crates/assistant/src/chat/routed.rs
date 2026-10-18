@@ -522,8 +522,8 @@ pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) 
     }
     let timed = shown.iter().any(|e| measured_at(e).is_some());
     if timed {
-        // The time column says it; the date as an attribute would only repeat it.
-        found.retain(|(key, ..)| key != "dateObserved");
+        // The time column says it; the dates as attributes would only repeat it (T-4682).
+        found.retain(|(key, ..)| key != "dateObserved" && key != "dateModified");
     }
     found.truncate(MAX_COLUMNS - 2);
     let named = shown.iter().any(|e| e.get("name").and_then(cell).is_some());
@@ -576,6 +576,27 @@ fn modelled(
     let mut attributes: Vec<(&str, bool)> = vec![("name", false)];
     attributes.extend(found.iter().map(|(key, ..)| (key.as_str(), false)));
     jc_core::display_order::display_order(Some(model), kind, &attributes, None).ok()
+}
+
+/// Each column's enum words from the model (T-4682); empty when the type has no model or no column
+/// holds an enum it describes, so the event carries nothing for it.
+fn enums_of(
+    model: Option<&str>,
+    kind: &str,
+    columns: &[String],
+) -> Vec<Option<super::agent::Words>> {
+    let Some(model) = model else {
+        return Vec::new();
+    };
+    let class = kind.rsplit(['/', '#', ':']).next().unwrap_or(kind);
+    let enums: Vec<_> = columns
+        .iter()
+        .map(|c| jc_core::display_order::enum_words(model, class, c))
+        .collect();
+    if enums.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    enums
 }
 
 /// Each column's labels in every language the model labels the type in, and English; `None` for
@@ -1157,6 +1178,7 @@ pub(super) async fn table(
     let total = total_of(text);
     let model = model_of(ask, connector).await;
     let (columns, rows, units, fields) = table_of(text, READ_ROWS, asked, model.as_deref())?;
+    let enums = enums_of(model.as_deref(), kind, &columns);
     let slug = connector.surface.slug.as_str();
     let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
         .await
@@ -1178,6 +1200,7 @@ pub(super) async fn table(
         rows,
         units,
         labels: labels_of(&fields),
+        enums,
         summary: fields
             .iter()
             .map(|f| f.as_ref().is_some_and(|f| f.summary))
@@ -2432,6 +2455,7 @@ mod tests {
             rows: (0..MODEL_ROWS + 3).map(|i| vec![json!(i)]).collect(),
             units: vec![None],
             labels: Vec::new(),
+            enums: Vec::new(),
             summary: Vec::new(),
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
@@ -3387,6 +3411,53 @@ mod tests {
                 "pm10": {"type": "Property", "value": pm10, "unitCode": "GQ", "observedAt": "2026-10-18T16:00:00Z"}})
         };
         json!({"entities": [station(1, 21.5, 12.0), station(2, 9.0, 30.1)]})
+    }
+
+    /// T-4682: a column whose slot ranges over one of the model's enums carries its values' words;
+    /// a table with no such column carries none.
+    #[test]
+    fn an_enum_column_carries_its_words_from_the_model() {
+        let model = r#"
+slots:
+  airQualityLevel: {range: Level}
+classes:
+  AirQualityObserved:
+    slots: [name, airQualityLevel, no2]
+enums:
+  Level:
+    permissible_values:
+      good:
+        annotations:
+          label: {tag: label, value: {sk: "dobrá", en: "good"}}
+"#;
+        let columns = ["name", "airQualityLevel", "no2"].map(String::from);
+        let enums = enums_of(
+            Some(model),
+            "https://smartdatamodels.org/dataModel.Environment/AirQualityObserved",
+            &columns,
+        );
+        assert_eq!(enums.len(), 3);
+        assert_eq!(
+            enums[1].as_ref().map(|w| w["good"]["sk"].as_str()),
+            Some("dobrá")
+        );
+        assert_eq!((&enums[0], &enums[2]), (&None, &None));
+        assert!(enums_of(Some(model), "AirQualityObserved", &columns[..1]).is_empty());
+        assert!(enums_of(None, "AirQualityObserved", &columns).is_empty());
+    }
+
+    /// T-4682: a measured row shows its time once; `dateModified` beside it would repeat it.
+    #[test]
+    fn a_timed_table_shows_no_second_time_column() {
+        let text = json!([{
+            "id": "urn:ngsi-ld:BikeHireDockingStation:x:1", "type": "BikeHireDockingStation",
+            "name": {"type": "Property", "value": "Kamppi"},
+            "availableBikeNumber": {"type": "Property", "value": 12, "observedAt": "2026-10-18T21:00:00Z"},
+            "dateModified": {"type": "Property", "value": "2026-10-18T21:00:00Z"}
+        }])
+        .to_string();
+        let (columns, ..) = table_of(&text, 5, &[], None).unwrap_or_default();
+        assert_eq!(columns, ["name", "availableBikeNumber", "observedAt"]);
     }
 
     /// T-4672: the model's display order, after what the person asked, its hidden slots left

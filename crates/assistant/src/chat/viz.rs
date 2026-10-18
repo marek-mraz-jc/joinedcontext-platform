@@ -385,6 +385,7 @@ mod tests {
             ],
             units: vec![None, Some("µg/m³".into()), Some("µg/m³".into()), None, None],
             labels: Vec::new(),
+            enums: Vec::new(),
             summary: Vec::new(),
             total: None,
             dataset: Some("https://data.dev.example.org/dataset/ovzdusie".into()),

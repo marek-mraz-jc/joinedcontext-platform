@@ -1850,6 +1850,7 @@ mod tests {
             rows: vec![vec![json!("Žilina")]],
             units: vec![None],
             labels: Vec::new(),
+            enums: Vec::new(),
             summary: Vec::new(),
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
