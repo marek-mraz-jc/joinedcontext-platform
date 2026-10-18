@@ -87,18 +87,6 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
 }
 
-impl Table {
-    /// How many entities the table holds.
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    /// Whether the answer had no entity at all.
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-}
-
 /// The table of one broker answer, refused when it holds more rows than allowed (EP-44).
 ///
 /// `entities` is what the broker returned and the projection narrowed: an array, a single

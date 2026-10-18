@@ -45,7 +45,7 @@ fn an_answer_that_is_not_entities_is_an_empty_table_and_not_an_error() {
     ] {
         let table = table(&not_entities, &Limits::DEFAULT).expect("a table");
         assert!(table.columns.is_empty(), "{not_entities}");
-        assert!(table.is_empty() && table.rows.is_empty(), "{not_entities}");
+        assert!(table.rows.is_empty(), "{not_entities}");
     }
 }
 
@@ -57,7 +57,7 @@ fn one_entity_is_one_row_whether_it_arrived_alone_or_in_a_list() {
     let listed = table(&json!([reading(1)]), &Limits::DEFAULT).expect("a table");
     assert_eq!(alone.columns, listed.columns);
     assert_eq!(alone.rows, listed.rows);
-    assert_eq!(alone.len(), 1);
+    assert_eq!(alone.rows.len(), 1);
 }
 
 #[test]
@@ -66,6 +66,7 @@ fn the_row_ceiling_is_the_ceiling_and_the_row_before_it_still_passes() {
     assert_eq!(
         table(&json!(rows), &limits(10, u64::MAX))
             .expect("exactly the ceiling")
+            .rows
             .len(),
         10
     );
@@ -79,6 +80,7 @@ fn the_row_ceiling_is_the_ceiling_and_the_row_before_it_still_passes() {
     assert_eq!(
         table(&json!([]), &limits(0, u64::MAX))
             .expect("nothing to refuse")
+            .rows
             .len(),
         0
     );
@@ -107,7 +109,7 @@ fn an_element_that_is_not_an_entity_is_a_row_of_nothing_and_never_a_shifted_row(
     // a rectangle: the element brings no cells, so its row is null under every column.
     let answer = json!([reading(1), ["not an entity"], "nor this"]);
     let table = table(&answer, &Limits::DEFAULT).expect("a table");
-    assert_eq!(table.len(), 3);
+    assert_eq!(table.rows.len(), 3);
     for row in &table.rows {
         assert_eq!(row.len(), table.columns.len());
     }

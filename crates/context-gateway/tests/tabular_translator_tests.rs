@@ -234,7 +234,7 @@ fn a_row_ceiling_refuses_rather_than_truncates() {
 #[test]
 fn an_empty_answer_is_an_empty_table() {
     let table = table(&json!([]), &Limits::default()).expect("within the limits");
-    assert!(table.is_empty());
+    assert!(table.rows.is_empty());
     assert_eq!(csv(&table, &Limits::default()), Ok("\r\n".to_owned()));
 }
 
