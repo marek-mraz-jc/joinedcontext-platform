@@ -268,14 +268,7 @@ fn guide(endpoint: &Endpoint, base: &str, headers: &HeaderMap) -> Response<Body>
     response
 }
 
-/// An `http(s)` address as the `ws(s)` one a WebSocket client opens.
-pub(crate) fn ws_address(url: &str) -> String {
-    match url.split_once("://") {
-        Some(("https", rest)) => format!("wss://{rest}"),
-        Some(("http", rest)) => format!("ws://{rest}"),
-        _ => url.to_owned(),
-    }
-}
+pub(crate) use jc_dcat::ws_address;
 
 /// The first entity type the Endpoint's policies name, else the first class of its models: a
 /// type the example can subscribe to.

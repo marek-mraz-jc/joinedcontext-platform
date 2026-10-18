@@ -11,7 +11,6 @@
 
 use crate::resolver::Space;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 
 /// The DCAT-AP media type the record is served as by default.
 pub const JSON_LD: &str = "application/ld+json";
@@ -310,58 +309,12 @@ pub fn dataset_html(space: &Space, base: &str) -> String {
     )
 }
 
-/// A language map as JSON-LD wants it: one `@value`/`@language` object per locale, or a
-/// plain string for text of no locale (a plain manifest title, or none at all).
-pub(crate) fn localized(map: &BTreeMap<String, String>, fallback: &str) -> Value {
-    if map.is_empty() {
-        return json!(fallback);
-    }
-    if let (1, Some(text)) = (map.len(), map.get("")) {
-        return json!(text);
-    }
-    Value::Array(
-        map.iter()
-            .map(|(locale, text)| match locale.as_str() {
-                "" => json!(text),
-                locale => json!({ "@value": text, "@language": locale }),
-            })
-            .collect(),
-    )
-}
-
-/// One string out of a language map, for the serializations that carry no language tag.
-///
-/// A blank entry counts as none, so `{en: ""}` falls back like an empty map (T-2496).
-pub(crate) fn plain(map: &BTreeMap<String, String>, fallback: &str) -> String {
-    let written = |text: &&String| !text.trim().is_empty();
-    map.get("en")
-        .filter(written)
-        .or_else(|| map.values().find(written))
-        .cloned()
-        .unwrap_or_else(|| fallback.to_owned())
-}
-
-/// A Turtle string literal, with the four escapes the grammar requires.
-pub(crate) fn literal(text: &str) -> String {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r");
-    format!("\"{escaped}\"")
-}
-
-/// HTML text: the manifest wrote the title, so it is escaped before it is rendered.
-pub(crate) fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
+pub(crate) use jc_dcat::{escape, literal, localized, plain};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn accept_picks_the_representation_the_client_can_read() {

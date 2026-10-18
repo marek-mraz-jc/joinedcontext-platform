@@ -1306,6 +1306,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "jc-core",
+ "jc-dcat",
  "jcctl",
  "jsonschema",
  "jsonwebtoken",
@@ -3642,6 +3643,14 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "jc-dcat"
+version = "0.1.0"
+dependencies = [
+ "jc-core",
+ "serde_json",
 ]
 
 [[package]]

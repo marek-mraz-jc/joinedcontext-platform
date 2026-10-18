@@ -35,6 +35,22 @@ pub struct OrganizationSpec {
     /// pipeline outcomes and uploads (ADR-N-035, PF-96).
     #[serde(default, skip_serializing_if = "OrganizationLimits::is_unset")]
     pub limits: OrganizationLimits,
+    /// The national DCAT-AP profiles the records of its Endpoints are also served in, besides
+    /// DCAT-AP 3.0, which is always served (EP-27, docs API/08 section 5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dcat_profiles: Vec<DcatProfile>,
+}
+
+/// A national DCAT-AP profile an Organization serves its records in (docs API/08).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum DcatProfile {
+    /// DCAT-AP-SK 2.0.1, which data.slovensko.sk harvests.
+    DcatApSk,
+    /// DCAT-AP-CZ 2026-09-23, which the Czech NKOD harvests.
+    DcatApCz,
 }
 
 /// The organization's rules for its projects (PF-61, PF-65).

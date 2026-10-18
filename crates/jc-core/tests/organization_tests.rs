@@ -190,6 +190,7 @@ fn organization_names_validators_smoke() {
             projects: Default::default(),
             policies: Default::default(),
             limits: Default::default(),
+            dcat_profiles: vec![],
         }
     )
     .resource_path()

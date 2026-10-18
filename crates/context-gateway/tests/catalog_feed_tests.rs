@@ -185,3 +185,92 @@ async fn an_organization_that_publishes_nothing_answers_an_empty_catalogue() {
     assert_eq!(feed["dcat:dataset"], json!([]));
     assert!(!body.contains(CLOSED));
 }
+
+/// The gateway of [`app_of`] for an Organization that serves `listed`, its public Endpoints
+/// licensed CC BY 4.0 (T-4499).
+fn app_serving(realm: &common::Realm, listed: &[jc_core::kinds::DcatProfile]) -> axum::Router {
+    let licensed: Vec<Endpoint> = served()
+        .into_iter()
+        .map(|mut endpoint| {
+            endpoint.catalog = Some(Arc::new(jc_core::kinds::Catalog {
+                license: Some(jc_core::kinds::Licence::CcBy4),
+                ..Default::default()
+            }));
+            endpoint
+        })
+        .collect();
+    let gateway = Gateway::new(
+        Broker::new("http://127.0.0.1:1"),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(licensed)
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    );
+    gateway.replace_limits(context_gateway::store::Limits {
+        dcat_profiles: jc_dcat::profile::Offered::of(listed),
+        ..Default::default()
+    });
+    router(Arc::new(gateway))
+}
+
+/// API/08 section 5: `?profile=` picks a rendering the Organization serves; DCAT-AP is the
+/// default and always served, anything else is 404, and a profile changes no dataset listed.
+#[tokio::test]
+async fn a_profile_the_organization_serves_is_rendered_and_any_other_is_not_found() {
+    use jc_core::kinds::DcatProfile;
+    let realm = common::Realm::new();
+    let sk_only = || app_serving(&realm, &[DcatProfile::DcatApSk]);
+
+    let (_, _, _, core) = get(sk_only(), "/catalog.jsonld", None).await;
+    let (status, _, _, explicit) = get(sk_only(), "/catalog.jsonld?profile=dcat-ap", None).await;
+    assert_eq!((status, &explicit), (StatusCode::OK, &core));
+    assert!(!core.contains("leg:termsOfUse"));
+
+    let (status, media, _, sk) = get(sk_only(), "/catalog.jsonld?profile=dcat-ap-sk", None).await;
+    assert_eq!(status, StatusCode::OK, "{sk}");
+    assert_eq!(media, "application/ld+json");
+    assert!(sk.contains("leg:termsOfUse"), "{sk}");
+    let ids = |body: &str| {
+        let feed: Value = serde_json::from_str(body).expect("JSON-LD");
+        feed["dcat:dataset"].clone()
+    };
+    assert_eq!(ids(&sk), ids(&core));
+    assert!(!sk.contains(CLOSED));
+
+    let (status, _, _, turtle) = get(sk_only(), "/catalog.ttl?profile=dcat-ap-sk", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(turtle.contains("leg:termsOfUse"), "{turtle}");
+
+    for refused in [
+        "/catalog.jsonld?profile=dcat-ap-cz",
+        "/catalog.ttl?profile=dcat-ap-cz",
+        "/catalog.jsonld?profile=nonsense",
+        "/catalog.jsonld?profile=",
+        &format!("/api/endpoint/{OPEN}/?profile=dcat-ap-cz"),
+    ] {
+        let (status, _, _, body) = get(sk_only(), refused, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}: {body}");
+    }
+
+    let (status, _, _, record) = get(
+        sk_only(),
+        &format!("/api/endpoint/{OPEN}/?profile=dcat-ap-sk"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert!(record.contains("leg:TermsOfUse"), "{record}");
+
+    // an Organization that lists nothing serves the core alone
+    let (status, _, _, _) = get(
+        app_serving(&realm, &[]),
+        "/catalog.jsonld?profile=dcat-ap-sk",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
