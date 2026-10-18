@@ -187,22 +187,6 @@ impl Surface {
         .await
     }
 
-    /// The tools the surface offers that `allowed` names and [`READ_ONLY_TOOLS`] holds, in the
-    /// order `allowed` names them.
-    pub async fn tools(
-        &self,
-        http: &reqwest::Client,
-        allowed: &[String],
-    ) -> Result<Vec<Tool>, String> {
-        if !allowed
-            .iter()
-            .any(|name| READ_ONLY_TOOLS.contains(&name.as_str()))
-        {
-            return Ok(Vec::new());
-        }
-        Ok(picked(&self.listing(http).await?, allowed))
-    }
-
     /// The surface's whole `tools/list`, as it answered it.
     pub async fn listing(&self, http: &reqwest::Client) -> Result<Vec<Value>, String> {
         let result = self.rpc(http, "tools/list", json!({})).await?;
@@ -244,6 +228,14 @@ impl Surface {
         }
         Ok(cut(&text, MAX_KEPT_CHARS))
     }
+}
+
+/// Whether `allowed` names a tool [`READ_ONLY_TOOLS`] holds; a connector naming none is never
+/// listed.
+pub fn reads_any(allowed: &[String]) -> bool {
+    allowed
+        .iter()
+        .any(|name| READ_ONLY_TOOLS.contains(&name.as_str()))
 }
 
 /// The tools of a `tools/list` that `allowed` names and [`READ_ONLY_TOOLS`] holds, in the order

@@ -806,7 +806,10 @@ async fn connected(
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
             token,
         };
-        let listed = routed::listing(&state.answers, &state.http, &surface).await;
+        let listed = match mcp::reads_any(&connector.tools) {
+            true => routed::listing(&state.answers, &state.http, &surface).await,
+            false => Ok(Vec::new()),
+        };
         match listed.map(|listed| mcp::picked(&listed, &connector.tools)) {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
@@ -915,7 +918,10 @@ async fn lent(
             timeout: Duration::from_secs(SERVER_SECONDS),
             token,
         };
-        let listed = routed::listing(&state.answers, &state.http, &surface).await;
+        let listed = match mcp::reads_any(&tools) {
+            true => routed::listing(&state.answers, &state.http, &surface).await,
+            false => Ok(Vec::new()),
+        };
         match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
                 label: publisher_of(state, &endpoint.slug),
