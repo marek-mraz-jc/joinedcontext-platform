@@ -33,8 +33,11 @@ thiserror = "2"
 tracing = "0.1"
 walkdir = "2"
 zeroize = "1"
-# The Portal renders `model_schema`'s problems and attributes into its OpenAPI document.
-utoipa = { version = "5", optional = true }
+
+[features]
+# The Portal renders `model_schema`'s problems and attributes into its OpenAPI document; the
+# derive lives in jc-manifest since T-4604.
+utoipa = ["jc-manifest/utoipa"]
 
 [dev-dependencies]
 aes-gcm = "0.10"

@@ -23,7 +23,7 @@ use context_gateway::auth::dataspace_token::{
 use context_gateway::auth::token::Claims;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use serde_json::{json, Value};
 
 const SLUG: &str = "d7m2xq9vkt4zc6wrb8shj5nfp3";

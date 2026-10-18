@@ -8,10 +8,15 @@ description = "The manifest repository: loading, assembly, validation and model 
 
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0" }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+jsonschema = { version = "0.54", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"
+sha2 = "0.10"
 thiserror = "2"
+tracing = "0.1"
 walkdir = "2"
 # The Portal renders `model_schema`'s problems and attributes into its OpenAPI document.
 utoipa = { version = "5", optional = true }

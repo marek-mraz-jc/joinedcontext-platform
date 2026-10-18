@@ -16,7 +16,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use jc_core::kinds::mqtt_broker::{release_name, MqttRole, RUNNER_USERNAME};
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;

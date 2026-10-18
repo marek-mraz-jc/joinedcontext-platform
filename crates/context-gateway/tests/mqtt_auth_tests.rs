@@ -68,7 +68,7 @@ struct Fixture {
 impl Fixture {
     fn new(test: &str) -> Self {
         let dir = repository(test);
-        let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+        let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
         Self {
             realm: common::Realm::new(),
             brokers: brokers_of(&repo),

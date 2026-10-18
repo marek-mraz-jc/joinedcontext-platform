@@ -357,7 +357,7 @@ dependencies = [
  "futures-util",
  "hex",
  "jc-core",
- "jcctl",
+ "jc-manifest",
  "jsonschema",
  "kreuzberg",
  "lopdf",
@@ -1238,6 +1238,7 @@ dependencies = [
  "hyper-util",
  "jc-core",
  "jc-dcat",
+ "jc-manifest",
  "jcctl",
  "jsonschema",
  "jsonwebtoken",
@@ -3570,11 +3571,16 @@ dependencies = [
 name = "jc-manifest"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "jc-core",
+ "jsonschema",
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tracing",
  "utoipa",
  "walkdir",
 ]
@@ -3600,7 +3606,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
- "utoipa",
  "walkdir",
  "zeroize",
 ]

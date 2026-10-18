@@ -24,7 +24,7 @@ use context_gateway::resolver::Endpoint;
 use context_gateway::store::SpaceBrokers;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use jc_core::{ClientCredential, Secret};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

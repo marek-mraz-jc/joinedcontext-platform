@@ -126,7 +126,7 @@ async fn fixture(name: &str, audience: Audience, account_project: &str) -> Fixtu
     let broker = common::BrokerStub::start(vec![json!({})]).await;
     let repo = Repo::new(name, account_project);
     let accounts =
-        accounts_of(&jcctl::loader::Repository::load(&repo.0).expect("the repository loads"));
+        accounts_of(&jc_manifest::loader::Repository::load(&repo.0).expect("the repository loads"));
     let app = router(Arc::new(
         Gateway::new(
             Broker::new(broker.url.clone()),

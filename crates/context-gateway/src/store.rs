@@ -20,8 +20,8 @@ use jc_core::kinds::{
     McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, ProjectSpec, Representation,
 };
 use jc_core::Urn;
-use jcctl::loader::{RawManifest, Repository};
-use jcctl::model_schema::ModelSchema;
+use jc_manifest::loader::{RawManifest, Repository};
+use jc_manifest::model_schema::ModelSchema;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -244,12 +244,12 @@ pub struct Checkouts {
     pub assembly: PathBuf,
     /// The last assembly's project renders: a reload renders only the projects whose checkout
     /// moved (T-4460, R48). A clone shares them.
-    pub renders: std::sync::Arc<std::sync::Mutex<jcctl::assemble::Renders>>,
+    pub renders: std::sync::Arc<std::sync::Mutex<jc_manifest::assemble::Renders>>,
 }
 
 /// Loads the endpoint table and the identity table from the repository under `dir`
 /// (CC-08, PF-46).
-pub fn load(dir: &Path) -> Result<Tables, jcctl::LoadError> {
+pub fn load(dir: &Path) -> Result<Tables, jc_manifest::loader::LoadError> {
     let repo = Repository::load(dir)?;
     Ok(tables(&repo, dir))
 }
@@ -261,8 +261,8 @@ pub fn load(dir: &Path) -> Result<Tables, jcctl::LoadError> {
 pub fn load_from(
     dir: &Path,
     checkouts: Option<&Checkouts>,
-) -> Result<Tables, jcctl::assemble::AssembleError> {
-    use jcctl::assemble::{assemble_reusing, layout_at, AssembleError, Directories};
+) -> Result<Tables, jc_manifest::assemble::AssembleError> {
+    use jc_manifest::assemble::{assemble_reusing, layout_at, AssembleError, Directories};
     if layout_at(dir, jc_core::project::RepositoryRole::Organization)? == 1 {
         return Ok(load(dir)?);
     }
@@ -407,7 +407,7 @@ pub fn load_with_previews(
     dir: &Path,
     checkouts: Option<&Checkouts>,
     previews: Option<&Path>,
-) -> Result<Tables, jcctl::assemble::AssembleError> {
+) -> Result<Tables, jc_manifest::assemble::AssembleError> {
     let (
         mut endpoints,
         mut spaces,
@@ -838,7 +838,7 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
         }
     }
     // Each Pipeline's Policies, granted to its own account and derived with it (PL-20).
-    for (project, derived) in jcctl::pipeline_identity::derived(repo) {
+    for (project, derived) in jc_manifest::pipeline_identity::derived(repo) {
         for (name, spec) in derived.policies {
             policies
                 .entry((project.clone(), spec.context_space_ref.name().to_owned()))

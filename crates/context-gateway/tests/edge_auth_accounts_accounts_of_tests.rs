@@ -55,8 +55,8 @@ impl Repo {
         self
     }
 
-    fn load(&self) -> jcctl::loader::Repository {
-        jcctl::loader::Repository::load(&self.0).expect("the repository loads")
+    fn load(&self) -> jc_manifest::loader::Repository {
+        jc_manifest::loader::Repository::load(&self.0).expect("the repository loads")
     }
 }
 

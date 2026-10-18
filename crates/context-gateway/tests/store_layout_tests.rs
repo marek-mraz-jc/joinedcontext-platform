@@ -512,7 +512,7 @@ fn the_organizations_dcat_profiles_are_read_and_a_broken_list_serves_the_core_al
     ] {
         let org = temp_dir("dcat-profiles");
         write(&org, "org.yaml", &format!("{ORG}{listed}"));
-        let repo = jcctl::loader::Repository::load(&org).expect("the repository loads");
+        let repo = jc_manifest::loader::Repository::load(&org).expect("the repository loads");
         let offered = store::limits_of(&repo).dcat_profiles;
         assert_eq!(offered.pick("dcat-ap-sk").is_some(), sk, "{listed:?}");
         assert_eq!(offered.pick("dcat-ap-cz").is_some(), cz, "{listed:?}");

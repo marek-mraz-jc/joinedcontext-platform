@@ -4,4 +4,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod assemble;
 pub mod bento;
+pub mod foreign_models;
+pub mod loader;
+pub mod model_schema;
+pub mod pipeline_identity;
+pub mod roles;
+pub mod validate;

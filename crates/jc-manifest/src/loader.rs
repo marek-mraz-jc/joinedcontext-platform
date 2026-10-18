@@ -7,6 +7,19 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// The file at the repository root that pins the Model Tools version (DM-19).
+pub const SETTINGS_FILE: &str = "platform-settings.yaml";
+
+/// File names the reconciler treats as encrypted secret files, everywhere in the tree.
+///
+/// The loader skips exactly these, so an encrypted file is never parsed as a manifest.
+pub const ENCRYPTED_SUFFIXES: [&str; 2] = [".enc.yaml", ".enc.yml"];
+
+/// Whether a file name is an encrypted secret file (CC-06).
+pub fn is_encrypted_file(file_name: &str) -> bool {
+    ENCRYPTED_SUFFIXES.iter().any(|s| file_name.ends_with(s))
+}
+
 /// One manifest loaded from the repository, kept untyped (CC-09, MF-05).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedResource {
@@ -521,22 +534,22 @@ fn resolve_endpoint_refs(
     unresolved
 }
 
-/// Every regular file under `root`, in deterministic path order (CC-08).
-///
-/// Links are followed, but anything resolving outside the root is refused rather than read:
-/// both the manifest loader and the secret store walk the repository this way, so the
-/// containment rule has one implementation, not one per caller.
 /// YAML the repository holds that is not a manifest: the authoring source of a data model, a
 /// Bento stream, the instance settings (Architecture/06 section 1), and an encrypted secrets
 /// file, whose values the secret store decrypts and no walk reads (CC-06).
 pub(crate) fn is_native_yaml(file_name: &str) -> bool {
     file_name.ends_with(".linkml.yaml")
         || file_name == "bento.yaml"
-        || file_name == crate::model::SETTINGS_FILE
-        || crate::secrets::sops::is_encrypted_file(file_name)
+        || file_name == SETTINGS_FILE
+        || is_encrypted_file(file_name)
 }
 
-pub(crate) fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadError> {
+/// Every regular file under `root`, in deterministic path order (CC-08).
+///
+/// Links are followed, but anything resolving outside the root is refused rather than read:
+/// both the manifest loader and the secret store walk the repository this way, so the
+/// containment rule has one implementation, not one per caller.
+pub fn walk_files(root: &Path) -> Result<Vec<walkdir::DirEntry>, LoadError> {
     let canonical_root = root.canonicalize().map_err(|source| LoadError::Io {
         path: root.to_path_buf(),
         source,
@@ -1081,7 +1094,7 @@ impl Repository {
 /// reference (MF-07). Reading only the first form put every `Policy` at
 /// `projects/{project}/spaces//policies/…` and made `validate` report a correctly placed
 /// manifest as misplaced.
-pub(crate) fn extract_space(spec: &serde_json::Value) -> &str {
+pub fn extract_space(spec: &serde_json::Value) -> &str {
     match spec.get("contextSpaceRef") {
         Some(serde_json::Value::String(name)) => name,
         Some(serde_json::Value::Object(reference)) => reference

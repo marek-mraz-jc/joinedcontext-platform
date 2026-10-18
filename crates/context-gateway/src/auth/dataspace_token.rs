@@ -19,7 +19,7 @@ use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
 use jc_core::kinds::{AgreementRole, DataAgreementSpec};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use std::collections::BTreeMap;
 
 /// The longest a transfer token may live, in seconds (DS-11).

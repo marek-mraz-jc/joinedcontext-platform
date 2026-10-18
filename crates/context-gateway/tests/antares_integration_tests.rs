@@ -1217,7 +1217,7 @@ spec:
         )
         .expect("the manifest is written");
     }
-    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
     let accounts = context_gateway::auth::accounts::accounts_of(&repo);
     assert_eq!(accounts.len(), 2);
     std::fs::remove_dir_all(&dir).expect("clean up");
