@@ -587,10 +587,72 @@ async fn a_service_account_grant_shows_its_endpoint_and_the_public_ones_and_noth
     assert_eq!(seen, [AIR, BIKES], "{answer}");
 }
 
+/// T-4528: a reach is kept per token for a moment, and a different token, a reload or a changed
+/// grant is never answered from it.
+#[tokio::test]
+async fn a_kept_reach_is_per_token_and_a_reload_replaces_it() {
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1"),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve(city())
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some("https://city.example".to_owned()),
+        ),
+    );
+    let lists_inner = |answer: Value| answer["result"].to_string().contains(INNER);
+    let list = |token: Option<String>| {
+        let app = router(Arc::clone(&gateway));
+        async move { call(app, token.as_deref(), "list_endpoints", json!({})).await }
+    };
+    let steward = steward(&realm);
+    assert!(lists_inner(list(Some(steward.clone())).await));
+    assert!(lists_inner(list(Some(steward.clone())).await), "kept");
+    assert!(!lists_inner(list(None).await), "anonymous is its own reach");
+    let plain = realm.mint(&json!({
+        "iss": common::ISSUER, "sub": "0f5a", "aud": "context-gateway", "scope": "openid",
+        "azp": "mcp-hub", "preferred_username": "jana", "groups": ["/mesto"],
+        "realm_access": { "roles": [] },
+        "exp": common::in_seconds(300), "iat": common::in_seconds(-10),
+    }));
+    assert!(
+        !lists_inner(list(Some(plain)).await),
+        "the same person without the role"
+    );
+
+    // The Policy now grants another role: the next call sees it.
+    let regranted = city()
+        .into_iter()
+        .map(|e| {
+            if e.slug == INNER {
+                endpoint(
+                    INNER,
+                    "Internal registry",
+                    "mesto-register",
+                    Audience::Organization,
+                    "auditor",
+                )
+            } else {
+                e
+            }
+        })
+        .collect::<Vec<_>>();
+    gateway.resolver.replace(regranted);
+    assert!(!lists_inner(list(Some(steward)).await), "after the reload");
+}
+
 /// A measurement, run on its own in release:
 /// `cargo test --release -p context-gateway --test mcp_hub_catalog_tests ten_thousand -- --ignored --nocapture`.
 /// Measured 2026-10-17: cold 1.8 s, a warm search p95 65 ms of which the hub's reach over
-/// 10,000 Endpoints is 50 ms (`list_types` on the catalog, which filters nothing).
+/// 10,000 Endpoints is 50 ms (`list_types` on the catalog, which filters nothing). On
+/// 2026-10-18, before T-4528: warm search p95 65.6 ms, list_endpoints p95 44.8 ms, the reach
+/// 35 ms of every call. After it: warm search p95 23.8 ms, list_endpoints p95 1.7 ms,
+/// list_types 2.7 ms.
 #[tokio::test]
 #[ignore = "a 10,000-Endpoint measurement; run in release"]
 async fn ten_thousand_endpoints_answer_a_warm_catalog_query_quickly() {
@@ -650,6 +712,13 @@ async fn ten_thousand_endpoints_answer_a_warm_catalog_query_quickly() {
     );
     eprintln!(
         "10,000 Endpoints: cold {cold_took:?}, warm p95 {p95:?}, list_endpoints p95 {:?}",
+        hub[18]
+    );
+    // With the caller's reach kept (T-4528), neither pays for the reach again.
+    assert!(p95 < std::time::Duration::from_millis(50), "{p95:?}");
+    assert!(
+        hub[18] < std::time::Duration::from_millis(50),
+        "{:?}",
         hub[18]
     );
 }

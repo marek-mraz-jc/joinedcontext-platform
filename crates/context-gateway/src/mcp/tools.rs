@@ -1121,9 +1121,8 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200,
-                            "description": "catalog (the default) to find a Dataset, then the \
-                                            Endpoint its dataService names: identifier, title \
-                                            or space",
+                            "description": "catalog (default), or the Endpoint to call: \
+                                            identifier, title or space",
                         }),
                     );
                 }
@@ -1139,10 +1138,8 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
             }
             json!({
                 "name": tool.name,
-                "description": format!(
-                    "{} Name the Endpoint in `endpoint`; the call is that Endpoint's own.",
-                    tool.description
-                ),
+                // How `endpoint` is named is said once, in the hub's instructions (T-4506).
+                "description": tool.description,
                 "inputSchema": schema,
                 "outputSchema": output_schema(tool),
                 "annotations": {
@@ -1209,15 +1206,10 @@ pub(crate) fn output_schema(tool: &Tool) -> Value {
         "properties": {
             // The tool's own description says what it is; a copy here cost each tool its length.
             tool.result_key: {},
-            "restricted": {
-                "type": "boolean",
-                "description": "Present when the policy narrowed this answer (AG-13, R22)",
-            },
-            "jc:source": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "The registrations this answer is a union over, by name (EP-71)",
-            },
+            // What `restricted` and `jc:source` mean is said once, in the primer (T-4506,
+            // AG-13, EP-71).
+            "restricted": { "type": "boolean" },
+            "jc:source": { "type": "array", "items": { "type": "string" } },
         },
         "required": [tool.result_key],
     })
