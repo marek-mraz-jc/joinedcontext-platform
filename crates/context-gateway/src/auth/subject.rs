@@ -353,6 +353,24 @@ pub(crate) fn admit(
     if representation.is_some_and(|wanted| !endpoint.serves(wanted)) {
         return Err(Box::new(ProblemDetails::not_found().into_response()));
     }
+    // ADR-N-054 2.6 (DM-122): a public Endpoint never serves a personal attribute, so one whose
+    // model and projection would is refused whole until its owner hides them or narrows it.
+    let personal = endpoint.public_personal_attributes();
+    if !personal.is_empty() {
+        tracing::warn!(slug, attributes = ?personal, "refused: a public endpoint exposes personal data");
+        return Err(Box::new(
+            ProblemDetails::new(
+                403,
+                "personal-data-public",
+                "Personal data on a public Endpoint",
+            )
+            .with_detail(format!(
+                "the model marks {} as personal data; hide them or narrow the audience",
+                personal.join(", ")
+            ))
+            .into_response(),
+        ));
+    }
     // The NGSI-LD surface is where a federated read arrives from another broker (T-3999).
     let federated = representation == Some(Representation::NgsiLd);
     let subject = authenticate_on(gateway, &endpoint, headers, federated)

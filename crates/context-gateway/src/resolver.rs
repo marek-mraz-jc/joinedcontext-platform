@@ -231,6 +231,40 @@ impl Endpoint {
             }),
         }
     }
+
+    /// The personal attributes this Endpoint would serve to anyone, as `Class.attribute`
+    /// (ADR-N-054 2.6, DM-122): none unless its audience is public; an attribute its projection
+    /// leaves out, or `hiddenAttributes` hides, is not served.
+    pub fn public_personal_attributes(&self) -> Vec<String> {
+        if self.audience != Audience::Public {
+            return Vec::new();
+        }
+        let Some(schema) = self
+            .declared_types
+            .as_ref()
+            .and_then(|d| d.schema.as_deref())
+        else {
+            return Vec::new();
+        };
+        let mut served = Vec::new();
+        for class in schema.classes.keys() {
+            let kept = match &self.projection {
+                None => None,
+                Some(projection) => match projection.classes.iter().find(|c| &c.name == class) {
+                    Some(projected) => Some(&projected.slots),
+                    None => continue,
+                },
+            };
+            for attribute in schema.personal_attributes(class) {
+                let hidden = self.hidden_attributes.contains(&attribute)
+                    || kept.is_some_and(|slots| !slots.contains(&attribute));
+                if !hidden {
+                    served.push(format!("{class}.{attribute}"));
+                }
+            }
+        }
+        served
+    }
 }
 
 /// One context space as its own surface (SP-01, SP-10).

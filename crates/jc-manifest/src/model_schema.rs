@@ -289,6 +289,25 @@ impl ModelSchema {
         }
     }
 
+    /// The attributes of `class` the model marks as personal data (`x-personal-data`, ADR-N-054
+    /// 2.6, DM-122), in name order; none for a class it does not declare.
+    pub fn personal_attributes(&self, class: &str) -> Vec<String> {
+        self.definitions
+            .get(class)
+            .and_then(|definition| definition.get("properties"))
+            .and_then(Value::as_object)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .filter(|(_, p)| {
+                        p.get("x-personal-data").and_then(Value::as_bool) == Some(true)
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The attributes of `class` as the model states them, or `None` for a type the model does not
     /// declare (T-3223). A declared class the artifact has no definition for (a draft model) has
     /// no attributes beyond its identity.
