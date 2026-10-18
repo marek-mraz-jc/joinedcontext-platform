@@ -257,23 +257,12 @@ impl Verifier {
     }
 }
 
-/// What every platform API key starts with (PF-36): the gateway's key verifier reads it, and
-/// [`bearer`] leaves such a token to that verifier.
-pub const API_KEY_PREFIX: &str = "jc_";
-
-/// The token in an `Authorization` header, if the header carries one that is not a
-/// platform API key.
-///
-/// An API key is a different credential with a different verifier (PF-36), so it is not
-/// this function's business, only its business to not mistake one for a JWT.
+/// The token in an `Authorization: Bearer` header. The platform has no other bearer
+/// credential: a static API key is no token and fails verification like any other (PF-37).
 pub fn bearer(header: Option<&str>) -> Result<&str, Rejected> {
-    let token = header
+    header
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .ok_or(Rejected::NoToken)?;
-    if token.starts_with(API_KEY_PREFIX) {
-        return Err(Rejected::NoToken);
-    }
-    Ok(token)
+        .ok_or(Rejected::NoToken)
 }

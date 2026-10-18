@@ -319,13 +319,6 @@ fn the_bearer_header_yields_a_token_or_nothing_at_all() {
             "{not_a_bearer:?} presents no bearer token",
         );
     }
-
-    let key = format!("Bearer {}whatever", jc_core::auth::token::API_KEY_PREFIX);
-    assert_eq!(
-        bearer(Some(&key)),
-        Err(Rejected::NoToken),
-        "an API key is another credential, not a malformed JWT",
-    );
 }
 
 /// The same token twice is the same answer, and a refused token in between changes nothing:
