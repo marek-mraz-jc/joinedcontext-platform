@@ -849,9 +849,7 @@ async fn run_tool(
                 "The call was not made: {why}. Correct the arguments, or answer without this tool."
             );
         }
-        let kind = (tool.name == "query_entities")
-            .then(|| super::data::type_of(&arguments))
-            .flatten();
+        let kind = super::routed::queried_type(&tool.name, &arguments);
         send(
             events,
             Event::Tool {

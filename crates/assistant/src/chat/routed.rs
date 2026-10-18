@@ -1017,6 +1017,13 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
 }
 
+/// The entity type a `query_entities` call with `arguments` reads; `None` for any other tool.
+pub(super) fn queried_type(tool: &str, arguments: &Value) -> Option<String> {
+    (tool == "query_entities")
+        .then(|| super::data::type_of(arguments))
+        .flatten()
+}
+
 /// The page a visitor opens about the rows of `kind` read from `connector`: the CKAN dataset
 /// page of an Endpoint over the same space that publishes the type (T-4625), else the page the
 /// sources hold about the connector's own Endpoint; `None` when neither is found.
