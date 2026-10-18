@@ -27,6 +27,10 @@ jobs:
       # fails only in the image build (T-4267: mcp/primer.md under **/*.md).
       - name: every file a crate embeds reaches the image build
         run: python3 scripts/ci/check-dockerignore-includes.py
+      # No format code comes back into the gateway: ci/gateway-formats-baseline.txt only shrinks
+      # (ADR-N-051, T-4476).
+      - name: the gateway holds no new format code
+        run: python3 scripts/ci/check-gateway-formats.py --selftest && python3 scripts/ci/check-gateway-formats.py
       # The checker itself; the statements run on a full `cg build --fg` before every merge, since
       # cg is not on the runner (T-3682, as Antares T-3587).
       - name: cg security invariants self-test
