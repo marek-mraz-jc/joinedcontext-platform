@@ -144,10 +144,10 @@ pub enum Rejected {
     WrongAudience,
 }
 
-impl From<Rejected> for jc_core::ProblemDetails {
+impl From<Rejected> for crate::ProblemDetails {
     fn from(rejected: Rejected) -> Self {
         tracing::info!(%rejected, "token refused");
-        jc_core::ProblemDetails::unauthorized()
+        crate::ProblemDetails::unauthorized()
     }
 }
 
@@ -257,6 +257,10 @@ impl Verifier {
     }
 }
 
+/// What every platform API key starts with (PF-36): the gateway's key verifier reads it, and
+/// [`bearer`] leaves such a token to that verifier.
+pub const API_KEY_PREFIX: &str = "jc_";
+
 /// The token in an `Authorization` header, if the header carries one that is not a
 /// platform API key.
 ///
@@ -268,7 +272,7 @@ pub fn bearer(header: Option<&str>) -> Result<&str, Rejected> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .ok_or(Rejected::NoToken)?;
-    if token.starts_with(crate::auth::api_key::KEY_PREFIX) {
+    if token.starts_with(API_KEY_PREFIX) {
         return Err(Rejected::NoToken);
     }
     Ok(token)

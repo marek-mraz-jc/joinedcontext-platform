@@ -11,7 +11,6 @@ jcctl | 9 | 15
 token-sidecar | 0 | 1
 wasm-host | 3 | 1
 # Workspace crate edges outside dev-dependencies; only ever removed. A new edge is red.
-# To go: functions -> context-gateway (the whole gateway linked for its token verifier, T-4605).
 edge | agent-proxy -> jc-core
 edge | assistant -> agent-proxy
 edge | assistant -> jc-core
@@ -20,7 +19,6 @@ edge | assistant -> jc-manifest
 edge | context-gateway -> jc-core
 edge | context-gateway -> jc-dcat
 edge | context-gateway -> jc-manifest
-edge | functions -> context-gateway
 edge | functions -> jc-core
 edge | jc-dcat -> jc-core
 edge | jc-manifest -> jc-core

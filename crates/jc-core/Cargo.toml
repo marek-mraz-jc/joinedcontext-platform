@@ -20,6 +20,12 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "allo
 axum = { version = "0.8", optional = true, default-features = false, features = ["json"] }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "json"] }
+# `auth` (T-4605): the realm's token verifier and its JWKS refresh, the gateway's and the
+# functions runtime's; the versions the gateway already locks.
+arc-swap = { version = "1", optional = true }
+jsonwebtoken = { version = "9", optional = true }
+hyper-util = { version = "0.1", optional = true, features = ["client-legacy", "http1", "tokio"] }
+tokio = { version = "1", optional = true, features = ["time"] }
 
 [build-dependencies]
 serde_json = "1"
@@ -28,3 +34,4 @@ serde_json = "1"
 default = []
 axum = ["dep:axum"]
 logs = ["dep:tracing", "dep:tracing-subscriber"]
+auth = ["axum", "dep:tracing", "dep:arc-swap", "dep:jsonwebtoken", "dep:hyper-util", "dep:tokio"]

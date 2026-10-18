@@ -7,7 +7,8 @@
 //! `parsing_splits_the_key_on_the_first_separator_after_the_prefix` in `api_key_tests.rs` has the
 //! happy path. These are the shapes an attacker sends.
 
-use context_gateway::auth::api_key::{parse, Rejected, KEY_PREFIX};
+use context_gateway::auth::api_key::{parse, Rejected};
+use jc_core::auth::token::API_KEY_PREFIX as KEY_PREFIX;
 
 #[test]
 fn nothing_that_is_not_a_bearer_platform_key_is_one() {

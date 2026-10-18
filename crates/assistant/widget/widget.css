@@ -54,6 +54,8 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 /* Where the panel is taller than the conversation (a phone's full screen), the conversation sits
    on the composer, as in a messenger; scrolling up still reaches its start. */
 .jc-log > :first-child { margin-top: auto; }
+/* A fresh chat reads from the top: the greeting under the header, its suggestions under it (T-4592). */
+.jc-log > .jc-intro:first-child { margin-top: 0; }
 .jc-log > li { margin: 0 0 14px; overflow-wrap: anywhere; }
 .jc-you { display: flex; flex-wrap: wrap; justify-content: flex-end; }
 .jc-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
