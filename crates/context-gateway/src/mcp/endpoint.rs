@@ -313,7 +313,7 @@ pub(crate) fn federated(answer: &mut Value, method: &str, members: &[String]) {
                 let read = tool
                     .get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(|name| MCP_READ_TOOLS.contains(&name));
+                    .is_some_and(mcp::writes::is_read_tool);
                 if !read {
                     continue;
                 }
@@ -355,7 +355,7 @@ pub(crate) fn federated(answer: &mut Value, method: &str, members: &[String]) {
 /// as a read is a write. It stands for the class of the call; the broker gates the tool's own
 /// clause.
 fn mcp_operation(tool: Option<&str>) -> Operation {
-    if tool.is_some_and(|tool| !MCP_READ_TOOLS.contains(&tool)) {
+    if tool.is_some_and(|tool| !mcp::writes::is_read_tool(tool)) {
         Operation::UpsertBatch
     } else {
         Operation::QueryEntity
@@ -381,7 +381,7 @@ pub(crate) async fn member_call(
         let held = axum::body::to_bytes(refusal.into_body(), MAX_BODY)
             .await
             .unwrap_or_default();
-        return member_refusal(id, problem_text(&held));
+        return member_refusal(id, mcp::writes::problem_text(&held));
     }
     let (mut parts, _) = request.into_parts();
     capped_arguments(&mut message);
@@ -448,7 +448,7 @@ pub(crate) async fn member_call(
             mcp::units::readable(&mut answer);
             answer
         }
-        _ if status.is_client_error() => member_refusal(id, problem_text(&held)),
+        _ if status.is_client_error() => member_refusal(id, mcp::writes::problem_text(&held)),
         _ => {
             tracing::warn!(
                 slug = %endpoint.slug,
@@ -461,15 +461,6 @@ pub(crate) async fn member_call(
     }
 }
 
-/// The sentence of a Problem Details body: its `detail`, else its `title`.
-pub(crate) fn problem_text(body: &[u8]) -> Option<String> {
-    let problem = serde_json::from_slice::<Value>(body).ok()?;
-    problem["detail"]
-        .as_str()
-        .or_else(|| problem["title"].as_str())
-        .map(str::to_owned)
-}
-
 /// A member call that ended before the broker's tool answered, as the tool error MCP gives it.
 fn member_refusal(id: Value, why: Option<String>) -> Value {
     let why = why.unwrap_or_else(|| {
@@ -480,30 +471,6 @@ fn member_refusal(id: Value, why: Option<String>) -> Value {
 
 /// The listings the gateway adds its own entries to, by method and result member.
 const OWN_LISTINGS: &[(&str, &str)] = &[("tools/list", "tools"), ("resources/list", "resources")];
-
-/// Whether the broker tool only reads (see [`MCP_READ_TOOLS`]).
-pub(crate) fn is_read_tool(tool: &str) -> bool {
-    MCP_READ_TOOLS.contains(&tool)
-}
-
-/// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
-const MCP_READ_TOOLS: &[&str] = &[
-    "batch_query",
-    "batch_query_temporal",
-    "get_attribute",
-    "get_attribute_value",
-    "get_entity",
-    "get_subscription",
-    "get_type",
-    "list_attribute_details",
-    "list_attributes",
-    "list_subscriptions",
-    "list_type_details",
-    "list_types",
-    "query_entities",
-    "query_temporal",
-    "retrieve_temporal",
-];
 
 /// The two costs one call may put on the shared broker, capped as [`capped_query`] caps them
 /// on the NGSI-LD surface: `joinLevel` (AG-25) and `lastN` (GW26). A message whose `params` or

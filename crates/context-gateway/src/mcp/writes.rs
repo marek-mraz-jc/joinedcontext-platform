@@ -43,7 +43,7 @@ pub(crate) async fn guarded(
     let Some(tool) = message["params"]["name"].as_str().map(str::to_owned) else {
         return Ok(None);
     };
-    if mcp::endpoint::is_read_tool(&tool) {
+    if is_read_tool(&tool) {
         return Ok(None);
     }
     let refuse =
@@ -140,8 +140,7 @@ fn word<'a>(arguments: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
 
 /// The sentence of a Problem Details body, or a plain refusal when it has none.
 fn refusal_text(body: &[u8]) -> String {
-    mcp::endpoint::problem_text(body)
-        .unwrap_or_else(|| "this Endpoint refused the write".to_owned())
+    problem_text(body).unwrap_or_else(|| "this Endpoint refused the write".to_owned())
 }
 
 /// The NGSI-LD request a broker write tool stands for (Antares `docs/src/mcp.md` section 2): its
@@ -258,6 +257,39 @@ const REQUESTS: &[(&str, Method, &str, Option<&str>)] = &[
     ),
 ];
 
+/// The sentence of a Problem Details body: its `detail`, else its `title`.
+pub(crate) fn problem_text(body: &[u8]) -> Option<String> {
+    let problem = serde_json::from_slice::<Value>(body).ok()?;
+    problem["detail"]
+        .as_str()
+        .or_else(|| problem["title"].as_str())
+        .map(str::to_owned)
+}
+
+/// Whether the broker tool only reads (see [`MCP_READ_TOOLS`]).
+pub(crate) fn is_read_tool(tool: &str) -> bool {
+    MCP_READ_TOOLS.contains(&tool)
+}
+
+/// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
+const MCP_READ_TOOLS: &[&str] = &[
+    "batch_query",
+    "batch_query_temporal",
+    "get_attribute",
+    "get_attribute_value",
+    "get_entity",
+    "get_subscription",
+    "get_type",
+    "list_attribute_details",
+    "list_attributes",
+    "list_subscriptions",
+    "list_type_details",
+    "list_types",
+    "query_entities",
+    "query_temporal",
+    "retrieve_temporal",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +307,7 @@ mod tests {
             .iter()
             .filter(|tool| matches!(tool.shape, mcp::tools::Shape::Broker(_)))
         {
-            if mcp::endpoint::is_read_tool(tool.name) {
+            if is_read_tool(tool.name) {
                 assert!(request_of(tool.name, arguments).is_none(), "{}", tool.name);
                 continue;
             }
