@@ -790,6 +790,9 @@ test("a chart or a map reaches only the viz origin, in the visitor's language, m
   const bar = { encoding: { x: { field: "value", title: "no2 (µg/m³)" }, y: { field: "label", title: null } } };
   assert.equal(vizSpec(bar, "en").encoding.x.title, "NO₂ (µg/m³)");
   assert.equal(vizSpec(bar, "en").encoding.y.title, null);
+  // T-4682: the model's words for the column win, in the visitor's language.
+  assert.equal(vizSpec(bar, "sk", { no2: { sk: "Oxid dusičitý", en: "Nitrogen dioxide" } }).encoding.x.title, "Oxid dusičitý (µg/m³)");
+  assert.equal(vizSpec(bar, "en", { no2: "nope" }).encoding.x.title, "NO₂ (µg/m³)");
   assert.equal(mapFirst({ rows: [[1], [2]], map }), true);
   assert.equal(mapFirst({ rows: [[1], [2], [3]], map }), false, "a row without a place: the table first");
   assert.equal(mapFirst({ rows: [[1]] }), false);

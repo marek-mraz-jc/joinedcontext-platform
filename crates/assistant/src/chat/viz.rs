@@ -16,6 +16,10 @@ const VEGA_LITE: &str = "https://vega.github.io/schema/vega-lite/v5.json";
 /// The values a default map's popup shows beside the label and the time.
 const POPUP: usize = 4;
 const TITLE_CHARS: usize = 80;
+/// The fewest values a chart is drawn of (T-4682).
+const MIN_POINTS: usize = 3;
+/// The widget's type, sizes from its tokens (T-4682): an axis reads at 12 px, never a heading's size.
+const FONT: &str = "system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif";
 
 /// The domain a viz origin serves: `https://viz.dev.example.org` → `dev.example.org`.
 pub fn domain(viz: &url::Url) -> Option<&str> {
@@ -82,6 +86,16 @@ fn plain(value: &Value) -> Value {
     match value {
         Value::Array(_) | Value::Object(_) => Value::String(value.to_string()),
         other => other.clone(),
+    }
+}
+
+/// A row's name on a chart's axis: a URN reads as its last segment, never whole (T-4682).
+fn named(value: &Value) -> Value {
+    match value.as_str() {
+        Some(urn) if urn.starts_with("urn:") => {
+            Value::String(urn.rsplit(':').next().unwrap_or(urn).to_owned())
+        }
+        _ => plain(value),
     }
 }
 
@@ -194,7 +208,7 @@ pub fn tool() -> Value {
                 "label": {"type": "string", "description": "the column that names each row, such as name"},
                 "value": {"type": "string", "description": "a numeric column of that table"},
                 "time": {"type": "string", "description": "a time column of that table, such as observedAt"},
-                "title": {"type": "string", "maxLength": TITLE_CHARS},
+                "title": {"type": "string", "maxLength": TITLE_CHARS, "description": "a heading in the person's language naming what is shown, such as Denné odchody podľa zastávky; never an attribute name or a value"},
             },
         },
     }})
@@ -268,6 +282,17 @@ pub fn build(arguments: &str, tables: &[(usize, Table)], domain: &str) -> Result
             request.value
         ));
     }
+    let points = table
+        .rows
+        .iter()
+        .filter(|row| row.get(value).is_some_and(Value::is_number))
+        .count();
+    if request.kind != Kind::Map && points < MIN_POINTS {
+        return Err(format!(
+            "Column `{}` has {points} values; a chart of fewer than {MIN_POINTS} says nothing a sentence does not. Answer in text.",
+            request.value
+        ));
+    }
     if request.title.chars().count() > TITLE_CHARS {
         return Err(format!(
             "The title is longer than {TITLE_CHARS} characters."
@@ -304,7 +329,7 @@ fn chart(
         .rows
         .iter()
         .map(|row| {
-            let mut out = json!({"label": row.get(label).map_or(Value::Null, plain), "value": row.get(value).cloned().unwrap_or(Value::Null)});
+            let mut out = json!({"label": row.get(label).map_or(Value::Null, named), "value": row.get(value).cloned().unwrap_or(Value::Null)});
             if let Some(time) = time {
                 out["time"] = row.get(time).cloned().unwrap_or(Value::Null);
             }
@@ -327,12 +352,24 @@ fn chart(
             "x": {"field": "value", "type": "quantitative", "title": value_title},
         })
     };
-    let mark = if kind == Kind::Line {
-        json!({"type": "line", "point": true, "tooltip": true})
+    let config = json!({
+        "font": FONT,
+        "axis": {"labelFontSize": 12, "titleFontSize": 13, "labelLimit": 160},
+        "legend": {"labelFontSize": 12, "titleFontSize": 13},
+        "title": {"fontSize": 14, "anchor": "start"},
+    });
+    let mut spec = json!({"$schema": VEGA_LITE, "data": {"name": "source"}, "encoding": encoding,
+        "width": "container", "autosize": {"type": "fit", "contains": "padding"}, "config": config});
+    if kind == Kind::Line {
+        spec["mark"] = json!({"type": "line", "point": true, "tooltip": true});
     } else {
-        json!({"type": "bar", "tooltip": true})
-    };
-    let mut spec = json!({"$schema": VEGA_LITE, "data": {"name": "source"}, "mark": mark, "encoding": encoding});
+        // Each bar says its value at its end, so no one reads it off the axis (T-4682).
+        spec["layer"] = json!([
+            {"mark": {"type": "bar", "tooltip": true}},
+            {"mark": {"type": "text", "align": "left", "baseline": "middle", "dx": 3, "fontSize": 12},
+             "encoding": {"text": {"field": "value", "type": "quantitative", "format": ",.4~g"}}},
+        ]);
+    }
     // A title the renderer's refusal list would refuse is left out, so the chart still draws.
     let lower = title.to_lowercase();
     if !title.is_empty()
@@ -342,7 +379,12 @@ fn chart(
     {
         spec["title"] = json!(title);
     }
-    json!({"spec": spec, "rows": rows})
+    let mut event = json!({"spec": spec, "rows": rows});
+    // The value column's words per language from the model, for the widget to title the axis.
+    if let Some(Some(labels)) = table.labels.get(value) {
+        event["labels"] = json!({table.columns[value].clone(): labels});
+    }
+    event
 }
 
 #[cfg(test)]
@@ -523,13 +565,56 @@ mod tests {
         assert_eq!(bar["rows"][1], json!({"label": "Zvolen", "value": 9.25}));
         assert_eq!(bar["spec"]["encoding"]["x"]["title"], "no2 (µg/m³)");
         assert_eq!(bar["spec"]["$schema"], VEGA_LITE);
-        let line = build(r#"{"kind":"line","data":3,"label":"name","value":"pm10","time":"observedAt","title":"constructor"}"#, &tables, "dev.example.org")
+        // T-4682: the axis reads at the widget's 12 px, each bar says its value, and the chart
+        // fills the panel's width.
+        assert_eq!(bar["spec"]["config"]["axis"]["labelFontSize"], 12);
+        assert_eq!(bar["spec"]["layer"][1]["mark"]["type"], "text");
+        assert_eq!(bar["spec"]["width"], "container");
+        let line = build(r#"{"kind":"line","data":3,"label":"name","value":"no2","time":"observedAt","title":"constructor"}"#, &tables, "dev.example.org")
             .expect("a line");
         assert_eq!(line["rows"][0]["time"], "2026-10-18T15:00:00Z");
         assert!(
             line["spec"].get("title").is_none(),
             "a title the renderer would refuse is dropped"
         );
+    }
+
+    /// T-4682: a chart names its rows by their labels, a URN by its last segment; the value
+    /// column's model labels go along for the axis title; under three values it is not drawn.
+    #[test]
+    fn a_chart_reads_in_words_and_needs_three_values() {
+        let mut stops = air();
+        for (row, urn) in stops.rows.iter_mut().zip([
+            "urn:ngsi-ld:GtfsStop:hel.fi:zilina:1001",
+            "urn:ngsi-ld:GtfsStop:x:1002",
+            "urn:ngsi-ld:GtfsStop:x:1003",
+        ]) {
+            row[0] = json!(urn);
+        }
+        stops.labels = vec![
+            None,
+            Some([("sk".to_owned(), "NO₂".to_owned())].into()),
+            None,
+            None,
+            None,
+        ];
+        let tables = [(1, stops)];
+        let bar = build(
+            r#"{"kind":"bar","data":1,"label":"name","value":"no2","title":"Odchody"}"#,
+            &tables,
+            "dev.example.org",
+        )
+        .expect("a bar");
+        assert_eq!(bar["rows"][0]["label"], "1001");
+        assert!(!bar.to_string().contains("urn:"), "{bar}");
+        assert_eq!(bar["labels"]["no2"]["sk"], "NO₂");
+        let refused = build(
+            r#"{"kind":"bar","data":1,"label":"name","value":"pm10","title":"x"}"#,
+            &tables,
+            "dev.example.org",
+        )
+        .expect_err("two values are no chart");
+        assert!(refused.contains("fewer than 3"), "{refused}");
     }
 
     #[test]

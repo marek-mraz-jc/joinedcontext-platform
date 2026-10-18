@@ -380,11 +380,16 @@ var JCRender = (function () {
    * A spec as the visitor reads it (T-4657): a map's popup labels and a chart's axis titles in
    * `lang`, a unit in brackets kept. A copy; the renderer checks it again and sets it as text.
    */
-  function vizSpec(spec, lang) {
+  function vizSpec(spec, lang, labels) {
     var copy = JSON.parse(JSON.stringify(spec || {}));
+    // The model's words for a column (T-4682) before the shared table's.
+    var named = function (key) {
+      var own = labels && typeof labels === "object" && labels[key] && typeof labels[key] === "object" ? labels[key] : null;
+      return (own && (entry(own, lang) || entry(own, "en"))) || word(LABELS, key, lang);
+    };
     if (Array.isArray(copy.popup)) {
       copy.popup.forEach(function (f) {
-        if (f && typeof f.field === "string") f.label = word(LABELS, f.field, lang);
+        if (f && typeof f.field === "string") f.label = named(f.field);
       });
     }
     var encoding = copy.encoding && typeof copy.encoding === "object" ? copy.encoding : {};
@@ -392,7 +397,7 @@ var JCRender = (function () {
       var title = encoding[channel] && encoding[channel].title;
       if (typeof title !== "string") return;
       var parts = /^(.*?)( \([^()]*\))?$/.exec(title);
-      encoding[channel].title = word(LABELS, parts[1], lang) + (parts[2] || "");
+      encoding[channel].title = named(parts[1]) + (parts[2] || "");
     });
     return copy;
   }
