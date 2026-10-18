@@ -118,6 +118,8 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
     let spec = &deployment.spec;
     json!({
         "linkHosts": link_hosts,
+        // The page's `frame-ancestors`, already in its header: where its close message may go (T-4654).
+        "frameOrigins": spec.allowed_origins,
         "publicId": spec.public_id,
         "title": spec.theme.as_ref().and_then(|t| t.title.clone()),
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
@@ -409,6 +411,15 @@ mod tests {
             ]
         );
         assert_eq!(config(&public, &hosts)["linkHosts"], json!(hosts));
+        // The close message's targets are the page's own frame-ancestors (T-4654).
+        assert_eq!(
+            config(&public, &hosts)["frameOrigins"],
+            json!(public.spec.allowed_origins)
+        );
+        assert!(!public.spec.allowed_origins.is_empty());
+        for origin in &public.spec.allowed_origins {
+            assert!(policy(&public).contains(origin.as_str()), "{origin}");
+        }
     }
 
     #[test]

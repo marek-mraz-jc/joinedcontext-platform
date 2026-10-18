@@ -202,8 +202,9 @@ var JCRender = (function () {
   }
 
   /**
-   * Whether `url` goes to one of `hosts` or a host under one, `www.` aside (T-4149). A host with
-   * anything but letters, digits, dots and dashes (a `user@host`, a backslash) never matches.
+   * Whether `url` goes to one of `hosts` itself, `www.` aside (T-4149): never a host under one, as
+   * a city's subdomains are not all the city's own pages (T-4654). A host with anything but
+   * letters, digits, dots and dashes (a `user@host`, a backslash) never matches.
    */
   function linkHost(url, hosts) {
     var match = /^https?:\/\/([^/?#]+)(?:[/?#]|$)/i.exec(String(url || ""));
@@ -213,7 +214,7 @@ var JCRender = (function () {
     host = host.replace(/^www\./, "");
     return (hosts || []).some(function (h) {
       h = String(h || "").toLowerCase().replace(/^www\./, "");
-      return h !== "" && (host === h || host.slice(-(h.length + 1)) === "." + h);
+      return h !== "" && host === h;
     });
   }
 
@@ -776,8 +777,23 @@ var JCRender = (function () {
     return split ? { lead: split[1], rest: split[2] } : { lead: whole, rest: "" };
   }
 
+  /**
+   * The origins the chat's close message goes to, never `*` (T-4654): the framing page's own,
+   * where the browser records it (`ancestorOrigins`), else each origin the deployment may be
+   * framed by (its `frame-ancestors`); a target that is not the parent drops the message.
+   * Anything but an http(s) origin is left out.
+   */
+  function closeTargets(ancestors, frameOrigins) {
+    var origin = function (value) {
+      var match = /^(https?:\/\/[a-z0-9.-]+(?::\d{1,5})?)\/?$/i.exec(String(value || ""));
+      return match ? match[1].toLowerCase() : null;
+    };
+    var listed = ancestors && ancestors.length ? [ancestors[0]] : frameOrigins || [];
+    return Array.prototype.map.call(listed, origin).filter(Boolean);
+  }
+
   return {
-    notice: notice,
+    notice: notice, closeTargets: closeTargets,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,

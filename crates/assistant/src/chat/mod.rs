@@ -881,7 +881,10 @@ fn utc_second(at: time::OffsetDateTime) -> String {
     )
 }
 
-fn sse(event: &Event) -> SseEvent {
+/// One event as the stream sends it. An anonymous channel's visitor gets no internals (T-4654):
+/// no Endpoint slug on a tool or a table, and a `done` without tokens, calls, providers or cost;
+/// those stay in the log, the usage and the timings (`record`).
+fn sse(event: &Event, anonymous: bool) -> SseEvent {
     let (name, data) = match event {
         Event::Tool {
             name,
@@ -889,7 +892,7 @@ fn sse(event: &Event) -> SseEvent {
             status,
         } => {
             let mut data = json!({"name": name, "status": status});
-            if let Some(endpoint) = endpoint {
+            if let Some(endpoint) = endpoint.as_ref().filter(|_| !anonymous) {
                 data["endpoint"] = json!(endpoint);
             }
             ("tool", data)
@@ -902,7 +905,15 @@ fn sse(event: &Event) -> SseEvent {
             ("stage", data)
         }
         Event::Delta(text) => ("delta", json!({"text": text})),
-        Event::Data(table) => ("data", json!(table)),
+        Event::Data(table) => {
+            let mut data = json!(table);
+            if anonymous {
+                if let Some(table) = data.as_object_mut() {
+                    table.remove("endpoint");
+                }
+            }
+            ("data", data)
+        }
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Followups(questions) => ("followups", json!({"questions": questions})),
@@ -921,29 +932,41 @@ fn sse(event: &Event) -> SseEvent {
                 Err(error) => json!({"code": code, "error": error}),
             },
         ),
-        Event::Done(spent, total_ms) => {
-            let mut done = json!({
-                "tokens": spent.total,
-                "tokensIn": spent.input,
-                "tokensOut": spent.output,
-                "modelCalls": spent.calls,
-                "firstTokenMs": spent.first_token_ms,
-                "totalMs": total_ms,
-                "cached": spent.cached,
-                "stagesMs": spent.stages.json(),
-                "judgeSkipped": spent.stages.judge_skipped,
-                "providers": spent.providers.json(),
-                "reasoningTokens": spent.reasoning.json(),
-            });
-            // Present only when every call reported its cost (T-4178): a missing one would make
-            // the sum look cheaper than the answer was.
-            if let Some(cost) = spent.cost_usd() {
-                done["costUsd"] = json!(cost);
-            }
-            ("done", done)
-        }
+        Event::Done(spent, total_ms) => ("done", done(spent, *total_ms, anonymous)),
     };
     SseEvent::default().event(name).data(data.to_string())
+}
+
+/// The `done` event: the timings for everyone, and what the answer spent only off an anonymous
+/// channel (T-4654).
+fn done(spent: &Spent, total_ms: u64, anonymous: bool) -> serde_json::Value {
+    if anonymous {
+        return json!({
+            "firstTokenMs": spent.first_token_ms,
+            "totalMs": total_ms,
+            "cached": spent.cached,
+            "stagesMs": spent.stages.json(),
+        });
+    }
+    let mut done = json!({
+        "tokens": spent.total,
+        "tokensIn": spent.input,
+        "tokensOut": spent.output,
+        "modelCalls": spent.calls,
+        "firstTokenMs": spent.first_token_ms,
+        "totalMs": total_ms,
+        "cached": spent.cached,
+        "stagesMs": spent.stages.json(),
+        "judgeSkipped": spent.stages.judge_skipped,
+        "providers": spent.providers.json(),
+        "reasoningTokens": spent.reasoning.json(),
+    });
+    // Present only when every call reported its cost (T-4178): a missing one would make the sum
+    // look cheaper than the answer was.
+    if let Some(cost) = spent.cost_usd() {
+        done["costUsd"] = json!(cost);
+    }
+    done
 }
 
 async fn chat(
@@ -1332,6 +1355,7 @@ async fn ask(
     }
     let (tokens_per_day, tokens_per_conversation) =
         (budget.tokens_per_day, budget.tokens_per_conversation);
+    let anonymous = deployment.spec.channel.is_anonymous();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
     // One moment for the question: every model call is told it and the chat shows it (T-4339).
     let asked_at = time::OffsetDateTime::now_utc();
@@ -1468,9 +1492,9 @@ async fn ask(
                 .data(json!({"id": conversation, "at": utc_second(asked_at)}).to_string()),
         )
     });
-    let rest = futures_util::stream::unfold(rx, |mut rx| async move {
+    let rest = futures_util::stream::unfold(rx, move |mut rx| async move {
         let event = rx.recv().await?;
-        Some((Ok::<_, Infallible>(sse(&event)), rx))
+        Some((Ok::<_, Infallible>(sse(&event, anonymous)), rx))
     });
     let stream = futures_util::StreamExt::chain(first, rest);
     let mut response = Sse::new(stream)
@@ -1486,6 +1510,72 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_visitor_s_stream_carries_no_slug_and_no_spending_but_a_signed_in_one_does() {
+        let spent = Spent {
+            total: 50,
+            input: 40,
+            output: 10,
+            calls: 1,
+            cost_micros: 12_000,
+            ..Spent::default()
+        };
+        let visitor = done(&spent, 900, true);
+        assert_eq!(
+            visitor.as_object().map(|o| {
+                let mut keys: Vec<String> = o.keys().cloned().collect();
+                keys.sort();
+                keys
+            }),
+            Some(
+                ["cached", "firstTokenMs", "stagesMs", "totalMs"]
+                    .map(String::from)
+                    .to_vec()
+            ),
+            "{visitor}"
+        );
+        let person = done(&spent, 900, false);
+        assert_eq!(
+            (
+                &person["tokensIn"],
+                &person["modelCalls"],
+                &person["costUsd"]
+            ),
+            (&json!(40), &json!(1), &json!(0.012))
+        );
+        assert!(person["providers"].is_object() && person["reasoningTokens"].is_object());
+        // T-4178: a call whose provider reported no cost leaves the sum out, never a floor.
+        let uncosted = Spent {
+            uncosted: 1,
+            ..spent
+        };
+        assert!(done(&uncosted, 900, false).get("costUsd").is_none());
+
+        let tool = Event::Tool {
+            name: "query_entities".into(),
+            endpoint: Some("ovzdusie-sk".into()),
+            status: "started",
+        };
+        let table = Event::Data(agent::Table {
+            endpoint: "ovzdusie-sk".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["name".into()],
+            rows: vec![vec![json!("Žilina")]],
+            total: None,
+            dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
+            download: None,
+        });
+        for event in [&tool, &table] {
+            let shown = |anonymous| format!("{:?}", sse(event, anonymous));
+            assert!(!shown(true).contains("ovzdusie-sk"), "{}", shown(true));
+            assert!(shown(false).contains("ovzdusie-sk"), "{}", shown(false));
+        }
+        assert!(
+            format!("{:?}", sse(&table, true)).contains("ovzdusie"),
+            "the dataset link stays"
+        );
+    }
 
     /// T-3059: the per-client key is the address the edge appended, past the cluster's own
     /// proxies, never one the caller wrote in front of it.

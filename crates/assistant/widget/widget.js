@@ -16,7 +16,7 @@
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
       paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
-      reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", copy: "Kopírovať",
+      reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", expand: "Zväčšiť", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
@@ -35,7 +35,7 @@
       busy: "You asked many questions at once. Wait a moment and try again.",
       paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
-      reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", copy: "Copy",
+      reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", expand: "Expand", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
@@ -54,7 +54,7 @@
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
       paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
-      reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", copy: "Kopírovat",
+      reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", expand: "Zvětšit", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
@@ -129,6 +129,8 @@
   var ICONS = {
     fresh: "M12 5v14M5 12h14",
     close: "M6 6l12 12M18 6L6 18",
+    expand: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
+    collapse: "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5",
     chat: "M4 5h16v11H9l-5 4z",
     send: "M5 12h13M12 5l7 7-7 7",
     stop: "M7 7h10v10H7z",
@@ -199,6 +201,22 @@
   }
   var fresh = iconButton("jc-fresh", "fresh", "fresh");
   actions.appendChild(fresh);
+  // Embedded, the panel grows to the full window and back (T-4658); on a phone it already fills
+  // the screen, so the button is left out there.
+  var size = null;
+  var expanded = false;
+  if (embedded && screen.width >= 600) {
+    try { expanded = sessionStorage.getItem("jc-chat-size:" + config.publicId) === "full"; } catch (e) { /* panel */ }
+    size = el("button", "jc-icon-button jc-size");
+    size.type = "button";
+    size.appendChild(icon(expanded ? "collapse" : "expand"));
+    var sized = function () { return w[expanded ? "collapse" : "expand"]; };
+    words(size, sized, "ariaLabel");
+    words(size, sized, "title");
+    size.setAttribute("aria-pressed", String(expanded));
+    size.addEventListener("click", function () { resize(!expanded); });
+    actions.appendChild(size);
+  }
   if (embedded) {
     var close = iconButton("jc-close", "close", "close");
     close.addEventListener("click", closePanel);
@@ -721,6 +739,20 @@
     var p = el("p", "", w[word]);
     p.setAttribute("role", "alert");
     item.appendChild(p);
+    if (word === "full") {
+      // A used-up conversation offers a new one that asks the same question again (T-4660).
+      var resend = JCRender.retry(history);
+      if (resend) {
+        var anew = button("jc-retry", "fresh");
+        anew.addEventListener("click", function () {
+          if (busy) return;
+          fresh.click();
+          submit(resend.question);
+        });
+        item.appendChild(anew);
+      }
+      return;
+    }
     if (!JCRender.retryable(word)) return;
     var again = button("jc-retry", "retry");
     again.addEventListener("click", function () {
@@ -758,7 +790,8 @@
         item.staged = true;
       }
     } else if (name === "tool" && data.status === "started" && item.status && !item.staged) {
-      item.status.textContent = w.reading + " " + (data.endpoint || data.name) + "…";
+      // A visitor's stream names no Endpoint (T-4654), and a tool's own name is no word for them.
+      item.status.textContent = w.reading + (data.endpoint ? " " + data.endpoint : "") + "…";
     } else if (name === "script") {
       var details = el("details", "jc-script");
       details.appendChild(el("summary", "", w.script));
@@ -911,7 +944,25 @@
   function closePanel() {
     // The launcher on the host page closes the panel and puts focus back on its button; the
     // message carries no data.
-    if (embedded) window.parent.postMessage({ type: "jc-assistant-close" }, "*");
+    toParent({ type: "jc-assistant-close" });
+  }
+
+  // The message goes to the framing page's origin alone, never `*` (T-4654).
+  function toParent(message) {
+    if (!embedded) return;
+    JCRender.closeTargets(location.ancestorOrigins, config.frameOrigins).forEach(function (origin) {
+      window.parent.postMessage(message, origin);
+    });
+  }
+
+  // The launcher sizes the panel; the state lives in this tab's sessionStorage (T-4658).
+  function resize(full) {
+    expanded = full;
+    try { sessionStorage.setItem("jc-chat-size:" + config.publicId, full ? "full" : "panel"); } catch (e) { /* this open only */ }
+    size.replaceChild(icon(full ? "collapse" : "expand"), size.firstChild);
+    size.setAttribute("aria-pressed", String(full));
+    relabel(lang);
+    toParent({ type: "jc-assistant-size", size: full ? "full" : "panel" });
   }
 
   form.addEventListener("submit", function (event) {
@@ -942,10 +993,13 @@
     }
   });
   document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") closePanel();
+    // Expanded, Escape first brings the panel back to its size; then it closes.
+    if (event.key === "Escape" && expanded) resize(false);
+    else if (event.key === "Escape") closePanel();
   });
 
   relabel(lang);
+  if (expanded) toParent({ type: "jc-assistant-size", size: "full" });
   // The conversation open before a page change on the host site, shown again as it was.
   kept = config.enabled === false ? null : kept0();
   if (kept && kept.turns.length > 0) {
