@@ -25,6 +25,7 @@ pub mod ngsi_catalog;
 pub mod project;
 pub mod qb;
 pub mod quality;
+pub mod reach;
 pub mod registry;
 pub mod secret;
 pub mod units;
