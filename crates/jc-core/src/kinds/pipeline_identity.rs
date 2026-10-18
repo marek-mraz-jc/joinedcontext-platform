@@ -228,6 +228,7 @@ fn policy(
         geo_q: None,
         temporal_q: None,
         validity: None,
+        actions: Vec::new(),
     }
 }
 

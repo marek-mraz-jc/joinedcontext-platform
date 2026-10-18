@@ -272,6 +272,27 @@ fn grants_operation(policy: &PolicySpec, operation: Operation) -> bool {
     })
 }
 
+/// Whether the space's Policies grant `subject` the platform action `action` now (ADR-N-054,
+/// T-4666): a permission names it for the subject, and no prohibition does. A role name grants
+/// nothing by itself; the defaults are Policies the Portal writes.
+pub fn grants_action(
+    subject: &Subject,
+    action: jc_core::kinds::PlatformAction,
+    policies: &[PolicySpec],
+    now: DateTime<Utc>,
+) -> bool {
+    let naming: Vec<&PolicySpec> = policies
+        .iter()
+        .filter(|policy| {
+            policy.actions.contains(&action)
+                && subject.is(&policy.assignee)
+                && in_force(policy, now)
+        })
+        .collect();
+    naming.iter().any(|policy| !policy.effect.is_prohibition())
+        && !naming.iter().any(|policy| policy.effect.is_prohibition())
+}
+
 /// Whether the policy is inside its validity window (GW7).
 fn in_force(policy: &PolicySpec, now: DateTime<Utc>) -> bool {
     policy.validity.as_ref().is_none_or(|validity| {

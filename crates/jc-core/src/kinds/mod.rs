@@ -101,8 +101,8 @@ pub use pipeline::{
     ReplaceConflict, SourceQuery, Step, SubscriptionTrigger, TemplatePart, TemporalWindow, Trigger,
 };
 pub use policy::{
-    EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,
-    PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
+    EntitySelector, Operation, OperationGroup, OperationRef, PlatformAction, PolicyEffect,
+    PolicySpec, Principal, PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
 pub use role::{
     BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, SubjectSource, Verb,

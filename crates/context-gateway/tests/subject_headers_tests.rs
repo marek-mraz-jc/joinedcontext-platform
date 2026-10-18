@@ -519,3 +519,56 @@ async fn a_delete_without_a_reason_is_refused_before_the_broker() {
     assert_ne!(code, StatusCode::BAD_REQUEST);
     assert_eq!(broker.hops().len(), 1);
 }
+
+/// ADR-N-054 2.4, DM-114: the broker answers `versions=all` only when the gateway says the space's
+/// Policy grants the caller `readVersions`; a caller typing the header gets nothing from it.
+#[tokio::test]
+async fn read_versions_reaches_the_broker_only_on_the_spaces_grant() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([]), json!([])]).await;
+    let versions: PolicySpec = serde_norway::from_str(
+        "contextSpaceRef: ovzdusie\nassigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: steward }\nactions: [readVersions]\n",
+    )
+    .expect("the policy spec parses");
+    let mut granted = endpoint(AIR, Audience::Organization, "steward");
+    granted.policies.push(versions);
+    let gateway = |endpoint: Endpoint| {
+        router(Arc::new(
+            Gateway::new(
+                Broker::new(&broker.url),
+                Box::new(PolicyPdp),
+                "banskabystrica.sk",
+            )
+            .serve(vec![endpoint])
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(HOST.to_owned()),
+            ),
+        ))
+    };
+    let path = format!("/api/endpoint/{AIR}/ngsi-ld/v1/temporal/entities/{ENTITY}?versions=all");
+    let edge = token(&realm, json!(["/ovzdusie"]));
+    for endpoint in [granted, endpoint(AIR, Audience::Organization, "steward")] {
+        let _ = answer(
+            gateway(endpoint),
+            request(
+                Method::GET,
+                &path,
+                Some(&edge),
+                &[("jc-read-versions", "true")],
+                None,
+            ),
+        )
+        .await;
+    }
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 2, "{hops:?}");
+    assert_eq!(values(&hops[0].headers, "jc-read-versions"), ["true"]);
+    assert!(
+        values(&hops[1].headers, "jc-read-versions").is_empty(),
+        "{:?}",
+        hops[1].headers
+    );
+}

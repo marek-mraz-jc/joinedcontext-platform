@@ -718,6 +718,18 @@ pub(crate) async fn view_request(
     if let Some(federated) = federated {
         request.headers_mut().insert(AUTHORIZATION, federated);
     }
+    // ADR-N-054 2.4: the broker answers `versions=all` only on this grant (DM-114)
+    if crate::pdp::evaluator::grants_action(
+        subject,
+        jc_core::kinds::PlatformAction::ReadVersions,
+        &endpoint.policies,
+        crate::pdp::now(),
+    ) {
+        request.headers_mut().insert(
+            tenancy::READ_VERSIONS,
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
     Ok(())
 }
 

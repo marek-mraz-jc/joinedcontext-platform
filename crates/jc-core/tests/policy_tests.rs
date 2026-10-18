@@ -342,3 +342,34 @@ fn effect_defaults_to_permission_and_round_trips() {
         "only the two documented effects parse"
     );
 }
+
+/// ADR-N-054, T-4666: a Policy may grant the platform actions alone; an action it does not know,
+/// the same action twice, or a Policy granting nothing is refused, and a Policy without actions
+/// renders as it did before them.
+#[test]
+fn a_policy_grants_platform_actions_beside_or_without_operations() {
+    use jc_core::kinds::{PlatformAction, PolicySpec};
+    let spec = |tail: &str| {
+        serde_norway::from_str::<PolicySpec>(&format!(
+            "contextSpaceRef: bike-trips\nassigner: did:web:banskabystrica.sk\n\
+             assignee: {{ kind: role, id: steward }}\n{tail}"
+        ))
+    };
+    let alone = spec("actions: [readVersions, personalData]\n").expect("parses");
+    assert_eq!(
+        alone.actions,
+        [PlatformAction::ReadVersions, PlatformAction::PersonalData]
+    );
+    assert!(alone.operations.is_empty());
+    alone.validate().expect("actions alone are a grant");
+
+    assert!(spec("actions: [deleteEverything]\n").is_err());
+    let twice = spec("actions: [readVersions, readVersions]\n").expect("parses");
+    assert!(twice.validate().is_err());
+    let nothing = spec("operations: []\n").expect("parses");
+    assert!(nothing.validate().is_err());
+
+    let plain = spec("operations: [queryEntity]\n").expect("parses");
+    let rendered = serde_json::to_value(&plain).expect("renders");
+    assert!(rendered.get("actions").is_none(), "{rendered}");
+}
