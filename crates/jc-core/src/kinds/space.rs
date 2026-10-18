@@ -450,11 +450,12 @@ impl QualityRule {
     }
 }
 
-/// One type's retention in a space (DM-82, ADR-N-046): both durations absent keeps it forever.
+/// One type's retention in a space (DM-82, ADR-N-046): `current` absent keeps its current state;
+/// `history` absent leaves its history to the space's `*` rule, then the platform's (DM-97).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RetentionRule {
-    /// A class of the space's Data Model.
+    /// A class of the space's Data Model, or `*` for the space's default (DM-97).
     pub entity_type: String,
     /// How long an entity not modified stays, as `PT5M`, `PT8H`, `P30D` or `P1DT12H` (DM-83).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,6 +469,9 @@ pub struct RetentionRule {
     pub reason: Option<String>,
 }
 
+/// The `entityType` of the space's default rule: the history of every type without a history
+/// rule of its own (DM-97); it sets `history` only.
+pub const RETENTION_ANY_TYPE: &str = "*";
 /// The `history` of a rule that records nothing for its type (T-4275).
 pub const HISTORY_OFF: &str = "off";
 /// The `history` of a rule that keeps everything, with a `reason` (T-4275).
@@ -570,7 +574,18 @@ impl ContextSpaceSpec {
 
         let mut ruled = std::collections::BTreeSet::new();
         for rule in &self.retention {
-            names::validate_entity_type(&rule.entity_type)?;
+            if rule.entity_type == RETENTION_ANY_TYPE {
+                if rule.current.is_some() {
+                    return Err(Error::Name {
+                        field: "spec.retention.current",
+                        value: rule.entity_type.clone(),
+                        reason: "the \"*\" rule sets the space's default history only; current \
+                                 state is removed per type (DM-97)",
+                    });
+                }
+            } else {
+                names::validate_entity_type(&rule.entity_type)?;
+            }
             if !ruled.insert(rule.entity_type.as_str()) {
                 return Err(Error::Name {
                     field: "spec.retention",
