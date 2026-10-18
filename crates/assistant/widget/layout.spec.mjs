@@ -19,6 +19,7 @@ const CONFIG = {
   disclaimer: { sk: "Odpovede tvorí umelá inteligencia z webov mesta a kraja. Môžu obsahovať chyby, overte si ich v zdrojoch. Nezadávajte osobné údaje.",
     en: "Answers are written by AI from the city's and the region's websites. They may contain mistakes; check them in the sources. Do not enter personal data." },
   enabled: true, connectors: [],
+  transcriptDays: 30, privacy: { contact: "dpo@banskabystrica.sk", documentsUrl: "https://www.banskabystrica.sk/gdpr" },
 };
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
@@ -479,4 +480,66 @@ test("on a phone the panel already fills the screen and offers no expand button 
   const chat = page.frameLocator("[data-jc-assistant] iframe");
   await expect(chat.locator(".jc-close")).toBeVisible();
   await expect(chat.locator(".jc-size")).toHaveCount(0);
+});
+
+// T-4670: the footer's privacy link opens a modal dialog that holds focus and closes on Escape
+// alone; its switch keeps the conversation in localStorage for 90 days, and off deletes it.
+test("the privacy dialog holds focus, closes on Escape, and its switch keeps or deletes the browser's copy (T-4670)", async ({ page, context }) => {
+  WIDGET = undefined;
+  SLOW = false;
+  await page.setViewportSize({ width: 420, height: 720 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await expect(page.locator(".jc-privacy-line")).toHaveText("Dôležité informácie si prosím overte. · Súkromie");
+  const open = page.locator(".jc-privacy-line .jc-more");
+  await open.click();
+  const dialog = page.locator("dialog.jc-about");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("h2")).toHaveText("O tomto asistentovi");
+  await expect(dialog).toContainText("30 dní");
+  await expect(dialog.locator('a[href="mailto:dpo@banskabystrica.sk"]')).toBeVisible();
+  await expect(dialog.locator('a[href="https://www.banskabystrica.sk/gdpr"]')).toBeVisible();
+  const box = await dialog.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(420);
+  for (const key of ["Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab"]) {
+    await page.keyboard.press(key);
+    expect(await page.evaluate(() => Boolean(document.activeElement && document.activeElement.closest("dialog")))).toBe(true);
+  }
+  const toggle = dialog.locator('input[role="switch"]');
+  await expect(toggle).not.toBeChecked();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("#jc-question")).toBeVisible();
+  await expect(open).toBeFocused();
+
+  const KEY = "jc-chat-remember:bb";
+  expect(await page.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+  await open.click();
+  await toggle.check();
+  expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k), KEY)).kept).toBeNull();
+
+  // The copy a later visit finds: shown in a new tab (no sessionStorage), the switch still on.
+  const conversation = {
+    conversation: "00000000-0000-4000-8000-000000000001", asked: 1,
+    turns: [{ question: "Kedy má otvorené klientske centrum?", text: "V pracovné dni od 8:00.", turn: 1, citations: [] }],
+  };
+  await page.evaluate(([k, kept]) => localStorage.setItem(k, JSON.stringify({ savedAt: new Date().toISOString(), kept })), [KEY, conversation]);
+  const later = await context.newPage();
+  await later.goto(`${base}/d/bb?lang=sk`);
+  await expect(later.locator(".jc-log")).toContainText("V pracovné dni od 8:00.");
+  await later.locator(".jc-privacy-line .jc-more").click();
+  const laterToggle = later.locator('dialog.jc-about input[role="switch"]');
+  await expect(laterToggle).toBeChecked();
+  await laterToggle.uncheck();
+  expect(await later.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+  await later.close();
+
+  // Past 90 days the copy is not shown and is deleted on the visit.
+  const old = new Date(Date.now() - 91 * 24 * 3600 * 1000).toISOString();
+  await page.evaluate(([k, kept, at]) => localStorage.setItem(k, JSON.stringify({ savedAt: at, kept })), [KEY, conversation, old]);
+  const stale = await context.newPage();
+  await stale.goto(`${base}/d/bb?lang=sk`);
+  await expect(stale.locator("#jc-question")).toBeVisible();
+  await expect(stale.locator(".jc-log")).not.toContainText("V pracovné dni od 8:00.");
+  expect(await stale.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
 });

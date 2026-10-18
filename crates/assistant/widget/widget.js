@@ -27,7 +27,15 @@
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
       declined: "Na túto otázku asistent neodpovedá.",
-      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej" },
+      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej",
+      verify: "Dôležité informácie si prosím overte.", privacy: "Súkromie", aboutTitle: "O tomto asistentovi",
+      aboutAi: "Odpovede píše umelá inteligencia a môžu byť nepresné. Do otázok nepíšte citlivé osobné údaje, napríklad rodné číslo, zdravotný stav alebo číslo účtu.",
+      remember: "Zapamätať konverzáciu v tomto prehliadači",
+      rememberHint: "Konverzácia ostane v tomto prehliadači najviac 90 dní od poslednej zmeny. Na zdieľanom zariadení ju nezapínajte. Vypnutím ju hneď vymažete.",
+      keptDays: "Služba uchováva konverzácie {days} dní na prevádzku, kontrolu kvality a opravu chýb, s vymazanými e-mailmi, telefónnymi číslami, rodnými číslami a číslami účtov a kariet.",
+      keptNone: "Služba konverzácie neuchováva.",
+      askData: "O prístup k svojim údajom, ich opravu alebo vymazanie požiadajte na adrese",
+      documents: "Informácie o ochrane osobných údajov" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -46,7 +54,15 @@
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
       declined: "The assistant does not answer this question.",
-      choose: "Choose your language", moreInfo: "More", lessInfo: "Less" },
+      choose: "Choose your language", moreInfo: "More", lessInfo: "Less",
+      verify: "Please verify important information.", privacy: "Privacy", aboutTitle: "About this assistant",
+      aboutAi: "Answers are written by artificial intelligence and may be wrong. Do not put sensitive personal data in a question, such as a national ID number, health details or an account number.",
+      remember: "Remember the conversation in this browser",
+      rememberHint: "The conversation stays in this browser for at most 90 days after its last change. Do not switch it on on a shared device. Switching it off deletes it at once.",
+      keptDays: "The service keeps conversations for {days} days to run the service, review quality and fix errors, with e-mail addresses, phone numbers, ID numbers and account and card numbers removed.",
+      keptNone: "The service keeps no conversations.",
+      askData: "To access, correct or erase your data, write to",
+      documents: "Privacy information" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -65,7 +81,15 @@
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
       declined: "Na tuto otázku asistent neodpovídá.",
-      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně" }
+      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně",
+      verify: "Důležité informace si prosím ověřte.", privacy: "Soukromí", aboutTitle: "O tomto asistentovi",
+      aboutAi: "Odpovědi píše umělá inteligence a mohou být nepřesné. Do otázek nepište citlivé osobní údaje, například rodné číslo, zdravotní stav nebo číslo účtu.",
+      remember: "Zapamatovat konverzaci v tomto prohlížeči",
+      rememberHint: "Konverzace zůstane v tomto prohlížeči nejvýše 90 dní od poslední změny. Na sdíleném zařízení ji nezapínejte. Vypnutím ji hned smažete.",
+      keptDays: "Služba uchovává konverzace {days} dní pro provoz, kontrolu kvality a opravu chyb, se smazanými e-maily, telefonními čísly, rodnými čísly a čísly účtů a karet.",
+      keptNone: "Služba konverzace neuchovává.",
+      askData: "O přístup ke svým údajům, jejich opravu nebo smazání požádejte na adrese",
+      documents: "Informace o ochraně osobních údajů" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -306,11 +330,35 @@
   notice.appendChild(more);
   foot.appendChild(form);
   foot.appendChild(notice);
+  // Under every chat (API/05 §1.6, T-4670): verify what matters, and the privacy dialog.
+  var line = el("p", "jc-privacy-line");
+  line.appendChild(words(el("span"), "verify"));
+  line.appendChild(document.createTextNode(" · "));
+  var privacyOpen = button("jc-more", "privacy");
+  privacyOpen.setAttribute("aria-haspopup", "dialog");
+  line.appendChild(privacyOpen);
+  foot.appendChild(line);
+  // A modal <dialog>: Escape closes it, the page behind is inert, and Tab cycles inside it.
+  var about = el("dialog", "jc-about");
+  about.setAttribute("aria-labelledby", "jc-about-title");
+  var aboutTitle = words(el("h2"), "aboutTitle");
+  aboutTitle.id = "jc-about-title";
+  var aboutBody = el("div", "jc-about-body");
+  var rememberLabel = el("label", "jc-remember");
+  var rememberBox = el("input");
+  rememberBox.type = "checkbox";
+  rememberBox.setAttribute("role", "switch");
+  rememberLabel.appendChild(rememberBox);
+  rememberLabel.appendChild(words(el("span"), "remember"));
+  var rememberHint = words(el("p", "jc-hint"), "rememberHint");
+  var aboutClose = button("jc-about-close", "close");
+  [aboutTitle, aboutBody, rememberLabel, rememberHint, aboutClose].forEach(function (n) { about.appendChild(n); });
 
   root.appendChild(head);
   if (tools) root.appendChild(tools);
   root.appendChild(log);
   root.appendChild(foot);
+  root.appendChild(about);
   root.appendChild(announce);
 
   var conversation = null;
@@ -330,10 +378,68 @@
       if (kept) sessionStorage.setItem(KEY, JSON.stringify(kept));
       else sessionStorage.removeItem(KEY);
     } catch (e) { /* not kept */ }
+    if (remembering) {
+      try { localStorage.setItem(LOCAL, JCRender.lasting(kept, new Date())); } catch (e) { /* not kept */ }
+    }
   }
+  // The visitor's own switch (T-4670): off by default; the copy in localStorage lives 90 days
+  // after its last change, and an expired one is deleted here.
+  var LOCAL = "jc-chat-remember:" + config.publicId;
+  var remembering = false;
   function kept0() {
-    try { return JCRender.restore(sessionStorage.getItem(KEY)); } catch (e) { return null; }
+    var held = null;
+    try {
+      held = JCRender.recalled(localStorage.getItem(LOCAL), new Date());
+      if (!held) localStorage.removeItem(LOCAL);
+    } catch (e) { /* storage off */ }
+    remembering = Boolean(held);
+    var session = null;
+    try { session = JCRender.restore(sessionStorage.getItem(KEY)); } catch (e) { /* storage off */ }
+    return session || (held && held.kept);
   }
+  rememberBox.addEventListener("change", function () {
+    remembering = rememberBox.checked;
+    if (remembering) keep();
+    else {
+      try { localStorage.removeItem(LOCAL); } catch (e) { /* nothing kept */ }
+    }
+  });
+
+  function fillAbout() {
+    aboutBody.textContent = "";
+    JCRender.privacyLines(w, config.transcriptDays, config.privacy).forEach(function (l) {
+      var p = el("p");
+      if (l.href) p.appendChild(link(l.href, l.text));
+      else p.textContent = l.text;
+      if (l.mail) {
+        var a = el("a", "", l.mail);
+        a.href = JCRender.mailto(l.mail);
+        p.appendChild(document.createTextNode(" "));
+        p.appendChild(a);
+      }
+      aboutBody.appendChild(p);
+    });
+  }
+  privacyOpen.addEventListener("click", function () {
+    fillAbout();
+    rememberBox.checked = remembering;
+    about.showModal();
+  });
+  aboutClose.addEventListener("click", function () { about.close(); });
+  about.addEventListener("keydown", function (event) {
+    if (event.key !== "Tab") return;
+    var stops = about.querySelectorAll("a[href], input, button");
+    var first = stops[0];
+    var last = stops[stops.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  about.addEventListener("close", function () { privacyOpen.focus(); });
 
   function perLanguage(map) {
     if (!map) return null;
@@ -372,6 +478,7 @@
       Array.prototype.forEach.call(picker.children, function (b) { b.setAttribute("aria-pressed", String(b.value === code)); });
     }
     if (named) retitle();
+    if (about.open) fillAbout();
     var parts = JCRender.notice(perLanguage(config.disclaimer));
     lead.textContent = parts.lead;
     rest.textContent = parts.rest;
@@ -1036,6 +1143,8 @@
   });
   document.addEventListener("keydown", function (event) {
     // Expanded, Escape first brings the panel back to its size; then it closes.
+    // The privacy dialog closes itself on Escape; the panel stays.
+    if (about.open) return;
     if (event.key === "Escape" && expanded) resize(false);
     else if (event.key === "Escape") closePanel();
   });

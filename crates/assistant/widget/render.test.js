@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, lasting, recalled, privacyLines, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -737,4 +737,34 @@ test("the close message goes to the framing page's origin alone, never to any (T
   assert.deepEqual(closeTargets(undefined, ["*", "", null, "null", "javascript:alert(1)", "https://a.sk/path", "https://a.sk@evil.example"]), []);
   assert.deepEqual(closeTargets(["null"], framers), [], "a sandboxed parent gets nothing");
   assert.deepEqual(closeTargets(undefined, undefined), []);
+});
+
+test("a remembered conversation comes back for 90 days after its last change and not after (T-4670)", () => {
+  const id = "00000000-0000-4000-8000-000000000000";
+  const kept = remember(null, id, 1, { question: "Kedy?", text: "Zajtra.", turn: 1, citations: [] });
+  const saved = new Date("2026-10-18T12:00:00Z");
+  const raw = lasting(kept, saved);
+  assert.equal(recalled(raw, new Date("2027-01-15T12:00:00Z")).kept.turns[0].question, "Kedy?");
+  assert.equal(recalled(raw, new Date("2027-01-17T12:00:00Z")), null, "past 90 days");
+  // Switched on before the first question: remembered, nothing to show yet.
+  assert.deepEqual(recalled(lasting(null, saved), saved), { kept: null });
+  for (const bad of [null, "", "{", "[]", '{"kept":{}}', '{"savedAt":"yesterday"}',
+    JSON.stringify({ savedAt: "2030-01-01T00:00:00Z", kept })]) {
+    assert.equal(recalled(bad, saved), null, String(bad));
+  }
+  // A planted conversation of the wrong shape is not shown.
+  assert.deepEqual(recalled(JSON.stringify({ savedAt: saved.toISOString(), kept: { conversation: "x", turns: [] } }), saved), { kept: null });
+});
+
+test("the privacy dialog says what is kept, and names only a contact and an https page it was given (T-4670)", () => {
+  const words = { aboutAi: "AI", keptDays: "kept {days} days", keptNone: "kept nothing", askData: "write to", documents: "documents" };
+  assert.deepEqual(privacyLines(words, 30, null), [{ text: "AI" }, { text: "kept 30 days" }]);
+  assert.deepEqual(privacyLines(words, 0, {}), [{ text: "AI" }, { text: "kept nothing" }]);
+  assert.deepEqual(privacyLines(words, 7, { contact: "dpo@banskabystrica.sk", documentsUrl: "https://www.banskabystrica.sk/gdpr" }), [
+    { text: "AI" }, { text: "kept 7 days" },
+    { text: "write to", mail: "dpo@banskabystrica.sk" },
+    { text: "documents", href: "https://www.banskabystrica.sk/gdpr" },
+  ]);
+  assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "javascript:alert(1)" }).length, 2);
+  assert.equal(privacyLines(words, 7, { documentsUrl: "http://x.sk/gdpr" }).length, 2, "https only");
 });

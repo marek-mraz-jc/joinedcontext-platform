@@ -197,6 +197,20 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-notice { margin: 6px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
 .jc-more { padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; cursor: pointer; }
 .jc-more[hidden], .jc-disclaimer-rest[hidden] { display: none; }
+.jc-privacy-line { margin: 2px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+/* The privacy dialog (T-4670): over the chat, inside the panel's own page. */
+.jc-about { max-width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; box-sizing: border-box;
+  padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); color: var(--fg);
+  box-shadow: var(--shadow); font-size: 14px; line-height: 1.45; }
+.jc-about::backdrop { background: rgba(0, 0, 0, .35); }
+.jc-about h2 { margin: 0 0 10px; font-size: 16px; }
+.jc-about p { margin: 0 0 10px; }
+.jc-about a { color: var(--link); }
+.jc-remember { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 6px; font-weight: 600; cursor: pointer; }
+.jc-remember input { flex: none; width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--accent); }
+.jc-hint { font-size: 12.5px; color: var(--muted); }
+.jc-about-close { min-height: 38px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--accent);
+  color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
 
 /* A phone's full screen: the header keeps one line for the name and its subtitle, with a smaller
    monogram and tighter gaps beside the 44 px controls; a name longer than that ends in an ellipsis
@@ -218,6 +232,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   /* A button is an inline block: the padding grows the tap target, the negative margin keeps the line. */
   .jc-more { padding: 14px 12px; margin: -14px -8px; }
   .jc-notice { margin-bottom: 8px; }
+  .jc-privacy-line { margin-bottom: 8px; }
 }
 /* With the expand button (T-4658, never on a phone) four controls share a 420 px header: 34 px
    targets and a slimmer toggle keep the name whole. */

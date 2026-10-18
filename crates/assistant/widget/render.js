@@ -647,6 +647,45 @@ var JCRender = (function () {
     return { conversation: conversation, asked: asked, turns: turns.slice(-MAX_KEPT) };
   }
 
+  // The copy the visitor chose to keep in this browser (T-4670): at most 90 days after its last
+  // change, then gone.
+  var REMEMBER_MS = 90 * 24 * 3600 * 1000;
+
+  /** What `localStorage` holds for a remembered conversation, stamped `now`; `kept` may be null. */
+  function lasting(kept, now) {
+    return JSON.stringify({ savedAt: now.toISOString(), kept: kept || null });
+  }
+
+  /**
+   * The remembered copy read back from `raw`: null when the visitor never switched it on, the
+   * value is not of its shape, or it is older than 90 days (the caller deletes it then); else
+   * `{ kept }`, the conversation or null when there was none yet.
+   */
+  function recalled(raw, now) {
+    var held;
+    try { held = JSON.parse(raw); } catch (e) { return null; }
+    if (!held || typeof held !== "object" || typeof held.savedAt !== "string") return null;
+    var at = new Date(held.savedAt).getTime();
+    if (isNaN(at) || at > now.getTime() + 60000 || now.getTime() - at > REMEMBER_MS) return null;
+    return { kept: held.kept ? restore(JSON.stringify(held.kept)) : null };
+  }
+
+  /**
+   * The paragraphs of the privacy dialog (API/05 §1.6, T-4670) in `words`: what the service keeps
+   * for how many `days` (none when 0), and, when the deployment names them, the contact to write
+   * to (`mail`) and the page of its privacy documents (`href`, https only).
+   */
+  function privacyLines(words, days, privacy) {
+    var lines = [{ text: words.aboutAi }];
+    var n = Number.isInteger(days) && days > 0 ? days : 0;
+    lines.push({ text: n > 0 ? words.keptDays.replace("{days}", String(n)) : words.keptNone });
+    var contact = privacy && typeof privacy.contact === "string" ? privacy.contact.trim() : "";
+    if (contact && mailto(contact)) lines.push({ text: words.askData, mail: contact });
+    var docs = privacy && safeUrl(privacy.documentsUrl);
+    if (docs && /^https:/i.test(docs)) lines.push({ text: words.documents, href: docs });
+    return lines;
+  }
+
   /**
    * The questions an empty chat offers (T-4253): the deployment's own in the language the chat
    * speaks, else the widget's own, never another language's; at most four distinct ones.
@@ -796,6 +835,7 @@ var JCRender = (function () {
     notice: notice, closeTargets: closeTargets,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
+    lasting: lasting, recalled: recalled, privacyLines: privacyLines,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
