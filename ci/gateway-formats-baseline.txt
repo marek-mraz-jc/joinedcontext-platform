@@ -16,4 +16,3 @@ file crates/context-gateway/src/handlers/reads.rs 585 | T-4456
 file crates/context-gateway/src/query.rs 752 | T-4479
 file crates/context-gateway/src/mcp/tools.rs 1837 | T-4480
 file crates/context-gateway/src/mcp/units.rs 121 | T-4480
-file crates/context-gateway/src/handlers/endpoint_surface.rs 1063 | T-4499

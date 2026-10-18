@@ -11,12 +11,17 @@
 //! SEMIC DCAT-AP 3.0 shapes and checks that both serialisations are one graph. The fast CI
 //! lane runs the two together; the assertions here run everywhere.
 
-use context_gateway::handlers::endpoint_surface::{dataset, dataset_turtle, feed, feed_turtle};
+use context_gateway::handlers::endpoint_surface::{dataset, feed, feed_turtle};
 use context_gateway::handlers::view_access::odrl;
-use context_gateway::resolver::{Endpoint, Model};
+use context_gateway::resolver::{Endpoint, Model, Space};
 use jc_core::kinds::{Audience, Catalog, Licence, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::Arc;
+
+/// The record as Turtle, the way the record route writes it (T-4499).
+fn dataset_turtle(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: &str) -> String {
+    jc_dcat::turtle(&dataset(endpoint, space, index, base))
+}
 
 const SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const BASE: &str = "https://data.example.org";

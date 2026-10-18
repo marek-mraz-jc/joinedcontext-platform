@@ -11,10 +11,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use context_gateway::handlers::endpoint_surface::dataset_turtle;
+use context_gateway::handlers::endpoint_surface::dataset;
 use context_gateway::resolver::{Endpoint, Space};
 use jc_core::kinds::{Audience, Representation};
 use serde_json::{json, Value};
+
+/// The record as Turtle, the way the record route writes it (T-4499).
+fn dataset_turtle(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: &str) -> String {
+    jc_dcat::turtle(&dataset(endpoint, space, index, base))
+}
 
 const SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const BASE: &str = "https://bb.example.sk";

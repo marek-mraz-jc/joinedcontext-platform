@@ -24,7 +24,7 @@ use axum::routing::get;
 use axum::Router;
 use jc_core::kinds::RateLimits;
 use jc_core::ProblemDetails;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// The largest broker answer the gateway will hold in memory. A request body is held to the
@@ -120,6 +120,9 @@ pub struct Gateway {
     /// The largest request body read, from the Organization's `spec.limits.gateway`
     /// (ADR-N-035); swapped with the tables when the repository changes.
     max_request_body: AtomicUsize,
+    /// The DCAT profiles the Organization serves its records in (T-4499), as
+    /// [`jc_dcat::profile::Offered::bits`].
+    dcat_profiles: AtomicU8,
     /// The KiB of write bodies the gateway holds at once (T-4077); see [`WRITE_BUDGET_MIB`].
     writes: Arc<tokio::sync::Semaphore>,
     /// The budget `writes` was made with, in KiB: what one write may take at most.
@@ -192,6 +195,7 @@ impl Gateway {
             hub_rate_limit: HUB_RATE_LIMIT,
             anonymous_mcp_rate_limit: ANONYMOUS_MCP_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
+            dcat_profiles: AtomicU8::new(0),
             writes: Arc::new(tokio::sync::Semaphore::new(WRITE_BUDGET_MIB * 1024)),
             write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
             write_wait: WRITE_WAIT,
@@ -504,6 +508,13 @@ impl Gateway {
     pub fn replace_limits(&self, limits: crate::store::Limits) {
         self.max_request_body
             .store(limits.max_request_body, Ordering::Relaxed);
+        self.dcat_profiles
+            .store(limits.dcat_profiles.bits(), Ordering::Relaxed);
+    }
+
+    /// The DCAT profiles the Organization serves its records in now (T-4499).
+    pub fn dcat_profiles(&self) -> jc_dcat::profile::Offered {
+        jc_dcat::profile::Offered::from_bits(self.dcat_profiles.load(Ordering::Relaxed))
     }
 
     /// The largest request body this gateway reads now, in bytes.

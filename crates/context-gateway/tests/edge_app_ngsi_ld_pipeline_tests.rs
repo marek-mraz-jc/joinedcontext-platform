@@ -219,6 +219,7 @@ async fn a_body_past_the_organizations_limit_is_400_naming_the_setting() {
     .serve([endpoint()]);
     gateway.replace_limits(context_gateway::store::Limits {
         max_request_body: 1024 * 1024,
+        ..Default::default()
     });
     let app = router(Arc::new(gateway));
 
@@ -310,7 +311,9 @@ async fn a_5xx_broker_body_never_reaches_the_caller() {
     }
 }
 
-/// A `4xx` is the caller's own request coming back, and it still says what to send instead.
+/// A `4xx` is the caller's own request coming back, and it still says what to send instead. The
+/// `q` parses, so it reaches the broker; one the parser refuses is answered at the edge
+/// (T-4479).
 #[tokio::test]
 async fn a_4xx_broker_body_still_explains_itself_to_the_caller() {
     let problem = r#"{"type":"https://uri.etsi.org/ngsi-ld/errors/BadRequestData","title":"Bad request","detail":"q: unknown operator ~~"}"#;
@@ -322,7 +325,7 @@ async fn a_4xx_broker_body_still_explains_itself_to_the_caller() {
     .await;
     let (status, _, body) = get(
         app(&broker.url),
-        &ngsi("/entities?type=AirQualityObserved&q=pm10~~1"),
+        &ngsi("/entities?type=AirQualityObserved&q=pm10%3E1"),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

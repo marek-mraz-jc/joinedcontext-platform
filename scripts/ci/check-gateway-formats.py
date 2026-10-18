@@ -36,7 +36,6 @@ FORMAT_MODULES = [
     "src/query.rs",
     "src/mcp/tools.rs",
     "src/mcp/units.rs",
-    "src/handlers/endpoint_surface.rs",
 ]
 GROWTH = 20
 

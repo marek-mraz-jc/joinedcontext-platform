@@ -91,7 +91,7 @@ pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter
 pub use mqtt_broker::{MqttBrokerSpec, MqttLimits, MqttRole};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
-    Contact, ContactRole, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
+    Contact, ContactRole, DcatProfile, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
 };
 pub use pipeline::{
     replace_conflicts, Compute, ComputeKind, Expiry, IdMint, Mint, Output, OutputMode,
