@@ -652,6 +652,15 @@ test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4
   assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
 });
 
+test("the table's labels are jc-core's field-order.json, the CKAN publisher's and theme's (T-4661)", () => {
+  const fields = require("../../jc-core/data/field-order.json");
+  const shown = table({ columns: ["startDate", "eventCategory", "url"], rows: [] }, "sk");
+  assert.deepEqual(shown.columns, ["Začiatok", "Kategória", "Odkaz"]);
+  for (const key of Object.keys(fields.labels)) {
+    assert.equal(table({ columns: [key], rows: [] }, "cs").columns[0], fields.labels[key].cs, key);
+  }
+});
+
 test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
   assert.deepEqual(markdown("| Stanica | NO₂ |\n|:---|---:|\n| **Centrum** | 12 \\| 14 |\nend"), [
     { tag: "table", children: [
