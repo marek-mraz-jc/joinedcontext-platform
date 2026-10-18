@@ -1,13 +1,13 @@
 # crate | functions with cc >= 25 | pub functions of 20+ lines no test reaches within 3 calls
 # (dev/cg-structure.py, T-4587); only ever lowered, in the commit that improves it.
 agent-proxy | 3 | 1
-assistant | 8 | 14
+assistant | 5 | 14
 context-gateway | 16 | 17
 jc-app-sdk | 0 | 1
-jc-core | 19 | 19
+jc-core | 17 | 18
 jc-dcat | 0 | 1
 jc-manifest | 5 | 0
-jcctl | 9 | 15
+jcctl | 8 | 10
 token-sidecar | 0 | 1
 wasm-host | 3 | 1
 # Workspace crate edges outside dev-dependencies; only ever removed. A new edge is red.

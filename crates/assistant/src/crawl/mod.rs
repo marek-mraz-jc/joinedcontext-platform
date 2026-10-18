@@ -8,7 +8,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use jc_core::kinds::assistant::{KnowledgeSourceSpec, PdfPolicyKind, SourceType, Visibility};
-use reqwest::header::{CONTENT_TYPE, ETAG, LAST_MODIFIED};
+use reqwest::header::{HeaderMap, CONTENT_TYPE, ETAG, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use url::Url;
@@ -160,6 +160,65 @@ struct FrontierItem {
     depth: u8,
 }
 
+/// The addresses a crawl still has to read, in order, each queued once.
+#[derive(Default)]
+struct Frontier {
+    queue: VecDeque<FrontierItem>,
+    queued: HashSet<String>,
+}
+
+impl Frontier {
+    fn push(&mut self, url: Url, parent_id: Option<i64>, depth: u8) {
+        let url = canonicalise_url(url);
+        if self.queued.insert(url.to_string()) {
+            self.queue.push_back(FrontierItem {
+                url,
+                parent_id,
+                depth,
+            });
+        }
+    }
+}
+
+/// What one crawl has queued, seen and counted so far.
+#[derive(Default)]
+struct Walk {
+    frontier: Frontier,
+    seen_documents: HashSet<String>,
+    report: CrawlReport,
+}
+
+/// The first start URL and its host; a source that is not a website, or names no usable start
+/// URL, is refused before anything is stored.
+fn start_of(source: &str, spec: &KnowledgeSourceSpec) -> Result<(Url, String), Error> {
+    if spec.source != SourceType::Website {
+        return Err(Error::Crawl(format!(
+            "source '{source}' has type {:?}, but crawl_site only supports website sources",
+            spec.source
+        )));
+    }
+    let Some(first) = spec.start_urls.first() else {
+        return Err(Error::Crawl(format!(
+            "website source '{source}' names no start URLs"
+        )));
+    };
+    let start_url = Url::parse(first)
+        .map_err(|err| Error::Crawl(format!("invalid start URL '{first}': {err}")))?;
+    let host = start_url
+        .host_str()
+        .ok_or_else(|| Error::Crawl(format!("start URL '{first}' has no host")))?
+        .to_owned();
+    Ok((start_url, host))
+}
+
+/// A response's media type, without its parameters.
+fn media_type(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or(s).trim())
+}
+
 struct ExistingRow {
     id: i64,
     content_hash: Option<String>,
@@ -177,26 +236,7 @@ pub async fn crawl_site(
     spec: &KnowledgeSourceSpec,
     sink: &mut impl Sink,
 ) -> Result<CrawlReport, Error> {
-    if spec.source != SourceType::Website {
-        return Err(Error::Crawl(format!(
-            "source '{source}' has type {:?}, but crawl_site only supports website sources",
-            spec.source
-        )));
-    }
-    if spec.start_urls.is_empty() {
-        return Err(Error::Crawl(format!(
-            "website source '{source}' names no start URLs"
-        )));
-    }
-
-    let start_url = Url::parse(&spec.start_urls[0]).map_err(|err| {
-        Error::Crawl(format!("invalid start URL '{}': {err}", spec.start_urls[0]))
-    })?;
-    let site_host = start_url
-        .host_str()
-        .ok_or_else(|| Error::Crawl(format!("start URL '{}' has no host", spec.start_urls[0])))?
-        .to_owned();
-
+    let (start_url, site_host) = start_of(source, spec)?;
     let site_id = upsert_site(pool, project, organization, source, spec.visibility).await?;
 
     let robots_url_str = match start_url.join("/robots.txt") {
@@ -241,10 +281,6 @@ pub async fn crawl_site(
     )
     .await;
 
-    let mut frontier = VecDeque::new();
-    let mut visited_urls = HashSet::new();
-    let mut seen_documents = HashSet::new();
-    let mut report = CrawlReport::default();
     let run = DocRun {
         pool,
         crawler,
@@ -254,391 +290,312 @@ pub async fn crawl_site(
         site_id,
         robots: &robots,
     };
+    let mut walk = Walk::default();
 
     for url_str in &spec.start_urls {
-        if let Ok(u) = Url::parse(url_str) {
-            let canon = canonicalise_url(u);
-            // A start address that names a document is one document of the site (T-3293),
-            // under the `pdf` policy and its bounds, not a page of its bytes.
-            if links::is_document_url(&canon) {
+        let Ok(u) = Url::parse(url_str) else {
+            continue;
+        };
+        let canon = canonicalise_url(u);
+        // A start address that names a document is one document of the site (T-3293),
+        // under the `pdf` policy and its bounds, not a page of its bytes.
+        if links::is_document_url(&canon) {
+            handle_document(
+                run,
+                None,
+                &canon,
+                &mut walk.seen_documents,
+                &mut walk.report,
+                sink,
+                false,
+            )
+            .await?;
+        } else {
+            walk.frontier.push(canon, None, 0);
+        }
+    }
+    for u in wordpress_urls.into_iter().chain(sitemap_urls) {
+        walk.frontier.push(u, None, 1);
+    }
+
+    while let Some(item) = walk.frontier.queue.pop_front() {
+        if walk.report.pages_fetched + walk.report.pages_unchanged >= spec.max_pages {
+            break;
+        }
+        if item.url.host_str() != Some(&site_host) || item.depth > spec.max_depth {
+            continue;
+        }
+        visit(run, &item, &mut walk, sink).await?;
+    }
+
+    update_site_last_crawl(pool, project, site_id).await?;
+    Ok(walk.report)
+}
+
+/// Reads one queued page of the site and records what it answered.
+async fn visit(
+    run: DocRun<'_>,
+    item: &FrontierItem,
+    walk: &mut Walk,
+    sink: &mut impl Sink,
+) -> Result<(), Error> {
+    let DocRun {
+        pool,
+        crawler,
+        spec,
+        site_host,
+        project,
+        site_id,
+        robots,
+    } = run;
+    let included = patterns::is_included(item.url.path(), &spec.include, &spec.exclude);
+
+    if !fetch::is_url_allowed(&item.url, crawler.policy.allow_plain_http) {
+        walk.report.refused += 1;
+        return run.skip(item, included).await;
+    }
+    if !robots.is_allowed(item.url.as_str()) {
+        walk.report.disallowed += 1;
+        return run.skip(item, included).await;
+    }
+
+    let existing = get_existing_page(pool, project, site_id, item.url.as_str()).await?;
+    let (stored_etag, stored_last_modified, stored_hash) = match &existing {
+        Some(e) => (
+            e.etag.as_deref(),
+            e.last_modified.as_deref(),
+            e.content_hash.as_deref(),
+        ),
+        None => (None, None, None),
+    };
+
+    let outcome = fetch::fetch_url(
+        &crawler.client,
+        &crawler.policy,
+        site_host,
+        &item.url,
+        crawler.policy.max_page_bytes,
+        stored_etag,
+        stored_last_modified,
+    )
+    .await;
+
+    match outcome {
+        fetch::FetchOutcome::Refused => {
+            walk.report.refused += 1;
+            run.skip(item, included).await
+        }
+        fetch::FetchOutcome::TooLarge => {
+            walk.report.too_large += 1;
+            run.skip(item, included).await
+        }
+        fetch::FetchOutcome::Failed(ref why) => {
+            walk.report.failed += 1;
+            run.fail(item, included, why).await
+        }
+        fetch::FetchOutcome::Status(status) => {
+            walk.report.failed += 1;
+            run.fail(item, included, &format!("HTTP {}", status.as_u16()))
+                .await
+        }
+        fetch::FetchOutcome::RedirectExternal { target_url } => {
+            if let Some(pid) = item.parent_id {
+                walk.report.links +=
+                    record_external_link(pool, project, pid, target_url.as_str()).await?;
+            }
+            run.skip(item, included).await
+        }
+        fetch::FetchOutcome::NotModified { .. } => {
+            walk.report.pages_unchanged += 1;
+            match &existing {
+                Some(e) => revisit(run, item, e.id, walk, sink).await,
+                None => Ok(()),
+            }
+        }
+        fetch::FetchOutcome::Success {
+            final_url,
+            headers,
+            body,
+            ..
+        } => {
+            let page = Read {
+                item,
+                included,
+                stored_hash,
+                final_url: &final_url,
+                headers: &headers,
+            };
+            read_page(run, page, &body, walk, sink).await
+        }
+    }
+}
+
+/// A page the server reports unchanged: its stored links are followed as if it had been read.
+async fn revisit(
+    run: DocRun<'_>,
+    item: &FrontierItem,
+    page_id: i64,
+    walk: &mut Walk,
+    sink: &mut impl Sink,
+) -> Result<(), Error> {
+    mark_page_not_modified(run.pool, run.project, page_id).await?;
+    for (to_url, kind) in get_stored_links(run.pool, run.project, page_id).await? {
+        let Ok(to_url) = Url::parse(&to_url) else {
+            continue;
+        };
+        match kind.as_str() {
+            "page" if item.depth < run.spec.max_depth => {
+                walk.frontier.push(to_url, Some(page_id), item.depth + 1);
+            }
+            "document" => {
                 handle_document(
                     run,
-                    None,
-                    &canon,
-                    &mut seen_documents,
-                    &mut report,
+                    Some(page_id),
+                    &to_url,
+                    &mut walk.seen_documents,
+                    &mut walk.report,
                     sink,
                     false,
                 )
                 .await?;
-                continue;
             }
-            let key = canon.to_string();
-            if !visited_urls.contains(&key) {
-                visited_urls.insert(key);
-                frontier.push_back(FrontierItem {
-                    url: canon,
-                    parent_id: None,
-                    depth: 0,
-                });
-            }
+            _ => {}
         }
     }
+    Ok(())
+}
 
-    for u in wordpress_urls.into_iter().chain(sitemap_urls) {
-        let canon = canonicalise_url(u);
-        let key = canon.to_string();
-        if !visited_urls.contains(&key) {
-            visited_urls.insert(key);
-            frontier.push_back(FrontierItem {
-                url: canon,
-                parent_id: None,
-                depth: 1,
-            });
-        }
-    }
+/// A page the server answered with content, and what the crawl knew of it before.
+struct Read<'a> {
+    item: &'a FrontierItem,
+    included: bool,
+    stored_hash: Option<&'a str>,
+    final_url: &'a Url,
+    headers: &'a HeaderMap,
+}
 
-    while let Some(item) = frontier.pop_front() {
-        if report.pages_fetched + report.pages_unchanged >= spec.max_pages {
-            break;
-        }
-        if item.url.host_str() != Some(&site_host) {
-            continue;
-        }
-        if item.depth > spec.max_depth {
-            continue;
-        }
-
-        let is_page_included = patterns::is_included(item.url.path(), &spec.include, &spec.exclude);
-
-        if !fetch::is_url_allowed(&item.url, crawler.policy.allow_plain_http) {
-            report.refused += 1;
-            record_skipped_page(
-                pool,
-                project,
-                site_id,
-                item.url.as_str(),
-                item.parent_id,
-                item.depth as i16,
-                is_page_included,
-            )
-            .await?;
-            continue;
-        }
-
-        if !robots.is_allowed(item.url.as_str()) {
-            report.disallowed += 1;
-            record_skipped_page(
-                pool,
-                project,
-                site_id,
-                item.url.as_str(),
-                item.parent_id,
-                item.depth as i16,
-                is_page_included,
-            )
-            .await?;
-            continue;
-        }
-
-        let existing = get_existing_page(pool, project, site_id, item.url.as_str()).await?;
-        let (stored_etag, stored_last_modified, stored_hash) = match &existing {
-            Some(e) => (
-                e.etag.as_deref(),
-                e.last_modified.as_deref(),
-                e.content_hash.as_deref(),
-            ),
-            None => (None, None, None),
-        };
-
-        let outcome = fetch::fetch_url(
-            &crawler.client,
-            &crawler.policy,
-            &site_host,
-            &item.url,
-            crawler.policy.max_page_bytes,
-            stored_etag,
-            stored_last_modified,
+/// Stores a page that answered, hands it to `sink` when new or changed, and queues its links.
+async fn read_page(
+    run: DocRun<'_>,
+    page: Read<'_>,
+    body: &[u8],
+    walk: &mut Walk,
+    sink: &mut impl Sink,
+) -> Result<(), Error> {
+    let Read {
+        item,
+        included,
+        stored_hash,
+        final_url,
+        headers,
+    } = page;
+    // An address without a document's name that answers with a document's type
+    // is read as that document, fetched again under the `pdf` bounds (T-3293).
+    // ponytail: one extra fetch per such address; pass the body on if they turn common.
+    if let Some(mime) = media_type(headers).filter(|m| links::is_document_type(m)) {
+        let pdf = mime.eq_ignore_ascii_case("application/pdf");
+        return handle_document(
+            run,
+            item.parent_id,
+            final_url,
+            &mut walk.seen_documents,
+            &mut walk.report,
+            sink,
+            pdf,
         )
         .await;
-
-        match outcome {
-            fetch::FetchOutcome::Refused => {
-                report.refused += 1;
-                record_skipped_page(
-                    pool,
-                    project,
-                    site_id,
-                    item.url.as_str(),
-                    item.parent_id,
-                    item.depth as i16,
-                    is_page_included,
-                )
-                .await?;
-            }
-            fetch::FetchOutcome::TooLarge => {
-                report.too_large += 1;
-                record_skipped_page(
-                    pool,
-                    project,
-                    site_id,
-                    item.url.as_str(),
-                    item.parent_id,
-                    item.depth as i16,
-                    is_page_included,
-                )
-                .await?;
-            }
-            fetch::FetchOutcome::Failed(ref why) => {
-                report.failed += 1;
-                record_failed_page(
-                    pool,
-                    project,
-                    site_id,
-                    item.url.as_str(),
-                    item.parent_id,
-                    item.depth as i16,
-                    is_page_included,
-                    why,
-                )
-                .await?;
-            }
-            fetch::FetchOutcome::Status(status) => {
-                report.failed += 1;
-                record_failed_page(
-                    pool,
-                    project,
-                    site_id,
-                    item.url.as_str(),
-                    item.parent_id,
-                    item.depth as i16,
-                    is_page_included,
-                    &format!("HTTP {}", status.as_u16()),
-                )
-                .await?;
-            }
-            fetch::FetchOutcome::RedirectExternal { target_url } => {
-                if let Some(pid) = item.parent_id {
-                    let mut tx = crate::project_scope(pool, project).await?;
-                    let res = sqlx::query(
-                        "INSERT INTO links (from_page, project, to_url, kind) \
-                         VALUES ($1, $2, $3, 'external') \
-                         ON CONFLICT (from_page, to_url) DO NOTHING",
-                    )
-                    .bind(pid)
-                    .bind(project)
-                    .bind(target_url.as_str())
-                    .execute(&mut *tx)
-                    .await?;
-                    tx.commit().await?;
-                    if res.rows_affected() > 0 {
-                        report.links += 1;
-                    }
-                }
-                record_skipped_page(
-                    pool,
-                    project,
-                    site_id,
-                    item.url.as_str(),
-                    item.parent_id,
-                    item.depth as i16,
-                    is_page_included,
-                )
-                .await?;
-            }
-            fetch::FetchOutcome::NotModified { .. } => {
-                report.pages_unchanged += 1;
-                if let Some(e) = &existing {
-                    mark_page_not_modified(pool, project, e.id).await?;
-                    let stored_links = get_stored_links(pool, project, e.id).await?;
-                    for (to_url_str, kind_str) in stored_links {
-                        if let Ok(to_url) = Url::parse(&to_url_str) {
-                            match kind_str.as_str() {
-                                "page" => {
-                                    if item.depth < spec.max_depth {
-                                        let canon = canonicalise_url(to_url);
-                                        let key = canon.to_string();
-                                        if !visited_urls.contains(&key) {
-                                            visited_urls.insert(key);
-                                            frontier.push_back(FrontierItem {
-                                                url: canon,
-                                                parent_id: Some(e.id),
-                                                depth: item.depth + 1,
-                                            });
-                                        }
-                                    }
-                                }
-                                "document" => {
-                                    handle_document(
-                                        DocRun {
-                                            pool,
-                                            crawler,
-                                            spec,
-                                            site_host: &site_host,
-                                            project,
-                                            site_id,
-                                            robots: &robots,
-                                        },
-                                        Some(e.id),
-                                        &to_url,
-                                        &mut seen_documents,
-                                        &mut report,
-                                        sink,
-                                        false,
-                                    )
-                                    .await?;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-            fetch::FetchOutcome::Success {
-                final_url,
-                headers,
-                body,
-                ..
-            } => {
-                // An address without a document's name that answers with a document's type
-                // is read as that document, fetched again under the `pdf` bounds (T-3293).
-                // ponytail: one extra fetch per such address; pass the body on if they turn common.
-                let mime = headers
-                    .get(CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.split(';').next().unwrap_or(s).trim());
-                if let Some(mime) = mime.filter(|m| links::is_document_type(m)) {
-                    let pdf = mime.eq_ignore_ascii_case("application/pdf");
-                    handle_document(
-                        run,
-                        item.parent_id,
-                        &final_url,
-                        &mut seen_documents,
-                        &mut report,
-                        sink,
-                        pdf,
-                    )
-                    .await?;
-                    continue;
-                }
-                let body_str = String::from_utf8_lossy(&body);
-                let hash = hex::encode(Sha256::digest(&body));
-                let language = links::extract_language(&body_str);
-                let etag = headers.get(ETAG).and_then(|v| v.to_str().ok());
-                let last_modified = headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok());
-
-                let is_unchanged = stored_hash == Some(&hash);
-                let page_id = if is_unchanged {
-                    report.pages_unchanged += 1;
-                    upsert_page_fetched(
-                        pool,
-                        project,
-                        site_id,
-                        PagePlace {
-                            url: final_url.as_str(),
-                            parent_id: item.parent_id,
-                            depth: item.depth as i16,
-                        },
-                        language.as_deref(),
-                        is_page_included,
-                        Validators {
-                            hash: &hash,
-                            etag,
-                            last_modified,
-                        },
-                    )
-                    .await?
-                } else {
-                    report.pages_fetched += 1;
-                    let pid = upsert_page_fetched(
-                        pool,
-                        project,
-                        site_id,
-                        PagePlace {
-                            url: final_url.as_str(),
-                            parent_id: item.parent_id,
-                            depth: item.depth as i16,
-                        },
-                        language.as_deref(),
-                        is_page_included,
-                        Validators {
-                            hash: &hash,
-                            etag,
-                            last_modified,
-                        },
-                    )
-                    .await?;
-                    if is_page_included {
-                        sink.page(pid, final_url.as_str(), language.as_deref(), &body_str)
-                            .await;
-                    }
-                    pid
-                };
-
-                let extracted = links::extract_links(&final_url, &body_str, &site_host);
-                let inserted_links = record_links(pool, project, page_id, &extracted).await?;
-                report.links += inserted_links;
-
-                for link in extracted {
-                    if !fetch::is_url_allowed(&link.url, crawler.policy.allow_plain_http) {
-                        report.refused += 1;
-                        record_skipped_page(
-                            pool,
-                            project,
-                            site_id,
-                            link.url.as_str(),
-                            Some(page_id),
-                            (item.depth + 1) as i16,
-                            false,
-                        )
-                        .await?;
-                        continue;
-                    }
-
-                    match link.kind {
-                        links::LinkKind::Page => {
-                            if item.depth < spec.max_depth {
-                                let canon = canonicalise_url(link.url);
-                                let key = canon.to_string();
-                                if !visited_urls.contains(&key) {
-                                    visited_urls.insert(key);
-                                    frontier.push_back(FrontierItem {
-                                        url: canon,
-                                        parent_id: Some(page_id),
-                                        depth: item.depth + 1,
-                                    });
-                                }
-                            }
-                        }
-                        links::LinkKind::Document => {
-                            handle_document(
-                                DocRun {
-                                    pool,
-                                    crawler,
-                                    spec,
-                                    site_host: &site_host,
-                                    project,
-                                    site_id,
-                                    robots: &robots,
-                                },
-                                Some(page_id),
-                                &link.url,
-                                &mut seen_documents,
-                                &mut report,
-                                sink,
-                                false,
-                            )
-                            .await?;
-                        }
-                        links::LinkKind::External => {}
-                    }
-                }
-            }
+    }
+    let body_str = String::from_utf8_lossy(body);
+    let hash = hex::encode(Sha256::digest(body));
+    let language = links::extract_language(&body_str);
+    let page_id = upsert_page_fetched(
+        run.pool,
+        run.project,
+        run.site_id,
+        PagePlace {
+            url: final_url.as_str(),
+            parent_id: item.parent_id,
+            depth: item.depth as i16,
+        },
+        language.as_deref(),
+        included,
+        Validators {
+            hash: &hash,
+            etag: headers.get(ETAG).and_then(|v| v.to_str().ok()),
+            last_modified: headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok()),
+        },
+    )
+    .await?;
+    if stored_hash == Some(hash.as_str()) {
+        walk.report.pages_unchanged += 1;
+    } else {
+        walk.report.pages_fetched += 1;
+        if included {
+            sink.page(page_id, final_url.as_str(), language.as_deref(), &body_str)
+                .await;
         }
     }
 
-    update_site_last_crawl(pool, project, site_id).await?;
-    Ok(report)
+    let extracted = links::extract_links(final_url, &body_str, run.site_host);
+    walk.report.links += record_links(run.pool, run.project, page_id, &extracted).await?;
+
+    for link in extracted {
+        if !fetch::is_url_allowed(&link.url, run.crawler.policy.allow_plain_http) {
+            walk.report.refused += 1;
+            record_skipped_page(
+                run.pool,
+                run.project,
+                run.site_id,
+                link.url.as_str(),
+                Some(page_id),
+                (item.depth + 1) as i16,
+                false,
+            )
+            .await?;
+            continue;
+        }
+        match link.kind {
+            links::LinkKind::Page if item.depth < run.spec.max_depth => {
+                walk.frontier.push(link.url, Some(page_id), item.depth + 1);
+            }
+            links::LinkKind::Document => {
+                handle_document(
+                    run,
+                    Some(page_id),
+                    &link.url,
+                    &mut walk.seen_documents,
+                    &mut walk.report,
+                    sink,
+                    false,
+                )
+                .await?;
+            }
+            links::LinkKind::Page | links::LinkKind::External => {}
+        }
+    }
+    Ok(())
+}
+
+/// Records a redirect off the site as an external link of the page that linked it; 1 when new.
+async fn record_external_link(
+    pool: &PgPool,
+    project: &str,
+    from_page: i64,
+    to_url: &str,
+) -> Result<u32, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let res = sqlx::query(
+        "INSERT INTO links (from_page, project, to_url, kind) \
+         VALUES ($1, $2, $3, 'external') \
+         ON CONFLICT (from_page, to_url) DO NOTHING",
+    )
+    .bind(from_page)
+    .bind(project)
+    .bind(to_url)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(u32::from(res.rows_affected() > 0))
 }
 
 /// What every document of one crawl shares: where it is stored and what governs it.
@@ -651,6 +608,39 @@ struct DocRun<'a> {
     project: &'a str,
     site_id: i64,
     robots: &'a robots::Robots,
+}
+
+impl DocRun<'_> {
+    /// Records a queued page that was not read.
+    async fn skip(self, item: &FrontierItem, included: bool) -> Result<(), Error> {
+        record_skipped_page(
+            self.pool,
+            self.project,
+            self.site_id,
+            item.url.as_str(),
+            item.parent_id,
+            item.depth as i16,
+            included,
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Records a queued page whose read failed, and why.
+    async fn fail(self, item: &FrontierItem, included: bool, why: &str) -> Result<(), Error> {
+        record_failed_page(
+            self.pool,
+            self.project,
+            self.site_id,
+            item.url.as_str(),
+            item.parent_id,
+            item.depth as i16,
+            included,
+            why,
+        )
+        .await
+        .map(drop)
+    }
 }
 
 async fn handle_document(
@@ -1264,4 +1254,92 @@ async fn mark_doc_not_modified(pool: &PgPool, project: &str, doc_id: i64) -> Res
         .await?;
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jc_core::kinds::assistant::PdfPolicy;
+
+    fn website(start_urls: &[&str]) -> KnowledgeSourceSpec {
+        KnowledgeSourceSpec {
+            source: SourceType::Website,
+            start_urls: start_urls.iter().map(|u| (*u).to_owned()).collect(),
+            ckan_instance_ref: None,
+            context_spaces: Vec::new(),
+            organizations: Vec::new(),
+            upload: None,
+            sitemap: true,
+            wordpress_types: vec![],
+            include: Vec::new(),
+            exclude: Vec::new(),
+            max_depth: 3,
+            max_pages: 100,
+            pdf: PdfPolicy::default(),
+            off_domain_documents: false,
+            schedule: None,
+            languages: Vec::new(),
+            visibility: Visibility::Public,
+        }
+    }
+
+    fn refusal(source: &str, spec: &KnowledgeSourceSpec) -> String {
+        match start_of(source, spec) {
+            Err(Error::Crawl(why)) => why,
+            other => panic!("expected a crawl refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_first_start_url_names_the_site() {
+        let spec = website(&["https://www.city.test:443/a#top", "https://other.test/"]);
+        let (url, host) = start_of("city", &spec).expect("a website with a start URL");
+        assert_eq!(url.as_str(), "https://www.city.test/a#top");
+        assert_eq!(host, "www.city.test");
+    }
+
+    #[test]
+    fn a_source_without_a_usable_start_url_is_refused_by_name() {
+        assert!(refusal("city", &website(&[])).contains("'city' names no start URLs"));
+        assert!(refusal("city", &website(&["not a url"])).contains("invalid start URL 'not a url'"));
+        assert!(refusal("city", &website(&["mailto:a@b.test"])).contains("has no host"));
+        let mut ckan = website(&["https://www.city.test/"]);
+        ckan.source = SourceType::Ckan;
+        assert!(refusal("city", &ckan).contains("only supports website sources"));
+    }
+
+    #[test]
+    fn the_frontier_queues_an_address_once_whatever_its_fragment_or_default_port() {
+        let mut frontier = Frontier::default();
+        let url = |s: &str| Url::parse(s).expect("a test URL");
+        frontier.push(url("https://www.city.test/a"), None, 0);
+        frontier.push(url("https://www.city.test:443/a#section"), Some(7), 1);
+        frontier.push(url("http://www.city.test:80/b"), Some(7), 2);
+        frontier.push(url("http://www.city.test/b"), None, 0);
+        let queued: Vec<_> = frontier
+            .queue
+            .iter()
+            .map(|i| (i.url.as_str(), i.parent_id, i.depth))
+            .collect();
+        assert_eq!(
+            queued,
+            [
+                ("https://www.city.test/a", None, 0),
+                ("http://www.city.test/b", Some(7), 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_media_type_drops_its_parameters_and_a_missing_header_is_none() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(media_type(&headers), None);
+        headers.insert(
+            CONTENT_TYPE,
+            "application/PDF ; name=x".parse().expect("a header"),
+        );
+        assert_eq!(media_type(&headers), Some("application/PDF"));
+        headers.insert(CONTENT_TYPE, "text/html".parse().expect("a header"));
+        assert_eq!(media_type(&headers), Some("text/html"));
+    }
 }

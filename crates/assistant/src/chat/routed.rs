@@ -1193,27 +1193,8 @@ pub async fn answer(
     let started = Instant::now();
     let now = super::clock::now_line(ask.now, ask.zone);
     let mut spent = Spent::default();
-    let within = |spent: &Spent, messages: &[Value], out: u64| {
-        ask.spent_before + spent.total + tokens_of(messages) + out <= ask.tokens_per_conversation
-    };
 
-    // A first question asked before is answered from the cache; a follow-up depends on its turns.
-    let key = if history.is_empty() {
-        match digest(ask).await {
-            // The local day is part of the key, so an answer about "today" is not kept past it.
-            Ok(digest) => Some(AnswerCache::key(
-                ask.deployment,
-                question,
-                &format!("{digest}@{}", local_day(ask)),
-            )),
-            Err(why) => {
-                tracing::warn!(deployment = %ask.deployment, %why, "the index digest failed; no cache");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let key = cache_key(ask, history, question).await;
     if let Some((text, citations)) = key.as_ref().and_then(|k| ask.cache.get(k)) {
         spent.cached = true;
         spent.first_token_ms = Some(started.elapsed().as_millis() as u64);
@@ -1235,8 +1216,16 @@ pub async fn answer(
     };
     let (live, missing) = live(ask).await;
     let languages = languages(ask).await;
+    let q = Question {
+        ask,
+        history,
+        question,
+        events,
+        languages: &languages,
+        now: &now,
+    };
     let messages = router_messages(history, question, &live, &languages, &now);
-    if !within(&spent, &messages, ROUTER_TOKENS) {
+    if !within(ask, &spent, &messages, ROUTER_TOKENS) {
         send(events, conversation_spent()).await;
         return spent;
     }
@@ -1253,64 +1242,13 @@ pub async fn answer(
             .await;
         (reply, at.elapsed())
     };
-    let first = async {
-        let at = Instant::now();
-        let hits = searched(ask, events, question).await;
-        let search = at.elapsed();
-        let judged = match &hits {
-            // Passages both rankings put at the top answer as they are: no judgement to wait for.
-            Some(hits) if covers(hits) => None,
-            Some(hits) if !hits.is_empty() && !events.is_closed() => {
-                let asked = [question.to_owned()];
-                let messages = follow_messages(
-                    history,
-                    question,
-                    &asked,
-                    &languages,
-                    &top(hits, ANSWER_PASSAGES),
-                    &now,
-                );
-                if within(&spent, &messages, reserve + ROUTER_TOKENS) {
-                    let at = Instant::now();
-                    let reply = ask
-                        .model
-                        .ask(ask.deployment, ask.tokens_per_day, &judge, &messages)
-                        .await;
-                    Some((reply, at.elapsed()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        (hits, search, judged)
-    };
-    let ((routed, route_took), (first_hits, first_took, judged)) = tokio::join!(route, first);
+    let ((routed, route_took), (first_hits, first_took, judged)) =
+        tokio::join!(route, search_first(q, &spent, &judge, reserve));
     spent.stages.route = Some(millis(route_took));
     spent.stages.search = Some(millis(first_took));
-    let mut covered = first_hits.as_deref().is_some_and(covers);
-    spent.stages.judge_skipped = covered;
-    let mut more = Vec::new();
-    if let Some((reply, took)) = judged {
-        spent.stages.judge = Some(millis(took));
-        match reply {
-            Ok(reply) => {
-                count(&mut spent, &reply);
-                spent.served(Stage::Judge, &reply);
-                let seen = HashSet::from([question.to_lowercase()]);
-                // `Stop` answers with what is found, as after any round: the router's queries
-                // are added, and nothing more is judged.
-                match verdict(&reply.text, &seen) {
-                    Verdict::Answers | Verdict::Stop => covered = true,
-                    Verdict::More(next) => more = next,
-                }
-            }
-            // The router's rounds still run; only the early judgement is lost.
-            Err(err) => {
-                tracing::warn!(deployment = %ask.deployment, %err, "the first round's judgement failed")
-            }
-        }
-    }
+    let first_covers = first_hits.as_deref().is_some_and(covers);
+    spent.stages.judge_skipped = first_covers;
+    let (judged_answers, more) = first_judgement(ask.deployment, &mut spent, judged, question);
     let routing = match routed {
         Ok(reply) => {
             count(&mut spent, &reply);
@@ -1326,141 +1264,18 @@ pub async fn answer(
         }
     };
 
-    let mut tables: Vec<Table> = Vec::new();
-    for wanted in &routing.reads {
-        let (endpoint, kind) = (&wanted.endpoint, &wanted.kind);
-        let Some(connector) = ask.connectors.iter().find(|c| &c.endpoint == endpoint) else {
-            continue;
-        };
-        if events.is_closed() {
-            return spent;
-        }
-        let tool = |status| Event::Tool {
-            name: "query_entities".into(),
-            endpoint: Some(endpoint.clone()),
-            status,
-        };
-        send(events, stage("reading", Some(kind.to_string()))).await;
-        send(events, tool("started")).await;
-        match read(ask, connector, wanted).await {
-            Ok(table) => {
-                send(events, tool("done")).await;
-                if !table.rows.is_empty() {
-                    send(events, Event::Data(table.clone())).await;
-                    tables.push(table);
-                }
-            }
-            Err(why) => {
-                tracing::warn!(deployment = %ask.deployment, %endpoint, %why, "a data read failed");
-                send(events, tool("failed")).await;
-            }
-        }
+    let Some(tables) = read_tables(ask, &routing, events).await else {
+        return spent;
+    };
+    let (mut found, pending) =
+        first_round(&routing, tables.is_empty(), first_hits, question, &more);
+    let covered = first_covers || judged_answers;
+    if !search_rounds(q, &mut spent, &judge, &mut found, pending, covered).await {
+        return spent;
     }
 
-    let mut found: Vec<Hit> = Vec::new();
-    let mut asked: Vec<String> = Vec::new();
-    let mut rounds = 0;
-    // A data question whose rows came back needs no search, and the first round's passages are
-    // left out of its answer; one whose read failed is searched.
-    let mut pending = Vec::new();
-    if routing.rag || tables.is_empty() {
-        if let Some(hits) = first_hits {
-            merge(&mut found, hits);
-            asked.push(question.to_owned());
-            rounds = 1;
-        }
-        pending = new_queries(&asked, routing.queries.iter().chain(&more));
-    }
-    while rounds < MAX_ROUNDS && !pending.is_empty() {
-        rounds += 1;
-        for query in pending.drain(..) {
-            if events.is_closed() {
-                return spent;
-            }
-            let at = Instant::now();
-            if let Some(hits) = searched(ask, events, &query).await {
-                merge(&mut found, hits);
-            }
-            Stages::add(&mut spent.stages.search, at);
-            asked.push(query);
-        }
-        // A first round that answers needs only what the router adds to it; the last round is
-        // never judged.
-        if covered || rounds == MAX_ROUNDS {
-            break;
-        }
-        // One more round only when the passages found do not answer the question, judged on
-        // their text before the answer call (T-4259).
-        let messages = follow_messages(
-            history,
-            question,
-            &asked,
-            &languages,
-            &top(&found, ANSWER_PASSAGES),
-            &now,
-        );
-        if !within(&spent, &messages, ROUTER_TOKENS) {
-            break;
-        }
-        let at = Instant::now();
-        let reply = ask
-            .model
-            .ask(ask.deployment, ask.tokens_per_day, &judge, &messages)
-            .await;
-        Stages::add(&mut spent.stages.judge, at);
-        match reply {
-            Ok(reply) => {
-                count(&mut spent, &reply);
-                spent.served(Stage::Judge, &reply);
-                let seen: HashSet<String> = asked.iter().map(|q| q.to_lowercase()).collect();
-                match verdict(&reply.text, &seen) {
-                    Verdict::More(next) => pending = next,
-                    Verdict::Answers | Verdict::Stop => break,
-                }
-            }
-            // The rounds so far still answer; only the follow-up is lost.
-            Err(err) => {
-                tracing::warn!(deployment = %ask.deployment, %err, "the follow-up router call failed")
-            }
-        }
-    }
-
-    let best = top(&found, ANSWER_PASSAGES);
-    let mut citations: Vec<Citation> = Vec::new();
-    let mut passages = Vec::new();
-    for (at, hit) in best.iter().enumerate() {
-        let n = at + 1;
-        citations.push(Citation {
-            n,
-            url: Some(hit.url.clone()),
-            tool: None,
-            endpoint: None,
-            title: None,
-            cards: super::cards::of(&hit.text),
-        });
-        passages.push(json!({"n": n, "url": hit.url, "text": hit.text}));
-    }
-    let mut data = Vec::new();
-    for table in &tables {
-        let n = citations.len() + 1;
-        citations.push(Citation {
-            n,
-            url: table.dataset.clone(),
-            tool: Some("query_entities".into()),
-            endpoint: Some(table.endpoint.clone()),
-            title: None,
-            cards: Vec::new(),
-        });
-        data.push(json!({
-            "n": n,
-            "type": table.entity_type,
-            "columns": table.columns,
-            "rows": &table.rows[..table.rows.len().min(MODEL_ROWS)],
-            "rowCount": table.rows.len(),
-            "total": table.total,
-            "endpointUrl": table.download,
-        }));
-    }
+    let best = top(&found.hits, ANSWER_PASSAGES);
+    let (citations, passages, data) = evidence(&best, &tables);
     let mut more = if routing.data {
         super::data::DATA_RULES.to_owned()
     } else {
@@ -1476,7 +1291,7 @@ pub async fn answer(
         &passages,
         &data,
     );
-    if !within(&spent, &messages, ask.output_tokens) {
+    if !within(ask, &spent, &messages, ask.output_tokens) {
         send(events, conversation_spent()).await;
         return spent;
     }
@@ -1500,6 +1315,355 @@ pub async fn answer(
         }
         return spent;
     }
+    let answering = Answering {
+        messages,
+        citations,
+        key,
+        keep: tables.is_empty(),
+        log: Log {
+            rag: routing.rag,
+            data: routing.data,
+            rounds: found.rounds,
+            reads: tables.len(),
+            searches: found.asked.len(),
+            passages: best.len(),
+        },
+        followups: routing.followups,
+        started,
+    };
+    stream_answer(q, spent, answering).await
+}
+
+/// What every step of one routed answer reads: the question, its turns and the stream.
+#[derive(Clone, Copy)]
+struct Question<'a, 'b> {
+    ask: &'a Ask<'b>,
+    history: &'a [Turn],
+    question: &'a str,
+    events: &'a Sender<Event>,
+    languages: &'a [String],
+    now: &'a str,
+}
+
+/// Whether a call that writes `out` tokens after `messages` stays inside the conversation's
+/// budget.
+fn within(ask: &Ask<'_>, spent: &Spent, messages: &[Value], out: u64) -> bool {
+    ask.spent_before + spent.total + tokens_of(messages) + out <= ask.tokens_per_conversation
+}
+
+/// A first question's cache key; a follow-up depends on its turns and has none.
+async fn cache_key(ask: &Ask<'_>, history: &[Turn], question: &str) -> Option<[u8; 32]> {
+    if !history.is_empty() {
+        return None;
+    }
+    match digest(ask).await {
+        // The local day is part of the key, so an answer about "today" is not kept past it.
+        Ok(digest) => Some(AnswerCache::key(
+            ask.deployment,
+            question,
+            &format!("{digest}@{}", local_day(ask)),
+        )),
+        Err(why) => {
+            tracing::warn!(deployment = %ask.deployment, %why, "the index digest failed; no cache");
+            None
+        }
+    }
+}
+
+/// A judge call's reply and how long it took.
+type Judged = Option<(Result<Completion, CallError>, Duration)>;
+
+/// The question searched as asked, and its passages judged unless both rankings agree on them.
+async fn search_first(
+    q: Question<'_, '_>,
+    spent: &Spent,
+    judge: &Call<'_>,
+    reserve: u64,
+) -> (Option<Vec<Hit>>, Duration, Judged) {
+    let at = Instant::now();
+    let hits = searched(q.ask, q.events, q.question).await;
+    let search = at.elapsed();
+    let judged = match &hits {
+        // Passages both rankings put at the top answer as they are: no judgement to wait for.
+        Some(hits) if covers(hits) => None,
+        Some(hits) if !hits.is_empty() && !q.events.is_closed() => {
+            let asked = [q.question.to_owned()];
+            let messages = follow_messages(
+                q.history,
+                q.question,
+                &asked,
+                q.languages,
+                &top(hits, ANSWER_PASSAGES),
+                q.now,
+            );
+            if within(q.ask, spent, &messages, reserve + ROUTER_TOKENS) {
+                let at = Instant::now();
+                let reply = q
+                    .ask
+                    .model
+                    .ask(q.ask.deployment, q.ask.tokens_per_day, judge, &messages)
+                    .await;
+                Some((reply, at.elapsed()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    (hits, search, judged)
+}
+
+/// What the first round's judgement says: whether the passages answer, and the queries it asks
+/// for next. A failed judgement says neither; the router's rounds still run.
+fn first_judgement(
+    deployment: &str,
+    spent: &mut Spent,
+    judged: Judged,
+    question: &str,
+) -> (bool, Vec<String>) {
+    let Some((reply, took)) = judged else {
+        return (false, Vec::new());
+    };
+    spent.stages.judge = Some(millis(took));
+    match reply {
+        Ok(reply) => {
+            count(spent, &reply);
+            spent.served(Stage::Judge, &reply);
+            let seen = HashSet::from([question.to_lowercase()]);
+            // `Stop` answers with what is found, as after any round: the router's queries
+            // are added, and nothing more is judged.
+            match verdict(&reply.text, &seen) {
+                Verdict::Answers | Verdict::Stop => (true, Vec::new()),
+                Verdict::More(next) => (false, next),
+            }
+        }
+        Err(err) => {
+            tracing::warn!(deployment = %deployment, %err, "the first round's judgement failed");
+            (false, Vec::new())
+        }
+    }
+}
+
+/// The routed reads, each streamed as it arrives; a failed or empty read adds no table. `None`
+/// once the client is gone.
+async fn read_tables(
+    ask: &Ask<'_>,
+    routing: &Routing,
+    events: &Sender<Event>,
+) -> Option<Vec<Table>> {
+    let mut tables: Vec<Table> = Vec::new();
+    for wanted in &routing.reads {
+        let (endpoint, kind) = (&wanted.endpoint, &wanted.kind);
+        let Some(connector) = ask.connectors.iter().find(|c| &c.endpoint == endpoint) else {
+            continue;
+        };
+        if events.is_closed() {
+            return None;
+        }
+        let tool = |status| Event::Tool {
+            name: "query_entities".into(),
+            endpoint: Some(endpoint.clone()),
+            status,
+        };
+        send(events, stage("reading", Some(kind.to_string()))).await;
+        send(events, tool("started")).await;
+        match read(ask, connector, wanted).await {
+            Ok(table) => {
+                send(events, tool("done")).await;
+                if !table.rows.is_empty() {
+                    send(events, Event::Data(table.clone())).await;
+                    tables.push(table);
+                }
+            }
+            Err(why) => {
+                tracing::warn!(deployment = %ask.deployment, %endpoint, %why, "a data read failed");
+                send(events, tool("failed")).await;
+            }
+        }
+    }
+    Some(tables)
+}
+
+/// The passages found so far, the queries searched and the rounds run.
+#[derive(Debug, Default)]
+struct Found {
+    hits: Vec<Hit>,
+    asked: Vec<String>,
+    rounds: usize,
+}
+
+/// What the search rounds start from. A data question whose rows came back needs no search, and
+/// the first round's passages are left out of its answer; one whose read failed is searched,
+/// with the router's and the judge's queries not asked yet.
+fn first_round(
+    routing: &Routing,
+    no_tables: bool,
+    first_hits: Option<Vec<Hit>>,
+    question: &str,
+    more: &[String],
+) -> (Found, Vec<String>) {
+    let mut found = Found::default();
+    if !routing.rag && !no_tables {
+        return (found, Vec::new());
+    }
+    if let Some(hits) = first_hits {
+        merge(&mut found.hits, hits);
+        found.asked.push(question.to_owned());
+        found.rounds = 1;
+    }
+    let pending = new_queries(&found.asked, routing.queries.iter().chain(more));
+    (found, pending)
+}
+
+/// Searches the pending queries for up to [`MAX_ROUNDS`] rounds. After each round but the last
+/// it asks the judge whether the passages answer, unless the first round already covered the
+/// question. Returns false once the client is gone.
+async fn search_rounds(
+    q: Question<'_, '_>,
+    spent: &mut Spent,
+    judge: &Call<'_>,
+    found: &mut Found,
+    mut pending: Vec<String>,
+    covered: bool,
+) -> bool {
+    while found.rounds < MAX_ROUNDS && !pending.is_empty() {
+        found.rounds += 1;
+        for query in pending.drain(..) {
+            if q.events.is_closed() {
+                return false;
+            }
+            let at = Instant::now();
+            if let Some(hits) = searched(q.ask, q.events, &query).await {
+                merge(&mut found.hits, hits);
+            }
+            Stages::add(&mut spent.stages.search, at);
+            found.asked.push(query);
+        }
+        // A first round that answers needs only what the router adds to it; the last round is
+        // never judged.
+        if covered || found.rounds == MAX_ROUNDS {
+            break;
+        }
+        // One more round only when the passages found do not answer the question, judged on
+        // their text before the answer call (T-4259).
+        let messages = follow_messages(
+            q.history,
+            q.question,
+            &found.asked,
+            q.languages,
+            &top(&found.hits, ANSWER_PASSAGES),
+            q.now,
+        );
+        if !within(q.ask, spent, &messages, ROUTER_TOKENS) {
+            break;
+        }
+        let at = Instant::now();
+        let reply = q
+            .ask
+            .model
+            .ask(q.ask.deployment, q.ask.tokens_per_day, judge, &messages)
+            .await;
+        Stages::add(&mut spent.stages.judge, at);
+        match reply {
+            Ok(reply) => {
+                count(spent, &reply);
+                spent.served(Stage::Judge, &reply);
+                let seen: HashSet<String> = found.asked.iter().map(|q| q.to_lowercase()).collect();
+                match verdict(&reply.text, &seen) {
+                    Verdict::More(next) => pending = next,
+                    Verdict::Answers | Verdict::Stop => break,
+                }
+            }
+            // The rounds so far still answer; only the follow-up is lost.
+            Err(err) => {
+                tracing::warn!(deployment = %q.ask.deployment, %err, "the follow-up router call failed")
+            }
+        }
+    }
+    true
+}
+
+/// The best passages, then the tables, numbered from 1 in that order: their citations, and the
+/// passages and tables as the answer call reads them (at most [`MODEL_ROWS`] rows each).
+fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<Value>) {
+    let mut citations: Vec<Citation> = Vec::new();
+    let mut passages = Vec::new();
+    for (at, hit) in best.iter().enumerate() {
+        let n = at + 1;
+        citations.push(Citation {
+            n,
+            url: Some(hit.url.clone()),
+            tool: None,
+            endpoint: None,
+            title: None,
+            cards: super::cards::of(&hit.text),
+        });
+        passages.push(json!({"n": n, "url": hit.url, "text": hit.text}));
+    }
+    let mut data = Vec::new();
+    for table in tables {
+        let n = citations.len() + 1;
+        citations.push(Citation {
+            n,
+            url: table.dataset.clone(),
+            tool: Some("query_entities".into()),
+            endpoint: Some(table.endpoint.clone()),
+            title: None,
+            cards: Vec::new(),
+        });
+        data.push(json!({
+            "n": n,
+            "type": table.entity_type,
+            "columns": table.columns,
+            "rows": &table.rows[..table.rows.len().min(MODEL_ROWS)],
+            "rowCount": table.rows.len(),
+            "total": table.total,
+            "endpointUrl": table.download,
+        }));
+    }
+    (citations, passages, data)
+}
+
+/// What the log line of a routed answer reports of how it was found.
+struct Log {
+    rag: bool,
+    data: bool,
+    rounds: usize,
+    reads: usize,
+    searches: usize,
+    passages: usize,
+}
+
+/// The answer call of a question that is not a data question, and what it was found with.
+struct Answering {
+    messages: Vec<Value>,
+    citations: Vec<Citation>,
+    key: Option<[u8; 32]>,
+    /// No table went into it, so it may be kept in the cache.
+    keep: bool,
+    log: Log,
+    followups: Vec<String>,
+    started: Instant,
+}
+
+/// Streams the answer, keeps only the citations it cites, caches an answer from pages alone,
+/// and sends the citations and the follow-up questions.
+async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answering) -> Spent {
+    let Question {
+        ask,
+        question,
+        events,
+        ..
+    } = q;
+    let Answering {
+        messages,
+        mut citations,
+        key,
+        keep,
+        log,
+        followups,
+        started,
+    } = answering;
     send(events, stage("answering", None)).await;
     let call = Call {
         model: ask.answer_model,
@@ -1544,12 +1708,12 @@ pub async fn answer(
     name_sources(ask, &mut citations).await;
     tracing::info!(
         deployment = %ask.deployment,
-        rag = routing.rag,
-        data = routing.data,
-        rounds,
-        reads = tables.len(),
-        searches = asked.len(),
-        passages = best.len(),
+        rag = log.rag,
+        data = log.data,
+        rounds = log.rounds,
+        reads = log.reads,
+        searches = log.searches,
+        passages = log.passages,
         cited = citations.len(),
         "routed answer"
     );
@@ -1557,14 +1721,14 @@ pub async fn answer(
     let told_time = super::clock::readings(ask.now, ask.zone)
         .iter()
         .any(|at| text.contains(at.as_str()));
-    let keep = tables.is_empty() && !told_time && worth_keeping(&completion, &text);
+    let keep = keep && !told_time && worth_keeping(&completion, &text);
     if let (Some(key), true) = (key, keep) {
         ask.cache.put(key, text.clone(), citations.clone());
     }
     send(events, Event::Answer(text)).await;
     send(events, Event::Citations(citations)).await;
-    if !routing.followups.is_empty() {
-        send(events, Event::Followups(routing.followups)).await;
+    if !followups.is_empty() {
+        send(events, Event::Followups(followups)).await;
     }
     spent
 }
@@ -1582,6 +1746,135 @@ pub fn worth_keeping(completion: &Completion, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn judged(text: &str) -> Judged {
+        let reply = Completion {
+            text: text.to_owned(),
+            calls: Vec::new(),
+            tokens: 30,
+            input: 20,
+            output: 10,
+            cost_micros: None,
+            provider: None,
+            reasoning: None,
+            finish: None,
+        };
+        Some((Ok(reply), Duration::from_millis(40)))
+    }
+
+    fn routing_of(rag: bool, queries: &[&str]) -> Routing {
+        Routing {
+            rag,
+            data: !rag,
+            queries: queries.iter().map(|q| (*q).to_owned()).collect(),
+            reads: Vec::new(),
+            followups: Vec::new(),
+        }
+    }
+
+    /// T-4606: the first round's judgement, split out of `answer`, keeps its three outcomes.
+    #[test]
+    fn the_first_judgement_answers_asks_for_more_or_says_nothing() {
+        let mut spent = Spent::default();
+        let (answers, more) =
+            first_judgement("p/a", &mut spent, judged("{\"answers\": true}"), "hours?");
+        assert!(answers && more.is_empty());
+        assert_eq!(spent.stages.judge, Some(40));
+        assert_eq!(spent.total, 30);
+
+        let more_text = "{\"answers\": false, \"queries\": [\"opening hours\", \"hours?\"]}";
+        let (answers, more) =
+            first_judgement("p/a", &mut Spent::default(), judged(more_text), "hours?");
+        assert!(!answers);
+        assert_eq!(more, ["opening hours"]);
+
+        let (answers, more) =
+            first_judgement("p/a", &mut Spent::default(), judged("not json"), "q");
+        assert!(
+            answers && more.is_empty(),
+            "a reply that is no verdict stops the search"
+        );
+
+        let mut spent = Spent::default();
+        let failed = Some((
+            Err(CallError::Unavailable("down".into())),
+            Duration::from_millis(5),
+        ));
+        assert_eq!(
+            first_judgement("p/a", &mut spent, failed, "q"),
+            (false, Vec::new())
+        );
+        assert_eq!(spent.total, 0);
+        assert_eq!(
+            first_judgement("p/a", &mut spent, None, "q"),
+            (false, Vec::new())
+        );
+        assert_eq!(spent.stages.judge, Some(5));
+    }
+
+    /// T-4606: rows that came back keep the search out; a failed read or a page question
+    /// starts from the first round and the queries not asked yet.
+    #[test]
+    fn the_first_round_is_kept_unless_a_data_read_answered() {
+        let first = || Some(vec![hit(1, 0.1)]);
+        let more = ["judge's".to_owned()];
+
+        let (found, pending) = first_round(&routing_of(false, &["x"]), false, first(), "q", &more);
+        assert!(found.hits.is_empty() && found.asked.is_empty() && pending.is_empty());
+        assert_eq!(found.rounds, 0);
+
+        let (found, pending) =
+            first_round(&routing_of(false, &["q", "x"]), true, first(), "q", &more);
+        assert_eq!(
+            (found.hits.len(), found.asked.as_slice(), found.rounds),
+            (1, &["q".to_owned()][..], 1)
+        );
+        assert_eq!(pending, ["x", "judge's"]);
+
+        let (found, pending) = first_round(&routing_of(true, &["x"]), false, None, "q", &[]);
+        assert_eq!((found.hits.len(), found.rounds), (0, 0));
+        assert_eq!(pending, ["x"]);
+    }
+
+    /// T-4606: passages are numbered first, tables after them, and a table's rows are cut for
+    /// the model while its row count stays whole.
+    #[test]
+    fn evidence_numbers_passages_then_tables_and_cuts_the_rows() {
+        let best = [hit(1, 0.2), hit(2, 0.1)];
+        let table = Table {
+            endpoint: "air".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["id".into()],
+            rows: (0..MODEL_ROWS + 3).map(|i| vec![json!(i)]).collect(),
+            total: Some(900),
+            dataset: Some("https://data.city.test/air".into()),
+            download: None,
+        };
+        let (citations, passages, data) = evidence(&best, std::slice::from_ref(&table));
+        let numbered: Vec<_> = citations
+            .iter()
+            .map(|c| (c.n, c.url.as_deref(), c.endpoint.as_deref()))
+            .collect();
+        assert_eq!(
+            numbered,
+            [
+                (1, Some("https://bb.example/1"), None),
+                (2, Some("https://bb.example/2"), None),
+                (3, Some("https://data.city.test/air"), Some("air")),
+            ]
+        );
+        assert_eq!(
+            passages[1],
+            json!({"n": 2, "url": "https://bb.example/2", "text": "passage 2"})
+        );
+        assert_eq!(data[0]["n"], 3);
+        assert_eq!(data[0]["rows"].as_array().map(Vec::len), Some(MODEL_ROWS));
+        assert_eq!(data[0]["rowCount"], MODEL_ROWS + 3);
+        assert_eq!(citations[2].tool.as_deref(), Some("query_entities"));
+
+        let (citations, passages, data) = evidence(&[], &[]);
+        assert!(citations.is_empty() && passages.is_empty() && data.is_empty());
+    }
 
     const NOW: &str = "Now: Friday 2026-10-16 12:05 UTC (2026-10-16T12:05Z).";
 
