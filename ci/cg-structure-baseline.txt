@@ -1,0 +1,27 @@
+# crate | functions with cc >= 25 | pub functions of 20+ lines no test reaches within 3 calls
+# (dev/cg-structure.py, T-4587); only ever lowered, in the commit that improves it.
+agent-proxy | 3 | 1
+assistant | 8 | 14
+context-gateway | 16 | 18
+jc-app-sdk | 0 | 1
+jc-core | 19 | 19
+jc-dcat | 0 | 1
+jcctl | 14 | 15
+token-sidecar | 0 | 1
+wasm-host | 3 | 1
+# Workspace crate edges outside dev-dependencies; only ever removed. A new edge is red.
+# To go: assistant -> jcctl and context-gateway -> jcctl (a server on the CLI crate, T-4604),
+# functions -> context-gateway (the whole gateway linked for its token verifier, T-4605).
+edge | agent-proxy -> jc-core
+edge | assistant -> agent-proxy
+edge | assistant -> jc-core
+edge | assistant -> jcctl
+edge | context-gateway -> jc-core
+edge | context-gateway -> jc-dcat
+edge | context-gateway -> jcctl
+edge | functions -> context-gateway
+edge | functions -> jc-core
+edge | jc-dcat -> jc-core
+edge | jcctl -> jc-core
+edge | token-sidecar -> jc-core
+edge | wasm-host -> jc-core
