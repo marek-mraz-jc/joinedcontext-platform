@@ -1834,6 +1834,7 @@ mod tests {
             entity_type: "AirQualityObserved".into(),
             columns: vec!["name".into()],
             rows: vec![vec![json!("Žilina")]],
+            units: vec![None],
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,

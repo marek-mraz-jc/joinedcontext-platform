@@ -34,10 +34,17 @@ const HOST = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 // About three screens of answer, five sources on four sites, and follow-ups.
 const LONG = ["The client centre is open on weekdays; the details by service follow.", "",
   ...Array.from({ length: 30 }, (_, i) => `- Answer line ${i + 1} with enough words to wrap at a phone's width [${(i % 5) + 1}]`)].join("\n");
-function sse(res) {
+// T-4650: a data answer, the shape src/chat/routed.rs sends: the name first, the values with units, the time last.
+const DATA = {
+  type: "AirQualityObserved", total: 12, columns: ["name", "pm10", "no2", "observedAt"], units: [null, "µg/m³", "µg/m³", null],
+  rows: [["Banská Bystrica, Štefánikovo nábrežie, stanica merania kvality ovzdušia", 21.5, 14, "2026-10-16T12:00:00Z"],
+    ["Zvolen, J. Alexyho", null, 9.25, "2026-10-16T11:00:00Z"]],
+};
+function sse(res, data) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   send("conversation", { id: "c1", at: "2026-10-16T12:17:05Z" });
+  if (data) send("data", DATA);
   send("answer", { text: LONG });
   send("citations", [1, 2, 3, 4, 5].map((n) => ({ n, url: `https://${n < 3 ? "example" : "site" + n}.sk/strana-${n}`, title: `Source ${n}` })));
   send("followups", { questions: ["Where is the client centre?", "Do I need an appointment?"] });
@@ -97,7 +104,10 @@ test.beforeAll(async () => {
     if (path === "/api/v1/d/bb/chat") {
       // T-4653: every question carries the token the worker's proof earned; the newest alone holds.
       if (req.headers["x-jc-visitor"] !== `visitor-${TOKENS}`) return res.writeHead(401, { "Content-Type": "application/json" }).end("{}");
-      return SLOW ? slow(res) : sse(res);
+      if (SLOW) return slow(res);
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      return req.on("end", () => sse(res, body.includes("ovzdušia")));
     }
     res.writeHead(404).end();
   });
@@ -283,6 +293,24 @@ test("the full page that names ?lang= does not ask", async ({ page }) => {
   await expect(page.locator("#jc-question")).toBeVisible();
   await expect(page.locator(".jc-choose-list")).toHaveCount(0);
   await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
+});
+
+// T-4650: at a phone's width the table reads from the left: the name, then the first value whole.
+test("a data table at 400 px shows the name and the first value", async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 800 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await page.locator("#jc-question").fill("Aká je kvalita ovzdušia?");
+  await page.locator(".jc-form .jc-submit").click();
+  const table = page.locator(".jc-data");
+  await expect(table.locator("th").first()).toHaveText("Názov");
+  await expect(table.locator("th").nth(1)).toHaveText("PM10 (µg/m³)");
+  await expect(table.locator("th").last()).toHaveText("Čas merania");
+  await expect(table.locator("tbody tr").first().locator("td").nth(1)).toHaveText("21,5");
+  await expect(table.locator("tbody tr").nth(1).locator("td").nth(1)).toHaveText("–");
+  const scroll = await table.locator(".jc-data-scroll").boundingBox();
+  const value = await table.locator("tbody tr").first().locator("td").nth(1).boundingBox();
+  expect(value.x + value.width, "the first value lies in view without scrolling").toBeLessThanOrEqual(scroll.x + scroll.width + 0.5);
+  expect(await table.locator("td.jc-num").count(), "values align as numbers").toBeGreaterThan(0);
 });
 
 // T-4343: the deployment's widget.language decides; the browser's languages never leave the page.
