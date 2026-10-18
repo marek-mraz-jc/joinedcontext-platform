@@ -150,7 +150,7 @@ const DESCRIBED: &str = r#"SELECT c.id, COALESCE(p.title, d.title) AS title,
        to_char(COALESCE(p.modified, d.modified) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS modified,
        COALESCE(p.language, c.lang) AS language
 FROM chunks c LEFT JOIN pages p ON p.id = c.page_id LEFT JOIN documents d ON d.id = c.document_id
-WHERE c.id = ANY($1) AND c.visibility = 'public'"#;
+WHERE c.id = ANY($1) AND (NOT $2 OR c.visibility = 'public')"#;
 
 async fn search(
     State(state): State<Arc<ChatState>>,
@@ -168,36 +168,50 @@ async fn search(
         return problem(400, why);
     }
     let scope = grouped(&asked.sources, asked.publisher.as_deref());
-    if scope.is_empty() {
-        return Json(json!({"hits": []})).into_response();
-    }
-    let query = asked.query.trim();
-    let vector = match state.embedder.query(query).await {
-        Ok(vector) => vector,
-        Err(err) => return failed(err),
-    };
-    let hits = match crate::search_projects(
-        &state.pool,
+    match ranked(
+        &state,
         &scope,
+        asked.query.trim(),
+        asked.lang.as_deref(),
+        asked.limit.unwrap_or(DEFAULT_HITS),
+        true,
+    )
+    .await
+    {
+        Ok(hits) => Json(json!({"hits": hits})).into_response(),
+        Err(err) => failed(err),
+    }
+}
+
+/// The best `limit` passages of `scope` for `query` as hits of API/05 §4, each with what its page
+/// or document states of itself; the `public` passages alone when `public_only`.
+pub(super) async fn ranked(
+    state: &ChatState,
+    scope: &[(String, Vec<String>)],
+    query: &str,
+    lang: Option<&str>,
+    limit: u8,
+    public_only: bool,
+) -> Result<Vec<Value>, crate::Error> {
+    if scope.is_empty() {
+        return Ok(Vec::new());
+    }
+    let vector = state.embedder.query(query).await?;
+    let hits = crate::search_projects(
+        &state.pool,
+        scope,
         &Search {
             text: query,
             embedding: &vector,
             sources: &[],
-            public_only: true,
-            limit: i64::from(asked.limit.unwrap_or(DEFAULT_HITS)),
-            lang: asked.lang.as_deref(),
+            public_only,
+            limit: i64::from(limit),
+            lang,
         },
     )
-    .await
-    {
-        Ok(hits) => hits,
-        Err(err) => return failed(err),
-    };
-    let about = match described(&state.pool, &scope, &hits).await {
-        Ok(about) => about,
-        Err(err) => return failed(err),
-    };
-    let hits: Vec<Value> = hits
+    .await?;
+    let about = described(&state.pool, scope, &hits, public_only).await?;
+    Ok(hits
         .iter()
         .filter_map(|hit| {
             let about = about.get(&hit.chunk)?;
@@ -213,8 +227,7 @@ async fn search(
                 "score": hit.score,
             }))
         })
-        .collect();
-    Json(json!({"hits": hits})).into_response()
+        .collect())
 }
 
 /// What the page or document of a hit states of itself (AG-120).
@@ -233,6 +246,7 @@ async fn described(
     pool: &sqlx::PgPool,
     scope: &[(String, Vec<String>)],
     hits: &[crate::Hit],
+    public_only: bool,
 ) -> Result<HashMap<i64, About>, crate::Error> {
     let ids: Vec<i64> = hits.iter().map(|hit| hit.chunk).collect();
     let mut found = HashMap::new();
@@ -243,6 +257,7 @@ async fn described(
         let mut tx = crate::project_scope(pool, project).await?;
         let rows = sqlx::query(DESCRIBED)
             .bind(&ids)
+            .bind(public_only)
             .fetch_all(&mut *tx)
             .await?;
         tx.rollback().await?;

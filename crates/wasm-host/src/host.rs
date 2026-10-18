@@ -12,7 +12,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store, StoreLimits,
-    StoreLimitsBuilder, Trap,
+    StoreLimitsBuilder, Trap, UpdateDeadline,
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
@@ -376,16 +376,21 @@ impl Host {
             apps: Mutex::new(HashMap::new()),
             tenants: Mutex::new(HashMap::new()),
         });
-        // The clock every deadline counts on: one tick per EPOCH_TICK, for as long as the host lives.
+        // The clock every deadline counts on: one tick per EPOCH_TICK, for as long as the host
+        // lives. A thread of its own, never a tokio task: guest code that spins never yields, and
+        // as many spinning requests as worker threads would stop a task clock and every deadline
+        // with it (T-4591).
         let weak = Arc::downgrade(&host);
-        tokio::spawn(async move {
-            let mut every = tokio::time::interval(EPOCH_TICK);
-            while let Some(host) = weak.upgrade() {
-                host.engine.increment_epoch();
-                drop(host);
-                every.tick().await;
-            }
-        });
+        std::thread::Builder::new()
+            .name("wasm-epoch".into())
+            .spawn(move || {
+                while let Some(host) = weak.upgrade() {
+                    host.engine.increment_epoch();
+                    drop(host);
+                    std::thread::sleep(EPOCH_TICK);
+                }
+            })
+            .map_err(|err| wasmtime::format_err!("the epoch clock: {err}"))?;
         Ok(host)
     }
 
@@ -523,8 +528,18 @@ impl Host {
         store
             .set_fuel(self.limits.fuel)
             .map_err(|err| Failure::Failed(err.to_string()))?;
-        store.set_epoch_deadline(deadline_ticks);
-        store.epoch_deadline_trap();
+        // Each tick yields to the runtime, so a spinning instance leaves the worker thread to
+        // the other requests; at the wall time it traps (T-4591).
+        let ends = std::time::Instant::now()
+            + EPOCH_TICK * u32::try_from(deadline_ticks).unwrap_or(u32::MAX);
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |_| {
+            if std::time::Instant::now() >= ends {
+                Err(Trap::Interrupt.into())
+            } else {
+                Ok(UpdateDeadline::Yield(1))
+            }
+        });
         Ok(store)
     }
 

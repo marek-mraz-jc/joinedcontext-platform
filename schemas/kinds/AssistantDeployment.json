@@ -2,6 +2,39 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AccessLevel": {
+      "description": "How a caller reaches an Endpoint, the levels of the per-caller catalogue (T-4503).",
+      "oneOf": [
+        {
+          "description": "Anyone, signed in or not.",
+          "enum": [
+            "public"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every member of the organization.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The members of the projects the Endpoint admits.",
+          "enum": [
+            "project"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The ServiceAccounts a grant names.",
+          "enum": [
+            "grant"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "AnswerSpec": {
       "additionalProperties": false,
       "description": "How the deployment answers.",
@@ -69,6 +102,13 @@
           ],
           "description": "How much it may spend; required on every channel but `internal`."
         },
+        "categories": {
+          "description": "EU data-theme codes it is about, for display (MF-60); `theme` is the chat's look.",
+          "items": {
+            "$ref": "#/definitions/DataTheme"
+          },
+          "type": "array"
+        },
         "channel": {
           "allOf": [
             {
@@ -95,6 +135,13 @@
           "default": true,
           "description": "Whether it answers at all; `false` makes every chat request answer `503`. Default true.",
           "type": "boolean"
+        },
+        "exclude": {
+          "description": "Endpoints it never reads, named as a connector names one (MF-59).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "feedback": {
           "default": true,
@@ -167,6 +214,17 @@
             }
           ],
           "description": "What it reaches beyond its own project."
+        },
+        "select": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Select"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Endpoints it reads beside its connectors, picked by the McpServer grammar (MF-58, ADR-N-055 §2.2); resolved inside the project's reach by [`crate::reach::resolve_connectors`]."
         },
         "sources": {
           "description": "The `KnowledgeSource`s it answers from: one of this project by its name, one of a project in `scope.projects` as `{project}/{source}` (T-4281).",
@@ -452,6 +510,102 @@
         "tools"
       ],
       "type": "object"
+    },
+    "DataTheme": {
+      "description": "A theme of the EU data-theme table.",
+      "oneOf": [
+        {
+          "description": "Agriculture, fisheries, forestry and food.",
+          "enum": [
+            "AGRI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Economy and finance.",
+          "enum": [
+            "ECON"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Education, culture and sport.",
+          "enum": [
+            "EDUC"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Energy.",
+          "enum": [
+            "ENER"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Environment.",
+          "enum": [
+            "ENVI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Government and public sector.",
+          "enum": [
+            "GOVE"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Health.",
+          "enum": [
+            "HEAL"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "International issues.",
+          "enum": [
+            "INTR"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Justice, legal system and public safety.",
+          "enum": [
+            "JUST"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Regions and cities.",
+          "enum": [
+            "REGI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Population and society.",
+          "enum": [
+            "SOCI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Science and technology.",
+          "enum": [
+            "TECH"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Transport.",
+          "enum": [
+            "TRAN"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "Localised": {
       "anyOf": [
@@ -825,6 +979,73 @@
           "type": "string"
         }
       ]
+    },
+    "Select": {
+      "additionalProperties": false,
+      "description": "Which Endpoints a server selects beside its members (MF-55). An Endpoint is selected when it matches every field given, one value of a field being enough; `select: {}` selects every Endpoint the caller's token and the server's audience admit. The gateway resolves it per call from the caller's own reach, so it only narrows.",
+      "properties": {
+        "accessLevel": {
+          "description": "How the caller reaches the Endpoint; no wider than the server's audience admits.",
+          "items": {
+            "$ref": "#/definitions/AccessLevel"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "domains": {
+          "description": "Smart Data Models domains of the Endpoint's classification, e.g. `Environment` (T-4498).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projects": {
+          "description": "Project names.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "spaces": {
+          "description": "Context Spaces as `{project}/{space}`.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "themes": {
+          "description": "EU data themes of that classification, e.g. `ENVI`.",
+          "items": {
+            "$ref": "#/definitions/DataTheme"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "types": {
+          "description": "NGSI-LD entity types the Endpoint serves, e.g. `OffStreetParking` (MF-61).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "StageReasoning": {
       "additionalProperties": false,

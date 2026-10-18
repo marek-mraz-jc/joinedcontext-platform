@@ -239,7 +239,11 @@ async fn main() -> ExitCode {
             }
             None => reaper,
         };
-        tokio::spawn(reaper.run());
+        tokio::spawn(async move {
+            let error = reaper.run().await;
+            tracing::error!(%error, "the repository reaper stopped; exiting so a revoked grant never stays");
+            std::process::exit(1);
+        });
     }
 
     // The MQTT brokers' CONNECT checks answer on a listener of their own, which APISIX does not

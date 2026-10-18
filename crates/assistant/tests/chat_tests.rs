@@ -57,6 +57,9 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             channel,
             system_prompt: Some("Odpovedaj stručne.".into()),
             sources: vec!["web".into()],
+            select: None,
+            exclude: Vec::new(),
+            categories: Vec::new(),
             connectors: vec![
                 Connector {
                     endpoint: "ovzdusie".into(),
@@ -180,6 +183,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     let public = |slug: &str| EndpointRef {
         slug: slug.into(),
         audience: "public".into(),
+        title: None,
     };
     snapshot.endpoints = BTreeMap::from([
         (("bbsk".into(), "kraj".into()), public(REGION_SLUG)),
@@ -188,6 +192,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                title: None,
             },
         ),
         (("helsinki".into(), "kraj".into()), public(ELSEWHERE_SLUG)),
@@ -196,6 +201,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: SLUG.into(),
                 audience: "public".into(),
+                title: None,
             },
         ),
         (
@@ -203,6 +209,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                title: None,
             },
         ),
     ]);
@@ -231,6 +238,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         limits: tokio::sync::Mutex::default(),
         questions: Arc::clone(&questions),
         answers: Default::default(),
+        listings: Default::default(),
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
         viz: None,
         organization: "hronov".into(),
@@ -3642,6 +3650,48 @@ async fn a_direct_message_is_answered_without_a_search_a_read_or_a_step() {
     let sent = answers[0]["messages"].to_string();
     assert!(sent.contains("This message needs none of them"), "{sent}");
     assert!(!sent.contains("passages"), "{sent}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4680: a public Endpoint's tools are listed once for many questions, not once per question:
+/// a second question within the listing's life asks the gateway nothing to offer the connector.
+#[tokio::test]
+async fn a_public_endpoints_tools_are_listed_once_for_two_questions() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatlisted", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let direct = || {
+        completion(
+            json!({"role": "assistant", "content": "{\"route\": \"direct\", \"queries\": [], \"data\": []}"}),
+            300,
+        )
+    };
+    script_routed(
+        &w.proxy,
+        vec![direct(), direct()],
+        vec![],
+        vec![
+            streamed(&["Dobrý deň."], 300, 12),
+            streamed(&["Rado sa stalo."], 300, 12),
+        ],
+    )
+    .await;
+    for message in ["Dobrý deň", "Ďakujem"] {
+        let (status, events, _) =
+            answer_of(&w.app, ask(json!({"message": message}), Some(ORIGIN))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
+    }
+    let listings = w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains("tools/list"))
+        .count();
+    assert_eq!(listings, 1);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
