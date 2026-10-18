@@ -289,3 +289,23 @@ async fn the_brokers_scan_ceiling_is_payload_too_large_not_forbidden() {
     let problem: Value = serde_json::from_str(&problem).expect("a problem document");
     assert_eq!(problem["status"], 413, "{problem}");
 }
+
+/// T-4591: `limit` cuts the answer and `offset` starts it, under the ceiling that refuses; a
+/// `limit` below the total is no 413, and a value that is no whole number is a 400.
+#[tokio::test]
+async fn limit_and_offset_window_a_download_and_a_bad_one_is_refused() {
+    let (broker, _) = view(true).await;
+    let (status, window) = download_with(&broker, endpoint(None), "?limit=10&offset=5").await;
+    assert_eq!(status, StatusCode::OK, "{window}");
+    assert_eq!(ids(&window), expected()[5..15].to_vec());
+    let (status, tail) = download_with(&broker, endpoint(None), "?offset=3695").await;
+    assert_eq!(status, StatusCode::OK, "{tail}");
+    assert_eq!(ids(&tail), expected()[3695..].to_vec());
+    for bad in ["?limit=ten", "?offset=-1", "?limit=1.5"] {
+        let (status, body) = download_with(&broker, endpoint(None), bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    // The ceiling still refuses a total past it, whatever the limit.
+    let (status, _) = download_with(&broker, endpoint(Some(2000)), "?limit=10").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}

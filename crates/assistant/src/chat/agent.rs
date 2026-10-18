@@ -55,6 +55,8 @@ const RULES: &str = "You answer the questions of a city's residents from what th
 #[derive(Debug, Clone)]
 pub struct Connected {
     pub endpoint: String,
+    /// The Endpoint's title ([`crate::worker::EndpointRef::title`]).
+    pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
 }
@@ -170,6 +172,8 @@ pub struct Ask<'a> {
     /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
     /// `answer.routes` is `data`.
     pub sources: &'a [(String, Vec<String>)],
+    /// The sources above that crawl a website, `{project}/{source}` ([`crate::website_sources`]).
+    pub websites: &'a [String],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,

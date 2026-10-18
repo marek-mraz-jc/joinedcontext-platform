@@ -200,6 +200,7 @@ pub struct Read {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     pub endpoint: String,
+    pub title: Option<String>,
     pub types: Vec<String>,
     pub attributes: Vec<String>,
 }
@@ -705,6 +706,24 @@ pub fn top(found: &[Hit], n: usize) -> Vec<Hit> {
     sorted
 }
 
+/// The most passages of a website source one answer sees (T-4680): a crawled page tells where to
+/// find or whom to ask, and never crowds out the data of the catalogue and the Endpoints.
+pub const WEB_PASSAGES: usize = 3;
+
+/// The best [`ANSWER_PASSAGES`] passages, at most [`WEB_PASSAGES`] of them from `websites`.
+pub fn best(found: &[Hit], websites: &[String]) -> Vec<Hit> {
+    let mut web = 0;
+    top(found, found.len())
+        .into_iter()
+        .filter(|hit| {
+            let crawled = websites.contains(&hit.site);
+            web += usize::from(crawled);
+            !crawled || web <= WEB_PASSAGES
+        })
+        .take(ANSWER_PASSAGES)
+        .collect()
+}
+
 /// A question as the cache compares it: lowercase, one space between words, no closing marks.
 pub fn normalized(question: &str) -> String {
     question
@@ -971,6 +990,7 @@ async fn live_of(
                 .unwrap_or_default();
             out.push(Shown {
                 endpoint: connector.endpoint.clone(),
+                title: connector.title.clone(),
                 types,
                 attributes,
             });
@@ -1241,9 +1261,13 @@ pub fn router_messages(
     // cache keeps the longest equal prefix (T-4680).
     let mut asked = written_in(languages);
     if !live.is_empty() {
-        asked.push_str("Live data you are shown (endpoint: types; the attributes a q may test):\n");
+        asked.push_str("Live data you are shown (endpoint (what it holds): types; the attributes a q may test):\n");
         for shown in live {
-            asked.push_str(&format!("- {}: {}", shown.endpoint, shown.types.join(", ")));
+            asked.push_str(&format!("- {}", shown.endpoint));
+            if let Some(title) = &shown.title {
+                asked.push_str(&format!(" ({title})"));
+            }
+            asked.push_str(&format!(": {}", shown.types.join(", ")));
             if !shown.attributes.is_empty() {
                 asked.push_str(&format!("; {}", shown.attributes.join(", ")));
             }
@@ -1479,7 +1503,7 @@ pub async fn search_only(
         }
     };
     let mut citations: Vec<Citation> = Vec::new();
-    for hit in top(&found, ANSWER_PASSAGES) {
+    for hit in best(&found, ask.websites) {
         if !citations
             .iter()
             .any(|c| c.url.as_deref() == Some(hit.url.as_str()))
@@ -1754,7 +1778,7 @@ pub async fn answer(
         return spent;
     }
 
-    let best = top(&found.hits, ANSWER_PASSAGES);
+    let best = best(&found.hits, ask.websites);
     let (citations, passages, data) = evidence(&best, &tables);
     let more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
     let messages = messages_with(
@@ -1880,7 +1904,7 @@ async fn search_first(
                 q.question,
                 &asked,
                 q.languages,
-                &top(hits, ANSWER_PASSAGES),
+                &best(hits, q.ask.websites),
                 q.now,
             );
             if within(q.ask, spent, &messages, reserve + ROUTER_TOKENS) {
@@ -2038,7 +2062,7 @@ async fn search_rounds(
             q.question,
             &found.asked,
             q.languages,
-            &top(&found.hits, ANSWER_PASSAGES),
+            &best(&found.hits, q.ask.websites),
             q.now,
         );
         if !within(q.ask, spent, &messages, ROUTER_TOKENS) {
@@ -2276,6 +2300,7 @@ mod tests {
     #[test]
     fn a_direct_route_searches_and_reads_nothing_and_an_unknown_one_is_searched() {
         let live = [Shown {
+            title: None,
             endpoint: "ovzdusie".into(),
             types: vec!["AirQualityObserved".into()],
             attributes: Vec::new(),
@@ -2319,6 +2344,7 @@ mod tests {
         ));
         assert!(ROUTER_RULES.contains("like a poem or general knowledge"));
         let live = vec![Shown {
+            title: None,
             endpoint: "praha/praha-mesto".into(),
             types: vec!["WasteContainer".into()],
             attributes: Vec::new(),
@@ -2496,6 +2522,7 @@ mod tests {
         };
         let connector = |slug: &str| Connected {
             endpoint: slug.into(),
+            title: None,
             surface: super::super::mcp::Surface {
                 gateway: gateway.uri(),
                 slug: slug.into(),
@@ -2544,6 +2571,7 @@ mod tests {
         };
         let connectors = [Connected {
             endpoint: "bb-events".into(),
+            title: None,
             surface: super::super::mcp::Surface {
                 gateway: gateway.uri(),
                 slug: "slow".into(),
@@ -2599,7 +2627,36 @@ mod tests {
             url: format!("https://bb.example/{chunk}"),
             text: format!("passage {chunk}"),
             score,
+            site: "bb/catalogue".into(),
         }
+    }
+
+    /// T-4680: a website gives an answer at most three passages; the data's records fill the
+    /// rest even when the crawled pages score higher, and with no website it is `top`.
+    #[test]
+    fn an_answer_sees_at_most_three_website_passages_and_the_data_first() {
+        let web = |chunk, score| Hit {
+            site: "bbsk/web".into(),
+            ..hit(chunk, score)
+        };
+        let found = [
+            web(1, 0.9),
+            web(2, 0.8),
+            web(3, 0.7),
+            web(4, 0.6),
+            web(5, 0.5),
+            hit(6, 0.2),
+            hit(7, 0.1),
+        ];
+        let websites = ["bbsk/web".to_owned()];
+        let chunks = |hits: Vec<Hit>| hits.iter().map(|h| h.chunk).collect::<Vec<_>>();
+        assert_eq!(chunks(best(&found, &websites)), [1, 2, 3, 6, 7]);
+        assert_eq!(
+            chunks(best(&found, &[])),
+            chunks(top(&found, ANSWER_PASSAGES))
+        );
+        assert_eq!(chunks(best(&found[..2], &websites)), [1, 2]);
+        assert!(best(&[], &websites).is_empty());
     }
 
     /// T-4360: a passage both rankings put in their first three skips the judgement; one only a
@@ -2652,8 +2709,30 @@ mod tests {
         assert!(!covers(&[]));
     }
 
+    /// T-4680: the router sees what each connector holds, so 45 tables of one type are told apart.
+    #[test]
+    fn the_router_is_shown_each_connectors_title() {
+        let titled = Shown {
+            title: Some("Unemployment, Slovak statistics".into()),
+            ..shown(
+                "slovensko/susr-pr",
+                &["KeyPerformanceIndicator"],
+                &["indicator"],
+            )
+        };
+        let plain = shown("slovensko/ovzdusie-sk", &["AirQualityObserved"], &[]);
+        let messages = router_messages(&[], "Nezamestnanosť?", &[titled, plain], &[], "now");
+        let asked = messages[1]["content"].as_str().expect("text");
+        assert!(asked.contains("- slovensko/susr-pr (Unemployment, Slovak statistics): KeyPerformanceIndicator; indicator\n"), "{asked}");
+        assert!(
+            asked.contains("- slovensko/ovzdusie-sk: AirQualityObserved\n"),
+            "{asked}"
+        );
+    }
+
     fn shown(endpoint: &str, types: &[&str], attributes: &[&str]) -> Shown {
         Shown {
+            title: None,
             endpoint: endpoint.into(),
             types: types.iter().map(|t| t.to_string()).collect(),
             attributes: attributes.iter().map(|a| a.to_string()).collect(),
@@ -3072,6 +3151,7 @@ mod tests {
         let asked = router[1]["content"].as_str().unwrap_or_default();
         // T-4680: the sources and live data come before the turns, the shared part first.
         let live = vec![Shown {
+            title: None,
             endpoint: "bbsk-registre".into(),
             types: vec!["Bridge".into()],
             attributes: vec!["yearBuilt".into()],
@@ -3153,6 +3233,7 @@ mod tests {
                 "x".repeat(400)
             ),
             score: BOTH,
+            site: "bb/web".into(),
         };
         let follow = follow_messages(
             &[],

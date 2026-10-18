@@ -17,6 +17,7 @@ use crate::Error;
 
 pub mod fetch;
 pub mod links;
+pub mod meta;
 pub mod patterns;
 pub mod queue;
 pub mod robots;
@@ -507,7 +508,13 @@ async fn read_page(
     }
     let body_str = String::from_utf8_lossy(body);
     let hash = hex::encode(Sha256::digest(body));
-    let language = links::extract_language(&body_str);
+    let last_modified = headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok());
+    let mut stated = meta::page(&body_str);
+    // A page that states no date of change has changed when its server says it did.
+    stated.modified = stated
+        .modified
+        .or_else(|| last_modified.and_then(meta::instant));
+    let language = stated.language.clone();
     let page_id = upsert_page_fetched(
         run.pool,
         run.project,
@@ -517,12 +524,12 @@ async fn read_page(
             parent_id: item.parent_id,
             depth: item.depth as i16,
         },
-        language.as_deref(),
+        &stated,
         included,
         Validators {
             hash: &hash,
             etag: headers.get(ETAG).and_then(|v| v.to_str().ok()),
-            last_modified: headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok()),
+            last_modified,
         },
     )
     .await?;
@@ -772,6 +779,10 @@ async fn handle_document(
             let etag = headers.get(ETAG).and_then(|v| v.to_str().ok());
             let last_modified = headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok());
             let bytes_count = body.len() as i64;
+            let mut stated = meta::pdf(&body);
+            stated.modified = stated
+                .modified
+                .or_else(|| last_modified.and_then(meta::instant));
 
             let is_unchanged = stored_hash == Some(&hash);
             if is_unchanged {
@@ -787,6 +798,7 @@ async fn handle_document(
                         off_domain,
                         bytes: bytes_count,
                         included: true,
+                        stated: &stated,
                     },
                     Validators {
                         hash: &hash,
@@ -808,6 +820,7 @@ async fn handle_document(
                         off_domain,
                         bytes: bytes_count,
                         included: true,
+                        stated: &stated,
                     },
                     Validators {
                         hash: &hash,
@@ -1007,7 +1020,7 @@ async fn upsert_page_fetched(
     project: &str,
     site_id: i64,
     place: PagePlace<'_>,
-    language: Option<&str>,
+    stated: &meta::Meta,
     included: bool,
     validators: Validators<'_>,
 ) -> Result<i64, Error> {
@@ -1023,10 +1036,16 @@ async fn upsert_page_fetched(
     } = validators;
     let mut tx = crate::project_scope(pool, project).await?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO pages (site_id, project, url, parent_id, depth, status, content_hash, language, included, etag, last_modified, fetched_at) \
-         VALUES ($1, $2, $3, $4, $5, 'fetched', $6, $7, $8, $9, $10, now()) \
+        "INSERT INTO pages (site_id, project, url, parent_id, depth, status, content_hash, language, included, etag, last_modified, \
+                            title, description, published, modified, fetched_at) \
+         VALUES ($1, $2, $3, $4, $5, 'fetched', $6, $7, $8, $9, $10, \
+                 $11, $12, $13::timestamptz, $14::timestamptz, now()) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              parent_id = COALESCE(pages.parent_id, EXCLUDED.parent_id), \
+             title = EXCLUDED.title, \
+             description = EXCLUDED.description, \
+             published = EXCLUDED.published, \
+             modified = EXCLUDED.modified, \
              depth = EXCLUDED.depth, \
              status = 'fetched', \
              content_hash = EXCLUDED.content_hash, \
@@ -1043,10 +1062,14 @@ async fn upsert_page_fetched(
     .bind(parent_id)
     .bind(depth)
     .bind(hash)
-    .bind(language)
+    .bind(stated.language.as_deref())
     .bind(included)
     .bind(etag)
     .bind(last_modified)
+    .bind(stated.title.as_deref())
+    .bind(stated.description.as_deref())
+    .bind(stated.published.as_deref())
+    .bind(stated.modified.as_deref())
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1190,6 +1213,7 @@ struct DocFacts<'a> {
     off_domain: bool,
     bytes: i64,
     included: bool,
+    stated: &'a meta::Meta,
 }
 
 async fn upsert_doc_fetched(
@@ -1206,6 +1230,7 @@ async fn upsert_doc_fetched(
         off_domain,
         bytes,
         included,
+        stated,
     } = facts;
     let Validators {
         hash,
@@ -1214,10 +1239,16 @@ async fn upsert_doc_fetched(
     } = validators;
     let mut tx = crate::project_scope(pool, project).await?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO documents (site_id, project, page_id, url, mime, off_domain, bytes, content_hash, status, included, etag, last_modified, fetched_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'fetched', $9, $10, $11, now()) \
+        "INSERT INTO documents (site_id, project, page_id, url, mime, off_domain, bytes, content_hash, status, included, etag, last_modified, \
+                                title, description, published, modified, fetched_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'fetched', $9, $10, $11, \
+                 $12, $13, $14::timestamptz, $15::timestamptz, now()) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
+             title = EXCLUDED.title, \
+             description = EXCLUDED.description, \
+             published = EXCLUDED.published, \
+             modified = EXCLUDED.modified, \
              mime = EXCLUDED.mime, \
              off_domain = EXCLUDED.off_domain, \
              bytes = EXCLUDED.bytes, \
@@ -1240,6 +1271,10 @@ async fn upsert_doc_fetched(
     .bind(included)
     .bind(etag)
     .bind(last_modified)
+    .bind(stated.title.as_deref())
+    .bind(stated.description.as_deref())
+    .bind(stated.published.as_deref())
+    .bind(stated.modified.as_deref())
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
