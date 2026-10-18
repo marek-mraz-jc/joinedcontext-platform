@@ -649,7 +649,7 @@
 
   // A data round's rows as a table with the dataset and download links (T-4140).
   function showData(item, data) {
-    var shown = JCRender.table(data);
+    var shown = JCRender.table(data, lang);
     if (!shown) return;
     var figure = el("figure", "jc-data");
     var scroll = el("div", "jc-data-scroll");
@@ -659,8 +659,8 @@
     var table = el("table");
     if (shown.caption) table.appendChild(el("caption", "", shown.caption));
     var headRow = el("tr");
-    shown.columns.forEach(function (c) {
-      var th = el("th", "", c);
+    shown.columns.forEach(function (c, i) {
+      var th = el("th", shown.numeric[i] ? "jc-num" : "", c);
       th.scope = "col";
       headRow.appendChild(th);
     });
@@ -668,7 +668,12 @@
     var body = table.appendChild(el("tbody"));
     shown.rows.forEach(function (row) {
       var tr = body.appendChild(el("tr"));
-      row.forEach(function (cell) { tr.appendChild(el("td", "", cell)); });
+      row.forEach(function (cell, i) {
+        // A long text keeps two lines; the whole of it is its title.
+        var td = tr.appendChild(el("td", shown.numeric[i] ? "jc-num" : "", ""));
+        var text = td.appendChild(el("span", "jc-cell", cell));
+        if (cell.length > 40) text.title = cell;
+      });
     });
     scroll.appendChild(table);
     figure.appendChild(scroll);

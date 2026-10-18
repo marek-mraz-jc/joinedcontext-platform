@@ -318,7 +318,14 @@ async fn step(
             let mut rows = None;
             if o.tool.name == "query_entities" {
                 if let Some(kind) = type_of(&arguments) {
-                    if let Some(table) = super::routed::table(ask, o.connector, &kind, &text).await
+                    if let Some(table) = super::routed::table(
+                        ask,
+                        o.connector,
+                        &kind,
+                        &text,
+                        &super::routed::asked_of(&arguments),
+                    )
+                    .await
                     {
                         rows = Some(table.rows.len());
                         if !table.rows.is_empty() {

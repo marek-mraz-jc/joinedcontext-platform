@@ -147,7 +147,13 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-data-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--bg); }
 .jc-data table { border-collapse: collapse; width: 100%; font-size: 13px; }
 .jc-data caption { text-align: left; padding: 6px 8px; color: var(--muted); }
-.jc-data th, .jc-data td { padding: 4px 8px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; }
+.jc-data th, .jc-data td { padding: 4px 8px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; vertical-align: top; }
+/* T-4650: the name wraps within 40 % of the table, so a value column shows at 400 px; a long text
+   keeps two lines, numbers line up on the right. */
+.jc-data th:first-child, .jc-data td:first-child { white-space: normal; max-width: 40%; min-width: 7em; }
+.jc-data td:first-child .jc-cell, .jc-data td .jc-cell { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.jc-data td:first-child .jc-cell { overflow-wrap: anywhere; }
+.jc-data .jc-num { text-align: right; font-variant-numeric: tabular-nums; }
 .jc-data-chart { display: block; width: 100%; height: auto; margin: 6px 0 0; }
 .jc-chart-axis { stroke: var(--line); }
 .jc-chart-line { fill: none; stroke: var(--accent); stroke-width: 2; }
