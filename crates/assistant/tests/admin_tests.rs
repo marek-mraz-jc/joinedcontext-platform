@@ -45,6 +45,7 @@ struct World {
 fn source_spec() -> KnowledgeSourceSpec {
     KnowledgeSourceSpec {
         source: SourceType::Website,
+        categories: Vec::new(),
         start_urls: vec!["https://hronov.example/".into()],
         ckan_instance_ref: None,
         context_spaces: Vec::new(),
@@ -138,6 +139,7 @@ async fn world(test: &str) -> World {
                 name: "subory".into(),
                 spec: KnowledgeSourceSpec {
                     source: SourceType::Upload,
+                    categories: Vec::new(),
                     start_urls: Vec::new(),
                     upload: Some(UploadLimits {
                         max_bytes: 64 * 1024,
