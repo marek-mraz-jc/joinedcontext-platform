@@ -61,6 +61,7 @@ fn main() {
     let checkouts = Checkouts {
         projects: tree.projects.clone(),
         assembly: root.join("assembly"),
+        renders: Default::default(),
     };
 
     let started = Instant::now();
