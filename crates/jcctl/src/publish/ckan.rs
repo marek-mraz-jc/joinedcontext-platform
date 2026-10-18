@@ -287,11 +287,35 @@ fn describe(resources: &mut Value, served: &[Representation], usage: &Usage) {
     };
     for (resource, representation) in resources.iter_mut().zip(served) {
         let address = resource["url"].as_str().unwrap_or_default().to_owned();
-        resource["description"] = json!(usage.of(*representation, &address));
+        let mut said = usage.of(*representation, &address);
+        if let Some(page) = usage.standards_page(*representation) {
+            said.push_str(&format!(
+                "\n\nThe fields it filters on and example queries that answered with this \
+                 dataset's data: {page}"
+            ));
+        }
+        resource["description"] = json!(said);
     }
 }
 
 impl Usage<'_> {
+    /// The public Endpoint's page on the Portal (`/d/{slug}`), whose "Standards" part lists the
+    /// fields and checked example queries of each query standard (API/01 §16a, T-4484); `None`
+    /// for a file, MCP, WebSocket or an Endpoint that is not public.
+    fn standards_page(&self, representation: Representation) -> Option<String> {
+        let query = matches!(
+            representation,
+            Representation::NgsiLd
+                | Representation::OgcFeatures
+                | Representation::Odata
+                | Representation::Sta
+        );
+        (self.public && query)
+            .then(|| self.url.replacen("/api/endpoint/", "/d/", 1))
+            .map(|page| page.trim_end_matches('/').to_owned())
+            .filter(|page| page.contains("/d/"))
+    }
+
     fn of(&self, representation: Representation, address: &str) -> String {
         let access = if self.public {
             "Open to anyone, with no sign-in."
