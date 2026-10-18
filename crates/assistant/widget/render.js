@@ -359,6 +359,9 @@ var JCRender = (function () {
   var LINK = { sk: "Zdroj", cs: "Zdroj", en: "Source", de: "Quelle" };
   // The rows a table shows in the panel; the dataset holds the rest (T-4682).
   var ROWS = 20;
+  // A row measured a day or more before the table's newest says so beside its time (T-4682).
+  var STALE = { sk: "neaktuálne", cs: "neaktuální", en: "out of date", de: "veraltet" };
+  var STALE_MS = 24 * 3600 * 1000;
 
   // `dateObserved` → "Date observed", `AirQualityObserved` → "Air quality observed".
   function spelt(key) {
@@ -465,8 +468,14 @@ var JCRender = (function () {
       if (column === "observedAt" || (TIME.test(v) && v.length > 10)) return when(v, lang, now);
       return String(v);
     };
-    var rows = raw.map(function (row) {
-      return keep.map(function (i) { return cell(row[i], data.columns[i], i); });
+    var at = data.columns.indexOf("observedAt");
+    var times = raw.map(function (row) { return at < 0 || typeof row[at] !== "string" ? NaN : Date.parse(row[at]); });
+    var newest = Math.max.apply(null, times.filter(isFinite).concat([-Infinity]));
+    var rows = raw.map(function (row, r) {
+      return keep.map(function (i) {
+        var shown = cell(row[i], data.columns[i], i);
+        return i === at && newest - times[r] >= STALE_MS ? shown + " · " + STALE[lang] : shown;
+      });
     });
     var numeric = keep.map(function (i) {
       return raw.length > 0 && raw.every(function (row) {

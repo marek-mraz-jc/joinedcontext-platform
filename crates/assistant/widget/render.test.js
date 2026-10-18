@@ -196,6 +196,20 @@ test("a data table shows at most 20 rows of text and only http(s) links", () => 
   assert.equal(table(null), null);
 });
 
+test("a row measured a day before the table's newest is marked out of date, the rest are not (T-4682)", () => {
+  const now = Date.parse("2026-10-18T22:00:00Z");
+  const shown = table({
+    type: "BikeHireDockingStation",
+    columns: ["name", "availableBikeNumber", "observedAt"],
+    rows: [["Kamppi", 12, "2026-10-18T21:58:00Z"], ["040", 3, "2026-09-30T09:22:00Z"], ["Töölö", 4, null]],
+  }, "sk", now);
+  assert.ok(!shown.rows[0][2].includes("neaktuálne"));
+  assert.match(shown.rows[1][2], / · neaktuálne$/);
+  assert.equal(shown.rows[2][2], "");
+  const fresh = table({ columns: ["name", "observedAt"], rows: [["a", "2026-10-01T00:00:00Z"]] }, "en", now);
+  assert.ok(!fresh.rows[0][1].includes("out of date"), "one old row alone has nothing newer to lag");
+});
+
 test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   const now = Date.parse("2026-10-18T16:45:00Z");
   const data = {
@@ -217,7 +231,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   assert.equal(sk.rows[1][2], "");
   assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
   assert.match(sk.rows[0][5], /^pred 5 min/);
-  assert.match(sk.rows[1][5], /^16\. 10\. 2026 \d{2}:\d{2}$/);
+  assert.match(sk.rows[1][5], /^16\. 10\. 2026 \d{2}:\d{2} · neaktuálne$/);
   const en = table(data, "en", now);
   assert.equal(en.caption, "Air quality — first 2 of 12");
   assert.equal(en.columns[5], "Measured");
