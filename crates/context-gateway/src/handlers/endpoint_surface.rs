@@ -49,16 +49,6 @@ pub fn dataset(endpoint: &Endpoint, space: Option<&Space>, index: &Value, base: 
     with_subject(endpoint, space, |s| jc_dcat::dataset(s, index, base))
 }
 
-/// The same record as Turtle (EP-27).
-pub fn dataset_turtle(
-    endpoint: &Endpoint,
-    space: Option<&Space>,
-    index: &Value,
-    base: &str,
-) -> String {
-    with_subject(endpoint, space, |s| jc_dcat::dataset_turtle(s, index, base))
-}
-
 /// The record as a page (EP-27).
 pub fn dataset_html(
     endpoint: &Endpoint,

@@ -824,14 +824,6 @@ pub fn feed_turtle(feed: &Value) -> String {
 /// whose manifest named no title.
 static EMPTY: BTreeMap<String, String> = BTreeMap::new();
 
-/// The same record as Turtle, for a triple store or a partner's connector (EP-27).
-///
-/// Written from the JSON-LD rather than beside it, so the two serialisations are one graph:
-/// whatever [`dataset`] says, this says in RDF (EP-78).
-pub fn dataset_turtle(endpoint: &Subject<'_>, index: &Value, base: &str) -> String {
-    turtle(&dataset(endpoint, index, base))
-}
-
 /// A record of [`dataset`]'s shape as Turtle, a profile's rendering included.
 pub fn turtle(record: &Value) -> String {
     let mut out = String::new();

@@ -53,16 +53,6 @@ pub enum DcatProfile {
     DcatApCz,
 }
 
-impl DcatProfile {
-    /// The id the record route's `?profile=` takes.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::DcatApSk => "dcat-ap-sk",
-            Self::DcatApCz => "dcat-ap-cz",
-        }
-    }
-}
-
 /// The organization's rules for its projects (PF-61, PF-65).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

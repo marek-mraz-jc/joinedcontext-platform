@@ -34,17 +34,6 @@ impl Profile {
             _ => None,
         }
     }
-
-    /// The id of the profile.
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::DcatAp => "dcat-ap",
-            #[cfg(feature = "dcat-ap-sk")]
-            Self::DcatApSk => "dcat-ap-sk",
-            #[cfg(feature = "dcat-ap-cz")]
-            Self::DcatApCz => "dcat-ap-cz",
-        }
-    }
 }
 
 /// The profiles an Organization serves its records in: DCAT-AP always, and those of its
@@ -218,7 +207,7 @@ fn czech(mut record: Value, licence: Option<&str>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{dataset, dataset_turtle, Subject};
+    use crate::{dataset, turtle, Subject};
     use jc_core::kinds::{Audience, Licence, Representation};
     use std::collections::BTreeMap;
 
@@ -271,11 +260,6 @@ mod tests {
         assert_eq!(Profile::parse("dcat-ap"), Some(Profile::DcatAp));
         assert_eq!(Profile::parse("dcat-ap-xx"), None);
         assert_eq!(Profile::parse(""), None);
-        for id in ["dcat-ap", "dcat-ap-sk", "dcat-ap-cz"] {
-            if let Some(profile) = Profile::parse(id) {
-                assert_eq!(profile.id(), id);
-            }
-        }
     }
 
     #[test]
@@ -353,7 +337,7 @@ mod tests {
         let catalog = catalog(None);
         let sk = render(record(&catalog), Profile::DcatApSk, Some(&catalog));
         assert!(!sk.to_string().contains("leg:termsOfUse"));
-        let turtle = crate::turtle(&sk);
+        let turtle = turtle(&sk);
         assert!(turtle.contains("\"120\"^^xsd:decimal"), "{turtle}");
         assert!(!turtle.contains("nonNegativeInteger"), "{turtle}");
     }
@@ -387,7 +371,7 @@ mod tests {
         // the SHA-256 checksum stays: the CZ base is DCAT-AP 3.0
         assert!(schema_distribution(&cz).get("spdx:checksum").is_some());
 
-        let turtle = crate::turtle(&cz);
+        let turtle = turtle(&cz);
         assert!(
             turtle.contains("<https://data.gov.cz/slovník/podmínky-užití/autorské-dílo>"),
             "{turtle}"
@@ -413,7 +397,7 @@ mod tests {
             classes: &[],
             assigners: &[],
         };
-        let turtle = dataset_turtle(&subject, &index(), BASE);
+        let turtle = turtle(&dataset(&subject, &index(), BASE));
         assert!(
             turtle.contains("\"120\"^^xsd:nonNegativeInteger"),
             "{turtle}"
