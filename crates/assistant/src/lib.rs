@@ -182,9 +182,12 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 /// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first. A page under a
 /// news path (`/aktuality/`, `/novinky/`, `/news/`, …) counts 0.9 of its score and loses a tie:
 /// opening hours, prices and contacts are kept on the pages beside the news, and a news item about
-/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370).
+/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370). `scope` is read twice, so
+/// Postgres would materialize it, copying every chunk's tsvector and embedding of the sources
+/// before either ranking, with no index left to serve them: the worker logged it as a slow
+/// statement on dev (T-4663). Inlined, the GIN index serves the lexical match.
 const HYBRID: &str = r#"
-WITH scope AS (
+WITH scope AS NOT MATERIALIZED (
     SELECT c.id, c.fts, c.embedding
     FROM chunks c JOIN sites s ON s.id = c.site_id
     WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
@@ -430,6 +433,12 @@ mod tests {
         assert!(sources_by_project("bbsk", &[]).is_empty());
     }
     use super::*;
+
+    /// T-4663: the scope of a search is inlined into both rankings, never materialized.
+    #[test]
+    fn the_search_scope_is_not_materialized() {
+        assert!(HYBRID.contains("WITH scope AS NOT MATERIALIZED ("));
+    }
 
     #[test]
     fn a_passage_is_titled_by_the_heading_it_opens_with() {
