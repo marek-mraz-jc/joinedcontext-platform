@@ -5,7 +5,7 @@
 //! metadata, coordinates, identifier) and what each is called in a language. The CKAN
 //! publisher orders and labels DataStore fields from it, the assistant widget labels its table
 //! columns from it, and the CKAN theme keeps a byte copy for the map popup, so the three never
-//! drift.
+//! drift. The enumeration names in the table are the theme's alone (the map popup).
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -24,7 +24,6 @@ const REST: &str = "other";
 struct Table {
     groups: Vec<Group>,
     labels: BTreeMap<String, BTreeMap<String, String>>,
-    enums: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -88,12 +87,6 @@ pub fn label(column: &str, lang: &str) -> String {
     word(leaf, lang)
         .or_else(|| word(attribute, lang))
         .unwrap_or_else(|| spelt(leaf))
-}
-
-/// The readable name of an enumeration code (`museumsGalleriesLibraries` → "Múzeá, galérie,
-/// knižnice") in `lang`, else in English, else the code spelt as words.
-pub fn enum_label(code: &str, lang: &str) -> String {
-    in_lang(TABLE.enums.get(code), lang).unwrap_or_else(|| spelt(code))
 }
 
 fn word(key: &str, lang: &str) -> Option<String> {
@@ -205,14 +198,5 @@ mod tests {
         assert_eq!(label("startDate.value", "fi"), "Start");
         assert_eq!(label("eventSubCategory.value", "sk"), "Event sub category");
         assert_eq!(label("tags.value[0]", "en"), "Tags");
-    }
-
-    #[test]
-    fn enum_codes_read_as_words() {
-        assert_eq!(
-            enum_label("museumsGalleriesLibraries", "sk"),
-            "Múzeá, galérie, knižnice"
-        );
-        assert_eq!(enum_label("openAirCinema", "sk"), "Open air cinema");
     }
 }
