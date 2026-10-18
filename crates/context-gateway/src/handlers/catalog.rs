@@ -87,11 +87,17 @@ pub(crate) async fn endpoint_record(
 /// the feed may carry (EP-84, EP-69): no token is read, so no grant widens what it lists.
 // ponytail: one broker hop per public Endpoint, in turn; join them if the feed's latency
 // ever shows on an organization with many Endpoints.
-async fn public_records(gateway: &Gateway, profile: Profile) -> Vec<serde_json::Value> {
+async fn public_records(
+    gateway: &Gateway,
+    profile: Profile,
+    project: Option<&str>,
+) -> Vec<serde_json::Value> {
     let anonymous = Subject::anonymous();
     let mut records = Vec::new();
     for endpoint in gateway.resolver.endpoints() {
-        if endpoint.audience != Audience::Public {
+        if endpoint.audience != Audience::Public
+            || project.is_some_and(|project| endpoint.project != project)
+        {
             continue;
         }
         let index = schema_routes::index_for(gateway, &endpoint, &endpoint.slug, &anonymous).await;
@@ -109,7 +115,7 @@ async fn public_records(gateway: &Gateway, profile: Profile) -> Vec<serde_json::
 
 async fn catalog_feed(gateway: &Gateway, profile: Profile) -> serde_json::Value {
     endpoint_surface::feed(
-        public_records(gateway, profile).await,
+        public_records(gateway, profile, None).await,
         gateway.base_url(),
         &gateway.org_domain,
     )
@@ -143,6 +149,57 @@ pub(crate) async fn catalog_feed_turtle(
     ([(axum::http::header::CONTENT_TYPE, "text/turtle")], body).into_response()
 }
 
+/// `GET /catalog/{project}.jsonld` and `.ttl`: the catalogue of one publisher, a Project that
+/// names it, with the records of the project's public Endpoints (EP-127, API/08 section 6). An
+/// unknown project, one without a publisher and one without a public Endpoint are the same 404,
+/// so the address says nothing about a project that publishes nothing.
+pub(crate) async fn publisher_catalog(
+    State(gateway): State<Arc<Gateway>>,
+    Path(file): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    let (project, turtle) = match file.rsplit_once('.') {
+        Some((project, "jsonld")) => (project, false),
+        Some((project, "ttl")) => (project, true),
+        _ => return ProblemDetails::not_found().into_response(),
+    };
+    let (Some(profile), Some(owner)) = (
+        profile_of(&gateway, request.uri().query()),
+        gateway.publisher(project),
+    ) else {
+        return ProblemDetails::not_found().into_response();
+    };
+    let records = public_records(&gateway, profile, Some(project)).await;
+    if records.is_empty() {
+        return ProblemDetails::not_found().into_response();
+    }
+    let feed = profile::render_catalog(
+        jc_dcat::publisher_feed(
+            records,
+            gateway.base_url(),
+            &jc_dcat::CatalogueOwner {
+                project,
+                title: &owner.title,
+                description: &owner.description,
+                domain: owner.domain.as_deref(),
+                catalog: &owner.catalog,
+            },
+        ),
+        profile,
+    );
+    if turtle {
+        let body = endpoint_surface::feed_turtle(&feed);
+        ([(axum::http::header::CONTENT_TYPE, "text/turtle")], body).into_response()
+    } else {
+        let body = serde_json::to_string(&feed).unwrap_or_default();
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/ld+json")],
+            body,
+        )
+            .into_response()
+    }
+}
+
 /// This surface's routes; `app::router` merges them under its guards.
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
     Router::new()
@@ -153,4 +210,6 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))
+        // One publisher's catalogue, which a national portal registers (EP-127).
+        .route("/catalog/{file}", get(publisher_catalog))
 }

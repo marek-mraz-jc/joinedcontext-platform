@@ -161,6 +161,25 @@
       ],
       "type": "object"
     },
+    "ContactPoint": {
+      "additionalProperties": false,
+      "description": "The contact point of a dataset, a `vcard:Kind`.",
+      "properties": {
+        "email": {
+          "description": "A role address, never a person's own (EP-80): `vcard:hasEmail`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The desk's name: `vcard:fn`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "name"
+      ],
+      "type": "object"
+    },
     "MultiLanguageMap": {
       "additionalProperties": {
         "type": "string"
@@ -422,6 +441,35 @@
       },
       "type": "object"
     },
+    "ProjectCatalog": {
+      "additionalProperties": false,
+      "description": "A Project's `spec.catalog`: the body that publishes its data, which the project's own catalogue names and every record whose Endpoint names no publisher carries (EP-127, docs API/08 section 6).",
+      "properties": {
+        "contactPoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContactPoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The desk that answers for the project's datasets."
+        },
+        "publisher": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Publisher"
+            }
+          ],
+          "description": "The publishing body, with its registry IRI: a catalogue's publisher is an IRI."
+        }
+      },
+      "required": [
+        "publisher"
+      ],
+      "type": "object"
+    },
     "ProjectRepository": {
       "additionalProperties": false,
       "description": "Where a registry entry's project comes from (PF-86, CC-89).",
@@ -468,6 +516,17 @@
             }
           ],
           "description": "What the project's Apps may use: a narrower service list and lower quotas than the organization's (AP-163, AP-165)."
+        },
+        "catalog": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectCatalog"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The body that publishes the project's data in a national catalogue: the project's own catalogue names it, and so does every record whose Endpoint names none (EP-127)."
         },
         "domain": {
           "description": "The internet domain of the body that publishes the project's data, the `did:web` assigner of the Policies compiled for its Apps; absent, the Organization's (PF-108). It describes who publishes and grants, verifies and routes nothing; pipelines keep minting over `JC_ORG_DOMAIN` (PF-44).",
@@ -534,6 +593,30 @@
       },
       "required": [
         "organizationRef"
+      ],
+      "type": "object"
+    },
+    "Publisher": {
+      "additionalProperties": false,
+      "description": "The publisher of a dataset, a `foaf:Agent`.",
+      "properties": {
+        "name": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The publisher's name per language: `foaf:name`.",
+          "type": "object"
+        },
+        "uri": {
+          "description": "The publisher's own IRI, its web site or registry entry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
       ],
       "type": "object"
     },

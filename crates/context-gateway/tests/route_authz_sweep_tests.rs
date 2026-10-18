@@ -84,6 +84,9 @@ enum Guard {
     Listing(&'static str),
     /// Answers everyone on purpose (the reason).
     Open(&'static str),
+    /// Lists public Endpoints only (the reason): with none but the project-bound one, every
+    /// caller, its granted member included, gets the same 404.
+    Withheld(&'static str),
 }
 
 const DATA: Guard = Guard::Data { binary: false };
@@ -306,6 +309,12 @@ fn rows() -> Vec<Row> {
             "/catalog.ttl",
             get("/catalog.ttl".to_owned()),
             Listing("the public Endpoints' records for harvesters; a project-bound one is absent"),
+        ),
+        row(
+            "GET",
+            "/catalog/{file}",
+            get(format!("/catalog/{PROJECT}.jsonld")),
+            Withheld("one publisher's public Endpoints' records for harvesters (EP-127)"),
         ),
         row(
             "GET",
@@ -553,6 +562,25 @@ async fn gateway(realm: &common::Realm, view: &str) -> axum::Router {
         audience: Audience::ProjectList,
         allowed_projects: Vec::new(),
     }]);
+    // The project names its publisher, so its catalogue route runs to the Endpoint table (EP-127).
+    gateway.replace_publishers(
+        [(
+            PROJECT.to_owned(),
+            Arc::new(context_gateway::store::ProjectPublisher {
+                title: Default::default(),
+                description: Default::default(),
+                domain: None,
+                catalog: jc_core::kinds::ProjectCatalog {
+                    publisher: jc_core::kinds::Publisher {
+                        name: [("en".to_owned(), "City of Helsinki".to_owned())].into(),
+                        uri: Some("https://www.hel.fi/".to_owned()),
+                    },
+                    contact_point: None,
+                },
+            }),
+        )]
+        .into(),
+    );
     // One published Mapping, so its file route has something to serve (EP-53). It reads no
     // source name, so admission alone decides who gets it.
     gateway.replace_mappings(
@@ -671,6 +699,7 @@ fn broken(
     let anonymous_401 = route.starts_with("/api/endpoint/");
     let ok = match (guard, caller) {
         (Guard::Open(_), _) => status.is_success(),
+        (Guard::Withheld(_), _) => status == StatusCode::NOT_FOUND,
         (Guard::Portal, Caller::Portal) => !refused(status, body),
         // The Portal's token is bound to the simulator alone: everywhere else it is a token for
         // another audience, refused, or ignored by a listing that reads no token.
@@ -727,7 +756,9 @@ async fn every_route_refuses_whom_the_policy_does_not_admit() {
             let (status, challenged, body) = send(app.clone(), &row, token(&realm, caller)).await;
             if let Some(why) = broken(row.route, row.guard, caller, status, &body) {
                 let promise = match row.guard {
-                    Guard::Listing(reason) | Guard::Open(reason) => reason,
+                    Guard::Listing(reason) | Guard::Open(reason) | Guard::Withheld(reason) => {
+                        reason
+                    }
                     _ => "",
                 };
                 failures.push(format!(
