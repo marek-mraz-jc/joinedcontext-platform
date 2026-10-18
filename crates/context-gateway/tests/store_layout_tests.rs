@@ -83,6 +83,7 @@ fn organization(test: &str) -> (PathBuf, Checkouts) {
     let checkouts = Checkouts {
         projects: root.join("checkouts"),
         assembly: root.join("assembly"),
+        renders: Default::default(),
     };
     project(&checkouts.projects, "ovzdusie", AIR);
     project(&checkouts.projects, "doprava", TRAFFIC);
@@ -367,6 +368,7 @@ fn an_idle_tick_reads_the_checkout_links_and_walks_no_project_file() {
     let checkouts = Checkouts {
         projects: projects.clone(),
         assembly: root.join("assembly"),
+        renders: Default::default(),
     };
     let (endpoints, spaces, ..) = store::load_from(&tree.org, Some(&checkouts)).expect("loads");
     assert_eq!(endpoints.len(), 200);
@@ -394,6 +396,92 @@ fn an_idle_tick_reads_the_checkout_links_and_walks_no_project_file() {
     assert!(reaper.tick(), "the relinked project reloads");
     assert!(gateway.resolver.resolve(&tree.slugs[100]).is_none());
     assert!(gateway.resolver.resolve(&tree.slugs[101]).is_some());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T-4460, R48: a relinked project whose one Policy changed is the only one rendered again. Its
+/// Endpoint carries the new Policy at once, and the other project's Endpoint is the same `Arc`
+/// it was.
+#[test]
+fn a_policy_change_in_one_project_leaves_the_other_projects_endpoints_as_they_were() {
+    let root = temp_dir("one-project");
+    let tree = jcctl::bench_org::write(&root.join("bench"), 200).expect("the tree");
+    let projects = root.join("checkouts");
+    let cache = projects.join(".cache");
+    std::fs::create_dir_all(&cache).expect("the cache");
+    for slug in ["p0000", "p0001"] {
+        let commit = cache.join(format!("{slug}.tree-c1"));
+        std::fs::rename(tree.projects.join(slug), &commit).expect("the tree moves");
+        std::os::unix::fs::symlink(format!(".cache/{slug}.tree-c1"), projects.join(slug))
+            .expect("the link");
+    }
+    let checkouts = Checkouts {
+        projects: projects.clone(),
+        assembly: root.join("assembly"),
+        renders: Default::default(),
+    };
+    let (endpoints, spaces, ..) = store::load_from(&tree.org, Some(&checkouts)).expect("loads");
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1".to_owned()),
+            Box::new(PolicyPdp),
+            "bench.example",
+        )
+        .serve(endpoints)
+        .serve_spaces(spaces),
+    );
+    let mut reaper = Reaper::new(Arc::clone(&gateway), &tree.org).with_checkouts(checkouts);
+    let operations = |slug: &str| {
+        let endpoint = gateway.resolver.resolve(slug).expect("served");
+        serde_json::to_value(&endpoint.policies[0]).expect("a policy")["operations"].clone()
+    };
+    let a = gateway.resolver.resolve(&tree.slugs[0]).expect("served");
+    let b = gateway.resolver.resolve(&tree.slugs[100]).expect("served");
+    assert_eq!(
+        operations(&tree.slugs[0]),
+        serde_json::json!(["retrieveOps"])
+    );
+
+    // The next commit of p0000 grants one more operation, swapped in by one rename.
+    let next = cache.join("p0000.tree-c2");
+    copy(&cache.join("p0000.tree-c1"), &next);
+    let policy = next.join("spaces/s00000/policies/r00000.yaml");
+    let text = std::fs::read_to_string(&policy).expect("the policy");
+    std::fs::write(
+        &policy,
+        text.replace("[retrieveOps]", "[retrieveOps, queryEntity]"),
+    )
+    .expect("the policy changes");
+    let link = projects.join(".p0000.link");
+    std::os::unix::fs::symlink(".cache/p0000.tree-c2", &link).expect("the next link");
+    std::fs::rename(&link, projects.join("p0000")).expect("relinked");
+    assert!(reaper.tick(), "the policy changed");
+
+    assert_eq!(
+        operations(&tree.slugs[0]),
+        serde_json::json!(["retrieveOps", "queryEntity"])
+    );
+    assert!(!Arc::ptr_eq(
+        &a,
+        &gateway.resolver.resolve(&tree.slugs[0]).expect("served")
+    ));
+    assert!(
+        Arc::ptr_eq(
+            &b,
+            &gateway.resolver.resolve(&tree.slugs[100]).expect("served")
+        ),
+        "p0001 did not change, and its Endpoint is the one it was"
+    );
+
+    // Withdrawn again: the grant goes in the same swap (R48).
+    let back = projects.join(".p0000.back");
+    std::os::unix::fs::symlink(".cache/p0000.tree-c1", &back).expect("the old link");
+    std::fs::rename(&back, projects.join("p0000")).expect("relinked back");
+    assert!(reaper.tick(), "the policy changed back");
+    assert_eq!(
+        operations(&tree.slugs[0]),
+        serde_json::json!(["retrieveOps"])
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -17,6 +17,7 @@ use jc_core::kinds::{Project, ProjectSpec};
 use jc_core::project::{self, LiteralParameter, Parameters, RepositoryRole};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 /// Where a registry entry's repository is checked out at its ref.
@@ -53,6 +54,9 @@ pub struct EntryStatus {
     pub error: Option<String>,
     /// Whether the project is in this render.
     pub rendered: bool,
+    /// Whether its render was taken from the last assembly, its linked tree and its registry
+    /// entry unchanged (T-4460).
+    pub reused: bool,
 }
 
 /// A finding in a project repository: where, and what.
@@ -141,6 +145,24 @@ pub fn layout_at(root: &Path, role: RepositoryRole) -> Result<u32, AssembleError
     project::layout_of(text.as_deref(), role).map_err(|err| refused(project::LAYOUT_FILE, err))
 }
 
+/// The render of each linked project checkout, kept from one [`assemble_reusing`] to the next
+/// so a project whose checkout did not move is not rendered again (T-4460).
+///
+/// Only a checkout that is a link is kept: `jcctl checkouts` and git-sync point it at a tree
+/// named by its commit, written once and swapped in by one rename (T-4444), so the tree the
+/// link resolves to names its content. A plain directory can change in place and is rendered
+/// on every run.
+#[derive(Debug, Default)]
+pub struct Renders(BTreeMap<String, Render>);
+
+#[derive(Debug, Clone)]
+struct Render {
+    tree: PathBuf,
+    entry: ProjectSpec,
+    documents: Arc<[LoadedResource]>,
+    findings: Arc<[Finding]>,
+}
+
 /// Assembles the organization checked out at `org_root` into `into` and loads it (CC-86).
 ///
 /// `into` is kept between runs: a project whose ref cannot be fetched this time renders as the
@@ -151,6 +173,25 @@ pub fn assemble(
     resolver: &dyn Resolver,
     into: &Path,
     environment: Option<&str>,
+) -> Result<Assembly, AssembleError> {
+    assemble_reusing(
+        org_root,
+        resolver,
+        into,
+        environment,
+        &mut Renders::default(),
+    )
+}
+
+/// [`assemble`], taking each linked project whose tree and registry entry are the ones
+/// `renders` holds from the last assembly instead of rendering it again (T-4460). The
+/// repository is still built and checked whole, so nothing it grants outlives a change.
+pub fn assemble_reusing(
+    org_root: &Path,
+    resolver: &dyn Resolver,
+    into: &Path,
+    environment: Option<&str>,
+    renders: &mut Renders,
 ) -> Result<Assembly, AssembleError> {
     let layout = layout_at(org_root, RepositoryRole::Organization)?;
     if layout == 1 {
@@ -177,55 +218,92 @@ pub fn assemble(
 
     let mut entries = Vec::new();
     let mut findings = Vec::new();
-    for (slug, entry) in &registry {
-        let git_ref = entry.spec.git_ref.clone().unwrap_or_default();
-        let target = next.join("projects").join(slug);
-        match resolver.checkout(slug, &entry.spec) {
-            Ok(checkout) => {
-                mount_project(
-                    slug,
-                    &entry.spec,
-                    &checkout,
-                    &next,
-                    &mut documents,
-                    &mut findings,
-                )?;
-                entries.push(EntryStatus {
-                    slug: slug.clone(),
-                    git_ref,
-                    error: None,
-                    rendered: true,
-                });
-            }
-            Err(error) => {
-                let last = into.join("projects").join(slug);
-                let rendered = last.is_dir();
-                if rendered {
-                    copy_tree(&last, &target, &|_| false, &mut copy_file)?;
-                    documents.extend(read_documents(&next, &target)?);
+    let mut kept = BTreeMap::new();
+    // Renders moved whole out of `into`, each put back when this assembly is refused.
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let loaded = (|| {
+        for (slug, entry) in &registry {
+            let git_ref = entry.spec.git_ref.clone().unwrap_or_default();
+            let target = next.join("projects").join(slug);
+            let last = into.join("projects").join(slug);
+            match resolver.checkout(slug, &entry.spec) {
+                Ok(checkout) => {
+                    let tree = linked_tree(&checkout);
+                    let reused = renders.0.get(slug).filter(|render| {
+                        Some(&render.tree) == tree.as_ref()
+                            && render.entry == entry.spec
+                            && last.is_dir()
+                    });
+                    let render = match reused {
+                        Some(render) => {
+                            std::fs::create_dir_all(next.join("projects")).map_err(io(&next))?;
+                            std::fs::rename(&last, &target).map_err(io(&last))?;
+                            moved.push((target, last));
+                            render.clone()
+                        }
+                        None => {
+                            let (mut own, mut found) = (Vec::new(), Vec::new());
+                            mount_project(
+                                slug,
+                                &entry.spec,
+                                &checkout,
+                                &next,
+                                &mut own,
+                                &mut found,
+                            )?;
+                            Render {
+                                tree: PathBuf::new(),
+                                entry: entry.spec.clone(),
+                                documents: own.into(),
+                                findings: found.into(),
+                            }
+                        }
+                    };
+                    documents.extend(render.documents.iter().cloned());
+                    findings.extend(render.findings.iter().cloned());
+                    if let Some(tree) = tree {
+                        kept.insert(slug.clone(), Render { tree, ..render });
+                    }
+                    entries.push(EntryStatus {
+                        slug: slug.clone(),
+                        git_ref,
+                        error: None,
+                        rendered: true,
+                        reused: reused.is_some(),
+                    });
                 }
-                entries.push(EntryStatus {
-                    slug: slug.clone(),
-                    git_ref,
-                    error: Some(error),
-                    rendered,
-                });
+                Err(error) => {
+                    let rendered = last.is_dir();
+                    if rendered {
+                        copy_tree(&last, &target, &|_| false, &mut copy_file)?;
+                        documents.extend(read_documents(&next, &target)?);
+                    }
+                    entries.push(EntryStatus {
+                        slug: slug.clone(),
+                        git_ref,
+                        error: Some(error),
+                        rendered,
+                        reused: false,
+                    });
+                }
             }
         }
-    }
-
-    let loaded = Repository::from_documents(&next, documents, environment);
+        let loaded =
+            Repository::from_documents(&next, std::mem::take(&mut documents), environment)?;
+        unique_across_projects(&loaded)?;
+        Ok(loaded)
+    })();
     let loaded = match loaded {
         Ok(repository) => repository,
         Err(err) => {
+            for (from, back) in moved.iter().rev() {
+                // Put back, or the next assembly renders that project again: `into` misses it.
+                let _ = std::fs::rename(from, back);
+            }
             let _ = std::fs::remove_dir_all(&next);
-            return Err(err.into());
+            return Err(err);
         }
     };
-    if let Err(conflict) = unique_across_projects(&loaded) {
-        let _ = std::fs::remove_dir_all(&next);
-        return Err(conflict);
-    }
 
     let previous = sibling(into, "previous");
     remove(&previous)?;
@@ -234,6 +312,7 @@ pub fn assemble(
     }
     std::fs::rename(&next, into).map_err(io(into))?;
     remove(&previous)?;
+    renders.0 = kept;
 
     Ok(Assembly {
         layout,
@@ -474,6 +553,16 @@ fn unique_across_projects(repository: &Repository) -> Result<(), AssembleError> 
         seen.insert(value, project);
     }
     Ok(())
+}
+
+/// The tree a linked checkout resolves to, which names its content ([`Renders`]); `None` for a
+/// checkout that is not a link.
+fn linked_tree(checkout: &Path) -> Option<PathBuf> {
+    let link = std::fs::symlink_metadata(checkout).ok()?;
+    if !link.file_type().is_symlink() {
+        return None;
+    }
+    checkout.canonicalize().ok()
 }
 
 fn sibling(into: &Path, suffix: &str) -> PathBuf {

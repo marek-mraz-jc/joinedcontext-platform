@@ -54,6 +54,7 @@ async fn main() -> ExitCode {
         .map(|projects| store::Checkouts {
             projects,
             assembly: config.assembly_dir.clone(),
+            renders: Default::default(),
         });
     let (
         endpoints,

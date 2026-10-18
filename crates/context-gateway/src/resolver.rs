@@ -297,11 +297,23 @@ impl SlugResolver {
     /// Replaces the whole table in one atomic step (EP-19).
     ///
     /// A reader either sees the entire old table or the entire new one, never a mixture,
-    /// so an endpoint is never briefly missing while its space is being updated.
+    /// so an endpoint is never briefly missing while its space is being updated. An endpoint
+    /// equal to the one it replaces keeps its `Arc`, so a reload of one project leaves every
+    /// other project's endpoints as they were (T-4460).
     pub fn replace(&self, endpoints: impl IntoIterator<Item = Endpoint>) {
+        let old = self.table.load();
         let table: HashMap<String, Arc<Endpoint>> = endpoints
             .into_iter()
-            .map(|endpoint| (endpoint.slug.clone(), Arc::new(endpoint)))
+            .map(|endpoint| {
+                let kept = old
+                    .get(&endpoint.slug)
+                    .filter(|was| ***was == endpoint)
+                    .map(Arc::clone);
+                (
+                    endpoint.slug.clone(),
+                    kept.unwrap_or_else(|| Arc::new(endpoint)),
+                )
+            })
             .collect();
         self.table.store(Arc::new(table));
     }
