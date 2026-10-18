@@ -15,6 +15,12 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The pinned NGSI-LD core `@context`, built once.
+fn core_context() -> &'static antares_jsonld::Context {
+    static CORE: std::sync::OnceLock<antares_jsonld::Context> = std::sync::OnceLock::new();
+    CORE.get_or_init(antares_jsonld::core_context)
+}
+
 /// The folder of one space that holds its seed entities.
 const SEED_DIR: &str = "entities/seed";
 
@@ -306,5 +312,17 @@ fn entity_id(body: &Value, file: &Path) -> Result<String, SeedError> {
     if !object.get("type").is_some_and(Value::is_string) {
         return Err(malformed(&format!("{id} declares no type")));
     }
+    // What the broker would refuse with a 400 on create (a Property without a value, a
+    // Relationship without an object, an id that is no URI), refused here before `apply`
+    // reaches it. A remote `@context` is not fetched: its terms expand under the core vocabulary,
+    // which leaves the structure checked and only the names unresolved.
+    let mut offline = object.clone();
+    offline.remove("@context");
+    antares_jsonld::expand_entity(
+        &offline,
+        core_context(),
+        antares_jsonld::ExpandOpts::default(),
+    )
+    .map_err(|e| malformed(&format!("{id} is not a valid NGSI-LD entity: {e}")))?;
     Ok(id.to_owned())
 }
