@@ -75,7 +75,7 @@ async function scrollers(frame) {
 
 const inside = (box, width, height) => box && box.x >= 0 && box.y >= 0 && box.x + box.width <= width + 0.5 && box.y + box.height <= height + 0.5;
 
-for (const [width, height] of [[1280, 720], [768, 1024], [375, 812], [320, 640]]) {
+for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]) {
   test(`the panel at ${width}x${height}: the browser's language at once, one scroll area, nothing cut`, async ({ page }) => {
     WIDGET = undefined;
     await page.setViewportSize({ width, height });
@@ -93,22 +93,22 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812], [320, 640]]
     await expect(frame.locator(".jc-suggest button")).toHaveCount(3);
     await expect(frame.locator("select")).toHaveCount(0);
 
-    // A short conversation leaves no empty panel: the chips sit right above the composer.
+    // T-4592: one tall panel, 760 px or the window less the launcher; the whole screen on a phone.
+    // A fresh chat reads from the top: the greeting under the header, the composer whole.
     const panel = page.locator("[data-jc-assistant] .jc-panel");
-    await expect.poll(async () => {
-      const chips = await frame.locator(".jc-suggest").boundingBox();
-      const composer = await frame.locator(".jc-form").boundingBox();
-      return composer.y - (chips.y + chips.height);
-    }, { message: "no dead space under the chips" }).toBeLessThan(40);
+    const opened = await panel.boundingBox();
     if (width > 640) {
-      expect(inside(await panel.boundingBox(), width, height), "the panel fits the window").toBe(true);
-      // ...and is as tall as what it shows: no empty band under the header either.
-      await expect.poll(async () => {
-        const top = await frame.locator(".jc-head").boundingBox();
-        const greeting = await frame.locator(".jc-greeting").boundingBox();
-        return greeting.y - (top.y + top.height);
-      }, { message: "the panel fits its content" }).toBeLessThan(40);
+      expect(inside(opened, width, height), "the panel fits the window").toBe(true);
+      expect(Math.round(opened.height), "the panel is 760 px or the window less 108").toBe(Math.min(760, height - 108));
+    } else {
+      expect([opened.x, opened.y, Math.round(opened.width), Math.round(opened.height)], "the panel fills the phone").toEqual([0, 0, width, height]);
+      expect(inside(await frame.locator(".jc-form").boundingBox(), width, height), "the composer is in view").toBe(true);
     }
+    await expect.poll(async () => {
+      const top = await frame.locator(".jc-head").boundingBox();
+      const greeting = await frame.locator(".jc-greeting").boundingBox();
+      return greeting.y - (top.y + top.height);
+    }, { message: "the greeting sits under the header" }).toBeLessThanOrEqual(24);
 
     // The name and its subtitle keep one line each, whole, at every size.
     const header = await frame.locator(".jc-title").evaluate((title) => {
@@ -188,7 +188,7 @@ for (const [width, height] of [[1280, 720], [768, 1024], [375, 812], [320, 640]]
     }
     const head = await frame.locator(".jc-head").boundingBox();
     expect(head.y, "the header stays at the top after a long answer").toBeLessThanOrEqual(frameBox.y + 1);
-    if (width > 640) expect(inside(await panel.boundingBox(), width, height), "the grown panel still fits").toBe(true);
+    expect(await panel.boundingBox(), "a long answer leaves the panel as it opened").toEqual(opened);
     if (width <= 480) {
       const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-notice .jc-more"].map((s) => s + ":visible").join(", ");
       for (const control of await frame.locator(controls).all()) {
