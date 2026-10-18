@@ -3409,6 +3409,74 @@ async fn a_deployments_max_data_steps_ends_its_loop() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4663: a tool that hangs costs the question no more than its data seconds. The model's read
+/// waits out what is left of `answer.maxDataSeconds` (5 s), not the connector's 20, comes back to
+/// the model as a source that did not answer, and the answer follows at once.
+#[tokio::test]
+async fn a_hanging_tool_costs_the_question_its_data_seconds_and_no_more() {
+    let mut d = deployment(Channel::Public, 200_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    d.spec.connectors[0].timeout_seconds = 20;
+    d.spec.answer = Some(jc_core::kinds::AnswerSpec {
+        max_data_seconds: Some(5),
+        ..Default::default()
+    });
+    let w = world("chathangingtool", d).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{SLUG}/mcp")))
+        .and(body_string_contains("\"limit\":7"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{}"}]}}))
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .with_priority(0)
+        .mount(&w.gateway)
+        .await;
+    recorded_air(&w.gateway, SLUG).await;
+    let hang = json!({"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":7}"}});
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [hang]}), 1_000),
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [1]."}), 1_000),
+    ]).await;
+
+    let at = std::time::Instant::now();
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Ako sa mení NO2?"}), Some(ORIGIN)),
+    )
+    .await;
+    let took = at.elapsed();
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "answer" && d["text"] == "NO2 je 21 [1]."),
+        "{events:?}"
+    );
+    assert!(took < std::time::Duration::from_secs(12), "took {took:?}");
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "tool" && d["status"] == "failed"),
+        "{events:?}"
+    );
+    let all = model_calls(&w.proxy).await;
+    let answers = calls_of(&all, None);
+    assert_eq!(answers.len(), 2);
+    assert!(
+        answers[1]["messages"]
+            .to_string()
+            .contains("did not answer within the question"),
+        "{}",
+        answers[1]["messages"]
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4651: a question whose loop spent its tokens answers with what it has: the call after the
 /// costly step is told to answer and offered no tool, though steps and seconds are left.
 #[tokio::test]
