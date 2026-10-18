@@ -671,17 +671,20 @@ var JCRender = (function () {
   }
 
   /**
-   * The paragraphs of the privacy dialog (API/05 §1.6, T-4670) in `words`: what the service keeps
-   * for how many `days` (none when 0), and, when the deployment names them, the contact to write
-   * to (`mail`) and the page of its privacy documents (`href`, https only).
+   * The paragraphs of the privacy dialog (API/05 §1.6, T-4670) in `words`: the deployment's
+   * `disclaimer`, else the widget's own; what is kept for how many `days` (none when 0); and,
+   * only when the deployment names a contact, whom to write (`mail`) with the page of its privacy
+   * documents (`href`, https only).
    */
-  function privacyLines(words, days, privacy) {
-    var lines = [{ text: words.aboutAi }];
+  function privacyLines(words, days, privacy, disclaimer) {
+    var own = typeof disclaimer === "string" ? disclaimer.trim() : "";
+    var lines = [{ text: own || words.aboutAi }];
     var n = Number.isInteger(days) && days > 0 ? days : 0;
-    lines.push({ text: n > 0 ? words.keptDays.replace("{days}", String(n)) : words.keptNone });
+    lines.push({ heading: words.keptHeading, text: n > 0 ? words.keptDays.replace("{days}", String(n)) : words.keptNone });
     var contact = privacy && typeof privacy.contact === "string" ? privacy.contact.trim() : "";
-    if (contact && mailto(contact)) lines.push({ text: words.askData, mail: contact });
-    var docs = privacy && safeUrl(privacy.documentsUrl);
+    if (!contact || !mailto(contact)) return lines;
+    lines.push({ heading: words.askHeading, text: words.askData, mail: contact });
+    var docs = safeUrl(privacy.documentsUrl);
     if (docs && /^https:/i.test(docs)) lines.push({ text: words.documents, href: docs });
     return lines;
   }
@@ -806,15 +809,6 @@ var JCRender = (function () {
     return list;
   }
 
-  /**
-   * The disclaimer as its first sentence, always shown whole, and the rest that "More" opens
-   * (T-4635); a text of one sentence has no rest.
-   */
-  function notice(text) {
-    var whole = typeof text === "string" ? text.trim().replace(/\s+/g, " ") : "";
-    var split = /^(.+?[.!?])\s+(\S.*)$/.exec(whole);
-    return split ? { lead: split[1], rest: split[2] } : { lead: whole, rest: "" };
-  }
 
   /**
    * The origins the chat's close message goes to, never `*` (T-4654): the framing page's own,
@@ -832,7 +826,7 @@ var JCRender = (function () {
   }
 
   return {
-    notice: notice, closeTargets: closeTargets,
+    closeTargets: closeTargets,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,

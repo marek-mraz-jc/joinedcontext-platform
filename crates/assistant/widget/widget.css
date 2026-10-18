@@ -35,7 +35,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-name { font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jc-role { font-size: 12px; font-weight: 400; color: var(--muted); }
 .jc-actions { flex: none; display: flex; align-items: center; gap: 6px; }
-.jc-actions [hidden], .jc-form[hidden], .jc-notice[hidden] { display: none; }
+.jc-actions [hidden], .jc-form[hidden] { display: none; }
 .jc-langs { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: var(--pill); background: var(--soft); }
 .jc-langs button { min-width: 40px; min-height: 32px; padding: 0 10px; border: 0; border-radius: var(--pill);
   background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
@@ -194,16 +194,15 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-send svg { width: 18px; height: 18px; }
 .jc-form .jc-stop { background: var(--fg); color: var(--bg); }
 .jc-form button[hidden] { display: none; }
-.jc-notice { margin: 6px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
 .jc-more { padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; cursor: pointer; }
-.jc-more[hidden], .jc-disclaimer-rest[hidden] { display: none; }
-.jc-privacy-line { margin: 2px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.jc-privacy-line { margin: 6px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
 /* The privacy dialog (T-4670): over the chat, inside the panel's own page. */
 .jc-about { max-width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; box-sizing: border-box;
   padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); color: var(--fg);
   box-shadow: var(--shadow); font-size: 14px; line-height: 1.45; }
 .jc-about::backdrop { background: rgba(0, 0, 0, .35); }
 .jc-about h2 { margin: 0 0 10px; font-size: 16px; }
+.jc-about h3 { margin: 14px 0 4px; font-size: 14px; }
 .jc-about p { margin: 0 0 10px; }
 .jc-about a { color: var(--link); }
 .jc-remember { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 6px; font-weight: 600; cursor: pointer; }
@@ -231,7 +230,6 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   .jc-suggest button { min-height: 44px; }
   /* A button is an inline block: the padding grows the tap target, the negative margin keeps the line. */
   .jc-more { padding: 14px 12px; margin: -14px -8px; }
-  .jc-notice { margin-bottom: 8px; }
   .jc-privacy-line { margin-bottom: 8px; }
 }
 /* With the expand button (T-4658, never on a phone) four controls share a 420 px header: 34 px

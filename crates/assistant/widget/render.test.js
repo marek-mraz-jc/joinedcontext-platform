@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, lasting, recalled, privacyLines, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, lasting, recalled, privacyLines, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -627,15 +627,6 @@ test("opening hours read as a list of bold days and their times, not one paragra
   ]);
 });
 
-test("the disclaimer shows its first sentence and keeps the rest for More (T-4635)", () => {
-  assert.deepEqual(notice("Answers are written by AI. They may contain mistakes; check them. Do not enter personal data."),
-    { lead: "Answers are written by AI.", rest: "They may contain mistakes; check them. Do not enter personal data." });
-  assert.deepEqual(notice("  One sentence only.  "), { lead: "One sentence only.", rest: "" });
-  assert.deepEqual(notice("No full stop at all"), { lead: "No full stop at all", rest: "" });
-  assert.deepEqual(notice("Ask!\n  Then   read."), { lead: "Ask!", rest: "Then read." });
-  for (const empty of ["", "   ", null, undefined, 3]) assert.deepEqual(notice(empty), { lead: "", rest: "" });
-});
-
 test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4653)", async () => {
   const { solve, zeroBits } = require("./visitor.js");
   const { createHash } = require("node:crypto");
@@ -756,15 +747,18 @@ test("a remembered conversation comes back for 90 days after its last change and
   assert.deepEqual(recalled(JSON.stringify({ savedAt: saved.toISOString(), kept: { conversation: "x", turns: [] } }), saved), { kept: null });
 });
 
-test("the privacy dialog says what is kept, and names only a contact and an https page it was given (T-4670)", () => {
-  const words = { aboutAi: "AI", keptDays: "kept {days} days", keptNone: "kept nothing", askData: "write to", documents: "documents" };
-  assert.deepEqual(privacyLines(words, 30, null), [{ text: "AI" }, { text: "kept 30 days" }]);
-  assert.deepEqual(privacyLines(words, 0, {}), [{ text: "AI" }, { text: "kept nothing" }]);
+test("the privacy dialog leads with the deployment's disclaimer, says what is kept, and names only a contact and an https page it was given (T-4670)", () => {
+  const words = { aboutAi: "AI", keptHeading: "Kept", keptDays: "kept {days} days", keptNone: "kept nothing", askHeading: "Ask",
+    askData: "write to", documents: "documents" };
+  assert.deepEqual(privacyLines(words, 30, null), [{ text: "AI" }, { heading: "Kept", text: "kept 30 days" }]);
+  assert.deepEqual(privacyLines(words, 0, {}, "  "), [{ text: "AI" }, { heading: "Kept", text: "kept nothing" }]);
+  assert.equal(privacyLines(words, 30, null, " The city's own words. ")[0].text, "The city's own words.");
   assert.deepEqual(privacyLines(words, 7, { contact: "dpo@banskabystrica.sk", documentsUrl: "https://www.banskabystrica.sk/gdpr" }), [
-    { text: "AI" }, { text: "kept 7 days" },
-    { text: "write to", mail: "dpo@banskabystrica.sk" },
+    { text: "AI" }, { heading: "Kept", text: "kept 7 days" },
+    { heading: "Ask", text: "write to", mail: "dpo@banskabystrica.sk" },
     { text: "documents", href: "https://www.banskabystrica.sk/gdpr" },
   ]);
-  assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "javascript:alert(1)" }).length, 2);
-  assert.equal(privacyLines(words, 7, { documentsUrl: "http://x.sk/gdpr" }).length, 2, "https only");
+  assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "https://x.sk/gdpr" }).length, 2, "no contact, no section");
+  assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "javascript:alert(1)" }).length, 3);
+  assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "http://x.sk/gdpr" }).length, 3, "https only");
 });

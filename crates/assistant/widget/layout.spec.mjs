@@ -165,8 +165,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return greeting.y - (top.y + top.height);
     }, { message: "the greeting sits under the header" }).toBeLessThanOrEqual(24);
 
-    // T-4635 option C: a labelled send button inside the bar, no circle in the footer, the
-    // disclaimer's sentence whole with a "More" link that opens the rest.
+    // T-4635 option C: a labelled send button inside the bar, no circle in the footer.
     const bar = await frame.locator(".jc-form").boundingBox();
     const send = frame.locator(".jc-form .jc-submit");
     await expect(send).toHaveText("Send");
@@ -179,19 +178,11 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return box.width > 4 && Math.abs(box.width - box.height) < 2 && radius >= box.width / 2 - 1;
     }).map((el) => el.className));
     expect(circles, "no circle in the footer").toEqual([]);
-    const lead = await frame.locator(".jc-notice .jc-disclaimer").evaluate((span) => ({
-      text: span.textContent, wraps: getComputedStyle(span.parentElement).whiteSpace !== "nowrap",
-      cut: getComputedStyle(span.parentElement).textOverflow === "ellipsis" }));
-    expect(lead, "the disclaimer's sentence is whole").toEqual({ text: "Answers are written by AI from the city's and the region's websites.", wraps: true, cut: false });
-    const more = frame.locator(".jc-notice .jc-more");
-    await expect(more).toHaveText("More");
-    await expect(more).toHaveAttribute("aria-expanded", "false");
-    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
-    await more.click();
-    await expect(more).toHaveAttribute("aria-expanded", "true");
-    await expect(frame.locator("#jc-disclaimer-rest")).toHaveText("They may contain mistakes; check them in the sources. Do not enter personal data.");
-    await more.click();
-    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
+    // T-4670: the footer is one line, whole and wrapping; the disclaimer moved into the privacy dialog.
+    const line = await frame.locator(".jc-privacy-line").evaluate((p) => ({
+      text: p.textContent, wraps: getComputedStyle(p).whiteSpace !== "nowrap", cut: getComputedStyle(p).textOverflow === "ellipsis" }));
+    expect(line, "the footer line is whole").toEqual({ text: "Please verify important information. · Privacy", wraps: true, cut: false });
+    await expect(frame.locator(".jc-disclaimer")).toHaveCount(0);
 
     // The name and its subtitle keep one line each, whole, at every size.
     const header = await frame.locator(".jc-title").evaluate((title) => {
@@ -265,7 +256,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     // Boxes are in the page's coordinates: each part lies within the frame, the frame within the window.
     const frameBox = await page.locator("[data-jc-assistant] iframe").boundingBox();
     expect(inside(frameBox, width, height), "the frame lies within the window").toBe(true);
-    for (const part of [".jc-head", ".jc-form", ".jc-notice"]) {
+    for (const part of [".jc-head", ".jc-form", ".jc-privacy-line"]) {
       const box = await frame.locator(part).boundingBox();
       expect(box.y >= frameBox.y - 0.5 && box.y + box.height <= frameBox.y + frameBox.height + 0.5, `${part} is whole`).toBe(true);
     }
@@ -273,7 +264,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     expect(head.y, "the header stays at the top after a long answer").toBeLessThanOrEqual(frameBox.y + 1);
     expect(await panel.boundingBox(), "a long answer leaves the panel as it opened").toEqual(opened);
     if (width <= 480) {
-      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-notice .jc-more"].map((s) => s + ":visible").join(", ");
+      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-privacy-line .jc-more"].map((s) => s + ":visible").join(", ");
       for (const control of await frame.locator(controls).all()) {
         const box = await control.boundingBox();
         expect(Math.min(box.width, box.height), "a tap target of 44 px").toBeGreaterThanOrEqual(44);
@@ -495,6 +486,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   const dialog = page.locator("dialog.jc-about");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator("h2")).toHaveText("O tomto asistentovi");
+  await expect(dialog.locator("p").first()).toHaveText(CONFIG.disclaimer.sk);
   await expect(dialog).toContainText("30 dní");
   await expect(dialog.locator('a[href="mailto:dpo@banskabystrica.sk"]')).toBeVisible();
   await expect(dialog.locator('a[href="https://www.banskabystrica.sk/gdpr"]')).toBeVisible();

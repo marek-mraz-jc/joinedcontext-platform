@@ -27,14 +27,16 @@
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
       declined: "Na túto otázku asistent neodpovedá.",
-      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej",
+      choose: "Vyberte jazyk",
       verify: "Dôležité informácie si prosím overte.", privacy: "Súkromie", aboutTitle: "O tomto asistentovi",
-      aboutAi: "Odpovede píše umelá inteligencia a môžu byť nepresné. Do otázok nepíšte citlivé osobné údaje, napríklad rodné číslo, zdravotný stav alebo číslo účtu.",
+      aboutAi: "Odpovede vytvára umelá inteligencia a môžu obsahovať chyby. Dôležité informácie si overte v oficiálnych zdrojoch. Nevkladajte citlivé osobné údaje.",
       remember: "Zapamätať konverzáciu v tomto prehliadači",
-      rememberHint: "Konverzácia ostane v tomto prehliadači najviac 90 dní od poslednej zmeny. Na zdieľanom zariadení ju nezapínajte. Vypnutím ju hneď vymažete.",
-      keptDays: "Služba uchováva konverzácie {days} dní na prevádzku, kontrolu kvality a opravu chýb, s vymazanými e-mailmi, telefónnymi číslami, rodnými číslami a číslami účtov a kariet.",
-      keptNone: "Služba konverzácie neuchováva.",
-      askData: "O prístup k svojim údajom, ich opravu alebo vymazanie požiadajte na adrese",
+      rememberHint: "Konverzácia ostane v tomto prehliadači najviac 90 dní od poslednej zmeny; vypnutím ju hneď vymažete. Na zdieľanom zariadení túto možnosť nezapínajte.",
+      keptHeading: "Konverzácie",
+      keptDays: "Obsah konverzácie uchovávame {days} dní na poskytovanie služby, spätnú kontrolu a riešenie chýb. História zahŕňa otázky a zobrazené odpovede.",
+      keptNone: "Obsah konverzácií neuchovávame.",
+      askHeading: "Otázky k osobným údajom",
+      askData: "Chcete sa opýtať na spracúvanie údajov alebo požiadať o prístup, opravu či vymazanie? Napíšte nám:",
       documents: "Informácie o ochrane osobných údajov" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
@@ -54,14 +56,16 @@
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
       declined: "The assistant does not answer this question.",
-      choose: "Choose your language", moreInfo: "More", lessInfo: "Less",
+      choose: "Choose your language",
       verify: "Please verify important information.", privacy: "Privacy", aboutTitle: "About this assistant",
-      aboutAi: "Answers are written by artificial intelligence and may be wrong. Do not put sensitive personal data in a question, such as a national ID number, health details or an account number.",
+      aboutAi: "Answers are made by artificial intelligence and may contain mistakes. Check important information in official sources. Do not enter sensitive personal data.",
       remember: "Remember the conversation in this browser",
-      rememberHint: "The conversation stays in this browser for at most 90 days after its last change. Do not switch it on on a shared device. Switching it off deletes it at once.",
-      keptDays: "The service keeps conversations for {days} days to run the service, review quality and fix errors, with e-mail addresses, phone numbers, ID numbers and account and card numbers removed.",
-      keptNone: "The service keeps no conversations.",
-      askData: "To access, correct or erase your data, write to",
+      rememberHint: "The conversation stays in this browser for at most 90 days after its last change; switching it off deletes it at once. Do not switch this on on a shared device.",
+      keptHeading: "Conversations",
+      keptDays: "We keep the content of conversations for {days} days to provide the service, review it and fix errors. The history holds the questions and the answers shown.",
+      keptNone: "We keep no conversation content.",
+      askHeading: "Questions about personal data",
+      askData: "Want to ask about how data is processed, or request access, correction or erasure? Write to us:",
       documents: "Privacy information" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
@@ -81,14 +85,16 @@
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
       declined: "Na tuto otázku asistent neodpovídá.",
-      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně",
+      choose: "Vyberte jazyk",
       verify: "Důležité informace si prosím ověřte.", privacy: "Soukromí", aboutTitle: "O tomto asistentovi",
-      aboutAi: "Odpovědi píše umělá inteligence a mohou být nepřesné. Do otázek nepište citlivé osobní údaje, například rodné číslo, zdravotní stav nebo číslo účtu.",
+      aboutAi: "Odpovědi vytváří umělá inteligence a mohou obsahovat chyby. Důležité informace si ověřte v oficiálních zdrojích. Nevkládejte citlivé osobní údaje.",
       remember: "Zapamatovat konverzaci v tomto prohlížeči",
-      rememberHint: "Konverzace zůstane v tomto prohlížeči nejvýše 90 dní od poslední změny. Na sdíleném zařízení ji nezapínejte. Vypnutím ji hned smažete.",
-      keptDays: "Služba uchovává konverzace {days} dní pro provoz, kontrolu kvality a opravu chyb, se smazanými e-maily, telefonními čísly, rodnými čísly a čísly účtů a karet.",
-      keptNone: "Služba konverzace neuchovává.",
-      askData: "O přístup ke svým údajům, jejich opravu nebo smazání požádejte na adrese",
+      rememberHint: "Konverzace zůstane v tomto prohlížeči nejvýše 90 dní od poslední změny; vypnutím ji hned smažete. Na sdíleném zařízení tuto možnost nezapínejte.",
+      keptHeading: "Konverzace",
+      keptDays: "Obsah konverzace uchováváme {days} dní pro poskytování služby, zpětnou kontrolu a řešení chyb. Historie zahrnuje otázky a zobrazené odpovědi.",
+      keptNone: "Obsah konverzací neuchováváme.",
+      askHeading: "Dotazy k osobním údajům",
+      askData: "Chcete se zeptat na zpracování údajů nebo požádat o přístup, opravu či smazání? Napište nám:",
       documents: "Informace o ochraně osobních údajů" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
@@ -306,31 +312,9 @@
   form.appendChild(send);
   form.appendChild(stop);
   var foot = el("footer", "jc-foot");
-  // The disclaimer's first sentence, whole and wrapping, then a "More" link that opens the rest
-  // (T-4635); no button of its own shape.
-  var notice = el("p", "jc-notice");
-  var lead = el("span", "jc-disclaimer");
-  var rest = el("span", "jc-disclaimer-rest");
-  rest.id = "jc-disclaimer-rest";
-  rest.hidden = true;
-  var more = el("button", "jc-more");
-  more.type = "button";
-  more.setAttribute("aria-controls", "jc-disclaimer-rest");
-  more.setAttribute("aria-expanded", "false");
-  more.addEventListener("click", function () {
-    var open = more.getAttribute("aria-expanded") !== "true";
-    more.setAttribute("aria-expanded", String(open));
-    rest.hidden = !open;
-    more.textContent = open ? w.lessInfo : w.moreInfo;
-  });
-  notice.appendChild(lead);
-  notice.appendChild(document.createTextNode(" "));
-  notice.appendChild(rest);
-  notice.appendChild(document.createTextNode(" "));
-  notice.appendChild(more);
   foot.appendChild(form);
-  foot.appendChild(notice);
-  // Under every chat (API/05 §1.6, T-4670): verify what matters, and the privacy dialog.
+  // Under every chat (API/05 §1.6, T-4670): verify what matters, and the privacy dialog, which
+  // carries the deployment's disclaimer.
   var line = el("p", "jc-privacy-line");
   line.appendChild(words(el("span"), "verify"));
   line.appendChild(document.createTextNode(" · "));
@@ -343,6 +327,7 @@
   about.setAttribute("aria-labelledby", "jc-about-title");
   var aboutTitle = words(el("h2"), "aboutTitle");
   aboutTitle.id = "jc-about-title";
+  var aboutLead = el("p");
   var aboutBody = el("div", "jc-about-body");
   var rememberLabel = el("label", "jc-remember");
   var rememberBox = el("input");
@@ -352,7 +337,7 @@
   rememberLabel.appendChild(words(el("span"), "remember"));
   var rememberHint = words(el("p", "jc-hint"), "rememberHint");
   var aboutClose = button("jc-about-close", "close");
-  [aboutTitle, aboutBody, rememberLabel, rememberHint, aboutClose].forEach(function (n) { about.appendChild(n); });
+  [aboutTitle, aboutLead, rememberLabel, rememberHint, aboutBody, aboutClose].forEach(function (n) { about.appendChild(n); });
 
   root.appendChild(head);
   if (tools) root.appendChild(tools);
@@ -406,8 +391,11 @@
   });
 
   function fillAbout() {
+    var lines = JCRender.privacyLines(w, config.transcriptDays, config.privacy, perLanguage(config.disclaimer));
+    aboutLead.textContent = lines[0].text;
     aboutBody.textContent = "";
-    JCRender.privacyLines(w, config.transcriptDays, config.privacy).forEach(function (l) {
+    lines.slice(1).forEach(function (l) {
+      if (l.heading) aboutBody.appendChild(el("h3", "", l.heading));
       var p = el("p");
       if (l.href) p.appendChild(link(l.href, l.text));
       else p.textContent = l.text;
@@ -479,12 +467,6 @@
     }
     if (named) retitle();
     if (about.open) fillAbout();
-    var parts = JCRender.notice(perLanguage(config.disclaimer));
-    lead.textContent = parts.lead;
-    rest.textContent = parts.rest;
-    notice.hidden = !parts.lead;
-    more.hidden = !parts.rest;
-    more.textContent = more.getAttribute("aria-expanded") === "true" ? w.lessInfo : w.moreInfo;
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
       welcome();
