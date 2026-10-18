@@ -32,13 +32,16 @@ fn a_percent_before_a_multibyte_character_does_not_panic() {
 
 /// And the way a caller reaches it: one query string, decoded once by `parse` and a second time
 /// by the reference check that keeps a filter off an attribute the endpoint does not serve.
+/// Since T-4479 the `q` is read by the broker's parser, which refuses `%a€x` as an attribute
+/// name: the `q` then references `unreadable q`, a name no grant shows, so it can only narrow.
 #[test]
 fn a_hostile_query_string_reaches_the_reference_check_without_panicking() {
     let params = parse("q=%25a%E2%82%ACx==1&attrs=%25b%E2%82%AC&orderBy=%25c%E2%82%AC");
     assert_eq!(params[0], ("q".to_owned(), "%a\u{20AC}x==1".to_owned()));
 
     let names = referenced_attributes(&params);
-    assert!(names.contains("%a\u{20AC}x"), "{names:?}");
+    assert!(names.contains("unreadable q"), "{names:?}");
+    assert!(!names.contains("%a\u{20AC}x"), "{names:?}");
     assert!(names.contains("%b\u{20AC}"), "{names:?}");
     assert!(names.contains("%c\u{20AC}"), "{names:?}");
 }
