@@ -144,6 +144,7 @@ async fn search(
             sources: &sources,
             public_only,
             limit: 10,
+            lang: None,
         },
     )
     .await
@@ -626,6 +627,7 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
                     sources: &[],
                     public_only: true,
                     limit: 10,
+                    lang: None,
                 },
             )
             .await

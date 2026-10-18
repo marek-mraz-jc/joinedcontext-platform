@@ -109,7 +109,7 @@ pub async fn project_scope<'c>(
 }
 
 /// A DNS label, which is what a project's `metadata.name` is.
-fn is_project_name(name: &str) -> bool {
+pub(crate) fn is_project_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
         && name
@@ -132,6 +132,9 @@ pub struct Search<'a> {
     pub public_only: bool,
     /// How many passages come back.
     pub limit: i64,
+    /// Passages in this language and those of no known language only; `None` reads every one
+    /// (T-4659).
+    pub lang: Option<&'a str>,
 }
 
 /// One passage, with where it came from and its fused score.
@@ -185,6 +188,7 @@ WITH scope AS (
     SELECT c.id, c.fts, c.embedding
     FROM chunks c JOIN sites s ON s.id = c.site_id
     WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
+      AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
 ),
 question AS (
     SELECT jc_any_word('english', $1) || jc_any_word('finnish', $1)
@@ -231,6 +235,7 @@ pub async fn hybrid_search(
         .bind(CANDIDATES)
         .bind(RRF_K)
         .bind(search.limit)
+        .bind(search.lang)
         .fetch_all(conn)
         .await?;
     rows.iter()

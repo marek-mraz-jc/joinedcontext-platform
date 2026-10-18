@@ -11,6 +11,7 @@ pub mod agent;
 pub mod cards;
 pub mod clock;
 pub mod data;
+pub mod documents;
 pub mod mcp;
 pub mod model;
 pub mod routed;
@@ -287,7 +288,8 @@ pub fn check_feedback(feedback: &Feedback) -> Result<Option<String>, String> {
     Ok(Some(note.to_owned()))
 }
 
-/// The chat route with its body limit, and the Portal's administration paths (admin.rs).
+/// The chat route with its body limit, the MCP servers' search (documents.rs) and the Portal's
+/// administration paths (admin.rs).
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/api/v1/d/{public_id}/chat", post(chat).options(preflight))
@@ -302,6 +304,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(Arc::clone(&state))
         .merge(widget::router(Arc::clone(&state)))
+        .merge(documents::router(Arc::clone(&state)))
         .merge(admin::router(state))
 }
 

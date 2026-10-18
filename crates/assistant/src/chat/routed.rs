@@ -671,6 +671,7 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
             sources: &[],
             public_only: ask.public_only,
             limit: ROUND_PASSAGES.min(CANDIDATES),
+            lang: None,
         },
     )
     .await
