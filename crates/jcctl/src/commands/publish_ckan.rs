@@ -17,6 +17,7 @@ use crate::loader::{LoadError, RawManifest, Repository, ResourceId};
 use crate::publish::ckan::{self, CkanApi, Outcome, PublishError, Settings};
 use crate::publish::ckan_datastore::{self as datastore, MirrorError};
 use crate::secrets::{identities_from_file, SecretStore, SecretValue};
+use jc_core::display_order::Display;
 use jc_core::envelope::{Kind, Ref};
 use jc_core::i18n::Text;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
@@ -446,6 +447,9 @@ pub struct Rows {
     /// The Endpoint's `model.schema.json`, narrowed to the same anonymous grant as the rows;
     /// `None` leaves every table to the columns its rows fill.
     pub schema: Option<Value>,
+    /// The Endpoint's `model.linkml.yaml`, the display order, key attributes and labels of its
+    /// tables (T-4672); `None` leaves them to the name heuristic.
+    pub linkml: Option<String>,
 }
 
 /// The rows of one target's mirror, read through the representation it declares, and the
@@ -463,9 +467,12 @@ pub fn rows(target: &Target, settings: &Settings) -> Result<Option<Rows>, Error>
         url,
         message: format!("the schema is not JSON: {e}"),
     })?;
+    // A gateway that serves no LinkML leaves the tables to the heuristic (DM-98).
+    let linkml = fetch(&format!("{base}/schema/v1/model.linkml.yaml"), "text/yaml").ok();
     Ok(Some(Rows {
         csv,
         schema: Some(schema),
+        linkml,
     }))
 }
 
@@ -618,6 +625,13 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
         by_type.entry(row[kind].as_str()).or_default().push(index);
     }
     let languages = languages(&columns, target.language.as_deref());
+    // The Endpoint's own order per type (EP-135); `jcctl validate` refused a bad one already.
+    let display: BTreeMap<String, Display> = target
+        .manifest
+        .spec
+        .get("display")
+        .and_then(|display| serde_json::from_value(display.clone()).ok())
+        .unwrap_or_default();
 
     let (package_id, live, digests) = live_tables(api, target.dataset_name())?;
     let mut table = datastore::Outcome::Unchanged;
@@ -640,8 +654,16 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
             Source::Empty => None,
             Source::GeoJson { .. } => Some("text".to_owned()),
         });
-        // The table reads in importance order (T-4661): name first, coordinates and id last.
-        let order = datastore::importance(&fields);
+        // The table reads in the model's display order with its labels (T-4661, T-4672).
+        let mut fields = fields;
+        let view = display.get(datastore::short_type(entity_type));
+        let order = datastore::arrange(
+            &mut fields,
+            rows.linkml.as_deref(),
+            entity_type,
+            view,
+            label_in,
+        );
         let names: Vec<String> = order.iter().map(|&i| names[i].clone()).collect();
         let sources: Vec<&Source> = order.iter().map(|&i| &sources[i]).collect();
         let fields: Vec<Value> = order.iter().map(|&i| fields[i].clone()).collect();
