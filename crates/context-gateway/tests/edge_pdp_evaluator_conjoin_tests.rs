@@ -45,20 +45,26 @@ fn a_filter_that_closes_its_own_wrapper_is_dropped_and_the_grant_stands() {
     }
 }
 
-/// A quote at the start of a name is part of the name in the broker's grammar, not an open string:
-/// the filter is kept, and the broker reads the grant as a conjunct of the whole expression.
+/// A quote in a name opens no string the grant could fall into: the broker's grammar (ngsild-ql
+/// 0.2, T-3913) refuses such a name, so the filter is dropped and the grant alone reaches the
+/// broker, still read as the grant.
 #[test]
 fn a_quote_in_a_name_cannot_swallow_the_grant() {
     let grant = antares_ql::parse_q("pm10>=0").expect("the grant parses");
     for odd in ["pm10>0;\"unclosed", "pm10>0;'unclosed"] {
-        let conjoined = conjoin(Some(odd), &filters(&["(pm10>=0)"])).expect("a grant is kept");
+        assert!(antares_ql::parse_q(odd).is_err(), "{odd:?} parses");
+        let conjoined = conjoin(Some(odd), &filters(&["(pm10>=0)"]));
 
-        match antares_ql::parse_q(&conjoined) {
-            Ok(antares_ql::QNode::And(terms)) => {
-                assert_eq!(terms.last(), Some(&grant), "{odd:?} regrouped the grant")
-            }
-            other => panic!("{odd:?} conjoined to {conjoined:?}, read as {other:?}"),
-        }
+        assert_eq!(
+            conjoined.as_deref(),
+            Some("((pm10>=0))"),
+            "{odd:?} was kept"
+        );
+        assert_eq!(
+            antares_ql::parse_q(conjoined.as_deref().unwrap_or_default()).ok(),
+            Some(grant.clone()),
+            "{odd:?} regrouped the grant"
+        );
     }
 }
 
