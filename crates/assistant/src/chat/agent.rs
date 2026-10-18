@@ -57,6 +57,8 @@ pub struct Connected {
     pub endpoint: String,
     pub surface: Surface,
     pub tools: Vec<Tool>,
+    /// Its publisher's name, how an answer names it when it could not be reached (T-4683).
+    pub label: Option<String>,
 }
 
 /// A turn the channel sent back (AG-99).

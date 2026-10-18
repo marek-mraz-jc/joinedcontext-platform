@@ -85,8 +85,20 @@ const TYPES_LIFE: Duration = Duration::from_secs(600);
 /// reads, and one slow Endpoint must not hold the question (T-4611).
 pub const ROUTING_DEADLINE: Duration = Duration::from_secs(3);
 
-/// How long an Endpoint whose type list did not come is skipped by routing (T-4611).
-pub const UNAVAILABLE_LIFE: Duration = Duration::from_secs(60);
+/// When warming lists an Endpoint's types again: well inside [`TYPES_LIFE`], so a question
+/// never meets them expired, and seldom enough that an idle Endpoint hears less than one call in
+/// five minutes (T-4683).
+const TYPES_REFRESH: Duration = Duration::from_secs(480);
+
+/// How long an Endpoint's public `tools/list` is reused, by every deployment that connects it:
+/// an Endpoint's tools change with a release, not with its data (T-4683).
+pub const TOOLS_LIFE: Duration = Duration::from_secs(1800);
+
+/// The first wait after an Endpoint failed to list, doubled on each failure after it up to
+/// [`BACKOFF_MAX`] (T-4683). Until it passes, routing and warming name the Endpoint's last lists
+/// without calling it; a success ends it.
+const BACKOFF_FIRST: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_secs(600);
 
 /// What the router is told. It never changes, so it is the cached prefix of every router call.
 const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Reply with one JSON object and nothing else:\n\
@@ -664,9 +676,15 @@ pub struct AnswerCache {
     types: Mutex<HashMap<String, (Instant, Vec<String>)>>,
     /// Each deployment's source languages, by name, for [`TYPES_LIFE`] (T-4259).
     languages: Mutex<HashMap<String, (Instant, Vec<String>)>>,
-    /// The Endpoints, by slug, whose type list failed or did not come in time, for
-    /// [`UNAVAILABLE_LIFE`] (T-4611).
-    unavailable: Mutex<HashMap<String, Instant>>,
+    /// Each Endpoint's public `tools/list`, by slug, for [`TOOLS_LIFE`] (T-4683).
+    tools: Mutex<HashMap<String, (Instant, Vec<Value>)>>,
+    /// The Endpoints, by slug, whose last listing failed: how many times in a row, and until
+    /// when they are left alone (T-4611, T-4683).
+    backoff: Mutex<HashMap<String, (u32, Instant)>>,
+    /// The Endpoints, by slug, whose type list missed a question's [`ROUTING_DEADLINE`]: the
+    /// next questions within [`BACKOFF_FIRST`] do not wait on them again, and warming, which
+    /// waits as long as the connector allows, still lists them (T-4611).
+    missed: Mutex<HashMap<String, Instant>>,
 }
 
 /// When an answer was stored, its text and its citations.
@@ -720,24 +738,75 @@ impl AnswerCache {
             // One entry per connector's Endpoint, so it is bounded by the manifests.
             types.insert(slug.to_owned(), (Instant::now(), listed));
         }
-        if let Ok(mut unavailable) = self.unavailable.lock() {
-            unavailable.remove(slug);
-        }
+        self.answered(slug);
     }
 
-    fn is_unavailable(&self, slug: &str) -> bool {
-        self.unavailable
+    /// The Endpoint's public `tools/list`, if it was listed less than `life` ago.
+    pub fn listing_within(&self, slug: &str, life: Duration) -> Option<Vec<Value>> {
+        let tools = self.tools.lock().ok()?;
+        tools
+            .get(slug)
+            .filter(|(at, _)| at.elapsed() < life)
+            .map(|(_, listed)| listed.clone())
+    }
+
+    pub fn keep_listing(&self, slug: &str, listed: Vec<Value>) {
+        if let Ok(mut tools) = self.tools.lock() {
+            // One entry per connector's Endpoint, like the type lists.
+            tools.insert(slug.to_owned(), (Instant::now(), listed));
+        }
+        self.answered(slug);
+    }
+
+    /// Whether the Endpoint failed lately and is left alone until its backoff passes.
+    pub fn waits(&self, slug: &str) -> bool {
+        self.backoff
             .lock()
             .ok()
-            .and_then(|unavailable| unavailable.get(slug).copied())
-            .is_some_and(|at| at.elapsed() < UNAVAILABLE_LIFE)
+            .and_then(|backoff| backoff.get(slug).copied())
+            .is_some_and(|(_, until)| Instant::now() < until)
     }
 
-    pub fn keep_unavailable(&self, slug: &str) {
-        if let Ok(mut unavailable) = self.unavailable.lock() {
+    /// The Endpoint failed to list: it is left alone for [`BACKOFF_FIRST`], doubled for each
+    /// failure in a row, at most [`BACKOFF_MAX`]. Its last lists stay what routing names.
+    pub fn failed(&self, slug: &str) {
+        if let Ok(mut backoff) = self.backoff.lock() {
+            let failures = backoff.get(slug).map_or(0, |(n, _)| *n).saturating_add(1);
+            let wait = BACKOFF_FIRST
+                .saturating_mul(1 << failures.saturating_sub(1).min(4))
+                .min(BACKOFF_MAX);
             // One entry per connector's Endpoint, like the type lists.
-            unavailable.insert(slug.to_owned(), Instant::now());
+            backoff.insert(slug.to_owned(), (failures, Instant::now() + wait));
         }
+    }
+
+    fn answered(&self, slug: &str) {
+        if let Ok(mut backoff) = self.backoff.lock() {
+            backoff.remove(slug);
+        }
+        if let Ok(mut missed) = self.missed.lock() {
+            missed.remove(slug);
+        }
+    }
+
+    /// The Endpoint's type list missed a question's deadline.
+    fn miss(&self, slug: &str) {
+        if let Ok(mut missed) = self.missed.lock() {
+            // One entry per connector's Endpoint, like the type lists.
+            missed.insert(slug.to_owned(), Instant::now());
+        }
+    }
+
+    /// Whether a question names the Endpoint's last list without calling it: it failed lately,
+    /// or missed a question's deadline less than [`BACKOFF_FIRST`] ago.
+    fn skipped(&self, slug: &str) -> bool {
+        self.waits(slug)
+            || self
+                .missed
+                .lock()
+                .ok()
+                .and_then(|missed| missed.get(slug).copied())
+                .is_some_and(|at| at.elapsed() < BACKOFF_FIRST)
     }
 
     fn languages_of(&self, deployment: &str) -> Option<Vec<String>> {
@@ -815,10 +884,10 @@ fn offers(connector: &Connected, tool: &str) -> bool {
 }
 
 /// What the router may name: each connector that can list and query its types, with its types;
-/// and the connectors whose list did not come, by endpoint name. The lists are asked for at once,
-/// each given [`ROUTING_DEADLINE`]; one that fails or does not come in time is skipped for
-/// [`UNAVAILABLE_LIFE`], unless an older list of it is known, which routing names instead
-/// (T-4611, T-4624).
+/// and the connectors whose list did not come, by their publisher's name (empty when it has
+/// none). The lists are asked for at once, each given [`ROUTING_DEADLINE`]; one that fails or
+/// does not come in time keeps its last list, which routing names instead, and is not waited on
+/// again for a while (T-4611, T-4624, T-4683).
 async fn live(ask: &Ask<'_>) -> (Live, Vec<String>) {
     live_of(ask.cache, ask.http, ask.deployment, ask.connectors).await
 }
@@ -837,7 +906,7 @@ async fn live_of(
             if let Some(types) = cache.types_of(slug) {
                 return (connector, Some(types));
             }
-            if cache.is_unavailable(slug) {
+            if cache.skipped(slug) {
                 return (connector, cache.last_types_of(slug));
             }
             let listed = tokio::time::timeout(
@@ -852,13 +921,13 @@ async fn live_of(
                     (connector, Some(types))
                 }
                 Ok(Err(why)) => {
-                    tracing::warn!(%deployment, endpoint = %connector.endpoint, %why, "a connector's types could not be listed; skipped for a minute");
-                    cache.keep_unavailable(slug);
+                    tracing::warn!(%deployment, endpoint = %connector.endpoint, %why, "a connector's types could not be listed; its last list stands in, asked again after a backoff");
+                    cache.failed(slug);
                     (connector, cache.last_types_of(slug))
                 }
                 Err(_) => {
-                    tracing::warn!(%deployment, endpoint = %connector.endpoint, deadline_ms = ROUTING_DEADLINE.as_millis() as u64, "a connector's types did not come in time; skipped for a minute");
-                    cache.keep_unavailable(slug);
+                    tracing::warn!(%deployment, endpoint = %connector.endpoint, deadline_ms = ROUTING_DEADLINE.as_millis() as u64, "a connector's types did not come in time; its last list stands in");
+                    cache.miss(slug);
                     (connector, cache.last_types_of(slug))
                 }
             }
@@ -867,7 +936,7 @@ async fn live_of(
     let mut missing = Vec::new();
     for (connector, types) in futures_util::future::join_all(listings).await {
         let Some(types) = types else {
-            missing.push(connector.endpoint.clone());
+            missing.push(connector.label.clone().unwrap_or_default());
             continue;
         };
         if !types.is_empty() {
@@ -889,42 +958,249 @@ async fn live_of(
 
 /// Lists the types of every connector routing does not know yet, at once and with the connector's
 /// own timeout, so no visitor pays the first, slow listing (T-4611): run in the background each
-/// time the manifests are read. One that fails is skipped by routing for [`UNAVAILABLE_LIFE`].
+/// time the manifests are read. A list is asked for again after [`TYPES_REFRESH`]; one that fails
+/// keeps the last list and is left alone until its backoff passes (T-4683).
 pub async fn warm(cache: &AnswerCache, http: &reqwest::Client, connectors: &[Connected]) {
+    let mut seen = HashSet::new();
     let listings = connectors
         .iter()
         .filter(|connector| offers(connector, "list_types") && offers(connector, "query_entities"))
-        // Listed again after half its life, so a question never meets it expired.
+        // each Endpoint once, however many deployments connect it
+        .filter(|connector| seen.insert(connector.surface.slug.as_str()))
         .filter(|connector| {
-            cache
-                .types_within(&connector.surface.slug, TYPES_LIFE / 2)
-                .is_none()
+            let slug = &connector.surface.slug;
+            cache.types_within(slug, TYPES_REFRESH).is_none() && !cache.waits(slug)
         })
         .map(|connector| async move {
             let slug = &connector.surface.slug;
             match connector.surface.call(http, "list_types", json!({})).await {
                 Ok(text) => cache.keep_types(slug, type_names(&text)),
                 Err(why) => {
-                    tracing::warn!(endpoint = %connector.endpoint, %why, "a connector's types could not be listed ahead of a question");
-                    cache.keep_unavailable(slug);
+                    tracing::warn!(endpoint = %connector.endpoint, %why, "a connector's types could not be listed ahead of a question; its last list stands in, asked again after a backoff");
+                    cache.failed(slug);
                 }
             }
         });
     futures_util::future::join_all(listings).await;
 }
 
+/// The Endpoint's `tools/list`. A public one (no person's token) is shared by every deployment
+/// that connects the Endpoint for [`TOOLS_LIFE`], so a warm-up over many deployments asks each
+/// Endpoint once; one that fails answers the last listing it gave, and the Endpoint is left alone
+/// until its backoff passes (T-4683). A person's listing is never shared.
+pub async fn listing(
+    cache: &AnswerCache,
+    http: &reqwest::Client,
+    surface: &super::mcp::Surface,
+) -> Result<Vec<Value>, String> {
+    if surface.token.is_some() {
+        return surface.listing(http).await;
+    }
+    let slug = &surface.slug;
+    if let Some(listed) = cache.listing_within(slug, TOOLS_LIFE) {
+        return Ok(listed);
+    }
+    if cache.waits(slug) {
+        return cache
+            .listing_within(slug, Duration::MAX)
+            .ok_or_else(|| "the Endpoint failed lately and is asked again after a backoff".into());
+    }
+    match surface.listing(http).await {
+        Ok(listed) => {
+            cache.keep_listing(slug, listed.clone());
+            Ok(listed)
+        }
+        Err(why) => {
+            cache.failed(slug);
+            cache.listing_within(slug, Duration::MAX).ok_or(why)
+        }
+    }
+}
+
 /// What the answer call is told about the data sources that did not answer, so the answer says
-/// so rather than reading as if they held nothing (T-4611).
+/// so rather than reading as if they held nothing (T-4611): by their publishers' names, never an
+/// Endpoint's slug (T-4683).
 fn unanswered(missing: &[String]) -> String {
     if missing.is_empty() {
         return String::new();
     }
+    let which = match named(missing) {
+        names if names.is_empty() => "Some data sources".to_owned(),
+        names => format!("The data of {names}"),
+    };
     format!(
-        "\n\nThese data sources did not answer in time and are not in what you are given: {}. \
-         Say once, in one sentence and without a citation, that they could not be reached now. \
-         Point to no API: the answer's panel already offers the dataset and its download.",
-        missing.join(", ")
+        "\n\n{which} did not answer in time and is not in what you are given. \
+         Say once, in one sentence and without a citation, that it could not be checked now, and \
+         offer to try again. Never say that the data does not contain, lacks or has nothing on \
+         the topic: what that source holds is unknown. Name it only as written here. \
+         Point to no API: the answer's panel already offers the dataset and its download."
     )
+}
+
+/// The publishers' names of the sources that did not answer, those without one left out.
+fn named(missing: &[String]) -> String {
+    let mut names: Vec<&str> = missing
+        .iter()
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.dedup();
+    names.join(", ")
+}
+
+/// Claims that the data holds nothing on a topic, by the language they are written in: what an
+/// answer may not say about a source that did not answer (T-4683). Czech shares the Slovak
+/// stems; its own letters and words ([`CZECH`]) tell the two apart.
+const ABSENCE: &[(&str, &[&str])] = &[
+    (
+        "sk",
+        &[
+            "neobsahuj",
+            "nie sú k dispozícii",
+            "nie sú dostupn",
+            "nie je k dispozícii",
+            "nie je dostupn",
+            "nie sú žiadn",
+            "nenašl",
+            "nemáme údaje",
+            "neexistuj",
+        ],
+    ),
+    (
+        "cs",
+        &["nejsou k dispozici", "nejsou dostupn", "není k dispozici"],
+    ),
+    (
+        "en",
+        &[
+            "does not contain",
+            "do not contain",
+            "doesn't contain",
+            "don't contain",
+            "contains no ",
+            "no data",
+            "not available",
+            "could not find",
+            "there is no ",
+            "there are no ",
+        ],
+    ),
+    (
+        "de",
+        &[
+            "enthält keine",
+            "enthalten keine",
+            "keine daten",
+            "nicht verfügbar",
+        ],
+    ),
+    (
+        "fi",
+        &[
+            "ei sisällä",
+            "eivät sisällä",
+            "ei ole saatavilla",
+            "ei löytynyt",
+        ],
+    ),
+];
+
+/// What only Czech writes of the two: its letters, and words Slovak spells otherwise.
+const CZECH: &[&str] = &["ř", "ů", "ě", "neobsahují", "nejsou", "není"];
+
+/// The sentence that stands where an answer claimed absence while a source did not answer.
+fn could_not_check(lang: &str, names: &str) -> String {
+    let (named, unnamed, again) = match lang {
+        "cs" => (
+            "Údaje těchto zdrojů se teď nepodařilo ověřit:",
+            "Údaje některých zdrojů se teď nepodařilo ověřit.",
+            "Zkuste to prosím za chvíli znovu.",
+        ),
+        "en" => (
+            "The data of these sources could not be checked just now:",
+            "Some data sources could not be checked just now.",
+            "Please try again in a moment.",
+        ),
+        "de" => (
+            "Die Daten dieser Quellen konnten gerade nicht geprüft werden:",
+            "Einige Datenquellen konnten gerade nicht geprüft werden.",
+            "Bitte versuchen Sie es gleich noch einmal.",
+        ),
+        "fi" => (
+            "Näiden lähteiden tietoja ei juuri nyt voitu tarkistaa:",
+            "Joidenkin lähteiden tietoja ei juuri nyt voitu tarkistaa.",
+            "Yritä hetken kuluttua uudelleen.",
+        ),
+        _ => (
+            "Údaje týchto zdrojov sa teraz nepodarilo overiť:",
+            "Údaje niektorých zdrojov sa teraz nepodarilo overiť.",
+            "Skúste to prosím o chvíľu znova.",
+        ),
+    };
+    if names.is_empty() {
+        format!("{unnamed} {again}")
+    } else {
+        format!("{named} {names}. {again}")
+    }
+}
+
+/// `text` with every sentence that claims the data holds nothing replaced, while a source that
+/// could hold it did not answer (`missing` not empty): the first by [`could_not_check`] in the
+/// claim's language, the others dropped. Unchanged when every source answered (T-4683).
+pub fn without_invented_absence(text: &str, missing: &[String]) -> String {
+    if missing.is_empty() {
+        return text.to_owned();
+    }
+    let lowered = text.to_lowercase();
+    let czech = CZECH.iter().any(|mark| lowered.contains(mark));
+    let mut out = String::with_capacity(text.len());
+    let mut replaced = false;
+    for sentence in sentences(text) {
+        let lower = sentence.to_lowercase();
+        let claim = ABSENCE
+            .iter()
+            .find(|(_, stems)| stems.iter().any(|stem| lower.contains(stem)))
+            .map(|(lang, _)| if *lang == "sk" && czech { "cs" } else { lang });
+        match claim {
+            None => out.push_str(sentence),
+            Some(_) if replaced => {}
+            Some(lang) => {
+                let tail = &sentence[sentence.trim_end().len()..];
+                let lead = &sentence[..sentence.len() - sentence.trim_start().len()];
+                out.push_str(lead);
+                out.push_str(&could_not_check(lang, &named(missing)));
+                out.push_str(if tail.is_empty() { " " } else { tail });
+                replaced = true;
+            }
+        }
+    }
+    out.trim_end().to_owned()
+}
+
+/// `text` cut after each `.`, `!`, `?` or line break, the whitespace after it kept with it.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        if !matches!(c, '.' | '!' | '?' | '\n') {
+            continue;
+        }
+        let mut end = at + c.len_utf8();
+        while let Some(&(next, w)) = chars.peek() {
+            if !w.is_whitespace() {
+                break;
+            }
+            end = next + w.len_utf8();
+            chars.next();
+        }
+        out.push(&text[start..end]);
+        start = end;
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
 }
 
 /// The answer model's extra rules: the data loop's when the route reads data, and the sources
@@ -1491,6 +1767,7 @@ async fn answer_direct(
         },
         followups: Vec::new(),
         started,
+        missing: Vec::new(),
     };
     stream_answer(q, spent, answering).await
 }
@@ -1626,6 +1903,7 @@ pub async fn answer(
             started,
         };
         if let Some((text, citations)) = super::data::answer(ask, start, &mut spent, events).await {
+            let text = without_invented_absence(&text, &missing);
             send(events, Event::Answer(text)).await;
             send(events, Event::Citations(citations)).await;
             if !routing.followups.is_empty() {
@@ -1638,7 +1916,8 @@ pub async fn answer(
         messages,
         citations,
         key,
-        keep: tables.is_empty(),
+        // an answer written while a source did not answer is never replayed
+        keep: tables.is_empty() && missing.is_empty(),
         log: Log {
             direct: false,
             rag: routing.rag,
@@ -1650,6 +1929,7 @@ pub async fn answer(
         },
         followups: routing.followups,
         started,
+        missing,
     };
     stream_answer(q, spent, answering).await
 }
@@ -1968,6 +2248,8 @@ struct Answering {
     log: Log,
     followups: Vec<String>,
     started: Instant,
+    /// The publishers of the data sources that did not answer (T-4683).
+    missing: Vec<String>,
 }
 
 /// Streams the answer, keeps only the citations it cites, caches an answer from pages alone,
@@ -1987,6 +2269,7 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         log,
         followups,
         started,
+        missing,
     } = answering;
     send(events, stage("answering", None)).await;
     let call = Call {
@@ -2020,7 +2303,7 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         send(events, super::agent::declined()).await;
         return spent;
     }
-    let text = completion.text.trim().to_owned();
+    let text = without_invented_absence(completion.text.trim(), &missing);
     if text.is_empty() {
         send(events, super::agent::no_answer(&mut spent)).await;
         return spent;
@@ -2337,6 +2620,7 @@ mod tests {
                 token: None,
             },
             tools: vec![tool("list_types"), tool("query_entities")],
+            label: None,
         };
         let cache = AnswerCache::default();
         let connectors = [connector("slow"), connector("down")];
@@ -2344,8 +2628,8 @@ mod tests {
         warm(&cache, &reqwest::Client::new(), &connectors).await;
 
         assert_eq!(cache.types_of("slow"), Some(vec!["Event".to_owned()]));
-        assert!(!cache.is_unavailable("slow"));
-        assert!(cache.is_unavailable("down"));
+        assert!(!cache.waits("slow"));
+        assert!(cache.waits("down"), "a failing Endpoint backs off");
         assert!(cache.types_of("down").is_none());
 
         // Known now, so a second warming asks neither: one call each in all.
@@ -2385,6 +2669,7 @@ mod tests {
                 token: None,
             },
             tools: vec![tool("list_types"), tool("query_entities")],
+            label: Some("Mesto Banská Bystrica".into()),
         }];
         let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
         let named = |live: &Live| {
@@ -2395,7 +2680,11 @@ mod tests {
 
         let (first, missing) = live_of(&cache, &http, "bb/public", &connectors).await;
         assert!(first.is_empty());
-        assert_eq!(missing, ["bb-events"]);
+        assert_eq!(
+            missing,
+            ["Mesto Banská Bystrica"],
+            "by its publisher, never its slug"
+        );
 
         warm(&cache, &http, &connectors).await;
         let (second, missing) = live_of(&cache, &http, "bb/public", &connectors).await;
@@ -2422,9 +2711,177 @@ mod tests {
             "an old list is not an unreachable source"
         );
         assert!(
-            cache.is_unavailable("slow"),
+            cache.skipped("slow"),
             "and the Endpoint is not asked again for a minute"
         );
+        assert!(
+            !cache.waits("slow"),
+            "a slow list is no failure: warming still asks"
+        );
+    }
+
+    /// T-4683: three deployments sharing two Endpoints list each Endpoint's tools once, and a
+    /// second warm-up inside the refresh asks nothing.
+    #[tokio::test]
+    async fn deployments_sharing_endpoints_list_each_once_and_a_second_warm_asks_nothing() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        // one answer for tools/list and list_types alike
+        let body = json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "tools": [{"name": "list_types"}, {"name": "query_entities"}],
+            "content": [{"type": "text", "text": "{\"typeList\": [\"CycleRoute\"]}"}]}});
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&gateway)
+            .await;
+        let surface = |slug: &str| super::super::mcp::Surface {
+            gateway: gateway.uri(),
+            slug: slug.into(),
+            timeout: Duration::from_secs(5),
+            token: None,
+        };
+        let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
+        let allowed = ["list_types".to_owned(), "query_entities".to_owned()];
+        let mut connectors = Vec::new();
+        for _deployment in 0..3 {
+            for slug in ["bbsk", "praha"] {
+                let listed = listing(&cache, &http, &surface(slug))
+                    .await
+                    .expect("listed");
+                connectors.push(Connected {
+                    endpoint: slug.into(),
+                    surface: surface(slug),
+                    tools: super::super::mcp::picked(&listed, &allowed),
+                    label: None,
+                });
+            }
+        }
+        assert_eq!(gateway.received_requests().await.map(|r| r.len()), Some(2));
+        assert_eq!(connectors[5].tools.len(), 2);
+
+        warm(&cache, &http, &connectors).await;
+        assert_eq!(gateway.received_requests().await.map(|r| r.len()), Some(4));
+        warm(&cache, &http, &connectors).await;
+        assert_eq!(
+            gateway.received_requests().await.map(|r| r.len()),
+            Some(4),
+            "the types are fresh: the second warm-up calls nobody"
+        );
+    }
+
+    /// T-4683: a failing Endpoint keeps its last types and tools, is not called while its
+    /// backoff runs, and waits longer after each failure, at most ten minutes.
+    #[tokio::test]
+    async fn a_failing_endpoint_keeps_its_last_lists_and_backs_off_longer_each_time() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&gateway)
+            .await;
+        let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
+        cache.keep_types("bbsk", vec!["CycleRoute".to_owned()]);
+        cache.keep_listing("bbsk", vec![json!({"name": "list_types"})]);
+        let old = Instant::now()
+            .checked_sub(TOOLS_LIFE * 2)
+            .expect("an old instant");
+        for held in [cache.types.lock().ok(), None].into_iter().flatten() {
+            let mut held = held;
+            held.insert("bbsk".into(), (old, vec!["CycleRoute".to_owned()]));
+        }
+        if let Ok(mut tools) = cache.tools.lock() {
+            tools.insert("bbsk".into(), (old, vec![json!({"name": "list_types"})]));
+        }
+        let surface = super::super::mcp::Surface {
+            gateway: gateway.uri(),
+            slug: "bbsk".into(),
+            timeout: Duration::from_secs(5),
+            token: None,
+        };
+        // The listing fails: the last one answers, and the Endpoint backs off.
+        let listed = listing(&cache, &http, &surface)
+            .await
+            .expect("the last listing");
+        assert_eq!(listed, [json!({"name": "list_types"})]);
+        assert!(cache.waits("bbsk"));
+        // While it waits, nothing calls it, and routing still names its old types.
+        let connector = Connected {
+            endpoint: "bbsk/bbsk-otvorene-data".into(),
+            surface: surface.clone(),
+            tools: super::super::mcp::picked(
+                &[
+                    json!({"name": "list_types"}),
+                    json!({"name": "query_entities"}),
+                ],
+                &["list_types".to_owned(), "query_entities".to_owned()],
+            ),
+            label: Some("Banskobystrický samosprávny kraj".into()),
+        };
+        let (live, missing) = live_of(
+            &cache,
+            &http,
+            "bbsk/public",
+            std::slice::from_ref(&connector),
+        )
+        .await;
+        assert_eq!(live.len(), 1, "never left out while its last list is known");
+        assert!(missing.is_empty());
+        warm(&cache, &http, std::slice::from_ref(&connector)).await;
+        assert_eq!(gateway.received_requests().await.map(|r| r.len()), Some(1));
+        // Each failure doubles the wait, 1, 2, 4, 8 minutes, then ten at most.
+        let wait = |cache: &AnswerCache| {
+            let backoff = cache.backoff.lock().expect("backoff");
+            backoff["bbsk"].1.saturating_duration_since(Instant::now())
+        };
+        for minutes in [2u64, 4, 8, 10, 10] {
+            cache.failed("bbsk");
+            let w = wait(&cache).as_secs();
+            assert!(
+                (minutes * 60 - 2..=minutes * 60).contains(&w),
+                "{minutes} min, waited {w} s"
+            );
+        }
+        // A good listing ends it.
+        cache.keep_types("bbsk", vec!["CycleRoute".to_owned()]);
+        assert!(!cache.waits("bbsk"));
+    }
+
+    /// T-4683: while a source did not answer, an answer never claims the data holds nothing;
+    /// the claim becomes the could-not-check sentence in its language, naming publishers only.
+    #[test]
+    fn an_absence_claim_is_replaced_while_a_source_is_missing() {
+        let missing = vec!["Banskobystrický samosprávny kraj".to_owned()];
+        let text = "Zverejnené dáta pre celé Slovensko cyklotrasy neobsahujú. \
+                    Cyklotrasy v Bratislave nájdete na stránke mesta [1].";
+        let guarded = without_invented_absence(text, &missing);
+        assert_eq!(
+            guarded,
+            "Údaje týchto zdrojov sa teraz nepodarilo overiť: Banskobystrický samosprávny kraj. \
+             Skúste to prosím o chvíľu znova. Cyklotrasy v Bratislave nájdete na stránke mesta [1]."
+        );
+        let slug = regex::Regex::new(r"[a-z0-9-]+/[a-z0-9-]+|otvorene-data").expect("regex");
+        assert!(!slug.is_match(&guarded), "{guarded}");
+        // Every source answered: the text stands.
+        assert_eq!(without_invented_absence(text, &[]), text);
+        // A second claim goes; Czech and English claims get their own sentence.
+        let twice = "Data neobsahují cyklotrasy. Také nejsou k dispozici mapy. Jinak nic.";
+        assert_eq!(
+            without_invented_absence(twice, &[String::new()]),
+            "Údaje některých zdrojů se teď nepodařilo ověřit. Zkuste to prosím za chvíli znovu. Jinak nic."
+        );
+        assert_eq!(
+            without_invented_absence("The data does not contain cycle routes.", &missing),
+            "The data of these sources could not be checked just now: \
+             Banskobystrický samosprávny kraj. Please try again in a moment."
+        );
+        let rules = unanswered(&["Mesto Banská Bystrica".to_owned(), String::new()]);
+        assert!(
+            rules.contains("The data of Mesto Banská Bystrica did not answer"),
+            "{rules}"
+        );
+        assert!(rules.contains("Never say that the data does not contain"));
     }
 
     fn hit(chunk: i64, score: f64) -> Hit {

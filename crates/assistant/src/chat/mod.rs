@@ -806,11 +806,13 @@ async fn connected(
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
             token,
         };
-        match surface.tools(&state.http, &connector.tools).await {
+        let listed = routed::listing(&state.answers, &state.http, &surface).await;
+        match listed.map(|listed| mcp::picked(&listed, &connector.tools)) {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
                 surface,
                 tools,
+                label: endpoint.publisher.clone(),
             }),
             Ok(_) => {
                 tracing::warn!(endpoint = %connector.endpoint, "the Endpoint offers none of the connector's tools")
@@ -913,8 +915,10 @@ async fn lent(
             timeout: Duration::from_secs(SERVER_SECONDS),
             token,
         };
-        match surface.tools(&state.http, &tools).await {
+        let listed = routed::listing(&state.answers, &state.http, &surface).await;
+        match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
+                label: publisher_of(state, &endpoint.slug),
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
@@ -925,6 +929,16 @@ async fn lent(
             }
         }
     }
+}
+
+/// The publisher's name of the Endpoint with `slug`, when the manifests name one (T-4683).
+fn publisher_of(state: &ChatState, slug: &str) -> Option<String> {
+    let snapshot = state.snapshot.read().ok()?;
+    snapshot
+        .endpoints
+        .values()
+        .find(|endpoint| endpoint.slug == slug)
+        .and_then(|endpoint| endpoint.publisher.clone())
 }
 
 /// How long a named server's listing and each lent Endpoint's call may take: a connector's

@@ -194,39 +194,23 @@ impl Surface {
         http: &reqwest::Client,
         allowed: &[String],
     ) -> Result<Vec<Tool>, String> {
-        let allowed: Vec<&String> = allowed
+        if !allowed
             .iter()
-            .filter(|name| READ_ONLY_TOOLS.contains(&name.as_str()))
-            .collect();
-        if allowed.is_empty() {
+            .any(|name| READ_ONLY_TOOLS.contains(&name.as_str()))
+        {
             return Ok(Vec::new());
         }
+        Ok(picked(&self.listing(http).await?, allowed))
+    }
+
+    /// The surface's whole `tools/list`, as it answered it.
+    pub async fn listing(&self, http: &reqwest::Client) -> Result<Vec<Value>, String> {
         let result = self.rpc(http, "tools/list", json!({})).await?;
-        let listed = result
+        Ok(result
             .get("tools")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
-        Ok(allowed
-            .iter()
-            .filter_map(|name| {
-                let tool = listed
-                    .iter()
-                    .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name.as_str()))?;
-                Some(Tool {
-                    name: (*name).clone(),
-                    description: tool
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    input_schema: tool
-                        .get("inputSchema")
-                        .cloned()
-                        .unwrap_or_else(|| json!({"type": "object"})),
-                })
-            })
-            .collect())
+            .unwrap_or_default())
     }
 
     /// Calls `name` with `arguments` and returns its text content, cut at [`MAX_KEPT_CHARS`].
@@ -260,6 +244,32 @@ impl Surface {
         }
         Ok(cut(&text, MAX_KEPT_CHARS))
     }
+}
+
+/// The tools of a `tools/list` that `allowed` names and [`READ_ONLY_TOOLS`] holds, in the order
+/// `allowed` names them.
+pub fn picked(listed: &[Value], allowed: &[String]) -> Vec<Tool> {
+    allowed
+        .iter()
+        .filter(|name| READ_ONLY_TOOLS.contains(&name.as_str()))
+        .filter_map(|name| {
+            let tool = listed
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name.as_str()))?;
+            Some(Tool {
+                name: (*name).clone(),
+                description: tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                input_schema: tool
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object"})),
+            })
+        })
+        .collect()
 }
 
 /// `text` cut at `max` characters, saying so.
