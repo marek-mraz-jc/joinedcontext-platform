@@ -14,6 +14,7 @@ pub mod classification;
 pub mod cron;
 pub mod envelope;
 pub mod error;
+pub mod field_order;
 pub mod i18n;
 pub mod kinds;
 pub mod kpi;

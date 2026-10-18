@@ -16,8 +16,12 @@ use serde_json::json;
 use super::ChatState;
 use crate::worker::{Deployment, Source};
 
-/// The answer's renderer first (T-3325), then the widget that uses it, as one script.
+/// The field labels the renderer reads (T-4661), the answer's renderer (T-3325), then the widget
+/// that uses it, as one script.
 const SCRIPT: &str = concat!(
+    "var JC_FIELDS = ",
+    include_str!("../../../jc-core/data/field-order.json"),
+    ";\n",
     include_str!("../../widget/render.js"),
     include_str!("../../widget/widget.js")
 );

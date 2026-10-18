@@ -75,7 +75,7 @@ let base;
 test.beforeAll(async () => {
   server = createServer((req, res) => {
     const path = new URL(req.url, "http://x").pathname;
-    if (path === "/d/widget.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("render.js") + read("widget.js"));
+    if (path === "/d/widget.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end("var JC_FIELDS = " + read("../../jc-core/data/field-order.json") + ";\n" + read("render.js") + read("widget.js"));
     if (path === "/d/widget.css") return res.writeHead(200, { "Content-Type": "text/css" }).end(read("widget.css"));
     if (path === "/d/bb/widget") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE());
     if (path === "/d/bb") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE().replace("<body>", '<body class="jc-page">'));

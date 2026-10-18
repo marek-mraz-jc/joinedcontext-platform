@@ -332,34 +332,10 @@ var JCRender = (function () {
    */
   // Headers a person reads (T-4650): the common Smart Data Models attributes and types in the
   // widget's languages; any other key is spelt out from its camelCase.
-  var LABELS = {
-    name: { sk: "Názov", cs: "Název", en: "Name", de: "Name" },
-    id: { sk: "Identifikátor", cs: "Identifikátor", en: "Identifier", de: "Kennung" },
-    observedAt: { sk: "Čas merania", cs: "Čas měření", en: "Measured", de: "Gemessen" },
-    temperature: { sk: "Teplota", cs: "Teplota", en: "Temperature", de: "Temperatur" },
-    relativeHumidity: { sk: "Vlhkosť", cs: "Vlhkost", en: "Humidity", de: "Luftfeuchte" },
-    atmosphericPressure: { sk: "Tlak", cs: "Tlak", en: "Pressure", de: "Luftdruck" },
-    precipitation: { sk: "Zrážky", cs: "Srážky", en: "Precipitation", de: "Niederschlag" },
-    windSpeed: { sk: "Rýchlosť vetra", cs: "Rychlost větru", en: "Wind speed", de: "Windgeschwindigkeit" },
-    windDirection: { sk: "Smer vetra", cs: "Směr větru", en: "Wind direction", de: "Windrichtung" },
-    pm10: { sk: "PM10", cs: "PM10", en: "PM10", de: "PM10" },
-    pm25: { sk: "PM2,5", cs: "PM2,5", en: "PM2.5", de: "PM2,5" },
-    no2: { sk: "NO₂", cs: "NO₂", en: "NO₂", de: "NO₂" },
-    o3: { sk: "O₃", cs: "O₃", en: "O₃", de: "O₃" },
-    so2: { sk: "SO₂", cs: "SO₂", en: "SO₂", de: "SO₂" },
-    co: { sk: "CO", cs: "CO", en: "CO", de: "CO" },
-    airQualityIndex: { sk: "Index kvality ovzdušia", cs: "Index kvality ovzduší", en: "Air quality index", de: "Luftqualitätsindex" },
-    airQualityLevel: { sk: "Kvalita ovzdušia", cs: "Kvalita ovzduší", en: "Air quality", de: "Luftqualität" },
-    category: { sk: "Kategória", cs: "Kategorie", en: "Category", de: "Kategorie" },
-    status: { sk: "Stav", cs: "Stav", en: "Status", de: "Status" },
-    description: { sk: "Popis", cs: "Popis", en: "Description", de: "Beschreibung" },
-    addressLocality: { sk: "Obec", cs: "Obec", en: "Locality", de: "Ort" },
-    dateObserved: { sk: "Dátum pozorovania", cs: "Datum pozorování", en: "Date observed", de: "Beobachtet" },
-    dateModified: { sk: "Zmenené", cs: "Změněno", en: "Modified", de: "Geändert" },
-    dateCreated: { sk: "Vytvorené", cs: "Vytvořeno", en: "Created", de: "Erstellt" },
-    source: { sk: "Zdroj", cs: "Zdroj", en: "Source", de: "Quelle" },
-    dataProvider: { sk: "Poskytovateľ", cs: "Poskytovatel", en: "Provider", de: "Anbieter" }
-  };
+  // One label table with the CKAN publisher and theme (T-4661): jc-core's field-order.json,
+  // which the server puts before this script as JC_FIELDS and `node --test` reads as a file.
+  var FIELDS = typeof JC_FIELDS !== "undefined" ? JC_FIELDS : require("../../jc-core/data/field-order.json");
+  var LABELS = FIELDS.labels;
   var TYPES = {
     AirQualityObserved: { sk: "Kvalita ovzdušia", cs: "Kvalita ovzduší", en: "Air quality", de: "Luftqualität" },
     WeatherObserved: { sk: "Počasie", cs: "Počasí", en: "Weather", de: "Wetter" },

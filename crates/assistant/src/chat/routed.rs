@@ -389,23 +389,15 @@ enum Rank {
     Metadata,
 }
 
-/// The attributes that describe the record rather than the thing.
+/// The attributes that describe the record rather than the thing: the link and metadata groups
+/// of the order the CKAN table shares (T-4661), the observation date, references and ids.
 fn metadata(key: &str, value: &Value) -> bool {
     let text = value.as_str().unwrap_or_default();
     matches!(
-        key,
-        "dateObserved"
-            | "dateCreated"
-            | "dateModified"
-            | "dateIssued"
-            | "dateRetrieved"
-            | "source"
-            | "dataProvider"
-            | "owner"
-            | "seeAlso"
-            | "image"
-            | "url"
-    ) || key.starts_with("ref")
+        jc_core::field_order::group(key, value.is_number()),
+        "link" | "meta"
+    ) || key == "dateObserved"
+        || key.starts_with("ref")
         || key.ends_with("Id")
         || text.starts_with("urn:")
         || text.starts_with("http://")
