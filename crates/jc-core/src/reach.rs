@@ -41,6 +41,33 @@ pub struct EndpointFacts {
 }
 
 impl EndpointFacts {
+    /// The facts of Endpoint `name` of `project` from its manifest and the entity types it
+    /// serves (its space's model classes): the domains and themes their classification gives,
+    /// a theme set by hand in `catalog.themes` winning, as on the DCAT record (EP-78, T-4498).
+    pub fn of(
+        project: &str,
+        name: &str,
+        spec: &crate::kinds::EndpointSpec,
+        types: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let types: BTreeSet<String> = types.into_iter().collect();
+        let classified = crate::classification::classify(types.iter().map(String::as_str));
+        let themes = match spec.catalog.as_ref().filter(|c| !c.themes.is_empty()) {
+            Some(catalog) => catalog.themes.iter().copied().collect(),
+            None => classified.themes,
+        };
+        Self {
+            project: project.to_owned(),
+            name: name.to_owned(),
+            slug: spec.slug.to_string(),
+            space: spec.context_space_ref.name().to_owned(),
+            audience: spec.audience,
+            domains: classified.domains.into_iter().map(str::to_owned).collect(),
+            themes,
+            types,
+        }
+    }
+
     /// The access level a deployment, which has no caller of its own, sees the Endpoint at; a
     /// grant is per caller and never matches here.
     fn level(&self) -> AccessLevel {
@@ -351,6 +378,23 @@ mod tests {
         assert_eq!(r.endpoints[0].slug, "bb-e000");
         assert_eq!(r.omitted, ["bb-e050", "bb-e051", "bb-e052"]);
         assert_eq!(r, resolve_connectors("bb", &d, &many, None));
+    }
+
+    #[test]
+    fn facts_classify_the_types_and_a_hand_set_theme_wins() {
+        let spec: crate::kinds::EndpointSpec = serde_json::from_value(json!({
+            "contextSpaceRef": "mesto", "slug": "zt4qm7ge2xdv6ksb3ncf5arw2y", "audience": "public"
+        }))
+        .unwrap();
+        let facts = EndpointFacts::of("bb", "parking", &spec, ["OffStreetParking".to_owned()]);
+        assert_eq!(facts.space, "mesto");
+        assert_eq!(facts.slug, "zt4qm7ge2xdv6ksb3ncf5arw2y");
+        assert!(facts.domains.contains("Parking"));
+        assert_eq!(facts.themes, BTreeSet::from([DataTheme::Tran]));
+        let mut themed = spec.clone();
+        themed.catalog = Some(serde_json::from_value(json!({"themes": ["ECON"]})).unwrap());
+        let facts = EndpointFacts::of("bb", "parking", &themed, ["OffStreetParking".to_owned()]);
+        assert_eq!(facts.themes, BTreeSet::from([DataTheme::Econ]));
     }
 
     #[test]

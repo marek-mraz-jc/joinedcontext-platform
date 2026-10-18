@@ -1040,14 +1040,58 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
         })
         .collect();
 
-    // Every named MCP server's audience, for the deployments that name one (MF-56).
-    let servers: BTreeMap<(Option<String>, String), jc_core::kinds::Audience> = repo
+    // Every named MCP server, for the deployments that name one (MF-56).
+    let server_specs: BTreeMap<(Option<String>, String), jc_core::kinds::McpServerSpec> = repo
         .iter()
         .filter(|(id, _)| id.kind == "McpServer")
         .filter_map(|(id, resource)| {
-            let spec: jc_core::kinds::McpServerSpec =
-                serde_json::from_value(resource.manifest.spec.clone()).ok()?;
-            Some(((id.namespace.clone(), id.name.clone()), spec.audience))
+            let spec = serde_json::from_value(resource.manifest.spec.clone()).ok()?;
+            Some(((id.namespace.clone(), id.name.clone()), spec))
+        })
+        .collect();
+    let servers: BTreeMap<(Option<String>, String), jc_core::kinds::Audience> = server_specs
+        .iter()
+        .map(|(key, spec)| (key.clone(), spec.audience))
+        .collect();
+    // What the resolver knows of each Endpoint from the repository: the classes of its space's
+    // model as its types, their classification, and the themes set by hand. A projection may
+    // serve fewer types; the finding below names the Endpoints so one can be excluded.
+    let model_classes = |project: &Option<String>, space: &str| -> Vec<String> {
+        let model = repo
+            .iter()
+            .find(|(id, _)| {
+                id.kind == "ContextSpace" && id.namespace == *project && id.name == space
+            })
+            .and_then(|(_, space)| {
+                let reference = &space.manifest.spec["dataModelRef"];
+                let name = reference.as_str().or_else(|| reference["name"].as_str())?;
+                let namespace = reference["namespace"].as_str().map(str::to_owned);
+                Some((namespace.or_else(|| project.clone()), name.to_owned()))
+            });
+        repo.iter()
+            .find(|(id, _)| {
+                id.kind == "DataModel"
+                    && model.as_ref() == Some(&(id.namespace.clone(), id.name.clone()))
+            })
+            .map(|(_, model)| {
+                model.manifest.spec["classes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|class| class.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let facts: Vec<jc_core::reach::EndpointFacts> = endpoint_specs
+        .iter()
+        .map(|((namespace, name), spec)| {
+            jc_core::reach::EndpointFacts::of(
+                namespace.as_deref().unwrap_or_default(),
+                name,
+                spec,
+                model_classes(namespace, spec.context_space_ref.name()),
+            )
         })
         .collect();
     // The projects and spaces a selector may name (MF-55): a project is any namespace a
@@ -1159,6 +1203,24 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                     .get("channel")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                if let Ok(deployment) =
+                    serde_json::from_value::<jc_core::kinds::AssistantDeploymentSpec>(spec.clone())
+                {
+                    let own = id.namespace.clone().unwrap_or_default();
+                    found.extend(
+                        deployment_reach(
+                            &own,
+                            &deployment,
+                            &projects,
+                            &spaces,
+                            &endpoints,
+                            &facts,
+                            &server_specs,
+                        )
+                        .into_iter()
+                        .map(|finding| (at.clone(), format!("{id}: {finding}"))),
+                    );
+                }
                 if let Some(server) = spec.get("mcpServer").and_then(|v| v.as_str()) {
                     let (project, name) = jc_core::kinds::assistant::connector_target(server);
                     // `org/all` is every organization's, served without a manifest (EP-122).
@@ -1243,6 +1305,81 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
             }
             _ => {}
         }
+    }
+    found
+}
+
+/// What a deployment's selector and exclusions name, checked against the repository (MF-58,
+/// MF-59, AG-122): projects and spaces in its reach and declared, excluded Endpoints declared,
+/// and no more Endpoints resolved than one deployment serves.
+fn deployment_reach(
+    own: &str,
+    deployment: &jc_core::kinds::AssistantDeploymentSpec,
+    projects: &std::collections::BTreeSet<String>,
+    spaces: &std::collections::BTreeSet<(Option<String>, String)>,
+    endpoints: &std::collections::BTreeSet<(Option<String>, String)>,
+    facts: &[jc_core::reach::EndpointFacts],
+    servers: &std::collections::BTreeMap<(Option<String>, String), jc_core::kinds::McpServerSpec>,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let in_reach =
+        |project: &str| project == own || deployment.scope_projects().iter().any(|p| p == project);
+    if let Some(select) = &deployment.select {
+        for project in select.projects.iter().flatten() {
+            if !in_reach(project) {
+                found.push(format!(
+                    "spec.select.projects names project `{project}`, which is neither this project nor in scope.projects; add it to scope.projects (MF-58)"
+                ));
+            } else if !projects.contains(project) {
+                found.push(format!(
+                    "spec.select.projects names project `{project}`, which the repository does not declare (MF-58)"
+                ));
+            }
+        }
+        for space in select.spaces.iter().flatten() {
+            let (project, name) = space.split_once('/').unwrap_or_default();
+            if !in_reach(project) {
+                found.push(format!(
+                    "spec.select.spaces names Context Space `{space}` of project `{project}`, which is neither this project nor in scope.projects; add it to scope.projects (MF-58)"
+                ));
+            } else if !spaces.contains(&(Some(project.to_owned()), name.to_owned())) {
+                found.push(format!(
+                    "spec.select.spaces names Context Space `{space}`, which no manifest declares (MF-58)"
+                ));
+            }
+        }
+    }
+    for excluded in &deployment.exclude {
+        let (project, name) = jc_core::kinds::assistant::connector_target(excluded);
+        let project = project.unwrap_or(own);
+        if !endpoints.contains(&(Some(project.to_owned()), name.to_owned())) {
+            found.push(format!(
+                "spec.exclude names Endpoint `{excluded}`, which no manifest of project `{project}` declares (MF-59)"
+            ));
+        }
+    }
+    // `org/all` has no manifest: every organization Endpoint, served as the hub's (EP-122).
+    let org_all: Option<jc_core::kinds::McpServerSpec> =
+        serde_json::from_value(serde_json::json!({"audience": "organization", "select": {}})).ok();
+    let server = deployment.mcp_server.as_deref().and_then(|named| {
+        let (project, name) = jc_core::kinds::assistant::connector_target(named);
+        let project = project.unwrap_or(own);
+        match servers.get(&(Some(project.to_owned()), name.to_owned())) {
+            Some(spec) => Some((project, spec)),
+            None if named == "org/all" => org_all
+                .as_ref()
+                .map(|spec| (jc_core::envelope::ORG_NAMESPACE, spec)),
+            None => None,
+        }
+    });
+    let resolution = jc_core::reach::resolve_connectors(own, deployment, facts, server);
+    if !resolution.omitted.is_empty() {
+        found.push(format!(
+            "resolves {} Endpoints, more than the {} one deployment serves; narrow spec.select or add spec.exclude. Left out: {} (AG-122)",
+            resolution.endpoints.len() + resolution.omitted.len(),
+            jc_core::reach::MAX_RESOLVED,
+            resolution.omitted.join(", ")
+        ));
     }
     found
 }
