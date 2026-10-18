@@ -56,6 +56,21 @@ pub struct Catalog {
     /// ELI IRIs of the laws that apply: `dcatap:applicableLegislation`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applicable_legislation: Vec<String>,
+    /// Whether the data holds personal data, as the publisher states it; never read from the
+    /// data. Only the national profiles carry it: `leg:personalDataContainmentType` and
+    /// `pu:osobní-údaje` (API/08 section 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_data: Option<PersonalData>,
+}
+
+/// The publisher's statement about personal data in a dataset (API/08 section 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PersonalData {
+    /// The data holds personal data.
+    Contains,
+    /// The data holds no personal data.
+    DoesNotContain,
 }
 
 /// The publisher of a dataset, a `foaf:Agent`.
