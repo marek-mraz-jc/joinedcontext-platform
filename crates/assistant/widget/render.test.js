@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { notice, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -585,4 +585,13 @@ test("opening hours read as a list of bold days and their times, not one paragra
       { tag: "li", children: [{ tag: "strong", children: ["Piatok:"] }, " 8:00 – 12:00 ", { tag: "cite", numbers: [1] }] },
     ] },
   ]);
+});
+
+test("the disclaimer shows its first sentence and keeps the rest for More (T-4635)", () => {
+  assert.deepEqual(notice("Answers are written by AI. They may contain mistakes; check them. Do not enter personal data."),
+    { lead: "Answers are written by AI.", rest: "They may contain mistakes; check them. Do not enter personal data." });
+  assert.deepEqual(notice("  One sentence only.  "), { lead: "One sentence only.", rest: "" });
+  assert.deepEqual(notice("No full stop at all"), { lead: "No full stop at all", rest: "" });
+  assert.deepEqual(notice("Ask!\n  Then   read."), { lead: "Ask!", rest: "Then read." });
+  for (const empty of ["", "   ", null, undefined, 3]) assert.deepEqual(notice(empty), { lead: "", rest: "" });
 });

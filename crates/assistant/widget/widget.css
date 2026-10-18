@@ -168,23 +168,25 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-retry { min-height: 36px; padding: 0 12px; border: 1px solid var(--accent); border-radius: var(--pill); background: var(--bg);
   color: var(--link); font: inherit; font-size: 13px; cursor: pointer; }
 
-/* The composer: one rounded field, the send button inside it; the notice under it, one line. */
+/* The composer: one bar, the labelled send button inside its border; the notice under it, whole. */
 .jc-foot { flex: none; padding: 8px max(12px, env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
   background: var(--bg); }
-.jc-form { display: flex; align-items: flex-end; gap: 4px; padding: 4px 4px 4px 14px; border: 1px solid var(--line);
-  border-radius: 22px; background: var(--bg); box-shadow: var(--shadow); }
+.jc-form { display: flex; align-items: flex-end; gap: 6px; min-height: 50px; box-sizing: border-box; padding: 5px 5px 5px 14px;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--bg); box-shadow: var(--shadow); }
 .jc-form:focus-within { border-color: var(--accent); }
 .jc-form textarea::placeholder { color: var(--muted); opacity: 1; }
 .jc-form textarea { flex: 1; min-height: 36px; max-height: 160px; padding: 7px 0; resize: none; border: 0; outline: none;
   font: inherit; color: inherit; background: transparent; }
-.jc-form .jc-icon-button { flex: none; width: 36px; height: 36px; background: var(--accent); color: var(--on-accent); }
-.jc-form .jc-icon-button:hover { background: var(--accent); filter: brightness(1.1); }
+.jc-send { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 12px; border: 0;
+  border-radius: 10px; background: var(--accent); color: var(--on-accent); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.jc-send:hover { filter: brightness(1.1); }
+.jc-send:disabled { opacity: .5; cursor: default; }
+.jc-send svg { width: 18px; height: 18px; }
 .jc-form .jc-stop { background: var(--fg); color: var(--bg); }
 .jc-form button[hidden] { display: none; }
-.jc-notice { display: flex; align-items: baseline; gap: 6px; margin: 5px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
-.jc-disclaimer { flex: 1; min-width: 0; margin: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.jc-notice.jc-open .jc-disclaimer { white-space: normal; }
-.jc-more { flex: none; padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; cursor: pointer; }
+.jc-notice { margin: 6px 4px 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.jc-more { padding: 0; border: 0; background: none; color: var(--link); font: inherit; text-decoration: underline; cursor: pointer; }
+.jc-more[hidden], .jc-disclaimer-rest[hidden] { display: none; }
 
 /* A phone's full screen: the header keeps one line for the name and its subtitle, with a smaller
    monogram and tighter gaps beside the 44 px controls; a name longer than that ends in an ellipsis
@@ -201,10 +203,11 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   .jc-log .jc-cards > li { min-height: 44px; align-items: center; }
   .jc-card-n { top: 12px; }
   .jc-sources { min-height: 44px; }
-  .jc-form .jc-icon-button { width: 44px; height: 44px; }
+  .jc-send { height: 44px; }
   .jc-suggest button { min-height: 44px; }
-  .jc-more { min-height: 44px; min-width: 44px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--pill); text-decoration: none; }
-  .jc-notice { align-items: center; margin-top: 2px; }
+  /* A button is an inline block: the padding grows the tap target, the negative margin keeps the line. */
+  .jc-more { padding: 14px 12px; margin: -14px -8px; }
+  .jc-notice { margin-bottom: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }

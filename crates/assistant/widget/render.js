@@ -625,7 +625,18 @@ var JCRender = (function () {
     return list;
   }
 
+  /**
+   * The disclaimer as its first sentence, always shown whole, and the rest that "More" opens
+   * (T-4635); a text of one sentence has no rest.
+   */
+  function notice(text) {
+    var whole = typeof text === "string" ? text.trim().replace(/\s+/g, " ") : "";
+    var split = /^(.+?[.!?])\s+(\S.*)$/.exec(whole);
+    return split ? { lead: split[1], rest: split[2] } : { lead: whole, rest: "" };
+  }
+
   return {
+    notice: notice,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
