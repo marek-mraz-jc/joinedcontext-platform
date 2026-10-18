@@ -24,7 +24,7 @@ use crate::handlers::ngsi_ld::{
 };
 use crate::handlers::respond::read_only;
 use crate::middleware::response::RESULTS_RESTRICTED;
-use crate::middleware::{rate_limit, tenancy};
+use crate::middleware::tenancy;
 use crate::pdp::evaluator::Subject;
 use crate::pdp::write_guard;
 use crate::resolver::Endpoint;
@@ -352,7 +352,7 @@ async fn odata_write(
                 .into_response();
         }
     }
-    let caller = rate_limit::caller_key(&parts.headers);
+    let caller = crate::handlers::ngsi_ld::create_key(&subject, &parts.headers);
     let reserved = match reserve_create(gateway, &endpoint, &caller, write.operation) {
         Ok(reserved) => reserved,
         Err(answer) => return *answer,

@@ -254,13 +254,14 @@ fn slug_of(path: &str) -> Option<&str> {
         .filter(|slug| !slug.is_empty())
 }
 
-/// Who is spending the quota: the presented credential when there is one, the client
+/// Who is spending the quota: the presented bearer token when there is one, the client
 /// address otherwise (EP-20).
 ///
-/// The credential is keyed by digest, never stored or logged, and the token is not
-/// verified here — this is a counter, not a decision, and the handler still rejects a
-/// forged token with 401. Keying it means two callers behind one NAT do not spend each
-/// other's quota, which keying by address alone cannot give them.
+/// The token is keyed by digest, never stored or logged, and it is not verified here — this
+/// is a counter, not a decision, and the handler still rejects a forged token with 401.
+/// Keying it means two callers behind one NAT do not spend each other's quota, which keying
+/// by address alone cannot give them. Any other `Authorization` value is no token (T-4590):
+/// a fresh `Basic` per request would otherwise be a fresh bucket per request.
 ///
 /// The address comes from the LAST `X-Forwarded-For` entry, which is the peer the gateway's
 /// own proxy saw. A client that sends the header itself only prepends to its own value,
@@ -269,6 +270,7 @@ pub(crate) fn caller_key(headers: &axum::http::HeaderMap) -> String {
     if let Some(credential) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
+        .filter(|_| crate::auth::token::presents(headers))
     {
         let digest = ring::digest::digest(&ring::digest::SHA256, credential.as_bytes());
         let hex: String = digest.as_ref()[..8]

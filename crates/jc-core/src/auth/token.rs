@@ -261,6 +261,19 @@ impl Verifier {
 /// [`bearer`] leaves such a token to that verifier.
 pub const API_KEY_PREFIX: &str = "jc_";
 
+/// Whether the request presents a bearer token: what makes a caller not anonymous on every
+/// surface, and the only credential a quota is keyed by (T-4590). `Authorization: Basic …` or
+/// any other scheme is no token, so it neither leaves the anonymous allowance nor buys a
+/// bucket of its own.
+pub fn presents(headers: &axum::http::HeaderMap) -> bool {
+    bearer(
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .is_ok()
+}
+
 /// The token in an `Authorization` header, if the header carries one that is not a
 /// platform API key.
 ///

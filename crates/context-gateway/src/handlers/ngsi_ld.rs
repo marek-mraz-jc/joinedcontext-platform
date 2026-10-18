@@ -341,6 +341,16 @@ pub(crate) fn reserve_create(
     Err(Box::new(refusal))
 }
 
+/// Who spends a form's daily creates: the signed-in principal, else the caller's address
+/// (T-4590). Every surface keys the same way, so one person is one share whichever surface they
+/// write through, and two people behind one address are two.
+pub(crate) fn create_key(subject: &Subject, headers: &HeaderMap) -> String {
+    match principal_of(subject) {
+        principal if principal != "anonymous" => format!("principal:{principal}"),
+        _ => crate::middleware::rate_limit::caller_key(headers),
+    }
+}
+
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
 pub(crate) const MAX_VIEW_ID: usize = 63;
 
@@ -458,7 +468,9 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
 
-    let caller = crate::middleware::rate_limit::caller_key(&parts.headers);
+    // After `pin_caller` the token is gone from the headers: a signed-in caller is keyed by
+    // who they are, not by the address they share (T-4590).
+    let caller = create_key(&subject, &parts.headers);
     let reserved = match reserve_create(gateway, &endpoint, &caller, operation) {
         Ok(reserved) => reserved,
         Err(answer) => return *answer,
@@ -698,7 +710,7 @@ fn subscription_target_refusal(sent: &[u8], private_hosts: &[String]) -> Option<
 /// core context (T-3287), a form's minted id and one entity per create (EP-97), the model's
 /// units (DM-06) and relationships (DM-70, DM-71). Returns the units it filled; a batch the
 /// relationships divide leaves its refused members in `divided`.
-async fn view_payload(
+pub(crate) async fn view_payload(
     gateway: &Gateway,
     (endpoint, subject): (&Endpoint, &Subject),
     (path, params, operation): (&str, &[(String, String)], Operation),
