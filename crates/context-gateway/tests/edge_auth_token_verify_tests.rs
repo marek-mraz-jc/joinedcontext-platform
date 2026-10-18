@@ -320,10 +320,7 @@ fn the_bearer_header_yields_a_token_or_nothing_at_all() {
         );
     }
 
-    let key = format!(
-        "Bearer {}whatever",
-        context_gateway::auth::api_key::KEY_PREFIX
-    );
+    let key = format!("Bearer {}whatever", jc_core::auth::token::API_KEY_PREFIX);
     assert_eq!(
         bearer(Some(&key)),
         Err(Rejected::NoToken),

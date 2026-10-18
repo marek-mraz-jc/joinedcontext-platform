@@ -13,9 +13,9 @@ use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
 use chrono::{DateTime, Utc};
 
-/// The prefix every platform API key carries, so a key is recognisable in a log or a leak
-/// scan before it is ever used (PF-37).
-pub const KEY_PREFIX: &str = jc_core::auth::token::API_KEY_PREFIX;
+// The prefix every platform API key carries, so a key is recognisable in a log or a leak scan
+// before it is ever used (PF-37), lives beside the bearer check in jc-core (T-4605).
+use jc_core::auth::token::API_KEY_PREFIX as KEY_PREFIX;
 
 /// What the platform stores about one key. Never the secret (PF-36).
 #[derive(Debug, Clone, PartialEq, Eq)]
