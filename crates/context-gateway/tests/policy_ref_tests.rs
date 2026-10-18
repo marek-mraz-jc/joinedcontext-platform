@@ -193,3 +193,29 @@ fn a_policy_ref_into_another_space_binds_nothing_rather_than_everything() {
         types_of(&nothing.policies)
     );
 }
+
+/// T-4591: a policyRef naming another organization's domain binds nothing, though space and
+/// name match a Policy of this one; its own domain still binds.
+#[test]
+fn a_policy_ref_of_another_domain_binds_nothing() {
+    for (domain, bound) in [("hel.fi", 1), ("vantaa.fi", 0)] {
+        let dir = repo(domain);
+        write(
+            &dir,
+            "org.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  name: helsinki\n  \
+             namespace: org\nspec:\n  domain: hel.fi\n  locales: [\"fi\"]\n  defaultLocale: fi\n",
+        );
+        write(
+            &dir,
+            "bikes.yaml",
+            &BIKES.replace(":hel.fi:", &format!(":{domain}:")),
+        );
+        let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+        let bikes = endpoints
+            .iter()
+            .find(|endpoint| endpoint.slug == "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("the endpoint is still in the table");
+        assert_eq!(bikes.policies.len(), bound, "{domain}");
+    }
+}
