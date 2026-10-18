@@ -1731,7 +1731,7 @@ mod tests {
     /// the primer names nothing a caller could use to reach around the hub.
     #[test]
     fn the_primer_teaches_ngsi_ld_and_names_no_slug_token_or_host() {
-        let primer = crate::mcp::PRIMER;
+        let primer: &str = &crate::mcp::PRIMER;
         for word in [
             "NGSI-LD",
             "@context",

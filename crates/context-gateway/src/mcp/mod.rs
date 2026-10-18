@@ -5,7 +5,7 @@ use crate::app::Gateway;
 use crate::auth::subject::HUB_PATH;
 use axum::routing::{get, post};
 use axum::Router;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 pub mod catalog;
 pub mod describe;
 pub mod endpoint;
@@ -20,9 +20,10 @@ pub mod writes;
 
 /// What the hub and every named server tell a client in `initialize`: catalogue first, then the
 /// dataset (`hub_lead.md`, T-4501), then that the connector speaks NGSI-LD, its query language
-/// and every tool argument (`primer.md`, ADR-N-025 §4c, EP-116, T-4502). It names no slug,
-/// token or host.
-pub(crate) const PRIMER: &str = concat!(include_str!("hub_lead.md"), include_str!("primer.md"));
+/// and every tool argument: the primer each Antares view sends too, from its one source
+/// (`antares_ql::PRIMER`, ADR-N-025 §4c, EP-116, T-4502, T-4532). It names no slug, token or host.
+pub(crate) static PRIMER: LazyLock<String> =
+    LazyLock::new(|| [include_str!("hub_lead.md"), antares_ql::PRIMER].concat());
 
 /// This surface's routes; `app::router` merges them under its guards.
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
@@ -87,7 +88,7 @@ mod tests {
             .filter(|name| {
                 let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(name)))
                     .expect("a word pattern");
-                !word.is_match(PRIMER)
+                !word.is_match(&PRIMER)
             })
             .collect();
         assert!(unexplained.is_empty(), "not in the primer: {unexplained:?}");

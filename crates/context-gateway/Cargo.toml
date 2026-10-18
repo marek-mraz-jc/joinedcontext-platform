@@ -24,11 +24,11 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "allo
 regex = "1"
 # The broker's own q/scopeQ evaluator, so a grant's condition is judged per entity exactly as the
 # broker judges it (T-3530, EP-16); the NGSI-LD crates' release repository at a tag (T-3913).
-antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.2.0", version = "0.2" }
-antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.2.0", version = "0.2" }
+antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
 # The broker's own subscription predicates against one in-memory entity, so the WebSocket fan-out
 # (ADR-N-049) decides a client filter exactly as the broker would.
-antares-matcher = { package = "ngsild-matcher", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.2.0", version = "0.2" }
+antares-matcher = { package = "ngsild-matcher", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
 # The preview list from the Portal (Architecture/06 §7.2).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }

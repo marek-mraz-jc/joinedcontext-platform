@@ -4309,8 +4309,8 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "ngsild-jsonld"
-version = "0.2.0"
-source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.2.0#2a978202a1a6d8b5ec7541699252d53613592f72"
+version = "0.3.0"
+source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.3.0#b06b4145fda4ee1b2147b08853e73e66da1959bd"
 dependencies = [
  "chrono",
  "ngsild-model",
@@ -4319,8 +4319,8 @@ dependencies = [
 
 [[package]]
 name = "ngsild-matcher"
-version = "0.2.0"
-source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.2.0#2a978202a1a6d8b5ec7541699252d53613592f72"
+version = "0.3.0"
+source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.3.0#b06b4145fda4ee1b2147b08853e73e66da1959bd"
 dependencies = [
  "chrono",
  "ngsild-jsonld",
@@ -4331,8 +4331,8 @@ dependencies = [
 
 [[package]]
 name = "ngsild-model"
-version = "0.2.0"
-source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.2.0#2a978202a1a6d8b5ec7541699252d53613592f72"
+version = "0.3.0"
+source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.3.0#b06b4145fda4ee1b2147b08853e73e66da1959bd"
 dependencies = [
  "serde",
  "serde_json",
@@ -4341,8 +4341,8 @@ dependencies = [
 
 [[package]]
 name = "ngsild-ql"
-version = "0.2.0"
-source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.2.0#2a978202a1a6d8b5ec7541699252d53613592f72"
+version = "0.3.0"
+source = "git+https://github.com/marek-mraz-jc/ngsild?tag=v0.3.0#b06b4145fda4ee1b2147b08853e73e66da1959bd"
 dependencies = [
  "geo",
  "geo-types",
@@ -6942,7 +6942,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",
