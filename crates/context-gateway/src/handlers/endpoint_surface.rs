@@ -15,14 +15,7 @@ fn with_subject<T>(
     space: Option<&Space>,
     write: impl FnOnce(&jc_dcat::Subject<'_>) -> T,
 ) -> T {
-    let classes: Vec<&str> = match endpoint.declared_types.as_deref() {
-        Some(declared) => declared.classes.iter().map(String::as_str).collect(),
-        None => endpoint
-            .models
-            .iter()
-            .flat_map(|model| model.classes.iter().map(String::as_str))
-            .collect(),
-    };
+    let classes = classes(endpoint);
     let assigners: Vec<&str> = endpoint
         .policies
         .iter()
@@ -57,6 +50,18 @@ pub fn dataset_html(
     base: &str,
 ) -> String {
     with_subject(endpoint, space, |s| jc_dcat::dataset_html(s, index, base))
+}
+
+/// The entity types the Endpoint serves: the ones it declares, else its models' classes.
+pub(crate) fn classes(endpoint: &Endpoint) -> Vec<&str> {
+    match endpoint.declared_types.as_deref() {
+        Some(declared) => declared.classes.iter().map(String::as_str).collect(),
+        None => endpoint
+            .models
+            .iter()
+            .flat_map(|model| model.classes.iter().map(String::as_str))
+            .collect(),
+    }
 }
 
 /// The Endpoint's catalogue block with its derived themes and keywords (T-4498).
