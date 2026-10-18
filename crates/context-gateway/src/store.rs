@@ -634,7 +634,9 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
         let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
         let app_client = app_of(repo, &project, &id.name);
         let mut bound = match &spec.policy_ref {
-            Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
+            Some(policy_ref) => {
+                bound_policy(&id.name, policy_ref, (repo.org_domain(), &space), named)
+            }
             None => named.to_vec(),
         };
         if app_client.is_some() {
@@ -1002,18 +1004,21 @@ fn is_own_grant(policy: &PolicySpec, project: &str, endpoint: &str) -> bool {
 ///
 /// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
 /// that Policy alone, which is how several endpoints over one space each publish a different
-/// slice of it. A reference to a Policy of another space, or to none the repository has, binds
-/// nothing and says so: an endpoint that widened to the whole space instead would publish
-/// exactly what its author narrowed away.
+/// slice of it. A reference to a Policy of another space or another organization's domain (when
+/// the load knows its own), or to none the repository has, binds nothing and says so: an
+/// endpoint that widened to the whole space instead would publish exactly what its author
+/// narrowed away.
 fn bound_policy(
     endpoint: &str,
     policy_ref: &Urn,
-    space: &str,
+    (domain, space): (Option<&str>, &str),
     named: &[(String, PolicySpec)],
 ) -> Vec<(String, PolicySpec)> {
+    let ours = domain.is_none_or(|domain| policy_ref.org_domain() == Some(domain))
+        && policy_ref.space() == Some(space);
     let bound: Vec<(String, PolicySpec)> = named
         .iter()
-        .filter(|(name, _)| policy_ref.space() == Some(space) && name == policy_ref.local_id())
+        .filter(|(name, _)| ours && name == policy_ref.local_id())
         .cloned()
         .collect();
     if bound.is_empty() {

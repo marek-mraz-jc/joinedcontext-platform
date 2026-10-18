@@ -19,6 +19,7 @@
 //! [`claims_of`] and [`unlink`] decide, the enforcement point reads and writes. Reads are not
 //! touched: the computed end is never added to an answer (DM-67, CIM 009).
 
+use jc_core::type_of_id;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jc_core::ProblemDetails;
@@ -189,19 +190,6 @@ impl From<Violation> for ProblemDetails {
 /// The local name of a type written as an IRI, a CURIE or a plain name.
 fn local(name: &str) -> &str {
     name.rsplit(['/', '#', ':']).next().unwrap_or(name)
-}
-
-/// The type an id names: `urn:ngsi-ld:{Type}:…` (PF-10).
-pub(crate) fn type_of_id(id: &str) -> Option<&str> {
-    let mut parts = id.splitn(4, ':');
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(urn), Some(ngsi), Some(kind), Some(_))
-            if urn.eq_ignore_ascii_case("urn") && ngsi.eq_ignore_ascii_case("ngsi-ld") =>
-        {
-            Some(kind)
-        }
-        _ => None,
-    }
 }
 
 impl RelationshipRules {
