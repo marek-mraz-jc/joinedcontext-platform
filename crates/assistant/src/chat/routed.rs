@@ -729,6 +729,24 @@ pub fn top(found: &[Hit], n: usize) -> Vec<Hit> {
     sorted
 }
 
+/// The most passages of a website source one answer sees (T-4680): a crawled page tells where to
+/// find or whom to ask, and never crowds out the data of the catalogue and the Endpoints.
+pub const WEB_PASSAGES: usize = 3;
+
+/// The best [`ANSWER_PASSAGES`] passages, at most [`WEB_PASSAGES`] of them from `websites`.
+pub fn best(found: &[Hit], websites: &[String]) -> Vec<Hit> {
+    let mut web = 0;
+    top(found, found.len())
+        .into_iter()
+        .filter(|hit| {
+            let crawled = websites.contains(&hit.site);
+            web += usize::from(crawled);
+            !crawled || web <= WEB_PASSAGES
+        })
+        .take(ANSWER_PASSAGES)
+        .collect()
+}
+
 /// A question as the cache compares it: lowercase, one space between words, no closing marks.
 pub fn normalized(question: &str) -> String {
     question
@@ -1505,7 +1523,7 @@ pub async fn search_only(
         }
     };
     let mut citations: Vec<Citation> = Vec::new();
-    for hit in top(&found, ANSWER_PASSAGES) {
+    for hit in best(&found, ask.websites) {
         if !citations
             .iter()
             .any(|c| c.url.as_deref() == Some(hit.url.as_str()))
@@ -1780,7 +1798,7 @@ pub async fn answer(
         return spent;
     }
 
-    let best = top(&found.hits, ANSWER_PASSAGES);
+    let best = best(&found.hits, ask.websites);
     let (citations, passages, data) = evidence(&best, &tables);
     let more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
     let messages = messages_with(
@@ -1906,7 +1924,7 @@ async fn search_first(
                 q.question,
                 &asked,
                 q.languages,
-                &top(hits, ANSWER_PASSAGES),
+                &best(hits, q.ask.websites),
                 q.now,
             );
             if within(q.ask, spent, &messages, reserve + ROUTER_TOKENS) {
@@ -2064,7 +2082,7 @@ async fn search_rounds(
             q.question,
             &found.asked,
             q.languages,
-            &top(&found.hits, ANSWER_PASSAGES),
+            &best(&found.hits, q.ask.websites),
             q.now,
         );
         if !within(q.ask, spent, &messages, ROUTER_TOKENS) {
@@ -2638,7 +2656,36 @@ mod tests {
             url: format!("https://bb.example/{chunk}"),
             text: format!("passage {chunk}"),
             score,
+            site: "bb/catalogue".into(),
         }
+    }
+
+    /// T-4680: a website gives an answer at most three passages; the data's records fill the
+    /// rest even when the crawled pages score higher, and with no website it is `top`.
+    #[test]
+    fn an_answer_sees_at_most_three_website_passages_and_the_data_first() {
+        let web = |chunk, score| Hit {
+            site: "bbsk/web".into(),
+            ..hit(chunk, score)
+        };
+        let found = [
+            web(1, 0.9),
+            web(2, 0.8),
+            web(3, 0.7),
+            web(4, 0.6),
+            web(5, 0.5),
+            hit(6, 0.2),
+            hit(7, 0.1),
+        ];
+        let websites = ["bbsk/web".to_owned()];
+        let chunks = |hits: Vec<Hit>| hits.iter().map(|h| h.chunk).collect::<Vec<_>>();
+        assert_eq!(chunks(best(&found, &websites)), [1, 2, 3, 6, 7]);
+        assert_eq!(
+            chunks(best(&found, &[])),
+            chunks(top(&found, ANSWER_PASSAGES))
+        );
+        assert_eq!(chunks(best(&found[..2], &websites)), [1, 2]);
+        assert!(best(&[], &websites).is_empty());
     }
 
     /// T-4360: a passage both rankings put in their first three skips the judgement; one only a
@@ -3192,6 +3239,7 @@ mod tests {
                 "x".repeat(400)
             ),
             score: BOTH,
+            site: "bb/web".into(),
         };
         let follow = follow_messages(
             &[],
