@@ -16,6 +16,9 @@ sha2 = "0.10"
 # Folds diacritics out of the NGSI-LD catalogue's searchText (T-4500); already in the graph.
 unicode-normalization = "0.1.25"
 zeroize = "1"
+# The pinned Vega-Lite and Vega schemas a visualization validates against (ADR-N-053, T-4642);
+# the version the gateway, jcctl and jc-manifest already lock.
+jsonschema = { version = "0.54", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
 axum = { version = "0.8", optional = true, default-features = false, features = ["json"] }
 tracing = { version = "0.1", optional = true }
