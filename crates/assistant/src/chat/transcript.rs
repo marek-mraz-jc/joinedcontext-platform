@@ -15,10 +15,6 @@ use super::agent::{Event, Turn};
 use super::redact::redact;
 use super::trace::Step;
 
-/// A turn slower than this, in milliseconds, is `slow` in the Portal's filter (the 15000 of the
-/// list's SQL).
-pub const SLOW_MS: i64 = 15_000;
-
 static RFC3339: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$")
         .expect("valid regex")
@@ -332,7 +328,7 @@ macro_rules! list_sql {
              AND ($5::text IS NULL OR ($5 = 'up' AND max(f.up) > 0) \
                OR ($5 = 'down' AND max(f.down) > 0) \
                OR ($5 = 'none' AND coalesce(max(f.up), 0) + coalesce(max(f.down), 0) = 0)) \
-             AND (NOT $6 OR max(t.total_ms) > 15000) \
+             AND (NOT $6 OR max(t.total_ms) > 15000) /* slow: 15 s */ \
              AND ($7::bigint IS NULL OR sum(t.cost_micros) >= $7) \
              AND ($8::text IS NULL OR bool_or(unaccent(lower(t.question || ' ' || t.answer)) \
                LIKE unaccent(lower($8)))) \
