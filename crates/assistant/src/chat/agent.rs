@@ -55,6 +55,8 @@ const RULES: &str = "You answer the questions of a city's residents from what th
 #[derive(Debug, Clone)]
 pub struct Connected {
     pub endpoint: String,
+    /// The Endpoint's title ([`crate::worker::EndpointRef::title`]).
+    pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
 }

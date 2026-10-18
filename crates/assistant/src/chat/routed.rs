@@ -203,6 +203,7 @@ pub struct Read {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     pub endpoint: String,
+    pub title: Option<String>,
     pub types: Vec<String>,
     pub attributes: Vec<String>,
 }
@@ -1013,6 +1014,7 @@ async fn live_of(
                 .unwrap_or_default();
             out.push(Shown {
                 endpoint: connector.endpoint.clone(),
+                title: connector.title.clone(),
                 types,
                 attributes,
             });
@@ -1285,9 +1287,13 @@ pub fn router_messages(
     // cache keeps the longest equal prefix (T-4680).
     let mut asked = written_in(languages);
     if !live.is_empty() {
-        asked.push_str("Live data you are shown (endpoint: types; the attributes a q may test):\n");
+        asked.push_str("Live data you are shown (endpoint (what it holds): types; the attributes a q may test):\n");
         for shown in live {
-            asked.push_str(&format!("- {}: {}", shown.endpoint, shown.types.join(", ")));
+            asked.push_str(&format!("- {}", shown.endpoint));
+            if let Some(title) = &shown.title {
+                asked.push_str(&format!(" ({title})"));
+            }
+            asked.push_str(&format!(": {}", shown.types.join(", ")));
             if !shown.attributes.is_empty() {
                 asked.push_str(&format!("; {}", shown.attributes.join(", ")));
             }
@@ -2320,6 +2326,7 @@ mod tests {
     #[test]
     fn a_direct_route_searches_and_reads_nothing_and_an_unknown_one_is_searched() {
         let live = [Shown {
+            title: None,
             endpoint: "ovzdusie".into(),
             types: vec!["AirQualityObserved".into()],
             attributes: Vec::new(),
@@ -2365,6 +2372,7 @@ mod tests {
         ));
         assert!(ROUTER_RULES.contains("like a poem or general knowledge"));
         let live = vec![Shown {
+            title: None,
             endpoint: "praha/praha-mesto".into(),
             types: vec!["WasteContainer".into()],
             attributes: Vec::new(),
@@ -2553,6 +2561,7 @@ mod tests {
         };
         let connector = |slug: &str| Connected {
             endpoint: slug.into(),
+            title: None,
             surface: super::super::mcp::Surface {
                 gateway: gateway.uri(),
                 slug: slug.into(),
@@ -2601,6 +2610,7 @@ mod tests {
         };
         let connectors = [Connected {
             endpoint: "bb-events".into(),
+            title: None,
             surface: super::super::mcp::Surface {
                 gateway: gateway.uri(),
                 slug: "slow".into(),
@@ -2738,8 +2748,30 @@ mod tests {
         assert!(!covers(&[]));
     }
 
+    /// T-4680: the router sees what each connector holds, so 45 tables of one type are told apart.
+    #[test]
+    fn the_router_is_shown_each_connectors_title() {
+        let titled = Shown {
+            title: Some("Unemployment, Slovak statistics".into()),
+            ..shown(
+                "slovensko/susr-pr",
+                &["KeyPerformanceIndicator"],
+                &["indicator"],
+            )
+        };
+        let plain = shown("slovensko/ovzdusie-sk", &["AirQualityObserved"], &[]);
+        let messages = router_messages(&[], "Nezamestnanosť?", &[titled, plain], &[], "now");
+        let asked = messages[1]["content"].as_str().expect("text");
+        assert!(asked.contains("- slovensko/susr-pr (Unemployment, Slovak statistics): KeyPerformanceIndicator; indicator\n"), "{asked}");
+        assert!(
+            asked.contains("- slovensko/ovzdusie-sk: AirQualityObserved\n"),
+            "{asked}"
+        );
+    }
+
     fn shown(endpoint: &str, types: &[&str], attributes: &[&str]) -> Shown {
         Shown {
+            title: None,
             endpoint: endpoint.into(),
             types: types.iter().map(|t| t.to_string()).collect(),
             attributes: attributes.iter().map(|a| a.to_string()).collect(),
@@ -3158,6 +3190,7 @@ mod tests {
         let asked = router[1]["content"].as_str().unwrap_or_default();
         // T-4680: the sources and live data come before the turns, the shared part first.
         let live = vec![Shown {
+            title: None,
             endpoint: "bbsk-registre".into(),
             types: vec!["Bridge".into()],
             attributes: vec!["yearBuilt".into()],
