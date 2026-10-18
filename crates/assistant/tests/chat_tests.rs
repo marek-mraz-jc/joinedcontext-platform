@@ -60,6 +60,9 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             channel,
             system_prompt: Some("Odpovedaj stručne.".into()),
             sources: vec!["web".into()],
+            select: None,
+            exclude: Vec::new(),
+            categories: Vec::new(),
             connectors: vec![
                 Connector {
                     endpoint: "ovzdusie".into(),
