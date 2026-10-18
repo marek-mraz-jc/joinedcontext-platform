@@ -273,13 +273,20 @@ async fn crawl_end_to_end() {
         .mount(&server1)
         .await;
 
-    // Allowed sitemap page: /about
+    // Allowed sitemap page: /about, stating its title, description and publication date; its
+    // change date comes from the server (AG-120).
     Mock::given(method("GET"))
         .and(path("/about"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/html; charset=utf-8")
-                .set_body_string(r#"<html lang="en"><body><h1>About</h1></body></html>"#),
+                .insert_header("last-modified", "Wed, 30 Sep 2026 08:12:31 GMT")
+                .set_body_string(
+                    r#"<html lang="en"><head><title>About the city</title>
+                    <meta name="description" content="Who we are">
+                    <meta property="article:published_time" content="2024-03-01T10:00:00+01:00">
+                    </head><body><h1>About</h1></body></html>"#,
+                ),
         )
         .mount(&server1)
         .await;
@@ -362,6 +369,41 @@ async fn crawl_end_to_end() {
     assert!(pages.contains(&(expected_about.clone(), "fetched".to_string(), true)));
     assert!(pages.contains(&(expected_news.clone(), "fetched".to_string(), true)));
     assert!(pages.contains(&(expected_private.clone(), "skipped".to_string(), true)));
+
+    let stated: Vec<(String, [Option<String>; 4])> =
+        sqlx::query(
+            "SELECT url, title, description, \
+                    to_char(published AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') AS published, \
+                    to_char(modified AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') AS modified \
+             FROM pages WHERE status = 'fetched' ORDER BY url",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("page metadata")
+        .into_iter()
+        .map(|r| {
+            (
+                r.get("url"),
+                ["title", "description", "published", "modified"].map(|c| r.get(c)),
+            )
+        })
+        .collect();
+    assert!(
+        stated.contains(&(
+            expected_about.clone(),
+            [
+                Some("About the city".into()),
+                Some("Who we are".into()),
+                Some("2024-03-01T09:00:00".into()),
+                Some("2026-09-30T08:12:31".into()),
+            ],
+        )),
+        "{stated:?}"
+    );
+    assert!(
+        stated.contains(&(expected_news.clone(), [None, None, None, None])),
+        "a page that states nothing has nothing: {stated:?}"
+    );
 
     let documents: Vec<(String, String, bool, bool)> =
         sqlx::query("SELECT url, status, included, off_domain FROM documents ORDER BY url")

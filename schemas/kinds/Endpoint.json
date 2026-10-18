@@ -2,6 +2,67 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AggrMethod": {
+      "description": "NGSI-LD's aggregation methods (ETSI GS CIM 009 §4.5.19).",
+      "oneOf": [
+        {
+          "description": "`totalCount`.",
+          "enum": [
+            "totalCount"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`distinctCount`.",
+          "enum": [
+            "distinctCount"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`sum`.",
+          "enum": [
+            "sum"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`avg`.",
+          "enum": [
+            "avg"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`min`.",
+          "enum": [
+            "min"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`max`.",
+          "enum": [
+            "max"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`stddev`.",
+          "enum": [
+            "stddev"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`sumsq`.",
+          "enum": [
+            "sumsq"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Audience": {
       "description": "Target audience access control setting for an endpoint (EP-14).",
       "oneOf": [
@@ -204,6 +265,13 @@
           "description": "EU data themes: `dcat:theme`.",
           "items": {
             "$ref": "#/definitions/DataTheme"
+          },
+          "type": "array"
+        },
+        "visualizations": {
+          "description": "Charts on the dataset, Vega-Lite 5 or Vega 5 over the Endpoint's own sources, published as CKAN `jc_visualization` views (ADR-N-053, EP-130); validated by the Endpoint, which knows what it serves.",
+          "items": {
+            "$ref": "#/definitions/Visualization"
           },
           "type": "array"
         }
@@ -489,6 +557,27 @@
         }
       ]
     },
+    "Display": {
+      "additionalProperties": false,
+      "description": "An override of the model's display order for one type: an Endpoint's `spec.display` entry or a visualization's `fields` (EP-135). Either list empty leaves that part to the model.",
+      "properties": {
+        "fields": {
+          "description": "The slots shown, in this order; the rest are not shown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "The key attributes, in place of the model's `summary` annotations.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "EndpointRole": {
       "additionalProperties": false,
       "description": "One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).",
@@ -586,6 +675,13 @@
             "$ref": "#/definitions/Representation"
           },
           "type": "array"
+        },
+        "display": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Display"
+          },
+          "description": "Per entity type, the slots this Endpoint's tables, popups and CKAN columns show and its key attributes, reordering and narrowing the model's display order (EP-135, DM-98).",
+          "type": "object"
         },
         "enabledRepresentations": {
           "description": "The representations this Endpoint serves, listed (EP-05). Omitted: every one but `sta`, less `disabledRepresentations` (EP-104); see [`EndpointSpec::served_representations`].",
@@ -1340,6 +1436,213 @@
       "description": "NGSI-LD entity URN (ADR-N-041, PF-43): urn:ngsi-ld:{Type}:{id}; the prefixed shape urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId} is optional",
       "pattern": "^urn:ngsi-ld:[A-Z][A-Za-z0-9]{1,63}:(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2}){0,255}$",
       "type": "string"
+    },
+    "Visualization": {
+      "additionalProperties": false,
+      "description": "One chart on the dataset (EP-130).",
+      "properties": {
+        "data": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/VisualizationData"
+            }
+          ],
+          "description": "Which of the Endpoint's own sources fills the spec's dataset `source`."
+        },
+        "description": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The view's description per language.",
+          "type": "object"
+        },
+        "name": {
+          "description": "Unique on the Endpoint, a DNS label: the CKAN view is found again by it.",
+          "type": "string"
+        },
+        "spec": {
+          "additionalProperties": true,
+          "description": "The Vega-Lite 5 or Vega 5 specification; it reads `{\"data\": {\"name\": \"source\"}}`.",
+          "type": "object"
+        },
+        "title": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The view's title per language.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "data",
+        "description",
+        "name",
+        "spec",
+        "title"
+      ],
+      "type": "object"
+    },
+    "VisualizationData": {
+      "description": "The Endpoint source a visualization reads, never a URL (ADR-N-053 §2.2).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The Endpoint's `file.csv` of one entity type.",
+          "properties": {
+            "source": {
+              "enum": [
+                "csv"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "description": "The entity type.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The items of one OGC API Features collection.",
+          "properties": {
+            "collection": {
+              "description": "The collection, the entity type.",
+              "type": "string"
+            },
+            "filter": {
+              "description": "A CQL2 text filter.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "properties": {
+              "description": "The properties to return, comma-separated.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "enum": [
+                "ogc"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "collection",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One OData entity set.",
+          "properties": {
+            "$apply": {
+              "description": "`$apply`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "$filter": {
+              "description": "`$filter`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "$orderby": {
+              "description": "`$orderby`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "$select": {
+              "description": "`$select`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "entitySet": {
+              "description": "The entity set, the entity type.",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "odata"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "entitySet",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "NGSI-LD Query Temporal Evolution of Entities over the last `last`.",
+          "properties": {
+            "aggrMethod": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AggrMethod"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The NGSI-LD aggregation method."
+            },
+            "aggrPeriod": {
+              "description": "The NGSI-LD aggregation period, an ISO 8601 duration.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attrs": {
+              "description": "The attributes whose history is read.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "last": {
+              "description": "An ISO 8601 duration of at most `P31D`.",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "temporal"
+              ],
+              "type": "string"
+            },
+            "type": {
+              "description": "The entity type.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "attrs",
+            "last",
+            "source",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",

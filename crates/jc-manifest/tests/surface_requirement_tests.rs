@@ -204,3 +204,53 @@ fn an_endpoint_that_does_not_list_ical_is_not_held_to_it() {
     assert_eq!(surface_findings(&dir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T-4672: an Endpoint's `spec.display` names only types and slots of its projection (EP-135).
+fn display_findings(dir: &Path) -> Vec<String> {
+    validate::run(dir)
+        .findings
+        .into_iter()
+        .filter(|f| f.message.contains("EP-135"))
+        .map(|f| f.message)
+        .collect()
+}
+
+#[test]
+fn a_display_of_the_model_slots_is_accepted_and_an_unknown_name_refused() {
+    let ok = "  display:\n    Event:\n      fields: [startDate, name]\n      summary: [name]\n";
+    let dir = repo_with("display-ok", Some(EVENT_MODEL), ok);
+    assert_eq!(display_findings(&dir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let bad = "  display:\n    Event:\n      fields: [startDate, venue]\n    Meeting:\n      fields: [name]\n";
+    let dir = repo_with("display-bad", Some(EVENT_MODEL), bad);
+    assert_eq!(
+        display_findings(&dir),
+        [
+            "Endpoint city/calendar: spec.display: venue is no slot of Event in the Endpoint's projection (EP-135)",
+            "Endpoint city/calendar: spec.display: Meeting is no type of its projection (EP-135)",
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_display_is_checked_against_the_projection_not_the_whole_model() {
+    let display = "  projectionRef:\n    kind: ModelProjection\n    name: public\n  display:\n    Event:\n      fields: [name, endDate]\n";
+    let dir = repo_with("display-projection", Some(EVENT_MODEL), display);
+    write(
+        &dir,
+        "projects/city/spaces/events/projections/public.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ModelProjection\nmetadata:\n  name: public\n  \
+         namespace: city\nspec:\n  contextSpaceRef: events\n  dataModelRef:\n    name: events\n    \
+         version: \"1\"\n  classes:\n    - name: Event\n      slots: [name, startDate]\n",
+    );
+    let found = display_findings(&dir);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("endDate is no slot of Event"),
+        "{}",
+        found[0]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

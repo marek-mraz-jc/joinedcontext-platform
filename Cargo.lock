@@ -3544,6 +3544,7 @@ dependencies = [
  "axum",
  "chrono",
  "hyper-util",
+ "jsonschema",
  "jsonwebtoken",
  "regex",
  "schemars",

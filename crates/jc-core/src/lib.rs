@@ -12,6 +12,7 @@
 pub mod auth;
 pub mod classification;
 pub mod cron;
+pub mod display_order;
 pub mod envelope;
 pub mod error;
 pub mod field_order;

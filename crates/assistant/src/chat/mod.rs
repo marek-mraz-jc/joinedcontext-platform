@@ -1665,6 +1665,17 @@ async fn ask(
         } else {
             crate::sources_by_project(&deployment.project, &deployment.spec.sources)
         };
+        let websites = state
+            .snapshot
+            .read()
+            .map(|snapshot| {
+                crate::website_sources(
+                    &deployment.project,
+                    &deployment.spec.sources,
+                    &snapshot.sources,
+                )
+            })
+            .unwrap_or_default();
         // The token reached the surfaces that need it; nothing else holds it past this point.
         drop(person);
         for event in failed {
@@ -1680,6 +1691,7 @@ async fn ask(
             deployment: &name,
             system_prompt: deployment.spec.system_prompt.as_deref(),
             sources: &sources,
+            websites: &websites,
             public_only: deployment.spec.channel.is_anonymous(),
             connectors: &connectors,
             tokens_per_day,
@@ -1851,6 +1863,8 @@ mod tests {
             columns: vec!["name".into()],
             rows: vec![vec![json!("Žilina")]],
             units: vec![None],
+            labels: Vec::new(),
+            summary: Vec::new(),
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,
