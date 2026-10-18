@@ -1,7 +1,7 @@
 //! T-0176: a mirrored foreign model is not part of any local surface (DM-48, DM-49).
 //!
 //! The reconciler commits a peer's model into the repository beside the reference that fetched
-//! it (`jcctl::foreign_models`), so the gateway loads it like every other manifest. DM-49 is
+//! it (`jc_manifest::foreign_models`), so the gateway loads it like every other manifest. DM-49 is
 //! the line it must not cross: a foreign model is read-only and no local Endpoint may serve it
 //! as its own. The endpoint table is where that is decided, so that is where it is tested.
 
@@ -142,7 +142,7 @@ fn the_space_surface_does_not_publish_a_mirror_either() {
 #[test]
 fn the_repository_really_holds_the_mirror() {
     let dir = repo("fixture");
-    let repository = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let repository = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
     let (_, resource) = repository
         .iter()
         .find(|(id, _)| id.kind == "DataModel" && id.name == "partner-air")

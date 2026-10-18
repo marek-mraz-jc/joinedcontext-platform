@@ -17,7 +17,7 @@
 pub mod exchange;
 
 use jc_core::kinds::{ContextSourceRegistrationSpec, FederationIdentity};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use std::collections::BTreeMap;
 
 /// One registered source, as the gateway needs it.

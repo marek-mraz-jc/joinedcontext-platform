@@ -357,7 +357,7 @@ dependencies = [
  "futures-util",
  "hex",
  "jc-core",
- "jcctl",
+ "jc-manifest",
  "jsonschema",
  "kreuzberg",
  "lopdf",
@@ -1237,6 +1237,7 @@ dependencies = [
  "hyper-util",
  "jc-core",
  "jc-dcat",
+ "jc-manifest",
  "jcctl",
  "jsonschema",
  "jsonwebtoken",
@@ -2349,7 +2350,6 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
- "context-gateway",
  "jc-core",
  "jsonwebtoken",
  "reqwest",
@@ -3539,8 +3539,11 @@ dependencies = [
 name = "jc-core"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "chrono",
+ "hyper-util",
+ "jsonwebtoken",
  "regex",
  "schemars",
  "serde",
@@ -3548,6 +3551,7 @@ dependencies = [
  "serde_norway",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
@@ -3563,6 +3567,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "jc-manifest"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "jc-core",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tracing",
+ "utoipa",
+ "walkdir",
+]
+
+[[package]]
 name = "jcctl"
 version = "0.1.0"
 dependencies = [
@@ -3571,6 +3593,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "jc-core",
+ "jc-manifest",
  "jsonschema",
  "minijinja",
  "ngsild-jsonld",
@@ -3581,8 +3604,6 @@ dependencies = [
  "serde_norway",
  "sha2 0.10.9",
  "thiserror 2.0.20",
- "tracing",
- "utoipa",
  "walkdir",
  "zeroize",
 ]

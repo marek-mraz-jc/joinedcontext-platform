@@ -23,8 +23,8 @@
 
 use std::sync::Arc;
 
-use context_gateway::auth::{jwks, token::Verifier};
 use functions::{router, AppState, SLOTS};
+use jc_core::auth::{jwks, token::Verifier};
 use tokio::sync::Semaphore;
 
 fn required(name: &str) -> Result<String, String> {

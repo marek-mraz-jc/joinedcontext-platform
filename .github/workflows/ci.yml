@@ -41,6 +41,10 @@ jobs:
       # Complexity, untested public functions and crate edges, against ci/cg-structure-baseline.txt (T-4587).
       - name: cg structure ratchet self-test
         run: python3 dev/cg-structure.py --selftest
+      # HTTP links across the platform, Portal and Antares graphs, and the security, modularity and
+      # memory counts, against ci/cg-audit-baseline.txt (T-4594).
+      - name: cg audit self-test
+        run: python3 dev/cg-audit.py --selftest
       - name: request trace self-test (T-3917)
         run: python3 dev/trace-request.py --selftest
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable

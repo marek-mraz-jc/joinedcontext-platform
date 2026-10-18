@@ -6,7 +6,7 @@
 
 use jc_core::envelope::ResourceEnvelope;
 use jc_core::kinds::{DataSourceSpec, PipelineSpec};
-use jcctl::bento::{input_of, render, InputContext, RenderError};
+use jc_manifest::bento::{input_of, render, InputContext, RenderError};
 
 fn source(yaml: &str) -> DataSourceSpec {
     let parsed = ResourceEnvelope::<DataSourceSpec>::from_yaml(yaml).expect("parses");

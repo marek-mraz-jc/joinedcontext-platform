@@ -1,6 +1,6 @@
 //! T-4011: every write through an Endpoint checked against the slot constraints of the space's
 //! model (DM-86, DM-27), with the compilation the Portal's pipeline stage checks a record
-//! against (`jcctl::model_schema`).
+//! against (`jc_manifest::model_schema`).
 //!
 //! The model holds `pm10` between 0 and 1000, `window` to `day` or `month`, `stationCode` to a
 //! pattern and requires `dateObserved`. A broken constraint is a 400 of type `quality-rule`
@@ -17,7 +17,7 @@ use context_gateway::proxy::Broker;
 use context_gateway::resolver::{DeclaredTypes, Endpoint};
 use context_gateway::units::UnitRules;
 use jc_core::kinds::{Audience, MissingUnitCode, PolicySpec, Representation};
-use jcctl::model_schema::ModelSchema;
+use jc_manifest::model_schema::ModelSchema;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;

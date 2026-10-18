@@ -95,7 +95,10 @@ async fn public_records(
     let anonymous = Subject::anonymous();
     let mut records = Vec::new();
     for endpoint in gateway.resolver.endpoints() {
+        // An App's own door re-serves a space for that App and carries no catalogue block: it
+        // is no dataset of the publisher, and a national catalogue would harvest it as one.
         if endpoint.audience != Audience::Public
+            || endpoint.roles.app_client.is_some()
             || project.is_some_and(|project| endpoint.project != project)
         {
             continue;

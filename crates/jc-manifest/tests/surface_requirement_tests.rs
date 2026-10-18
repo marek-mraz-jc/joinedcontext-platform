@@ -2,7 +2,7 @@
 //! (`ical`) when its space's data model lacks the type that standard maps, or has it without
 //! each mandatory source attribute marked required, and names what is missing (EP-125).
 
-use jcctl::commands::validate;
+use jc_manifest::validate;
 use std::path::{Path, PathBuf};
 
 fn temp_repo(test_name: &str) -> PathBuf {

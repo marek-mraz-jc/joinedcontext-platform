@@ -36,10 +36,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
-/// File names the reconciler treats as encrypted secret files, everywhere in the tree.
-///
-/// The loader skips exactly these, so an encrypted file is never parsed as a manifest.
-pub const ENCRYPTED_SUFFIXES: [&str; 2] = [".enc.yaml", ".enc.yml"];
+pub use crate::loader::{is_encrypted_file, ENCRYPTED_SUFFIXES};
 
 /// SOPS's own key for its metadata block inside the encrypted file.
 const METADATA_KEY: &str = "sops";
@@ -49,11 +46,6 @@ type SopsCipher = aes_gcm::AesGcm<aes_gcm::aes::Aes256, U32>;
 
 const DATA_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 32;
-
-/// Whether a file name is an encrypted secret file (CC-06).
-pub fn is_encrypted_file(file_name: &str) -> bool {
-    ENCRYPTED_SUFFIXES.iter().any(|s| file_name.ends_with(s))
-}
 
 /// A decrypted secret value.
 ///

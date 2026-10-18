@@ -691,7 +691,7 @@ fn endpoint_slug(repo: &Repository, project: Option<&str>, name: &str) -> Option
         })
 }
 
-/// Whether the mirror is due, in the same epoch-second shape [`crate::sync::due`] uses (DM-49).
+/// Whether the mirror is due, in the same epoch-second shape `jcctl::sync::due` uses (DM-49).
 ///
 /// No schedule is the 24-hour default, and a model never fetched is always due. The schedule
 /// is validated where it is declared, so an interval this cannot parse has already been

@@ -2094,8 +2094,7 @@ mod deployment_spec_tests {
         );
         assert_eq!(
             refused(
-                with(|s| s["model"] = json!({"provider": {"allowFallbacks": true}}))
-                    .model_fields()
+                with(|s| s["model"] = json!({"provider": {"allowFallbacks": true}})).model_fields()
             ),
             "model.provider"
         );

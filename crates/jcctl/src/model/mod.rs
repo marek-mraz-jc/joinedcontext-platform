@@ -21,8 +21,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The file at the repository root that pins the Model Tools version (DM-19).
-pub const SETTINGS_FILE: &str = "platform-settings.yaml";
+pub use crate::loader::SETTINGS_FILE;
 
 /// Where Model Tools is, when `--url` names no address: `JC_MODEL_TOOLS_URL`. Without either,
 /// a command that needs the generators says so rather than guessing a service name (DM-18).

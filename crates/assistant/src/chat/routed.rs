@@ -81,7 +81,7 @@ const TYPES_LIFE: Duration = Duration::from_secs(600);
 pub const ROUTING_DEADLINE: Duration = Duration::from_secs(3);
 
 /// How long an Endpoint whose type list did not come is skipped by routing (T-4611).
-const UNAVAILABLE_LIFE: Duration = Duration::from_secs(60);
+pub const UNAVAILABLE_LIFE: Duration = Duration::from_secs(60);
 
 /// What the router is told. It never changes, so it is the cached prefix of every router call.
 const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Reply with one JSON object and nothing else:\n\

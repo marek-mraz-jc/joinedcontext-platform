@@ -24,102 +24,67 @@ each = '(?P<verb>get|post|put|patch|delete|head|options|any)\(\s*(?P<symbol>[\w:
 key = "{verb} {key}"
 
 # The gateway's hops to the broker build their paths at run time
-# (`format!("/x/views/{view}/ngsi-ld/v1{path}")`, `format!("/ngsi-ld/v1{path}?…")`), so each hop
-# the five traced operations take is pinned on the function that sends it, with the key Antares'
-# own .cg/links/axum.toml provides (T-3917). The view hop keeps its `/x/views/{}` root; Antares
-# serves it with one catch-all (antares_views::Views::router) and runs it in-process as the root key.
+# (`format!("/x/views/{view}/ngsi-ld/v1{path}")`, `format!("/ngsi-ld/v1/entities?…")`), so each
+# hop is pinned on the function that sends it, with the key Antares' own .cg/links/axum.toml
+# provides (T-3917; repinned in T-4594 after T-4472 moved the view forward into handlers::ngsi_ld
+# and every NGSI-LD operation, subscriptions included, went through the view). The view hop keeps
+# its `/x/views/{}` root; Antares serves it with one catch-all (antares_views::Views::router).
 
 # The broker's view (plan 5.1, T-3643): every operation a view serves.
+
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "POST /x/views/{view}/ngsi-ld/v1/entities"
-symbol = "context_gateway::app::serve_ngsi_ld_view"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "PATCH /x/views/{view}/ngsi-ld/v1/entities/{id}/attrs"
-symbol = "context_gateway::app::serve_ngsi_ld_view"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "PATCH /x/views/{view}/ngsi-ld/v1/entities/{id}/attrs/{attr}"
-symbol = "context_gateway::app::serve_ngsi_ld_view"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "GET /x/views/{view}/ngsi-ld/v1/entities"
-symbol = "context_gateway::app::serve_ngsi_ld_view"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
+
+[[endpoint]]
+channel = "http"
+role = "uses"
+key = "POST /x/views/{view}/ngsi-ld/v1/subscriptions"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "GET /x/views/{view}/ngsi-ld/v1/temporal/entities"
-symbol = "context_gateway::app::serve_ngsi_ld_view"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "GET /x/views/{view}/ngsi-ld/v1/temporal/entities/{id}"
-symbol = "context_gateway::app::serve_ngsi_ld_view"
+symbol = "context_gateway::handlers::ngsi_ld::serve_ngsi_ld_view"
 
-# The gateway's own decision (no view yet: a subscription, an If-Match write, a view of another
-# model, a caller under an agreement): the broker's root, the tenant pinned.
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "POST /ngsi-ld/v1/entities"
-symbol = "context_gateway::app::serve_ngsi_ld"
-
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "PATCH /ngsi-ld/v1/entities/{id}/attrs"
-symbol = "context_gateway::app::serve_ngsi_ld"
-
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "PATCH /ngsi-ld/v1/entities/{id}/attrs/{attr}"
-symbol = "context_gateway::app::serve_ngsi_ld"
+# The write path's own reads at the broker's root, the tenant pinned: which targets of a
+# relationship exist, and which entities point at a target (T-2971).
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "GET /ngsi-ld/v1/entities"
-symbol = "context_gateway::app::serve_ngsi_ld"
-
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "POST /ngsi-ld/v1/subscriptions"
-symbol = "context_gateway::app::serve_ngsi_ld"
-
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "GET /ngsi-ld/v1/temporal/entities"
-symbol = "context_gateway::app::serve_ngsi_ld"
-
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "GET /ngsi-ld/v1/temporal/entities/{id}"
-symbol = "context_gateway::app::serve_ngsi_ld"
-
-# Notification egress (map 7.3): a delivery is decided again against the stored subscription and
-# the entity read back under the subscriber (T-0931).
-[[endpoint]]
-channel = "http"
-role = "uses"
-key = "GET /ngsi-ld/v1/subscriptions/{id}"
-symbol = "context_gateway::egress::notifications::read"
+symbol = "context_gateway::handlers::writes::HeldWrite::readable"
 
 [[endpoint]]
 channel = "http"
 role = "uses"
 key = "GET /ngsi-ld/v1/entities"
-symbol = "context_gateway::egress::notifications::dispatch"
+symbol = "context_gateway::handlers::writes::storing"

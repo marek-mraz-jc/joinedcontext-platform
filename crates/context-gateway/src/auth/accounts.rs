@@ -9,7 +9,7 @@
 //! this platform has never heard of.
 
 use jc_core::kinds::ServiceAccountSpec;
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use std::collections::{BTreeSet, HashMap};
 
 /// The Keycloak client id of a service account (Architecture/12 section 3).
@@ -174,7 +174,7 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
     // Every Pipeline's own account (PL-19): derived, never a file, and the azp of its federated
     // client `{project}-pl-{pipeline}`. A hand-written `pl-` account is refused at validation, so
     // a collision here is a repository nobody could have committed; it resolves to nobody.
-    for (project, derived) in jcctl::pipeline_identity::derived(repo) {
+    for (project, derived) in jc_manifest::pipeline_identity::derived(repo) {
         let client = client_id(&project, &derived.name);
         if ambiguous.contains(&client) || by_client_id.remove(&client).is_some() {
             tracing::warn!(client = %client, "a pipeline's account and another derive one client id; it resolves to nobody");

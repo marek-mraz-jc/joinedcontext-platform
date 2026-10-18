@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0" }
+jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
 aes-gcm = "0.10"
 age = { version = "0.12", default-features = false, features = ["armor"] }
 # A seed entity is checked offline the way the broker checks it on create: NGSI-LD expansion with
@@ -29,11 +30,13 @@ serde_json = "1"
 serde_norway = "0.9"
 sha2 = "0.10"
 thiserror = "2"
-tracing = "0.1"
 walkdir = "2"
 zeroize = "1"
-# The Portal renders `model_schema`'s problems and attributes into its OpenAPI document.
-utoipa = { version = "5", optional = true }
+
+[features]
+# The Portal renders `model_schema`'s problems and attributes into its OpenAPI document; the
+# derive lives in jc-manifest since T-4604.
+utoipa = ["jc-manifest/utoipa"]
 
 [dev-dependencies]
 aes-gcm = "0.10"

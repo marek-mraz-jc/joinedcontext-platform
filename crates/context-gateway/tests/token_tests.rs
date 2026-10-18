@@ -234,7 +234,7 @@ spec:
     )
     .expect("the space is written");
 
-    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
     let accounts = accounts_of(&repo);
     assert_eq!(accounts.len(), 1);
 
@@ -297,7 +297,7 @@ spec:
         .expect("the manifest is written");
     }
 
-    let repo = jcctl::loader::Repository::load(&dir).expect("the repository loads");
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
     let accounts = accounts_of(&repo);
     assert!(
         accounts.resolve("helsinki-kpi-writer").is_none(),

@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 
 use jc_core::kinds::data_model::{DataModelLifecycle, DataModelSpec};
 use jc_core::kinds::EndpointSpec;
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;

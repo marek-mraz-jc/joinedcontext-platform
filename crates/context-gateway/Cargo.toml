@@ -6,9 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum", "logs"] }
+jc-core = { path = "../jc-core", version = "0.1.0", features = ["auth", "axum", "logs"] }
 jc-dcat = { path = "../jc-dcat", version = "0.1.0", features = ["dcat-ap-sk", "dcat-ap-cz"] }
-jcctl = { path = "../jcctl", version = "0.1.0" }
+jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
 arc-swap = "1"
 # base64url for the egress subject; already in the tree via jsonwebtoken
 base64 = "0.22"
@@ -29,7 +29,7 @@ antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mr
 # The broker's own subscription predicates against one in-memory entity, so the WebSocket fan-out
 # (ADR-N-049) decides a client filter exactly as the broker would.
 antares-matcher = { package = "ngsild-matcher", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.2.0", version = "0.2" }
-# The preview list from the Portal (Architecture/06 §7.2); already in the tree through jcctl.
+# The preview list from the Portal (Architecture/06 §7.2).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -62,10 +62,12 @@ metrics-exporter-prometheus = { version = "0.17", default-features = false }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 rustls-pki-types = "1"
-# a published Mapping's specification is served as YAML (EP-53); jcctl's loader links it already
+# a published Mapping's specification is served as YAML (EP-53); jc-manifest's loader links it already
 serde_norway = "0.9"
 
 [dev-dependencies]
+# `bench_org` writes the synthetic organization the store tests and scale_bench load.
+jcctl = { path = "../jcctl", version = "0.1.0" }
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }
 # `test-util` pauses the clock, so the reaper's five-second bound is measured

@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use context_gateway::auth::dataspace_token::{agreements_of, Agreements};
-use jcctl::loader::Repository;
+use jc_manifest::loader::Repository;
 
 const PROJECT: &str = "banskabystrica";
 const CONSUMER: &str = "did:web:helsinki.fi";
