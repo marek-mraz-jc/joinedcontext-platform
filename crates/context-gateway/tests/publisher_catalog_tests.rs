@@ -29,6 +29,8 @@ const CITY_TOO: &str = "m3x8rq5vzt2khw7pbnd4sjc6fy";
 const CITY_CLOSED: &str = "p9d2wc5kzn8mth4rqvb7xj3sfy";
 const REGION: &str = "w2b6tq9mzx4kcr7nvh3dsj5pfy";
 const PRAGUE: &str = "t6v3kq8mzx2wcr5nbh7dsj4pfy";
+/// The public door the Portal generated for the city's App `mapa` (T-4596).
+const APP_DOOR: &str = "a7n4kq2mzx6wcr3vbh5dsj8pfy";
 const HOST: &str = "https://bb.example.sk";
 const IRI: &str = "https://data.gov.sk/id/legal-subject/00313271";
 
@@ -98,6 +100,15 @@ fn complete(project: &str) -> jc_core::kinds::Catalog {
     }
 }
 
+/// `app-mapa`, the Endpoint the Portal writes for App `mapa`: public as the App is, with no
+/// catalogue block of its own.
+fn app_door() -> Endpoint {
+    let mut door = endpoint(APP_DOOR, "banskabystrica", "verejne", Audience::Public);
+    door.roles.app_client = Some("app-mapa".to_owned());
+    door.catalog = None;
+    door
+}
+
 fn publisher() -> ProjectPublisher {
     ProjectPublisher {
         title: [
@@ -146,8 +157,9 @@ fn prague() -> ProjectPublisher {
     }
 }
 
-/// The city publishes two public Endpoints and one for its staff; the region publishes one and
-/// names no publisher; `quiet` names a publisher and has no public Endpoint.
+/// The city publishes two public Endpoints, one for its staff and its App's public door; the
+/// region publishes one and names no publisher; `quiet` names a publisher and has no public
+/// Endpoint.
 fn app_of(realm: &common::Realm, listed: &[DcatProfile]) -> axum::Router {
     let gateway = Gateway::new(
         Broker::new("http://127.0.0.1:1"),
@@ -163,6 +175,7 @@ fn app_of(realm: &common::Realm, listed: &[DcatProfile]) -> axum::Router {
             "interne",
             Audience::Organization,
         ),
+        app_door(),
         endpoint(REGION, "bbsk", "cesty", Audience::Public),
         endpoint(PRAGUE, "praha", "ovzdusi", Audience::Public),
         endpoint(
@@ -248,9 +261,35 @@ async fn a_publishers_catalogue_lists_its_public_endpoints_under_its_publisher_o
             format!("{HOST}/api/endpoint/{CITY_TOO}"),
         ]
     );
-    for other in [CITY_CLOSED, "interne", REGION, "cesty"] {
+    for other in [CITY_CLOSED, "interne", REGION, "cesty", APP_DOOR] {
         assert!(!body.contains(other), "the catalogue names {other}: {body}");
     }
+}
+
+/// T-4596: an App's door re-serves a space for that App and has no catalogue block, so it is
+/// no dataset of the publisher, in its catalogue or in the installation's; its record stays.
+#[tokio::test]
+async fn an_apps_door_is_in_no_catalogue_and_keeps_its_record() {
+    let realm = common::Realm::new();
+    for path in ["/catalog/banskabystrica.jsonld", "/catalog.jsonld"] {
+        let (status, _, body) = get(app_of(&realm, &[]), path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert!(
+            datasets(&body).contains(&format!("{HOST}/api/endpoint/{CITY}")),
+            "{body}"
+        );
+        assert!(
+            !body.contains(APP_DOOR),
+            "{path} lists the App's door: {body}"
+        );
+    }
+    let (status, _, _) = get(
+        app_of(&realm, &[]),
+        &format!("/api/endpoint/{APP_DOOR}/"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
