@@ -38,9 +38,13 @@
     ".jc-panel{position:fixed;right:20px;bottom:88px;z-index:2147483000;width:420px;max-width:calc(100vw - 40px);" +
     "height:min(760px,calc(100vh - 108px));height:min(760px,calc(100dvh - 108px));" +
     "border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);background:#fff}" +
+    // Expanded (T-4658): the window less a 20 px gutter and the safe areas, at most 960 px wide.
+    ".jc-panel.jc-full{top:max(20px,env(safe-area-inset-top));bottom:max(20px,env(safe-area-inset-bottom));height:auto;" +
+    "left:max(20px,calc(50vw - 480px));right:max(20px,calc(50vw - 480px));width:auto;max-width:none}" +
+    ".jc-full~.jc-launch{display:none}" +
     ".jc-panel[hidden]{display:none}" +
     ".jc-panel iframe{width:100%;height:100%;border:0;display:block}" +
-    "@media (max-width:640px){.jc-panel{inset:0;width:100%;max-width:none;height:100%;height:100dvh;border-radius:0}" +
+    "@media (max-width:640px){.jc-panel,.jc-panel.jc-full{inset:0;width:100%;max-width:none;height:100%;height:100dvh;border-radius:0}" +
     ".jc-open .jc-launch{display:none}}" +
     "@media (prefers-reduced-motion:no-preference){.jc-launch{transition:transform .15s}.jc-launch:hover{transform:scale(1.05)}}";
 
@@ -84,14 +88,20 @@
   panel.id = "jc-assistant-panel";
   launch.setAttribute("aria-controls", panel.id);
   var frame = null;
-  // Below 640 px the open panel takes the whole screen; the page behind is made inert, so focus
-  // and a screen reader stay inside the chat until it closes.
+  // Below 640 px, or expanded, the open panel takes the whole screen; the page behind is made
+  // inert and does not scroll, so focus and a screen reader stay inside the chat until it closes.
   var phone = window.matchMedia("(max-width: 640px)");
   var silenced = [];
+  var kept = null;
   function silence(on) {
     silenced.forEach(function (el) { el.inert = false; });
     silenced = [];
-    if (!on || !phone.matches) return;
+    var root = document.documentElement.style;
+    if (kept !== null) root.overflow = kept;
+    kept = null;
+    if (!on || !(phone.matches || panel.classList.contains("jc-full"))) return;
+    kept = root.overflow;
+    root.overflow = "hidden";
     Array.prototype.forEach.call(document.body.children, function (el) {
       if (el !== host && el !== spacer && !el.inert) { el.inert = true; silenced.push(el); }
     });
@@ -134,11 +144,16 @@
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape") close();
   });
-  // The chat page asks to close (its own close button or Escape inside it); only our frame may.
+  // The chat page asks to close (its own close button or Escape inside it) or to change its size;
+  // only our frame may.
   window.addEventListener("message", function (event) {
     if (frame && event.source === frame.contentWindow && event.origin === src.origin &&
         event.data && event.data.type === "jc-assistant-close") {
       close();
+    } else if (frame && event.source === frame.contentWindow && event.origin === src.origin &&
+        event.data && event.data.type === "jc-assistant-size" && /^(full|panel)$/.test(event.data.size)) {
+      panel.classList.toggle("jc-full", event.data.size === "full");
+      silence(!panel.hidden);
     }
   });
 
