@@ -185,15 +185,50 @@ test("a data table shows at most 50 rows of text and only http(s) links", () => 
     rows: [["Námestie SNP", { value: 21 }], ...rows, "not a row"],
     dataset: "https://data.dev.joinedcontext.com/dataset/ovzdusie",
     download: "javascript:alert(1)",
-  });
+  }, "en");
   assert.equal(shown.rows.length, 50);
-  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', ""]);
-  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", ""]);
-  assert.equal(shown.caption, "AirQualityObserved");
+  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', "–"]);
+  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", "–"]);
+  assert.equal(shown.caption, "Air quality (50)");
   assert.equal(shown.dataset, "https://data.dev.joinedcontext.com/dataset/ovzdusie");
   assert.equal(shown.download, null);
   assert.equal(table({ columns: [], rows: [[1]] }), null);
   assert.equal(table(null), null);
+});
+
+test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
+  const now = Date.parse("2026-10-18T16:45:00Z");
+  const data = {
+    type: "AirQualityObserved", total: 12,
+    columns: ["name", "pm10", "no2", "open", "dateModified", "observedAt"],
+    units: [null, "µg/m³", "µg/m³", null, null, null],
+    rows: [
+      ["Stanica Žilina", 21.5, 12.000, true, "2026-10-01T08:00:00Z", "2026-10-18T16:40:00Z"],
+      ["Stanica BB", 9.12345, null, false, null, "2026-10-16T10:05:00Z"],
+    ],
+  };
+  const sk = table(data, "sk", now);
+  assert.equal(sk.caption, "Kvalita ovzdušia (2 z 12)");
+  assert.deepEqual(sk.columns, ["Názov", "PM10 (µg/m³)", "NO₂ (µg/m³)", "Open", "Zmenené", "Čas merania"]);
+  assert.deepEqual(sk.numeric, [false, true, true, false, false, false]);
+  assert.equal(sk.rows[0][1], "21,5");
+  assert.equal(sk.rows[0][2], "12");
+  assert.equal(sk.rows[1][1], "9,123");
+  assert.equal(sk.rows[1][2], "–");
+  assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
+  assert.match(sk.rows[0][5], /^pred 5 min/);
+  assert.match(sk.rows[1][5], /^16\. 10\. 2026 \d{2}:\d{2}$/);
+  const en = table(data, "en", now);
+  assert.equal(en.caption, "Air quality (2 of 12)");
+  assert.equal(en.columns[5], "Measured");
+  assert.equal(en.rows[1][1], "9.123");
+  assert.deepEqual([en.rows[0][3], en.rows[1][3]], ["Yes", "No"]);
+  assert.match(en.rows[0][5], /^5 min\. ago$/);
+  // A key the table does not know is spelt out; a language it does not know reads English.
+  assert.equal(table({ type: "BikeHireDockingStation", columns: ["availableBikeNumber"], rows: [[3]] }, "xx").columns[0], "Available bike number");
+  assert.equal(table({ type: "BikeHireDockingStation", columns: ["x"], rows: [] }, "sk").caption, "Bike hire docking station (0)");
+  // Text stays text: a cell that looks like markup is shown as typed.
+  assert.equal(table({ columns: ["name"], rows: [["<img src=x onerror=alert(1)>"]] }, "sk").rows[0][0], "<img src=x onerror=alert(1)>");
 });
 
 test("only an http(s) address is a link", () => {
@@ -599,6 +634,18 @@ test("the disclaimer shows its first sentence and keeps the rest for More (T-463
   assert.deepEqual(notice("No full stop at all"), { lead: "No full stop at all", rest: "" });
   assert.deepEqual(notice("Ask!\n  Then   read."), { lead: "Ask!", rest: "Then read." });
   for (const empty of ["", "   ", null, undefined, 3]) assert.deepEqual(notice(empty), { lead: "", rest: "" });
+});
+
+test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4653)", async () => {
+  const { solve, zeroBits } = require("./visitor.js");
+  const { createHash } = require("node:crypto");
+  assert.equal(zeroBits(Uint8Array.from([0, 0x0f, 0xff])), 12);
+  assert.equal(zeroBits(Uint8Array.from([0x80])), 0);
+  assert.equal(zeroBits(Uint8Array.from([0, 0])), 16);
+  const challenge = "3a1f.1760792400.10.9f2c";
+  const nonce = await solve(challenge, 10);
+  assert.match(nonce, /^\d+$/);
+  assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
 });
 
 test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {

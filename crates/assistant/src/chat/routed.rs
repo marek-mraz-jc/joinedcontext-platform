@@ -359,54 +359,186 @@ fn cell(attribute: &Value) -> Option<Value> {
     }
 }
 
-/// The entities of a `query_entities` answer as a table: `name` (else `id`) first, then each
-/// attribute with a plain value, in the order they first appear, then `observedAt` when an
-/// attribute carries one; at most `most` rows. `None` when the answer is no list of entities.
-pub fn table_of(text: &str, most: usize) -> Option<(Vec<String>, Vec<Vec<Value>>)> {
+/// The attributes a read asked about (T-4650): those `attrs` names, then those its `q` tests, in
+/// the order written, so the table shows them right after the name.
+pub fn asked_of(arguments: &Value) -> Vec<String> {
+    let mut out: Vec<String> = arguments
+        .get("attrs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
+    if let Some(q) = arguments.get("q").and_then(Value::as_str) {
+        let tested = regex::Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?(?:\.[A-Za-z_][A-Za-z0-9_]*)?\s*(?:==|!=|>=|<=|!~=|~=|>|<)")
+            .ok();
+        for found in tested.iter().flat_map(|re| re.captures_iter(q)) {
+            let name = found[1].to_owned();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// What the columns of a table are, by importance (T-4650): a measured value comes before a
+/// category, and the record's own dates, sources and links come last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    Asked,
+    Measured,
+    Number,
+    Category,
+    Metadata,
+}
+
+/// The attributes that describe the record rather than the thing.
+fn metadata(key: &str, value: &Value) -> bool {
+    let text = value.as_str().unwrap_or_default();
+    matches!(
+        key,
+        "dateObserved"
+            | "dateCreated"
+            | "dateModified"
+            | "dateIssued"
+            | "dateRetrieved"
+            | "source"
+            | "dataProvider"
+            | "owner"
+            | "seeAlso"
+            | "image"
+            | "url"
+    ) || key.starts_with("ref")
+        || key.ends_with("Id")
+        || text.starts_with("urn:")
+        || text.starts_with("http://")
+        || text.starts_with("https://")
+        || (text.len() >= 16
+            && text.as_bytes().get(4) == Some(&b'-')
+            && text.as_bytes().get(10) == Some(&b'T'))
+}
+
+/// The newest `observedAt` of an entity's attributes, else its `dateObserved`: one time per row.
+fn measured_at(entity: &Value) -> Option<Value> {
+    let newest = entity
+        .as_object()?
+        .values()
+        .filter_map(|a| a.get("observedAt").and_then(Value::as_str))
+        .max()
+        .map(|t| Value::String(t.to_owned()));
+    newest.or_else(|| entity.get("dateObserved").and_then(cell))
+}
+
+/// The symbol (else the name) of the unit an attribute's `unitCode` names.
+fn unit_of(attribute: &Value) -> Option<String> {
+    let unit = jc_core::units::lookup(attribute.get("unitCode")?.as_str()?)?;
+    Some(
+        if unit.symbol.is_empty() {
+            unit.name
+        } else {
+            unit.symbol
+        }
+        .to_owned(),
+    )
+}
+
+/// Where an attribute stands in a table's order; `plain` is its value, `has_unit` whether its
+/// `unitCode` names a known unit.
+fn rank_of(key: &str, attribute: &Value, plain: &Value, has_unit: bool, asked: &[String]) -> Rank {
+    if asked.iter().any(|a| a == key) {
+        Rank::Asked
+    } else if plain.is_number() && (has_unit || attribute.get("observedAt").is_some()) {
+        Rank::Measured
+    } else if attribute.get("object").is_some() || metadata(key, plain) {
+        Rank::Metadata
+    } else if plain.is_number() {
+        Rank::Number
+    } else {
+        Rank::Category
+    }
+}
+
+/// A table's columns, its rows and each column's unit.
+pub type Columns = (Vec<String>, Vec<Vec<Value>>, Vec<Option<String>>);
+
+/// The entities of a `query_entities` answer as a table, by importance (T-4650): `name` (else
+/// `id`), the attributes `asked` names, measured values (a number with a `unitCode` or an
+/// `observedAt`, the most common first), other numbers, categories, then the record's metadata,
+/// and last one time column `observedAt`, the newest measurement of the row. The column cap cuts
+/// from the end of that order. Each column carries the unit symbol its `unitCode` names. At most
+/// `most` rows; `None` when the answer is no list of entities.
+pub fn table_of(text: &str, most: usize, asked: &[String]) -> Option<Columns> {
     let value: Value = serde_json::from_str(text).ok()?;
     let entities = value.get("entities").unwrap_or(&value).as_array()?;
-    let mut columns: Vec<String> = Vec::new();
-    for entity in entities.iter().take(most) {
+    let shown = &entities[..entities.len().min(most)];
+    // Per attribute: where it first appears, how many rows carry it, its rank and its unit.
+    let mut found: Vec<(String, usize, Rank, Option<String>)> = Vec::new();
+    for entity in shown {
         for (key, attribute) in entity.as_object().into_iter().flatten() {
             let skip = matches!(
                 key.as_str(),
                 "id" | "type" | "@context" | "name" | "location"
             );
-            if !skip && !columns.contains(key) && cell(attribute).is_some() {
-                columns.push(key.clone());
+            let Some(plain) = cell(attribute).filter(|_| !skip) else {
+                continue;
+            };
+            let unit = unit_of(attribute);
+            let rank = rank_of(key, attribute, &plain, unit.is_some(), asked);
+            match found.iter_mut().find(|(k, ..)| k == key) {
+                Some(entry) => {
+                    entry.1 += 1;
+                    entry.2 = entry.2.min(rank);
+                    if entry.3.is_none() {
+                        entry.3 = unit;
+                    }
+                }
+                None => found.push((key.clone(), 1, rank, unit)),
             }
         }
     }
-    columns.truncate(MAX_COLUMNS - 2);
-    let named = entities
-        .iter()
-        .any(|e| e.get("name").and_then(cell).is_some());
-    columns.insert(0, if named { "name" } else { "id" }.to_owned());
-    let observed = entities.iter().take(most).any(|e| {
-        e.as_object()
-            .is_some_and(|m| m.values().any(|a| a.get("observedAt").is_some()))
+    let asked_at = |key: &str| asked.iter().position(|a| a == key).unwrap_or(usize::MAX);
+    // A stable sort: within a rank the first seen stays first, asked ones in the order asked and
+    // measured ones the most common first.
+    found.sort_by(|a, b| {
+        a.2.cmp(&b.2).then_with(|| match a.2 {
+            Rank::Asked => asked_at(&a.0).cmp(&asked_at(&b.0)),
+            Rank::Measured => b.1.cmp(&a.1),
+            _ => std::cmp::Ordering::Equal,
+        })
     });
-    if observed {
-        columns.push("observedAt".to_owned());
+    let timed = shown.iter().any(|e| measured_at(e).is_some());
+    if timed {
+        // The time column says it; the date as an attribute would only repeat it.
+        found.retain(|(key, ..)| key != "dateObserved");
     }
-    let rows = entities
+    found.truncate(MAX_COLUMNS - 2);
+    let named = shown.iter().any(|e| e.get("name").and_then(cell).is_some());
+    let mut columns = vec![if named { "name" } else { "id" }.to_owned()];
+    let mut units = vec![None];
+    for (key, _, _, unit) in found {
+        columns.push(key);
+        units.push(unit);
+    }
+    if timed {
+        columns.push("observedAt".to_owned());
+        units.push(None);
+    }
+    let rows = shown
         .iter()
-        .take(most)
         .map(|entity| {
             columns
                 .iter()
                 .map(|column| match column.as_str() {
                     "id" => entity.get("id").cloned().unwrap_or(Value::Null),
-                    "observedAt" => entity
-                        .as_object()
-                        .and_then(|m| m.values().find_map(|a| a.get("observedAt").cloned()))
-                        .unwrap_or(Value::Null),
+                    "observedAt" => measured_at(entity).unwrap_or(Value::Null),
                     key => entity.get(key).and_then(cell).unwrap_or(Value::Null),
                 })
                 .collect()
         })
         .collect();
-    Some((columns, rows))
+    Some((columns, rows, units))
 }
 
 /// What the follow-up call said of the passages found (T-4259).
@@ -886,7 +1018,8 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         }
         other => other?,
     };
-    table(ask, connector, kind, &text)
+    let asked = asked_of(&json!({ "q": wanted.q }));
+    table(ask, connector, kind, &text, &asked)
         .await
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
 }
@@ -899,9 +1032,10 @@ pub(super) async fn table(
     connector: &Connected,
     kind: &str,
     text: &str,
+    asked: &[String],
 ) -> Option<Table> {
     let total = total_of(text);
-    let (columns, rows) = table_of(text, READ_ROWS)?;
+    let (columns, rows, units) = table_of(text, READ_ROWS, asked)?;
     let slug = connector.surface.slug.as_str();
     let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
         .await
@@ -921,6 +1055,7 @@ pub(super) async fn table(
         entity_type: kind.to_owned(),
         columns,
         rows,
+        units,
         total,
         dataset,
         download,
@@ -2079,6 +2214,7 @@ mod tests {
             entity_type: "AirQualityObserved".into(),
             columns: vec!["id".into()],
             rows: (0..MODEL_ROWS + 3).map(|i| vec![json!(i)]).collect(),
+            units: vec![None],
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
             download: None,
@@ -2924,7 +3060,7 @@ mod tests {
             {"id": "urn:ngsi-ld:AirQualityObserved:2", "type": "AirQualityObserved",
              "pm10": {"type": "Property", "value": 9}}
         ]});
-        let (columns, rows) = table_of(&normalized.to_string(), 50).unwrap_or_default();
+        let (columns, rows, _) = table_of(&normalized.to_string(), 50, &[]).unwrap_or_default();
         // The structured address and the location are no columns.
         assert_eq!(columns, ["name", "pm10", "refDevice", "observedAt"]);
         assert_eq!(
@@ -2940,21 +3076,110 @@ mod tests {
 
         let key_values =
             json!([{"id": "urn:ngsi-ld:Parking:1", "type": "Parking", "free": 12, "open": true}]);
-        let (columns, rows) = table_of(&key_values.to_string(), 50).unwrap_or_default();
+        let (columns, rows, _) = table_of(&key_values.to_string(), 50, &[]).unwrap_or_default();
         assert_eq!(columns, ["id", "free", "open"]);
         assert_eq!(
             rows,
             [[json!("urn:ngsi-ld:Parking:1"), json!(12), json!(true)]]
         );
 
-        assert!(table_of("{\"error\": 1}", 50).is_none());
-        assert!(table_of("nope", 50).is_none());
-        let (_, rows) = table_of("[]", 50).unwrap_or_default();
+        assert!(table_of("{\"error\": 1}", 50, &[]).is_none());
+        assert!(table_of("nope", 50, &[]).is_none());
+        let (_, rows, _) = table_of("[]", 50, &[]).unwrap_or_default();
         assert!(rows.is_empty());
         let wide: Value = json!([(0..20)
             .map(|n| (format!("a{n}"), json!(n)))
             .collect::<serde_json::Map<_, _>>()]);
-        let (columns, _) = table_of(&wide.to_string(), 50).unwrap_or_default();
+        let (columns, ..) = table_of(&wide.to_string(), 50, &[]).unwrap_or_default();
         assert!(columns.len() <= MAX_COLUMNS);
+    }
+
+    /// The owner's screenshot (T-4650): `dateObserved` second and the pollutants off the edge.
+    fn air() -> Value {
+        let station = |n: u32, pm10: f64, no2: f64| {
+            json!({"id": format!("urn:ngsi-ld:AirQualityObserved:{n}"), "type": "AirQualityObserved",
+                "dateObserved": {"type": "Property", "value": "2026-10-18T15:00:00Z"},
+                "source": {"type": "Property", "value": "https://www.shmu.sk/"},
+                "name": {"type": "Property", "value": format!("Stanica {n}")},
+                "refPointOfInterest": {"type": "Relationship", "object": "urn:ngsi-ld:PointOfInterest:1"},
+                "airQualityLevel": {"type": "Property", "value": "good"},
+                "no2": {"type": "Property", "value": no2, "unitCode": "GQ", "observedAt": "2026-10-18T15:00:00Z"},
+                "pm10": {"type": "Property", "value": pm10, "unitCode": "GQ", "observedAt": "2026-10-18T16:00:00Z"}})
+        };
+        json!({"entities": [station(1, 21.5, 12.0), station(2, 9.0, 30.1)]})
+    }
+
+    #[test]
+    fn measured_values_follow_the_name_and_the_time_is_last() {
+        let (columns, rows, units) = table_of(&air().to_string(), 50, &[]).unwrap_or_default();
+        assert_eq!(
+            columns,
+            [
+                "name",
+                "no2",
+                "pm10",
+                "airQualityLevel",
+                "source",
+                "refPointOfInterest",
+                "observedAt"
+            ]
+        );
+        assert_eq!(units[1].as_deref(), Some("µg/m³"));
+        assert_eq!(units[0], None);
+        // One time per row, the newest of its measurements; dateObserved is not repeated.
+        assert_eq!(rows[0][6], json!("2026-10-18T16:00:00Z"));
+    }
+
+    #[test]
+    fn the_attributes_asked_about_come_first_in_the_order_asked() {
+        let asked = asked_of(
+            &json!({"q": "pm10>20;address[addressLocality]==\"Žilina\"", "attrs": ["airQualityLevel"]}),
+        );
+        assert_eq!(asked, ["airQualityLevel", "pm10", "address"]);
+        let (columns, ..) = table_of(&air().to_string(), 50, &asked).unwrap_or_default();
+        assert_eq!(&columns[..4], ["name", "airQualityLevel", "pm10", "no2"]);
+        assert!(asked_of(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn the_cap_drops_metadata_before_any_value() {
+        let mut entity = serde_json::Map::new();
+        entity.insert("id".into(), json!("urn:ngsi-ld:X:1"));
+        for n in 0..6 {
+            entity.insert(
+                format!("ref{n}"),
+                json!({"type": "Relationship", "object": "urn:ngsi-ld:Y:1"}),
+            );
+        }
+        for n in 0..4 {
+            entity.insert(
+                format!("v{n}"),
+                json!({"type": "Property", "value": n, "unitCode": "CEL"}),
+            );
+        }
+        let (columns, ..) = table_of(&json!([entity]).to_string(), 50, &[]).unwrap_or_default();
+        assert_eq!(columns.len(), MAX_COLUMNS - 1, "no time column here");
+        for n in 0..4 {
+            assert!(columns.contains(&format!("v{n}")), "{columns:?}");
+        }
+    }
+
+    #[test]
+    fn a_record_without_measurements_shows_its_categories_and_no_time() {
+        let schools = json!([{"id": "urn:ngsi-ld:School:1", "type": "School", "name": "ZŠ Brezno",
+            "category": "základná", "addressLocality": "Brezno", "pupilCount": 312,
+            "dateModified": "2026-01-02T10:00:00Z", "refSchool": "urn:ngsi-ld:School:2"}]);
+        let (columns, ..) = table_of(&schools.to_string(), 50, &[]).unwrap_or_default();
+        assert_eq!(
+            columns,
+            [
+                "name",
+                "pupilCount",
+                "category",
+                "addressLocality",
+                "dateModified",
+                "refSchool"
+            ]
+        );
     }
 }
