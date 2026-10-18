@@ -89,6 +89,23 @@ fn secret_ref_is_rejected_at_parse_time_ap16() {
     assert!(App::from_yaml(&under_need).is_err());
 }
 
+/// T-4597: a data need that asks for a removed file is refused by name, as an Endpoint is, so the
+/// App reconciler never renders an Endpoint the gateway would refuse.
+#[test]
+fn a_data_need_naming_a_removed_file_is_refused_by_name() {
+    let removed = GOLDEN.replace(
+        "      representations: [ngsi-ld, csv]",
+        "      representations: [ngsi-ld, geojson]",
+    );
+    let refused = App::from_yaml(&removed).expect_err("a removed file is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("representation `geojson` was removed"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn source_is_a_path_or_a_forge_repository_ap02() {
     let both = GOLDEN.replace(

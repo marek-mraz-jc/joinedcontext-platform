@@ -525,6 +525,31 @@ fn a_removed_representation_is_refused_by_name() {
     );
 }
 
+/// T-4597: the Portal's API hands the enum JSON, where a name may arrive escaped and so not
+/// borrowed from the input; it is refused by the same name, and a removed name in another case
+/// is just unknown.
+#[test]
+fn a_removed_representation_in_json_is_refused_by_name_however_it_is_written() {
+    let escaped = serde_json::from_str::<Representation>(r#""\u0078lsx""#)
+        .expect_err("an escaped removed name is refused");
+    assert!(
+        escaped
+            .to_string()
+            .contains("representation `xlsx` was removed"),
+        "{escaped}"
+    );
+    let shouted =
+        serde_json::from_str::<Representation>(r#""XLSX""#).expect_err("names are lower case");
+    assert!(
+        shouted.to_string().contains("unknown variant `XLSX`"),
+        "{shouted}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Representation>(r#""\u0063sv""#).expect("an escaped csv"),
+        Representation::Csv
+    );
+}
+
 /// EP-24: `mcp: false` beside a listed `mcp` says two things at once and is refused, with the
 /// way out in the message.
 #[test]
