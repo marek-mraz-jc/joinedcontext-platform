@@ -79,7 +79,7 @@ pub use dataspace::{
 pub use endpoint::{
     endpoint_role, Audience, Caching, Creates, EndpointRef, EndpointRole, EndpointSlug,
     EndpointSpec, FileLimits, Projection, RateLimits, Representation, SharedSpaceReferenceSpec,
-    ENDPOINT_ROLE_PREFIX,
+    SurfaceRequirement, ENDPOINT_ROLE_PREFIX,
 };
 pub use environment::{EnvironmentSpec, SecretBackend};
 pub use group::{GroupSpec, Member};

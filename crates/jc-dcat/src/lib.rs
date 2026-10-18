@@ -146,6 +146,12 @@ fn served(representation: Representation) -> Served {
             media_type: "application/json",
             conforms_to: None,
         },
+        Representation::Ical => Served {
+            path: "ical/v1/events.ics",
+            title: "iCalendar feed",
+            media_type: "text/calendar",
+            conforms_to: Some("https://www.rfc-editor.org/rfc/rfc5545"),
+        },
     }
 }
 
@@ -283,6 +289,7 @@ fn file_type_iri(representation: Representation) -> String {
         Representation::Xlsx => "XLSX",
         Representation::Parquet => "PARQUET",
         Representation::Zip => "ZIP",
+        Representation::Ical => "ICS",
         Representation::Mcp
         | Representation::Json
         | Representation::Sta

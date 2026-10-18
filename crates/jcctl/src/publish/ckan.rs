@@ -401,6 +401,13 @@ impl Usage<'_> {
                 "OGC SensorThings API 1.1, read-only: Things, Datastreams and Observations.\
                  \n\n    curl{auth} '{address}Things'\n\n{live} {access}"
             ),
+            Representation::Ical => format!(
+                "The events as an iCalendar (RFC 5545) feed a calendar app subscribes to: in \
+                 Google Calendar, Other calendars, From URL; in Outlook, Add calendar, Subscribe \
+                 from web; in Apple Calendar, File, New Calendar Subscription, with the URL \
+                 {address}. `from` and `to` narrow it to a date window.\
+                 \n\n    curl{auth} '{address}?from=2026-01-01&to=2026-12-31'\n\n{live} {access}"
+            ),
             Representation::Xlsx => file("An Excel spreadsheet that opens in Excel or LibreOffice"),
             Representation::Csv => file("A CSV table"),
             Representation::Parquet => file(
@@ -764,6 +771,12 @@ const fn distribution(
             "OGC SensorThings API",
         ),
         Representation::Odata => ("/odata/v4/", "OData", "application/json", "OData v4"),
+        Representation::Ical => (
+            "/ical/v1/events.ics",
+            "ICS",
+            "text/calendar",
+            "iCalendar feed",
+        ),
         Representation::WebSocket => (
             "/ws",
             "WebSocket",
