@@ -166,6 +166,7 @@ async fn drop_database(admin: PgPool, pool: PgPool, name: &str) {
 fn test_spec(start_url: &str) -> KnowledgeSourceSpec {
     KnowledgeSourceSpec {
         source: SourceType::Website,
+        categories: Vec::new(),
         start_urls: vec![start_url.to_string()],
         ckan_instance_ref: None,
         context_spaces: Vec::new(),
