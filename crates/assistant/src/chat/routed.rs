@@ -1214,25 +1214,16 @@ fn count(spent: &mut Spent, completion: &Completion) {
     spent.add(completion);
 }
 
-fn refusal(err: &CallError) -> Event {
-    let (status, title) = match err {
-        CallError::DaySpent(_) => (429, "Budget Spent"),
-        CallError::Unavailable(_) => (503, "Model Unavailable"),
-    };
-    Event::Error {
-        status,
-        title,
-        detail: err.to_string(),
+/// A model call the proxy or the model refused, as the visitor reads it.
+pub(super) fn refusal(ask: &Ask<'_>, err: &CallError) -> Event {
+    match err {
+        CallError::DaySpent(_) => Limit::Day.event(ask.now, ask.zone),
+        CallError::Unavailable(_) => Event::Error {
+            status: 503,
+            title: "Model Unavailable",
+            detail: err.to_string(),
+        },
     }
-}
-
-/// What a question spent before the day ran out, with the search-only answer's first token.
-fn with_search(mut spent: Spent, searched: Spent) -> Spent {
-    spent.first_token_ms = searched.first_token_ms;
-    if let Some(ms) = searched.stages.search {
-        spent.stages.search = Some(spent.stages.search.unwrap_or(0).saturating_add(ms));
-    }
-    spent
 }
 
 fn conversation_spent() -> Event {
@@ -1243,101 +1234,75 @@ fn conversation_spent() -> Event {
     }
 }
 
-/// What the chat says when the day's cost cap is reached and it answers as search (T-4149).
-pub const SEARCH_ONLY: &str = "Dnes už asistent vyčerpal svoj denný rozpočet, preto neodpovedá \
-    vlastnými slovami. Tu sú stránky, ktoré k vašej otázke našiel vyhľadávaním:";
-/// What it says when the search finds nothing either.
-pub const SEARCH_ONLY_NOTHING: &str = "Dnes už asistent vyčerpal svoj denný rozpočet a \
-    vyhľadávanie k vašej otázke nenašlo žiadnu stránku. Skúste to zajtra alebo navštívte \
-    kontaktnú stránku mesta.";
+/// What a visitor reads when today's spend could not be read: the chat refuses rather than
+/// answer past a cap it cannot see (T-4671).
+pub const SPEND_UNKNOWN: &str = "Asistent je dočasne nedostupný. Skúste to o chvíľu.";
 
-/// Why a question is answered as search, without a model (T-4149, T-4286). No cap ever refuses:
-/// the visitor gets the pages that answer, and a sentence saying why the assistant did not write.
+/// Why a question gets no answer at all (T-4671): no model call, no search, no links. The chat
+/// sends one `error` event that says the limit and when it resets, then `done`; the sentence
+/// names no cost and no cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cap {
+pub enum Limit {
     /// The deployment's day is spent: its `costPerDayUsd`, or the proxy's `tokensPerDay`.
     Day,
     /// This visitor asked their month's questions (`perClientPerMonth`); `resets` is the first day
     /// of the next month as the visitor reads it, e.g. `1. 11. 2026`.
     Month { resets: String },
+    /// Today's spend could not be read: refused, never answered past the cap.
+    Unknown,
 }
 
-impl Cap {
-    /// The sentence before the links.
-    pub fn lead(&self) -> String {
-        match self {
-            Cap::Day => SEARCH_ONLY.to_owned(),
-            Cap::Month { resets } => format!(
-                "Tento mesiac ste už položili všetky otázky, na ktoré asistent odpovedá vlastnými \
-                 slovami; znova tak odpovedá od {resets}. Tu sú stránky, ktoré k vašej otázke našiel \
-                 vyhľadávaním:"
+impl Limit {
+    /// The one event a capped question gets.
+    pub fn event(&self, now: time::OffsetDateTime, zone: Option<super::clock::Zone>) -> Event {
+        let (status, title, detail) = match self {
+            Limit::Day => (429, "Daily Limit Reached", day_reached(now, zone)),
+            Limit::Month { resets } => (
+                429,
+                "Monthly Limit Reached",
+                format!("Dosiahli ste mesačný limit otázok. Obnoví sa {resets}."),
             ),
+            Limit::Unknown => (503, "Assistant Unavailable", SPEND_UNKNOWN.to_owned()),
+        };
+        Event::Error {
+            status,
+            title,
+            detail,
         }
     }
 
-    /// The sentence when the search found nothing either.
-    pub fn nothing(&self) -> String {
+    /// The `cap` a refusal is logged under.
+    pub fn name(&self) -> &'static str {
         match self {
-            Cap::Day => SEARCH_ONLY_NOTHING.to_owned(),
-            Cap::Month { resets } => format!(
-                "Tento mesiac ste už položili všetky otázky, na ktoré asistent odpovedá vlastnými \
-                 slovami (znova od {resets}), a vyhľadávanie k vašej otázke nenašlo žiadnu stránku. \
-                 Navštívte kontaktnú stránku mesta alebo kraja."
-            ),
+            Limit::Day => "day",
+            Limit::Month { .. } => "month",
+            Limit::Unknown => "unknown",
         }
     }
 }
 
-/// Answers as search when the day's cost cap is reached (T-4149): one hybrid search for the
-/// question, the best pages as citations under a sentence that says why, no model call.
-pub async fn search_only(
-    ask: &Ask<'_>,
-    cap: &Cap,
-    question: &str,
-    events: &Sender<Event>,
-) -> Spent {
-    let started = Instant::now();
-    let searched = search(ask, question).await;
-    let mut stages = Stages::default();
-    Stages::add(&mut stages.search, started);
-    let found = match searched {
-        Ok(found) => found,
-        Err(why) => {
-            tracing::warn!(deployment = %ask.deployment, %why, "the search-only answer's search failed");
-            Vec::new()
-        }
-    };
-    let mut citations: Vec<Citation> = Vec::new();
-    for hit in top(&found, ANSWER_PASSAGES) {
-        if !citations
-            .iter()
-            .any(|c| c.url.as_deref() == Some(hit.url.as_str()))
-        {
-            citations.push(Citation {
-                n: citations.len() + 1,
-                cards: super::cards::of(&hit.text),
-                url: Some(hit.url),
-                tool: None,
-                endpoint: None,
-                title: None,
-            });
-        }
-    }
-    let text = if citations.is_empty() {
-        cap.nothing()
+/// The day cap's sentence: the next UTC midnight, when the day's spend starts again, as the
+/// deployment's zone reads it, e.g. `zajtra po 2:00` in Bratislava's summer.
+fn day_reached(now: time::OffsetDateTime, zone: Option<super::clock::Zone>) -> String {
+    let utc = now.to_offset(time::UtcOffset::UTC);
+    let midnight = utc
+        .date()
+        .next_day()
+        .map_or(utc, |day| day.midnight().assume_utc());
+    let (at, here) = (
+        super::clock::local(midnight, zone),
+        super::clock::local(now, zone),
+    );
+    let day = if at.date() == here.date() {
+        "dnes"
     } else {
-        let marks: Vec<String> = citations.iter().map(|c| format!("[{}]", c.n)).collect();
-        format!("{} {}", cap.lead(), marks.join(" "))
+        "zajtra"
     };
-    let spent = Spent {
-        first_token_ms: Some(started.elapsed().as_millis() as u64),
-        stages,
-        ..Spent::default()
-    };
-    name_sources(ask, &mut citations).await;
-    send(events, Event::Answer(text)).await;
-    send(events, Event::Citations(citations)).await;
-    spent
+    format!(
+        "Asistent dnes dosiahol denný limit. Skúste to znova {day} po {}:{:02}.",
+        at.hour(),
+        at.minute()
+    )
 }
 
 fn stage(stage: &'static str, topic: Option<String>) -> Event {
@@ -1561,11 +1526,8 @@ pub async fn answer(
             spent.served(Stage::Route, &reply);
             routing(&reply.text, question, &live)
         }
-        Err(CallError::DaySpent(_)) => {
-            return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
-        }
         Err(err) => {
-            send(events, refusal(&err)).await;
+            send(events, refusal(ask, &err)).await;
             return spent;
         }
     };
@@ -1958,12 +1920,7 @@ struct Answering {
 /// Streams the answer, keeps only the citations it cites, caches an answer from pages alone,
 /// and sends the citations and the follow-up questions.
 async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answering) -> Spent {
-    let Question {
-        ask,
-        question,
-        events,
-        ..
-    } = q;
+    let Question { ask, events, .. } = q;
     let Answering {
         messages,
         mut citations,
@@ -1990,11 +1947,8 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
     let (completion, first) = match streamed {
         Ok(streamed) => streamed,
         // The proxy refuses before the stream starts, so nothing of an answer was sent yet.
-        Err(CallError::DaySpent(_)) => {
-            return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
-        }
         Err(err) => {
-            send(events, refusal(&err)).await;
+            send(events, refusal(ask, &err)).await;
             return spent;
         }
     };
@@ -2056,6 +2010,64 @@ pub fn worth_keeping(completion: &Completion, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4671: the day's limit names the next UTC midnight as the deployment's zone reads it,
+    /// today or tomorrow, and never a number of the budget.
+    #[test]
+    fn the_day_s_limit_says_when_the_day_starts_again() {
+        use super::super::clock::Zone;
+        use time::macros::datetime;
+        let said = |now, zone| match Limit::Day.event(now, zone) {
+            Event::Error {
+                status,
+                title,
+                detail,
+            } => {
+                assert_eq!((status, title), (429, "Daily Limit Reached"));
+                detail
+            }
+            other => panic!("{other:?}"),
+        };
+        let day = "Asistent dnes dosiahol denný limit. Skúste to znova";
+        let summer = datetime!(2026-10-18 18:30 UTC);
+        assert_eq!(
+            said(summer, Some(Zone::Bratislava)),
+            format!("{day} zajtra po 2:00.")
+        );
+        assert_eq!(
+            said(summer, Some(Zone::Helsinki)),
+            format!("{day} zajtra po 3:00.")
+        );
+        assert_eq!(said(summer, None), format!("{day} zajtra po 0:00."));
+        // Past local midnight, before UTC's: the reset is later the same local day.
+        let late = datetime!(2026-10-18 22:30 UTC);
+        assert_eq!(
+            said(late, Some(Zone::Bratislava)),
+            format!("{day} dnes po 2:00.")
+        );
+        let winter = datetime!(2026-12-01 12:00 UTC);
+        assert_eq!(
+            said(winter, Some(Zone::Prague)),
+            format!("{day} zajtra po 1:00.")
+        );
+        // The year's last day still rolls over.
+        assert_eq!(
+            said(datetime!(2026-12-31 23:59 UTC), None),
+            format!("{day} zajtra po 0:00.")
+        );
+        let month = Limit::Month {
+            resets: "1. 11. 2026".into(),
+        }
+        .event(summer, None);
+        assert!(
+            matches!(month, Event::Error { status: 429, title: "Monthly Limit Reached", ref detail }
+            if detail == "Dosiahli ste mesačný limit otázok. Obnoví sa 1. 11. 2026.")
+        );
+        assert!(matches!(
+            Limit::Unknown.event(summer, None),
+            Event::Error { status: 503, .. }
+        ));
+    }
 
     #[test]
     fn missing_sources_reach_the_answer_model_only_when_no_table_came_back() {

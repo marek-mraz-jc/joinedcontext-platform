@@ -16,7 +16,7 @@ use super::agent::{
     Spent, Stage, MAX_ARGUMENTS, MAX_CALLS_PER_REPLY,
 };
 use super::mcp::{cut, Tool};
-use super::model::{Call, CallError};
+use super::model::Call;
 
 /// The most of one tool result the model reads in the loop: ten of them stay within a prompt.
 const STEP_RESULT_CHARS: usize = 8_000;
@@ -230,19 +230,7 @@ pub async fn answer(
         let completion = match stepped {
             Ok(completion) => completion,
             Err(err) => {
-                let (status, title) = match err {
-                    CallError::DaySpent(_) => (429, "Budget Spent"),
-                    CallError::Unavailable(_) => (503, "Model Unavailable"),
-                };
-                send(
-                    events,
-                    Event::Error {
-                        status,
-                        title,
-                        detail: err.to_string(),
-                    },
-                )
-                .await;
+                send(events, super::routed::refusal(ask, &err)).await;
                 return None;
             }
         };

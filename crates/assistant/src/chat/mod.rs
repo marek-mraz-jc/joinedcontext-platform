@@ -56,7 +56,7 @@ pub const ANONYMOUS_TURN_CHARS: usize = 1_000;
 /// (T-4653): a script is not a browser on an allowed site, so it may not take the whole pool.
 const UNPLACED_SHARE: u32 = 6;
 /// The share of a deployment's `costPerDayUsd` one visitor, or all callers without an `Origin`
-/// together, may spend before their answers go on as search (T-4653).
+/// together, may spend before their questions are refused until UTC midnight (T-4653, T-4671).
 const VISITOR_COST_SHARE: f64 = 0.10;
 /// How long a conversation may be continued; migration 0006's policy deletes it after as long.
 const CONVERSATION_HOURS: i64 = 24;
@@ -286,6 +286,36 @@ fn too_many(retry: u64, detail: &str) -> Response {
         response.headers_mut().insert(header::RETRY_AFTER, value);
     }
     response
+}
+
+/// A visitor past their share of the day's cost (T-4653): `429` until UTC midnight, under a title
+/// the chat knows a retry cannot help with (T-4671).
+fn share_spent(retry: u64) -> Response {
+    let mut problem = jc_core::ProblemDetails::for_status(429)
+        .with_detail("Dnes ste položili veľa otázok. Skúste to znova neskôr.");
+    problem.title = "Visitor Limit Reached".into();
+    let mut response = problem.into_response();
+    if let Ok(value) = HeaderValue::from_str(&retry.to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
+/// Seconds from `now` to the next UTC midnight, when the day's spend starts again; at least 1.
+fn until_midnight(now: time::OffsetDateTime) -> u64 {
+    let into_day = u64::try_from(now.unix_timestamp()).unwrap_or(0) % DAY.as_secs();
+    DAY.as_secs() - into_day
+}
+
+/// A capped question's whole stream (T-4671): its one `error` event, then `done` with nothing
+/// spent; no answer, no citation, no card and no follow-up.
+fn capped(refusal: &Event, anonymous: bool) -> Response {
+    let events = [
+        sse(refusal, anonymous),
+        sse(&Event::Done(Spent::default(), 0), anonymous),
+    ]
+    .map(Ok::<_, Infallible>);
+    Sse::new(futures_util::stream::iter(events)).into_response()
 }
 
 /// The request body (API/05 §1.1).
@@ -1499,8 +1529,8 @@ async fn ask(
     // The token's own minute and streams; the address's with none.
     let holder = token.map_or_else(|| visitor.clone(), |id| format!("{key}\u{0}visitor:{id}"));
     let (month, resets) = month_of(time::OffsetDateTime::now_utc());
-    // A visitor past their month is answered as search, with links (T-4286): the other windows
-    // still count, so the search itself stays paced.
+    // A visitor past their month is refused until it resets (T-4286, T-4671): the other windows
+    // still count.
     let mut month_spent = false;
     if let Some(rate) = &rate {
         let (minute, hour, day) = (
@@ -1595,36 +1625,52 @@ async fn ask(
             );
         }
     }
-    let share_spent =
-        state
-            .limits
-            .lock()
-            .await
-            .over_share(&spender, today(), budget.cost_per_day_usd);
-    let day_spent = share_spent
-        || match spent_today(&state.pool, &deployment).await {
-            Ok(spent) => over_cost_cap(spent, budget.cost_per_day_usd),
-            Err(err) => {
-                // Unknown spend is spend: the chat goes on as search rather than past the cap.
-                tracing::error!(%err, "today's cost could not be read; answering as search");
-                true
-            }
-        };
-    let search_only = if month_spent {
-        Some(routed::Cap::Month { resets })
+    // Past their share of the day's cost a visitor is refused until UTC midnight, while other
+    // visitors still get answers (T-4653, T-4671).
+    if state
+        .limits
+        .lock()
+        .await
+        .over_share(&spender, today(), budget.cost_per_day_usd)
+    {
+        if streams.is_some() {
+            state.limits.lock().await.close_stream(&holder);
+        }
+        tracing::info!(deployment = %key, cap = "share", "a question was refused at its cap");
+        return share_spent(until_midnight(time::OffsetDateTime::now_utc()));
+    }
+    let cap = if month_spent {
+        Some(routed::Limit::Month { resets })
     } else {
-        day_spent.then_some(routed::Cap::Day)
+        match spent_today(&state.pool, &deployment).await {
+            Ok(spent) => {
+                over_cost_cap(spent, budget.cost_per_day_usd).then_some(routed::Limit::Day)
+            }
+            Err(err) => {
+                // Unknown spend is spend: refused, never answered past a cap nobody can see.
+                tracing::error!(%err, deployment = %key, "@user today's cost could not be read; the assistant refuses questions");
+                Some(routed::Limit::Unknown)
+            }
+        }
     };
-    if day_spent && !share_spent && state.limits.lock().await.first_cap_today(&key, today()) {
+    if cap == Some(routed::Limit::Day) && state.limits.lock().await.first_cap_today(&key, today()) {
         tracing::warn!(
             deployment = %key,
             cap_usd = budget.cost_per_day_usd,
-            "@user the assistant reached its daily cost cap; it answers as search until midnight UTC"
+            "@user the assistant reached its daily cost cap; it refuses questions until midnight UTC"
         );
+    }
+    let anonymous = deployment.spec.channel.is_anonymous();
+    if let Some(cap) = cap {
+        if streams.is_some() {
+            state.limits.lock().await.close_stream(&holder);
+        }
+        tracing::info!(deployment = %key, cap = cap.name(), "a question was refused at its cap");
+        let zone = clock::Zone::of(&deployment.spec.languages);
+        return capped(&cap.event(time::OffsetDateTime::now_utc(), zone), anonymous);
     }
     let (tokens_per_day, tokens_per_conversation) =
         (budget.tokens_per_day, budget.tokens_per_conversation);
-    let anonymous = deployment.spec.channel.is_anonymous();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
     // One moment for the question: every model call is told it and the chat shows it (T-4339).
     let asked_at = time::OffsetDateTime::now_utc();
@@ -1703,7 +1749,6 @@ async fn ask(
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),
-            search_only,
             data_steps: deployment.spec.data_steps() as usize,
             data_time: Duration::from_secs(u64::from(deployment.spec.data_seconds())),
             now: asked_at,
@@ -2043,6 +2088,14 @@ mod tests {
                 assert!(!text.contains(refusal), "{file} says {refusal:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_share_s_retry_after_runs_to_the_next_utc_midnight() {
+        use time::macros::datetime;
+        assert_eq!(until_midnight(datetime!(2026-10-18 23:59:30 UTC)), 30);
+        assert_eq!(until_midnight(datetime!(2026-10-18 00:00 UTC)), 86_400);
+        assert_eq!(until_midnight(datetime!(2026-10-18 12:00 +02:00)), 50_400);
     }
 
     #[test]
