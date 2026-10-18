@@ -139,7 +139,7 @@ impl Reaper {
                 self.gateway.replace_servers(servers);
                 // EP-53: a Mapping withdrawn from the repository stops being published.
                 self.gateway.replace_mappings(mappings);
-                // EP-125: a publisher's catalogue follows its Project's spec.catalog.
+                // EP-127: a publisher's catalogue follows its Project's spec.catalog.
                 self.gateway.replace_publishers(publishers);
                 // ADR-N-047: a space follows its broker from the next request on.
                 self.gateway.broker.route(&homes);

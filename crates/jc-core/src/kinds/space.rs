@@ -22,7 +22,7 @@ pub struct ProjectSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     /// The body that publishes the project's data in a national catalogue: the project's own
-    /// catalogue names it, and so does every record whose Endpoint names none (EP-125).
+    /// catalogue names it, and so does every record whose Endpoint names none (EP-127).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<crate::kinds::ProjectCatalog>,
     /// Optional resource quotas for this Project (PF-17); the project file's, never a registry

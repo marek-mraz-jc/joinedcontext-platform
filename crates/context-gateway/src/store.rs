@@ -41,7 +41,7 @@ pub type Tables = (
     Publishers,
 );
 
-/// The body that publishes one Project's data, as its own catalogue names it (EP-125).
+/// The body that publishes one Project's data, as its own catalogue names it (EP-127).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectPublisher {
     /// The project's `metadata.title` per locale, the catalogue's title.
@@ -54,10 +54,10 @@ pub struct ProjectPublisher {
     pub catalog: jc_core::kinds::ProjectCatalog,
 }
 
-/// Every Project that names its publisher, by name (EP-125).
+/// Every Project that names its publisher, by name (EP-127).
 pub type Publishers = BTreeMap<String, Arc<ProjectPublisher>>;
 
-/// The Projects of the repository that name their publisher in `spec.catalog` (EP-125). A
+/// The Projects of the repository that name their publisher in `spec.catalog` (EP-127). A
 /// manifest whose spec does not parse is left out with a line in the log, as every kind here.
 pub fn publishers_of(repo: &Repository) -> Publishers {
     repo.iter()
@@ -80,7 +80,7 @@ pub fn publishers_of(repo: &Repository) -> Publishers {
 }
 
 /// An Endpoint's catalogue block with its Project's publisher and desk where it names none of
-/// its own (EP-125): an Endpoint without a block gets one holding just those two.
+/// its own (EP-127): an Endpoint without a block gets one holding just those two.
 fn with_publisher(
     catalog: Option<jc_core::kinds::Catalog>,
     publisher: Option<&ProjectPublisher>,

@@ -813,7 +813,7 @@ pub fn feed(records: Vec<Value>, base: &str, org_domain: &str) -> Value {
     )
 }
 
-/// Who a publisher's catalogue belongs to: a Project that names its publisher (EP-125, docs
+/// Who a publisher's catalogue belongs to: a Project that names its publisher (EP-127, docs
 /// API/08 section 6).
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogueOwner<'a> {
@@ -830,7 +830,7 @@ pub struct CatalogueOwner<'a> {
 }
 
 /// One publisher's catalogue: the records of its project's public Endpoints, under its own
-/// publisher, contact point and home page (EP-125). As [`feed`], it only gathers the records.
+/// publisher, contact point and home page (EP-127). As [`feed`], it only gathers the records.
 pub fn publisher_feed(records: Vec<Value>, base: &str, owner: &CatalogueOwner<'_>) -> Value {
     let publisher = &owner.catalog.publisher;
     let title = if owner.title.is_empty() {

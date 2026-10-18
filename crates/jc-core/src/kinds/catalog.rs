@@ -85,7 +85,7 @@ pub struct Publisher {
 }
 
 /// A Project's `spec.catalog`: the body that publishes its data, which the project's own
-/// catalogue names and every record whose Endpoint names no publisher carries (EP-125, docs
+/// catalogue names and every record whose Endpoint names no publisher carries (EP-127, docs
 /// API/08 section 6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

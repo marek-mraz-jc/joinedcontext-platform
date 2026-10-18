@@ -1,4 +1,4 @@
-//! A Project names the body that publishes its data for its own catalogue (T-4586, EP-125).
+//! A Project names the body that publishes its data for its own catalogue (T-4586, EP-127).
 //!
 //! The publisher carries its registry IRI, because a catalogue's publisher is an IRI in every
 //! national profile; the block is checked as an Endpoint's is, and it belongs to the project

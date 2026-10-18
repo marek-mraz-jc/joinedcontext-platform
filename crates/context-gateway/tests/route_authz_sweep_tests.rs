@@ -314,7 +314,7 @@ fn rows() -> Vec<Row> {
             "GET",
             "/catalog/{file}",
             get(format!("/catalog/{PROJECT}.jsonld")),
-            Withheld("one publisher's public Endpoints' records for harvesters (EP-125)"),
+            Withheld("one publisher's public Endpoints' records for harvesters (EP-127)"),
         ),
         row(
             "GET",
@@ -562,7 +562,7 @@ async fn gateway(realm: &common::Realm, view: &str) -> axum::Router {
         audience: Audience::ProjectList,
         allowed_projects: Vec::new(),
     }]);
-    // The project names its publisher, so its catalogue route runs to the Endpoint table (EP-125).
+    // The project names its publisher, so its catalogue route runs to the Endpoint table (EP-127).
     gateway.replace_publishers(
         [(
             PROJECT.to_owned(),

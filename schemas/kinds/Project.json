@@ -443,7 +443,7 @@
     },
     "ProjectCatalog": {
       "additionalProperties": false,
-      "description": "A Project's `spec.catalog`: the body that publishes its data, which the project's own catalogue names and every record whose Endpoint names no publisher carries (EP-125, docs API/08 section 6).",
+      "description": "A Project's `spec.catalog`: the body that publishes its data, which the project's own catalogue names and every record whose Endpoint names no publisher carries (EP-127, docs API/08 section 6).",
       "properties": {
         "contactPoint": {
           "anyOf": [
@@ -526,7 +526,7 @@
               "type": "null"
             }
           ],
-          "description": "The body that publishes the project's data in a national catalogue: the project's own catalogue names it, and so does every record whose Endpoint names none (EP-125)."
+          "description": "The body that publishes the project's data in a national catalogue: the project's own catalogue names it, and so does every record whose Endpoint names none (EP-127)."
         },
         "domain": {
           "description": "The internet domain of the body that publishes the project's data, the `did:web` assigner of the Policies compiled for its Apps; absent, the Organization's (PF-108). It describes who publishes and grants, verifies and routes nothing; pipelines keep minting over `JC_ORG_DOMAIN` (PF-44).",

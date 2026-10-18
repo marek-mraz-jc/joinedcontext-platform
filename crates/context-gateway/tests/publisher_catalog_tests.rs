@@ -1,4 +1,4 @@
-//! `GET /catalog/{project}.jsonld` and `.ttl`: one publisher's catalogue (T-4586, EP-125, API/08
+//! `GET /catalog/{project}.jsonld` and `.ttl`: one publisher's catalogue (T-4586, EP-127, API/08
 //! section 6).
 //!
 //! Contract, in one sentence: a Project that names its publisher in `spec.catalog` has a
@@ -486,7 +486,7 @@ fn a_project_without_a_publisher_publishes_no_catalogue_and_changes_no_record() 
 
 /// Each national rendering of a publisher's catalogue, written to `DCAT_RECORDS_DIR` (else
 /// `target/tmp/dcat-records`) as the conformance repository's `publisher-*.jsonld` fixtures,
-/// which its profile suite holds to that profile's shapes (EP-125).
+/// which its profile suite holds to that profile's shapes (EP-127).
 #[tokio::test]
 async fn each_national_catalogue_is_written_for_the_profile_check() {
     let directory = std::env::var("DCAT_RECORDS_DIR")

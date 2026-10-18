@@ -79,7 +79,7 @@ pub struct Gateway {
     pub(crate) agreements: ArcSwap<Agreements>,
     /// The named MCP servers, swapped whole with the rest (ADR-N-043, EP-92).
     servers: ArcSwap<crate::mcp::server::McpServers>,
-    /// The Projects that name their publisher, for their own catalogues (EP-125).
+    /// The Projects that name their publisher, for their own catalogues (EP-127).
     publishers: ArcSwap<crate::store::Publishers>,
     /// The Mappings each Endpoint publishes beside its model, by slug (EP-53).
     mappings: ArcSwap<crate::handlers::mappings::Mappings>,
@@ -345,12 +345,12 @@ impl Gateway {
         self.accounts.load_full()
     }
 
-    /// Replaces the Projects that name their publisher (EP-125): from the next request on.
+    /// Replaces the Projects that name their publisher (EP-127): from the next request on.
     pub fn replace_publishers(&self, publishers: crate::store::Publishers) {
         self.publishers.store(Arc::new(publishers));
     }
 
-    /// The publisher of `project`'s catalogue, when the project names one (EP-125).
+    /// The publisher of `project`'s catalogue, when the project names one (EP-127).
     pub fn publisher(&self, project: &str) -> Option<Arc<crate::store::ProjectPublisher>> {
         self.publishers.load().get(project).cloned()
     }

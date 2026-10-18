@@ -150,7 +150,7 @@ pub(crate) async fn catalog_feed_turtle(
 }
 
 /// `GET /catalog/{project}.jsonld` and `.ttl`: the catalogue of one publisher, a Project that
-/// names it, with the records of the project's public Endpoints (EP-125, API/08 section 6). An
+/// names it, with the records of the project's public Endpoints (EP-127, API/08 section 6). An
 /// unknown project, one without a publisher and one without a public Endpoint are the same 404,
 /// so the address says nothing about a project that publishes nothing.
 pub(crate) async fn publisher_catalog(
@@ -210,6 +210,6 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))
-        // One publisher's catalogue, which a national portal registers (EP-125).
+        // One publisher's catalogue, which a national portal registers (EP-127).
         .route("/catalog/{file}", get(publisher_catalog))
 }
