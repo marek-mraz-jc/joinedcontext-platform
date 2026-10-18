@@ -750,6 +750,10 @@ impl EndpointSpec {
 
         if let Some(ref catalog) = self.catalog {
             catalog.validate()?;
+            crate::kinds::visualization::validate_list(
+                &catalog.visualizations,
+                &self.served_representations(),
+            )?;
         }
 
         if let Some(ref policy) = self.policy_ref {

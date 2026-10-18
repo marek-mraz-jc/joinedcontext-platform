@@ -1468,16 +1468,47 @@ fn messages_with(
         )}),
         json!({"role": "user", "content": if tables.is_empty() {
             format!(
-                "{}\nAnswer the question from these passages, citing them as [n].",
-                json!({"passages": passages})
+                "{}\nAnswer the question from these passages, citing them as [n].{}",
+                json!({"passages": passages}),
+                in_english(question)
             )
         } else {
             format!(
-                "{}\nAnswer the question from these passages and data tables, citing them as [n].",
-                json!({"passages": passages, "data": tables})
+                "{}\nAnswer the question from these passages and data tables, citing them as [n].{}",
+                json!({"passages": passages, "data": tables}),
+                in_english(question)
             )
         }}),
     ]
+}
+
+/// The reminder after an English question's passages (T-4626): with Slovak titles and
+/// descriptions all around it, the model answered two English questions of the T-3153 eval in
+/// Slovak. Read from the question's words alone, never from the sources.
+// ponytail: English only, by function words; another language keeps the rules' own line.
+fn in_english(question: &str) -> &'static str {
+    const EN: &[&str] = &[
+        "the", "what", "which", "how", "many", "much", "does", "do", "is", "are", "of", "in",
+        "about", "where", "when", "who", "there", "any", "for", "and", "me", "show", "list",
+        "give", "tell", "today", "now", "publish", "can", "i", "you", "it", "this", "on",
+    ];
+    const SK: &[&str] = &[
+        "je", "sú", "aké", "aký", "aká", "ktoré", "ktorý", "ktorá", "koľko", "kde", "kedy", "čo",
+        "ako", "v", "na", "o", "pre", "z", "zo", "má", "mi", "ukáž", "dnes", "teraz", "sa",
+        "nejaké", "zoznam", "alebo",
+    ];
+    let lower = question.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let en = words.iter().filter(|w| EN.contains(w)).count();
+    let sk = words.iter().filter(|w| SK.contains(w)).count();
+    if en >= 2 && en > sk {
+        "\nThe question is written in English: write the answer in English, even where the passages and tables are in another language."
+    } else {
+        ""
+    }
 }
 
 /// The deployment's local date of the question; the UTC date without a zone.
@@ -3237,6 +3268,33 @@ mod tests {
         assert_eq!(cache.get(&key), None);
         cache.put(key, "Od 9:00 [1].".into(), Vec::new());
         assert_eq!(cache.get(&key).map(|(a, _)| a), Some("Od 9:00 [1].".into()));
+    }
+
+    #[test]
+    fn an_english_question_over_slovak_sources_is_told_to_answer_in_english() {
+        let passages = [
+            json!({"n": 1, "title": "Kvalita ovzdušia v Banskej Bystrici", "text": "Mesto zverejňuje merania PM10."}),
+        ];
+        let last = |question: &str| {
+            messages_with(None, "", &[], question, "now", &passages, &[])[2]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        for question in [
+            "Which data about air quality does Banská Bystrica publish?",
+            "How many facilities does the BBSK hospitals and social services dataset list?",
+        ] {
+            assert!(last(question).ends_with("write the answer in English, even where the passages and tables are in another language."), "{question}");
+        }
+        for question in [
+            "Aké údaje o kvalite ovzdušia zverejňuje Banská Bystrica?",
+            "Koľko zariadení je v Žiline?",
+            "Mitä tapahtumia on tänään?",
+            "PM10",
+        ] {
+            assert!(!last(question).contains("in English"), "{question}");
+        }
     }
 
     #[test]
