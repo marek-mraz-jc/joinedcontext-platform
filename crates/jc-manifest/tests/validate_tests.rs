@@ -1236,6 +1236,41 @@ fn a_named_mcp_server_wider_than_its_members_or_naming_what_is_not_there_is_refu
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// MF-57 (T-4659): a server attaches declared public knowledge sources only; an unknown one and
+/// an internal one are each named with the rule.
+#[test]
+fn a_named_mcp_server_attaches_declared_public_knowledge_sources_only() {
+    let dir = valid_repo("mcp-server-knowledge");
+    knowledge_source(&dir, "web", "public", None);
+    knowledge_source(&dir, "intranet", "internal", None);
+    write(
+        &dir,
+        "projects/ovzdusie/mcp/air.yaml",
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: McpServer\nmetadata:\n  name: air\n  namespace: ovzdusie\nspec:\n  audience: public\n  knowledgeSources: [web, intranet, ovzdusie/nowhere]\n  members:\n{}", member("public-air")),
+    );
+    let report = validate::run(&dir);
+    let found: Vec<&str> = report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("MF-57"))
+        .map(|f| f.message.as_str())
+        .collect();
+    assert_eq!(found.len(), 2, "{:?}", report.findings);
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`ovzdusie/intranet`") && m.contains("not `visibility: public`")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`ovzdusie/nowhere`") && m.contains("no manifest declares")),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// MF-53: the kind refuses an empty member list and a member that is not an Endpoint.
 #[test]
 fn a_named_mcp_server_without_endpoint_members_is_refused_by_its_kind() {
