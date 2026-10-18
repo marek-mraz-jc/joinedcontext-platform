@@ -15,7 +15,8 @@ does not fit: it carries `@type`, `types`, `attributes`, `default_range` and the
 - a range is a class, an enum or one of the broker's built-in types: a LinkML type is walked
   down `typeof` to the built-in it specialises, and one that never reaches one is refused;
 - an annotation value is text, `true`/`false` for a boolean, as the broker's flags read it;
-- a unit keeps `ucum_code`, `symbol` and `exact_mappings`.
+- a unit keeps `ucum_code`, `symbol` and `exact_mappings`;
+- a slot's `rank` and `title`, the display order and name a table reads (DM-98, T-4672), stay.
 
 The Portal's reconciler sends the result to the broker of a Context Space whose `dataModelRef`
 is set; Model Tools renders it with the other artifacts so the editor and the broker cannot
@@ -52,7 +53,18 @@ BUILTINS = (
 )
 
 #: The slot metaslots of the subset that are plain values, in the order they are written.
-SLOT_VALUES = ("slot_uri", "range", "required", "multivalued", "identifier", "inlined", "inverse", "description")
+SLOT_VALUES = (
+    "slot_uri",
+    "range",
+    "required",
+    "multivalued",
+    "identifier",
+    "inlined",
+    "inverse",
+    "description",
+    "rank",
+    "title",
+)
 
 
 def _text(value: Any) -> str:
@@ -102,7 +114,8 @@ def _slot(view: SchemaView, slot: SlotDefinition, owner: str) -> dict[str, Any]:
             continue
         if field == "range":
             value = _range(view, str(value), owner)
-        out[field] = value if isinstance(value, bool) else str(value)
+        # `rank` stays a number (the display order, DM-98, T-4672), a flag a boolean.
+        out[field] = value if isinstance(value, (bool, int)) else str(value)
     unit = getattr(slot, "unit", None)
     if unit is not None:
         fields = {

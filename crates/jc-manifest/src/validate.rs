@@ -397,6 +397,15 @@ fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
         });
     }
 
+    for (location, message) in displays_off_the_projection(repo_dir, &repo) {
+        report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+
     for (location, message) in assistant_references(&repo) {
         report.findings.push(Finding {
             path: location.0,
@@ -1529,32 +1538,7 @@ fn surfaces_without_their_model(repo_dir: &Path, repo: &Repository) -> Vec<(Loca
         if wanted.is_empty() {
             continue;
         }
-        let linkml = repo
-            .iter()
-            .filter(|(model, _)| model.kind == "DataModel" && model.namespace == id.namespace)
-            .filter_map(|(_, model)| {
-                serde_json::from_value::<DataModelSpec>(model.manifest.spec.clone())
-                    .ok()
-                    .map(|spec| (spec, model.path.clone()))
-            })
-            .find(|(model, _)| {
-                model.context_space_ref.as_deref() == Some(space)
-                    && model.lifecycle != DataModelLifecycle::Mirrored
-                    && model.validate().is_ok()
-            })
-            .map(|(model, path)| {
-                let file = repo_dir
-                    .join(&path)
-                    .parent()
-                    .map(|dir| dir.join(&model.linkml))
-                    .unwrap_or_else(|| repo_dir.join(&model.linkml));
-                std::fs::read_to_string(&file).map_err(|err| {
-                    format!(
-                        "its LinkML source cannot be read at `{}`: {err}",
-                        file.display()
-                    )
-                })
-            });
+        let linkml = space_linkml(repo_dir, repo, id.namespace.as_deref(), space);
         for representation in wanted {
             let gap = match &linkml {
                 // A space without a model has no type at all.
@@ -1580,6 +1564,100 @@ fn surfaces_without_their_model(repo_dir: &Path, repo: &Repository) -> Vec<(Loca
             refused.push((
                 (resource.path.clone(), resource.document, resource.line),
                 message,
+            ));
+        }
+    }
+    refused
+}
+
+/// The LinkML source of a space's own data model: `None` when the space has none, `Err` when its
+/// file cannot be read.
+fn space_linkml(
+    repo_dir: &Path,
+    repo: &Repository,
+    namespace: Option<&str>,
+    space: &str,
+) -> Option<std::result::Result<String, String>> {
+    repo.iter()
+        .filter(|(model, _)| model.kind == "DataModel" && model.namespace.as_deref() == namespace)
+        .filter_map(|(_, model)| {
+            serde_json::from_value::<DataModelSpec>(model.manifest.spec.clone())
+                .ok()
+                .map(|spec| (spec, model.path.clone()))
+        })
+        .find(|(model, _)| {
+            model.context_space_ref.as_deref() == Some(space)
+                && model.lifecycle != DataModelLifecycle::Mirrored
+                && model.validate().is_ok()
+        })
+        .map(|(model, path)| {
+            let file = repo_dir
+                .join(&path)
+                .parent()
+                .map(|dir| dir.join(&model.linkml))
+                .unwrap_or_else(|| repo_dir.join(&model.linkml));
+            std::fs::read_to_string(&file).map_err(|err| {
+                format!(
+                    "its LinkML source cannot be read at `{}`: {err}",
+                    file.display()
+                )
+            })
+        })
+}
+
+/// An Endpoint's `spec.display` names only types and slots of its projection: the space's model,
+/// narrowed by its `projectionRef` when it has one (EP-135).
+fn displays_off_the_projection(repo_dir: &Path, repo: &Repository) -> Vec<(Location, String)> {
+    let mut refused = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "Endpoint" {
+            continue;
+        }
+        let Ok(spec) = serde_json::from_value::<EndpointSpec>(resource.manifest.spec.clone())
+        else {
+            continue;
+        };
+        if spec.display.is_empty() {
+            continue;
+        }
+        let space = spec.context_space_ref.name();
+        let classes = match space_linkml(repo_dir, repo, id.namespace.as_deref(), space) {
+            None => Err(format!("space {space} has no data model")),
+            Some(linkml) => {
+                linkml.and_then(|text| jc_core::kinds::model_projection::linkml_classes(&text))
+            }
+        };
+        let projection = spec.projection_ref.as_ref().and_then(|wanted| {
+            repo.iter()
+                .find(|(p, _)| {
+                    p.kind == "ModelProjection"
+                        && p.namespace == id.namespace
+                        && p.name == wanted.name
+                })
+                .and_then(|(_, p)| {
+                    serde_json::from_value::<ModelProjectionSpec>(p.manifest.spec.clone()).ok()
+                })
+        });
+        for (class, display) in &spec.display {
+            let slots = classes.as_ref().map(|classes| match &projection {
+                Some(projection) => projection.attributes_of(class),
+                None => classes.get(class).cloned(),
+            });
+            let problem = match slots {
+                Err(err) => format!("{err} (EP-135)"),
+                Ok(None) => format!("{class} is no type of its projection (EP-135)"),
+                Ok(Some(slots)) => match display.check(class, &slots) {
+                    Ok(()) => continue,
+                    Err(err) => err,
+                },
+            };
+            refused.push((
+                (resource.path.clone(), resource.document, resource.line),
+                format!(
+                    "Endpoint {}/{}: spec.display: {problem}",
+                    id.namespace.as_deref().unwrap_or_default(),
+                    id.name
+                ),
             ));
         }
     }

@@ -9,7 +9,7 @@
 //! from the ones `list_types` lists. A repeated question is answered from [`AnswerCache`]. The
 //! model never calls a tool here, so the tool allowlist is this code.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -453,8 +453,17 @@ fn rank_of(key: &str, attribute: &Value, plain: &Value, has_unit: bool, asked: &
     }
 }
 
-/// A table's columns, its rows and each column's unit.
-pub type Columns = (Vec<String>, Vec<Vec<Value>>, Vec<Option<String>>);
+/// Each column as the data model shows it, `None` where the model does not order it; empty for a
+/// type without a model class (T-4672).
+pub type ModelColumns = Vec<Option<jc_core::display_order::Field>>;
+
+/// A table's columns, its rows, each column's unit and how the model shows it.
+pub type Columns = (
+    Vec<String>,
+    Vec<Vec<Value>>,
+    Vec<Option<String>>,
+    ModelColumns,
+);
 
 /// The entities of a `query_entities` answer as a table, by importance (T-4650): `name` (else
 /// `id`), the attributes `asked` names, measured values (a number with a `unitCode` or an
@@ -462,7 +471,11 @@ pub type Columns = (Vec<String>, Vec<Vec<Value>>, Vec<Option<String>>);
 /// and last one time column `observedAt`, the newest measurement of the row. The column cap cuts
 /// from the end of that order. Each column carries the unit symbol its `unitCode` names. At most
 /// `most` rows; `None` when the answer is no list of entities.
-pub fn table_of(text: &str, most: usize, asked: &[String]) -> Option<Columns> {
+///
+/// With `model`, the Endpoint's LinkML as the caller is served it, a type the model has a class
+/// for reads in the model's display order instead, after the attributes `asked` names; a slot
+/// it hides is left out, and each column carries the model's labels (DM-98…DM-101, T-4672).
+pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) -> Option<Columns> {
     let value: Value = serde_json::from_str(text).ok()?;
     let entities = value.get("entities").unwrap_or(&value).as_array()?;
     let shown = &entities[..entities.len().min(most)];
@@ -501,6 +514,12 @@ pub fn table_of(text: &str, most: usize, asked: &[String]) -> Option<Columns> {
             _ => std::cmp::Ordering::Equal,
         })
     });
+    let display = modelled(model, shown, &found);
+    if let Some(display) = &display {
+        let at = |key: &str| display.iter().position(|f| f.slot == key);
+        found.retain(|(key, ..)| at(key).is_some());
+        found.sort_by_key(|(key, _, rank, _)| (*rank != Rank::Asked, at(key)));
+    }
     let timed = shown.iter().any(|e| measured_at(e).is_some());
     if timed {
         // The time column says it; the date as an attribute would only repeat it.
@@ -518,6 +537,12 @@ pub fn table_of(text: &str, most: usize, asked: &[String]) -> Option<Columns> {
         columns.push("observedAt".to_owned());
         units.push(None);
     }
+    let fields: ModelColumns = display.map_or_else(Vec::new, |display| {
+        columns
+            .iter()
+            .map(|c| display.iter().find(|f| &f.slot == c).cloned())
+            .collect()
+    });
     let rows = shown
         .iter()
         .map(|entity| {
@@ -531,7 +556,51 @@ pub fn table_of(text: &str, most: usize, asked: &[String]) -> Option<Columns> {
                 .collect()
         })
         .collect();
-    Some((columns, rows, units))
+    Some((columns, rows, units, fields))
+}
+
+/// The display order of the entities' type when the model has a class for it, over the attributes
+/// the table may show; `None` otherwise, which keeps the order above (T-4672).
+fn modelled(
+    model: Option<&str>,
+    shown: &[Value],
+    found: &[(String, usize, Rank, Option<String>)],
+) -> Option<Vec<jc_core::display_order::Field>> {
+    let model = model?;
+    let kind = shown.first()?.get("type")?.as_str()?;
+    let kind = kind.rsplit(['/', '#', ':']).next().unwrap_or(kind);
+    let classes = jc_core::kinds::model_projection::linkml_classes(model).ok()?;
+    if !classes.contains_key(kind) {
+        return None;
+    }
+    let mut attributes: Vec<(&str, bool)> = vec![("name", false)];
+    attributes.extend(found.iter().map(|(key, ..)| (key.as_str(), false)));
+    jc_core::display_order::display_order(Some(model), kind, &attributes, None).ok()
+}
+
+/// Each column's labels in every language the model labels the type in, and English; `None` for
+/// a column the model does not order (`id`, the time column).
+pub fn labels_of(fields: &ModelColumns) -> Vec<Option<BTreeMap<String, String>>> {
+    let mut languages: Vec<&str> = fields
+        .iter()
+        .flatten()
+        .flat_map(|f| f.labels.keys().map(String::as_str))
+        .chain(["en"])
+        .collect();
+    languages.sort_unstable();
+    languages.dedup();
+    fields
+        .iter()
+        .map(|field| {
+            let field = field.as_ref()?;
+            Some(
+                languages
+                    .iter()
+                    .map(|l| ((*l).to_owned(), field.label(l)))
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// What the follow-up call said of the passages found (T-4259).
@@ -685,7 +754,13 @@ pub struct AnswerCache {
     /// The Endpoints, by slug, whose type list failed or did not come in time, for
     /// [`UNAVAILABLE_LIFE`] (T-4611).
     unavailable: Mutex<HashMap<String, Instant>>,
+    /// Each Endpoint's model as a deployment is served it, by `{deployment}/{slug}`, for
+    /// [`TYPES_LIFE`]; `None` when it could not be read (T-4672).
+    models: Mutex<HashMap<String, KeptModel>>,
 }
+
+/// When a model was read, and the model.
+type KeptModel = (Instant, Option<std::sync::Arc<str>>);
 
 /// When an answer was stored, its text and its citations.
 type Cached = (Instant, String, Vec<Citation>);
@@ -755,6 +830,23 @@ impl AnswerCache {
         if let Ok(mut unavailable) = self.unavailable.lock() {
             // One entry per connector's Endpoint, like the type lists.
             unavailable.insert(slug.to_owned(), Instant::now());
+        }
+    }
+
+    /// The model kept for `key`, read less than [`TYPES_LIFE`] ago; the inner `None` when that
+    /// read failed.
+    fn model_of(&self, key: &str) -> Option<Option<std::sync::Arc<str>>> {
+        let models = self.models.lock().ok()?;
+        models
+            .get(key)
+            .filter(|(at, _)| at.elapsed() < TYPES_LIFE)
+            .map(|(_, model)| model.clone())
+    }
+
+    fn keep_model(&self, key: &str, model: Option<std::sync::Arc<str>>) {
+        if let Ok(mut models) = self.models.lock() {
+            // One entry per deployment and connector, so it is bounded by the manifests.
+            models.insert(key.to_owned(), (Instant::now(), model));
         }
     }
 
@@ -1035,6 +1127,41 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
 }
 
+/// How long the assistant waits for an Endpoint's model; past it the table keeps the name order.
+const MODEL_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The largest model the assistant reads for a table's order.
+const MODEL_BYTES: usize = 1 << 20;
+
+/// The Endpoint's LinkML as the deployment is served it (`describe_schema`, format linkml), for a
+/// table's display order (T-4672); kept per deployment and Endpoint for [`TYPES_LIFE`], a failed
+/// read too, so a slow schema surface costs one wait, not one per table. `None` without one.
+async fn model_of(ask: &Ask<'_>, connector: &Connected) -> Option<std::sync::Arc<str>> {
+    let key = format!("{}/{}", ask.deployment, connector.surface.slug.as_str());
+    if let Some(kept) = ask.cache.model_of(&key) {
+        return kept;
+    }
+    let read = async {
+        if !offers(connector, "describe_schema") {
+            return None;
+        }
+        let call =
+            connector
+                .surface
+                .call(ask.http, "describe_schema", json!({ "format": "linkml" }));
+        let text = tokio::time::timeout(MODEL_DEADLINE, call)
+            .await
+            .ok()?
+            .ok()?;
+        let answer: Value = serde_json::from_str(&text).ok()?;
+        let document = answer.get("document")?.as_str()?;
+        (document.len() <= MODEL_BYTES).then(|| std::sync::Arc::from(document))
+    };
+    let model = read.await;
+    ask.cache.keep_model(&key, model.clone());
+    model
+}
+
 /// A `query_entities` answer of `kind` from `connector` as the table the person sees, with the
 /// page the sources hold about the Endpoint and the address its rows download from; `None` when
 /// the answer is no list of entities.
@@ -1046,7 +1173,8 @@ pub(super) async fn table(
     asked: &[String],
 ) -> Option<Table> {
     let total = total_of(text);
-    let (columns, rows, units) = table_of(text, READ_ROWS, asked)?;
+    let model = model_of(ask, connector).await;
+    let (columns, rows, units, fields) = table_of(text, READ_ROWS, asked, model.as_deref())?;
     let slug = connector.surface.slug.as_str();
     let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
         .await
@@ -1067,6 +1195,11 @@ pub(super) async fn table(
         columns,
         rows,
         units,
+        labels: labels_of(&fields),
+        summary: fields
+            .iter()
+            .map(|f| f.as_ref().is_some_and(|f| f.summary))
+            .collect(),
         total,
         dataset,
         download,
@@ -1210,16 +1343,47 @@ fn messages_with(
         )}),
         json!({"role": "user", "content": if tables.is_empty() {
             format!(
-                "{}\nAnswer the question from these passages, citing them as [n].",
-                json!({"passages": passages})
+                "{}\nAnswer the question from these passages, citing them as [n].{}",
+                json!({"passages": passages}),
+                in_english(question)
             )
         } else {
             format!(
-                "{}\nAnswer the question from these passages and data tables, citing them as [n].",
-                json!({"passages": passages, "data": tables})
+                "{}\nAnswer the question from these passages and data tables, citing them as [n].{}",
+                json!({"passages": passages, "data": tables}),
+                in_english(question)
             )
         }}),
     ]
+}
+
+/// The reminder after an English question's passages (T-4626): with Slovak titles and
+/// descriptions all around it, the model answered two English questions of the T-3153 eval in
+/// Slovak. Read from the question's words alone, never from the sources.
+// ponytail: English only, by function words; another language keeps the rules' own line.
+fn in_english(question: &str) -> &'static str {
+    const EN: &[&str] = &[
+        "the", "what", "which", "how", "many", "much", "does", "do", "is", "are", "of", "in",
+        "about", "where", "when", "who", "there", "any", "for", "and", "me", "show", "list",
+        "give", "tell", "today", "now", "publish", "can", "i", "you", "it", "this", "on",
+    ];
+    const SK: &[&str] = &[
+        "je", "sú", "aké", "aký", "aká", "ktoré", "ktorý", "ktorá", "koľko", "kde", "kedy", "čo",
+        "ako", "v", "na", "o", "pre", "z", "zo", "má", "mi", "ukáž", "dnes", "teraz", "sa",
+        "nejaké", "zoznam", "alebo",
+    ];
+    let lower = question.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let en = words.iter().filter(|w| EN.contains(w)).count();
+    let sk = words.iter().filter(|w| SK.contains(w)).count();
+    if en >= 2 && en > sk {
+        "\nThe question is written in English: write the answer in English, even where the passages and tables are in another language."
+    } else {
+        ""
+    }
 }
 
 /// The deployment's local date of the question; the UTC date without a zone.
@@ -2285,6 +2449,8 @@ mod tests {
             columns: vec!["id".into()],
             rows: (0..MODEL_ROWS + 3).map(|i| vec![json!(i)]).collect(),
             units: vec![None],
+            labels: Vec::new(),
+            summary: Vec::new(),
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
             download: None,
@@ -2830,6 +2996,33 @@ mod tests {
     }
 
     #[test]
+    fn an_english_question_over_slovak_sources_is_told_to_answer_in_english() {
+        let passages = [
+            json!({"n": 1, "title": "Kvalita ovzdušia v Banskej Bystrici", "text": "Mesto zverejňuje merania PM10."}),
+        ];
+        let last = |question: &str| {
+            messages_with(None, "", &[], question, "now", &passages, &[])[2]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        for question in [
+            "Which data about air quality does Banská Bystrica publish?",
+            "How many facilities does the BBSK hospitals and social services dataset list?",
+        ] {
+            assert!(last(question).ends_with("write the answer in English, even where the passages and tables are in another language."), "{question}");
+        }
+        for question in [
+            "Aké údaje o kvalite ovzdušia zverejňuje Banská Bystrica?",
+            "Koľko zariadení je v Žiline?",
+            "Mitä tapahtumia on tänään?",
+            "PM10",
+        ] {
+            assert!(!last(question).contains("in English"), "{question}");
+        }
+    }
+
+    #[test]
     fn the_cache_stays_bounded() {
         let cache = AnswerCache::default();
         for n in 0..CACHE_ENTRIES + 5 {
@@ -3193,7 +3386,8 @@ mod tests {
             {"id": "urn:ngsi-ld:AirQualityObserved:2", "type": "AirQualityObserved",
              "pm10": {"type": "Property", "value": 9}}
         ]});
-        let (columns, rows, _) = table_of(&normalized.to_string(), 50, &[]).unwrap_or_default();
+        let (columns, rows, ..) =
+            table_of(&normalized.to_string(), 50, &[], None).unwrap_or_default();
         // The structured address and the location are no columns.
         assert_eq!(columns, ["name", "pm10", "refDevice", "observedAt"]);
         assert_eq!(
@@ -3209,21 +3403,22 @@ mod tests {
 
         let key_values =
             json!([{"id": "urn:ngsi-ld:Parking:1", "type": "Parking", "free": 12, "open": true}]);
-        let (columns, rows, _) = table_of(&key_values.to_string(), 50, &[]).unwrap_or_default();
+        let (columns, rows, ..) =
+            table_of(&key_values.to_string(), 50, &[], None).unwrap_or_default();
         assert_eq!(columns, ["id", "free", "open"]);
         assert_eq!(
             rows,
             [[json!("urn:ngsi-ld:Parking:1"), json!(12), json!(true)]]
         );
 
-        assert!(table_of("{\"error\": 1}", 50, &[]).is_none());
-        assert!(table_of("nope", 50, &[]).is_none());
-        let (_, rows, _) = table_of("[]", 50, &[]).unwrap_or_default();
+        assert!(table_of("{\"error\": 1}", 50, &[], None).is_none());
+        assert!(table_of("nope", 50, &[], None).is_none());
+        let (_, rows, ..) = table_of("[]", 50, &[], None).unwrap_or_default();
         assert!(rows.is_empty());
         let wide: Value = json!([(0..20)
             .map(|n| (format!("a{n}"), json!(n)))
             .collect::<serde_json::Map<_, _>>()]);
-        let (columns, ..) = table_of(&wide.to_string(), 50, &[]).unwrap_or_default();
+        let (columns, ..) = table_of(&wide.to_string(), 50, &[], None).unwrap_or_default();
         assert!(columns.len() <= MAX_COLUMNS);
     }
 
@@ -3242,9 +3437,66 @@ mod tests {
         json!({"entities": [station(1, 21.5, 12.0), station(2, 9.0, 30.1)]})
     }
 
+    /// T-4672: the model's display order, after what the person asked, its hidden slots left
+    /// out and its labels on each column; a type the model has no class for keeps the order above.
+    #[test]
+    fn a_modelled_type_reads_in_the_models_order_with_its_labels() {
+        let model = r#"
+classes:
+  AirQualityObserved:
+    slots: [name, airQualityLevel, no2, pm10, source, refPointOfInterest, dateObserved]
+    slot_usage:
+      pm10:
+        rank: 1
+        annotations:
+          label: { tag: label, value: { sk: "Prach PM10", en: "PM10" } }
+      source:
+        annotations: { hidden: { tag: hidden, value: "true" } }
+"#;
+        let (columns, rows, units, fields) =
+            table_of(&air().to_string(), 50, &[], Some(model)).unwrap_or_default();
+        let labels = labels_of(&fields);
+        assert_eq!(
+            columns,
+            [
+                "name",
+                "pm10",
+                "airQualityLevel",
+                "no2",
+                "refPointOfInterest",
+                "observedAt"
+            ]
+        );
+        assert_eq!(rows[0][1], json!(21.5));
+        assert_eq!(units[1].as_deref(), Some("µg/m³"));
+        let pm10 = labels[1].as_ref().expect("the model labels pm10");
+        assert_eq!(pm10.get("sk").map(String::as_str), Some("Prach PM10"));
+        assert_eq!(labels[5], None, "the time column is no slot");
+
+        let asked = vec!["no2".to_owned()];
+        let (columns, ..) =
+            table_of(&air().to_string(), 50, &asked, Some(model)).unwrap_or_default();
+        assert_eq!(
+            columns[1..3],
+            ["no2", "pm10"],
+            "what the person asked comes first"
+        );
+
+        let other = model.replace("AirQualityObserved:", "WeatherObserved:");
+        let (columns, _, _, fields) =
+            table_of(&air().to_string(), 50, &[], Some(&other)).unwrap_or_default();
+        assert_eq!(
+            columns[1..3],
+            ["no2", "pm10"],
+            "no class: the measured values first"
+        );
+        assert!(fields.is_empty());
+    }
+
     #[test]
     fn measured_values_follow_the_name_and_the_time_is_last() {
-        let (columns, rows, units) = table_of(&air().to_string(), 50, &[]).unwrap_or_default();
+        let (columns, rows, units, _) =
+            table_of(&air().to_string(), 50, &[], None).unwrap_or_default();
         assert_eq!(
             columns,
             [
@@ -3269,7 +3521,7 @@ mod tests {
             &json!({"q": "pm10>20;address[addressLocality]==\"Žilina\"", "attrs": ["airQualityLevel"]}),
         );
         assert_eq!(asked, ["airQualityLevel", "pm10", "address"]);
-        let (columns, ..) = table_of(&air().to_string(), 50, &asked).unwrap_or_default();
+        let (columns, ..) = table_of(&air().to_string(), 50, &asked, None).unwrap_or_default();
         assert_eq!(&columns[..4], ["name", "airQualityLevel", "pm10", "no2"]);
         assert!(asked_of(&json!({})).is_empty());
     }
@@ -3290,7 +3542,8 @@ mod tests {
                 json!({"type": "Property", "value": n, "unitCode": "CEL"}),
             );
         }
-        let (columns, ..) = table_of(&json!([entity]).to_string(), 50, &[]).unwrap_or_default();
+        let (columns, ..) =
+            table_of(&json!([entity]).to_string(), 50, &[], None).unwrap_or_default();
         assert_eq!(columns.len(), MAX_COLUMNS - 1, "no time column here");
         for n in 0..4 {
             assert!(columns.contains(&format!("v{n}")), "{columns:?}");
@@ -3302,7 +3555,7 @@ mod tests {
         let schools = json!([{"id": "urn:ngsi-ld:School:1", "type": "School", "name": "ZŠ Brezno",
             "category": "základná", "addressLocality": "Brezno", "pupilCount": 312,
             "dateModified": "2026-01-02T10:00:00Z", "refSchool": "urn:ngsi-ld:School:2"}]);
-        let (columns, ..) = table_of(&schools.to_string(), 50, &[]).unwrap_or_default();
+        let (columns, ..) = table_of(&schools.to_string(), 50, &[], None).unwrap_or_default();
         assert_eq!(
             columns,
             [

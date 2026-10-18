@@ -139,6 +139,7 @@ fn a_large_mirrored_table_is_published_within_a_bounded_heap() {
     let rows = Rows {
         csv: table(9813),
         schema: None,
+        linkml: None,
     };
     let csv = &rows.csv;
     let record =
