@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -665,4 +665,15 @@ test("HTML in an answer, streamed or not, stays text", () => {
     assert.ok(tags.every((t) => /"(p|table|tr|td)"/.test(t)), JSON.stringify(tree));
     assert.ok(shown(tree).includes("<"), "the angle brackets are shown as typed");
   }
+});
+
+test("the close message goes to the framing page's origin alone, never to any (T-4654)", () => {
+  const framers = ["https://www.banskabystrica.sk", "https://data.dev.joinedcontext.com"];
+  assert.deepEqual(closeTargets(["https://www.banskabystrica.sk"], framers), ["https://www.banskabystrica.sk"]);
+  // Without the browser's record (Firefox), each origin that may frame it; the others drop it.
+  assert.deepEqual(closeTargets(undefined, framers), framers);
+  assert.deepEqual(closeTargets([], ["HTTPS://City.SK/", "http://localhost:8080"]), ["https://city.sk", "http://localhost:8080"]);
+  assert.deepEqual(closeTargets(undefined, ["*", "", null, "null", "javascript:alert(1)", "https://a.sk/path", "https://a.sk@evil.example"]), []);
+  assert.deepEqual(closeTargets(["null"], framers), [], "a sandboxed parent gets nothing");
+  assert.deepEqual(closeTargets(undefined, undefined), []);
 });

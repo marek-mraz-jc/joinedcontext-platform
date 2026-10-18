@@ -706,8 +706,23 @@ var JCRender = (function () {
     return split ? { lead: split[1], rest: split[2] } : { lead: whole, rest: "" };
   }
 
+  /**
+   * The origins the chat's close message goes to, never `*` (T-4654): the framing page's own,
+   * where the browser records it (`ancestorOrigins`), else each origin the deployment may be
+   * framed by (its `frame-ancestors`); a target that is not the parent drops the message.
+   * Anything but an http(s) origin is left out.
+   */
+  function closeTargets(ancestors, frameOrigins) {
+    var origin = function (value) {
+      var match = /^(https?:\/\/[a-z0-9.-]+(?::\d{1,5})?)\/?$/i.exec(String(value || ""));
+      return match ? match[1].toLowerCase() : null;
+    };
+    var listed = ancestors && ancestors.length ? [ancestors[0]] : frameOrigins || [];
+    return Array.prototype.map.call(listed, origin).filter(Boolean);
+  }
+
   return {
-    notice: notice,
+    notice: notice, closeTargets: closeTargets,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
