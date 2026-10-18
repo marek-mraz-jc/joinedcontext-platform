@@ -34,6 +34,7 @@ const DATA_RULES: &str = "\n\nYou may read more live data before you answer, wit
 - Every number in your answer comes from a table or a tool result you were given, with its [n]. For \"how many\" ask with `count: true` and give `total`.\n\
 - query_entities takes `type` (a list), `q` (conditions joined with `;` for AND and `|` for OR; == != > >= < <= ~= for a regular expression; a member of a structured value as `address[addressLocality]==\"X\"`), `idPattern` (a regular expression over ids), `georel` (`near;maxDistance==1000`) with `geometry` and `coordinates` (longitude first), `limit` and `count`.\n\
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
+- A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
 - get_type, list_attributes and describe_schema tell you a type's attributes when you do not know which one holds what you need.\n\
 - When a tool refuses, correct the arguments once; when it still refuses, answer from what you have and say which data you could not find.";
 
@@ -302,11 +303,12 @@ pub async fn answer(
                         show(&tables, arguments, domain, &mut shown, events).await
                     }
                     (None, _) => {
+                        let left = ask.data_time.saturating_sub(started.elapsed());
                         let content = step(
                             ask,
                             &offered,
-                            name,
-                            arguments,
+                            (name, arguments),
+                            left,
                             &mut citations,
                             &mut tables,
                             events,
@@ -345,12 +347,15 @@ async fn show(
 }
 
 /// One tool call of the model: refused unless it names an offered tool with arguments its schema
-/// admits, else sent, shown as a stage and a `tool` event, and numbered for citing.
+/// admits, else sent, shown as a stage and a `tool` event, and numbered for citing. It waits at
+/// most `left` of the question's data seconds: up to four calls of one reply run one after the
+/// other, and each waiting out its connector's own timeout took a question to the 45 s cut
+/// (T-4663).
 async fn step(
     ask: &Ask<'_>,
     offered: &[Offered<'_>],
-    name: &str,
-    arguments: &str,
+    (name, arguments): (&str, &str),
+    left: Duration,
     citations: &mut Vec<Citation>,
     tables: &mut Vec<(usize, Table)>,
     events: &Sender<Event>,
@@ -378,11 +383,14 @@ async fn step(
     };
     send(events, tool("started")).await;
     let began = Instant::now();
-    let answered = o
-        .connector
-        .surface
-        .call(ask.http, &o.tool.name, arguments.clone())
-        .await;
+    let answered = tokio::time::timeout(
+        left,
+        o.connector
+            .surface
+            .call(ask.http, &o.tool.name, arguments.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| Err("the source did not answer within the question's time".into()));
     let ms = began.elapsed().as_millis() as u64;
     match answered {
         Ok(text) => {
@@ -431,6 +439,17 @@ async fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_history_question_is_answered_with_values_and_never_points_to_the_api() {
+        // A history question gets the values, or one sentence when they cannot be read.
+        assert!(DATA_RULES.contains(
+            "call query_temporal for the entities the tables and the earlier turns name"
+        ));
+        assert!(DATA_RULES
+            .contains("Never tell the person to call an API, an address or a query themselves."));
+        assert!(DATA_RULES.contains("say in one sentence that it is not available right now"));
+    }
 
     #[test]
     fn a_scoped_endpoint_is_named_with_dashes_and_long_names_are_not_offered() {

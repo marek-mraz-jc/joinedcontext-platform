@@ -614,13 +614,21 @@ fn mirror(api: &mut impl CkanApi, target: &Target, rows: &Rows) -> Result<Mirror
             .as_ref()
             .and_then(|schema| datastore::definition(schema, entity_type));
         let (names, sources) = layout(&columns, &raw, indices, [id, kind], definition, &languages);
-        let fields = datastore::table_fields(&names, definition, |index| match &sources[index] {
+        let label_in = target.language.as_deref().unwrap_or("en");
+        let fields = datastore::table_fields(&names, definition, label_in, |index| match &sources
+            [index]
+        {
             Source::Cell(column) => Some(datastore::observed_kind(
                 indices.iter().map(|&row| typed_cell(&raw[row][*column])),
             )),
             Source::Empty => None,
             Source::GeoJson { .. } => Some("text".to_owned()),
         });
+        // The table reads in importance order (T-4661): name first, coordinates and id last.
+        let order = datastore::importance(&fields);
+        let names: Vec<String> = order.iter().map(|&i| names[i].clone()).collect();
+        let sources: Vec<&Source> = order.iter().map(|&i| &sources[i]).collect();
+        let fields: Vec<Value> = order.iter().map(|&i| fields[i].clone()).collect();
         // A column CKAN will hold as text keeps the cell as it was written: `42` in a text
         // column is the text "42", not a number the database would refuse.
         let text_columns: Vec<bool> = fields

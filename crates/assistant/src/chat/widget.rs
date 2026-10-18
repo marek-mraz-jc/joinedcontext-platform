@@ -16,19 +16,26 @@ use serde_json::json;
 use super::ChatState;
 use crate::worker::{Deployment, Source};
 
-/// The answer's renderer first (T-3325), then the widget that uses it, as one script.
+/// The field labels the renderer reads (T-4661), the answer's renderer (T-3325), then the widget
+/// that uses it, as one script.
 const SCRIPT: &str = concat!(
+    "var JC_FIELDS = ",
+    include_str!("../../../jc-core/data/field-order.json"),
+    ";\n",
     include_str!("../../widget/render.js"),
     include_str!("../../widget/widget.js")
 );
 const STYLE: &str = include_str!("../../widget/widget.css");
 /// The launcher a site includes; it reads its deployment from its own address.
 const LAUNCHER: &str = include_str!("../../widget/embed.js");
+/// The Web Worker that proves the visitor token's challenge (T-4653).
+const VISITOR: &str = include_str!("../../widget/visitor.js");
 
 pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/d/widget.js", get(script))
         .route("/d/widget.css", get(style))
+        .route("/d/visitor.js", get(visitor))
         .route("/d/{public_id}", get(full_page))
         .route("/d/{public_id}/widget", get(page))
         .route("/d/{public_id}/embed.js", get(launcher))
@@ -49,6 +56,10 @@ fn asset(body: &'static str, content_type: &'static str) -> Response {
 
 async fn script() -> Response {
     asset(SCRIPT, "text/javascript; charset=utf-8")
+}
+
+async fn visitor() -> Response {
+    asset(VISITOR, "text/javascript; charset=utf-8")
 }
 
 async fn style() -> Response {
@@ -124,6 +135,8 @@ fn config(
         // The chart renderer the widget frames a map or a chart from (T-4657); null for none.
         "viz": viz.map(|url| url.origin().ascii_serialization()),
         "linkHosts": link_hosts,
+        // The page's `frame-ancestors`, already in its header: where its close message may go (T-4654).
+        "frameOrigins": spec.allowed_origins,
         "publicId": spec.public_id,
         "title": spec.theme.as_ref().and_then(|t| t.title.clone()),
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
@@ -443,6 +456,15 @@ mod tests {
             ]
         );
         assert_eq!(config(&public, &hosts, None)["linkHosts"], json!(hosts));
+        // The close message's targets are the page's own frame-ancestors (T-4654).
+        assert_eq!(
+            config(&public, &hosts, None)["frameOrigins"],
+            json!(public.spec.allowed_origins)
+        );
+        assert!(!public.spec.allowed_origins.is_empty());
+        for origin in &public.spec.allowed_origins {
+            assert!(policy(&public, None).contains(origin.as_str()), "{origin}");
+        }
     }
 
     #[test]

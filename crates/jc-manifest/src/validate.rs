@@ -1061,6 +1061,20 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
         .filter(|project| project != jc_core::envelope::ORG_NAMESPACE)
         .collect();
     let spaces = declared("ContextSpace");
+    // Every knowledge source and whether it is public, for the servers that attach one (MF-57).
+    let knowledge: BTreeMap<(Option<String>, String), bool> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "KnowledgeSource")
+        .map(|(id, resource)| {
+            let public = resource
+                .manifest
+                .spec
+                .get("visibility")
+                .and_then(|v| v.as_str())
+                == Some("public");
+            ((id.namespace.clone(), id.name.clone()), public)
+        })
+        .collect();
 
     let mut found = Vec::new();
     for (id, resource) in repo.iter() {
@@ -1091,6 +1105,17 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
                                 "{id}: spec.select.spaces names Context Space `{space}`, which no manifest declares (MF-55)"
                             )));
                         }
+                    }
+                }
+                for (project, name) in server.knowledge_source_ids(&namespace) {
+                    match knowledge.get(&(Some(project.to_owned()), name.to_owned())) {
+                        None => found.push((at.clone(), format!(
+                            "{id}: spec.knowledgeSources names KnowledgeSource `{project}/{name}`, which no manifest declares (MF-57)"
+                        ))),
+                        Some(false) => found.push((at.clone(), format!(
+                            "{id}: spec.knowledgeSources names KnowledgeSource `{project}/{name}`, which is not `visibility: public`; a server searches public sources only (MF-57)"
+                        ))),
+                        Some(true) => {}
                     }
                 }
                 for (project, name) in server.member_ids(&namespace) {
