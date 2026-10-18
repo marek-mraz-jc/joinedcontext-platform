@@ -22,7 +22,18 @@ use serde_json::Value;
 /// with a single `Group` member, and the variant's own doc comment — "The members of one
 /// group." — goes on that object. Documenting the inner member would repeat the sentence a
 /// reader has just read one line above, so the parent is asserted instead.
-const DOCUMENTED_BY_ITS_PARENT: &[(&str, &str)] = &[("Organization", "Group")];
+///
+/// A visualization's `data.source` is the tag of an internally tagged enum (T-4642): `schemars`
+/// writes it as a bare `enum` member of each `oneOf` branch, and the branch carries the
+/// variant's doc comment, which says what that source reads.
+const DOCUMENTED_BY_ITS_PARENT: &[(&str, &str, &str)] = &[
+    ("Organization", "Group", "The members of one group."),
+    (
+        "Endpoint",
+        "source",
+        "The Endpoint's `file.csv` of one entity type.",
+    ),
+];
 
 /// Values that must never appear in a doc comment, because a doc comment is published.
 ///
@@ -111,7 +122,16 @@ fn collect(kind: &'static str, path: String, node: &Value, found: &mut Vec<Prope
                 }
             }
             for (key, value) in members {
-                collect(kind, format!("{path}.{key}"), value, found);
+                // A `properties` map holds property schemas, not a schema of its own: a property
+                // named `properties` (an OGC query member) is no nested map.
+                match (key.as_str(), value) {
+                    ("properties", Value::Object(props)) => {
+                        for (name, sub) in props {
+                            collect(kind, format!("{path}.properties.{name}"), sub, found);
+                        }
+                    }
+                    _ => collect(kind, format!("{path}.{key}"), value, found),
+                }
             }
         }
         Value::Array(items) => {
@@ -147,7 +167,9 @@ fn every_kind_field_carries_a_description() {
             .and_then(Value::as_str)
             .is_some_and(|text| !text.trim().is_empty());
         if !described
-            && !DOCUMENTED_BY_ITS_PARENT.contains(&(property.kind, property.name.as_str()))
+            && !DOCUMENTED_BY_ITS_PARENT
+                .iter()
+                .any(|(kind, name, _)| (*kind, *name) == (property.kind, property.name.as_str()))
         {
             undocumented.push(format!(
                 "{}{}.{}",
@@ -168,7 +190,7 @@ fn every_kind_field_carries_a_description() {
 /// rather than the case above quietly passing.
 #[test]
 fn the_field_documented_by_its_parent_really_has_a_documented_parent() {
-    for (kind, name) in DOCUMENTED_BY_ITS_PARENT {
+    for (kind, name, sentence) in DOCUMENTED_BY_ITS_PARENT {
         let schema = registry::schema_of(kind).unwrap_or_else(|| panic!("no schema for {kind}"));
         let parents = properties()
             .into_iter()
@@ -178,7 +200,7 @@ fn the_field_documented_by_its_parent_really_has_a_documented_parent() {
 
         let text = serde_json::to_string(&schema).expect("the schema serializes");
         assert!(
-            text.contains("The members of one group."),
+            text.contains(sentence),
             "{kind}: the parent of {name} no longer carries the sentence that documents it",
         );
     }

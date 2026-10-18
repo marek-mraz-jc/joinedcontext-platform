@@ -34,6 +34,7 @@ pub mod space;
 pub mod subscription;
 pub mod sync;
 pub mod ui_schema;
+pub mod visualization;
 
 pub use agent_profile::{
     AgentEgress, AgentLimits, AgentModel, AgentProfileRole, AgentProfileSpec, AgentRuntime,
