@@ -1138,3 +1138,128 @@ fn a_deployment_may_read_one_named_mcp_server() {
         assert_eq!(refused(deployment(&yaml)), "mcpServer", "{server}");
     }
 }
+
+/// The golden deployment with neither sources nor connectors, `extra` before `allowedOrigins`.
+fn bare_with(extra: &str) -> String {
+    deployment_with("  sources: [bb-web]\n", "")
+        .replace(
+            "  connectors:\n    - { endpoint: mesto-verejne, tools: [query_entities], timeoutSeconds: 20 }\n",
+            "",
+        )
+        .replace("  allowedOrigins:", &format!("{extra}  allowedOrigins:"))
+}
+
+/// The field and reason of an `Error::Invalid` or `Error::Name` refusal.
+fn refusal(result: Result<AssistantDeployment, Error>) -> String {
+    match result.expect_err("refused") {
+        Error::Name { field, reason, .. } => format!("{field}: {reason}"),
+        other => other.to_string(),
+    }
+}
+
+/// MF-52, MF-58: a selector alone is enough to answer from data, and a data-only assistant
+/// names no source; a RAG-only one names no Endpoint.
+#[test]
+fn a_selector_alone_makes_a_data_only_assistant() {
+    let parsed = deployment(&bare_with(
+        "  select: { projects: [banskabystrica], themes: [TRAN], types: [OffStreetParking], accessLevel: [public] }\n",
+    ))
+    .expect("data only");
+    let select = parsed.spec.select.expect("select");
+    assert_eq!(
+        select.types.as_deref(),
+        Some(&["OffStreetParking".to_owned()][..])
+    );
+    assert!(parsed.spec.sources.is_empty());
+    assert!(deployment(&bare_with("  answer: { routes: data }\n  select: {}\n")).is_ok());
+    assert!(deployment(&bare_with("  sources: [bb-web]\n")).is_ok());
+    assert!(refusal(deployment(&bare_with(""))).contains("select"));
+}
+
+/// MF-58: a channel nobody signs in to selects public Endpoints only; `internal` any level.
+#[test]
+fn a_public_deployment_selects_public_endpoints_only() {
+    for level in ["organization", "project", "grant"] {
+        let yaml = bare_with(&format!("  select: {{ accessLevel: [public, {level}] }}\n"));
+        let why = refusal(deployment(&yaml));
+        assert!(why.contains("spec.select.accessLevel"), "{why}");
+        assert!(why.contains("channel `internal`"), "{why}");
+        let internal = yaml.replace("channel: public ", "channel: internal ");
+        assert!(deployment(&internal).is_ok(), "{level}");
+    }
+}
+
+/// MF-58: a selector reaches the deployment's own project and `scope.projects` only.
+#[test]
+fn a_selector_names_projects_in_reach() {
+    let two = bare_with("  select: { projects: [banskabystrica, praha] }\n");
+    let why = refusal(deployment(&two));
+    assert!(
+        why.contains("scope.projects") && why.contains("`praha`"),
+        "{why}"
+    );
+    let scoped = bare_with(
+        "  scope: { projects: [praha] }\n  select: { projects: [banskabystrica, praha] }\n",
+    );
+    assert!(deployment(&scoped).is_ok());
+    let space = bare_with("  select: { spaces: [banskabystrica/mesto, praha/doprava] }\n");
+    assert!(refusal(deployment(&space)).contains("scope.projects"));
+}
+
+/// MF-59: exclude names each Endpoint once, at most 50, in the connector form.
+#[test]
+fn exclude_names_endpoints_once_in_the_connector_form() {
+    let ok = bare_with("  select: {}\n  exclude: [hfp-raw, bbsk/roads]\n");
+    assert_eq!(
+        deployment(&ok).unwrap().spec.exclude,
+        ["hfp-raw", "bbsk/roads"]
+    );
+    for bad in ["[hfp-raw, hfp-raw]", "[Hfp]", "[a/b/c]"] {
+        let yaml = bare_with(&format!("  select: {{}}\n  exclude: {bad}\n"));
+        assert_eq!(refused(deployment(&yaml)), "exclude", "{bad}");
+    }
+    let many: Vec<String> = (0..51).map(|i| format!("e{i}")).collect();
+    let yaml = bare_with(&format!(
+        "  select: {{}}\n  exclude: [{}]\n",
+        many.join(", ")
+    ));
+    assert_eq!(refused(deployment(&yaml)), "exclude");
+}
+
+/// MF-60: categories are EU data-theme codes, each once, on a deployment and on a source; an
+/// unknown key is refused with the codes it accepts.
+#[test]
+fn categories_are_eu_data_theme_codes() {
+    let parsed = deployment(&deployment_with(
+        "  languages: [sk, en]\n",
+        "  languages: [sk, en]\n  categories: [TRAN, ENVI]\n",
+    ))
+    .expect("categories");
+    assert_eq!(parsed.spec.categories.len(), 2);
+    let unknown = refused(deployment(&deployment_with(
+        "  languages: [sk, en]\n",
+        "  languages: [sk, en]\n  categories: [SPACE]\n",
+    )));
+    assert!(
+        unknown.contains("unknown variant `SPACE`") && unknown.contains("TRAN"),
+        "{unknown}"
+    );
+    let twice = deployment_with(
+        "  languages: [sk, en]\n",
+        "  languages: [sk, en]\n  categories: [TRAN, TRAN]\n",
+    );
+    assert_eq!(refused(deployment(&twice)), "categories");
+    let source_yaml = source_with(
+        "  visibility: public",
+        "  visibility: public\n  categories: [EDUC]",
+    );
+    assert_eq!(
+        source(&source_yaml).expect("source").spec.categories.len(),
+        1
+    );
+    let bad_source = source_with(
+        "  visibility: public",
+        "  visibility: public\n  categories: [EDUC, EDUC]",
+    );
+    assert_eq!(refused(source(&bad_source)), "categories");
+}
