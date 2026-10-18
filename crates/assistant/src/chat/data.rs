@@ -21,27 +21,38 @@ use super::model::{Call, CallError};
 /// The most of one tool result the model reads in the loop: ten of them stay within a prompt.
 const STEP_RESULT_CHARS: usize = 8_000;
 
-/// The most tokens one question's calls may take before the loop answers from what it has
-/// (T-4660, T-4651): each step sends its earlier results again, so a long loop, not the
-/// conversation, is what spends a share.
+/// The tokens one question's loop may spend before its next call must be the answer (T-4651).
+/// ponytail: one number for every deployment; an `answer` field when one needs another.
 pub const QUESTION_TOKENS: u64 = 60_000;
 
-/// Whether one more call keeps the question within its tokens: what it spent and the call's
-/// estimate.
-pub fn within_question(spent: u64, estimate: u64) -> bool {
-    spent + estimate <= QUESTION_TOKENS
-}
-
 /// What the answering model is told beside the routed answer's rules: when to call a tool, how
-/// NGSI-LD is asked, and that every number comes from a result. Fixed, so it is cached.
-pub const DATA_RULES: &str = "\n\nYou may read more live data before you answer, with the tools you are given. Call a tool only when the data tables you have do not answer the question; when they do, answer at once without a tool.\n\
-- At most 10 tool calls per question in all. Each result comes back as JSON with its number `n`: cite it like a table, [n].\n\
+/// NGSI-LD is asked, and that every number comes from a result. `{steps}` is the deployment's
+/// `answer.maxDataSteps` (T-4651), so the text is the same for every question of a deployment
+/// and stays cached.
+const DATA_RULES: &str = "\n\nYou may read more live data before you answer, with the tools you are given. Call a tool only when the data tables you have do not answer the question; when they do, answer at once without a tool.\n\
+- At most {steps} tool calls per question in all; before each call you are told how many are left. Each result comes back as JSON with its number `n`: cite it like a table, [n].\n\
 - Every number in your answer comes from a table or a tool result you were given, with its [n]. For \"how many\" ask with `count: true` and give `total`.\n\
 - query_entities takes `type` (a list), `q` (conditions joined with `;` for AND and `|` for OR; == != > >= < <= ~= for a regular expression; a member of a structured value as `address[addressLocality]==\"X\"`), `idPattern` (a regular expression over ids), `georel` (`near;maxDistance==1000`) with `geometry` and `coordinates` (longitude first), `limit` and `count`.\n\
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
 - A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
 - get_type, list_attributes and describe_schema tell you a type's attributes when you do not know which one holds what you need.\n\
 - When a tool refuses, correct the arguments once; when it still refuses, answer from what you have and say which data you could not find.";
+
+/// The data rules for a deployment whose loop ends after `steps` tool calls.
+pub fn data_rules(steps: usize) -> String {
+    DATA_RULES.replace("{steps}", &steps.to_string())
+}
+
+/// What the model reads before each call while it may still call a tool (T-4651): what is left
+/// of its steps and seconds, and to prepare the answer when little is. A message of the loop,
+/// never an event, so the visitor never sees it.
+pub fn budget(left: usize, most: usize, secs: u64) -> String {
+    let mut line = format!("Budget: {left} of {most} tool steps and {secs} s left.");
+    if left <= 2 || secs < 5 {
+        line.push_str(" Prepare the final answer now; call a tool only if the answer is impossible without it.");
+    }
+    line
+}
 
 /// What the last call is told when a bound is reached.
 const ANSWER_NOW: &str = "No more tool calls: answer the question now from the tables and tool results above, citing them as [n]. Say plainly which data you could not find.";
@@ -115,17 +126,6 @@ fn stage_of(tool: &str, endpoint: &str, arguments: &Value) -> (&'static str, Opt
     }
 }
 
-/// One call's tokens as the loop counts them before it: its messages a token per four
-/// characters, and the most it may write.
-fn estimate(messages: &[Value], output: u64) -> u64 {
-    (messages
-        .iter()
-        .map(|m| m.to_string().chars().count())
-        .sum::<usize>()
-        / 4) as u64
-        + output
-}
-
 /// Whether the loop may still call a tool: steps left of `most` and time left of `time`.
 pub fn may_call(steps: usize, elapsed: Duration, most: usize, time: Duration) -> bool {
     steps < most && elapsed < time
@@ -173,17 +173,26 @@ pub async fn answer(
         if events.is_closed() {
             return None;
         }
+        let estimate = (messages
+            .iter()
+            .map(|m| m.to_string().chars().count())
+            .sum::<usize>()
+            / 4) as u64
+            + ask.output_tokens;
         let allow = !tools.is_empty()
             && !forced
             && may_call(steps, started.elapsed(), ask.data_steps, ask.data_time)
-            && within_question(spent.total, estimate(&messages, ask.output_tokens));
+            && spent.total + estimate <= QUESTION_TOKENS;
         if !allow && !tools.is_empty() && !forced {
             // `tool_choice: none` alone is not obeyed (T-3205): the last call is told as well.
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
             forced = true;
+        } else if allow {
+            let secs = ask.data_time.saturating_sub(started.elapsed()).as_secs();
+            let left = ask.data_steps.saturating_sub(steps);
+            messages.push(json!({"role": "user", "content": budget(left, ask.data_steps, secs)}));
         }
-        let next = estimate(&messages, ask.output_tokens);
-        if ask.spent_before + spent.total + next > ask.tokens_per_conversation {
+        if ask.spent_before + spent.total + estimate > ask.tokens_per_conversation {
             send(
                 events,
                 Event::Error {
@@ -255,7 +264,9 @@ pub async fn answer(
             let used = markers(&text);
             citations.retain(|c| used.contains(&c.n));
             name_sources(ask, &mut citations).await;
-            tracing::info!(deployment = %ask.deployment, steps, calls = spent.calls, ms = started.elapsed().as_millis() as u64, cited = citations.len(), "data loop answered");
+            // Whether the model stopped early or ran into the cap (T-4651).
+            let steps_left_at_answer = ask.data_steps.saturating_sub(steps);
+            tracing::info!(deployment = %ask.deployment, steps, steps_left_at_answer, calls = spent.calls, tokens = spent.total, reasoning = spent.reasoning.answer.unwrap_or_default(), ms = started.elapsed().as_millis() as u64, cited = citations.len(), "data loop answered");
             return Some((text, citations));
         }
         let calls: Vec<Value> = completion
@@ -372,16 +383,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_question_answers_from_what_it_has_past_its_tokens_and_never_points_to_the_api() {
-        // T-4660: the cap is per question, so the loop answers instead of spending the
-        // conversation's share.
-        assert!(within_question(0, QUESTION_TOKENS));
-        assert!(within_question(40_000, 20_000));
-        assert!(!within_question(40_000, 20_001));
-        let messages = vec![json!({"role": "user", "content": "x".repeat(4_000)})];
-        // The JSON of the message, a token per four characters, and the most it may write.
-        let chars = messages[0].to_string().chars().count() as u64;
-        assert_eq!(estimate(&messages, 1_000), chars / 4 + 1_000);
+    fn a_history_question_is_answered_with_values_and_never_points_to_the_api() {
         // A history question gets the values, or one sentence when they cannot be read.
         assert!(DATA_RULES.contains(
             "call query_temporal for the entities the tables and the earlier turns name"
@@ -420,6 +422,30 @@ mod tests {
             "raised"
         );
         assert!(!may_call(25, Duration::ZERO, 25, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn the_rules_name_the_deployments_steps_and_the_budget_counts_down() {
+        let rules = data_rules(4);
+        assert!(rules.contains("At most 4 tool calls"), "{rules}");
+        assert!(!rules.contains("{steps}") && !rules.contains("10 tool calls"));
+        let most = 6;
+        for k in 0..most {
+            let line = budget(most - k, most, 18);
+            assert!(line.starts_with(&format!(
+                "Budget: {} of 6 tool steps and 18 s left.",
+                most - k
+            )));
+            assert_eq!(
+                line.contains("Prepare the final answer now"),
+                most - k <= 2,
+                "step {k}: {line}"
+            );
+        }
+        assert!(
+            budget(5, 6, 4).contains("Prepare the final answer now"),
+            "under 5 s left"
+        );
     }
 
     #[test]

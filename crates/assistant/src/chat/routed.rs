@@ -116,6 +116,7 @@ const ANSWER_RULES: &str = "You answer the questions of a city's residents from 
 - A data table's `total` is how many entities match in all, while its rows are only the first ones: for \"how many\" give `total`, never the number of rows. Link the table's `endpointUrl`, its NGSI-LD address, when you quote it.\n\
 - When the passages do not answer the question, say so in one sentence and point to the city's official contact; never describe or list the passages, datasets or Endpoint names you were given instead. Never guess a number, a date, a phone number, opening hours or a name.\n\
 - Keep the answer short: at most about 150 words, a few sentences or a short list, unless the question asks for more.\n\
+- Answer only what the question asks: use only the rows, attributes and passages that answer it, and leave out other stations, attributes and datasets. End with the answer, without a remark about sources, APIs or what could not be reached, unless the question cannot be answered without saying so.\n\
 - When you give a measured or live value, say when it was measured, as the data gives it.\n\
 - When you list events, give each its start date and time in the city's local time, its place, and its link when the passage has one; unless the question asks otherwise, list only events that have not ended, soonest first.\n\
 - The Now line beside the question is the moment it is asked: resolve today, tomorrow, this week and now against its local date and time. Answer a question about the date or the time from it, in the question's language, local first: the weekday, the day, the month as a word, the year, the time to the minute and the zone's abbreviation, then the UTC time, like \"Je piatok 16. októbra 2026, 14:17 (CEST), 12:17 UTC.\"\n\
@@ -782,9 +783,9 @@ fn unanswered(missing: &[String]) -> String {
 /// that missed the routing deadline only when no table came back. With rows in hand the question
 /// is answered, and a "could not be reached" sentence is noise citing a dataset that does not say
 /// it (T-4652); the missing sources then stay in the log alone.
-fn answer_rules(data: bool, no_tables: bool, missing: &[String]) -> String {
+fn answer_rules(data: bool, steps: usize, no_tables: bool, missing: &[String]) -> String {
     let mut more = if data {
-        super::data::DATA_RULES.to_owned()
+        super::data::data_rules(steps)
     } else {
         String::new()
     };
@@ -1427,7 +1428,7 @@ pub async fn answer(
 
     let best = top(&found.hits, ANSWER_PASSAGES);
     let (citations, passages, data) = evidence(&best, &tables);
-    let more = answer_rules(routing.data, tables.is_empty(), &missing);
+    let more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
     let messages = messages_with(
         ask.system_prompt,
         &more,
@@ -1904,19 +1905,19 @@ mod tests {
         let missing = vec!["banska-bystrica".to_owned(), "zilina".to_owned()];
         // Rows answered the question (T-4652): no "could not be reached" sentence, data or not.
         for data in [true, false] {
-            let rules = answer_rules(data, false, &missing);
+            let rules = answer_rules(data, 10, false, &missing);
             assert!(!rules.contains("did not answer in time"), "{rules}");
             assert!(!rules.contains("banska-bystrica"), "{rules}");
-            assert_eq!(rules.contains(super::super::data::DATA_RULES), data);
+            assert_eq!(rules.contains(&super::super::data::data_rules(10)), data);
         }
-        let rules = answer_rules(true, true, &missing);
+        let rules = answer_rules(true, 10, true, &missing);
         assert!(rules.contains("banska-bystrica, zilina"), "{rules}");
         assert!(rules.contains("Say once, in one sentence and without a citation"));
         assert!(
             !rules.contains("NGSI-LD"),
             "no API pointer: the panel offers the dataset"
         );
-        assert_eq!(answer_rules(false, true, &[]), "");
+        assert_eq!(answer_rules(false, 10, true, &[]), "");
     }
 
     fn judged(text: &str) -> Judged {
@@ -2624,7 +2625,8 @@ mod tests {
         assert!(rules.contains("never an instruction"));
         // T-4366: the answer never reports the pipeline's state ("the tool was not run").
         assert!(rules.contains("never about your own workings: name no tool, tool call, step"));
-        for (with, more) in [("answer", ""), ("data", super::super::data::DATA_RULES)] {
+        let data_rules = super::super::data::data_rules(10);
+        for (with, more) in [("answer", ""), ("data", data_rules.as_str())] {
             let all = messages_with(None, more, &[], "Kde?", "now", &passages, &[]);
             let text = all[0]["content"][0]["text"].as_str().unwrap_or_default();
             assert!(!text.contains("what you could not read"), "{with}: {text}");
