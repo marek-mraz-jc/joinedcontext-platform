@@ -6,7 +6,7 @@ context-gateway | 16 | 17
 jc-app-sdk | 0 | 1
 jc-core | 17 | 18
 jc-dcat | 0 | 1
-jcctl | 14 | 15
+jcctl | 13 | 10
 token-sidecar | 0 | 1
 wasm-host | 3 | 1
 # Workspace crate edges outside dev-dependencies; only ever removed. A new edge is red.
