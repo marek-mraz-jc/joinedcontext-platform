@@ -1755,10 +1755,14 @@ async fn ask(
             zone: clock::Zone::of(&deployment.spec.languages),
         };
         let started = Instant::now();
+        let so_far = Arc::new(std::sync::Mutex::new(Spent::default()));
         // A raised data loop keeps its answer call's time after its last tool (T-4294).
         let spent = match tokio::time::timeout(
             ANSWER_TIMEOUT.max(ask.data_time + DATA_ANSWER),
-            agent::answer(&ask, &question.history, &question.message, &tx),
+            agent::SPENT_SO_FAR.scope(
+                Arc::clone(&so_far),
+                agent::answer(&ask, &question.history, &question.message, &tx),
+            ),
         )
         .await
         {
@@ -1773,9 +1777,10 @@ async fn ask(
                                 .into(),
                     })
                     .await;
-                // ponytail: the calls of a cut answer count no tokens; a usage counter shared
-                // with the loop when the cap must hold to the last cent.
-                Spent::default()
+                // The calls made before the cut, so the day's cost and the timings hold them.
+                let spent = so_far.lock().map(|s| s.clone()).unwrap_or_default();
+                tracing::warn!(deployment = %name, model_calls = spent.calls, "the answer was cut at the outer timeout");
+                spent
             }
         };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

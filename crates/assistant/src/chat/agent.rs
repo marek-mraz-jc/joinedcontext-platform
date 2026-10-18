@@ -369,6 +369,13 @@ pub(super) async fn send(events: &Sender<Event>, event: Event) {
     let _ = events.send(event).await;
 }
 
+tokio::task_local! {
+    /// Every model call of the question running in this task, counted as [`Spent::add`] counts
+    /// it, so an answer cut at the outer timeout still records its calls, tokens and cost
+    /// (T-4663: 45 s of work was recorded as no call at all).
+    pub static SPENT_SO_FAR: std::sync::Arc<std::sync::Mutex<Spent>>;
+}
+
 /// What one question spent, read and written, as the provider counted it, and what the final
 /// `done` event reports beside it (API/05 §1.3).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -504,6 +511,16 @@ impl Stages {
 impl Spent {
     /// Counts one model call: its tokens, and its cost when the provider reported one.
     pub fn add(&mut self, completion: &Completion) {
+        self.count(completion);
+        // Outside a question's scope there is nothing to mirror.
+        let _ = SPENT_SO_FAR.try_with(|so_far| {
+            if let Ok(mut so_far) = so_far.lock() {
+                so_far.count(completion);
+            }
+        });
+    }
+
+    fn count(&mut self, completion: &Completion) {
         self.total += completion.tokens;
         self.input += completion.input;
         self.output += completion.output;
@@ -1011,6 +1028,44 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<(String, String)>, cra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4663: the calls of a question are mirrored where the cut answer reads them, from every
+    /// `Spent` of the question; outside a question nothing is mirrored and nothing fails.
+    #[tokio::test]
+    async fn a_questions_calls_are_counted_where_a_cut_answer_reads_them() {
+        let completion = super::super::model::Completion {
+            text: String::new(),
+            calls: Vec::new(),
+            tokens: 120,
+            input: 100,
+            output: 20,
+            cost_micros: Some(300),
+            provider: None,
+            reasoning: None,
+            finish: None,
+        };
+        Spent::default().add(&completion);
+        let so_far = std::sync::Arc::new(std::sync::Mutex::new(Spent::default()));
+        SPENT_SO_FAR
+            .scope(std::sync::Arc::clone(&so_far), async {
+                let (mut router, mut answer) = (Spent::default(), Spent::default());
+                router.add(&completion);
+                answer.add(&completion);
+                answer.add(&completion);
+            })
+            .await;
+        let counted = so_far.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(
+            (
+                counted.calls,
+                counted.total,
+                counted.input,
+                counted.output,
+                counted.cost_micros
+            ),
+            (3, 360, 300, 60, 900)
+        );
+    }
     use crate::chat::clock::{now_line, Zone};
     use time::macros::datetime;
 

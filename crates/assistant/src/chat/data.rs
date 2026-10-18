@@ -279,8 +279,16 @@ pub async fn answer(
                 match seen.get(&key) {
                     Some(earlier) => earlier.clone(),
                     None => {
-                        let content =
-                            step(ask, &offered, name, arguments, &mut citations, events).await;
+                        let left = ask.data_time.saturating_sub(started.elapsed());
+                        let content = step(
+                            ask,
+                            &offered,
+                            (name, arguments),
+                            left,
+                            &mut citations,
+                            events,
+                        )
+                        .await;
                         seen.insert(key, content.clone());
                         content
                     }
@@ -292,12 +300,15 @@ pub async fn answer(
 }
 
 /// One tool call of the model: refused unless it names an offered tool with arguments its schema
-/// admits, else sent, shown as a stage and a `tool` event, and numbered for citing.
+/// admits, else sent, shown as a stage and a `tool` event, and numbered for citing. It waits at
+/// most `left` of the question's data seconds: up to four calls of one reply run one after the
+/// other, and each waiting out its connector's own timeout took a question to the 45 s cut
+/// (T-4663).
 async fn step(
     ask: &Ask<'_>,
     offered: &[Offered<'_>],
-    name: &str,
-    arguments: &str,
+    (name, arguments): (&str, &str),
+    left: Duration,
     citations: &mut Vec<Citation>,
     events: &Sender<Event>,
 ) -> String {
@@ -324,11 +335,14 @@ async fn step(
     };
     send(events, tool("started")).await;
     let began = Instant::now();
-    let answered = o
-        .connector
-        .surface
-        .call(ask.http, &o.tool.name, arguments.clone())
-        .await;
+    let answered = tokio::time::timeout(
+        left,
+        o.connector
+            .surface
+            .call(ask.http, &o.tool.name, arguments.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| Err("the source did not answer within the question's time".into()));
     let ms = began.elapsed().as_millis() as u64;
     match answered {
         Ok(text) => {
