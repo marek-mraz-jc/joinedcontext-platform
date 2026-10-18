@@ -1,7 +1,8 @@
 //! An assistant's own MCP server, `/api/mcp/d/{publicId}` (T-4691, MF-52): exactly its
 //! connectors' Endpoints and the reach of the named server it reads, `search_documents` only
 //! when it has knowledge sources, read-only for every caller, and a public deployment never
-//! serving an internal Endpoint. A publicId declared twice is nobody's.
+//! serving an internal Endpoint. A publicId declared twice is nobody's. Every list is the one
+//! resolver's (`jc_core::reach::resolve_connectors`, AG-121).
 
 mod common;
 
@@ -26,9 +27,11 @@ const BIKES: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
 const STAFF: &str = "cccccccccccccccccccccccccc";
 /// Public, and no connector of any deployment.
 const OUTSIDE: &str = "dddddddddddddddddddddddddd";
+/// Public and tagged TRAN, as is BIKES.
+const PARKING: &str = "eeeeeeeeeeeeeeeeeeeeeeeeee";
 
-/// The manifests: three Endpoints, a public deployment with two of them, the internal one and
-/// a web source; one without sources; an internal one; a disabled one.
+/// The manifests: four Endpoints, a public deployment with two of them, the internal one and
+/// a web source; one without sources; one by selector; an internal one; a disabled one.
 fn repository() -> std::path::PathBuf {
     let endpoint = |name: &str, slug: &str, audience: &str| {
         format!(
@@ -37,6 +40,8 @@ fn repository() -> std::path::PathBuf {
              audience: {audience}\n  enabledRepresentations: [\"ngsi-ld\", \"mcp\"]\n"
         )
     };
+    let transport =
+        |name: &str, slug: &str| endpoint(name, slug, "public") + "  catalog: { themes: [TRAN] }\n";
     let deployment = |name: &str, extra: &str| {
         format!(
             "apiVersion: joinedcontext.com/v1alpha1\nkind: AssistantDeployment\nmetadata:\n  \
@@ -64,7 +69,8 @@ fn repository() -> std::path::PathBuf {
                 .to_owned(),
         ),
         ("air.yaml", endpoint("air", AIR, "public")),
-        ("bikes.yaml", endpoint("bikes", BIKES, "public")),
+        ("bikes.yaml", transport("bikes", BIKES)),
+        ("parking.yaml", transport("parking", PARKING)),
         ("staff.yaml", endpoint("staff", STAFF, "organization")),
         (
             "data.yaml",
@@ -78,6 +84,13 @@ fn repository() -> std::path::PathBuf {
             deployment(
                 "plain",
                 "  channel: public\n  connectors:\n    - { endpoint: air, tools: [query_entities] }\n",
+            ),
+        ),
+        (
+            "transport.yaml",
+            deployment(
+                "transport",
+                "  channel: public\n  select: { themes: [TRAN] }\n  exclude: [bikes]\n",
             ),
         ),
         (
@@ -123,16 +136,16 @@ fn the_store_serves_each_enabled_deployment_with_its_connectors_and_sources() {
         [
             "/api/mcp/d/bbsk-data",
             "/api/mcp/d/bbsk-internal",
-            "/api/mcp/d/bbsk-plain"
+            "/api/mcp/d/bbsk-plain",
+            "/api/mcp/d/bbsk-transport"
         ],
         "a disabled deployment serves no MCP, nor a publicId two deployments declare"
     );
     let data = &servers[0];
-    let mut members = vec![AIR, BIKES, STAFF];
-    members.sort_unstable();
     assert_eq!(
-        data.members, members,
-        "the connector naming no Endpoint is left out"
+        data.members,
+        [AIR, BIKES],
+        "a public deployment resolves no internal connector, and one naming no Endpoint is left out"
     );
     assert_eq!(data.audience, Audience::Public);
     assert_eq!(data.title.as_deref(), Some("Dáta kraja"));
@@ -141,7 +154,17 @@ fn the_store_serves_each_enabled_deployment_with_its_connectors_and_sources() {
         [("bbsk".to_owned(), "web".to_owned())]
     );
     assert_eq!(servers[1].audience, Audience::Organization);
+    assert_eq!(
+        servers[1].members,
+        [STAFF],
+        "internal resolves its own project's every audience"
+    );
     assert!(servers[2].knowledge_sources.is_empty());
+    assert_eq!(
+        servers[3].members,
+        [PARKING],
+        "the selector's TRAN Endpoints, the excluded one never"
+    );
 }
 
 /// A stand-in `jc-assistant` answering the sources summary and one search hit.

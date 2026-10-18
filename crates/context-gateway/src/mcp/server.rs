@@ -165,7 +165,7 @@ impl McpServer {
 /// What a selector reads of `endpoint` (MF-55, MF-61): its types, their classification, and its
 /// themes, a theme set by hand winning over the derived one as on the DCAT record (T-4498). The
 /// table holds no manifest name, so the slug stands in; matching never reads it.
-fn facts(endpoint: &Endpoint) -> EndpointFacts {
+pub(crate) fn facts(endpoint: &Endpoint) -> EndpointFacts {
     let classified = crate::handlers::endpoint_surface::classification(endpoint);
     let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
         Some(catalog) => catalog.themes.iter().copied().collect(),

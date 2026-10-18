@@ -15,13 +15,13 @@ use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::units::UnitRules;
 use crate::view_mapping::ViewMapping;
-use jc_core::kinds::assistant::connector_target;
-use jc_core::kinds::mcp_server::knowledge_source_id;
+use jc_core::kinds::mcp_server::{knowledge_source_id, Select};
 use jc_core::kinds::{
     AssistantDeploymentSpec, Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec,
     EndpointSpec, MappingSpec, McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind,
     ProjectSpec, Representation,
 };
+use jc_core::reach::{resolve_connectors, EndpointFacts};
 use jc_core::Urn;
 use jc_manifest::loader::{RawManifest, Repository};
 use jc_manifest::model_schema::ModelSchema;
@@ -326,6 +326,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
     let endpoints = endpoints_from(repo, Some(root), &models);
     let homes = brokers_of(repo, &endpoints);
     let mappings = mappings_of(repo, Some(root), &endpoints);
+    let servers = servers_of(repo, &endpoints);
     (
         endpoints,
         spaces_from(repo, &models),
@@ -333,7 +334,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         federations_of(repo),
         agreements_of(repo),
         limits_of(repo),
-        servers_of(repo),
+        servers,
         homes,
         crate::mqtt::brokers_of(repo),
         mappings,
@@ -344,7 +345,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
 /// The named MCP servers the repository declares, each member resolved to its Endpoint's slug
 /// (ADR-N-043). A member that names no Endpoint here is left out with a line in the log; a
 /// server keeps serving the members that remain, which `jcctl validate` refuses before merge.
-pub fn servers_of(repo: &Repository) -> McpServers {
+pub fn servers_of(repo: &Repository, endpoints: &[Endpoint]) -> McpServers {
     let slugs: BTreeMap<(String, String), String> = repo
         .iter()
         .filter(|(id, _)| id.kind == "Endpoint")
@@ -397,7 +398,7 @@ pub fn servers_of(repo: &Repository) -> McpServers {
             project,
         });
     }
-    let mut deployments = deployment_servers(repo, &slugs, &servers);
+    let mut deployments = deployment_servers(repo, &slugs, endpoints);
     // A publicId two deployments declare is nobody's: both answer as an unknown server (EP-137).
     let twice: BTreeSet<String> = deployments
         .iter()
@@ -414,14 +415,46 @@ pub fn servers_of(repo: &Repository) -> McpServers {
 }
 
 /// Every enabled AssistantDeployment as its own read-only server, `/api/mcp/d/{publicId}`
-/// (T-4691): its connectors' Endpoints as members, plus the members and selector of the named
-/// server it reads, and its knowledge sources. A public channel serves only public Endpoints
-/// (`serve` drops a narrower member); `internal` asks for an organization token.
+/// (T-4691, EP-136): its Endpoints exactly as the one resolver gives them (connectors ∪ select ∪
+/// the named server it reads, − exclude, inside the project's reach, AG-121) and its knowledge
+/// sources. An anonymous channel resolves public Endpoints alone, and `serve` drops a narrower
+/// member again; `internal` asks for an organization token.
 fn deployment_servers(
     repo: &Repository,
     slugs: &BTreeMap<(String, String), String>,
-    named: &[McpServer],
+    endpoints: &[Endpoint],
 ) -> McpServers {
+    let names: BTreeMap<&str, &(String, String)> =
+        slugs.iter().map(|(id, slug)| (slug.as_str(), id)).collect();
+    let facts: Vec<EndpointFacts> = endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let (_, name) = names.get(endpoint.slug.as_str())?;
+            Some(EndpointFacts {
+                name: name.clone(),
+                ..crate::mcp::server::facts(endpoint)
+            })
+        })
+        .collect();
+    let named: BTreeMap<(String, String), McpServerSpec> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "McpServer")
+        .filter_map(|(id, resource)| {
+            let spec = spec_of::<McpServerSpec>(&resource.manifest)?;
+            Some((
+                (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                spec,
+            ))
+        })
+        .collect();
+    // `org/all` has no manifest until the organization declares one (EP-122).
+    let org_all = McpServerSpec {
+        members: Vec::new(),
+        select: Some(Select::default()),
+        audience: Audience::Organization,
+        allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
+    };
     let mut servers = Vec::new();
     for (id, resource) in repo.iter() {
         if id.kind != "AssistantDeployment" {
@@ -438,43 +471,25 @@ fn deployment_servers(
             continue;
         }
         let project = id.namespace.clone().unwrap_or_default();
-        let mut members: Vec<String> = spec
-            .connectors
-            .iter()
-            .filter_map(|connector| {
-                let (namespace, name) = connector_target(&connector.endpoint);
-                let key = (namespace.unwrap_or(&project).to_owned(), name.to_owned());
-                let slug = slugs.get(&key);
-                if slug.is_none() {
-                    tracing::warn!(deployment = %id.name, endpoint = %connector.endpoint, "the connector names no Endpoint and is left out");
-                }
-                slug.cloned()
-            })
-            .collect();
-        let mut select = None;
-        if let Some(reads) = &spec.mcp_server {
-            let (server_project, server_name) = reads.split_once('/').unwrap_or_default();
-            let read = named
-                .iter()
-                .find(|s| s.project == server_project && s.name == server_name)
-                .cloned()
+        let server = spec.mcp_server.as_deref().and_then(|reads| {
+            let (namespace, name) = reads.split_once('/')?;
+            let found = named
+                .get(&(namespace.to_owned(), name.to_owned()))
                 .or_else(|| {
-                    (server_project == jc_core::envelope::ORG_NAMESPACE
-                        && server_name == crate::mcp::server::ORG_ALL)
-                        .then(McpServer::org_all)
+                    (namespace == jc_core::envelope::ORG_NAMESPACE
+                        && name == crate::mcp::server::ORG_ALL)
+                        .then_some(&org_all)
                 });
-            match read {
-                Some(read) => {
-                    members.extend(read.members);
-                    select = read.select;
-                }
-                None => {
-                    tracing::warn!(deployment = %id.name, server = %reads, "the McpServer it reads is not served")
-                }
+            if found.is_none() {
+                tracing::warn!(deployment = %id.name, server = %reads, "the McpServer it reads is not declared");
             }
+            Some((namespace, found?))
+        });
+        let resolution = resolve_connectors(&project, &spec, &facts, server);
+        if !resolution.omitted.is_empty() {
+            tracing::warn!(deployment = %id.name, omitted = resolution.omitted.len(), "the deployment resolves more Endpoints than it may read; the first by slug are served");
         }
-        members.sort();
-        members.dedup();
+        let members = resolution.endpoints.into_iter().map(|e| e.slug).collect();
         // The chat's title when the manifest has none; never the system prompt, which stays
         // the assistant's own.
         let title = manifest_text(&resource.manifest, "title").or_else(|| {
@@ -487,7 +502,7 @@ fn deployment_servers(
             title,
             description: manifest_text(&resource.manifest, "description"),
             members,
-            select,
+            select: None,
             endpoints: None,
             audience: if spec.channel.is_anonymous() {
                 Audience::Public
