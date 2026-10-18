@@ -1163,5 +1163,9 @@ async fn a_held_list_expires_and_an_unreadable_portal_is_a_503() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{problem}");
+    assert_eq!(
+        problem["type"], "https://joinedcontext.com/errors/service-unavailable",
+        "a catalogued type (API/00 §4)"
+    );
     assert_eq!(portal.calls.load(Ordering::SeqCst), 2);
 }

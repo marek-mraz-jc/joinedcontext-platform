@@ -217,7 +217,7 @@ pub async fn message(gateway: Arc<Gateway>, name: String, request: Request) -> R
         Ok(connectors) => connectors,
         Err(why) => {
             tracing::warn!(%why, "a person's connectors could not be read from the Portal");
-            return ProblemDetails::new(503, "unavailable", "Service Unavailable")
+            return ProblemDetails::new(503, "service-unavailable", "Service Unavailable")
                 .with_detail("your connectors cannot be read right now; try again in a minute")
                 .into_response();
         }
