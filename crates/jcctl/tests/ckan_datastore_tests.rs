@@ -7,8 +7,8 @@
 use jc_core::kinds::ckan::CkanPublication;
 use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan};
 use jcctl::publish::ckan_datastore::{
-    drop_table, ensure, ensure_view, fields, mirrored, records, sync, table, touched, MirrorError,
-    Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY, UPSERT_BATCH,
+    drop_table, ensure, ensure_view, fields, importance, mirrored, records, sync, table,
+    table_fields, touched, MirrorError, Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY, UPSERT_BATCH,
 };
 use serde_json::{json, Value};
 
@@ -984,4 +984,132 @@ fn a_notification_updates_rows_and_metadata_modified() {
     )
     .expect("empty");
     assert_eq!(modified(&ckan), after);
+}
+
+fn labelled(columns: &[(&str, &str)]) -> Vec<Value> {
+    columns
+        .iter()
+        .map(|(id, label)| json!({ "id": id, "type": "text", "info": { "label": label } }))
+        .collect()
+}
+
+/// T-4661: CKAN only appends a field and keeps the label it was first given, so a table whose
+/// columns stand in another order, carry another label, or would get a new field before one it
+/// holds is built again; a field appended after the rest extends it, and a field the answer
+/// lacks stays.
+#[test]
+fn a_table_in_another_order_or_with_other_labels_is_built_again() {
+    let first = labelled(&[("name", "Názov"), ("url", "Odkaz"), ("entity_id", "Id")]);
+    let cases: [(&str, Vec<Value>, Outcome); 5] = [
+        (
+            "reordered",
+            labelled(&[("url", "Odkaz"), ("name", "Názov"), ("entity_id", "Id")]),
+            Outcome::Created,
+        ),
+        (
+            "relabelled",
+            labelled(&[("name", "Name"), ("url", "Odkaz"), ("entity_id", "Id")]),
+            Outcome::Created,
+        ),
+        (
+            "inserted",
+            labelled(&[
+                ("name", "Názov"),
+                ("start", "Začiatok"),
+                ("url", "Odkaz"),
+                ("entity_id", "Id"),
+            ]),
+            Outcome::Created,
+        ),
+        (
+            "appended",
+            labelled(&[
+                ("name", "Názov"),
+                ("url", "Odkaz"),
+                ("entity_id", "Id"),
+                ("x", "X"),
+            ]),
+            Outcome::Extended,
+        ),
+        (
+            "a field lacking",
+            labelled(&[("name", "Názov"), ("entity_id", "Id")]),
+            Outcome::Unchanged,
+        ),
+    ];
+    for (case, second, expected) in cases {
+        let mut ckan = InMemoryCkan::new();
+        let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &first).expect("created");
+        let (_, outcome) = ensure(&mut ckan, PACKAGE, TABLE, &second).expect("ensured");
+        assert_eq!(outcome, expected, "{case}");
+        let held = ckan.table_fields(&resource).expect("the table");
+        if expected == Outcome::Created {
+            assert_eq!(held, second.as_slice(), "{case}");
+        }
+        let (_, again) = ensure(&mut ckan, PACKAGE, TABLE, &second).expect("again");
+        assert_eq!(again, Outcome::Unchanged, "{case} converges");
+    }
+}
+
+#[test]
+fn a_tables_fields_carry_a_readable_label_and_read_in_importance_order() {
+    let columns: Vec<String> = [
+        "id",
+        "location.value.coordinates[0]",
+        "url.value",
+        "startDate.value",
+        "eventCategory.value",
+        "name.languageMap.sk",
+        "price.value",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let fields = table_fields(&columns, None, "sk", |index| {
+        Some(if index == 6 { "float8" } else { "text" }.to_owned())
+    });
+    let labels: Vec<&str> = fields
+        .iter()
+        .map(|f| f["info"]["label"].as_str().expect("a label"))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Identifikátor",
+            "Zemepisná dĺžka",
+            "Odkaz",
+            "Začiatok",
+            "Kategória",
+            "Názov",
+            "Price"
+        ]
+    );
+    let order: Vec<&str> = importance(&fields)
+        .into_iter()
+        .map(|i| fields[i]["id"].as_str().expect("an id"))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "name.languageMap.sk",
+            "startDate.value",
+            "price.value",
+            "eventCategory.value",
+            "url.value",
+            "location.value.coordinates[0]",
+            PRIMARY_KEY,
+        ]
+    );
+}
+
+#[test]
+fn a_label_is_text_and_a_declared_description_stays_beside_it() {
+    let definition = schema()["definitions"]["AirQualityObserved"].clone();
+    let columns = vec!["temperature.value".to_owned(), "<b>x</b>".to_owned()];
+    let fields = table_fields(&columns, Some(&definition), "en", |_| None);
+    assert_eq!(
+        fields[0]["info"],
+        json!({ "label": "Temperature", "notes": "Air temperature." })
+    );
+    // The theme writes labels as text; the publisher passes a column name through as words.
+    assert_eq!(fields[1]["info"]["label"], json!("<b>x</b>"));
 }

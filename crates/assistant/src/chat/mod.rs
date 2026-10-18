@@ -1717,6 +1717,7 @@ async fn ask(
             trace: &trace,
         };
         let started = Instant::now();
+        let so_far = Arc::new(std::sync::Mutex::new(Spent::default()));
         // The answer's events pass through here on their way to the stream, so the transcript
         // keeps what the visitor saw (T-4670).
         let (inner, mut passing) = tokio::sync::mpsc::channel::<Event>(32);
@@ -1724,7 +1725,10 @@ async fn ask(
             // A raised data loop keeps its answer call's time after its last tool (T-4294).
             let answered = tokio::time::timeout(
                 ANSWER_TIMEOUT.max(ask.data_time + DATA_ANSWER),
-                agent::answer(&ask, &question.history, &question.message, &inner),
+                agent::SPENT_SO_FAR.scope(
+                    Arc::clone(&so_far),
+                    agent::answer(&ask, &question.history, &question.message, &inner),
+                ),
             )
             .await;
             drop(inner);
@@ -1754,10 +1758,10 @@ async fn ask(
                 };
                 seen.see(&cut);
                 let _ = tx.send(cut).await;
-                // ponytail: the calls of a cut answer count no tokens; a usage counter shared
-                // with the loop when the cap must hold to the last cent. The transcript keeps
-                // the steps and prices the trace reached.
-                Spent::default()
+                // The calls made before the cut, so the day's cost and the timings hold them.
+                let spent = so_far.lock().map(|s| s.clone()).unwrap_or_default();
+                tracing::warn!(deployment = %name, model_calls = spent.calls, "the answer was cut at the outer timeout");
+                spent
             }
         };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
