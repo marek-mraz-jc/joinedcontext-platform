@@ -461,9 +461,9 @@ pub fn rows(target: &Target, settings: &Settings) -> Result<Option<Rows>, Error>
 
 /// The file the mirror's rows are read from.
 ///
-/// Only `csv` is read: `xlsx` is a binary the gateway builds for a spreadsheet, and the
-/// JSON file is not a tabular projection. The manifest validator admits all three, so
-/// this is where the other two are refused, with the fix named.
+/// Only `file.csv` is read, the one file an Endpoint serves since T-4597. The manifest
+/// validator refuses any other datastore representation already; a manifest that reaches
+/// here without it is refused again, with the fix named.
 fn representation_file(
     representation: Representation,
 ) -> Result<(&'static str, &'static str), Error> {

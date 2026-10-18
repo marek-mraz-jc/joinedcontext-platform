@@ -1,5 +1,3 @@
-//! Turning the broker's NGSI-LD into the shapes an endpoint also serves (EP-05…EP-13).
+//! Turning the broker's NGSI-LD into the one file an endpoint serves, `file.csv` (EP-08, EP-44).
 
-pub mod geojson;
 pub mod tabular;
-pub mod zip_export;

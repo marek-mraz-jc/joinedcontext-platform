@@ -173,7 +173,7 @@ spec:
   audience: project-list
   allowedProjects: [regional-transport]
   projectionRef: { kind: ModelProjection, name: partner-view }
-  enabledRepresentations: [ngsi-ld, geojson]
+  enabledRepresentations: [ngsi-ld, csv]
 "#;
     let endpoint = Endpoint::from_yaml(yaml).expect("parses");
     endpoint.validate().expect("valid");

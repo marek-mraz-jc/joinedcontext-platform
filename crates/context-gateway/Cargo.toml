@@ -42,10 +42,6 @@ tracing = "0.1"
 jsonwebtoken = "9"
 # sha256 for the schema surface's strong ETags; jsonwebtoken already links it
 ring = "0.17"
-# xlsx is a zip of XML parts: the XML is written here, the container is not worth rewriting
-zip = { version = "9", default-features = false, features = ["deflate"] }
-# the parquet file is read back from memory, which the reader takes as `Bytes`
-bytes = "1"
 
 jsonschema = { version = "0.54", default-features = false }
 
@@ -66,7 +62,6 @@ metrics-exporter-prometheus = { version = "0.17", default-features = false }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 rustls-pki-types = "1"
-parquet = { version = "60.0.0", default-features = false }
 # a published Mapping's specification is served as YAML (EP-53); jc-manifest's loader links it already
 serde_norway = "0.9"
 
@@ -75,8 +70,6 @@ serde_norway = "0.9"
 jcctl = { path = "../jcctl", version = "0.1.0" }
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }
-# the workbook is read back part by part, so the test asserts a package rather than bytes
-zip = { version = "9", default-features = false, features = ["deflate"] }
 # `test-util` pauses the clock, so the reaper's five-second bound is measured
 # without a test that actually sleeps for five seconds.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

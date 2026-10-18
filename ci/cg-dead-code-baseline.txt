@@ -2,7 +2,7 @@
 # Each row's reason: docs/analysis/platform-dead-code.md.
 agent-proxy | 3
 assistant | 1
-context-gateway | 31
+context-gateway | 30
 jc-core | 46
 jc-manifest | 2
 jcctl | 29

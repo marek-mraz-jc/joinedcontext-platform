@@ -32,12 +32,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/mcp/p/n/.well-known/oauth-protected-resource"),
     ("POST", "/api/endpoint/s/access/check"),
     ("POST", "/api/endpoint/s/access/simulate"),
-    ("GET", "/api/endpoint/s/file.geojson"),
-    ("GET", "/api/endpoint/s/file.json"),
     ("GET", "/api/endpoint/s/file.csv"),
-    ("GET", "/api/endpoint/s/file.xlsx"),
-    ("GET", "/api/endpoint/s/file.parquet"),
-    ("GET", "/api/endpoint/s/file.zip"),
     ("GET", "/api/endpoint/s/ogc/features"),
     ("GET", "/api/endpoint/s/ogc/features/"),
     ("GET", "/api/endpoint/s/ogc/features/collections"),
@@ -55,7 +50,6 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/cs/sp/ngsi-ld/v1/entities"),
     ("POST", "/cs/sp/mcp"),
     ("GET", "/cs/sp/schema/index.json"),
-    ("GET", "/cs/sp/dump/"),
     ("GET", "/cs/sp/schema/1/model.json"),
     (
         "GET",
@@ -69,6 +63,16 @@ const ROUTES: &[(&str, &str)] = &[
     ("GET", "/healthz"),
     ("GET", "/livez"),
     ("GET", "/metrics"),
+];
+
+/// The files an endpoint stopped publishing (T-4597, API/02 §5): no handler serves them.
+const REMOVED: &[&str] = &[
+    "/api/endpoint/s/file.geojson",
+    "/api/endpoint/s/file.json",
+    "/api/endpoint/s/file.xlsx",
+    "/api/endpoint/s/file.parquet",
+    "/api/endpoint/s/file.zip",
+    "/cs/sp/dump/",
 ];
 
 fn app() -> Router {
@@ -106,4 +110,29 @@ async fn a_path_off_the_surface_reaches_the_fallback() {
         .expect("a request");
     let status = app().oneshot(request).await.expect("an answer").status();
     assert_eq!(status, UNROUTED);
+}
+
+/// T-4597: a removed file reaches no handler, and the gateway answers it with the `404` of any
+/// child an endpoint does not serve.
+#[tokio::test]
+async fn a_removed_file_is_routed_nowhere_and_answers_404() {
+    for path in REMOVED {
+        let request = || Request::builder().uri(*path).body(Body::empty());
+        let status = app()
+            .oneshot(request().expect("a request"))
+            .await
+            .expect("an answer")
+            .status();
+        assert_eq!(status, UNROUTED, "{path} still has a handler");
+        let served = router(Arc::new(Gateway::new(
+            Broker::new("http://127.0.0.1:1"),
+            Box::new(PolicyPdp),
+            "example.org",
+        )))
+        .oneshot(request().expect("a request"))
+        .await
+        .expect("an answer")
+        .status();
+        assert_eq!(served, StatusCode::NOT_FOUND, "{path}");
+    }
 }

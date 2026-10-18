@@ -41,7 +41,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         project: SPACE.to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit,
         creates: None,
         file_limits: None,

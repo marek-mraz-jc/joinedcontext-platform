@@ -3,7 +3,7 @@
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::header::ACCEPT;
-use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use jc_core::ProblemDetails;
 use serde_json::Value;
@@ -54,13 +54,6 @@ pub(crate) fn text_response(body: String, media_type: &'static str) -> Response<
         body,
     )
         .into_response()
-}
-
-/// The language the caller asked for, as they wrote it (EP-37, EP-45).
-pub(crate) fn accept_language(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(axum::http::header::ACCEPT_LANGUAGE)
-        .and_then(|value| value.to_str().ok())
 }
 
 /// The answer of a read-only representation to a method it does not have (EP-13, EP-39).

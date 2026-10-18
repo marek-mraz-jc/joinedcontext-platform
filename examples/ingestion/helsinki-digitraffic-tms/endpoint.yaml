@@ -12,7 +12,7 @@ spec:
   contextSpaceRef: { kind: ContextSpace, name: traffic }
   slug: vbsb5w7hk5hypmpum5obi3pcau
   audience: public
-  enabledRepresentations: [ngsi-ld, geojson, csv, mcp]
+  enabledRepresentations: [ngsi-ld, csv, mcp]
   publish:
     ckan:
       instanceRef: { kind: CkanInstance, name: open-data }

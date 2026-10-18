@@ -85,7 +85,6 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Csv,
             Representation::Sta,
         ],
@@ -133,26 +132,6 @@ async fn get(path: &str) -> (StatusCode, Vec<u8>) {
         .await
         .expect("a readable body");
     (status, body.to_vec())
-}
-
-#[tokio::test]
-async fn a_view_served_geojson_download_under_a_geojson_accept_holds_every_entity() {
-    for path in ["/file.geojson", "/file.geojson?type=GtfsStop"] {
-        let (status, body) = get(path).await;
-        let answer: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        assert_eq!(status, StatusCode::OK, "{path}: {answer}");
-        let ids: Vec<&str> = answer["features"]
-            .as_array()
-            .expect("features")
-            .iter()
-            .filter_map(|f| f["id"].as_str())
-            .collect();
-        assert_eq!(ids.len(), 3, "{path}: {answer}");
-        assert!(
-            ids.iter().all(|id| id.starts_with("urn:ngsi-ld:GtfsStop:")),
-            "{path}: {answer}"
-        );
-    }
 }
 
 #[tokio::test]

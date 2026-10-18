@@ -71,9 +71,8 @@ const CALLERS: [Caller; 5] = [
 /// member alone.
 #[derive(Debug, Clone, Copy)]
 enum Guard {
-    /// The Endpoint's data: refused to everyone but the granted member, who is served the secret
-    /// (`binary`: a compressed download, where it is not visible as text).
-    Data { binary: bool },
+    /// The Endpoint's data: refused to everyone but the granted member, who is served the secret.
+    Data,
     /// About the Endpoint: refused to nobody and the stranger; a member is not refused for
     /// lack of a login, though the broker's engine may refuse the ungranted one.
     Member,
@@ -89,7 +88,7 @@ enum Guard {
     Withheld(&'static str),
 }
 
-const DATA: Guard = Guard::Data { binary: false };
+const DATA: Guard = Guard::Data;
 
 struct Row {
     method: &'static str,
@@ -203,39 +202,9 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "GET",
-            "/api/endpoint/{slug}/file.geojson",
-            get(ep("/file.geojson")),
-            DATA,
-        ),
-        row(
-            "GET",
-            "/api/endpoint/{slug}/file.json",
-            get(ep("/file.json")),
-            DATA,
-        ),
-        row(
-            "GET",
             "/api/endpoint/{slug}/file.csv",
             get(ep("/file.csv")),
             DATA,
-        ),
-        row(
-            "GET",
-            "/api/endpoint/{slug}/file.xlsx",
-            get(ep("/file.xlsx")),
-            Data { binary: true },
-        ),
-        row(
-            "GET",
-            "/api/endpoint/{slug}/file.parquet",
-            get(ep("/file.parquet")),
-            Data { binary: true },
-        ),
-        row(
-            "GET",
-            "/api/endpoint/{slug}/file.zip",
-            get(ep("/file.zip")),
-            Data { binary: true },
         ),
         row(
             "ANY",
@@ -335,12 +304,6 @@ fn rows() -> Vec<Row> {
             "/cs/{space}/schema/index.json",
             get(cs("/schema/index.json")),
             Member,
-        ),
-        row(
-            "GET",
-            "/cs/{space}/dump/",
-            get(cs("/dump/")),
-            Data { binary: true },
         ),
         row(
             "GET",
@@ -494,12 +457,7 @@ fn endpoint(base_path: String) -> Endpoint {
         representations: vec![
             Representation::NgsiLd,
             Representation::Mcp,
-            Representation::GeoJson,
             Representation::Csv,
-            Representation::Xlsx,
-            Representation::Parquet,
-            Representation::Json,
-            Representation::Zip,
             Representation::OgcFeatures,
             Representation::Sta,
             Representation::Odata,
@@ -709,10 +667,8 @@ fn broken(
         (_, Caller::Anonymous) if anonymous_401 => status == StatusCode::UNAUTHORIZED,
         (Guard::Portal, _) => refused(status, body),
         (_, Caller::Anonymous | Caller::Stranger) => refused(status, body),
-        (Guard::Data { binary }, Caller::Granted) => {
-            !refused(status, body) && (binary || body.contains(SECRET))
-        }
-        (Guard::Data { .. }, _) => refused(status, body),
+        (Guard::Data, Caller::Granted) => !refused(status, body) && body.contains(SECRET),
+        (Guard::Data, _) => refused(status, body),
         (Guard::Member, Caller::Ungranted) => status != StatusCode::UNAUTHORIZED,
         (Guard::Member, _) => !refused(status, body),
     };
@@ -870,7 +826,7 @@ async fn every_tool_of_the_catalogue_refuses_whom_the_policy_does_not_admit() {
 
 #[test]
 fn a_secret_in_a_refusal_breaks_the_row() {
-    let route = "/api/endpoint/{slug}/file.json";
+    let route = "/api/endpoint/{slug}/file.csv";
     for guard in [
         DATA,
         Guard::Member,
