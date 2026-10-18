@@ -151,59 +151,112 @@ fn request_of(
     tool: &str,
     arguments: &Map<String, Value>,
 ) -> Option<(Method, String, Option<&'static str>)> {
-    let entity = || {
-        Some(format!(
-            "/entities/{}",
-            query::encode(word(arguments, "id")?)
-        ))
-    };
-    let attribute = || {
-        Some(format!(
-            "{}/attrs/{}",
-            entity()?,
-            word(arguments, "attrId")?
-        ))
-    };
-    let subscription = || {
-        Some(format!(
-            "/subscriptions/{}",
-            query::encode(word(arguments, "id")?)
-        ))
-    };
-    let batch = |op: &str| format!("/entityOperations/{op}");
-    Some(match tool {
-        "create_entity" => (Method::POST, "/entities".to_owned(), Some("entity")),
-        "replace_entity" => (Method::PUT, entity()?, Some("entity")),
-        "merge_entity" => (Method::PATCH, entity()?, Some("fragment")),
-        "delete_entity" => (Method::DELETE, entity()?, None),
-        "append_attributes" => (
-            Method::POST,
-            format!("{}/attrs", entity()?),
-            Some("attributes"),
-        ),
-        "update_attributes" => (
-            Method::PATCH,
-            format!("{}/attrs", entity()?),
-            Some("attributes"),
-        ),
-        "update_attribute" => (Method::PATCH, attribute()?, Some("attribute")),
-        "replace_attribute" => (Method::PUT, attribute()?, Some("attribute")),
-        "delete_attribute" => (Method::DELETE, attribute()?, None),
-        "batch_create" => (Method::POST, batch("create"), Some("entities")),
-        "batch_upsert" => (Method::POST, batch("upsert"), Some("entities")),
-        "batch_update" => (Method::POST, batch("update"), Some("entities")),
-        "batch_merge" => (Method::POST, batch("merge"), Some("entities")),
-        "batch_delete" => (Method::POST, batch("delete"), Some("ids")),
-        "create_subscription" => (
-            Method::POST,
-            "/subscriptions".to_owned(),
-            Some("subscription"),
-        ),
-        "update_subscription" => (Method::PATCH, subscription()?, Some("fragment")),
-        "delete_subscription" => (Method::DELETE, subscription()?, None),
-        _ => return None,
-    })
+    let (_, method, template, body) = REQUESTS.iter().find(|(name, ..)| *name == tool)?;
+    let mut path = (*template).to_owned();
+    if path.contains("{id}") {
+        path = path.replace("{id}", &query::encode(word(arguments, "id")?));
+    }
+    if path.contains("{attrId}") {
+        path = path.replace("{attrId}", word(arguments, "attrId")?);
+    }
+    Some((method.clone(), path, *body))
 }
+
+/// Tool, method, path (`{id}` percent-encoded, `{attrId}` as given) and body argument.
+const REQUESTS: &[(&str, Method, &str, Option<&str>)] = &[
+    ("create_entity", Method::POST, "/entities", Some("entity")),
+    (
+        "replace_entity",
+        Method::PUT,
+        "/entities/{id}",
+        Some("entity"),
+    ),
+    (
+        "merge_entity",
+        Method::PATCH,
+        "/entities/{id}",
+        Some("fragment"),
+    ),
+    ("delete_entity", Method::DELETE, "/entities/{id}", None),
+    (
+        "append_attributes",
+        Method::POST,
+        "/entities/{id}/attrs",
+        Some("attributes"),
+    ),
+    (
+        "update_attributes",
+        Method::PATCH,
+        "/entities/{id}/attrs",
+        Some("attributes"),
+    ),
+    (
+        "update_attribute",
+        Method::PATCH,
+        "/entities/{id}/attrs/{attrId}",
+        Some("attribute"),
+    ),
+    (
+        "replace_attribute",
+        Method::PUT,
+        "/entities/{id}/attrs/{attrId}",
+        Some("attribute"),
+    ),
+    (
+        "delete_attribute",
+        Method::DELETE,
+        "/entities/{id}/attrs/{attrId}",
+        None,
+    ),
+    (
+        "batch_create",
+        Method::POST,
+        "/entityOperations/create",
+        Some("entities"),
+    ),
+    (
+        "batch_upsert",
+        Method::POST,
+        "/entityOperations/upsert",
+        Some("entities"),
+    ),
+    (
+        "batch_update",
+        Method::POST,
+        "/entityOperations/update",
+        Some("entities"),
+    ),
+    (
+        "batch_merge",
+        Method::POST,
+        "/entityOperations/merge",
+        Some("entities"),
+    ),
+    (
+        "batch_delete",
+        Method::POST,
+        "/entityOperations/delete",
+        Some("ids"),
+    ),
+    (
+        "create_subscription",
+        Method::POST,
+        "/subscriptions",
+        Some("subscription"),
+    ),
+    (
+        "update_subscription",
+        Method::PATCH,
+        "/subscriptions/{id}",
+        Some("fragment"),
+    ),
+    (
+        "delete_subscription",
+        Method::DELETE,
+        "/subscriptions/{id}",
+        None,
+    ),
+];
 
 #[cfg(test)]
 mod tests {
