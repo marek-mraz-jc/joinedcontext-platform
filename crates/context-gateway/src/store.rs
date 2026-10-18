@@ -15,9 +15,12 @@ use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::units::UnitRules;
 use crate::view_mapping::ViewMapping;
+use jc_core::kinds::assistant::connector_target;
+use jc_core::kinds::mcp_server::knowledge_source_id;
 use jc_core::kinds::{
-    Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
-    McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, ProjectSpec, Representation,
+    AssistantDeploymentSpec, Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec,
+    EndpointSpec, MappingSpec, McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind,
+    ProjectSpec, Representation,
 };
 use jc_core::Urn;
 use jc_manifest::loader::{RawManifest, Repository};
@@ -376,14 +379,7 @@ pub fn servers_of(repo: &Repository) -> McpServers {
                 slug.cloned()
             })
             .collect();
-        let text = |key| {
-            let texts = language_map(&resource.manifest.metadata.rest, key);
-            texts
-                .get("")
-                .or_else(|| texts.get("en"))
-                .or_else(|| texts.values().next())
-                .cloned()
-        };
+        let text = |key| manifest_text(&resource.manifest, key);
         let knowledge_sources = spec
             .knowledge_source_ids(&project)
             .map(|(project, source)| (project.to_owned(), source.to_owned()))
@@ -399,6 +395,103 @@ pub fn servers_of(repo: &Repository) -> McpServers {
             knowledge_sources,
             allowed_projects: spec.allowed_projects,
             project,
+        });
+    }
+    let deployments = deployment_servers(repo, &slugs, &servers);
+    servers.extend(deployments);
+    servers
+}
+
+/// Every enabled AssistantDeployment as its own read-only server, `/api/mcp/d/{publicId}`
+/// (T-4691): its connectors' Endpoints as members, plus the members and selector of the named
+/// server it reads, and its knowledge sources. A public channel serves only public Endpoints
+/// (`serve` drops a narrower member); `internal` asks for an organization token.
+fn deployment_servers(
+    repo: &Repository,
+    slugs: &BTreeMap<(String, String), String>,
+    named: &[McpServer],
+) -> McpServers {
+    let mut servers = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "AssistantDeployment" {
+            continue;
+        }
+        let Some(spec) = spec_of::<AssistantDeploymentSpec>(&resource.manifest) else {
+            continue;
+        };
+        if let Err(error) = spec.validate() {
+            tracing::warn!(deployment = %id.name, %error, "the AssistantDeployment's MCP server is not served");
+            continue;
+        }
+        if !spec.enabled {
+            continue;
+        }
+        let project = id.namespace.clone().unwrap_or_default();
+        let mut members: Vec<String> = spec
+            .connectors
+            .iter()
+            .filter_map(|connector| {
+                let (namespace, name) = connector_target(&connector.endpoint);
+                let key = (namespace.unwrap_or(&project).to_owned(), name.to_owned());
+                let slug = slugs.get(&key);
+                if slug.is_none() {
+                    tracing::warn!(deployment = %id.name, endpoint = %connector.endpoint, "the connector names no Endpoint and is left out");
+                }
+                slug.cloned()
+            })
+            .collect();
+        let mut select = None;
+        if let Some(reads) = &spec.mcp_server {
+            let (server_project, server_name) = reads.split_once('/').unwrap_or_default();
+            let read = named
+                .iter()
+                .find(|s| s.project == server_project && s.name == server_name)
+                .cloned()
+                .or_else(|| {
+                    (server_project == jc_core::envelope::ORG_NAMESPACE
+                        && server_name == crate::mcp::server::ORG_ALL)
+                        .then(McpServer::org_all)
+                });
+            match read {
+                Some(read) => {
+                    members.extend(read.members);
+                    select = read.select;
+                }
+                None => {
+                    tracing::warn!(deployment = %id.name, server = %reads, "the McpServer it reads is not served")
+                }
+            }
+        }
+        members.sort();
+        members.dedup();
+        // The chat's title when the manifest has none; never the system prompt, which stays
+        // the assistant's own.
+        let title = manifest_text(&resource.manifest, "title").or_else(|| {
+            let theme = spec.theme.as_ref()?.title.as_ref()?;
+            theme.texts().first().map(|(_, text)| (*text).to_owned())
+        });
+        servers.push(McpServer {
+            project: crate::mcp::server::DEPLOYMENTS.to_owned(),
+            name: spec.public_id.clone(),
+            title,
+            description: manifest_text(&resource.manifest, "description"),
+            members,
+            select,
+            endpoints: None,
+            audience: if spec.channel.is_anonymous() {
+                Audience::Public
+            } else {
+                Audience::Organization
+            },
+            allowed_projects: Vec::new(),
+            knowledge_sources: spec
+                .sources
+                .iter()
+                .map(|named| {
+                    let (project, source) = knowledge_source_id(named, &project);
+                    (project.to_owned(), source.to_owned())
+                })
+                .collect(),
         });
     }
     servers
@@ -801,6 +894,16 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
 /// to no locale and is kept under the empty key; the legacy `{locale: text}` map is kept
 /// as it is. Anything else is a manifest the Portal would have rejected, and here it
 /// simply describes nothing.
+/// `metadata.{key}` in the default language, else English, else the first one given.
+fn manifest_text(manifest: &RawManifest, key: &str) -> Option<String> {
+    let texts = language_map(&manifest.metadata.rest, key);
+    texts
+        .get("")
+        .or_else(|| texts.get("en"))
+        .or_else(|| texts.values().next())
+        .cloned()
+}
+
 fn language_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
     key: &str,

@@ -49,6 +49,10 @@ pub(crate) const MAX_FAN_OUT: usize = 10;
 /// The name of the server every organization has without a manifest (EP-122).
 pub const ORG_ALL: &str = "all";
 
+/// The first segment of an assistant's own server, `/api/mcp/d/{publicId}`: an
+/// AssistantDeployment's reach, read-only for every caller (T-4691).
+pub const DEPLOYMENTS: &str = "d";
+
 /// One named server as the gateway serves it (MF-53).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
@@ -217,6 +221,9 @@ pub(crate) async fn serve(
         .members
         .iter()
         .filter_map(|slug| gateway.resolver.resolve(slug))
+        // Never wider than its narrowest member (EP-93): a public server's internal member
+        // is not served, whoever calls.
+        .filter(|endpoint| breadth(endpoint.audience) >= breadth(server.audience))
         .chain(
             gateway
                 .resolver
@@ -283,7 +290,8 @@ pub(crate) async fn serve(
                 })
                 .filter(level)
                 .collect();
-            (format!("subject:{}", claims.sub), reach, false)
+            let reads_only = server.project == DEPLOYMENTS;
+            (format!("subject:{}", claims.sub), reach, reads_only)
         }
     };
 
