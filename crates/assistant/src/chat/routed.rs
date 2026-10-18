@@ -1043,7 +1043,7 @@ pub(super) async fn table(
         url.query_pairs_mut().append_pair("type", kind);
         Some(url.to_string())
     });
-    Some(Table {
+    let mut table = Table {
         endpoint: connector.endpoint.clone(),
         entity_type: kind.to_owned(),
         columns,
@@ -1052,7 +1052,14 @@ pub(super) async fn table(
         total,
         dataset,
         download,
-    })
+        map: None,
+        geometries: super::viz::geometries(text, READ_ROWS),
+    };
+    // Located rows get a map unasked when there is a renderer to draw it (T-4657).
+    if let Some(domain) = ask.viz.and_then(super::viz::domain) {
+        table.map = super::viz::default_map(&table, domain);
+    }
+    Some(table)
 }
 
 /// The earlier turns as data blocks, the last `most` of them.
@@ -1598,9 +1605,17 @@ pub async fn answer(
     }
     // A data question goes on in the loop, which may read more before it answers (T-4294).
     if routing.data {
+        // The tables by the number the model cites them with, for a chart it may ask for.
+        let numbered = citations
+            .iter()
+            .filter(|c| c.tool.is_some())
+            .map(|c| c.n)
+            .zip(tables.iter().cloned())
+            .collect();
         let start = super::data::Start {
             messages,
             citations,
+            tables: numbered,
             steps: routing.reads.len(),
             started,
         };
@@ -2225,6 +2240,8 @@ mod tests {
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
             download: None,
+            map: None,
+            geometries: Vec::new(),
         };
         let (citations, passages, data) = evidence(&best, std::slice::from_ref(&table));
         let numbered: Vec<_> = citations

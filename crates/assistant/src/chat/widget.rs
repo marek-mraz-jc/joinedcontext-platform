@@ -76,16 +76,20 @@ fn escaped(text: &str) -> String {
 }
 
 /// The page's policy: its own host for scripts, styles and requests, framed by the deployment's
-/// origins alone. jc-core holds each origin to `https://host[:port]`, so none can widen it.
-pub fn policy(deployment: &Deployment) -> String {
+/// origins alone. jc-core holds each origin to `https://host[:port]`, so none can widen it. With
+/// a chart renderer the page may frame that one origin (T-4657, ADR-N-053 §2.9), nothing else.
+pub fn policy(deployment: &Deployment, viz: Option<&url::Url>) -> String {
     let ancestors = if deployment.spec.allowed_origins.is_empty() {
         "'none'".to_owned()
     } else {
         deployment.spec.allowed_origins.join(" ")
     };
+    let frames = viz.map_or_else(String::new, |url| {
+        format!("frame-src {}; ", url.origin().ascii_serialization())
+    });
     format!(
         "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; \
-         base-uri 'none'; form-action 'none'; frame-ancestors {ancestors}"
+         {frames}base-uri 'none'; form-action 'none'; frame-ancestors {ancestors}"
     )
 }
 
@@ -121,9 +125,15 @@ pub fn link_hosts(deployment: &Deployment, sources: &[Source]) -> Vec<String> {
 }
 
 /// What the page needs to know of its deployment; nothing in it is secret.
-fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
+fn config(
+    deployment: &Deployment,
+    link_hosts: &[String],
+    viz: Option<&url::Url>,
+) -> serde_json::Value {
     let spec = &deployment.spec;
     json!({
+        // The chart renderer the widget frames a map or a chart from (T-4657); null for none.
+        "viz": viz.map(|url| url.origin().ascii_serialization()),
         "linkHosts": link_hosts,
         // The page's `frame-ancestors`, already in its header: where its close message may go (T-4654).
         "frameOrigins": spec.allowed_origins,
@@ -150,7 +160,12 @@ fn config(deployment: &Deployment, link_hosts: &[String]) -> serde_json::Value {
 }
 
 /// The page of one public deployment: the panel, or with `full` the page of its own.
-pub fn html(deployment: &Deployment, link_hosts: &[String], full: bool) -> String {
+pub fn html(
+    deployment: &Deployment,
+    link_hosts: &[String],
+    full: bool,
+    viz: Option<&url::Url>,
+) -> String {
     let spec = &deployment.spec;
     // The first of `languages` is the one the chat opens in (MF-52, T-4281); Slovak when none.
     let lang = spec.languages.first().map_or("sk", String::as_str);
@@ -164,7 +179,7 @@ pub fn html(deployment: &Deployment, link_hosts: &[String], full: bool) -> Strin
         lang = escaped(lang),
         title = escaped(&spec.public_id),
         class = if full { " class=\"jc-page\"" } else { "" },
-        config = escaped(&config(deployment, link_hosts).to_string()),
+        config = escaped(&config(deployment, link_hosts, viz).to_string()),
     )
 }
 
@@ -246,10 +261,10 @@ fn serve(state: &ChatState, public_id: &str, full: bool) -> Response {
             (header::CACHE_CONTROL, "no-store"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        html(&deployment, &hosts, full),
+        html(&deployment, &hosts, full, state.viz.as_ref()),
     )
         .into_response();
-    if let Ok(value) = HeaderValue::from_str(&policy(&deployment)) {
+    if let Ok(value) = HeaderValue::from_str(&policy(&deployment, state.viz.as_ref())) {
         response
             .headers_mut()
             .insert(header::CONTENT_SECURITY_POLICY, value);
@@ -271,6 +286,29 @@ mod tests {
 
     /// T-4138: the page carries what the visitor sees before asking, per language, and nothing
     /// a visitor should not read; the full page and the panel differ only in their layout.
+    /// T-4657: with a chart renderer the page may frame that one origin and nothing else; the
+    /// rest of the policy stays as it was, and without one nothing changes.
+    #[test]
+    fn the_policy_frames_only_the_chart_renderer() {
+        let public = deployment(json!({
+            "publicId": "bb", "channel": "public", "sources": ["web"],
+            "allowedOrigins": ["https://www.banskabystrica.sk"],
+        }));
+        let plain = policy(&public, None);
+        assert!(!plain.contains("frame-src"));
+        let viz = url::Url::parse("https://viz.dev.joinedcontext.com").expect("url");
+        let framed = policy(&public, Some(&viz));
+        assert_eq!(
+            framed.replace("frame-src https://viz.dev.joinedcontext.com; ", ""),
+            plain
+        );
+        assert_eq!(
+            config(&public, &[], Some(&viz))["viz"],
+            json!("https://viz.dev.joinedcontext.com")
+        );
+        assert_eq!(config(&public, &[], None)["viz"], json!(null));
+    }
+
     #[test]
     fn the_page_carries_the_suggestions_disclaimer_and_switch_and_no_secret() {
         let public = deployment(json!({
@@ -286,7 +324,7 @@ mod tests {
             "rateLimit": {"requestsPerMinute": 60, "perClientPerMinute": 10},
             "budget": {"tokensPerDay": 100000, "tokensPerConversation": 10000, "questionChars": 500},
         }));
-        let config = config(&public, &[]);
+        let config = config(&public, &[], None);
         // T-4283: the header's name; the monogram is drawn from it, no image.
         assert_eq!(config["title"], json!("Banská Bystrica"));
         assert_eq!(config["languages"], json!(["sk", "en"]));
@@ -311,11 +349,11 @@ mod tests {
             language_toggle: false,
         });
         assert_eq!(
-            super::config(&asking, &[])["widget"],
+            super::config(&asking, &[], None)["widget"],
             json!({"language": "ask", "languageToggle": false})
         );
-        let panel = html(&public, &[], false);
-        let page = html(&public, &[], true);
+        let panel = html(&public, &[], false, None);
+        let page = html(&public, &[], true, None);
         assert!(panel.contains("<html lang=\"sk\">") && panel.contains("<body>"));
         assert!(page.contains("<body class=\"jc-page\">"));
         for html in [&panel, &page] {
@@ -340,11 +378,11 @@ mod tests {
             })
         };
         let public = deployment(spec("public"));
-        assert_eq!(config(&public, &[])["connectors"], json!([]));
-        assert!(!html(&public, &[], false).contains("air-quality"));
+        assert_eq!(config(&public, &[], None)["connectors"], json!([]));
+        assert!(!html(&public, &[], false, None).contains("air-quality"));
         let internal = deployment(spec("internal"));
         assert_eq!(
-            config(&internal, &[])["connectors"],
+            config(&internal, &[], None)["connectors"],
             json!(["banskabystrica/air-quality"])
         );
     }
@@ -358,9 +396,9 @@ mod tests {
             "languages": ["en", "fi"],
             "enabled": false,
         }));
-        assert_eq!(config(&paused, &[])["enabled"], json!(false));
-        assert_eq!(config(&paused, &[])["questionChars"], json!(null));
-        assert!(html(&paused, &[], true).contains("<html lang=\"en\">"));
+        assert_eq!(config(&paused, &[], None)["enabled"], json!(false));
+        assert_eq!(config(&paused, &[], None)["questionChars"], json!(null));
+        assert!(html(&paused, &[], true, None).contains("<html lang=\"en\">"));
     }
 
     /// T-4149: links go to the deployment's own sites, its sources and the national portal; a
@@ -417,15 +455,15 @@ mod tests {
                 "mapy.banskabystrica.sk",
             ]
         );
-        assert_eq!(config(&public, &hosts)["linkHosts"], json!(hosts));
+        assert_eq!(config(&public, &hosts, None)["linkHosts"], json!(hosts));
         // The close message's targets are the page's own frame-ancestors (T-4654).
         assert_eq!(
-            config(&public, &hosts)["frameOrigins"],
+            config(&public, &hosts, None)["frameOrigins"],
             json!(public.spec.allowed_origins)
         );
         assert!(!public.spec.allowed_origins.is_empty());
         for origin in &public.spec.allowed_origins {
-            assert!(policy(&public).contains(origin.as_str()), "{origin}");
+            assert!(policy(&public, None).contains(origin.as_str()), "{origin}");
         }
     }
 

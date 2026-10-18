@@ -116,6 +116,8 @@ pub enum Event {
     Delta(String),
     /// Rows a data round read from a connector, for the person to see as a table (T-4140).
     Data(Table),
+    /// A chart or a map the model asked for, built by code from a table's rows (T-4657).
+    Visualization(Value),
     /// Up to three questions to offer after the answer (T-4174).
     Followups(Vec<String>),
     /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
@@ -139,6 +141,12 @@ pub struct Table {
     pub dataset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<String>,
+    /// The map spec of the located rows (ADR-N-053 §2.9), when the deployment has a renderer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map: Option<Value>,
+    /// Each row's location, checked and rounded, for the maps; never sent as it is (T-4657).
+    #[serde(skip)]
+    pub geometries: Vec<Option<Value>>,
 }
 
 /// Everything one question is answered with.
@@ -176,6 +184,8 @@ pub struct Ask<'a> {
     pub cache: &'a super::routed::AnswerCache,
     /// The public origin `/api/endpoint/{slug}` is served under: a data table's download link.
     pub endpoint_base: Option<&'a url::Url>,
+    /// The chart renderer's origin (T-4657); `None` draws no chart and offers no tool for one.
+    pub viz: Option<&'a url::Url>,
     /// The most tool calls of a data question's loop (`answer.maxDataSteps`, T-4294).
     pub data_steps: usize,
     /// How long after the question the loop may still call a tool (`answer.maxDataSeconds`).
