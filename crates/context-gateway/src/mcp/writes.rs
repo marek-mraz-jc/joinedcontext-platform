@@ -156,7 +156,7 @@ fn request_of(
         path = path.replace("{id}", &query::encode(word(arguments, "id")?));
     }
     if path.contains("{attrId}") {
-        path = path.replace("{attrId}", word(arguments, "attrId")?);
+        path = path.replace("{attrId}", &query::encode(word(arguments, "attrId")?));
     }
     Some((method.clone(), path, *body))
 }
@@ -295,6 +295,16 @@ mod tests {
     use super::*;
     use crate::handlers::ngsi_ld::create_key;
     use serde_json::json;
+
+    /// An attribute name stays one path segment: `../subscriptions` cannot turn an attribute
+    /// write into a request on another resource the guards would classify instead.
+    #[test]
+    fn an_attribute_name_cannot_leave_its_segment() {
+        let arguments = json!({"id": "urn:ngsi-ld:Thing:a", "attrId": "../../../subscriptions"});
+        let (_, path, _) = request_of("update_attribute", arguments.as_object().unwrap()).unwrap();
+        assert!(!path.contains("/../"), "{path}");
+        assert_eq!(path.matches('/').count(), 4, "{path}");
+    }
 
     /// Every tool the gateway lists is a read or a write it can name as an NGSI-LD request, and
     /// that request is the operation the tool's grant names: a tool added to one list and not the
