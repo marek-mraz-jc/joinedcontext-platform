@@ -769,6 +769,7 @@ pub fn dataset(endpoint: &Subject<'_>, index: &Value, base: &str) -> Value {
         service["dct:license"] = json!(licence.iri());
     }
     included.push(json!({ "@id": format!("{iri}/"), "@type": "rdfs:Resource" }));
+    included.push(json!({ "@id": format!("{iri}/openapi.json"), "@type": "rdfs:Resource" }));
     included.push(service);
     if let Some(distributions) = record["dcat:distribution"].as_array() {
         typed_values(distributions, &mut included);

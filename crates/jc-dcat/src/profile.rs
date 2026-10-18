@@ -170,8 +170,8 @@ fn czech_personal(statement: PersonalData) -> &'static str {
 
 /// A plain string under `key` as a text in `language`: what the gateway names itself, a
 /// representation's or an artifact's title or a desk's name, is one string, and the Slovak shapes
-/// ask for a language-tagged one (API/08 section 5).
-#[cfg(feature = "dcat-ap-sk")]
+/// ask for a language-tagged one, the Czech shapes for a `rdf:langString` (API/08 section 5).
+#[cfg(any(feature = "dcat-ap-sk", feature = "dcat-ap-cz"))]
 fn tag(node: &mut Map<String, Value>, key: &str, language: &str) {
     if let Some(Value::String(text)) = node.get(key) {
         let tagged = json!([{ "@value": text, "@language": language }]);
@@ -355,6 +355,13 @@ fn czech(mut record: Value, licence: Option<&str>, personal: Option<PersonalData
             let kept = pick_language(texts);
             distribution.insert("dct:description".to_owned(), kept);
         }
+        tag(distribution, "dct:title", "cs");
+    }
+    if let Some(contact) = record
+        .get_mut("dcat:contactPoint")
+        .and_then(Value::as_object_mut)
+    {
+        tag(contact, "vcard:fn", "cs");
     }
     record
 }
@@ -399,6 +406,12 @@ pub fn render_catalog(feed: Value, profile: Profile) -> Value {
             let mut feed = feed;
             for key in ["dct:title", "dct:description"] {
                 one_language(&mut feed, key);
+            }
+            if let Some(contact) = feed
+                .get_mut("dcat:contactPoint")
+                .and_then(Value::as_object_mut)
+            {
+                tag(contact, "vcard:fn", "cs");
             }
             feed
         }
@@ -772,7 +785,11 @@ mod tests {
     #[cfg(feature = "dcat-ap-cz")]
     #[test]
     fn a_czech_record_keeps_one_text_per_property_czech_first() {
-        let catalog = catalog(Some(Licence::Cc0));
+        let mut catalog = catalog(Some(Licence::Cc0));
+        catalog.contact_point = Some(jc_core::kinds::ContactPoint {
+            name: "Odbor informatiky".into(),
+            email: "opendata@example.org".into(),
+        });
         let titled = |pairs: &[(&str, &str)]| {
             let title: BTreeMap<String, String> = pairs
                 .iter()
@@ -812,6 +829,17 @@ mod tests {
             .and_then(|all| all.iter().find(|n| n["@type"] == "dcat:DataService"))
             .expect("the service");
         assert_eq!(service["dct:title"], cz["dct:title"]);
+        // The names the gateway writes as one string are `rdf:langString`s too.
+        assert_eq!(
+            cz["dcat:contactPoint"]["vcard:fn"],
+            json!([{ "@value": "Odbor informatiky", "@language": "cs" }])
+        );
+        for distribution in cz["dcat:distribution"].as_array().expect("distributions") {
+            assert!(
+                distribution["dct:title"][0]["@language"] == "cs",
+                "{distribution}"
+            );
+        }
         let en = titled(&[("en", "Bikes"), ("sk", "Bicykle")]);
         assert_eq!(
             en["dct:title"],

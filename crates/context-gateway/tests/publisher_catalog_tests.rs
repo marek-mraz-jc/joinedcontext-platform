@@ -28,6 +28,7 @@ const CITY: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const CITY_TOO: &str = "m3x8rq5vzt2khw7pbnd4sjc6fy";
 const CITY_CLOSED: &str = "p9d2wc5kzn8mth4rqvb7xj3sfy";
 const REGION: &str = "w2b6tq9mzx4kcr7nvh3dsj5pfy";
+const PRAGUE: &str = "t6v3kq8mzx2wcr5nbh7dsj4pfy";
 const HOST: &str = "https://bb.example.sk";
 const IRI: &str = "https://data.gov.sk/id/legal-subject/00313271";
 
@@ -45,7 +46,11 @@ fn endpoint(slug: &str, project: &str, space: &str, audience: Audience) -> Endpo
         roles: Default::default(),
         slug: slug.to_owned(),
         title: [("sk".to_owned(), format!("Dáta {space}"))].into(),
-        description: Default::default(),
+        description: [
+            ("cs".to_owned(), format!("Měření {space}")),
+            ("sk".to_owned(), format!("Merania {space}")),
+        ]
+        .into(),
         space: space.to_owned(),
         project: project.to_owned(),
         audience,
@@ -59,12 +64,37 @@ fn endpoint(slug: &str, project: &str, space: &str, audience: Audience) -> Endpo
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         view_mapping: None,
-        catalog: Some(Arc::new(jc_core::kinds::Catalog {
-            license: Some(jc_core::kinds::Licence::CcBy4),
-            ..Default::default()
-        })),
+        catalog: Some(Arc::new(complete(project))),
         policy_names: Vec::new(),
         policies: vec![policy],
+    }
+}
+
+/// Every member the national profiles ask of a record, with the publisher the store folds in
+/// from the project (`store::load`), so the written catalogues hold the gateway's whole record.
+fn complete(project: &str) -> jc_core::kinds::Catalog {
+    // The HVD regulation belongs only to a dataset with an HVD category (the Slovak shapes'
+    // `sh:xone`); the Czech record names the open-data act it is published under.
+    let (publisher, spatial, legislation) = if project == "praha" {
+        let act = "https://www.e-sbirka.cz/eli/cz/sb/1999/106/".to_owned();
+        (prague().catalog.publisher, "CZ010", vec![act])
+    } else {
+        (publisher().catalog.publisher, "SK032", Vec::new())
+    };
+    jc_core::kinds::Catalog {
+        publisher: Some(publisher),
+        license: Some(jc_core::kinds::Licence::CcBy4),
+        themes: vec![jc_core::kinds::DataTheme::Envi],
+        keywords: [
+            ("cs".to_owned(), vec!["ovzduší".to_owned()]),
+            ("sk".to_owned(), vec!["ovzdušie".to_owned()]),
+        ]
+        .into(),
+        spatial: vec![spatial.to_owned()],
+        frequency: Some(jc_core::kinds::Frequency::Hourly),
+        applicable_legislation: legislation,
+        personal_data: Some(jc_core::kinds::PersonalData::DoesNotContain),
+        ..Default::default()
     }
 }
 
@@ -90,6 +120,32 @@ fn publisher() -> ProjectPublisher {
     }
 }
 
+/// A Czech publisher, named by its RPP IRI the way DCAT-AP-CZ asks.
+fn prague() -> ProjectPublisher {
+    ProjectPublisher {
+        title: [
+            ("cs".to_owned(), "Hlavní město Praha".to_owned()),
+            ("en".to_owned(), "City of Prague".to_owned()),
+        ]
+        .into(),
+        description: Default::default(),
+        domain: Some("praha.eu".to_owned()),
+        catalog: ProjectCatalog {
+            publisher: Publisher {
+                name: [("cs".to_owned(), "Hlavní město Praha".to_owned())].into(),
+                uri: Some(
+                    "https://rpp-opendata.egon.gov.cz/odrpp/zdroj/orgán-veřejné-moci/00064581"
+                        .to_owned(),
+                ),
+            },
+            contact_point: Some(ContactPoint {
+                name: "Odbor informatiky".to_owned(),
+                email: "opendata@example.org".to_owned(),
+            }),
+        },
+    }
+}
+
 /// The city publishes two public Endpoints and one for its staff; the region publishes one and
 /// names no publisher; `quiet` names a publisher and has no public Endpoint.
 fn app_of(realm: &common::Realm, listed: &[DcatProfile]) -> axum::Router {
@@ -108,6 +164,7 @@ fn app_of(realm: &common::Realm, listed: &[DcatProfile]) -> axum::Router {
             Audience::Organization,
         ),
         endpoint(REGION, "bbsk", "cesty", Audience::Public),
+        endpoint(PRAGUE, "praha", "ovzdusi", Audience::Public),
         endpoint(
             "q8n3vz5tk2wmx7rbc4hdj6sfpy",
             "quiet",
@@ -127,6 +184,7 @@ fn app_of(realm: &common::Realm, listed: &[DcatProfile]) -> axum::Router {
     let publishers: Publishers = [
         ("banskabystrica".to_owned(), Arc::new(publisher())),
         ("quiet".to_owned(), Arc::new(publisher())),
+        ("praha".to_owned(), Arc::new(prague())),
     ]
     .into();
     gateway.replace_publishers(publishers);
@@ -424,4 +482,33 @@ fn a_project_without_a_publisher_publishes_no_catalogue_and_changes_no_record() 
     assert!(publishers.is_empty());
     assert!(endpoints.iter().all(|e| e.catalog.is_none()));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Each national rendering of a publisher's catalogue, written to `DCAT_RECORDS_DIR` (else
+/// `target/tmp/dcat-records`) as the conformance repository's `publisher-*.jsonld` fixtures,
+/// which its profile suite holds to that profile's shapes (EP-125).
+#[tokio::test]
+async fn each_national_catalogue_is_written_for_the_profile_check() {
+    let directory = std::env::var("DCAT_RECORDS_DIR")
+        .unwrap_or_else(|_| format!("{}/dcat-records", env!("CARGO_TARGET_TMPDIR")));
+    std::fs::create_dir_all(&directory).expect("the records directory");
+    let realm = common::Realm::new();
+    for (name, path) in [
+        (
+            "publisher-sk-banskabystrica",
+            "/catalog/banskabystrica.jsonld?profile=dcat-ap-sk",
+        ),
+        (
+            "publisher-cz-praha",
+            "/catalog/praha.jsonld?profile=dcat-ap-cz",
+        ),
+    ] {
+        let app = app_of(&realm, &[DcatProfile::DcatApSk, DcatProfile::DcatApCz]);
+        let (status, _, body) = get(app, path, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let pretty =
+            serde_json::to_string_pretty(&serde_json::from_str::<Value>(&body).expect("JSON-LD"))
+                .expect("json");
+        std::fs::write(format!("{directory}/{name}.jsonld"), pretty).expect("jsonld written");
+    }
 }
