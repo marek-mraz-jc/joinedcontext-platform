@@ -113,11 +113,18 @@ pub struct Asked {
     lang: Option<String>,
 }
 
-/// The language of the answer: the asked one when the deployment answers in it, else its first.
+/// The language of the answer: the asked one when the deployment answers in it, else its first
+/// one the category labels exist in, else its first.
 fn language<'a>(deployment: &'a Deployment, asked: Option<&'a str>) -> &'a str {
     let languages = &deployment.spec.languages;
     asked
         .filter(|lang| languages.iter().any(|l| l == lang))
+        .or_else(|| {
+            languages
+                .iter()
+                .map(String::as_str)
+                .find(|lang| DataTheme::LABEL_LANGUAGES.contains(lang))
+        })
         .or_else(|| languages.first().map(String::as_str))
         .unwrap_or("sk")
 }
@@ -242,7 +249,11 @@ pub async fn compute(
         public_id: deployment.spec.public_id.clone(),
         title: titles(deployment),
         languages: deployment.spec.languages.clone(),
-        categories: deployment.spec.categories.clone(),
+        // In the table's order, each once, whatever order the manifest lists them in.
+        categories: DataTheme::ALL
+            .into_iter()
+            .filter(|theme| deployment.spec.categories.contains(theme))
+            .collect(),
         limits: limits(deployment),
         endpoints,
         sources,

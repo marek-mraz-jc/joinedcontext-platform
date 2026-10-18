@@ -49,7 +49,7 @@ fn deployment(name: &str, spec: Value) -> Deployment {
             {"endpoint": "staff", "tools": ["query_entities"]},
         ],
         "select": {"themes": ["TRAN"]},
-        "categories": ["TRAN"],
+        "categories": ["TRAN", "ENVI", "TRAN"],
         "allowedOrigins": [ORIGIN],
         "rateLimit": {"requestsPerMinute": 60, "perClientPerMinute": 10, "perClientPerHour": 40},
         "budget": {"tokensPerDay": 1_000_000, "tokensPerConversation": 20_000, "costPerDayUsd": 2.5},
@@ -303,7 +303,11 @@ async fn the_context_lists_the_resolved_endpoints_and_the_public_sources() {
     );
     assert_eq!(
         context["categories"],
-        json!([{"code": "TRAN", "label": DataTheme::Tran.label_in("en")}])
+        json!([
+            {"code": "ENVI", "label": DataTheme::Envi.label_in("en")},
+            {"code": "TRAN", "label": DataTheme::Tran.label_in("en")}
+        ]),
+        "the table's order, each once"
     );
     assert_eq!(context["title"]["en"], "Transport in BB");
     assert_eq!(context["limits"]["perClientPerHour"], 40);
