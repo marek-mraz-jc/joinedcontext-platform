@@ -17,7 +17,7 @@ spec:
   contextSpaceRef: { kind: ContextSpace, name: charging }
   slug: 2j24lifsjj6soaqvleydeo4n5v
   audience: public
-  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  enabledRepresentations: [ngsi-ld, csv, ogc-features, sta, mcp]
   publish:
     ckan:
       instanceRef: { kind: CkanInstance, name: open-data }

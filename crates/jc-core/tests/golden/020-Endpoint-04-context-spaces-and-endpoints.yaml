@@ -7,7 +7,7 @@ spec:
   contextSpaceRef: { kind: ContextSpace, name: ovzdusie }
   slug: zt4qm7ge2xdv6ksb3ncf5arw2y
   audience: public
-  enabledRepresentations: [ngsi-ld, geojson, csv, ogc-features, sta, mcp]
+  enabledRepresentations: [ngsi-ld, csv, ogc-features, sta, mcp]
   publish:
     ckan:
       instanceRef: { kind: CkanInstance, name: open-data }

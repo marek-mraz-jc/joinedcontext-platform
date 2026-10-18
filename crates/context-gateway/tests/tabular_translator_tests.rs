@@ -1,13 +1,9 @@
 //! The tabular representations of an NGSI-LD answer (T-0157, EP-08, EP-44, EP-45).
 
 use context_gateway::translators::tabular::{
-    csv, flatten, humanize, parquet, table, xlsx, Limits, ParquetError, Table, TooLarge, XlsxError,
+    csv, flatten, humanize, table, Limits, Table, TooLarge,
 };
-use parquet::basic::Type as Physical;
-use parquet::file::reader::{FileReader, SerializedFileReader};
-use parquet::record::Field;
 use serde_json::{json, Value};
-use std::io::Read;
 
 fn station() -> Value {
     json!({
@@ -242,91 +238,6 @@ fn an_empty_answer_is_an_empty_table() {
     assert_eq!(csv(&table, &Limits::default()), Ok("\r\n".to_owned()));
 }
 
-/// The workbook is a real OOXML package: the parts Excel opens are all there, the numbers
-/// are numbers, and the strings are inline rather than in a shared table.
-#[test]
-fn the_workbook_is_a_readable_ooxml_package() {
-    let table = table(&json!([station()]), &Limits::default()).expect("within the limits");
-    let bytes = xlsx(
-        &table,
-        &[("space".to_owned(), "ovzdusie".to_owned())],
-        &Limits::DEFAULT,
-    )
-    .expect("a workbook");
-
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a zip");
-    let names: Vec<String> = archive
-        .file_names()
-        .map(|name| name.expect("an entry name").into_owned())
-        .collect();
-    for required in [
-        "[Content_Types].xml",
-        "_rels/.rels",
-        "xl/workbook.xml",
-        "xl/_rels/workbook.xml.rels",
-        "xl/worksheets/sheet1.xml",
-        "xl/worksheets/sheet2.xml",
-    ] {
-        assert!(
-            names.iter().any(|name| name == required),
-            "{required} missing from {names:?}"
-        );
-    }
-
-    let mut sheet = String::new();
-    archive
-        .by_name("xl/worksheets/sheet1.xml")
-        .expect("the data sheet")
-        .read_to_string(&mut sheet)
-        .expect("utf-8");
-    assert!(
-        sheet.contains("<t xml:space=\"preserve\">temperature.value</t>"),
-        "{sheet}"
-    );
-    // A JSON number is a numeric cell, in the column the header put it in, so a reader
-    // can sum a measurement without retyping it.
-    let column = table
-        .columns
-        .iter()
-        .position(|name| name == "temperature.value")
-        .expect("the measurement has a column");
-    let reference = format!("{}2", (b'A' + column as u8) as char);
-    assert!(
-        sheet.contains(&format!("<c r=\"{reference}\"><v>22.4</v></c>")),
-        "{sheet}"
-    );
-
-    let mut metadata = String::new();
-    archive
-        .by_name("xl/worksheets/sheet2.xml")
-        .expect("the metadata sheet")
-        .read_to_string(&mut metadata)
-        .expect("utf-8");
-    assert!(metadata.contains("ovzdusie"), "{metadata}");
-}
-
-/// A value that would close the XML it is written into is escaped, so a manifest or an
-/// entity cannot make the workbook unopenable, or make it say something else.
-#[test]
-fn a_hostile_value_cannot_break_out_of_the_worksheet() {
-    let answer = json!([{
-        "id": "urn:a",
-        "type": "T",
-        "note": { "type": "Property", "value": "</t></is></c><c r=\"Z9\"><v>0</v></c>" }
-    }]);
-    let table = table(&answer, &Limits::default()).expect("within the limits");
-    let bytes = xlsx(&table, &[], &Limits::DEFAULT).expect("a workbook");
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("a zip");
-    let mut sheet = String::new();
-    archive
-        .by_name("xl/worksheets/sheet1.xml")
-        .expect("the data sheet")
-        .read_to_string(&mut sheet)
-        .expect("utf-8");
-    assert!(!sheet.contains("<c r=\"Z9\">"), "{sheet}");
-    assert!(sheet.contains("&lt;/t&gt;&lt;/is&gt;"), "{sheet}");
-}
-
 /// A table built twice from the same answer is byte-identical, which is what makes an
 /// `ETag` on a download mean anything (EP-43).
 #[test]
@@ -342,23 +253,6 @@ fn the_same_answer_produces_the_same_bytes() {
 }
 
 // --- The representation as the gateway serves it -----------------------------------
-
-/// T-0810: the workbook writer takes the same ceiling the CSV writer takes, and refuses
-/// rather than truncating — a short file is indistinguishable from a complete one (EP-44).
-#[test]
-fn a_workbook_past_the_byte_ceiling_is_refused() {
-    let many: Vec<Value> = (0..500).map(|_| station()).collect();
-    let table = table(&json!(many), &Limits::DEFAULT).expect("a table");
-    let tight = Limits {
-        max_bytes: 1024,
-        ..Limits::DEFAULT
-    };
-    assert!(
-        matches!(xlsx(&table, &[], &tight), Err(XlsxError::TooLarge)),
-        "a sheet larger than the ceiling is not a workbook"
-    );
-    xlsx(&table, &[], &Limits::DEFAULT).expect("the same table inside the default ceiling");
-}
 
 mod common;
 
@@ -551,15 +445,15 @@ async fn a_representation_the_endpoint_does_not_serve_is_404() {
     assert!(broker.hops().is_empty(), "a 404 must not reach the broker");
 }
 
-/// EP-43: the workbook is sent as an attachment with its own media type.
+/// EP-43: the table is sent as an attachment under CSV's own media type.
 #[tokio::test]
-async fn the_workbook_is_served_as_an_attachment() {
+async fn the_csv_is_served_as_an_attachment() {
     let broker = BrokerStub::start(vec![json!([reading(1)])]).await;
-    let response = gateway(&broker.url, endpoint(vec![Representation::Xlsx], None))
+    let response = gateway(&broker.url, endpoint(vec![Representation::Csv], None))
         .oneshot(
             HttpRequest::builder()
                 .uri(format!(
-                    "/api/endpoint/{SLUG}/file.xlsx?type=AirQualityObserved"
+                    "/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"
                 ))
                 .body(Body::empty())
                 .expect("a request"),
@@ -573,212 +467,39 @@ async fn the_workbook_is_served_as_an_attachment() {
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
-        Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        Some("text/csv; charset=utf-8; header=present")
     );
     assert_eq!(
         response
             .headers()
             .get(axum::http::header::CONTENT_DISPOSITION)
             .and_then(|value| value.to_str().ok()),
-        Some(format!("attachment; filename=\"{SLUG}.xlsx\"").as_str())
+        Some(format!("attachment; filename=\"{SLUG}.csv\"").as_str())
     );
 
     let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
         .await
         .expect("a readable body");
-    // A workbook is a zip, and it starts with one.
-    assert_eq!(&body[..2], b"PK");
+    assert!(String::from_utf8_lossy(&body).starts_with("id,type"));
 }
 
-/// T-0810, EP-44: the workbook was the one file representation no byte ceiling reached, so a
-/// download that csv refuses was built whole in memory and answered 200.
+/// T-0810, EP-44: past the endpoint's byte ceiling the file is refused whole, never built in
+/// memory and answered 200.
 #[tokio::test]
-async fn the_endpoints_byte_ceiling_refuses_a_workbook_too() {
+async fn the_endpoints_byte_ceiling_refuses_the_file() {
     let full: Vec<Value> = (0..1000).map(reading).collect();
     let limits = FileLimits {
         max_file_rows: None,
         max_file_bytes: Some(1024),
     };
-    for (representation, file) in [
-        (Representation::Xlsx, "file.xlsx"),
-        (Representation::Csv, "file.csv"),
-        (Representation::Parquet, "file.parquet"),
-    ] {
-        let broker = BrokerStub::start(vec![json!(full)]).await;
-        let (status, _, _) = download(
-            gateway(
-                &broker.url,
-                endpoint(vec![representation], Some(limits.clone())),
-            ),
-            &format!("/api/endpoint/{SLUG}/{file}?type=AirQualityObserved"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{file}");
-    }
-}
-
-/// A Parquet file read back: each column's physical type, the rows as fields, the metadata.
-struct ReadBack {
-    columns: Vec<(String, Physical)>,
-    rows: Vec<Vec<Field>>,
-    metadata: Vec<(String, String)>,
-}
-
-fn read_parquet(file: Vec<u8>) -> ReadBack {
-    let reader = SerializedFileReader::new(bytes::Bytes::from(file)).expect("a parquet file");
-    let meta = reader.metadata().file_metadata();
-    let columns = meta
-        .schema_descr()
-        .columns()
-        .iter()
-        .map(|column| (column.name().to_owned(), column.physical_type()))
-        .collect();
-    let metadata = meta
-        .key_value_metadata()
-        .into_iter()
-        .flatten()
-        .map(|kv| (kv.key.clone(), kv.value.clone().unwrap_or_default()))
-        .collect();
-    let rows = reader
-        .get_row_iter(None)
-        .expect("rows")
-        .map(|row| {
-            row.expect("a row")
-                .get_column_iter()
-                .map(|(_, field)| field.clone())
-                .collect()
-        })
-        .collect();
-    ReadBack {
-        columns,
-        rows,
-        metadata,
-    }
-}
-
-/// EP-119: a column is typed by its values, a mixed one is text written as the CSV writes it,
-/// and a missing value is null, never an empty string.
-#[test]
-fn parquet_columns_are_typed_by_their_values() {
-    let answer = json!([
-        {"id": "urn:a", "type": "T", "n": {"type": "Property", "value": 1},
-         "x": {"type": "Property", "value": 1}, "ok": {"type": "Property", "value": true},
-         "mix": {"type": "Property", "value": 7}},
-        {"id": "urn:b", "type": "T", "x": {"type": "Property", "value": 2.5},
-         "ok": {"type": "Property", "value": false}, "mix": {"type": "Property", "value": "seven"}},
-    ]);
-    let table = table(&answer, &Limits::DEFAULT).expect("a table");
-    let metadata = vec![("endpoint".to_owned(), "e1".to_owned())];
-    let file = parquet(&table, &metadata, &Limits::DEFAULT).expect("a parquet file");
-    assert_eq!(&file[..4], b"PAR1");
-
-    let back = read_parquet(file);
-    let typed: Vec<(&str, Physical)> = back
-        .columns
-        .iter()
-        .map(|(name, kind)| (name.as_str(), *kind))
-        .collect();
-    assert_eq!(
-        typed,
-        vec![
-            ("id", Physical::BYTE_ARRAY),
-            ("type", Physical::BYTE_ARRAY),
-            ("mix.value", Physical::BYTE_ARRAY),
-            ("n.value", Physical::INT64),
-            ("ok.value", Physical::BOOLEAN),
-            ("x.value", Physical::DOUBLE),
-        ]
-    );
-    assert_eq!(
-        back.rows,
-        vec![
-            vec![
-                Field::Str("urn:a".into()),
-                Field::Str("T".into()),
-                Field::Str("7".into()),
-                Field::Long(1),
-                Field::Bool(true),
-                Field::Double(1.0),
-            ],
-            vec![
-                Field::Str("urn:b".into()),
-                Field::Str("T".into()),
-                Field::Str("seven".into()),
-                Field::Null,
-                Field::Bool(false),
-                Field::Double(2.5),
-            ],
-        ]
-    );
-    assert_eq!(back.metadata, metadata);
-}
-
-/// EP-119: nothing to show is a valid file with no rows, not an error.
-#[test]
-fn an_empty_answer_is_an_empty_parquet_file() {
-    let table = table(&json!([]), &Limits::DEFAULT).expect("a table");
-    let back = read_parquet(parquet(&table, &[], &Limits::DEFAULT).expect("a parquet file"));
-    assert!(back.columns.is_empty());
-    assert!(back.rows.is_empty());
-}
-
-/// EP-44: a file past `maxFileBytes` is refused whole, with nothing half-written handed back.
-#[test]
-fn a_parquet_file_past_the_byte_ceiling_is_refused() {
-    let answer: Vec<Value> = (0..200).map(reading).collect();
-    let table = table(&json!(answer), &Limits::DEFAULT).expect("a table");
-    let small = Limits {
-        max_rows: 1000,
-        max_bytes: 512,
-    };
-    assert!(matches!(
-        parquet(&table, &[], &small),
-        Err(ParquetError::TooLarge)
-    ));
-}
-
-/// EP-119, EP-43: the file is an attachment under its media type, and the caller's filter is
-/// what the broker is asked.
-#[tokio::test]
-async fn the_parquet_file_is_served_filtered_as_an_attachment() {
-    let broker = BrokerStub::start(vec![json!([reading(1)])]).await;
-    let response = gateway(&broker.url, endpoint(vec![Representation::Parquet], None))
-        .oneshot(
-            HttpRequest::builder()
-                .uri(format!(
-                    "/api/endpoint/{SLUG}/file.parquet?type=AirQualityObserved&q=pm10%3E0"
-                ))
-                .body(Body::empty())
-                .expect("a request"),
-        )
-        .await
-        .expect("the gateway answers");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let header = |name| {
-        response
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    };
-    assert_eq!(
-        header(axum::http::header::CONTENT_TYPE).as_deref(),
-        Some("application/vnd.apache.parquet")
-    );
-    assert_eq!(
-        header(axum::http::header::CONTENT_DISPOSITION),
-        Some(format!("attachment; filename=\"{SLUG}.parquet\""))
-    );
-    let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
-        .await
-        .expect("a readable body");
-    let back = read_parquet(body.to_vec());
-    assert_eq!(back.rows.len(), 1);
-    assert!(back
-        .metadata
-        .iter()
-        .any(|(key, value)| key == "rows" && value == "1"));
-    let hops = broker.hops();
-    assert!(hops[0].query.contains("q=pm10"), "{}", hops[0].query);
+    let broker = BrokerStub::start(vec![json!(full)]).await;
+    let (status, _, _) = download(
+        gateway(
+            &broker.url,
+            endpoint(vec![Representation::Csv], Some(limits)),
+        ),
+        &format!("/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }

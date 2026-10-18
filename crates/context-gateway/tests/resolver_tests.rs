@@ -15,7 +15,7 @@ fn endpoint(slug: &str, space: &str) -> Endpoint {
         project: "ovzdusie".to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -47,8 +47,8 @@ fn a_resolved_endpoint_carries_its_space_and_representations() {
     let resolved = resolver.resolve(SLUG).expect("the endpoint resolves");
 
     assert_eq!(resolved.space, "ovzdusie");
-    assert!(resolved.serves(Representation::GeoJson));
-    assert!(!resolved.serves(Representation::Csv));
+    assert!(resolved.serves(Representation::Csv));
+    assert!(!resolved.serves(Representation::OgcFeatures));
 }
 
 /// EP-14, EP-15: who may use the endpoint at all, before any policy is evaluated.

@@ -69,7 +69,7 @@ An endpoint is where a space is published: who may call it, in which representat
 2. Fill in **Name** and **Title**, and pick the **Context Space** it publishes.
 3. **Slug** is the address, and **Generate slug** makes one for you. It never changes, even when the endpoint is renamed, so a link you give out keeps working.
 4. **Audience** is one of three: *Selected projects: only the projects you tick*, *Organization: every project of the organization*, or *Public: anyone with the address*. Choosing *Selected projects* adds **Allowed projects**, where you tick them.
-5. **Representations** is how the same data is served: *NGSI-LD API*, *GeoJSON*, *CSV*, *Excel (xlsx)*, *ZIP download*, *OGC API Features*, *SensorThings API*, *JSON*, and *MCP for AI assistants*. Tick the ones you want; every one you tick becomes a link on the endpoint's row.
+5. **Representations** is how the same data is served: *NGSI-LD API*, *CSV*, *OGC API Features*, *OData*, *SensorThings API*, and *MCP for AI assistants*. Every endpoint serves the NGSI-LD API; tick the others you want, and every one you tick becomes a link on the endpoint's row.
 6. Under **Which classes and attributes it shows**, tick the classes and the attributes this endpoint exposes. What you do not tick is not served. **Hide attributes** takes out single attributes from what is otherwise shown.
 7. **Show the manifests this proposes** is worth opening once: it is exactly what will be written, before you write it.
 8. **Propose change**.

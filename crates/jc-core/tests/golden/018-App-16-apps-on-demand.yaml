@@ -19,6 +19,6 @@ spec:
       operations: [queryEntity, retrieveEntity, queryTemporal]      # CIM 009 names (R8)
       temporalQ: { window: P1D }                                     # today only
       geoQ: { within: { scopeRef: /geo/SK/BB } }
-      representations: [ngsi-ld, geojson]           # Endpoint.enabledRepresentations vocabulary (EP-08)
+      representations: [ngsi-ld, csv]               # Endpoint.enabledRepresentations vocabulary (EP-08)
   limits: { requestsPerMinute: 600, maxFileRows: 20000 }
   csp: { connectSrc: [self], frameAncestors: [none] }               # defaults; only the app's own endpoint is reachable

@@ -33,7 +33,7 @@ Each endpoint has its own address: a 26-character random slug nobody can guess.
 4. In **Context Space**, select `helsinki`.
 5. Click **Generate slug** to mint a random address.
 6. Under **Audience**, select `Public: anyone with the address` (or `Organization`).
-7. Under **Representations**, check the needed formats: `NGSI-LD API`, `GeoJSON`, `CSV`, `Excel (xlsx)`, and `MCP for AI assistants`.
+7. Under **Representations**, check the needed formats: `CSV`, `OGC API Features` and `MCP for AI assistants` (the `NGSI-LD API` is always on).
 8. Leave **Traffic and caching** empty for an endpoint without a rate limit, the default. Set **Requests per minute** only to protect a public endpoint from one heavy caller.
 9. Under **Model projection**, tick the classes (e.g. `BikeHireDockingStation`) and slots to expose. Identity slots `id` and `type` remain locked.
 10. Click **Check**. You should see the verdict chip display `Checked`.
@@ -79,9 +79,9 @@ The assistant updates the projection filter and opens `/projects/helsinki/endpoi
 
 Copy endpoint addresses using the **Copy URL** button beside any slug:
 
-- **QGIS & Desktop GIS:** Add a new vector layer using the GeoJSON representation at `https://{host}/api/endpoint/{slug}/file.geojson`, or add an OGC API Features connection pointing to `https://{host}/api/endpoint/{slug}/ogc/features`.
+- **QGIS & Desktop GIS:** Add an OGC API Features connection pointing to `https://{host}/api/endpoint/{slug}/ogc/features`.
 - **Microsoft Excel & Power BI:** Select **Data > From Web** and enter the CSV export URL `https://{host}/api/endpoint/{slug}/file.csv`.
-- **Grafana:** In the Infinity datasource plugin, query `/file.geojson` to plot live positions on a Geomap panel.
+- **Grafana:** In the Infinity datasource plugin, query `/ogc/features/collections/{type}/items` to plot live positions on a Geomap panel.
 - **AI Agents (MCP):** Connect external agent environments (such as Claude Code) to `https://{host}/api/endpoint/{slug}/mcp`. The agent discovers query tools automatically according to the endpoint policy.
 - The schema and what you may do: `https://{host}/api/endpoint/{slug}/schema/v1/AirQualityObserved.json` is the published schema of one type, and `https://{host}/api/endpoint/{slug}/access` answers what the caller of that moment may read and write.
 

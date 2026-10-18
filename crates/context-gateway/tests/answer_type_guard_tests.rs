@@ -4,7 +4,7 @@
 //! for a neighbour or a broker defect does not, and the gateway is the policy enforcement point:
 //! it may not depend on any of them. Measured on 2026-09-18 by the leak probe, when the stub
 //! ignored `type` and answered a `Depot` beside the asked Vehicles, the Depot's own attributes
-//! reached the caller on NGSI-LD, temporal, `file.csv`, `file.geojson`, OGC items, SensorThings
+//! reached the caller on NGSI-LD, temporal, `file.csv`, OGC items, SensorThings
 //! Things and the MCP tools.
 //!
 //! Every surface here reads the same broker answer, so this is one fixture asked eight ways: a
@@ -96,7 +96,6 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Csv,
             Representation::OgcFeatures,
             Representation::Sta,

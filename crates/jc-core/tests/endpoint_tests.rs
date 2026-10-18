@@ -16,7 +16,6 @@ spec:
   enabledRepresentations:
     - ngsi-ld
     - mcp
-    - geojson
     - csv
     - ogc-features
     - sta
@@ -57,12 +56,7 @@ fn representation_variants_serialize_to_expected_wire_names() {
     let representations = [
         (Representation::NgsiLd, "ngsi-ld"),
         (Representation::Mcp, "mcp"),
-        (Representation::GeoJson, "geojson"),
         (Representation::Csv, "csv"),
-        (Representation::Xlsx, "xlsx"),
-        (Representation::Parquet, "parquet"),
-        (Representation::Json, "json"),
-        (Representation::Zip, "zip"),
         (Representation::OgcFeatures, "ogc-features"),
         (Representation::Sta, "sta"),
         (Representation::Odata, "odata"),
@@ -76,12 +70,7 @@ fn representation_variants_serialize_to_expected_wire_names() {
         vec![
             "ngsi-ld",
             "mcp",
-            "geojson",
             "csv",
-            "xlsx",
-            "parquet",
-            "json",
-            "zip",
             "ogc-features",
             "sta",
             "odata",
@@ -453,13 +442,13 @@ fn listing(representations: &str, extra: &str) -> Endpoint {
 /// leaves it out; the listed order stays as written.
 #[test]
 fn every_endpoint_serves_mcp_unless_it_opts_out() {
-    let listed = listing("[ngsi-ld, geojson]", "");
+    let listed = listing("[ngsi-ld, csv]", "");
     listed.validate().expect("valid");
     assert_eq!(
         listed.spec.served_representations(),
         [
             Representation::NgsiLd,
-            Representation::GeoJson,
+            Representation::Csv,
             Representation::Mcp
         ]
     );
@@ -467,20 +456,13 @@ fn every_endpoint_serves_mcp_unless_it_opts_out() {
     let already = listing("[mcp, ngsi-ld]", "");
     assert_eq!(
         already.spec.served_representations(),
-        [
-            Representation::Mcp,
-            Representation::NgsiLd,
-            Representation::GeoJson
-        ],
+        [Representation::Mcp, Representation::NgsiLd],
         "a listed mcp is not served twice"
     );
 
     let off = listing("[ngsi-ld]", "  mcp: false\n");
     off.validate().expect("an opt-out is valid");
-    assert_eq!(
-        off.spec.served_representations(),
-        [Representation::NgsiLd, Representation::GeoJson]
-    );
+    assert_eq!(off.spec.served_representations(), [Representation::NgsiLd]);
 
     let on = listing("[ngsi-ld]", "  mcp: true\n");
     assert!(on
@@ -489,30 +471,57 @@ fn every_endpoint_serves_mcp_unless_it_opts_out() {
         .contains(&Representation::Mcp));
 }
 
-/// EP-10 (T-2939): NGSI-LD and GeoJSON are served without being listed, like MCP, so an
-/// endpoint that lists only a file format still serves the uniform surface.
+/// EP-10 (T-2939, T-4597): NGSI-LD is served without being listed, like MCP, so an endpoint
+/// that lists only its file still serves the uniform surface, maps included (geo+json).
 #[test]
-fn every_endpoint_serves_ngsi_ld_and_geojson_whatever_it_lists() {
-    let files = listing("[csv, json]", "");
+fn every_endpoint_serves_ngsi_ld_whatever_it_lists() {
+    let files = listing("[csv]", "");
     files.validate().expect("valid");
     assert_eq!(
         files.spec.served_representations(),
         [
             Representation::Csv,
-            Representation::Json,
             Representation::NgsiLd,
-            Representation::GeoJson,
             Representation::Mcp
         ]
     );
-    let each_once = listing("[geojson, ngsi-ld, mcp]", "");
+    let each_once = listing("[ngsi-ld, mcp]", "");
     assert_eq!(
         each_once.spec.served_representations(),
-        [
-            Representation::GeoJson,
-            Representation::NgsiLd,
-            Representation::Mcp
-        ]
+        [Representation::NgsiLd, Representation::Mcp]
+    );
+}
+
+/// T-4597 (API/02 §5): a manifest that still names a removed file is refused with a sentence
+/// that names the removal and the way out, in either list, not as an unknown word.
+#[test]
+fn a_removed_representation_is_refused_by_name() {
+    for removed in ["geojson", "json", "xlsx", "parquet", "zip"] {
+        for list in ["enabledRepresentations", "disabledRepresentations"] {
+            let raw = format!(
+                "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: air\n  \
+                 namespace: bb-ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  \
+                 slug: zt4qm7ge2xdv6ksb3ncf5arw2y\n  audience: public\n  {list}: [{removed}]\n"
+            );
+            let refused = Endpoint::from_yaml(&raw).expect_err("a removed file is refused");
+            let message = refused.to_string();
+            assert!(
+                message.contains(&format!("representation `{removed}` was removed"))
+                    && message.contains("file.csv"),
+                "{list}: {message}"
+            );
+        }
+    }
+    let typo = Endpoint::from_yaml(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: air\n  \
+         namespace: bb-ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  \
+         slug: zt4qm7ge2xdv6ksb3ncf5arw2y\n  audience: public\n  enabledRepresentations: [cvs]\n",
+    )
+    .expect_err("an unknown name is refused");
+    assert!(
+        typo.to_string().contains("unknown variant `cvs`")
+            && !typo.to_string().contains("was removed"),
+        "{typo}"
     );
 }
 
@@ -648,12 +657,7 @@ fn an_endpoint_that_lists_nothing_serves_every_standard_but_sta() {
         [
             R::NgsiLd,
             R::Mcp,
-            R::GeoJson,
             R::Csv,
-            R::Xlsx,
-            R::Parquet,
-            R::Json,
-            R::Zip,
             R::OgcFeatures,
             R::Odata,
             R::WebSocket
@@ -661,20 +665,11 @@ fn an_endpoint_that_lists_nothing_serves_every_standard_but_sta() {
         "EP-104, EP-125: SensorThings and iCalendar are opt-in"
     );
     let narrowed =
-        defaulted("  disabledRepresentations: [odata, xlsx, websocket]\n").expect("parses");
+        defaulted("  disabledRepresentations: [odata, csv, websocket]\n").expect("parses");
     narrowed.validate().expect("validates");
     assert_eq!(
         narrowed.spec.served_representations(),
-        [
-            R::NgsiLd,
-            R::Mcp,
-            R::GeoJson,
-            R::Csv,
-            R::Parquet,
-            R::Json,
-            R::Zip,
-            R::OgcFeatures
-        ]
+        [R::NgsiLd, R::Mcp, R::OgcFeatures]
     );
     let no_mcp = defaulted("  mcp: false\n").expect("parses");
     no_mcp.validate().expect("validates");
@@ -693,14 +688,7 @@ fn an_explicit_list_serves_what_it_served_before() {
     use Representation as R;
     assert_eq!(
         ep.spec.served_representations(),
-        [
-            R::NgsiLd,
-            R::Mcp,
-            R::GeoJson,
-            R::Csv,
-            R::OgcFeatures,
-            R::Sta
-        ],
+        [R::NgsiLd, R::Mcp, R::Csv, R::OgcFeatures, R::Sta],
         "the list, and nothing the default would add"
     );
 }
@@ -711,10 +699,6 @@ fn disabled_representations_are_checked() {
         (
             "  disabledRepresentations: [ngsi-ld]\n",
             "ngsi-ld is always served",
-        ),
-        (
-            "  disabledRepresentations: [geojson]\n",
-            "geojson is always served",
         ),
         (
             "  disabledRepresentations: [mcp]\n",

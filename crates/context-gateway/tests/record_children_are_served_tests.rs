@@ -10,7 +10,8 @@
 //! none of the three was routed. The endpoint record advertised `file.json` for every endpoint
 //! whose manifest enabled the `json` representation, and that was not routed either. Nothing
 //! leaked — a `404` says nothing — so every test stayed green while three published catalogues
-//! pointed at nothing.
+//! pointed at nothing. T-4597 removed `file.json` and the dump; the download cases stand for
+//! `file.csv`, the one file left.
 //!
 //! The first case below is the one most likely to be red: it walks the space record and asks
 //! for every service IRI it finds, rather than for the paths this file happens to know.
@@ -114,11 +115,7 @@ fn every_representation() -> Vec<Representation> {
     vec![
         Representation::NgsiLd,
         Representation::Mcp,
-        Representation::GeoJson,
         Representation::Csv,
-        Representation::Xlsx,
-        Representation::Json,
-        Representation::Zip,
         Representation::OgcFeatures,
         Representation::Sta,
     ]
@@ -293,8 +290,6 @@ async fn the_three_serializations_of_a_space_record_name_the_same_children() {
     assert_eq!(
         first,
         &vec![
-            // The dump is back now that the router serves it (T-2391).
-            format!("/cs/{SPACE}/dump/"),
             format!("/cs/{SPACE}/mcp"),
             format!("/cs/{SPACE}/ngsi-ld/v1/"),
             format!("/cs/{SPACE}/schema/index.json"),
@@ -352,11 +347,11 @@ async fn every_distribution_an_endpoint_record_names_is_one_the_router_serves() 
     }
 }
 
-/// The download the record has always promised: the projected entities, as an attachment
-/// named after the endpoint (EP-41, EP-43). The broker's view narrows them to the grant since
+/// The download the record promises: the projected entities, as an attachment named after the
+/// endpoint (EP-43). The broker's view narrows them to the grant since
 /// T-3651.
 #[tokio::test]
-async fn file_json_serves_the_projected_entities_as_an_attachment() {
+async fn file_csv_serves_the_projected_entities_as_an_attachment() {
     let broker = BrokerStub::narrowing(
         vec![json!([station()]), json!([])],
         View::of(
@@ -374,7 +369,7 @@ async fn file_json_serves_the_projected_entities_as_an_attachment() {
         .oneshot(
             HttpRequest::builder()
                 .uri(format!(
-                    "/api/endpoint/{SLUG}/file.json?type=AirQualityObserved"
+                    "/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"
                 ))
                 .body(Body::empty())
                 .expect("a request"),
@@ -387,31 +382,31 @@ async fn file_json_serves_the_projected_entities_as_an_attachment() {
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
-        Some("application/json")
+        Some(context_gateway::translators::tabular::CSV_MEDIA_TYPE)
     );
     assert_eq!(
         response
             .headers()
             .get(axum::http::header::CONTENT_DISPOSITION)
             .and_then(|value| value.to_str().ok()),
-        Some(format!("attachment; filename=\"{SLUG}.json\"").as_str())
+        Some(format!("attachment; filename=\"{SLUG}.csv\"").as_str())
     );
 
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("a readable body");
-    let entities: Value = serde_json::from_slice(&body).expect("a JSON array");
-    assert_eq!(entities[0]["pm10"]["value"], json!(34.2));
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("34.2"), "{text}");
     assert!(
-        entities[0].get("operatorPhone").is_none(),
-        "the download served an attribute the grant does not name: {entities}"
+        !text.contains("operatorPhone"),
+        "the download served an attribute the grant does not name: {text}"
     );
 }
 
 /// A representation the manifest does not enable is not served, whichever surface asks for
 /// it: `admit` refuses before a broker request exists (EP-03, R20).
 #[tokio::test]
-async fn file_json_is_not_served_by_an_endpoint_that_does_not_enable_it() {
+async fn file_csv_is_not_served_by_an_endpoint_that_does_not_enable_it() {
     let broker = BrokerStub::start(vec![json!([station()])]).await;
     let app = router(Arc::new(published(&broker.url).serve([endpoint(
         SLUG,
@@ -419,7 +414,7 @@ async fn file_json_is_not_served_by_an_endpoint_that_does_not_enable_it() {
         vec![Representation::NgsiLd],
     )])));
 
-    let (status, body) = call(&app, &format!("/api/endpoint/{SLUG}/file.json"), None).await;
+    let (status, body) = call(&app, &format!("/api/endpoint/{SLUG}/file.csv"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(
         !body.contains("AirQualityObserved"),
@@ -427,10 +422,10 @@ async fn file_json_is_not_served_by_an_endpoint_that_does_not_enable_it() {
     );
 }
 
-/// EP-44: the endpoint's own byte ceiling bounds this download as it bounds the tabular ones.
-/// Half a JSON array is not a smaller answer, so the whole download is refused.
+/// EP-44: the endpoint's own byte ceiling bounds the download. Half a file is not a smaller
+/// answer, so the whole download is refused.
 #[tokio::test]
-async fn a_json_download_past_the_endpoints_byte_limit_is_refused_whole() {
+async fn a_download_past_the_endpoints_byte_limit_is_refused_whole() {
     let broker = BrokerStub::start(vec![json!([station()]), json!([])]).await;
     let limited = Endpoint {
         roles: Default::default(),
@@ -443,7 +438,7 @@ async fn a_json_download_past_the_endpoints_byte_limit_is_refused_whole() {
 
     let (status, body) = call(
         &app,
-        &format!("/api/endpoint/{SLUG}/file.json?type=AirQualityObserved"),
+        &format!("/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"),
         None,
     )
     .await;

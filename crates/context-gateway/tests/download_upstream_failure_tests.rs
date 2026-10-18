@@ -62,11 +62,7 @@ fn endpoint() -> Endpoint {
         allowed_projects: Vec::new(),
         representations: vec![
             Representation::NgsiLd,
-            Representation::GeoJson,
-            Representation::Json,
             Representation::Csv,
-            Representation::Xlsx,
-            Representation::Zip,
             Representation::OgcFeatures,
             Representation::Sta,
         ],
@@ -134,12 +130,12 @@ fn assert_nothing_leaked(what: &str, body: &str) {
     }
 }
 
-/// The red case of T-2340: a broker `500` behind `file.geojson` answered the caller with the DSN,
-/// its password, the cluster host and the source path.
+/// The red case of T-2340: a broker `500` behind a file download answered the caller with the
+/// DSN, its password, the cluster host and the source path.
 #[tokio::test]
 async fn a_broker_error_body_is_not_forwarded() {
     let (broker, calls) = failing_broker(StatusCode::INTERNAL_SERVER_ERROR).await;
-    let (status, body) = ask(&broker, "/file.geojson?type=AirQualityObserved").await;
+    let (status, body) = ask(&broker, "/file.csv?type=AirQualityObserved").await;
     assert!(
         calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
         "the broker was asked"
@@ -149,7 +145,7 @@ async fn a_broker_error_body_is_not_forwarded() {
         body.contains("broker-failure"),
         "the gateway's own document: {body}"
     );
-    assert_nothing_leaked("file.geojson 500", &body);
+    assert_nothing_leaked("file.csv 500", &body);
 }
 
 /// Every download, whatever the broker's failure: its body never comes out, and a broker that
@@ -164,14 +160,10 @@ async fn no_download_carries_a_failing_brokers_words() {
     ] {
         let (broker, _) = failing_broker(failure).await;
         for path in [
-            "/file.geojson?type=AirQualityObserved",
-            "/file.json?type=AirQualityObserved",
             "/file.csv?type=AirQualityObserved",
-            "/file.xlsx?type=AirQualityObserved",
-            "/file.zip?type=AirQualityObserved",
             // No selector: the gateway asks the broker what the space holds first, and that
             // read fails the same way.
-            "/file.geojson",
+            "/file.csv",
         ] {
             let (status, body) = ask(&broker, path).await;
             let what = format!("{path} behind a broker {failure}");

@@ -128,9 +128,8 @@ const PARALLEL_PAGES: usize = 4;
 /// ceiling is a refusal and not a truncation: a short CSV looks exactly like a complete
 /// one, and a caller who cannot tell will act on half the data.
 ///
-/// `view` is the broker's view the surface reads through: the endpoint's slug, or `cs-{space}`
-/// for the space's dump (plan 5.1). A view id the broker cannot hold answers `503 no-view`
-/// (T-3652).
+/// `view` is the broker's view the surface reads through, the endpoint's slug. A view id the
+/// broker cannot hold answers `503 no-view` (T-3652).
 pub(crate) async fn paged_entities(
     gateway: &Gateway,
     endpoint: &Endpoint,

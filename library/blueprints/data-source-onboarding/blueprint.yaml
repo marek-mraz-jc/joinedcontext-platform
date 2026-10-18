@@ -84,4 +84,4 @@ spec:
           contextSpaceRef: { kind: ContextSpace, name: "{{ space }}" }
           slug: "{{ endpointSlug }}"
           audience: organization
-          enabledRepresentations: [ngsi-ld, geojson, csv]
+          enabledRepresentations: [ngsi-ld, csv]

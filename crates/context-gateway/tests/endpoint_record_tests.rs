@@ -75,11 +75,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         project: "ovzdusie".to_owned(),
         audience,
         allowed_projects: Vec::new(),
-        representations: vec![
-            Representation::NgsiLd,
-            Representation::GeoJson,
-            Representation::Csv,
-        ],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -255,7 +251,7 @@ async fn the_record_lists_one_distribution_per_enabled_representation() {
     let record = record(Audience::Public).await;
     let urls = urls(&record);
 
-    for path in ["ngsi-ld/v1/", "file.geojson", "file.csv"] {
+    for path in ["ngsi-ld/v1/", "file.csv"] {
         assert!(
             urls.iter().any(|url| url.ends_with(path)),
             "{path} is not listed among {urls:?}"
@@ -263,7 +259,15 @@ async fn the_record_lists_one_distribution_per_enabled_representation() {
     }
     // A representation the endpoint does not serve must not be advertised: a caller
     // following it would get a 404 from a document that promised it (EP-05).
-    assert!(!urls.iter().any(|url| url.ends_with("file.xlsx")));
+    for removed in [
+        "file.geojson",
+        "file.xlsx",
+        "file.zip",
+        "file.json",
+        "file.parquet",
+    ] {
+        assert!(!urls.iter().any(|url| url.ends_with(removed)), "{removed}");
+    }
     assert!(!urls.iter().any(|url| url.ends_with("sta/v1.1/")));
 }
 

@@ -1,5 +1,5 @@
-//! Edge cases of `translators::tabular::{table, humanize, xlsx}` (T-1958, T-1959, T-1960;
-//! EP-08, EP-44, EP-45, DM-06).
+//! Edge cases of `translators::tabular::{table, humanize}` (T-1958, T-1959; EP-08, EP-44,
+//! EP-45, DM-06). The workbook writer went with T-4597.
 //!
 //! Contracts, one sentence each:
 //!
@@ -7,14 +7,12 @@
 //!   row ceiling is refused whole rather than returned short.
 //! - `humanize`: the header is rewritten for a reader without a cell moving out from under its
 //!   column.
-//! - `xlsx`: the workbook is a package a spreadsheet opens, whatever the data carries, and one
-//!   past the byte ceiling is refused rather than truncated.
 //!
 //! `tabular_translator_tests.rs` covers the flattening, the CSV quoting, one unit header, the
-//! row ceiling and the package's shape. These are the shapes around them: what is not an entity,
-//! the bound and the bound plus one, a header that collides, and a value written to break the XML.
+//! row ceiling. These are the shapes around them: what is not an entity, the bound and the bound
+//! plus one, and a header that collides.
 
-use context_gateway::translators::tabular::{flatten, humanize, table, xlsx, Limits, Table};
+use context_gateway::translators::tabular::{flatten, humanize, table, Limits, Table};
 use serde_json::{json, Value};
 
 fn reading(id: usize) -> Value {
@@ -30,36 +28,6 @@ fn limits(max_rows: u32, max_bytes: u64) -> Limits {
         max_rows,
         max_bytes,
     }
-}
-
-/// The parts every workbook carries, in the order they are written.
-fn parts(workbook: &[u8]) -> Vec<String> {
-    let mut archive =
-        zip::ZipArchive::new(std::io::Cursor::new(workbook.to_vec())).expect("a zip archive");
-    (0..archive.len())
-        .map(|index| {
-            archive
-                .by_index(index)
-                .expect("an entry")
-                .name()
-                .expect("an entry name")
-                .into_owned()
-        })
-        .collect()
-}
-
-/// One part of a workbook as text.
-fn part(workbook: &[u8], name: &str) -> String {
-    use std::io::Read;
-    let mut archive =
-        zip::ZipArchive::new(std::io::Cursor::new(workbook.to_vec())).expect("a zip archive");
-    let mut text = String::new();
-    archive
-        .by_name(name)
-        .expect("the part")
-        .read_to_string(&mut text)
-        .expect("utf-8");
-    text
 }
 
 // --- table (T-1958) ---------------------------------------------------------------------------
@@ -305,8 +273,7 @@ fn a_unit_whose_value_column_is_not_there_takes_no_header_with_it() {
 
 #[test]
 fn humanizing_a_header_twice_changes_nothing_the_second_time() {
-    // The CSV and the workbook are written from the same table, so it is humanized once — but a
-    // second pass must not turn `pm10 [GQ]` into something else.
+    // A table is humanized once, but a second pass must not turn `pm10 [GQ]` into something else.
     let mut table = table_of(
         &["pm10.value", "pm10.unitCode"],
         vec![vec![json!(1), json!("GQ")]],
@@ -338,143 +305,4 @@ fn several_units_each_find_their_own_column() {
     humanize(&mut table);
     assert_eq!(table.columns, vec!["pm10 [GQ]", "temp [CEL]"]);
     assert_eq!(table.rows[0], vec![json!(1), json!(-3)]);
-}
-
-// --- xlsx (T-1960) ----------------------------------------------------------------------------
-
-#[test]
-fn an_empty_table_is_still_a_package_a_spreadsheet_opens() {
-    // Nothing to show is not an error: the workbook has both sheets and an empty grid.
-    let workbook = xlsx(&Table::default(), &[], &Limits::DEFAULT).expect("a workbook");
-    assert_eq!(
-        parts(&workbook),
-        vec![
-            "[Content_Types].xml",
-            "_rels/.rels",
-            "xl/workbook.xml",
-            "xl/_rels/workbook.xml.rels",
-            "xl/worksheets/sheet1.xml",
-            "xl/worksheets/sheet2.xml",
-        ]
-    );
-    // The header row is written even when there is no column, so the grid is a grid: one row,
-    // no cells, and no second sheet pretending to hold data.
-    let sheet = part(&workbook, "xl/worksheets/sheet1.xml");
-    assert!(
-        sheet.contains(r#"<sheetData><row r="1"></row></sheetData>"#),
-        "{sheet}"
-    );
-    assert!(part(&workbook, "xl/worksheets/sheet2.xml").contains("<sheetData></sheetData>"));
-}
-
-#[test]
-fn a_number_is_a_number_and_everything_else_is_a_string_a_reader_cannot_confuse() {
-    // A measurement a reader has to retype is a measurement nobody sums. A string that looks
-    // like a number stays a string, or an id of digits would arrive as a float.
-    let table = table_of(
-        &["id", "pm10", "note", "flag"],
-        vec![vec![json!("00420"), json!(34.2), json!("ok"), json!(true)]],
-    );
-    let workbook = xlsx(&table, &[], &Limits::DEFAULT).expect("a workbook");
-    let sheet = part(&workbook, "xl/worksheets/sheet1.xml");
-    assert!(sheet.contains(r#"<c r="B2"><v>34.2</v></c>"#), "{sheet}");
-    assert!(sheet.contains(r#"r="A2" t="inlineStr"#), "{sheet}");
-    assert!(sheet.contains(">00420<"), "{sheet}");
-    assert!(
-        sheet.contains(">true<"),
-        "a boolean is written as it reads: {sheet}"
-    );
-}
-
-#[test]
-fn a_cell_the_entity_does_not_carry_is_absent_rather_than_empty_text() {
-    // SpreadsheetML addresses every cell by its reference, so a missing one leaves the column
-    // aligned. Writing an empty string would make "no reading" look like a reading of nothing.
-    let table = table_of(
-        &["id", "pm10", "pm25"],
-        vec![vec![json!("s-1"), Value::Null, json!(12)]],
-    );
-    let sheet = part(
-        &xlsx(&table, &[], &Limits::DEFAULT).expect("a workbook"),
-        "xl/worksheets/sheet1.xml",
-    );
-    assert!(
-        !sheet.contains(r#"r="B2""#),
-        "the empty cell was written: {sheet}"
-    );
-    assert!(sheet.contains(r#"<c r="C2"><v>12</v></c>"#), "{sheet}");
-}
-
-#[test]
-fn a_value_written_to_break_the_worksheet_is_escaped_and_the_package_still_opens() {
-    // The XML is written by hand, so every hostile value has to be proved harmless here: the
-    // five predefined entities, and the control characters XML 1.0 has no escape for at all.
-    let table = table_of(
-        &["note"],
-        vec![
-            vec![json!(
-                "</t></is></c></row><row r=\"999\"><c><v>1</v></c></row>"
-            )],
-            vec![json!("a & b < c > d \" e ' f")],
-            vec![json!("bell:\u{7} nul-free\u{1} tab:\tnewline:\n")],
-        ],
-    );
-    let workbook = xlsx(&table, &[], &Limits::DEFAULT).expect("a workbook");
-    let sheet = part(&workbook, "xl/worksheets/sheet1.xml");
-    assert!(!sheet.contains(r#"<row r="999">"#), "{sheet}");
-    assert!(sheet.contains("&lt;/t&gt;"), "{sheet}");
-    assert!(sheet.contains("&amp;"), "{sheet}");
-    assert!(
-        sheet.contains("&quot;") && sheet.contains("&apos;"),
-        "{sheet}"
-    );
-    assert!(
-        !sheet.contains('\u{7}') && !sheet.contains('\u{1}'),
-        "a control character survived"
-    );
-    assert!(sheet.contains('\t'), "a tab is legal XML and stays");
-    // Four rows: the header and the three the table holds, and no fifth one smuggled in.
-    assert_eq!(sheet.matches("<row r=").count(), 4, "{sheet}");
-}
-
-#[test]
-fn the_metadata_sheet_says_what_produced_the_file_and_escapes_it_too() {
-    let workbook = xlsx(
-        &Table::default(),
-        &[
-            ("endpoint".to_owned(), "verejné-ovzdušie".to_owned()),
-            ("filter".to_owned(), "pm10>30 & pm25<10".to_owned()),
-        ],
-        &Limits::DEFAULT,
-    )
-    .expect("a workbook");
-    let sheet = part(&workbook, "xl/worksheets/sheet2.xml");
-    assert!(sheet.contains("verejné-ovzdušie"), "{sheet}");
-    assert!(sheet.contains("pm10&gt;30 &amp; pm25&lt;10"), "{sheet}");
-    assert_eq!(sheet.matches("<row r=").count(), 2, "{sheet}");
-}
-
-#[test]
-fn a_workbook_past_the_byte_ceiling_is_refused_while_it_is_written() {
-    // EP-44: refused, never truncated. A short workbook opens and looks complete.
-    let rows: Vec<Vec<Value>> = (0..500)
-        .map(|index| vec![json!(format!("urn:ngsi-ld:X:o:s:{index}")), json!(index)])
-        .collect();
-    let table = table_of(&["id", "pm10"], rows);
-    assert!(xlsx(&table, &[], &limits(u32::MAX, 1024)).is_err());
-    assert!(xlsx(&table, &[], &Limits::DEFAULT).is_ok());
-}
-
-#[test]
-fn a_table_wider_than_the_alphabet_keeps_addressing_its_cells() {
-    // 27 columns is `AA`, and a workbook whose references run out is one no reader opens.
-    let columns: Vec<String> = (0..30).map(|index| format!("c{index}")).collect();
-    let names: Vec<&str> = columns.iter().map(String::as_str).collect();
-    let table = table_of(&names, vec![(0..30).map(|index| json!(index)).collect()]);
-    let sheet = part(
-        &xlsx(&table, &[], &Limits::DEFAULT).expect("a workbook"),
-        "xl/worksheets/sheet1.xml",
-    );
-    assert!(sheet.contains(r#"<c r="AA2">"#), "{sheet}");
-    assert!(sheet.contains(r#"<c r="AD2">"#), "{sheet}");
 }

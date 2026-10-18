@@ -169,10 +169,11 @@ async fn an_endpoint_serves_mcp_without_listing_it() {
     assert!(listed.serves(jc_core::kinds::Representation::Mcp));
 }
 
-/// EP-10 (T-2939): GeoJSON is served without being listed too, so the endpoint that lists
-/// NGSI-LD alone resolves `file.geojson` and advertises it wherever its representations go.
+/// EP-10 (T-2939, T-4597): NGSI-LD is what every endpoint serves unlisted; GeoJSON is no longer
+/// a representation of its own, so the endpoint that lists NGSI-LD alone answers `file.geojson`
+/// with the bytes an unknown slug gets.
 #[tokio::test]
-async fn an_endpoint_serves_geojson_without_listing_it() {
+async fn an_endpoint_serves_no_geojson_file() {
     let realm = common::Realm::new();
     let dir = repo("geojson");
     let (endpoints, ..) = store::load(&dir).expect("the repository loads");
@@ -180,16 +181,18 @@ async fn an_endpoint_serves_geojson_without_listing_it() {
         .iter()
         .find(|e| e.slug == LISTED_NGSI)
         .expect("loaded");
-    assert!(listed.serves(jc_core::kinds::Representation::GeoJson));
+    assert!(listed.serves(jc_core::kinds::Representation::NgsiLd));
 
-    // Resolved and admitted, the download goes on to the broker (none listens here), rather
-    // than the 404 of a surface the endpoint does not serve.
-    let request = Request::builder()
-        .uri(format!("/api/endpoint/{LISTED_NGSI}/file.geojson"))
-        .body(Body::empty())
-        .expect("a request");
-    let (status, body) = send(app(&dir, &realm).await, request).await;
-    assert_ne!(status, StatusCode::NOT_FOUND, "{body}");
+    let at = |slug: &str| {
+        Request::builder()
+            .uri(format!("/api/endpoint/{slug}/file.geojson"))
+            .body(Body::empty())
+            .expect("a request")
+    };
+    let removed = send(app(&dir, &realm).await, at(LISTED_NGSI)).await;
+    let unknown = send(app(&dir, &realm).await, at(UNKNOWN)).await;
+    assert_eq!(removed.0, StatusCode::NOT_FOUND, "{}", removed.1);
+    assert_eq!(removed, unknown);
 }
 
 /// EP-24, EP-23: `mcp: false` turns the instance off, and the path then answers the bytes an
