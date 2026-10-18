@@ -248,7 +248,7 @@ fn czech(mut record: Value, licence: Option<&str>, personal: Option<PersonalData
 mod tests {
     use super::*;
     use crate::{dataset, turtle, Subject};
-    use jc_core::kinds::{Audience, Licence, Representation};
+    use jc_core::kinds::{Audience, Licence, PersonalData, Representation};
     use std::collections::BTreeMap;
 
     const BASE: &str = "https://data.example.sk";
@@ -457,24 +457,46 @@ mod tests {
     #[cfg(feature = "dcat-ap-cz")]
     #[test]
     fn a_czech_statement_is_a_licence_document_of_the_vocabulary() {
-        let mut stated = catalog(Some(Licence::Cc0));
-        stated.personal_data = Some(PersonalData::DoesNotContain);
-        let cz = render(record(&stated), Profile::DcatApCz, Some(&stated));
-        let code = "https://data.gov.cz/podmínky-užití/neobsahuje-osobní-údaje/";
-        for distribution in cz["dcat:distribution"].as_array().into_iter().flatten() {
-            assert_eq!(
-                distribution["pu:specifikace"]["pu:osobní-údaje"],
-                json!({ "@id": code })
-            );
+        for (statement, code) in [
+            (
+                PersonalData::Contains,
+                "https://data.gov.cz/podmínky-užití/obsahuje-osobní-údaje/",
+            ),
+            (
+                PersonalData::DoesNotContain,
+                "https://data.gov.cz/podmínky-užití/neobsahuje-osobní-údaje/",
+            ),
+        ] {
+            let mut stated = catalog(Some(Licence::Cc0));
+            stated.personal_data = Some(statement);
+            let cz = render(record(&stated), Profile::DcatApCz, Some(&stated));
+            for distribution in cz["dcat:distribution"].as_array().into_iter().flatten() {
+                assert_eq!(
+                    distribution["pu:specifikace"]["pu:osobní-údaje"],
+                    json!({ "@id": code })
+                );
+            }
+            let included = cz["@included"].as_array().expect("@included");
+            assert!(included
+                .iter()
+                .any(|n| n["@id"] == code && n["@type"] == "dct:LicenseDocument"));
+            let turtle = turtle(&cz);
+            assert!(turtle.contains(&format!("<{code}>")), "{turtle}");
         }
-        let included = cz["@included"].as_array().expect("@included");
-        assert!(included
-            .iter()
-            .any(|n| n["@id"] == code && n["@type"] == "dct:LicenseDocument"));
-        // the core record never carries it
-        assert!(!record(&stated).to_string().contains("osobní"));
-        let turtle = turtle(&cz);
-        assert!(turtle.contains(&format!("<{code}>")), "{turtle}");
+    }
+
+    /// Without a national profile the statement is never written: DCAT-AP 3.0 has no term for
+    /// it, and this runs in every build, the featureless one included.
+    #[test]
+    fn the_core_record_never_carries_the_statement() {
+        for statement in [PersonalData::Contains, PersonalData::DoesNotContain] {
+            let mut stated = catalog(Some(Licence::CcBy4));
+            stated.personal_data = Some(statement);
+            let core = render(record(&stated), Profile::DcatAp, Some(&stated));
+            let written = core.to_string();
+            assert!(!written.contains("personal"), "{written}");
+            assert!(!written.contains("osobn"), "{written}");
+        }
     }
 
     #[test]
