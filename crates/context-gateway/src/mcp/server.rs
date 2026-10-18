@@ -70,6 +70,8 @@ pub struct McpServer {
     pub audience: Audience,
     /// The projects a `project-list` server admits besides its own.
     pub allowed_projects: Vec<String>,
+    /// The knowledge sources its `search_documents` searches, as `(project, source)` (MF-57).
+    pub knowledge_sources: Vec<(String, String)>,
 }
 
 /// Every named server the repository declares.
@@ -93,6 +95,7 @@ impl McpServer {
             endpoints: None,
             audience: Audience::Organization,
             allowed_projects: Vec::new(),
+            knowledge_sources: Vec::new(),
         }
     }
 
@@ -674,6 +677,7 @@ mod tests {
             endpoints: None,
             audience,
             allowed_projects: vec!["espoo".into()],
+            knowledge_sources: Vec::new(),
         }
     }
 
