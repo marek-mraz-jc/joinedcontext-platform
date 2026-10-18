@@ -17,7 +17,7 @@ spec:
   contextSpaceRef: ovzdusie
   slug: zt4qm7ge2xdv6ksb3ncf5arw2y
   audience: public
-  enabledRepresentations: ["ngsi-ld", "geojson"]
+  enabledRepresentations: ["ngsi-ld", "csv"]
   rateLimits:
     requestsPerMinute: 600
     burst: 50
@@ -46,7 +46,7 @@ spec:
   rateLimits:
     burst: 50
     requestsPerMinute: 600
-  enabledRepresentations: ["geojson", "ngsi-ld"]
+  enabledRepresentations: ["csv", "ngsi-ld"]
   slug: zt4qm7ge2xdv6ksb3ncf5arw2y
   contextSpaceRef: ovzdusie
 "#,

@@ -188,10 +188,7 @@ fn a_keyword_becomes_a_tag_ckan_accepts() {
 #[test]
 fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {
     let dataset = package(
-        &endpoint(
-            "[ngsi-ld, sta, geojson, csv, mcp, zip, ogc-features, xlsx, json]",
-            PUBLISH,
-        ),
+        &endpoint("[ngsi-ld, sta, csv, mcp, ogc-features]", PUBLISH),
         &instance(),
         &record(),
         &settings(),
@@ -205,13 +202,9 @@ fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {
         vec![
             format!("{base}/ngsi-ld/v1/"),
             format!("{base}/sta/v1.1/"),
-            format!("{base}/file.geojson"),
             format!("{base}/file.csv"),
             format!("{base}/mcp"),
-            format!("{base}/file.zip"),
             format!("{base}/ogc/features/"),
-            format!("{base}/file.xlsx"),
-            format!("{base}/file.json"),
             format!("{base}/schema/index.json"),
         ]
     );
@@ -223,7 +216,7 @@ fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {
         .collect();
     assert_eq!(
         formats,
-        vec!["NGSI-LD", "STA", "GeoJSON", "CSV", "MCP", "ZIP", "OGCFEAT", "XLSX", "JSON", "JSON"]
+        vec!["NGSI-LD", "STA", "CSV", "MCP", "OGCFEAT", "JSON"]
     );
 }
 
@@ -231,7 +224,7 @@ fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {
 #[test]
 fn no_resource_url_leaves_the_endpoint() {
     let dataset = package(
-        &endpoint("[ngsi-ld, csv, geojson]", PUBLISH),
+        &endpoint("[ngsi-ld, csv]", PUBLISH),
         &instance(),
         &record(),
         &settings(),
@@ -361,7 +354,7 @@ fn a_disabled_representation_loses_its_resource() {
     let mut api = ckan();
     publish(
         &mut api,
-        &endpoint("[ngsi-ld, csv, geojson]", PUBLISH),
+        &endpoint("[ngsi-ld, csv]", PUBLISH),
         &instance(),
         &record(),
         &settings(),
@@ -385,7 +378,6 @@ fn a_disabled_representation_loses_its_resource() {
         vec![
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/ngsi-ld/v1/",
             // GeoJSON and MCP stay without being listed (EP-10, EP-24); the CSV is gone.
-            "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/file.geojson",
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/mcp",
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/index.json",
         ]
@@ -673,7 +665,6 @@ fn every_schema_artifact_the_record_lists_becomes_its_own_resource() {
         resource_urls(&dataset),
         vec![
             format!("{base}/ngsi-ld/v1/"),
-            format!("{base}/file.geojson"),
             format!("{base}/mcp"),
             format!("{base}/schema/index.json"),
             format!("{base}/schema/v2/model.shacl.ttl"),
@@ -1219,22 +1210,7 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
         ("/mcp", "MCP", "application/json", "mcpServers"),
         ("/ogc/features/", "OGCFEAT", "application/geo+json", "QGIS"),
         ("/odata/v4/", "OData", "application/json", "Power BI"),
-        ("/file.geojson", "GeoJSON", "application/geo+json", "curl"),
         ("/file.csv", "CSV", "text/csv", "live data"),
-        (
-            "/file.xlsx",
-            "XLSX",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "Excel",
-        ),
-        ("/file.json", "JSON", "application/json", "live data"),
-        (
-            "/file.parquet",
-            "PARQUET",
-            "application/vnd.apache.parquet",
-            "DuckDB",
-        ),
-        ("/file.zip", "ZIP", "application/zip", "live data"),
         ("/schema/index.json", "JSON", "application/json", "sha256"),
     ] {
         let found = resource(&dataset, suffix);
@@ -1244,8 +1220,8 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
         let said = description(&dataset, suffix);
         assert!(said.contains(says), "{suffix}: {said}");
     }
-    // T-4287: Parquet is a default file, beside CSV and JSON.
-    assert_eq!(resource_urls(&dataset).len(), 12, "{dataset:#}");
+    // T-4597: CSV is the one file, beside the APIs and the schema.
+    assert_eq!(resource_urls(&dataset).len(), 7, "{dataset:#}");
     assert!(!resource_urls(&dataset)
         .iter()
         .any(|url| url.contains("/sta/")));

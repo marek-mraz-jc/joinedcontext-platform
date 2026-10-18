@@ -34,7 +34,7 @@ fn app_endpoint(property_names: &str) -> Endpoint {
         project: "helsinki".to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd, Representation::GeoJson],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: None,

@@ -17,7 +17,7 @@ fn endpoint(publish: &str) -> Result<EndpointSpec, Error> {
         r#"contextSpaceRef: ovzdusie
 slug: zt4qm7ge2xdv6ksb3ncf5arw2y
 audience: public
-enabledRepresentations: [ngsi-ld, geojson, csv]
+enabledRepresentations: [ngsi-ld, csv, ogc-features]
 {publish}"#
     ))
     .map_err(|e| Error::Parse(e.to_string()))?;
@@ -154,10 +154,10 @@ fn a_mirror_of_a_representation_the_endpoint_does_not_serve_is_refused() {
         r#"publish:
   ckan:
     instanceRef: { kind: CkanInstance, name: open-data }
-    datastore: { representation: xlsx }
+    datastore: { representation: sta }
 "#,
     )
-    .expect_err("xlsx is not enabled");
+    .expect_err("sta is not enabled");
 
     assert!(
         matches!(
@@ -178,10 +178,10 @@ fn a_mirror_of_a_non_tabular_representation_is_refused() {
         r#"publish:
   ckan:
     instanceRef: { kind: CkanInstance, name: open-data }
-    datastore: { representation: geojson }
+    datastore: { representation: ogc-features }
 "#,
     )
-    .expect_err("geojson is not tabular");
+    .expect_err("ogc-features is not tabular");
 
     assert!(
         matches!(

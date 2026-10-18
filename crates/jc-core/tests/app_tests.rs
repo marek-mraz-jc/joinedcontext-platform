@@ -32,7 +32,7 @@ spec:
       operations: [queryEntity, retrieveEntity, queryTemporal]
       temporalQ: { window: P1D }
       geoQ: { within: { scopeRef: /geo/SK/BB } }
-      representations: [ngsi-ld, geojson]
+      representations: [ngsi-ld, csv]
   limits: { requestsPerMinute: 600, maxFileRows: 20000 }
   csp: { connectSrc: [self], frameAncestors: [none] }
 "#;
@@ -56,7 +56,7 @@ fn golden_app_parses_validates_and_roundtrips() {
     assert_eq!(app.spec.build.0["rust"], "1.90");
     assert_eq!(
         app.spec.representations(),
-        [Representation::NgsiLd, Representation::GeoJson]
+        [Representation::NgsiLd, Representation::Csv]
             .into_iter()
             .collect()
     );
@@ -83,10 +83,27 @@ fn secret_ref_is_rejected_at_parse_time_ap16() {
     );
 
     let under_need = GOLDEN.replace(
-        "      representations: [ngsi-ld, geojson]",
-        "      representations: [ngsi-ld, geojson]\n      apiKey: \"inline\"",
+        "      representations: [ngsi-ld, csv]",
+        "      representations: [ngsi-ld, csv]\n      apiKey: \"inline\"",
     );
     assert!(App::from_yaml(&under_need).is_err());
+}
+
+/// T-4597: a data need that asks for a removed file is refused by name, as an Endpoint is, so the
+/// App reconciler never renders an Endpoint the gateway would refuse.
+#[test]
+fn a_data_need_naming_a_removed_file_is_refused_by_name() {
+    let removed = GOLDEN.replace(
+        "      representations: [ngsi-ld, csv]",
+        "      representations: [ngsi-ld, geojson]",
+    );
+    let refused = App::from_yaml(&removed).expect_err("a removed file is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("representation `geojson` was removed"),
+        "{refused}"
+    );
 }
 
 #[test]

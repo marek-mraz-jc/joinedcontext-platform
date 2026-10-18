@@ -146,29 +146,17 @@ impl fmt::Display for Audience {
 /// Supported representation formats served under an endpoint (EP-05, Architecture/04).
 ///
 /// Note: `schema` (EP-46) and `access` (EP-55) are not variants: they are unconditional
-/// surfaces on every endpoint and cannot be toggled off.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
+/// surfaces on every endpoint and cannot be toggled off. `file.csv` is the one file an Endpoint
+/// publishes; the names of the removed files are refused by name ([`REMOVED_REPRESENTATIONS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Representation {
     /// Canonical NGSI-LD representation (`/ngsi-ld/v1/`).
     NgsiLd,
     /// Direct Model Context Protocol streamable HTTP interface (`/mcp`).
     Mcp,
-    /// GeoJSON feature collection (`/file.geojson`).
-    #[serde(rename = "geojson")]
-    GeoJson,
-    /// Flat tabular CSV (`/file.csv`).
+    /// Flat tabular CSV (`/file.csv`), the one file an Endpoint publishes.
     Csv,
-    /// Flat tabular Excel spreadsheet (`/file.xlsx`).
-    Xlsx,
-    /// Typed columnar Apache Parquet file (`/file.parquet`, EP-119).
-    Parquet,
-    /// JSON array of entities (`/file.json`).
-    Json,
-    /// Zipped multi-representation export bundle (`/file.zip`).
-    Zip,
     /// OGC API - Features Part 1 collections and items (`/ogc/features/`).
     #[serde(rename = "ogc-features")]
     OgcFeatures,
@@ -226,12 +214,7 @@ impl Representation {
         match self {
             Self::NgsiLd => "ngsi-ld",
             Self::Mcp => "mcp",
-            Self::GeoJson => "geojson",
             Self::Csv => "csv",
-            Self::Xlsx => "xlsx",
-            Self::Parquet => "parquet",
-            Self::Json => "json",
-            Self::Zip => "zip",
             Self::OgcFeatures => "ogc-features",
             Self::Sta => "sta",
             Self::Odata => "odata",
@@ -286,15 +269,10 @@ impl Representation {
     }
 
     /// Every representation, in the order a record lists them.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 8] = [
         Self::NgsiLd,
         Self::Mcp,
-        Self::GeoJson,
         Self::Csv,
-        Self::Xlsx,
-        Self::Parquet,
-        Self::Json,
-        Self::Zip,
         Self::OgcFeatures,
         Self::Sta,
         Self::Odata,
@@ -306,6 +284,42 @@ impl Representation {
 impl fmt::Display for Representation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+/// The representations an Endpoint no longer publishes (owner 2026-10-18, T-4597, API/02 §5): a
+/// manifest that still names one is refused with a sentence that says so, not as a typo.
+pub const REMOVED_REPRESENTATIONS: [&str; 5] = ["geojson", "json", "xlsx", "parquet", "zip"];
+
+/// The wire names of [`Representation::ALL`], for serde's "expected one of".
+const REPRESENTATION_NAMES: [&str; Representation::ALL.len()] = {
+    let mut names = [""; Representation::ALL.len()];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = Representation::ALL[i].as_str();
+        i += 1;
+    }
+    names
+};
+
+impl<'de> Deserialize<'de> for Representation {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let name = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        if let Some(known) = Self::ALL.into_iter().find(|r| r.as_str() == name) {
+            return Ok(known);
+        }
+        if REMOVED_REPRESENTATIONS.contains(&name.as_ref()) {
+            return Err(serde::de::Error::custom(format_args!(
+                "representation `{name}` was removed (T-4597): an Endpoint publishes file.csv and \
+                 its APIs (ngsi-ld, ogc-features, odata, sta, mcp); drop it from the list"
+            )));
+        }
+        Err(serde::de::Error::unknown_variant(
+            &name,
+            &REPRESENTATION_NAMES,
+        ))
     }
 }
 
@@ -582,7 +596,7 @@ impl EndpointSpec {
                 .filter(|r| *r != Representation::Mcp || self.mcp != Some(false))
                 .collect(),
         };
-        let mut always = vec![Representation::NgsiLd, Representation::GeoJson];
+        let mut always = vec![Representation::NgsiLd];
         if self.mcp != Some(false) {
             always.push(Representation::Mcp);
         }
@@ -683,9 +697,7 @@ impl EndpointSpec {
         let mut disabled = std::collections::BTreeSet::new();
         for rep in &self.disabled_representations {
             let reason = match rep {
-                Representation::NgsiLd | Representation::GeoJson => {
-                    "every Endpoint serves ngsi-ld and geojson (EP-10)"
-                }
+                Representation::NgsiLd => "every Endpoint serves ngsi-ld (EP-10)",
                 Representation::Mcp => "mcp: false turns the MCP instance off (EP-24)",
                 _ if !disabled.insert(*rep) => {
                     "duplicate representation in disabledRepresentations"
