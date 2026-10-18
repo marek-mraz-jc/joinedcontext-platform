@@ -130,6 +130,8 @@ pub struct Table {
     pub entity_type: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    /// The unit symbol of each column (`µg/m³`), `null` where it has none (T-4650).
+    pub units: Vec<Option<String>>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
