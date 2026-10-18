@@ -168,13 +168,3 @@ async fn a_view_served_csv_under_a_geojson_accept_holds_every_row() {
         "{text}"
     );
 }
-
-/// STA reads the view through `read_entities` with the caller's own headers: each entity is a Thing.
-#[tokio::test]
-async fn view_served_sta_things_under_a_geojson_accept_are_every_entity() {
-    let (status, body) = get("/sta/v1.1/Things").await;
-    let answer: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    let things = answer["value"].as_array().expect("a value list");
-    assert_eq!(things.len(), 3, "{answer}");
-}

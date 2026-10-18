@@ -179,29 +179,6 @@ async fn a_temporal_retrieve_by_id_asks_the_broker_without_the_granted_type() {
     assert!(log[0].contains("attrs=name"), "{log:?}");
 }
 
-/// T-2987: a SensorThings Datastream reads the same history through the same function, so its
-/// Observations reach the broker without `type` as well.
-#[tokio::test]
-async fn sensorthings_observations_ask_the_broker_without_the_granted_type() {
-    let (status, body, log) = ask(
-        entity(VEHICLE, "Vehicle"),
-        &["Vehicle"],
-        &format!("/sta/v1.1/Datastreams('{VEHICLE}/name')/Observations"),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::OK, "body was {body}");
-    assert_eq!(log.len(), 1, "{log:?}");
-    assert!(
-        log[0].starts_with("/ngsi-ld/v1/temporal/entities/"),
-        "{log:?}"
-    );
-    assert!(
-        !log[0].contains("type="),
-        "the broker was sent a type: {log:?}"
-    );
-}
-
 /// An entity that carries two types, one of them granted, is a granted entity.
 #[tokio::test]
 async fn an_entity_with_two_types_one_granted_is_served() {

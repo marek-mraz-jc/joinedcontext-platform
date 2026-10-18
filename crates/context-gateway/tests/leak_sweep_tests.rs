@@ -11,15 +11,15 @@
 //! Antares sweeps that surface itself (`views_read`, `views_q`, `joinedcontext-policy` engine
 //! tests), and since T-3645 so are the schema artifacts (`linkml` surface). The probes cover the
 //! file downloads (`json`, `csv`, `geojson`, `xlsx`, `parquet`, `zip` — the two compressed ones
-//! are opened and their parts read, and the parquet one is written uncompressed), OGC API Features, SensorThings, the access
+//! are opened and their parts read, and the parquet one is written uncompressed), OGC API Features, the access
 //! document, the endpoint record and every read-only MCP tool. Two brokers: one that honours
 //! `type` and `attrs`, and one that answers more than it was asked, which is what a federated
 //! source, a registration answering for a neighbour or a defect looks like.
 //!
 //! An answer is judged by what it carries and a request by what it selects on: a filter is a
 //! read, so a name outside the endpoint's own vocabulary may not reach the broker inside anything
-//! that decides which entities come back. Since T-3651 the file downloads and SensorThings read
-//! the broker's view: both brokers answer a view hop as the engine would (projection ∩ grants −
+//! that decides which entities come back. Since T-3651 the file downloads read the broker's
+//! view (SensorThings is the broker's own surface since T-4463, swept by `antares-sta`): both brokers answer a view hop as the engine would (projection ∩ grants −
 //! hidden, no `Depot`), and a view hop is not judged for oracles, because the engine reads a hidden
 //! name as absent there (Antares `views_props::q_over_hidden_equals_q_over_absent`). The answers
 //! of those probes are still judged byte by byte. `every_representation_and_tool_has_a_probe` fails when
@@ -292,16 +292,7 @@ fn probes() -> Vec<Probe> {
         get("file xlsx", "/file.xlsx?type=User,Vehicle"),
         get("file parquet", "/file.parquet?type=User,Vehicle"),
         get("file zip", "/file.zip?type=User,Vehicle"),
-        get("sta root", "/sta/v1.1"),
-        get("sta things", "/sta/v1.1/Things"),
-        get("sta things expand", "/sta/v1.1/Things?$expand=Datastreams"),
-        get("sta datastreams", "/sta/v1.1/Datastreams"),
-        get("sta observed properties", "/sta/v1.1/ObservedProperties"),
-        get("sta observations", "/sta/v1.1/Observations"),
-        get(
-            "sta filter foreign",
-            "/sta/v1.1/Things?$filter=properties/age%20eq%20%27x%27",
-        ),
+        // SensorThings is the broker's view since T-4463: Antares' `antares-sta` tests sweep it.
         get("access", "/access"),
         get("endpoint record", ""),
         // The two registry item reads: one name the grant covers and one it does not, because the
@@ -539,7 +530,8 @@ async fn sweep(honest: bool) {
         );
         probed += 1;
     }
-    assert!(probed >= 20, "the sweep stopped after {probed} probes");
+    // 14 since T-4463: the seven SensorThings probes went with the gateway's own STA.
+    assert!(probed >= 14, "the sweep stopped after {probed} probes");
     assert!(
         failures.is_empty(),
         "honest broker: {honest}\n{}",
@@ -570,11 +562,12 @@ async fn every_representation_and_tool_has_a_probe() {
 
     for representation in endpoint().representations {
         let path = match representation {
-            // The broker's view serves them since T-3643, T-3752 and T-3830, and Antares sweeps
-            // them there.
-            Representation::NgsiLd | Representation::OgcFeatures | Representation::Odata => {
-                continue
-            }
+            // The broker's view serves them since T-3643, T-3752, T-3830 and T-4463, and Antares
+            // sweeps them there.
+            Representation::NgsiLd
+            | Representation::OgcFeatures
+            | Representation::Odata
+            | Representation::Sta => continue,
             Representation::Mcp => "/mcp",
             Representation::GeoJson => "/file.geojson",
             Representation::Csv => "/file.csv",
@@ -582,7 +575,6 @@ async fn every_representation_and_tool_has_a_probe() {
             Representation::Parquet => "/file.parquet",
             Representation::Json => "/file.json",
             Representation::Zip => "/file.zip",
-            Representation::Sta => "/sta/v1.1",
             Representation::WebSocket => "/ws",
         };
         assert!(

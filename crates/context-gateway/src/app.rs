@@ -8,8 +8,8 @@ use crate::auth::subject::{audiences_of, HUB_AUDIENCE, HUB_PATH};
 use crate::auth::token::{self, Claims, Verifier};
 use crate::federation::{Federations, Member};
 use crate::handlers::{
-    catalog, files, mappings, ngsi_ld, ogc, openapi_doc, schema_routes, space_routes, sta,
-    view_access, ws,
+    catalog, files, mappings, ngsi_ld, ogc, openapi_doc, schema_routes, space_routes, view_access,
+    ws,
 };
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::Pdp;
@@ -52,13 +52,6 @@ pub(crate) const PAGE: usize = 1_000;
 /// shared enforcement point will spend on one caller; an endpoint's own `maxFileBytes` bounds
 /// the file, which is a different and usually smaller number.
 pub(crate) const MAX_COLLECTED: u64 = 64 * 1024 * 1024;
-
-/// The deepest offset a paging parameter may name (T-0809).
-///
-/// A hundred pages is further than any client of this surface pages, and it is the ceiling on
-/// what one request can make the shared broker read: the temporal path turns the offset into
-/// `lastN`, and nothing in an endpoint's configuration bounds that.
-pub(crate) const MAX_SKIP: usize = 100 * PAGE;
 
 /// Everything the surface needs, built once at start-up.
 pub struct Gateway {
@@ -557,7 +550,6 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .merge(files::routes())
         .merge(ogc::routes())
         .merge(ws::routes())
-        .merge(sta::routes())
         .merge(space_routes::routes())
         .merge(schema_routes::routes())
         .merge(openapi_doc::routes())

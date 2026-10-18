@@ -252,11 +252,11 @@ async fn a_type_the_view_refuses_is_left_out_of_the_download() {
     assert_eq!(collection["features"].as_array().map(Vec::len), Some(6));
 }
 
-/// A view that refuses the caller every type refuses the download and the page, as it refuses
-/// the caller's own query.
+/// A view that refuses the caller every type refuses the download, as it refuses the caller's
+/// own query.
 #[tokio::test]
 async fn a_view_refusing_every_type_refuses_the_read() {
-    for path in ["file.csv", "sta/v1.1/Things?$top=5"] {
+    for path in ["file.csv", "file.geojson"] {
         let (broker, _) = view_broker(Some(&[])).await;
         let (status, body) = get(
             gateway(&broker, endpoint(&[])),
@@ -273,11 +273,11 @@ async fn a_view_refusing_every_type_refuses_the_read() {
 }
 
 /// An Endpoint whose slug no view id can hold has no view, and nothing decides for it: its
-/// downloads and pages answer `503 no-view` and the broker is not asked (T-3652).
+/// downloads answer `503 no-view` and the broker is not asked (T-3652).
 #[tokio::test]
 async fn an_endpoint_without_a_view_answers_no_view() {
     let long = "a".repeat(64);
-    for path in ["file.csv", "sta/v1.1/Things"] {
+    for path in ["file.csv", "file.geojson"] {
         let (broker, asked) = view_broker(None).await;
         let mut endpoint = endpoint(&[]);
         endpoint.slug = long.clone();
@@ -312,26 +312,4 @@ async fn a_grant_naming_no_held_type_leaves_the_list_to_the_view() {
     assert_eq!(status, StatusCode::OK);
     let asked = asked.lock().expect("no poisoned lock").clone();
     assert_eq!(asked.len(), 1, "{asked:?}");
-}
-
-/// A single page through the view (the STA surface's read) is one request with the caller's
-/// window: rows 59 to 63 of 63 span two types.
-#[tokio::test]
-async fn a_page_of_a_space_of_many_types_spans_the_types_in_order() {
-    let (broker, asked) = view_broker(None).await;
-    let (status, body) = get(
-        gateway(&broker, endpoint(&[])),
-        &format!("/api/endpoint/{SLUG}/sta/v1.1/Things?$top=5&$skip=59"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let asked = asked.lock().expect("no poisoned lock").clone();
-    assert_eq!(asked.len(), 1, "{asked:?}");
-    assert_eq!(asked[0].len(), TYPES, "{asked:?}");
-    let answer: Value = serde_json::from_slice(&body).expect("an STA collection");
-    assert_eq!(
-        answer["value"].as_array().map(Vec::len),
-        Some(4),
-        "{answer}"
-    );
 }

@@ -5,14 +5,12 @@ crate parquet | T-4466
 crate zip | T-4478
 
 file crates/context-gateway/src/translators/geojson.rs 206 | T-4478
-file crates/context-gateway/src/translators/mod.rs 7 | T-4478
-file crates/context-gateway/src/translators/sta.rs 638 | T-4463
+file crates/context-gateway/src/translators/mod.rs 6 | T-4478
 file crates/context-gateway/src/translators/tabular.rs 697 | T-4478
 file crates/context-gateway/src/translators/view_mapping.rs 379 | T-4547
 file crates/context-gateway/src/translators/zip_export.rs 166 | T-4478
-file crates/context-gateway/src/handlers/sta.rs 421 | T-4463
 file crates/context-gateway/src/handlers/files.rs 473 | T-4478
-file crates/context-gateway/src/handlers/reads.rs 469 | T-4478
+file crates/context-gateway/src/handlers/reads.rs 392 | T-4478
 file crates/context-gateway/src/query.rs 752 | T-4479
 file crates/context-gateway/src/mcp/tools.rs 1837 | T-4480
 file crates/context-gateway/src/mcp/units.rs 121 | T-4480

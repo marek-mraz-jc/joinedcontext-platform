@@ -22,7 +22,7 @@ GREP (split\(':'\)|splitn\([0-9], ?':'\)|rsplit(n)?\(([0-9], ?)?':'\)|split_once
 // False positives (baef746, 2026-10-16), so the next run skips them:
 // - view_access::access_simulate: the_portal admits only the Portal's account; it asks the view for an explain, never a write.
 // - app::catalog_feed_jsonld / catalog_feed_turtle: public Endpoints only, read as the anonymous subject.
-// - handlers::sta::sensorthings, handlers::ogc::ogc_features: reads only, through the broker's view after admit.
+// - handlers::ogc::sensorthings, handlers::ogc::ogc_features: reads only, through the broker's view after admit.
 // - pdp::reaper::Reaper::tick -> Broker::route: swaps the routing table, sends nothing.
 // - mqtt::decide: device CONNECT ACL on the MQTT broker; the pipeline writes through the gateway.
 // - jcctl::gateway::Broker::upsert: POSTs to the gateway, which applies the Policy.

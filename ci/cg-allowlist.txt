@@ -94,7 +94,4 @@ gateway-format-call | context_gateway::handlers::files::file_geojson | the GeoJS
 gateway-format-call | context_gateway::handlers::files::file_json | the JSON download, moving to the broker's encoding (ADR-N-051, T-4478)
 gateway-format-call | context_gateway::handlers::files::tabular_download | CSV, XLSX and Parquet downloads, moving to the broker's encodings (ADR-N-051, T-4478, T-4466)
 gateway-format-call | context_gateway::handlers::files::zip_download | the zip export, moving to the broker (ADR-N-051, T-4478)
-gateway-format-call | context_gateway::handlers::sta::sensorthings | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
-gateway-format-call | context_gateway::handlers::sta::sta_items | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
-gateway-format-call | context_gateway::handlers::sta::sta_series | the gateway's own STA, replaced by a forward to antares-sta (ADR-N-051, T-4463)
 gateway-format-call | context_gateway::store::view_mappings | the load-time parse of a Mapping IR, reduced to a version check (ADR-N-051, T-4547)

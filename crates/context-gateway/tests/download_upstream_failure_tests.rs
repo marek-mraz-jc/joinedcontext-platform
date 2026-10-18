@@ -172,7 +172,6 @@ async fn no_download_carries_a_failing_brokers_words() {
             // No selector: the gateway asks the broker what the space holds first, and that
             // read fails the same way.
             "/file.geojson",
-            "/sta/v1.1/Things",
         ] {
             let (status, body) = ask(&broker, path).await;
             let what = format!("{path} behind a broker {failure}");

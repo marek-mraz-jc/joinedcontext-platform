@@ -71,89 +71,10 @@ async fn dataset_types(
         .unwrap_or_default())
 }
 
-/// One page of the entities behind an endpoint through the broker's view (plan 5.7, T-3651).
-/// The engine decides and narrows; the gateway adds no grant and projects nothing, so the
-/// representation holds what the view answers the caller and no more. An endpoint without a
-/// view answers `503 no-view` (T-3652).
-pub(crate) async fn read_entities(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    params: &[(String, String)],
-    request: &mut Request,
-) -> Result<(Value, bool), Box<Response<Body>>> {
-    let slug = endpoint.slug.as_str();
-    if !has_view(slug) {
-        return Err(Box::new(no_view(endpoint)));
-    }
-    view_hop(endpoint, subject, request)?;
-    let Some(types) = selector(gateway, slug, params, request.headers()).await? else {
-        return Ok((Value::Array(Vec::new()), false));
-    };
-    let target = format!("entities?{}", query::view_read(params, &types));
-    let (page, restricted, _, _) =
-        view_page(gateway, slug, slug, &target, request.headers()).await?;
-    Ok((Value::Array(page), restricted))
-}
-
-/// The history of one entity through the broker's view, decided and narrowed by its engine as
-/// the current state is (T-0438, plan 5.7). An entity outside the view and one with no history
-/// both answer `Null`; an endpoint without a view answers `503 no-view` (T-3652).
-pub(crate) async fn query_temporal(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    urn: &str,
-    params: &[(String, String)],
-    request: &mut Request,
-) -> Result<(Value, bool), Box<Response<Body>>> {
-    let slug = endpoint.slug.as_str();
-    if !has_view(slug) {
-        return Err(Box::new(no_view(endpoint)));
-    }
-    view_hop(endpoint, subject, request)?;
-    let target = format!(
-        "/x/views/{slug}/ngsi-ld/v1/temporal/entities/{}?{}",
-        query::encode(urn),
-        query::view_read_by_id(params)
-    );
-    let answer = gateway
-        .broker
-        .send(
-            axum::http::Method::GET,
-            &target,
-            request.headers().clone(),
-            Body::empty(),
-        )
-        .await
-        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
-    // The engine refusing the operation itself is a refusal here too (EP-07): this
-    // representation is no softer than the NGSI-LD surface.
-    if answer.status() == StatusCode::FORBIDDEN {
-        return Err(Box::new(ProblemDetails::forbidden().into_response()));
-    }
-    let restricted = restricted_by(answer.headers());
-    let (parts, body) = answer.into_parts();
-    // No history and an entity outside the view both mean "no observations here", and the
-    // caller learns nothing from the difference (R20).
-    if !parts.status.is_success() {
-        return Ok((Value::Null, restricted));
-    }
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    let mut entity: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    if let Some(first) = entity.as_array().and_then(|list| list.first()).cloned() {
-        entity = first;
-    }
-    Ok((entity, restricted))
-}
-
 /// The gateway's own answer to a broker that failed a read behind one of its representations
 /// (T-2340, EP-26, R22).
 ///
-/// A download and a SensorThings collection are the gateway's documents, and what a
+/// A download is the gateway's document, and what a
 /// failing broker prints is whatever it was holding: a DSN with its password, a host inside the
 /// cluster, a source path, the tenant. None of it reaches the caller, most of whom need no token
 /// to ask; the operator reads it in the log beside the endpoint's slug. A `400` is the broker
