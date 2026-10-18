@@ -1269,6 +1269,41 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
     }
 }
 
+/// T-4484, TS-19: on a public Endpoint each query standard's resource links the Endpoint's
+/// public page, whose examples the Portal checked against the data; a file or a restricted
+/// Endpoint's resource names no such page.
+#[test]
+fn a_public_datasets_query_resources_link_the_endpoints_standards_page() {
+    let page = "https://data.example.org/d/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    let public = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &record(),
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    for suffix in ["/ngsi-ld/v1/", "/ogc/features/", "/odata/v4/"] {
+        let said = description(&public, suffix);
+        assert!(said.contains(page), "{suffix}: {said}");
+    }
+    for suffix in ["/file.csv", "/mcp", "/ws"] {
+        assert!(!description(&public, suffix).contains("/d/"), "{suffix}");
+    }
+    let restricted = package(
+        &default_endpoint("organization", ""),
+        &instance(),
+        &record(),
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert!(
+        !description(&restricted, "/ngsi-ld/v1/").contains("/d/"),
+        "a visitor without a grant has no public page to open"
+    );
+}
+
 /// T-4132: the usage texts a reader copies name the type the gateway's WebSocket guide names,
 /// the websocat line names the subprotocol, and the private member never reaches CKAN.
 #[test]
