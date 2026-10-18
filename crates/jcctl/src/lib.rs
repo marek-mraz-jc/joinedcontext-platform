@@ -4,9 +4,9 @@
 #![warn(missing_docs)]
 
 pub mod apisix;
+pub use jc_manifest::bento;
 pub mod assemble;
 pub mod bench_org;
-pub mod bento;
 pub mod blueprints;
 pub mod commands;
 pub mod csr;

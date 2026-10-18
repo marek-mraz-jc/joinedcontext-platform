@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0" }
+jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
 aes-gcm = "0.10"
 age = { version = "0.12", default-features = false, features = ["armor"] }
 # A seed entity is checked offline the way the broker checks it on create: NGSI-LD expansion with

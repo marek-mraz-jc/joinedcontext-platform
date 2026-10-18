@@ -3567,6 +3567,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jc-manifest"
+version = "0.1.0"
+dependencies = [
+ "jc-core",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "thiserror 2.0.20",
+ "utoipa",
+ "walkdir",
+]
+
+[[package]]
 name = "jcctl"
 version = "0.1.0"
 dependencies = [
@@ -3575,6 +3588,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "jc-core",
+ "jc-manifest",
  "jsonschema",
  "minijinja",
  "ngsild-jsonld",
