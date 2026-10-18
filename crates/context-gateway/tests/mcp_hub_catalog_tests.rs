@@ -12,7 +12,7 @@ use context_gateway::auth::accounts::{accounts_of, ServiceAccounts};
 use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
-use context_gateway::resolver::{DeclaredTypes, Endpoint};
+use context_gateway::resolver::{DeclaredTypes, Endpoint, Model};
 use jc_core::kinds::{Audience, PolicySpec, QualityRule, RateLimits, Representation};
 use jc_core::ngsi_catalog::{self, Place};
 use serde_json::{json, Value};
@@ -779,6 +779,7 @@ async fn one_hundred_eleven_endpoints_list_in_under_25000_characters() {
                 "public",
             );
             e.declared_types = Some(Arc::new(area()));
+            e.models = vec![model(&["AirQualityObserved"])];
             e
         })
         .collect();
@@ -848,8 +849,20 @@ fn holding(mut e: Endpoint, class: &str, sk: &str) -> Endpoint {
     let mut declared = area();
     declared.classes = [class.to_owned()].into_iter().collect();
     e.declared_types = Some(Arc::new(declared));
+    e.models = vec![model(&[class])];
     e.title.insert("sk".to_owned(), sk.to_owned());
     e
+}
+
+fn model(classes: &[&str]) -> Model {
+    Model {
+        name: "model".to_owned(),
+        version: "1.0.0".to_owned(),
+        major: 1,
+        classes: classes.iter().map(|c| (*c).to_owned()).collect(),
+        json_schema: None,
+        context: None,
+    }
 }
 
 /// T-4493: one search call from a question in either language, with or without diacritics,
@@ -931,7 +944,7 @@ async fn search_ranks_the_dataset_a_question_names_first() {
         );
         assert_eq!(
             hit["nextQuery"]["arguments"]["type"],
-            json!("AirQualityObserved")
+            json!(["AirQualityObserved"])
         );
         assert_eq!(hit["domains"], json!(["Environment"]));
         eprintln!("search {question:?}: {}", hit["title"]);
@@ -999,6 +1012,119 @@ async fn search_ranks_the_dataset_a_question_names_first() {
             .as_str()
             .is_some_and(|t| t.contains(word)));
     }
+}
+
+/// T-4567: an Endpoint advertises, in search and list_endpoints alike, only the types its Policy
+/// lets this caller read, each of them answers a query, and a public reader may call list_types
+/// although the Policy grants no retrieveEntityTypes (tools/list names it only where a Policy
+/// grants it, so its bytes stay under the T-4506 ceiling). The space declares four types, the model
+/// three, the Policy one: the other three are neither listed nor counted.
+#[tokio::test]
+async fn an_endpoint_advertises_only_the_types_the_caller_reads() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([{
+        "id": "urn:ngsi-ld:AirQualityObserved:st-1", "type": "AirQualityObserved",
+    }])])
+    .await;
+    let mut mixed = holding(
+        endpoint(
+            AIR,
+            "Air quality in Banská Bystrica",
+            "mesto-ovzdusie",
+            Audience::Public,
+            "public",
+        ),
+        "AirQualityObserved",
+        "Kvalita ovzdušia Banská Bystrica",
+    );
+    let mut declared = area();
+    declared.classes = [
+        "AirQualityObserved",
+        "Event",
+        "Organization",
+        "WeatherObserved",
+    ]
+    .map(str::to_owned)
+    .into_iter()
+    .collect();
+    mixed.declared_types = Some(Arc::new(declared));
+    mixed.models = vec![model(&["AirQualityObserved", "Event", "WeatherObserved"])];
+    mixed.policies = vec![serde_norway::from_str(
+        "contextSpaceRef: mesto\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: public }\n\
+         operations: [queryEntity, retrieveEntity]\n\
+         information:\n  - entities:\n      - type: AirQualityObserved\n",
+    )
+    .expect("the policy spec parses")];
+    let app = app_on(&broker.url, &realm, vec![mixed]);
+
+    let found = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality" }),
+    )
+    .await;
+    let hit = &found["result"]["structuredContent"]["hits"][0];
+    assert_eq!(hit["endpoint"], json!(AIR), "{found}");
+    assert_eq!(hit["types"], json!(["AirQualityObserved"]), "{found}");
+    assert_eq!(hit["domains"], json!(["Environment"]), "{found}");
+    assert_eq!(
+        hit["nextQuery"]["arguments"]["type"],
+        json!(["AirQualityObserved"]),
+        "the type is an array, as query_entities takes it"
+    );
+    for hidden in ["Event", "WeatherObserved", "Organization"] {
+        let none = call(
+            app.clone(),
+            None,
+            "search",
+            json!({ "query": "air quality", "type": hidden }),
+        )
+        .await;
+        assert_eq!(
+            none["result"]["structuredContent"]["total"],
+            json!(0),
+            "{hidden}: {none}"
+        );
+    }
+    let listed = call(app.clone(), None, "list_endpoints", json!({})).await;
+    assert!(
+        listed
+            .to_string()
+            .contains(r#""types":["AirQualityObserved"]"#),
+        "{listed}"
+    );
+    assert!(!listed.to_string().contains("WeatherObserved"), "{listed}");
+
+    let types = call(app.clone(), None, "list_types", json!({ "endpoint": AIR })).await;
+    assert_eq!(types["result"]["isError"], json!(false), "{types}");
+    assert_eq!(
+        types["result"]["structuredContent"]["entityTypes"],
+        json!(["AirQualityObserved"]),
+        "{types}"
+    );
+    assert!(
+        broker.hops().is_empty(),
+        "the hub answered list_types itself"
+    );
+
+    for advertised in ["AirQualityObserved"] {
+        let read = call(
+            app.clone(),
+            None,
+            "query_entities",
+            json!({ "endpoint": AIR, "type": [advertised] }),
+        )
+        .await;
+        assert_eq!(
+            read["result"]["isError"],
+            json!(false),
+            "{advertised}: {read}"
+        );
+    }
+    assert_eq!(broker.hops().len(), 1, "the query reached the broker");
 }
 
 /// T-4497: a catalogue of `n` Datasets a person would search, one Endpoint each: an SDM topic

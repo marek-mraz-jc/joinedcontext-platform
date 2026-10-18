@@ -21,7 +21,7 @@ use jc_core::kinds::{
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Who is calling, as established by the PEP — never as claimed by the client (GW20).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Subject {
     /// The authenticated user, absent for an anonymous caller.
     pub user: Option<String>,
