@@ -199,37 +199,6 @@ pub struct SurfaceRequirement {
     pub fields: &'static [(&'static str, &'static str, &'static str, bool)],
 }
 
-impl SurfaceRequirement {
-    /// Every representation's requirement as the Markdown tables `schemas/surface-requirements.md`
-    /// commits and API/02 §8b quotes (EP-125).
-    pub fn markdown() -> String {
-        let mut out = String::from(
-            "# Domain-standard representations and the data model they need\n\n\
-             Generated from `Representation::requirement()` (jc-core); a test fails when this \
-             file and the code differ. `UPDATE_SCHEMAS=1 cargo test -p jc-core --test \
-             endpoint_tests` rewrites it. An Endpoint may list a representation below only when \
-             its space's data model has the type with every mandatory source attribute as a \
-             required slot; `id`, `type` and `modifiedAt` belong to every entity (EP-125).\n",
-        );
-        for representation in Representation::ALL {
-            let Some(need) = representation.requirement() else {
-                continue;
-            };
-            out.push_str(&format!(
-                "\n## `{representation}` ({})\n\nType: `{}` ({})\n\n| Field | Section | Source attribute | Mandatory |\n|---|---|---|---|\n",
-                need.standard, need.entity_type, need.type_iri
-            ));
-            for (field, section, attribute, mandatory) in need.fields {
-                out.push_str(&format!(
-                    "| `{field}` | {section} | `{attribute}` | {} |\n",
-                    if *mandatory { "yes" } else { "no" }
-                ));
-            }
-        }
-        out
-    }
-}
-
 /// Attributes every entity has, so a model never has to declare them.
 const SYSTEM_ATTRIBUTES: [&str; 3] = ["id", "type", "modifiedAt"];
 

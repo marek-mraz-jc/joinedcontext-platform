@@ -783,6 +783,35 @@ fn ical_needs_event_with_start_date_and_name_required_and_nothing_else_needs_a_m
     );
 }
 
+/// Every representation's requirement as the Markdown tables `schemas/surface-requirements.md`
+/// commits and API/02 §8b quotes (EP-125).
+fn markdown() -> String {
+    let mut out = String::from(
+        "# Domain-standard representations and the data model they need\n\n\
+         Generated from `Representation::requirement()` (jc-core); a test fails when this \
+         file and the code differ. `UPDATE_SCHEMAS=1 cargo test -p jc-core --test \
+         endpoint_tests` rewrites it. An Endpoint may list a representation below only when \
+         its space's data model has the type with every mandatory source attribute as a \
+         required slot; `id`, `type` and `modifiedAt` belong to every entity (EP-125).\n",
+    );
+    for representation in Representation::ALL {
+        let Some(need) = representation.requirement() else {
+            continue;
+        };
+        out.push_str(&format!(
+            "\n## `{representation}` ({})\n\nType: `{}` ({})\n\n| Field | Section | Source attribute | Mandatory |\n|---|---|---|---|\n",
+            need.standard, need.entity_type, need.type_iri
+        ));
+        for (field, section, attribute, mandatory) in need.fields {
+            out.push_str(&format!(
+                "| `{field}` | {section} | `{attribute}` | {} |\n",
+                if *mandatory { "yes" } else { "no" }
+            ));
+        }
+    }
+    out
+}
+
 /// The committed `schemas/surface-requirements.md` is what the code declares (EP-125, T-4573).
 /// `UPDATE_SCHEMAS=1` writes it.
 #[test]
@@ -792,7 +821,7 @@ fn the_committed_surface_requirements_are_the_generated_ones() {
         .and_then(|p| p.parent())
         .expect("workspace root")
         .join("schemas/surface-requirements.md");
-    let generated = jc_core::kinds::SurfaceRequirement::markdown();
+    let generated = markdown();
     if std::env::var("UPDATE_SCHEMAS").is_ok() {
         std::fs::write(&path, &generated).expect("written");
     }
