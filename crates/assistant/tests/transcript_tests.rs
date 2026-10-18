@@ -192,6 +192,13 @@ async fn a_turn_reads_back_redacted_with_its_steps_and_the_cost_is_their_sum() {
         .await
         .expect("another project's list reads");
     assert!(other.is_empty(), "row-level security keeps projects apart");
+    assert_eq!(
+        transcript::detail(&pool, "elsewhere", DATA)
+            .await
+            .expect("another project's read answers"),
+        None,
+        "a conversation of {PROJECT} is no conversation in another project"
+    );
 
     db::drop_database(admin, pool, &name).await;
 }
