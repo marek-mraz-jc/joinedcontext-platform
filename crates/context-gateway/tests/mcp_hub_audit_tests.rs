@@ -106,6 +106,7 @@ async fn the_audit_line_names_the_endpoint_the_tool_and_the_subject() {
         endpoints: None,
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     }]);
     let app = router(Arc::clone(&gateway));
     let token = realm.mint(&json!({

@@ -109,7 +109,7 @@ pub async fn project_scope<'c>(
 }
 
 /// A DNS label, which is what a project's `metadata.name` is.
-fn is_project_name(name: &str) -> bool {
+pub(crate) fn is_project_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
         && name
@@ -132,6 +132,9 @@ pub struct Search<'a> {
     pub public_only: bool,
     /// How many passages come back.
     pub limit: i64,
+    /// Passages in this language and those of no known language only; `None` reads every one
+    /// (T-4659).
+    pub lang: Option<&'a str>,
 }
 
 /// One passage, with where it came from and its fused score.
@@ -179,12 +182,16 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 /// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first. A page under a
 /// news path (`/aktuality/`, `/novinky/`, `/news/`, …) counts 0.9 of its score and loses a tie:
 /// opening hours, prices and contacts are kept on the pages beside the news, and a news item about
-/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370).
+/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370). `scope` is read twice, so
+/// Postgres would materialize it, copying every chunk's tsvector and embedding of the sources
+/// before either ranking, with no index left to serve them: the worker logged it as a slow
+/// statement on dev (T-4663). Inlined, the GIN index serves the lexical match.
 const HYBRID: &str = r#"
-WITH scope AS (
+WITH scope AS NOT MATERIALIZED (
     SELECT c.id, c.fts, c.embedding
     FROM chunks c JOIN sites s ON s.id = c.site_id
     WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
+      AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
 ),
 question AS (
     SELECT jc_any_word('english', $1) || jc_any_word('finnish', $1)
@@ -231,6 +238,7 @@ pub async fn hybrid_search(
         .bind(CANDIDATES)
         .bind(RRF_K)
         .bind(search.limit)
+        .bind(search.lang)
         .fetch_all(conn)
         .await?;
     rows.iter()
@@ -425,6 +433,12 @@ mod tests {
         assert!(sources_by_project("bbsk", &[]).is_empty());
     }
     use super::*;
+
+    /// T-4663: the scope of a search is inlined into both rankings, never materialized.
+    #[test]
+    fn the_search_scope_is_not_materialized() {
+        assert!(HYBRID.contains("WITH scope AS NOT MATERIALIZED ("));
+    }
 
     #[test]
     fn a_passage_is_titled_by_the_heading_it_opens_with() {

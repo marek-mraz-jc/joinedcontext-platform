@@ -101,6 +101,7 @@ async fn every_project_finds_the_catalogue_page_that_answers_its_question() {
                 sources: &sources,
                 public_only: true,
                 limit: 10,
+                lang: None,
             },
         )
         .await

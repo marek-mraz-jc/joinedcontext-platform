@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -185,15 +185,50 @@ test("a data table shows at most 50 rows of text and only http(s) links", () => 
     rows: [["Námestie SNP", { value: 21 }], ...rows, "not a row"],
     dataset: "https://data.dev.joinedcontext.com/dataset/ovzdusie",
     download: "javascript:alert(1)",
-  });
+  }, "en");
   assert.equal(shown.rows.length, 50);
-  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', ""]);
-  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", ""]);
-  assert.equal(shown.caption, "AirQualityObserved");
+  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', "–"]);
+  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", "–"]);
+  assert.equal(shown.caption, "Air quality (50)");
   assert.equal(shown.dataset, "https://data.dev.joinedcontext.com/dataset/ovzdusie");
   assert.equal(shown.download, null);
   assert.equal(table({ columns: [], rows: [[1]] }), null);
   assert.equal(table(null), null);
+});
+
+test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
+  const now = Date.parse("2026-10-18T16:45:00Z");
+  const data = {
+    type: "AirQualityObserved", total: 12,
+    columns: ["name", "pm10", "no2", "open", "dateModified", "observedAt"],
+    units: [null, "µg/m³", "µg/m³", null, null, null],
+    rows: [
+      ["Stanica Žilina", 21.5, 12.000, true, "2026-10-01T08:00:00Z", "2026-10-18T16:40:00Z"],
+      ["Stanica BB", 9.12345, null, false, null, "2026-10-16T10:05:00Z"],
+    ],
+  };
+  const sk = table(data, "sk", now);
+  assert.equal(sk.caption, "Kvalita ovzdušia (2 z 12)");
+  assert.deepEqual(sk.columns, ["Názov", "PM10 (µg/m³)", "NO₂ (µg/m³)", "Open", "Zmenené", "Čas merania"]);
+  assert.deepEqual(sk.numeric, [false, true, true, false, false, false]);
+  assert.equal(sk.rows[0][1], "21,5");
+  assert.equal(sk.rows[0][2], "12");
+  assert.equal(sk.rows[1][1], "9,123");
+  assert.equal(sk.rows[1][2], "–");
+  assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
+  assert.match(sk.rows[0][5], /^pred 5 min/);
+  assert.match(sk.rows[1][5], /^16\. 10\. 2026 \d{2}:\d{2}$/);
+  const en = table(data, "en", now);
+  assert.equal(en.caption, "Air quality (2 of 12)");
+  assert.equal(en.columns[5], "Measured");
+  assert.equal(en.rows[1][1], "9.123");
+  assert.deepEqual([en.rows[0][3], en.rows[1][3]], ["Yes", "No"]);
+  assert.match(en.rows[0][5], /^5 min\. ago$/);
+  // A key the table does not know is spelt out; a language it does not know reads English.
+  assert.equal(table({ type: "BikeHireDockingStation", columns: ["availableBikeNumber"], rows: [[3]] }, "xx").columns[0], "Available bike number");
+  assert.equal(table({ type: "BikeHireDockingStation", columns: ["x"], rows: [] }, "sk").caption, "Bike hire docking station (0)");
+  // Text stays text: a cell that looks like markup is shown as typed.
+  assert.equal(table({ columns: ["name"], rows: [["<img src=x onerror=alert(1)>"]] }, "sk").rows[0][0], "<img src=x onerror=alert(1)>");
 });
 
 test("only an http(s) address is a link", () => {
@@ -227,12 +262,17 @@ test("without an allowlist no link is rendered", () => {
   assert.deepEqual(markdown("[mesto](https://banskabystrica.sk)"), [{ tag: "p", children: ["mesto"] }]);
 });
 
-test("a host matches itself and its subdomains, never a look-alike", () => {
+test("a host matches itself and its www, never a subdomain or a look-alike (T-4654)", () => {
   assert.ok(city("https://banskabystrica.sk"));
   assert.ok(city("https://www.banskabystrica.sk/a?b#c"));
-  assert.ok(city("http://mapy.banskabystrica.sk/"));
   assert.ok(city("https://DATA.GOV.SK/dataset/x"));
+  assert.ok(city("https://www.data.gov.sk/"));
+  assert.ok(linkHost("https://banskabystrica.sk/", ["www.banskabystrica.sk"]));
   for (const bad of [
+    "https://evil.banskabystrica.sk/",
+    "http://mapy.banskabystrica.sk/",
+    "https://www.evil.banskabystrica.sk/",
+    "https://x.data.dev.joinedcontext.com/",
     "https://banskabystrica.sk.evil.example/",
     "https://evilbanskabystrica.sk/",
     "https://banskabystrica.sk@evil.example/",
@@ -594,4 +634,107 @@ test("the disclaimer shows its first sentence and keeps the rest for More (T-463
   assert.deepEqual(notice("No full stop at all"), { lead: "No full stop at all", rest: "" });
   assert.deepEqual(notice("Ask!\n  Then   read."), { lead: "Ask!", rest: "Then read." });
   for (const empty of ["", "   ", null, undefined, 3]) assert.deepEqual(notice(empty), { lead: "", rest: "" });
+});
+
+test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4653)", async () => {
+  const { solve, zeroBits } = require("./visitor.js");
+  const { createHash } = require("node:crypto");
+  assert.equal(zeroBits(Uint8Array.from([0, 0x0f, 0xff])), 12);
+  assert.equal(zeroBits(Uint8Array.from([0x80])), 0);
+  assert.equal(zeroBits(Uint8Array.from([0, 0])), 16);
+  const challenge = "3a1f.1760792400.10.9f2c";
+  const nonce = await solve(challenge, 10);
+  assert.match(nonce, /^\d+$/);
+  assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
+});
+
+test("the table's labels are jc-core's field-order.json, the CKAN publisher's and theme's (T-4661)", () => {
+  const fields = require("../../jc-core/data/field-order.json");
+  const shown = table({ columns: ["startDate", "eventCategory", "url"], rows: [] }, "sk");
+  assert.deepEqual(shown.columns, ["Začiatok", "Kategória", "Odkaz"]);
+  for (const key of Object.keys(fields.labels)) {
+    assert.equal(table({ columns: [key], rows: [] }, "cs").columns[0], fields.labels[key].cs, key);
+  }
+});
+
+test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
+  assert.deepEqual(markdown("| Stanica | NO₂ |\n|:---|---:|\n| **Centrum** | 12 \\| 14 |\nend"), [
+    { tag: "table", children: [
+      { tag: "tr", children: [{ tag: "th", children: ["Stanica"] }, { tag: "th", children: ["NO₂"] }] },
+      { tag: "tr", children: [{ tag: "td", children: [{ tag: "strong", children: ["Centrum"] }] }, { tag: "td", children: ["12 | 14"] }] },
+    ] },
+    { tag: "p", children: ["end"] },
+  ]);
+  assert.deepEqual(markdown("a | b"), [{ tag: "p", children: ["a | b"] }], "a pipe inside a sentence stays text");
+});
+
+test("a fenced block keeps its lines as code, markers and all", () => {
+  assert.deepEqual(markdown("```js\nconst a = \"**x**\";\n\n- y\n```\nafter"), [
+    { tag: "pre", children: [{ tag: "code", children: ["const a = \"**x**\";\n\n- y"] }] },
+    { tag: "p", children: ["after"] },
+  ]);
+});
+
+// Every text the tree would show, as one string.
+const shown = (nodes) => nodes.map((n) => (typeof n === "string" ? n : shown(n.children || []))).join("\n");
+
+const STREAMED = [
+  "## Doprava",
+  "",
+  "Máme **tri** zdroje [1, 2]:",
+  "",
+  "- **`type`**: typ entity [1]",
+  "- **`q`**: filter [2, 5]",
+  "",
+  "| Zdroj | Stav |",
+  "|---|---|",
+  "| **Parkoviská** | `live` |",
+  "",
+  "```",
+  "GET /ngsi-ld/v1/entities?type=OffStreetParking",
+  "```",
+  "Hotovo [docs](https://example.sk/a).",
+  "",
+].join("\n");
+
+test("no prefix of a streamed answer shows a marker, and the end equals the final render", () => {
+  const cited = upTo(5);
+  const linkable = (url) => linkHost(url, ["example.sk"]);
+  for (let at = 1; at <= STREAMED.length; at += 1) {
+    const tree = markdown(streamable(STREAMED.slice(0, at)), null, linkable);
+    const text = shown(tree.filter((block) => block.tag !== "pre"));
+    assert.ok(!/\*\*|`|^\s*\||^#|\[\d|\]\(/m.test(text), `prefix ${at} shows a marker: ${JSON.stringify(text)}`);
+  }
+  assert.deepEqual(markdown(streamable(STREAMED), cited, linkable), markdown(STREAMED, cited, linkable));
+});
+
+test("a token split across deltas waits for its close", () => {
+  assert.equal(streamable("Hello **bo"), "Hello bo");
+  assert.deepEqual(markdown(streamable("Hello **bo" + "ld**")), [{ tag: "p", children: ["Hello ", { tag: "strong", children: ["bold"] }] }]);
+  assert.equal(streamable("text\n| a | b"), "text\n", "half a table row waits for its line");
+  assert.equal(streamable("```py\nprint(1)"), "```py\nprint(1)\n```", "an open fence shows its code so far");
+  assert.equal(streamable("see [1, 2"), "see ", "half a citation shows nothing");
+  assert.equal(streamable("read [the page](https://exa"), "read the page");
+  assert.equal(streamable("- **`ty"), "- ty");
+  assert.equal(streamable("text\n##"), "text\n");
+});
+
+test("HTML in an answer, streamed or not, stays text", () => {
+  for (const text of ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "| <b>x</b> |"]) {
+    const tree = markdown(streamable(text + "\n"));
+    const tags = JSON.stringify(tree).match(/"tag":"[a-z]+"/g) || [];
+    assert.ok(tags.every((t) => /"(p|table|tr|td)"/.test(t)), JSON.stringify(tree));
+    assert.ok(shown(tree).includes("<"), "the angle brackets are shown as typed");
+  }
+});
+
+test("the close message goes to the framing page's origin alone, never to any (T-4654)", () => {
+  const framers = ["https://www.banskabystrica.sk", "https://data.dev.joinedcontext.com"];
+  assert.deepEqual(closeTargets(["https://www.banskabystrica.sk"], framers), ["https://www.banskabystrica.sk"]);
+  // Without the browser's record (Firefox), each origin that may frame it; the others drop it.
+  assert.deepEqual(closeTargets(undefined, framers), framers);
+  assert.deepEqual(closeTargets([], ["HTTPS://City.SK/", "http://localhost:8080"]), ["https://city.sk", "http://localhost:8080"]);
+  assert.deepEqual(closeTargets(undefined, ["*", "", null, "null", "javascript:alert(1)", "https://a.sk/path", "https://a.sk@evil.example"]), []);
+  assert.deepEqual(closeTargets(["null"], framers), [], "a sandboxed parent gets nothing");
+  assert.deepEqual(closeTargets(undefined, undefined), []);
 });

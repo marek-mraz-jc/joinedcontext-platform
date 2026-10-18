@@ -472,8 +472,11 @@ pub fn publish(
             api.action("package_create", &desired)?;
             Ok(Outcome::Created)
         }
-        Some(live) if !deleted(&live) && same(&live, &desired) => Ok(Outcome::Unchanged),
         Some(live) => {
+            let desired = with_issued(desired, &live);
+            if !deleted(&live) && same(&live, &desired) {
+                return Ok(Outcome::Unchanged);
+            }
             let mut payload = desired;
             // CKAN addresses an update by id when it has one; the name is what a URL shows
             // and may be what this run is changing.
@@ -617,6 +620,19 @@ pub fn publish_views(
 
 /// What a visualization view holds; an update is sent when one of them differs.
 const VIEW_FIELDS: [&str; 5] = ["title", "description", "spec", "data", "endpoint"];
+
+/// The dataset's first publication, when the live one carries it and this run does not: the
+/// `issued` a restoration wrote after the datasets were re-created (T-4644) is the dataset's own,
+/// so it is neither drift nor dropped by the `package_update` that replaces the extras.
+fn with_issued(mut desired: Value, live: &Value) -> Value {
+    let issued = extras_by_key(live.get("extras")).remove("issued");
+    if let (Some(issued), Some(extras)) = (issued, desired["extras"].as_array_mut()) {
+        if !extras.iter().any(|extra| extra["key"] == "issued") {
+            extras.push(json!({ "key": "issued", "value": issued }));
+        }
+    }
+    desired
+}
 
 /// Removes the dataset an Endpoint no longer publishes (EP-62, CC-19).
 ///

@@ -347,12 +347,13 @@ fn a_mirrored_endpoint_fills_its_datastore_from_the_csv() {
     assert_eq!(
         types,
         vec![
-            ("entity_id", "text"),
-            ("type", "text"),
             ("temperature.value", "float"),
-            ("location.value", "json"),
             ("note", "text"),
-        ]
+            ("type", "text"),
+            ("location.value", "json"),
+            ("entity_id", "text"),
+        ],
+        "T-4661: values, the rest, metadata, location, the id last"
     );
     let rows = api.rows(AIR).expect("rows");
     let first = &rows["urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1"];
@@ -524,7 +525,8 @@ fn a_table_larger_than_one_upsert_is_written_in_batches_and_whole() {
     assert_eq!(upserts, vec![500, 500, 201]);
     assert_eq!(api.rows(AIR).map(|rows| rows.len()), Some(1201));
     let fields = api.table_fields(AIR).expect("the table");
-    assert_eq!(fields[2]["type"], json!("float"));
+    assert_eq!(fields[0]["id"], json!("temperature.value"));
+    assert_eq!(fields[0]["type"], json!("float"));
 }
 
 /// T-2968: a bad row in the last batch refuses the table before the first batch is written, so
@@ -1180,18 +1182,18 @@ fn every_entity_type_gets_its_own_table_with_every_model_attribute() {
     assert_eq!(
         air,
         vec![
-            "entity_id",
-            "type",
+            "name.languageMap.cs",
+            "observedAt.value",
             "no2.value",
             "no2.unitCode",
             "no2.observedAt",
-            "name.languageMap.cs",
+            "dataProvider.value",
+            "type",
             "location.value.type",
             "location.value.coordinates[0]",
             "location.value.coordinates[1]",
-            "dataProvider.value",
-            "observedAt.value",
             "location.geojson",
+            "entity_id",
         ],
         "a column another type fills is not in this table"
     );

@@ -19,6 +19,7 @@
 //! notification body instead would put a second, unpoliced path into the catalogue.
 
 use super::ckan::{CkanApi, CkanError};
+use jc_core::field_order;
 use jc_core::kinds::ckan::CkanPublication;
 use jc_core::kinds::Representation;
 use serde_json::{json, Map, Value};
@@ -147,6 +148,7 @@ pub fn fields_by(
 pub fn table_fields(
     columns: &[String],
     definition: Option<&Value>,
+    language: &str,
     observed: impl Fn(usize) -> Option<String>,
 ) -> Vec<Value> {
     let declared = definition
@@ -160,13 +162,37 @@ pub fn table_fields(
             let kind = observed(index)
                 .or_else(|| declared.and_then(|declaration| declaration.datastore_type(column)))
                 .unwrap_or_else(|| "text".to_owned());
-            let mut field = json!({ "id": field_name(column), "type": kind });
+            let mut field = json!({
+                "id": field_name(column),
+                "type": kind,
+                "info": { "label": field_order::label(column, language) },
+            });
             if let Some(notes) = declared.and_then(|declaration| declaration.description.clone()) {
-                field["info"] = json!({ "notes": notes });
+                field["info"]["notes"] = json!(notes);
             }
             field
         })
         .collect()
+}
+
+/// The order in which a table's columns are read (T-4661): the indexes of `fields`, the name
+/// first, then the main time, the values, category, place, link, the rest, the record's
+/// metadata, the coordinates and the identifier last ([`field_order::rank`]).
+pub fn importance(fields: &[Value]) -> Vec<usize> {
+    let numeric = |field: &Value| {
+        matches!(
+            field["type"].as_str(),
+            Some("int" | "int4" | "int8" | "float" | "float8" | "numeric")
+        )
+    };
+    let mut order: Vec<usize> = (0..fields.len()).collect();
+    order.sort_by_key(|&index| {
+        let field = &fields[index];
+        let id = field["id"].as_str().unwrap_or_default();
+        let column = if id == PRIMARY_KEY { ID_COLUMN } else { id };
+        field_order::rank(column, numeric(field))
+    });
+    order
 }
 
 /// The definition of `entity_type` in an Endpoint's JSON Schema (T-3012).
@@ -364,9 +390,9 @@ pub fn touched(notification: &Value) -> Vec<String> {
 /// Creates the table, or adds the fields this answer brought to the table that exists.
 ///
 /// Idempotent: an answer whose columns the table already holds makes no writing call at
-/// all, so a publication run converges rather than churning the catalogue (CC-18). A field
-/// is only ever added — dropping one would delete a column of data because an Endpoint
-/// answered one page without it.
+/// all, so a publication run converges rather than churning the catalogue (CC-18). New fields
+/// that come after every field the table holds are added; a retyped, reordered or relabelled
+/// field rebuilds the table, which the caller then reloads in full.
 pub fn ensure(
     api: &mut impl CkanApi,
     package_id: &str,
@@ -396,7 +422,31 @@ pub fn ensure(
             .and_then(|live| live["type"].as_str())
             .is_some_and(|held| !holds(held, wanted))
     });
-    if retyped {
+    // The fields are in reading order with a label each (T-4661), and CKAN only appends a field
+    // and keeps a label as first written, so a table whose columns stand in another order or
+    // carry other labels, or that would get a new field before one it holds, is built again.
+    // A field the table holds and this answer lacks is left where it is.
+    let held = |id: &Value| live_fields.iter().any(|live| &live["id"] == id);
+    let common_live: Vec<&Value> = live_fields
+        .iter()
+        .map(|live| &live["id"])
+        .filter(|id| fields.iter().any(|field| &&field["id"] == id))
+        .collect();
+    let common_wanted: Vec<&Value> = fields
+        .iter()
+        .map(|field| &field["id"])
+        .filter(|id| held(id))
+        .collect();
+    let last_held = fields.iter().rposition(|field| held(&field["id"]));
+    let inserted = last_held.is_some_and(|last| !fields[..last].iter().all(|f| held(&f["id"])));
+    let reordered = common_live != common_wanted || inserted;
+    let relabelled = fields.iter().any(|field| {
+        live_fields
+            .iter()
+            .find(|live| live["id"] == field["id"])
+            .is_some_and(|live| live["info"]["label"] != field["info"]["label"])
+    });
+    if retyped || reordered || relabelled {
         api.action(
             "datastore_delete",
             &json!({ "resource_id": id, "force": true }),

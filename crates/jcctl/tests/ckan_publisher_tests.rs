@@ -260,6 +260,38 @@ fn the_first_run_creates_the_dataset_and_the_second_changes_nothing() {
     );
 }
 
+/// T-4644: the first publication a restoration wrote stays with the dataset: a run over the
+/// same Endpoint leaves it unchanged, and a run that updates the dataset carries it over.
+#[test]
+fn a_restored_issued_date_is_kept_and_is_no_drift() {
+    let mut api = ckan();
+    let endpoint = endpoint("[ngsi-ld, csv]", PUBLISH);
+    publish(&mut api, &endpoint, &instance(), &record(), &settings()).expect("published");
+    let mut restored = api
+        .package("kvalita-ovzdusia")
+        .expect("the dataset")
+        .clone();
+    restored["extras"]
+        .as_array_mut()
+        .expect("extras")
+        .push(json!({ "key": "issued", "value": "2026-09-07T09:00:00Z" }));
+    api.action("package_update", &restored).expect("restored");
+    let writes = api.actions().len();
+
+    let again = publish(&mut api, &endpoint, &instance(), &record(), &settings()).expect("again");
+    assert_eq!(again, Outcome::Unchanged);
+    assert_eq!(api.actions().len(), writes, "a restored date is not drift");
+
+    let mut renamed = record();
+    renamed["dct:description"] =
+        json!([{ "@value": "Every station, every hour.", "@language": "en" }]);
+    let updated =
+        publish(&mut api, &endpoint, &instance(), &renamed, &settings()).expect("updated");
+    assert_eq!(updated, Outcome::Updated);
+    let live = api.package("kvalita-ovzdusia").expect("the dataset");
+    assert_eq!(extra(live, "issued"), Some("2026-09-07T09:00:00Z"));
+}
+
 /// T-3152, EP-81: the MCP resource tells an AI client what it is: the endpoint it reads and
 /// that it needs no sign-in on a public one, its tools, the licence, and a client configuration
 /// whose url is the resource's own, shown as an indented block CKAN renders as code.

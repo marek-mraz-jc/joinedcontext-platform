@@ -97,6 +97,7 @@ pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "list_endpoints",
     "get_endpoint",
     "search",
+    "search_documents",
     "list_types",
     "get_type",
     "list_type_details",
@@ -1374,10 +1375,12 @@ mod tests {
     /// nobody named, is kept from it.
     #[test]
     fn an_anonymous_caller_may_use_the_named_reads_alone() {
-        for name in ANONYMOUS_TOOLS
-            .iter()
-            .filter(|name| !matches!(**name, "list_endpoints" | "get_endpoint" | "search"))
-        {
+        for name in ANONYMOUS_TOOLS.iter().filter(|name| {
+            !matches!(
+                **name,
+                "list_endpoints" | "get_endpoint" | "search" | "search_documents"
+            )
+        }) {
             let tool = TOOLS.iter().find(|tool| tool.name == *name);
             assert!(
                 tool.is_some_and(Tool::read_only),
@@ -1387,6 +1390,11 @@ mod tests {
         for tool in TOOLS.iter().filter(|tool| !tool.read_only()) {
             assert!(!anonymous_may(tool.name), "{} writes", tool.name);
         }
+        // The gateway's own document search reads only (T-4659).
+        assert_eq!(
+            crate::mcp::documents::tool("")["annotations"]["readOnlyHint"],
+            true
+        );
         for name in [
             "get_type",
             "list_type_details",
