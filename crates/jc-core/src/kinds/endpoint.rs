@@ -6,6 +6,7 @@ use crate::names;
 use crate::urn::Urn;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The opaque endpoint slug of EP-02: at least 128 bits of entropy, lowercase RFC 4648
@@ -538,6 +539,10 @@ pub struct EndpointSpec {
     /// through it alone (AP-96, AP-97).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<EndpointRole>,
+    /// Per entity type, the slots this Endpoint's tables, popups and CKAN columns show and its
+    /// key attributes, reordering and narrowing the model's display order (EP-135, DM-98).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub display: BTreeMap<String, crate::display_order::Display>,
 }
 
 /// One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).
@@ -677,6 +682,23 @@ impl EndpointSpec {
                 },
                 other => other,
             })?;
+        }
+
+        for (class, display) in &self.display {
+            names::validate_entity_type(class)?;
+            for (field, list) in [
+                ("spec.display.fields", &display.fields),
+                ("spec.display.summary", &display.summary),
+            ] {
+                let mut seen = std::collections::BTreeSet::new();
+                if let Some(twice) = list.iter().find(|name| !seen.insert(name.as_str())) {
+                    return Err(Error::Name {
+                        field,
+                        value: format!("{class}.{twice}"),
+                        reason: "a slot is listed once (EP-135)",
+                    });
+                }
+            }
         }
 
         let listed = self.enabled_representations.as_deref().unwrap_or_default();

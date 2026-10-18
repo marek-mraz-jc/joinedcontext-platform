@@ -489,6 +489,27 @@
         }
       ]
     },
+    "Display": {
+      "additionalProperties": false,
+      "description": "An override of the model's display order for one type: an Endpoint's `spec.display` entry or a visualization's `fields` (EP-135). Either list empty leaves that part to the model.",
+      "properties": {
+        "fields": {
+          "description": "The slots shown, in this order; the rest are not shown.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "description": "The key attributes, in place of the model's `summary` annotations.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "EndpointRole": {
       "additionalProperties": false,
       "description": "One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).",
@@ -586,6 +607,13 @@
             "$ref": "#/definitions/Representation"
           },
           "type": "array"
+        },
+        "display": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Display"
+          },
+          "description": "Per entity type, the slots this Endpoint's tables, popups and CKAN columns show and its key attributes, reordering and narrowing the model's display order (EP-135, DM-98).",
+          "type": "object"
         },
         "enabledRepresentations": {
           "description": "The representations this Endpoint serves, listed (EP-05). Omitted: every one but `sta`, less `disabledRepresentations` (EP-104); see [`EndpointSpec::served_representations`].",
