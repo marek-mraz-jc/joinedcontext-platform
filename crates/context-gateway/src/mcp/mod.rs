@@ -16,6 +16,7 @@ pub mod search;
 pub mod server;
 pub mod tools;
 pub mod units;
+pub mod writes;
 
 /// What the hub and every named server tell a client in `initialize`: catalogue first, then the
 /// dataset (`hub_lead.md`, T-4501), then that the connector speaks NGSI-LD, its query language
