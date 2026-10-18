@@ -18,7 +18,7 @@ const CONFIG = {
     en: ["When is the client centre open?", "How do I pay for parking?", "What is the air quality?"] },
   disclaimer: { sk: "Odpovede tvorí umelá inteligencia z webov mesta a kraja. Môžu obsahovať chyby, overte si ich v zdrojoch. Nezadávajte osobné údaje.",
     en: "Answers are written by AI from the city's and the region's websites. They may contain mistakes; check them in the sources. Do not enter personal data." },
-  enabled: true, connectors: [],
+  enabled: true, connectors: [], viz: "https://viz.dev.joinedcontext.com",
 };
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
@@ -40,11 +40,19 @@ const DATA = {
   rows: [["Banská Bystrica, Štefánikovo nábrežie, stanica merania kvality ovzdušia", 21.5, 14, "2026-10-16T12:00:00Z"],
     ["Zvolen, J. Alexyho", null, 9.25, "2026-10-16T11:00:00Z"]],
 };
+// T-4657: the same rows with places, and the map spec the server builds of them.
+const MAP = { $schema: "urn:joinedcontext:map:v1", label: "name", time: "observedAt", popup: [{ field: "pm10", label: "pm10", unit: "µg/m³" }],
+  data: { type: "FeatureCollection", features: [
+    { type: "Feature", geometry: { type: "Point", coordinates: [19.1462, 48.7363] }, properties: { name: "Banská Bystrica", pm10: 21.5, observedAt: "2026-10-16T12:00:00Z" } },
+    { type: "Feature", geometry: { type: "Point", coordinates: [19.1237, 48.5762] }, properties: { name: "Zvolen", pm10: null, observedAt: "2026-10-16T11:00:00Z" } }] } };
+// The renderer stands in as a page that keeps what it was sent and tells its height.
+const VIZ_PAGE = `<!doctype html><script>addEventListener("message", (e) => { window.got = { origin: e.origin, data: e.data };
+  parent.postMessage({ type: "jc-viz-height", height: 300 }, e.origin); });</script>`;
 function sse(res, data) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   send("conversation", { id: "c1", at: "2026-10-16T12:17:05Z" });
-  if (data) send("data", DATA);
+  if (data) send("data", data === "map" ? { ...DATA, map: MAP } : DATA);
   send("answer", { text: LONG });
   send("citations", [1, 2, 3, 4, 5].map((n) => ({ n, url: `https://${n < 3 ? "example" : "site" + n}.sk/strana-${n}`, title: `Source ${n}` })));
   send("followups", { questions: ["Where is the client centre?", "Do I need an appointment?"] });
@@ -107,7 +115,9 @@ test.beforeAll(async () => {
       if (SLOW) return slow(res);
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
-      return req.on("end", () => sse(res, body.includes("ovzdušia")));
+      // The question asked now, not the history the request carries beside it.
+      const asked = () => { try { return String(JSON.parse(body).message || ""); } catch { return body; } };
+      return req.on("end", () => sse(res, asked().includes("mape") ? "map" : asked().includes("ovzdušia")));
     }
     res.writeHead(404).end();
   });
@@ -311,6 +321,36 @@ test("a data table at 400 px shows the name and the first value", async ({ page 
   const value = await table.locator("tbody tr").first().locator("td").nth(1).boundingBox();
   expect(value.x + value.width, "the first value lies in view without scrolling").toBeLessThanOrEqual(scroll.x + scroll.width + 0.5);
   expect(await table.locator("td.jc-num").count(), "values align as numbers").toBeGreaterThan(0);
+});
+
+// T-4657: a data card whose rows all have places opens on its map, framed from the viz origin
+// alone; the spec goes in by message, labels in the visitor's language, and the table is one tab away.
+test("a data card with places opens on its map from the viz origin", async ({ page, context }) => {
+  await context.route("https://viz.dev.joinedcontext.com/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: VIZ_PAGE }));
+  await page.setViewportSize({ width: 400, height: 800 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await page.locator("#jc-question").fill("Ukáž kvalitu ovzdušia na mape");
+  await page.locator(".jc-form .jc-submit").click();
+  await expect(page.locator(".jc-tab[aria-selected=true]")).toHaveText("Mapa");
+  const frame = page.locator("iframe.jc-viz");
+  await expect(frame).toHaveAttribute("src", "https://viz.dev.joinedcontext.com/#show");
+  await expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox");
+  await expect.poll(() => frame.evaluate((f) => f.style.height)).toBe("300px");
+  const viz = page.frames().find((f) => f.url().startsWith("https://viz.dev.joinedcontext.com/"));
+  const got = await viz.evaluate(() => window.got);
+  expect(got.data.type).toBe("jc-viz-show");
+  expect(got.data.lang).toBe("sk");
+  expect(got.data.spec.popup[0].label).toBe("PM10");
+  expect(got.data.spec.data.features).toHaveLength(2);
+  await expect(page.locator(".jc-data-scroll")).toBeHidden();
+  await page.locator(".jc-tab", { hasText: "Tabuľka" }).click();
+  await expect(page.locator(".jc-data-scroll")).toBeVisible();
+  await expect(frame).toBeHidden();
+  // A data card without places has no tabs.
+  await page.locator("#jc-question").fill("Aká je kvalita ovzdušia?");
+  await page.locator(".jc-form .jc-submit").click();
+  await expect(page.locator(".jc-data")).toHaveCount(2);
+  await expect(page.locator(".jc-data").nth(1).locator(".jc-tab")).toHaveCount(0);
 });
 
 // T-4343: the deployment's widget.language decides; the browser's languages never leave the page.

@@ -174,6 +174,7 @@ async fn world(test: &str) -> World {
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
         endpoint_base: None,
+        viz: None,
         organization: "hronov".into(),
     });
     World {

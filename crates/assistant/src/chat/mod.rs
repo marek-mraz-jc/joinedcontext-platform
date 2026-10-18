@@ -17,6 +17,7 @@ pub mod model;
 pub mod routed;
 pub mod script;
 pub mod visitor;
+pub mod viz;
 pub mod widget;
 
 use std::collections::HashMap;
@@ -94,6 +95,9 @@ pub struct ChatState {
     /// The public origin `/api/endpoint/{slug}` is served under (`JC_ASSISTANT_ENDPOINT_URL`):
     /// a data table's download link; `None` offers none.
     pub endpoint_base: Option<url::Url>,
+    /// The chart renderer's origin, `https://viz.{domain}` (`JC_ASSISTANT_VIZ_URL`, T-4657): data
+    /// answers get maps and charts, and the widget may frame it; `None` offers neither.
+    pub viz: Option<url::Url>,
     /// The organization the service answers for, the `sites` row an upload creates (T-4184).
     pub organization: String,
 }
@@ -1000,6 +1004,7 @@ fn sse(event: &Event, anonymous: bool) -> SseEvent {
             }
             ("data", data)
         }
+        Event::Visualization(shown) => ("visualization", shown.clone()),
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Followups(questions) => ("followups", json!({"questions": questions})),
@@ -1706,6 +1711,7 @@ async fn ask(
             output_tokens: u64::from(budget.output_tokens_per_answer),
             cache: &state.answers,
             endpoint_base: state.endpoint_base.as_ref(),
+            viz: state.viz.as_ref(),
             search_only,
             data_steps: deployment.spec.data_steps() as usize,
             data_time: Duration::from_secs(u64::from(deployment.spec.data_seconds())),
@@ -1846,6 +1852,8 @@ mod tests {
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,
+            map: None,
+            geometries: Vec::new(),
         });
         for event in [&tool, &table] {
             let shown = |anonymous| format!("{:?}", sse(event, anonymous));

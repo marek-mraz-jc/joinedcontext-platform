@@ -27,7 +27,7 @@
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
       declined: "Na túto otázku asistent neodpovedá.",
-      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej" },
+      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej", tabTable: "Tabuľka", tabMap: "Mapa", chart: "Graf" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -46,7 +46,7 @@
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
       declined: "The assistant does not answer this question.",
-      choose: "Choose your language", moreInfo: "More", lessInfo: "Less" },
+      choose: "Choose your language", moreInfo: "More", lessInfo: "Less", tabTable: "Table", tabMap: "Map", chart: "Chart" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -65,7 +65,7 @@
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
       declined: "Na tuto otázku asistent neodpovídá.",
-      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně" }
+      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně", tabTable: "Tabulka", tabMap: "Mapa", chart: "Graf" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -686,6 +686,78 @@
   }
 
   // A data round's rows as a table with the dataset and download links (T-4140).
+  // The renderer on viz.{domain} draws maps and charts (T-4657, ADR-N-053 §2.9): each frame gets
+  // its spec by message to that origin alone, and only its own messages size it.
+  var VIZ = JCRender.vizOrigin(config.viz);
+  var vizFrames = [];
+  function vizFrame(payload, title, broken) {
+    var frame = el("iframe", "jc-viz");
+    frame.title = title;
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    var message = { type: "jc-viz-show", spec: JCRender.vizSpec(payload.spec, lang), rows: payload.rows, lang: lang };
+    frame.addEventListener("load", function () {
+      frame.contentWindow.postMessage(message, VIZ);
+    });
+    frame.src = VIZ + "/#show";
+    vizFrames.push({ frame: frame, broken: broken });
+    return frame;
+  }
+  window.addEventListener("message", function (event) {
+    if (!VIZ || event.origin !== VIZ) return;
+    var hit = vizFrames.filter(function (f) { return f.frame.contentWindow === event.source; })[0];
+    var data = event.data || {};
+    if (!hit) return;
+    if (data.type === "jc-viz-height" && typeof data.height === "number") {
+      hit.frame.style.height = Math.min(Math.max(Math.round(data.height), 120), 900) + "px";
+    }
+    if (data.type === "jc-viz-error") hit.broken();
+  });
+
+  // A chart the model asked for, drawn from a table's rows by the server's code (T-4657).
+  function showVisualization(item, data) {
+    if (!VIZ || !data || !data.spec || typeof data.spec !== "object") return;
+    var figure = el("figure", "jc-data jc-viz-card");
+    var title = typeof data.spec.title === "string" && data.spec.title ? data.spec.title : w.chart;
+    figure.appendChild(vizFrame(data, title, function () { figure.remove(); }));
+    item.insertBefore(figure, item.status && item.status.parentNode === item ? item.status : null);
+  }
+
+  // "Table | Map" over a data card whose rows have places; the map loads when it is first shown,
+  // so it never holds up the answer, and a map that fails leaves the table (T-4657).
+  function mapTabs(figure, scroll, drawn, data) {
+    var tabs = el("div", "jc-tabs");
+    tabs.setAttribute("role", "tablist");
+    var box = el("div", "jc-viz-box");
+    var tab = function (text) {
+      var b = tabs.appendChild(el("button", "jc-tab", text));
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      return b;
+    };
+    var toTable = tab(w.tabTable);
+    var toMap = tab(w.tabMap);
+    var pick = function (map) {
+      toTable.setAttribute("aria-selected", String(!map));
+      toMap.setAttribute("aria-selected", String(map));
+      scroll.hidden = map;
+      if (drawn) drawn.hidden = map;
+      box.hidden = !map;
+      if (map && !box.firstChild) {
+        box.appendChild(vizFrame({ spec: data.map }, w.tabMap, function () {
+          tabs.remove();
+          box.remove();
+          pick(false);
+        }));
+      }
+    };
+    toTable.addEventListener("click", function () { pick(false); });
+    toMap.addEventListener("click", function () { pick(true); });
+    figure.insertBefore(tabs, scroll);
+    figure.insertBefore(box, scroll);
+    pick(JCRender.mapFirst(data));
+  }
+
   function showData(item, data) {
     var shown = JCRender.table(data, lang);
     if (!shown) return;
@@ -717,6 +789,7 @@
     figure.appendChild(scroll);
     var drawn = plot(JCRender.chart(data));
     if (drawn) figure.appendChild(drawn);
+    if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
     if (shown.dataset || shown.download) {
       var links = el("p", "jc-data-links");
       if (shown.dataset) links.appendChild(link(shown.dataset, w.dataset));
@@ -800,6 +873,8 @@
       item.appendChild(details);
     } else if (name === "data") {
       showData(item, data);
+    } else if (name === "visualization") {
+      showVisualization(item, data);
     } else if (name === "delta" && typeof data.text === "string") {
       if (item.status) {
         item.status.remove();
