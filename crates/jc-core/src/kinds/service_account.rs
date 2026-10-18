@@ -269,10 +269,9 @@ fn is_base64url(value: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum CredentialKind {
-    /// Keycloak confidential OAuth 2.1 client with client_credentials flow.
+    /// Keycloak confidential OAuth 2.1 client with client_credentials flow; the only kind, as
+    /// the platform mints and accepts no static API key (PF-37, T-4362).
     OauthClient,
-    /// Static hashed API bearer key for external legacy systems (PF-36, PF-37).
-    ApiKey,
 }
 
 impl CredentialKind {
@@ -280,7 +279,6 @@ impl CredentialKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::OauthClient => "oauth-client",
-            Self::ApiKey => "api-key",
         }
     }
 }
@@ -451,13 +449,6 @@ impl ServiceAccountSpec {
             }
 
             if let Some(jwks) = &cred.jwks {
-                if cred.kind != CredentialKind::OauthClient {
-                    return Err(Error::Name {
-                        field: "spec.credentials.jwks",
-                        value: cred.name.clone(),
-                        reason: "only an oauth-client credential signs in by a key pair",
-                    });
-                }
                 if self.workload.is_some() {
                     return Err(Error::Name {
                         field: "spec.credentials.jwks",
@@ -486,13 +477,6 @@ impl ServiceAccountSpec {
         }
 
         Ok(())
-    }
-
-    /// Returns `true` if this service account registers any credential of kind [`CredentialKind::ApiKey`] (PF-37).
-    pub fn has_api_key(&self) -> bool {
-        self.credentials
-            .iter()
-            .any(|c| c.kind == CredentialKind::ApiKey)
     }
 }
 

@@ -14,12 +14,8 @@ spec:
   credentials:
     - kind: oauth-client         # Keycloak confidential client, client_credentials → short-lived JWT (preferred)
       name: main
-    - kind: api-key              # for systems that cannot do OAuth (devices, legacy ETL); hashed at rest, shown once
-      name: legacy-push
-      expiresAt: "2027-03-01T00:00:00Z"
-      ipAllowList: ["185.12.0.0/22"]
   limits: { requestsPerMinute: 1200 }
-# status (never in Git): keycloak clientId, keyIds, lastUsedAt per credential, rotation state
+# status (never in Git): keycloak clientId, lastUsedAt per credential, rotation state
 "#;
 
 #[test]
@@ -43,18 +39,14 @@ fn test_service_account_golden_manifest_roundtrip() {
     assert_eq!(sa.spec.roles[0].types, vec!["ParkingSpot"]);
     assert_eq!(sa.spec.roles[0].operations.len(), 2);
 
-    assert_eq!(sa.spec.credentials.len(), 2);
+    assert_eq!(sa.spec.credentials.len(), 1);
     assert_eq!(sa.spec.credentials[0].kind, CredentialKind::OauthClient);
     assert_eq!(sa.spec.credentials[0].name, "main");
-    assert_eq!(sa.spec.credentials[1].kind, CredentialKind::ApiKey);
-    assert_eq!(sa.spec.credentials[1].name, "legacy-push");
-    assert_eq!(sa.spec.credentials[1].ip_allow_list, vec!["185.12.0.0/22"]);
 
     assert_eq!(
         sa.spec.limits.as_ref().map(|l| l.requests_per_minute),
         Some(1200)
     );
-    assert!(sa.spec.has_api_key());
 
     let yaml = sa.to_yaml().expect("serializes to yaml");
     let roundtripped = ServiceAccount::from_yaml(&yaml).expect("deserializes back");
@@ -131,7 +123,7 @@ fn test_ip_allow_list_cidr_validation() {
 
     for cidr in invalid_cidrs {
         let mut test_sa = sa.clone();
-        test_sa.spec.credentials[1].ip_allow_list = vec![cidr.to_string()];
+        test_sa.spec.credentials[0].ip_allow_list = vec![cidr.to_string()];
         assert!(
             test_sa.validate().is_err(),
             "expected CIDR validation failure for `{cidr}`"
@@ -141,7 +133,7 @@ fn test_ip_allow_list_cidr_validation() {
     let valid_cidrs = ["185.12.0.0/22", "10.0.0.1/32", "2001:db8::/32"];
     for cidr in valid_cidrs {
         let mut test_sa = sa.clone();
-        test_sa.spec.credentials[1].ip_allow_list = vec![cidr.to_string()];
+        test_sa.spec.credentials[0].ip_allow_list = vec![cidr.to_string()];
         assert!(
             test_sa.validate().is_ok(),
             "expected CIDR validation success for `{cidr}`"
@@ -159,14 +151,17 @@ fn test_role_rejects_proprietary_operation_verb() {
     );
 }
 
+/// PF-37 (owner decision 2026-10-18, T-4362): the platform mints and accepts no API key, so a
+/// manifest declaring one does not read, rather than declaring a credential nothing honours.
 #[test]
-fn test_has_api_key_check() {
-    let mut sa = ServiceAccount::from_yaml(GOLDEN).expect("golden");
-    assert!(sa.spec.has_api_key());
-
-    // Remove the api-key credential
-    sa.spec.credentials.truncate(1);
-    assert!(!sa.spec.has_api_key());
+fn an_api_key_credential_is_no_credential_kind() {
+    let yaml = GOLDEN.replace(
+        "      name: main\n",
+        "      name: main\n    - kind: api-key\n      name: legacy-push\n",
+    );
+    assert!(yaml.contains("kind: api-key"));
+    let refused = ServiceAccount::from_yaml(&yaml).expect_err("api-key is refused");
+    assert!(refused.to_string().contains("api-key"), "{refused}");
 }
 
 #[test]
@@ -372,12 +367,7 @@ fn a_device_key_set_is_one_to_five_keys_each_named_once_and_well_formed() {
 }
 
 #[test]
-fn keys_belong_on_an_oauth_client_of_an_account_bound_to_no_workload() {
-    let on_api_key = format!(
-        "    - kind: api-key\n      name: main\n      jwks:\n        keys: [{}]\n",
-        ec_key("k")
-    );
-    assert!(refusal(&device(&on_api_key)).contains("only an oauth-client"));
+fn keys_belong_on_an_account_bound_to_no_workload() {
     let bound = format!(
         "{}  workload:\n    kubernetes: {{ namespace: cams, serviceAccount: north }}\n",
         device(&oauth_with(&[ec_key("k")]))

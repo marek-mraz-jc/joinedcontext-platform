@@ -171,19 +171,21 @@ fn a_token_without_a_key_id_or_with_a_forged_algorithm_is_refused() {
     }
 }
 
-/// The `Authorization` header carries two different credentials; a platform API key is not
-/// a JWT and must not be handed to the JWT verifier (PF-36, PF-37).
+/// The `Authorization` header carries one credential, a Keycloak JWT; what was once a platform
+/// API key is no JWT and is refused by the verifier like any other string (PF-37, T-4362).
 #[test]
-fn the_bearer_header_separates_a_token_from_an_api_key() {
+fn the_bearer_header_carries_a_token_and_an_old_api_key_is_refused_as_one() {
     assert_eq!(
         bearer(Some("Bearer eyJhbGciOiJFUzI1NiJ9.x.y")),
         Ok("eyJhbGciOiJFUzI1NiJ9.x.y")
     );
+    let realm = Realm::new();
+    let old_key = bearer(Some("Bearer jc_3f9c2a7b1d4e8f06_Zm9vYmFy")).expect("a bearer value");
+    assert!(realm.verifier().verify(old_key, &audiences()).is_err());
     for not_a_token in [
         None,
         Some("Bearer "),
         Some("Basic dXNlcjpwYXNz"),
-        Some("Bearer jc_k1_secret"),
         Some("eyJhbGciOiJFUzI1NiJ9.x.y"),
     ] {
         assert_eq!(

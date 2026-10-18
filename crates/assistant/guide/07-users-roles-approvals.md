@@ -50,24 +50,9 @@ Non-human callers such as ingestion scripts, automated ETL jobs, or GIS tools co
 1. Open `/projects/banskabystrica/access`, go to **Service accounts** and click **New service account**.
 2. Under **Who and why**, give the account a **Name** such as `bb-senzory-import`, write its **Purpose** in one sentence an auditor can check (*Uploads the city gateway's air-quality readings every 10 minutes.*), and enter the person who answers for it in **Owner's sign-in**, such as `jana.novakova@example.org`.
 3. Under **What it may do**, add one row to **Grants** for each thing the program needs: a **Role** such as `data-writer`, the **Scope level** (a project, one context space, or the whole organization) and the **Scope name**, such as `ovzdusie`. Narrow the grant further with **Operations** and **Entity types**, such as `AirQualityObserved`. Left empty, those two keep what the role itself allows.
-4. Under **How it signs in**, add a row to **Credentials**. Choose `oauth-client` for any program that can sign in with OAuth, and `api-key` only for an older one that cannot. Give it a **Credential name** such as `brana-mesta`, and, when you can, an **Expires at** date and the **Allowed address blocks** it calls from, such as `192.0.2.0/24`. You never type a secret here; the key or client secret is issued after the approval.
+4. Under **How it signs in**, add a row to **Credentials**: an `oauth-client`, the one kind there is, with a **Credential name** such as `brana-mesta` and, when you can, an **Expires at** date. You never type a secret here; the client secret is issued after the approval. The platform issues no API keys (T-4362).
 5. Under **Limits and workload**, set **Requests per minute** if the program should be held below the endpoint's own limit. When the program runs inside the cluster, name its **Namespace** and **Kubernetes service account**, so that it signs in with its workload identity and holds no key at all.
-6. Click **Propose change**. The account and its client exist once an approver accepts the proposal; then issue its key as below.
-
-### Issuing an API Key
-
-#### By hand
-
-1. Open `/projects/helsinki/access` and scroll down to the **Service accounts** section.
-2. Locate the account card for your client, such as `helsinki-pipelines`.
-3. Click **New API key (api-key)**.
-4. In the dialog titled **Your new API key**, copy the displayed token value.
-You should see a read-only input field showing the generated token beside a warning that this is the only time the key is shown.
-5. Click **Close** to dismiss the dialog. To cycle credentials later, click **Rotate** to create an overlapping successor key valid for 24 hours, or click **Revoke** to terminate access immediately.
-
-#### By asking the assistant
-
-The assistant cannot issue or display API key secrets, because credentials never pass through conversational context windows. You must generate and rotate keys by hand in the Portal.
+6. Click **Propose change**. The account and its Keycloak client exist once an approver accepts the proposal.
 
 ## 3. Reviewing and Deciding Change Proposals
 
