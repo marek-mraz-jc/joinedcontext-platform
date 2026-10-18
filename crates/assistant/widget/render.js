@@ -439,8 +439,11 @@ var JCRender = (function () {
         return row[i] === null || row[i] === undefined || typeof row[i] === "number";
       });
     });
+    // The data model's labels where the table carries them (T-4672), else the shared table's.
+    var modelled = Array.isArray(data.labels) ? data.labels : [];
     var columns = data.columns.map(function (c, i) {
-      var label = word(LABELS, String(c), lang);
+      var own = modelled[i] && typeof modelled[i] === "object" ? entry(modelled[i], lang) || entry(modelled[i], "en") : "";
+      var label = own || word(LABELS, String(c), lang);
       return typeof units[i] === "string" && units[i] ? label + " (" + units[i] + ")" : label;
     });
     var count = typeof data.total === "number" && data.total > rows.length

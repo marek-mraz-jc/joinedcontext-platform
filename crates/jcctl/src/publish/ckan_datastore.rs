@@ -19,6 +19,7 @@
 //! notification body instead would put a second, unpoliced path into the catalogue.
 
 use super::ckan::{CkanApi, CkanError};
+use jc_core::display_order::{display_order, Display};
 use jc_core::field_order;
 use jc_core::kinds::ckan::CkanPublication;
 use jc_core::kinds::Representation;
@@ -175,24 +176,94 @@ pub fn table_fields(
         .collect()
 }
 
-/// The order in which a table's columns are read (T-4661): the indexes of `fields`, the name
-/// first, then the main time, the values, category, place, link, the rest, the record's
-/// metadata, the coordinates and the identifier last ([`field_order::rank`]).
-pub fn importance(fields: &[Value]) -> Vec<usize> {
+/// The order in which a table's columns are read and what each is called (T-4661, T-4672): the
+/// indexes of `fields` in the display order of `entity_type` in `model` (the Endpoint's LinkML,
+/// [`display_order`]) narrowed by the Endpoint's `display` entry, the columns of one attribute
+/// together in the heuristic's order. A column whose attribute the model hides or the `display`
+/// leaves out is not among them; the primary key always is. Each kept field's `info` gets the
+/// model's label in `language`, its labels in every language the model names as `labels`, and
+/// `summary` on a key attribute's columns (DM-99…DM-101, T-4648).
+pub fn arrange(
+    fields: &mut [Value],
+    model: Option<&str>,
+    entity_type: &str,
+    view: Option<&Display>,
+    language: &str,
+) -> Vec<usize> {
     let numeric = |field: &Value| {
         matches!(
             field["type"].as_str(),
             Some("int" | "int4" | "int8" | "float" | "float8" | "numeric")
         )
     };
-    let mut order: Vec<usize> = (0..fields.len()).collect();
-    order.sort_by_key(|&index| {
-        let field = &fields[index];
+    let column = |field: &Value| -> String {
         let id = field["id"].as_str().unwrap_or_default();
-        let column = if id == PRIMARY_KEY { ID_COLUMN } else { id };
-        field_order::rank(column, numeric(field))
-    });
+        if id == PRIMARY_KEY { ID_COLUMN } else { id }.to_owned()
+    };
+    let mut attributes: Vec<(String, bool)> = Vec::new();
+    for field in fields.iter() {
+        let name = field_order::attribute(&column(field)).to_owned();
+        match attributes.iter_mut().find(|(a, _)| *a == name) {
+            Some((_, number)) => *number |= numeric(field),
+            None => attributes.push((name, numeric(field))),
+        }
+    }
+    let served: Vec<(&str, bool)> = attributes.iter().map(|(a, n)| (a.as_str(), *n)).collect();
+    let short = short_type(entity_type);
+    // The gateway serves a model that validated; one that does not parse is ordered as if none.
+    let shown = display_order(model, short, &served, view)
+        .or_else(|_| display_order(None, short, &served, view))
+        .unwrap_or_default();
+    let place = |field: &Value| {
+        let column = column(field);
+        let attribute = field_order::attribute(&column);
+        shown
+            .iter()
+            .position(|f| f.slot == attribute)
+            .map(|at| (at, field_order::rank(&column, numeric(field))))
+    };
+    let mut order: Vec<usize> = (0..fields.len())
+        .filter(|&i| place(&fields[i]).is_some())
+        .collect();
+    order.sort_by_key(|&i| place(&fields[i]));
+    if let Some(key) = fields.iter().position(|f| f["id"] == PRIMARY_KEY) {
+        if !order.contains(&key) {
+            order.push(key);
+        }
+    }
+    // Every language the model labels the type in, for a page in another one (T-4648).
+    let mut languages: BTreeSet<&str> = shown
+        .iter()
+        .flat_map(|f| f.labels.keys().map(String::as_str))
+        .collect();
+    languages.extend([language, "en"]);
+    for &index in &order {
+        let column = column(&fields[index]);
+        let attribute = field_order::attribute(&column);
+        let Some(shown) = shown.iter().find(|f| f.slot == attribute) else {
+            continue;
+        };
+        if field_order::leaf(&column) == attribute {
+            fields[index]["info"]["label"] = json!(shown.label(language));
+            let labels: Map<String, Value> = languages
+                .iter()
+                .map(|lang| ((*lang).to_owned(), json!(shown.label(lang))))
+                .collect();
+            fields[index]["info"]["labels"] = Value::Object(labels);
+        }
+        if shown.summary {
+            fields[index]["info"]["summary"] = json!(true);
+        }
+    }
     order
+}
+
+/// An entity type by its short name: the last segment of an expanded IRI.
+pub fn short_type(entity_type: &str) -> &str {
+    entity_type
+        .rsplit(['/', '#', ':'])
+        .next()
+        .unwrap_or(entity_type)
 }
 
 /// The definition of `entity_type` in an Endpoint's JSON Schema (T-3012).
@@ -200,10 +271,7 @@ pub fn importance(fields: &[Value]) -> Vec<usize> {
 /// The schema keys a class by its short name (`$defs`, or `definitions` in an older document);
 /// the rows may carry the type expanded, so an IRI is matched by its last segment.
 pub fn definition<'a>(schema: &'a Value, entity_type: &str) -> Option<&'a Value> {
-    let short = entity_type
-        .rsplit(['/', '#', ':'])
-        .next()
-        .unwrap_or(entity_type);
+    let short = short_type(entity_type);
     ["$defs", "definitions"]
         .iter()
         .filter_map(|key| schema.get(key).and_then(Value::as_object))
@@ -424,7 +492,8 @@ pub fn ensure(
     });
     // The fields are in reading order with a label each (T-4661), and CKAN only appends a field
     // and keeps a label as first written, so a table whose columns stand in another order or
-    // carry other labels, or that would get a new field before one it holds, is built again.
+    // carry other labels or key flags (T-4672), or that would get a new field before one it
+    // holds, is built again.
     // A field the table holds and this answer lacks is left where it is.
     let held = |id: &Value| live_fields.iter().any(|live| &live["id"] == id);
     let common_live: Vec<&Value> = live_fields
@@ -444,7 +513,11 @@ pub fn ensure(
         live_fields
             .iter()
             .find(|live| live["id"] == field["id"])
-            .is_some_and(|live| live["info"]["label"] != field["info"]["label"])
+            .is_some_and(|live| {
+                ["label", "labels", "summary"]
+                    .iter()
+                    .any(|key| live["info"][key] != field["info"][key])
+            })
     });
     if retyped || reordered || relabelled {
         api.action(

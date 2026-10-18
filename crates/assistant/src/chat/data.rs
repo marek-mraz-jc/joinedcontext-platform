@@ -542,6 +542,8 @@ mod tests {
             columns: vec!["name".into(), "pm10".into()],
             rows: vec![vec![json!("Námestie SNP"), json!(21)]],
             units: vec![None, Some("µg/m³".into())],
+            labels: Vec::new(),
+            summary: Vec::new(),
             total: None,
             dataset: None,
             download: None,
