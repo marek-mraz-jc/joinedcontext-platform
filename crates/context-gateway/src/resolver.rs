@@ -150,7 +150,7 @@ pub struct Endpoint {
     /// Present only when the manifest names one *and* the compiled IR beside it could be
     /// read: an endpoint that is meant to be a view and has no IR would otherwise serve the
     /// source model under the target model's name, which is worse than not serving at all.
-    pub view_mapping: Option<std::sync::Arc<crate::translators::view_mapping::ViewMapping>>,
+    pub view_mapping: Option<std::sync::Arc<crate::view_mapping::ViewMapping>>,
     /// The manifest's `spec.catalog`, which the DCAT-AP record and the ODRL offer render
     /// (EP-78, EP-79).
     pub catalog: Option<std::sync::Arc<jc_core::kinds::Catalog>>,
@@ -297,13 +297,30 @@ impl SlugResolver {
     /// Replaces the whole table in one atomic step (EP-19).
     ///
     /// A reader either sees the entire old table or the entire new one, never a mixture,
-    /// so an endpoint is never briefly missing while its space is being updated.
+    /// so an endpoint is never briefly missing while its space is being updated. An endpoint
+    /// equal to the one it replaces keeps its `Arc`, so a reload of one project leaves every
+    /// other project's endpoints as they were (T-4460).
     pub fn replace(&self, endpoints: impl IntoIterator<Item = Endpoint>) {
+        let old = self.table.load();
         let table: HashMap<String, Arc<Endpoint>> = endpoints
             .into_iter()
-            .map(|endpoint| (endpoint.slug.clone(), Arc::new(endpoint)))
+            .map(|endpoint| {
+                let kept = old
+                    .get(&endpoint.slug)
+                    .filter(|was| ***was == endpoint)
+                    .map(Arc::clone);
+                (
+                    endpoint.slug.clone(),
+                    kept.unwrap_or_else(|| Arc::new(endpoint)),
+                )
+            })
             .collect();
         self.table.store(Arc::new(table));
+    }
+
+    /// The table as it is now; a reload replaces it, so a different one means a reload.
+    pub(crate) fn table(&self) -> Arc<HashMap<String, Arc<Endpoint>>> {
+        self.table.load_full()
     }
 
     /// Every endpoint the table holds, sorted by slug, for the organization's feed (EP-84).

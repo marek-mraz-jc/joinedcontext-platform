@@ -27,6 +27,8 @@ struct Doc {
     slugs: Vec<String>,
     title: Map<String, Value>,
     types: Vec<String>,
+    /// Per Endpoint, the types it answers for this caller, so a hit names one that serves them.
+    served: Vec<(String, Vec<String>)>,
     domains: Vec<String>,
     themes: Vec<String>,
     terms: HashMap<String, u32>,
@@ -153,6 +155,7 @@ impl Index {
                     .unwrap_or_default(),
                 slugs,
                 types: Vec::new(),
+                served: Vec::new(),
                 domains: Vec::new(),
                 themes: strings(Some(&entity["theme"]["value"]))
                     .iter()
@@ -163,6 +166,7 @@ impl Index {
             };
             for slug in &doc.slugs {
                 if let Some(f) = facts.get(slug) {
+                    doc.served.push((slug.clone(), f.types.clone()));
                     for (into, from) in [(&mut doc.types, &f.types), (&mut doc.domains, &f.domains)]
                     {
                         into.extend(
@@ -273,7 +277,7 @@ impl Index {
         let hits: Vec<Value> = ranked
             .iter()
             .take(limit)
-            .map(|(score, doc)| hit(doc, *score, &lang))
+            .map(|(score, doc)| hit(doc, *score, &lang, kind.as_deref()))
             .collect();
         let mut text = String::from("endpoint | title | types | domain | dataset\n");
         for hit in &hits {
@@ -299,7 +303,10 @@ impl Index {
 }
 
 /// One hit: the Dataset, the Endpoint to read and the call that reads it.
-fn hit(doc: &Doc, score: f64, lang: &str) -> Value {
+///
+/// The Endpoint is the first that serves the asked `type`, else the first that serves any, and
+/// the hit names that Endpoint's types alone: each one answers its `nextQuery` (T-4567).
+fn hit(doc: &Doc, score: f64, lang: &str, kind: Option<&str>) -> Value {
     let title = doc
         .title
         .get(lang)
@@ -307,17 +314,24 @@ fn hit(doc: &Doc, score: f64, lang: &str) -> Value {
         .or_else(|| doc.title.values().next())
         .cloned()
         .unwrap_or(Value::Null);
-    let endpoint = doc.slugs.first().cloned().unwrap_or_default();
+    let named = |t: &String| kind.is_some_and(|k| t.to_lowercase() == k);
+    let (endpoint, types) = doc
+        .served
+        .iter()
+        .find(|(_, types)| types.iter().any(named))
+        .or_else(|| doc.served.iter().find(|(_, types)| !types.is_empty()))
+        .map(|(slug, types)| (slug.clone(), types.as_slice()))
+        .unwrap_or_else(|| (doc.slugs.first().cloned().unwrap_or_default(), &[]));
     let mut arguments = json!({ "endpoint": endpoint, "limit": 10 });
-    if let Some(first) = doc.types.first() {
-        arguments["type"] = json!(first);
+    if let Some(first) = types.iter().find(|t| named(t)).or(types.first()) {
+        arguments["type"] = json!([first]);
     }
     json!({
         "dataset": doc.dataset,
         "endpoint": endpoint,
         "endpoints": doc.slugs,
         "title": title,
-        "types": doc.types,
+        "types": types,
         "domains": doc.domains,
         "themes": doc.themes,
         "score": (score * 100.0).round() / 100.0,

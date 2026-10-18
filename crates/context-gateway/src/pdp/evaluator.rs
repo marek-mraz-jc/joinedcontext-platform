@@ -21,7 +21,7 @@ use jc_core::kinds::{
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Who is calling, as established by the PEP — never as claimed by the client (GW20).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Subject {
     /// The authenticated user, absent for an anonymous caller.
     pub user: Option<String>,
@@ -536,7 +536,7 @@ pub fn granted_attrs(information: &[RegistrationInfo]) -> BTreeSet<String> {
 ///
 /// Every operand is parenthesized, so no operand can reach outside itself and change how
 /// its neighbours are grouped. That only holds if the caller's filter is one the broker's own
-/// parser reads ([`parses`]): any other is dropped rather than conjoined, leaving the grants
+/// parser reads (`parses` below): any other is dropped rather than conjoined, leaving the grants
 /// alone in force.
 pub fn conjoin(requested: Option<&str>, filters: &[String]) -> Option<String> {
     let union = match filters.len() {

@@ -13,8 +13,8 @@ use crate::federation::{federations_of, Federations};
 use crate::mcp::server::{McpServer, McpServers};
 use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
-use crate::translators::view_mapping::ViewMapping;
 use crate::units::UnitRules;
+use crate::view_mapping::ViewMapping;
 use jc_core::kinds::{
     Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
     McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, Representation,
@@ -178,12 +178,15 @@ pub fn limits_of(repo: &Repository) -> Limits {
 /// `projects` holds one checkout per registry slug at its pinned ref, which the deployment
 /// mounts; the gateway reads them and never the forge, so it holds no forge credential.
 /// `assembly` is a scratch directory the pod owns, outside both, where the render is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Checkouts {
     /// The project checkouts, one directory per slug (`JC_GATEWAY_PROJECTS_DIR`).
     pub projects: PathBuf,
     /// Where the organization is assembled (`JC_GATEWAY_ASSEMBLY_DIR`).
     pub assembly: PathBuf,
+    /// The last assembly's project renders: a reload renders only the projects whose checkout
+    /// moved (T-4460, R48). A clone shares them.
+    pub renders: std::sync::Arc<std::sync::Mutex<jcctl::assemble::Renders>>,
 }
 
 /// Loads the endpoint table and the identity table from the repository under `dir`
@@ -201,7 +204,7 @@ pub fn load_from(
     dir: &Path,
     checkouts: Option<&Checkouts>,
 ) -> Result<Tables, jcctl::assemble::AssembleError> {
-    use jcctl::assemble::{assemble, layout_at, AssembleError, Directories};
+    use jcctl::assemble::{assemble_reusing, layout_at, AssembleError, Directories};
     if layout_at(dir, jc_core::project::RepositoryRole::Organization)? == 1 {
         return Ok(load(dir)?);
     }
@@ -228,12 +231,18 @@ pub fn load_from(
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let assembly = assemble(
+    let mut renders = checkouts
+        .renders
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let assembly = assemble_reusing(
         dir,
         &Directories(directories),
         &checkouts.assembly,
         environment.as_deref(),
+        &mut renders,
     )?;
+    drop(renders);
     for entry in assembly
         .entries
         .iter()

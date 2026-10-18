@@ -4,7 +4,7 @@
 mod common;
 
 use common::{temp_dir, write, ENDPOINT, ORG, PROJECT, SPACE};
-use jcctl::assemble::{assemble, AssembleError, Directories};
+use jcctl::assemble::{assemble, assemble_reusing, AssembleError, Assembly, Directories, Renders};
 use jcctl::loader::Repository;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -408,4 +408,188 @@ fn the_assembly_in_memory_is_what_the_written_render_loads() {
         .map(|(_, loaded)| loaded)
         .expect("the third document");
     assert_eq!((second.document, second.line), (2, 8));
+}
+
+/// `slug` under `links` pointed at `tree`, as `jcctl checkouts` leaves a checkout: a link to a
+/// tree named by its commit, swapped by one rename.
+fn link(links: &Path, slug: &str, tree: &Path) -> Directories {
+    std::fs::create_dir_all(links).expect("the links");
+    let at = links.join(slug);
+    let next = links.join(format!(".{slug}.next"));
+    std::os::unix::fs::symlink(tree, &next).expect("linked");
+    std::fs::rename(&next, &at).expect("swapped in");
+    checkouts(&[(slug, &at)])
+}
+
+fn representations(assembly: &Assembly) -> serde_json::Value {
+    let (_, endpoint) = assembly
+        .repository
+        .iter()
+        .find(|(id, _)| id.kind == "Endpoint")
+        .expect("the Endpoint");
+    endpoint.manifest.spec["enabledRepresentations"].clone()
+}
+
+const ONE: &str = r#"enabledRepresentations: ["ngsi-ld"]"#;
+const BOTH: &str = r#"enabledRepresentations: ["ngsi-ld", "geojson"]"#;
+
+/// T-4460: a linked project whose tree did not move is taken from the last assembly, not
+/// rendered again, and stays on disk; relinked to another tree, it renders that tree.
+#[test]
+fn a_linked_project_renders_again_only_when_its_link_moves() {
+    let org = organization("reuse", &[("ovzdusie", ENTRY)]);
+    let c1 = project_repository("reuse-c1");
+    let links = temp_dir("reuse-links");
+    let into = temp_dir("reuse-into").join("r");
+    let mut renders = Renders::default();
+    let first = assemble_reusing(
+        &org,
+        &link(&links, "ovzdusie", &c1),
+        &into,
+        None,
+        &mut renders,
+    )
+    .expect("assembles");
+    assert_eq!(
+        representations(&first),
+        serde_json::json!(["ngsi-ld", "geojson"])
+    );
+    assert!(!first.entries[0].reused, "nothing was kept yet");
+
+    // A tree is written once; one rewritten in place is not read again while the link holds.
+    let endpoint = c1.join("spaces/ovzdusie/endpoints/public-air.yaml");
+    write(
+        &c1,
+        "spaces/ovzdusie/endpoints/public-air.yaml",
+        &ENDPOINT.replace(BOTH, ONE),
+    );
+    let again = assemble_reusing(
+        &org,
+        &link(&links, "ovzdusie", &c1),
+        &into,
+        None,
+        &mut renders,
+    )
+    .expect("assembles");
+    assert_eq!(
+        representations(&again),
+        serde_json::json!(["ngsi-ld", "geojson"])
+    );
+    assert!(again.entries[0].reused);
+    assert!(
+        into.join("projects/ovzdusie/spaces/ovzdusie/endpoints/public-air.yaml")
+            .is_file(),
+        "the reused render is in the new tree"
+    );
+
+    let c2 = temp_dir("reuse-c2");
+    write(&c2, ".jc/layout", "2\n");
+    write(&c2, "project.yaml", PROJECT);
+    write(&c2, "spaces/ovzdusie/space.yaml", SPACE);
+    std::fs::create_dir_all(c2.join("spaces/ovzdusie/endpoints")).expect("dir");
+    std::fs::copy(
+        &endpoint,
+        c2.join("spaces/ovzdusie/endpoints/public-air.yaml"),
+    )
+    .expect("copy");
+    let moved = assemble_reusing(
+        &org,
+        &link(&links, "ovzdusie", &c2),
+        &into,
+        None,
+        &mut renders,
+    )
+    .expect("assembles");
+    assert_eq!(representations(&moved), serde_json::json!(["ngsi-ld"]));
+    assert!(!moved.entries[0].reused, "the link moved");
+}
+
+/// T-4460: a checkout that is not a link can change in place, so it is rendered every time and
+/// nothing is kept for it.
+#[test]
+fn a_checkout_that_is_no_link_renders_every_time() {
+    let org = organization("plain", &[("ovzdusie", ENTRY)]);
+    let dir = project_repository("plain");
+    let into = temp_dir("plain-into").join("r");
+    let mut renders = Renders::default();
+    assemble_reusing(
+        &org,
+        &checkouts(&[("ovzdusie", &dir)]),
+        &into,
+        None,
+        &mut renders,
+    )
+    .expect("assembles");
+    write(
+        &dir,
+        "spaces/ovzdusie/endpoints/public-air.yaml",
+        &ENDPOINT.replace(BOTH, ONE),
+    );
+    let again = assemble_reusing(
+        &org,
+        &checkouts(&[("ovzdusie", &dir)]),
+        &into,
+        None,
+        &mut renders,
+    )
+    .expect("assembles");
+    assert_eq!(representations(&again), serde_json::json!(["ngsi-ld"]));
+    assert!(!again.entries[0].reused);
+}
+
+/// T-4460: a refused assembly puts every reused render back where it was and keeps the renders
+/// it had, so the last tree still serves a project whose checkout goes missing and the next
+/// assembly still reuses.
+#[test]
+fn a_refused_assembly_puts_the_reused_renders_back() {
+    let entry = |slug: &str| ENTRY.replace("ovzdusie", slug);
+    let org = organization("putback", &[("ovzdusie", ENTRY)]);
+    let tree = project_repository("putback");
+    let links = temp_dir("putback-links");
+    let into = temp_dir("putback-into").join("r");
+    let mut renders = Renders::default();
+    let linked = link(&links, "ovzdusie", &tree);
+    assemble_reusing(&org, &linked, &into, None, &mut renders).expect("assembles");
+
+    // doprava claims ovzdusie's Endpoint slug: the assembly is refused after the reuse.
+    write(&org, "projects/doprava.yaml", &entry("doprava"));
+    let clash = temp_dir("putback-doprava");
+    write(&clash, ".jc/layout", "2\n");
+    write(
+        &clash,
+        "project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    write(
+        &clash,
+        "spaces/doprava/space.yaml",
+        &SPACE.replace("ovzdusie", "doprava"),
+    );
+    write(
+        &clash,
+        "spaces/doprava/endpoints/public-air.yaml",
+        &ENDPOINT.replace("ovzdusie", "doprava"),
+    );
+    let mut both = linked.0.clone();
+    both.insert("doprava".to_owned(), clash);
+    let refused = assemble_reusing(&org, &Directories(both), &into, None, &mut renders)
+        .expect_err("one slug, two projects");
+    assert!(
+        matches!(refused, AssembleError::Conflict { .. }),
+        "{refused}"
+    );
+    assert!(
+        into.join("projects/ovzdusie/spaces/ovzdusie/endpoints/public-air.yaml")
+            .is_file(),
+        "the reused render is back in the last tree"
+    );
+
+    std::fs::remove_file(org.join("projects/doprava.yaml")).expect("unregister");
+    let next = assemble_reusing(&org, &linked, &into, None, &mut renders).expect("assembles");
+    assert!(next.entries[0].reused, "the renders it had are kept");
+    let fallback = assemble(&org, &Directories::default(), &into, None).expect("assembles");
+    assert!(
+        fallback.entries[0].rendered,
+        "the last tree still serves ovzdusie"
+    );
 }

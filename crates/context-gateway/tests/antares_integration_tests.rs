@@ -18,7 +18,7 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
-use context_gateway::translators::view_mapping::ViewMapping;
+use context_gateway::view_mapping::ViewMapping;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::process::Command;

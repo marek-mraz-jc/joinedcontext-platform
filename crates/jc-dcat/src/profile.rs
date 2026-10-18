@@ -5,6 +5,8 @@
 //! (title, publisher, themes, licence, distributions) are the same under every profile. What a
 //! profile requires and the Endpoint does not declare is left out, never invented.
 
+#[cfg(any(feature = "dcat-ap-sk", feature = "dcat-ap-cz"))]
+use jc_core::kinds::PersonalData;
 use jc_core::kinds::{Catalog, DcatProfile};
 use serde_json::{json, Map, Value};
 
@@ -87,12 +89,17 @@ pub fn render(record: Value, profile: Profile, catalog: Option<&Catalog>) -> Val
         allow(unused_variables)
     )]
     let licence = catalog.and_then(|c| c.license).map(|l| l.iri());
+    #[cfg_attr(
+        not(any(feature = "dcat-ap-sk", feature = "dcat-ap-cz")),
+        allow(unused_variables)
+    )]
+    let personal = catalog.and_then(|c| c.personal_data);
     match profile {
         Profile::DcatAp => record,
         #[cfg(feature = "dcat-ap-sk")]
-        Profile::DcatApSk => slovak(record, licence.as_deref()),
+        Profile::DcatApSk => slovak(record, licence.as_deref(), personal),
         #[cfg(feature = "dcat-ap-cz")]
-        Profile::DcatApCz => czech(record, licence.as_deref()),
+        Profile::DcatApCz => czech(record, licence.as_deref(), personal),
     }
 }
 
@@ -110,28 +117,63 @@ fn distributions(record: &mut Value) -> impl Iterator<Item = &mut Map<String, Va
         .filter_map(Value::as_object_mut)
 }
 
-/// The three rights of a terms-of-use node, each the Endpoint's EU licence: the licence the
-/// owner chose covers the work, the database as a work and the database maker's right
-/// (API/08 section 6). The personal-data statement is not derived: it is a fact about the data,
-/// not about the licence, and the platform has no source for it.
+/// A terms-of-use node: the three rights, each the Endpoint's EU licence, because the licence
+/// the owner chose covers the work, the database as a work and the database maker's right
+/// (API/08 section 6); and the personal-data statement, `(key, code)`, which no licence implies
+/// and the Endpoint states itself (API/08 section 5). `None` when neither is known.
 #[cfg_attr(
     not(any(feature = "dcat-ap-sk", feature = "dcat-ap-cz")),
     allow(dead_code)
 )]
-fn rights(class: &str, keys: [&str; 3], licence: &str) -> Value {
+fn terms(
+    class: &str,
+    rights: [&str; 3],
+    licence: Option<&str>,
+    personal: Option<(&str, &str)>,
+) -> Option<Value> {
     let mut node = Map::new();
-    node.insert("@type".to_owned(), json!(class));
-    for key in keys {
-        node.insert(key.to_owned(), json!({ "@id": licence }));
+    if let Some(licence) = licence {
+        for key in rights {
+            node.insert(key.to_owned(), json!({ "@id": licence }));
+        }
     }
-    Value::Object(node)
+    if let Some((key, code)) = personal {
+        node.insert(key.to_owned(), json!({ "@id": code }));
+    }
+    if node.is_empty() {
+        return None;
+    }
+    node.insert("@type".to_owned(), json!(class));
+    Some(Value::Object(node))
+}
+
+/// The Slovak code for a personal-data statement, from the code list
+/// `https://data.gov.sk/set/codelist/personal-data-occurence-type` (API/08 section 5).
+#[cfg(feature = "dcat-ap-sk")]
+fn slovak_personal(statement: PersonalData) -> &'static str {
+    match statement {
+        PersonalData::Contains => "https://data.gov.sk/def/personal-data-occurence-type/1",
+        PersonalData::DoesNotContain => "https://data.gov.sk/def/personal-data-occurence-type/2",
+    }
+}
+
+/// The Czech statement IRI of the terms-of-use vocabulary (API/08 section 5).
+#[cfg(feature = "dcat-ap-cz")]
+fn czech_personal(statement: PersonalData) -> &'static str {
+    match statement {
+        PersonalData::Contains => "https://data.gov.cz/podmínky-užití/obsahuje-osobní-údaje/",
+        PersonalData::DoesNotContain => {
+            "https://data.gov.cz/podmínky-užití/neobsahuje-osobní-údaje/"
+        }
+    }
 }
 
 /// DCAT-AP-SK 2.0.1: `leg:termsOfUse` on every distribution (API/08 section 2); no checksum,
 /// because the DCAT-AP 2.1.1 base takes SHA-1 alone, and `dcat:byteSize` as `xsd:decimal`
 /// (API/08 section 5).
 #[cfg(feature = "dcat-ap-sk")]
-fn slovak(mut record: Value, licence: Option<&str>) -> Value {
+fn slovak(mut record: Value, licence: Option<&str>, personal: Option<PersonalData>) -> Value {
+    let personal = personal.map(|p| ("leg:personalDataContainmentType", slovak_personal(p)));
     for distribution in distributions(&mut record) {
         distribution.remove("spdx:checksum");
         if let Some(Value::String(bytes)) = distribution.remove("dcat:byteSize") {
@@ -140,19 +182,17 @@ fn slovak(mut record: Value, licence: Option<&str>) -> Value {
                 json!({ "@value": bytes, "@type": "xsd:decimal" }),
             );
         }
-        if let Some(licence) = licence {
-            distribution.insert(
-                "leg:termsOfUse".to_owned(),
-                rights(
-                    "leg:TermsOfUse",
-                    [
-                        "leg:authorsWorkType",
-                        "leg:originalDatabaseType",
-                        "leg:databaseProtectedBySpecialRightsType",
-                    ],
-                    licence,
-                ),
-            );
+        if let Some(node) = terms(
+            "leg:TermsOfUse",
+            [
+                "leg:authorsWorkType",
+                "leg:originalDatabaseType",
+                "leg:databaseProtectedBySpecialRightsType",
+            ],
+            licence,
+            personal,
+        ) {
+            distribution.insert("leg:termsOfUse".to_owned(), node);
         }
     }
     if let Some(included) = record.get_mut("@included").and_then(Value::as_array_mut) {
@@ -165,22 +205,21 @@ fn slovak(mut record: Value, licence: Option<&str>) -> Value {
 /// `dct:LicenseDocument`, and the dataset's `r5r:applicableLegislation` repeated on each
 /// distribution and on the data service (API/08 section 3).
 #[cfg(feature = "dcat-ap-cz")]
-fn czech(mut record: Value, licence: Option<&str>) -> Value {
+fn czech(mut record: Value, licence: Option<&str>, personal: Option<PersonalData>) -> Value {
+    let personal = personal.map(czech_personal);
     let legislation = record.get("dcatap:applicableLegislation").cloned();
     for distribution in distributions(&mut record) {
-        if let Some(licence) = licence {
-            distribution.insert(
-                "pu:specifikace".to_owned(),
-                rights(
-                    "pu:Specifikace",
-                    [
-                        "pu:autorské-dílo",
-                        "pu:databáze-jako-autorské-dílo",
-                        "pu:databáze-chráněná-zvláštními-právy",
-                    ],
-                    licence,
-                ),
-            );
+        if let Some(node) = terms(
+            "pu:Specifikace",
+            [
+                "pu:autorské-dílo",
+                "pu:databáze-jako-autorské-dílo",
+                "pu:databáze-chráněná-zvláštními-právy",
+            ],
+            licence,
+            personal.map(|code| ("pu:osobní-údaje", code)),
+        ) {
+            distribution.insert("pu:specifikace".to_owned(), node);
         }
         if let Some(legislation) = &legislation {
             distribution.insert(
@@ -197,8 +236,9 @@ fn czech(mut record: Value, licence: Option<&str>) -> Value {
                 node["dcatap:applicableLegislation"] = legislation.clone();
             }
         }
-        if let Some(licence) = licence {
-            included.push(json!({ "@id": licence, "@type": "dct:LicenseDocument" }));
+        // The shapes take every right and the statement as a `dct:LicenseDocument`.
+        for document in licence.into_iter().chain(personal) {
+            included.push(json!({ "@id": document, "@type": "dct:LicenseDocument" }));
         }
     }
     record
@@ -208,7 +248,7 @@ fn czech(mut record: Value, licence: Option<&str>) -> Value {
 mod tests {
     use super::*;
     use crate::{dataset, turtle, Subject};
-    use jc_core::kinds::{Audience, Licence, Representation};
+    use jc_core::kinds::{Audience, Licence, PersonalData, Representation};
     use std::collections::BTreeMap;
 
     const BASE: &str = "https://data.example.sk";
@@ -377,6 +417,86 @@ mod tests {
             "{turtle}"
         );
         assert!(turtle.contains("a pu:Specifikace"), "{turtle}");
+    }
+
+    #[cfg(feature = "dcat-ap-sk")]
+    #[test]
+    fn a_slovak_statement_is_its_code_and_stands_without_a_licence() {
+        let mut licensed = catalog(Some(Licence::CcBy4));
+        licensed.personal_data = Some(PersonalData::Contains);
+        let sk = render(record(&licensed), Profile::DcatApSk, Some(&licensed));
+        let terms = &schema_distribution(&sk)["leg:termsOfUse"];
+        assert_eq!(
+            terms["leg:personalDataContainmentType"],
+            json!({ "@id": "https://data.gov.sk/def/personal-data-occurence-type/1" })
+        );
+        assert_eq!(
+            terms["leg:authorsWorkType"],
+            json!({ "@id": Licence::CcBy4.iri() })
+        );
+
+        let mut unlicensed = catalog(None);
+        unlicensed.personal_data = Some(PersonalData::DoesNotContain);
+        let sk = render(record(&unlicensed), Profile::DcatApSk, Some(&unlicensed));
+        let terms = &schema_distribution(&sk)["leg:termsOfUse"];
+        assert_eq!(
+            terms,
+            &json!({
+                "@type": "leg:TermsOfUse",
+                "leg:personalDataContainmentType":
+                    { "@id": "https://data.gov.sk/def/personal-data-occurence-type/2" }
+            })
+        );
+        let turtle = turtle(&sk);
+        assert!(
+            turtle.contains("<https://data.gov.sk/def/personal-data-occurence-type/2>"),
+            "{turtle}"
+        );
+    }
+
+    #[cfg(feature = "dcat-ap-cz")]
+    #[test]
+    fn a_czech_statement_is_a_licence_document_of_the_vocabulary() {
+        for (statement, code) in [
+            (
+                PersonalData::Contains,
+                "https://data.gov.cz/podmínky-užití/obsahuje-osobní-údaje/",
+            ),
+            (
+                PersonalData::DoesNotContain,
+                "https://data.gov.cz/podmínky-užití/neobsahuje-osobní-údaje/",
+            ),
+        ] {
+            let mut stated = catalog(Some(Licence::Cc0));
+            stated.personal_data = Some(statement);
+            let cz = render(record(&stated), Profile::DcatApCz, Some(&stated));
+            for distribution in cz["dcat:distribution"].as_array().into_iter().flatten() {
+                assert_eq!(
+                    distribution["pu:specifikace"]["pu:osobní-údaje"],
+                    json!({ "@id": code })
+                );
+            }
+            let included = cz["@included"].as_array().expect("@included");
+            assert!(included
+                .iter()
+                .any(|n| n["@id"] == code && n["@type"] == "dct:LicenseDocument"));
+            let turtle = turtle(&cz);
+            assert!(turtle.contains(&format!("<{code}>")), "{turtle}");
+        }
+    }
+
+    /// Without a national profile the statement is never written: DCAT-AP 3.0 has no term for
+    /// it, and this runs in every build, the featureless one included.
+    #[test]
+    fn the_core_record_never_carries_the_statement() {
+        for statement in [PersonalData::Contains, PersonalData::DoesNotContain] {
+            let mut stated = catalog(Some(Licence::CcBy4));
+            stated.personal_data = Some(statement);
+            let core = render(record(&stated), Profile::DcatAp, Some(&stated));
+            let written = core.to_string();
+            assert!(!written.contains("personal"), "{written}");
+            assert!(!written.contains("osobn"), "{written}");
+        }
     }
 
     #[test]

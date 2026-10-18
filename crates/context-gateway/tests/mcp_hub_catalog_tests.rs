@@ -12,7 +12,7 @@ use context_gateway::auth::accounts::{accounts_of, ServiceAccounts};
 use context_gateway::mcp::server::McpServer;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
-use context_gateway::resolver::{DeclaredTypes, Endpoint};
+use context_gateway::resolver::{DeclaredTypes, Endpoint, Model};
 use jc_core::kinds::{Audience, PolicySpec, QualityRule, RateLimits, Representation};
 use jc_core::ngsi_catalog::{self, Place};
 use serde_json::{json, Value};
@@ -587,10 +587,72 @@ async fn a_service_account_grant_shows_its_endpoint_and_the_public_ones_and_noth
     assert_eq!(seen, [AIR, BIKES], "{answer}");
 }
 
+/// T-4528: a reach is kept per token for a moment, and a different token, a reload or a changed
+/// grant is never answered from it.
+#[tokio::test]
+async fn a_kept_reach_is_per_token_and_a_reload_replaces_it() {
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1"),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve(city())
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some("https://city.example".to_owned()),
+        ),
+    );
+    let lists_inner = |answer: Value| answer["result"].to_string().contains(INNER);
+    let list = |token: Option<String>| {
+        let app = router(Arc::clone(&gateway));
+        async move { call(app, token.as_deref(), "list_endpoints", json!({})).await }
+    };
+    let steward = steward(&realm);
+    assert!(lists_inner(list(Some(steward.clone())).await));
+    assert!(lists_inner(list(Some(steward.clone())).await), "kept");
+    assert!(!lists_inner(list(None).await), "anonymous is its own reach");
+    let plain = realm.mint(&json!({
+        "iss": common::ISSUER, "sub": "0f5a", "aud": "context-gateway", "scope": "openid",
+        "azp": "mcp-hub", "preferred_username": "jana", "groups": ["/mesto"],
+        "realm_access": { "roles": [] },
+        "exp": common::in_seconds(300), "iat": common::in_seconds(-10),
+    }));
+    assert!(
+        !lists_inner(list(Some(plain)).await),
+        "the same person without the role"
+    );
+
+    // The Policy now grants another role: the next call sees it.
+    let regranted = city()
+        .into_iter()
+        .map(|e| {
+            if e.slug == INNER {
+                endpoint(
+                    INNER,
+                    "Internal registry",
+                    "mesto-register",
+                    Audience::Organization,
+                    "auditor",
+                )
+            } else {
+                e
+            }
+        })
+        .collect::<Vec<_>>();
+    gateway.resolver.replace(regranted);
+    assert!(!lists_inner(list(Some(steward)).await), "after the reload");
+}
+
 /// A measurement, run on its own in release:
 /// `cargo test --release -p context-gateway --test mcp_hub_catalog_tests ten_thousand -- --ignored --nocapture`.
 /// Measured 2026-10-17: cold 1.8 s, a warm search p95 65 ms of which the hub's reach over
-/// 10,000 Endpoints is 50 ms (`list_types` on the catalog, which filters nothing).
+/// 10,000 Endpoints is 50 ms (`list_types` on the catalog, which filters nothing). On
+/// 2026-10-18, before T-4528: warm search p95 65.6 ms, list_endpoints p95 44.8 ms, the reach
+/// 35 ms of every call. After it: warm search p95 23.8 ms, list_endpoints p95 1.7 ms,
+/// list_types 2.7 ms.
 #[tokio::test]
 #[ignore = "a 10,000-Endpoint measurement; run in release"]
 async fn ten_thousand_endpoints_answer_a_warm_catalog_query_quickly() {
@@ -652,6 +714,13 @@ async fn ten_thousand_endpoints_answer_a_warm_catalog_query_quickly() {
         "10,000 Endpoints: cold {cold_took:?}, warm p95 {p95:?}, list_endpoints p95 {:?}",
         hub[18]
     );
+    // With the caller's reach kept (T-4528), neither pays for the reach again.
+    assert!(p95 < std::time::Duration::from_millis(50), "{p95:?}");
+    assert!(
+        hub[18] < std::time::Duration::from_millis(50),
+        "{:?}",
+        hub[18]
+    );
 }
 
 /// T-4501: the first call names no Endpoint and finds the dataset in the catalogue by the place
@@ -710,6 +779,7 @@ async fn one_hundred_eleven_endpoints_list_in_under_25000_characters() {
                 "public",
             );
             e.declared_types = Some(Arc::new(area()));
+            e.models = vec![model(&["AirQualityObserved"])];
             e
         })
         .collect();
@@ -779,8 +849,20 @@ fn holding(mut e: Endpoint, class: &str, sk: &str) -> Endpoint {
     let mut declared = area();
     declared.classes = [class.to_owned()].into_iter().collect();
     e.declared_types = Some(Arc::new(declared));
+    e.models = vec![model(&[class])];
     e.title.insert("sk".to_owned(), sk.to_owned());
     e
+}
+
+fn model(classes: &[&str]) -> Model {
+    Model {
+        name: "model".to_owned(),
+        version: "1.0.0".to_owned(),
+        major: 1,
+        classes: classes.iter().map(|c| (*c).to_owned()).collect(),
+        json_schema: None,
+        context: None,
+    }
 }
 
 /// T-4493: one search call from a question in either language, with or without diacritics,
@@ -862,7 +944,7 @@ async fn search_ranks_the_dataset_a_question_names_first() {
         );
         assert_eq!(
             hit["nextQuery"]["arguments"]["type"],
-            json!("AirQualityObserved")
+            json!(["AirQualityObserved"])
         );
         assert_eq!(hit["domains"], json!(["Environment"]));
         eprintln!("search {question:?}: {}", hit["title"]);
@@ -930,6 +1012,119 @@ async fn search_ranks_the_dataset_a_question_names_first() {
             .as_str()
             .is_some_and(|t| t.contains(word)));
     }
+}
+
+/// T-4567: an Endpoint advertises, in search and list_endpoints alike, only the types its Policy
+/// lets this caller read, each of them answers a query, and a public reader may call list_types
+/// although the Policy grants no retrieveEntityTypes (tools/list names it only where a Policy
+/// grants it, so its bytes stay under the T-4506 ceiling). The space declares four types, the model
+/// three, the Policy one: the other three are neither listed nor counted.
+#[tokio::test]
+async fn an_endpoint_advertises_only_the_types_the_caller_reads() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([{
+        "id": "urn:ngsi-ld:AirQualityObserved:st-1", "type": "AirQualityObserved",
+    }])])
+    .await;
+    let mut mixed = holding(
+        endpoint(
+            AIR,
+            "Air quality in Banská Bystrica",
+            "mesto-ovzdusie",
+            Audience::Public,
+            "public",
+        ),
+        "AirQualityObserved",
+        "Kvalita ovzdušia Banská Bystrica",
+    );
+    let mut declared = area();
+    declared.classes = [
+        "AirQualityObserved",
+        "Event",
+        "Organization",
+        "WeatherObserved",
+    ]
+    .map(str::to_owned)
+    .into_iter()
+    .collect();
+    mixed.declared_types = Some(Arc::new(declared));
+    mixed.models = vec![model(&["AirQualityObserved", "Event", "WeatherObserved"])];
+    mixed.policies = vec![serde_norway::from_str(
+        "contextSpaceRef: mesto\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: public }\n\
+         operations: [queryEntity, retrieveEntity]\n\
+         information:\n  - entities:\n      - type: AirQualityObserved\n",
+    )
+    .expect("the policy spec parses")];
+    let app = app_on(&broker.url, &realm, vec![mixed]);
+
+    let found = call(
+        app.clone(),
+        None,
+        "search",
+        json!({ "query": "air quality" }),
+    )
+    .await;
+    let hit = &found["result"]["structuredContent"]["hits"][0];
+    assert_eq!(hit["endpoint"], json!(AIR), "{found}");
+    assert_eq!(hit["types"], json!(["AirQualityObserved"]), "{found}");
+    assert_eq!(hit["domains"], json!(["Environment"]), "{found}");
+    assert_eq!(
+        hit["nextQuery"]["arguments"]["type"],
+        json!(["AirQualityObserved"]),
+        "the type is an array, as query_entities takes it"
+    );
+    for hidden in ["Event", "WeatherObserved", "Organization"] {
+        let none = call(
+            app.clone(),
+            None,
+            "search",
+            json!({ "query": "air quality", "type": hidden }),
+        )
+        .await;
+        assert_eq!(
+            none["result"]["structuredContent"]["total"],
+            json!(0),
+            "{hidden}: {none}"
+        );
+    }
+    let listed = call(app.clone(), None, "list_endpoints", json!({})).await;
+    assert!(
+        listed
+            .to_string()
+            .contains(r#""types":["AirQualityObserved"]"#),
+        "{listed}"
+    );
+    assert!(!listed.to_string().contains("WeatherObserved"), "{listed}");
+
+    let types = call(app.clone(), None, "list_types", json!({ "endpoint": AIR })).await;
+    assert_eq!(types["result"]["isError"], json!(false), "{types}");
+    assert_eq!(
+        types["result"]["structuredContent"]["entityTypes"],
+        json!(["AirQualityObserved"]),
+        "{types}"
+    );
+    assert!(
+        broker.hops().is_empty(),
+        "the hub answered list_types itself"
+    );
+
+    for advertised in ["AirQualityObserved"] {
+        let read = call(
+            app.clone(),
+            None,
+            "query_entities",
+            json!({ "endpoint": AIR, "type": [advertised] }),
+        )
+        .await;
+        assert_eq!(
+            read["result"]["isError"],
+            json!(false),
+            "{advertised}: {read}"
+        );
+    }
+    assert_eq!(broker.hops().len(), 1, "the query reached the broker");
 }
 
 /// T-4497: a catalogue of `n` Datasets a person would search, one Endpoint each: an SDM topic

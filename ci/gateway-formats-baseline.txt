@@ -7,7 +7,6 @@ crate zip | T-4478
 file crates/context-gateway/src/translators/geojson.rs 206 | T-4478
 file crates/context-gateway/src/translators/mod.rs 6 | T-4478
 file crates/context-gateway/src/translators/tabular.rs 697 | T-4478
-file crates/context-gateway/src/translators/view_mapping.rs 379 | T-4547
 file crates/context-gateway/src/translators/zip_export.rs 166 | T-4478
 file crates/context-gateway/src/handlers/files.rs 473 | T-4478
 file crates/context-gateway/src/handlers/reads.rs 392 | T-4478
