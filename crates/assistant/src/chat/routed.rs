@@ -756,9 +756,26 @@ fn unanswered(missing: &[String]) -> String {
     }
     format!(
         "\n\nThese data sources did not answer in time and are not in what you are given: {}. \
-         When the question needs them, say in one sentence that they could not be reached now.",
+         Say once, in one sentence and without a citation, that they could not be reached now. \
+         Point to no API: the answer's panel already offers the dataset and its download.",
         missing.join(", ")
     )
+}
+
+/// The answer model's extra rules: the data loop's when the route reads data, and the sources
+/// that missed the routing deadline only when no table came back. With rows in hand the question
+/// is answered, and a "could not be reached" sentence is noise citing a dataset that does not say
+/// it (T-4652); the missing sources then stay in the log alone.
+fn answer_rules(data: bool, no_tables: bool, missing: &[String]) -> String {
+    let mut more = if data {
+        super::data::DATA_RULES.to_owned()
+    } else {
+        String::new()
+    };
+    if no_tables {
+        more.push_str(&unanswered(missing));
+    }
+    more
 }
 
 /// The attribute names a `query_entities` schema lets a read pick, which are the names a `q` can
@@ -1276,12 +1293,7 @@ pub async fn answer(
 
     let best = top(&found.hits, ANSWER_PASSAGES);
     let (citations, passages, data) = evidence(&best, &tables);
-    let mut more = if routing.data {
-        super::data::DATA_RULES.to_owned()
-    } else {
-        String::new()
-    };
-    more.push_str(&unanswered(&missing));
+    let more = answer_rules(routing.data, tables.is_empty(), &missing);
     let messages = messages_with(
         ask.system_prompt,
         &more,
@@ -1746,6 +1758,26 @@ pub fn worth_keeping(completion: &Completion, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_sources_reach_the_answer_model_only_when_no_table_came_back() {
+        let missing = vec!["banska-bystrica".to_owned(), "zilina".to_owned()];
+        // Rows answered the question (T-4652): no "could not be reached" sentence, data or not.
+        for data in [true, false] {
+            let rules = answer_rules(data, false, &missing);
+            assert!(!rules.contains("did not answer in time"), "{rules}");
+            assert!(!rules.contains("banska-bystrica"), "{rules}");
+            assert_eq!(rules.contains(super::super::data::DATA_RULES), data);
+        }
+        let rules = answer_rules(true, true, &missing);
+        assert!(rules.contains("banska-bystrica, zilina"), "{rules}");
+        assert!(rules.contains("Say once, in one sentence and without a citation"));
+        assert!(
+            !rules.contains("NGSI-LD"),
+            "no API pointer: the panel offers the dataset"
+        );
+        assert_eq!(answer_rules(false, true, &[]), "");
+    }
 
     fn judged(text: &str) -> Judged {
         let reply = Completion {
