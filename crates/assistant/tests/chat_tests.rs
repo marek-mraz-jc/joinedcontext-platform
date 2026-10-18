@@ -178,6 +178,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     let public = |slug: &str| EndpointRef {
         slug: slug.into(),
         audience: "public".into(),
+        space: String::new(),
     };
     snapshot.endpoints = BTreeMap::from([
         (("bbsk".into(), "kraj".into()), public(REGION_SLUG)),
@@ -186,6 +187,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                space: String::new(),
             },
         ),
         (("helsinki".into(), "kraj".into()), public(ELSEWHERE_SLUG)),
@@ -194,6 +196,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: SLUG.into(),
                 audience: "public".into(),
+                space: String::new(),
             },
         ),
         (
@@ -201,6 +204,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                space: String::new(),
             },
         ),
     ]);

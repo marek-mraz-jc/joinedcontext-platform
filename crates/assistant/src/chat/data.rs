@@ -395,7 +395,7 @@ async fn step(
     match answered {
         Ok(text) => {
             send(events, tool("done")).await;
-            let mut rows = None;
+            let (mut rows, mut dataset) = (None, None);
             if o.tool.name == "query_entities" {
                 if let Some(kind) = type_of(&arguments) {
                     if let Some(table) = super::routed::table(
@@ -408,6 +408,7 @@ async fn step(
                     .await
                     {
                         rows = Some(table.rows.len());
+                        dataset = table.dataset.clone();
                         if !table.rows.is_empty() {
                             tables.push((citations.len() + 1, table.clone()));
                             send(events, Event::Data(table)).await;
@@ -420,7 +421,7 @@ async fn step(
             let n = citations.len() + 1;
             citations.push(Citation {
                 n,
-                url: None,
+                url: dataset,
                 tool: Some(o.tool.name.clone()),
                 endpoint: Some(endpoint),
                 title: None,

@@ -57,6 +57,9 @@ pub struct Connected {
     pub endpoint: String,
     pub surface: Surface,
     pub tools: Vec<Tool>,
+    /// The slugs of the project's Endpoints over the same context space, its own included: one
+    /// that publishes a type as a CKAN dataset is the page its rows cite (T-4625).
+    pub siblings: Vec<String>,
 }
 
 /// A turn the channel sent back (AG-99).
@@ -846,6 +849,9 @@ async fn run_tool(
                 "The call was not made: {why}. Correct the arguments, or answer without this tool."
             );
         }
+        let kind = (tool.name == "query_entities")
+            .then(|| super::data::type_of(&arguments))
+            .flatten();
         send(
             events,
             Event::Tool {
@@ -870,10 +876,15 @@ async fn run_tool(
                     },
                 )
                 .await;
+                // Rows of a type cite the dataset a visitor can open (T-4625).
+                let dataset = match kind.as_deref() {
+                    Some(kind) => super::routed::dataset_of(ask, connector, kind).await,
+                    None => None,
+                };
                 let n = citations.len() + 1;
                 citations.push(Citation {
                     n,
-                    url: None,
+                    url: dataset,
                     tool: Some(tool.name.clone()),
                     endpoint,
                     title: None,

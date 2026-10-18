@@ -1017,6 +1017,39 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
 }
 
+/// The page a visitor opens about the rows of `kind` read from `connector`: the CKAN dataset
+/// page of an Endpoint over the same space that publishes the type (T-4625), else the page the
+/// sources hold about the connector's own Endpoint; `None` when neither is found.
+pub(super) async fn dataset_of(ask: &Ask<'_>, connector: &Connected, kind: &str) -> Option<String> {
+    let found = async {
+        match crate::dataset_page_projects(
+            ask.pool,
+            &connector.siblings,
+            kind,
+            ask.sources,
+            ask.public_only,
+        )
+        .await?
+        {
+            Some(page) => Ok(Some(page)),
+            None => {
+                crate::endpoint_page_projects(
+                    ask.pool,
+                    &connector.surface.slug,
+                    ask.sources,
+                    ask.public_only,
+                )
+                .await
+            }
+        }
+    }
+    .await;
+    found.unwrap_or_else(|why: crate::Error| {
+        tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
+        None
+    })
+}
+
 /// A `query_entities` answer of `kind` from `connector` as the table the person sees, with the
 /// page the sources hold about the Endpoint and the address its rows download from; `None` when
 /// the answer is no list of entities.
@@ -1030,12 +1063,7 @@ pub(super) async fn table(
     let total = total_of(text);
     let (columns, rows, units) = table_of(text, READ_ROWS, asked)?;
     let slug = connector.surface.slug.as_str();
-    let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
-        .await
-        .unwrap_or_else(|why| {
-        tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
-        None
-    });
+    let dataset = dataset_of(ask, connector, kind).await;
     let download = ask.endpoint_base.and_then(|base| {
         let mut url = base
             .join(&format!("api/endpoint/{slug}/ngsi-ld/v1/entities"))
@@ -2307,6 +2335,7 @@ mod tests {
                 token: None,
             },
             tools: vec![tool("list_types"), tool("query_entities")],
+            siblings: Vec::new(),
         };
         let cache = AnswerCache::default();
         let connectors = [connector("slow"), connector("down")];
@@ -2355,6 +2384,7 @@ mod tests {
                 token: None,
             },
             tools: vec![tool("list_types"), tool("query_entities")],
+            siblings: Vec::new(),
         }];
         let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
         let named = |live: &Live| {
