@@ -257,6 +257,19 @@ impl Verifier {
     }
 }
 
+/// Whether the request presents a bearer token: what makes a caller not anonymous on every
+/// surface, and the only credential a quota is keyed by (T-4590). `Authorization: Basic …` or
+/// any other scheme is no token, so it neither leaves the anonymous allowance nor buys a
+/// bucket of its own.
+pub fn presents(headers: &axum::http::HeaderMap) -> bool {
+    bearer(
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+    .is_ok()
+}
+
 /// The token in an `Authorization: Bearer` header. The platform has no other bearer
 /// credential: a static API key is no token and fails verification like any other (PF-37).
 pub fn bearer(header: Option<&str>) -> Result<&str, Rejected> {

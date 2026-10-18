@@ -24,8 +24,28 @@ fn main() -> ExitCode {
         Err(code) => return code,
     };
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(&words)
+}
 
-    match words.as_slice() {
+/// Dispatches the command line, one verb family per function.
+fn run(words: &[&str]) -> ExitCode {
+    match words {
+        ["model", rest @ ..] => model_command(rest),
+        ["roles", rest @ ..] => roles_command(rest),
+        ["workspace", rest @ ..] => workspace_command(rest),
+        ["schema", "export", rest @ ..] => schema_export(rest),
+        ["get" | "describe", ..] | ["apply" | "diff" | "delete", "-f", ..] => client(words),
+        ["login", rest @ ..] => login_command(rest),
+        ["validate" | "migrate" | "checkouts" | "plan" | "apply" | "drift", ..] => {
+            repository_command(words)
+        }
+        _ => bundle_command(words),
+    }
+}
+
+/// `validate`, `migrate`, `checkouts`, `plan`, `apply` and `drift` against a checkout.
+fn repository_command(words: &[&str]) -> ExitCode {
+    match words {
         ["validate", "--repo-dir", dir, rest @ ..] => match project_dirs(rest) {
             Some(dirs) => validate(jcctl::commands::validate::run_assembled(
                 Path::new(dir),
@@ -73,6 +93,13 @@ fn main() -> ExitCode {
             }
             None => usage(),
         },
+        _ => usage(),
+    }
+}
+
+/// `import`, `export`, `pipeline test`, `artifacts rebuild`, `sync` and `publish ckan`.
+fn bundle_command(words: &[&str]) -> ExitCode {
+    match words {
         ["import", "--format", "git", source, "--out-dir", out] => {
             git_import(Path::new(source), Path::new(out))
         }
@@ -92,24 +119,6 @@ fn main() -> ExitCode {
             }
             None => usage(),
         },
-        ["model", "import", id, rest @ ..] => match import_options(rest) {
-            Some((out, url)) => model_import(id, &out, url),
-            None => usage(),
-        },
-        ["model", "merge", rest @ ..] => match merge_options(rest) {
-            Some((dir, project, space, name)) => {
-                model_merge(&dir, &project, &space, name.as_deref())
-            }
-            None => usage(),
-        },
-        ["model", "infer", rest @ ..] => match infer_options(rest) {
-            Some((file, url)) => model_infer(&file, url),
-            None => usage(),
-        },
-        ["model", verb, rest @ ..] => match (model_mode(verb), model_options(rest)) {
-            (Some(mode), Some((dir, org_dir, url))) => model(&dir, org_dir.as_deref(), url, mode),
-            _ => usage(),
-        },
         ["pipeline", "test", rest @ ..] => match pipeline_test_options(rest) {
             Some(options) => pipeline_test(&options),
             None => usage(),
@@ -126,7 +135,39 @@ fn main() -> ExitCode {
             Some(options) => publish_ckan(&options),
             None => usage(),
         },
-        ["roles", "seed", "--repo-dir", dir] => match jcctl::taxonomy::seed(Path::new(dir)) {
+        _ => usage(),
+    }
+}
+
+/// `jcctl model import|merge|infer|generate|diff|validate`.
+fn model_command(words: &[&str]) -> ExitCode {
+    match words {
+        ["import", id, rest @ ..] => match import_options(rest) {
+            Some((out, url)) => model_import(id, &out, url),
+            None => usage(),
+        },
+        ["merge", rest @ ..] => match merge_options(rest) {
+            Some((dir, project, space, name)) => {
+                model_merge(&dir, &project, &space, name.as_deref())
+            }
+            None => usage(),
+        },
+        ["infer", rest @ ..] => match infer_options(rest) {
+            Some((file, url)) => model_infer(&file, url),
+            None => usage(),
+        },
+        [verb, rest @ ..] => match (model_mode(verb), model_options(rest)) {
+            (Some(mode), Some((dir, org_dir, url))) => model(&dir, org_dir.as_deref(), url, mode),
+            _ => usage(),
+        },
+        _ => usage(),
+    }
+}
+
+/// `jcctl roles seed|render|input`.
+fn roles_command(words: &[&str]) -> ExitCode {
+    match words {
+        ["seed", "--repo-dir", dir] => match jcctl::taxonomy::seed(Path::new(dir)) {
             Ok(written) if written.is_empty() => {
                 println!("every seeded role is already there; nothing written");
                 ExitCode::SUCCESS
@@ -142,7 +183,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        ["roles", "render", "--repo-dir", dir] => match jcctl::roles::render(Path::new(dir)) {
+        ["render", "--repo-dir", dir] => match jcctl::roles::render(Path::new(dir)) {
             Ok(written) => {
                 for path in written {
                     println!("{}", path.display());
@@ -151,50 +192,61 @@ fn main() -> ExitCode {
             }
             Err(err) => fail(&err.to_string()),
         },
-        ["roles", "input", rest @ ..] => match roles_input_options(rest) {
+        ["input", rest @ ..] => match roles_input_options(rest) {
             Some(options) => roles_input(&options),
             None => usage(),
         },
-        ["workspace", "render", "--repo-dir", dir, "--prefix", prefix, rest @ ..] => match rest {
+        _ => usage(),
+    }
+}
+
+/// `jcctl workspace render|diff`.
+fn workspace_command(words: &[&str]) -> ExitCode {
+    match words {
+        ["render", "--repo-dir", dir, "--prefix", prefix, rest @ ..] => match rest {
             [] => workspace_render(Path::new(dir), prefix, None),
             ["--out-dir", out] => workspace_render(Path::new(dir), prefix, Some(Path::new(out))),
             _ => usage(),
         },
-        ["workspace", "diff", "--base-dir", base, "--repo-dir", dir, rest @ ..] => match rest {
+        ["diff", "--base-dir", base, "--repo-dir", dir, rest @ ..] => match rest {
             [] => workspace_diff(Path::new(base), Path::new(dir), false),
             ["--json"] => workspace_diff(Path::new(base), Path::new(dir), true),
             _ => usage(),
         },
-        ["schema", "export", rest @ ..] => match out_dir(rest) {
-            Some(out) => match export_schemas(&out) {
-                Ok(count) => {
-                    println!("{count} schemas written to {}", out.display());
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("jcctl: {e}");
-                    ExitCode::FAILURE
-                }
-            },
-            None => {
-                eprintln!("{USAGE}");
-                ExitCode::FAILURE
-            }
-        },
-        ["get" | "describe", ..] | ["apply" | "diff" | "delete", "-f", ..] => client(&words),
-        ["login", rest @ ..] => match client_options(rest) {
-            Some(options)
-                if options.words.is_empty()
-                    && options.project.is_none()
-                    && options.output.is_none()
-                    && options.selector.is_none()
-                    && options.file.is_none()
-                    && options.server.is_none() =>
-            {
-                login(&options)
-            }
-            _ => usage(),
-        },
+        _ => usage(),
+    }
+}
+
+/// `jcctl schema export [--out <dir>]`.
+fn schema_export(rest: &[&str]) -> ExitCode {
+    let Some(out) = out_dir(rest) else {
+        return usage();
+    };
+    match export_schemas(&out) {
+        Ok(count) => {
+            println!("{count} schemas written to {}", out.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("jcctl: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `jcctl login --idm <issuer> [--token-file <path>]`: no other client flag.
+fn login_command(rest: &[&str]) -> ExitCode {
+    match client_options(rest) {
+        Some(options)
+            if options.words.is_empty()
+                && options.project.is_none()
+                && options.output.is_none()
+                && options.selector.is_none()
+                && options.file.is_none()
+                && options.server.is_none() =>
+        {
+            login(&options)
+        }
         _ => usage(),
     }
 }
@@ -1956,6 +2008,51 @@ mod tests {
             pipeline_test_options(&["--pipeline", "p.yaml", "--sample"]),
             None
         );
+    }
+
+    #[test]
+    fn every_verb_family_refuses_a_line_it_does_not_know() {
+        for line in [
+            &[][..],
+            &["nonsense"],
+            &["validate"],
+            &["validate", "--repo-dir"],
+            &["migrate", "--repo-dir", "a"],
+            &["plan", "--repo-dir", "a", "--bogus"],
+            &["drift"],
+            &["import", "--format", "git", "a"],
+            &["export", "--bogus"],
+            &["pipeline", "run"],
+            &["publish", "dcat"],
+            &["model"],
+            &["model", "unknown", "--repo-dir", "a"],
+            &["roles", "seed"],
+            &["roles", "input", "--bogus"],
+            &[
+                "workspace",
+                "render",
+                "--repo-dir",
+                "a",
+                "--prefix",
+                "ws-",
+                "--json",
+            ],
+            &["workspace", "diff", "--base-dir", "a"],
+            &["schema", "export", "--out"],
+            &["login", "--project", "p"],
+        ] {
+            assert_eq!(run(line), ExitCode::FAILURE, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn schema_export_runs_through_the_dispatcher() {
+        let dir = std::env::temp_dir().join(format!("jcctl-run-schema-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = dir.to_str().expect("utf-8 temp dir");
+        assert_eq!(run(&["schema", "export", "--out", out]), ExitCode::SUCCESS);
+        assert!(std::fs::read_dir(&dir).expect("written").count() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

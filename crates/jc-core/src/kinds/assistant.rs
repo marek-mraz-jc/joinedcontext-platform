@@ -272,101 +272,132 @@ impl KnowledgeSourceSpec {
         self.upload.clone().unwrap_or_default()
     }
 
-    /// Every rule of MF-51 that one manifest can be judged by.
+    /// Every rule of MF-51 that one manifest can be judged by, field group by field group, in the
+    /// order a manifest is read: the first broken rule is the one reported.
     pub fn validate(&self) -> Result<()> {
         match self.source {
-            SourceType::Website => {
-                if self.start_urls.is_empty() || self.start_urls.len() > MAX_START_URLS {
-                    return Err(name(
-                        "startUrls",
-                        self.start_urls.len().to_string(),
-                        "a website source names one to twenty start URLs",
-                    ));
-                }
-                if self.ckan_instance_ref.is_some() {
-                    return Err(name(
-                        "ckanInstanceRef",
-                        String::new(),
-                        "a website source names no CkanInstance; use source: ckan",
-                    ));
-                }
-                for url in &self.start_urls {
-                    https_url(url).ok_or_else(|| {
-                        name(
-                            "startUrls",
-                            url.clone(),
-                            "a start URL is an absolute https:// address with a host",
-                        )
-                    })?;
-                }
-            }
-            SourceType::Ckan => {
-                let instance = self.ckan_instance_ref.as_deref().unwrap_or_default();
-                if names::validate_dns1123_label(instance).is_err() {
-                    return Err(name(
-                        "ckanInstanceRef",
-                        instance.to_owned(),
-                        "a ckan source names the CkanInstance of this project it reads",
-                    ));
-                }
-                if !self.start_urls.is_empty() {
-                    return Err(name(
-                        "startUrls",
-                        self.start_urls.join(", "),
-                        "a ckan source reads its CkanInstance and names no start URLs",
-                    ));
-                }
-            }
-            SourceType::Catalogue => {
-                if !self.start_urls.is_empty() || self.ckan_instance_ref.is_some() {
-                    return Err(name(
-                        "source",
-                        "catalogue".to_owned(),
-                        "a catalogue source reads the project's own Endpoints and names no start URLs and no CkanInstance",
-                    ));
-                }
-                for space in &self.context_spaces {
-                    names::validate_space_name(space).map_err(|_| {
-                        name(
-                            "contextSpaces",
-                            space.clone(),
-                            "a context space of this project, by its name",
-                        )
-                    })?;
-                }
-            }
-            SourceType::Guide => {
-                if !self.start_urls.is_empty()
-                    || self.ckan_instance_ref.is_some()
-                    || !self.context_spaces.is_empty()
-                {
-                    return Err(name(
-                        "source",
-                        "guide".to_owned(),
-                        "a guide source reads the User Guide jc-assistant ships and names no start URLs, no CkanInstance and no context spaces",
-                    ));
-                }
-            }
-            SourceType::Upload => {
-                if !self.start_urls.is_empty()
-                    || self.ckan_instance_ref.is_some()
-                    || !self.context_spaces.is_empty()
-                {
-                    return Err(name(
-                        "source",
-                        "upload".to_owned(),
-                        "an upload source holds the files an administrator uploads and names no start URLs, no CkanInstance and no context spaces",
-                    ));
-                }
-                if self.schedule.is_some() {
-                    return Err(name(
-                        "schedule",
-                        String::new(),
-                        "an upload source has nothing to fetch on a schedule; its files are read as they are uploaded",
-                    ));
-                }
-            }
+            SourceType::Website => self.website_fields()?,
+            SourceType::Ckan => self.ckan_fields()?,
+            SourceType::Catalogue => self.catalogue_fields()?,
+            SourceType::Guide => self.guide_fields()?,
+            SourceType::Upload => self.upload_source_fields()?,
         }
+        self.organization_fields()?;
+        self.upload_limit_fields()?;
+        self.wordpress_fields()?;
+        self.space_and_pattern_fields()?;
+        self.crawl_limit_fields()?;
+        languages(&self.languages)
+    }
+
+    /// A website source: one to twenty https start URLs and no CkanInstance.
+    fn website_fields(&self) -> Result<()> {
+        if self.start_urls.is_empty() || self.start_urls.len() > MAX_START_URLS {
+            return Err(name(
+                "startUrls",
+                self.start_urls.len().to_string(),
+                "a website source names one to twenty start URLs",
+            ));
+        }
+        if self.ckan_instance_ref.is_some() {
+            return Err(name(
+                "ckanInstanceRef",
+                String::new(),
+                "a website source names no CkanInstance; use source: ckan",
+            ));
+        }
+        for url in &self.start_urls {
+            https_url(url).ok_or_else(|| {
+                name(
+                    "startUrls",
+                    url.clone(),
+                    "a start URL is an absolute https:// address with a host",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A ckan source: its CkanInstance by name and no start URLs.
+    fn ckan_fields(&self) -> Result<()> {
+        let instance = self.ckan_instance_ref.as_deref().unwrap_or_default();
+        if names::validate_dns1123_label(instance).is_err() {
+            return Err(name(
+                "ckanInstanceRef",
+                instance.to_owned(),
+                "a ckan source names the CkanInstance of this project it reads",
+            ));
+        }
+        if !self.start_urls.is_empty() {
+            return Err(name(
+                "startUrls",
+                self.start_urls.join(", "),
+                "a ckan source reads its CkanInstance and names no start URLs",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A catalogue source: the project's own context spaces, no start URLs and no CkanInstance.
+    fn catalogue_fields(&self) -> Result<()> {
+        if !self.start_urls.is_empty() || self.ckan_instance_ref.is_some() {
+            return Err(name(
+                "source",
+                "catalogue".to_owned(),
+                "a catalogue source reads the project's own Endpoints and names no start URLs and no CkanInstance",
+            ));
+        }
+        for space in &self.context_spaces {
+            names::validate_space_name(space).map_err(|_| {
+                name(
+                    "contextSpaces",
+                    space.clone(),
+                    "a context space of this project, by its name",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A guide source names nothing to fetch.
+    fn guide_fields(&self) -> Result<()> {
+        if !self.start_urls.is_empty()
+            || self.ckan_instance_ref.is_some()
+            || !self.context_spaces.is_empty()
+        {
+            return Err(name(
+                "source",
+                "guide".to_owned(),
+                "a guide source reads the User Guide jc-assistant ships and names no start URLs, no CkanInstance and no context spaces",
+            ));
+        }
+        Ok(())
+    }
+
+    /// An upload source names nothing to fetch and has no schedule.
+    fn upload_source_fields(&self) -> Result<()> {
+        if !self.start_urls.is_empty()
+            || self.ckan_instance_ref.is_some()
+            || !self.context_spaces.is_empty()
+        {
+            return Err(name(
+                "source",
+                "upload".to_owned(),
+                "an upload source holds the files an administrator uploads and names no start URLs, no CkanInstance and no context spaces",
+            ));
+        }
+        if self.schedule.is_some() {
+            return Err(name(
+                "schedule",
+                String::new(),
+                "an upload source has nothing to fetch on a schedule; its files are read as they are uploaded",
+            ));
+        }
+        Ok(())
+    }
+
+    /// CKAN organizations: only on a ckan source, at most ten, each a CKAN name.
+    fn organization_fields(&self) -> Result<()> {
         if self.source != SourceType::Ckan && !self.organizations.is_empty() {
             return Err(name(
                 "organizations",
@@ -390,6 +421,11 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Upload limits: only on an upload source, each within its bounds.
+    fn upload_limit_fields(&self) -> Result<()> {
         if let Some(upload) = &self.upload {
             if self.source != SourceType::Upload {
                 return Err(name(
@@ -413,6 +449,11 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// WordPress REST bases: only on a website source, at most forty, each a plain base.
+    fn wordpress_fields(&self) -> Result<()> {
         if self.source != SourceType::Website && !self.wordpress_types.is_empty() {
             return Err(name(
                 "wordpressTypes",
@@ -441,6 +482,11 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Context spaces only on a catalogue source; include and exclude path patterns.
+    fn space_and_pattern_fields(&self) -> Result<()> {
         if self.source != SourceType::Catalogue && !self.context_spaces.is_empty() {
             return Err(name(
                 "contextSpaces",
@@ -469,6 +515,11 @@ impl KnowledgeSourceSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Crawl depth and pages, PDF limits and the schedule.
+    fn crawl_limit_fields(&self) -> Result<()> {
         if !(1..=MAX_DEPTH).contains(&self.max_depth) {
             return Err(name(
                 "maxDepth",
@@ -506,7 +557,7 @@ impl KnowledgeSourceSpec {
                 ));
             }
         }
-        languages(&self.languages)
+        Ok(())
     }
 }
 
@@ -942,8 +993,24 @@ impl AssistantDeploymentSpec {
             .unwrap_or(20)
     }
 
-    /// Every rule of MF-52 that one manifest can be judged by.
+    /// Every rule of MF-52 that one manifest can be judged by, field group by field group, in the
+    /// order a manifest is read: the first broken rule is the one reported.
     pub fn validate(&self) -> Result<()> {
+        self.identity_fields()?;
+        self.answer_fields()?;
+        self.connector_fields()?;
+        self.channel_fields()?;
+        self.rate_limit_fields()?;
+        self.budget_fields()?;
+        self.model_fields()?;
+        self.text_fields()?;
+        self.scope_fields()?;
+        self.theme_fields()?;
+        languages(&self.languages)
+    }
+
+    /// The public id, what it answers from, its MCP server and its sources (MF-52).
+    fn identity_fields(&self) -> Result<()> {
         names::validate_dns1123_label(&self.public_id).map_err(|_| {
             name(
                 "publicId",
@@ -989,6 +1056,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// What an answer may use, and the data loop's bounds.
+    fn answer_fields(&self) -> Result<()> {
         match self.routes() {
             Routes::Rag if self.sources.is_empty() => {
                 return Err(name(
@@ -1024,6 +1096,11 @@ impl AssistantDeploymentSpec {
                 return Err(name(field, value.to_string(), reason));
             }
         }
+        Ok(())
+    }
+
+    /// Each connector: its Endpoint in scope, its tools and its timeout.
+    fn connector_fields(&self) -> Result<()> {
         for connector in &self.connectors {
             let (project, endpoint) = connector_target(&connector.endpoint);
             names::validate_dns1123_label(endpoint).map_err(|_| {
@@ -1057,6 +1134,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Its origins, and what a deployment anyone may reach must carry.
+    fn channel_fields(&self) -> Result<()> {
         for origin in &self.allowed_origins {
             if !is_origin(origin) {
                 return Err(name(
@@ -1089,6 +1171,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// The rate limit's windows, each within its bounds.
+    fn rate_limit_fields(&self) -> Result<()> {
         if let Some(limit) = &self.rate_limit {
             if !(1..=600).contains(&limit.requests_per_minute) {
                 return Err(name(
@@ -1137,6 +1224,11 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The budget: tokens, cost and the bounds of one answer.
+    fn budget_fields(&self) -> Result<()> {
         if let Some(budget) = &self.budget {
             if !(1..=100_000_000).contains(&budget.tokens_per_day) {
                 return Err(name(
@@ -1186,6 +1278,11 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The system prompt's length and the models and providers it names.
+    fn model_fields(&self) -> Result<()> {
         if self
             .system_prompt
             .as_deref()
@@ -1237,6 +1334,11 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Suggestions and disclaimers per known language, and no credential in any visible text.
+    fn text_fields(&self) -> Result<()> {
         for (language, questions) in &self.suggestions {
             self.known_language("suggestions", language)?;
             if questions.len() > MAX_SUGGESTIONS {
@@ -1293,6 +1395,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// scope.projects: at most ten, each a DNS label, named once, never `*`.
+    fn scope_fields(&self) -> Result<()> {
         let projects = self.scope_projects();
         if projects.len() > MAX_SCOPE_PROJECTS {
             return Err(name(
@@ -1324,6 +1431,11 @@ impl AssistantDeploymentSpec {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// The theme's colour, greeting and title.
+    fn theme_fields(&self) -> Result<()> {
         if let Some(theme) = &self.theme {
             if let Some(colour) = &theme.primary_color {
                 let hex = colour.strip_prefix('#').unwrap_or_default();
@@ -1375,7 +1487,7 @@ impl AssistantDeploymentSpec {
                 }
             }
         }
-        languages(&self.languages)
+        Ok(())
     }
 }
 
@@ -1488,4 +1600,539 @@ fn languages(codes: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod knowledge_source_tests {
+    use super::*;
+
+    fn spec(value: serde_json::Value) -> KnowledgeSourceSpec {
+        serde_json::from_value(value).expect("a KnowledgeSource spec")
+    }
+
+    /// The field a refusal names, so each piece is judged by what it reports.
+    fn refused(result: Result<()>) -> &'static str {
+        match result {
+            Err(Error::Name { field, .. }) => field,
+            other => panic!("expected a refused field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_website_needs_one_to_twenty_https_start_urls_and_no_ckan_instance() {
+        let ok = spec(
+            serde_json::json!({"source": "website", "startUrls": ["https://hronov.example/"]}),
+        );
+        assert!(ok.website_fields().is_ok());
+        let none = spec(serde_json::json!({"source": "website"}));
+        assert_eq!(refused(none.website_fields()), "startUrls");
+        let many: Vec<String> = (0..=MAX_START_URLS)
+            .map(|i| format!("https://h{i}.example/"))
+            .collect();
+        let many = spec(serde_json::json!({"source": "website", "startUrls": many}));
+        assert_eq!(refused(many.website_fields()), "startUrls");
+        let plain =
+            spec(serde_json::json!({"source": "website", "startUrls": ["http://hronov.example/"]}));
+        assert_eq!(refused(plain.website_fields()), "startUrls");
+        let both = spec(
+            serde_json::json!({"source": "website", "startUrls": ["https://h.example/"], "ckanInstanceRef": "open"}),
+        );
+        assert_eq!(refused(both.website_fields()), "ckanInstanceRef");
+    }
+
+    #[test]
+    fn a_ckan_source_names_its_instance_and_no_start_urls() {
+        assert!(
+            spec(serde_json::json!({"source": "ckan", "ckanInstanceRef": "open"}))
+                .ckan_fields()
+                .is_ok()
+        );
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "ckan"})).ckan_fields()),
+            "ckanInstanceRef"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "ckanInstanceRef": "Open Data"}))
+                    .ckan_fields()
+            ),
+            "ckanInstanceRef"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "ckanInstanceRef": "open", "startUrls": ["https://h.example/"]}))
+                    .ckan_fields()
+            ),
+            "startUrls"
+        );
+    }
+
+    #[test]
+    fn a_catalogue_guide_and_upload_source_name_nothing_to_fetch() {
+        assert!(
+            spec(serde_json::json!({"source": "catalogue", "contextSpaces": ["air"]}))
+                .catalogue_fields()
+                .is_ok()
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "catalogue", "contextSpaces": ["Air Space"]}))
+                    .catalogue_fields()
+            ),
+            "contextSpaces"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "catalogue", "ckanInstanceRef": "open"}))
+                    .catalogue_fields()
+            ),
+            "source"
+        );
+        assert!(spec(serde_json::json!({"source": "guide"}))
+            .guide_fields()
+            .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "guide", "contextSpaces": ["air"]}))
+                    .guide_fields()
+            ),
+            "source"
+        );
+        assert!(spec(serde_json::json!({"source": "upload"}))
+            .upload_source_fields()
+            .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "upload", "schedule": "0 3 * * *"}))
+                    .upload_source_fields()
+            ),
+            "schedule"
+        );
+    }
+
+    #[test]
+    fn organizations_and_upload_limits_belong_to_their_own_source() {
+        let ten: Vec<String> = (0..MAX_ORGANIZATIONS).map(|i| format!("org-{i}")).collect();
+        assert!(spec(
+            serde_json::json!({"source": "ckan", "ckanInstanceRef": "open", "organizations": ten})
+        )
+        .organization_fields()
+        .is_ok());
+        let eleven: Vec<String> = (0..=MAX_ORGANIZATIONS)
+            .map(|i| format!("org-{i}"))
+            .collect();
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "organizations": eleven}))
+                    .organization_fields()
+            ),
+            "organizations"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "organizations": ["mesto"]}))
+                    .organization_fields()
+            ),
+            "organizations"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "organizations": ["Mesto!"]}))
+                    .organization_fields()
+            ),
+            "organizations"
+        );
+        assert!(spec(serde_json::json!({"source": "upload", "upload": {"maxBytes": MAX_UPLOAD_BYTES, "maxFiles": MAX_UPLOAD_FILES}}))
+            .upload_limit_fields()
+            .is_ok());
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "website", "upload": {"maxBytes": 1, "maxFiles": 1}})).upload_limit_fields()),
+            "upload"
+        );
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "upload", "upload": {"maxBytes": 0, "maxFiles": 1}})).upload_limit_fields()),
+            "upload.maxBytes"
+        );
+        assert_eq!(
+            refused(spec(serde_json::json!({"source": "upload", "upload": {"maxBytes": 1, "maxFiles": MAX_UPLOAD_FILES + 1}})).upload_limit_fields()),
+            "upload.maxFiles"
+        );
+    }
+
+    #[test]
+    fn wordpress_types_spaces_and_patterns_are_bounded() {
+        assert!(spec(
+            serde_json::json!({"source": "website", "wordpressTypes": ["pages", "news_2"]})
+        )
+        .wordpress_fields()
+        .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "ckan", "wordpressTypes": ["pages"]}))
+                    .wordpress_fields()
+            ),
+            "wordpressTypes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "wordpressTypes": ["Pages"]}))
+                    .wordpress_fields()
+            ),
+            "wordpressTypes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "wordpressTypes": [""]}))
+                    .wordpress_fields()
+            ),
+            "wordpressTypes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "contextSpaces": ["air"]}))
+                    .space_and_pattern_fields()
+            ),
+            "contextSpaces"
+        );
+        assert!(spec(
+            serde_json::json!({"source": "website", "include": ["/sk/"], "exclude": ["/en/"]})
+        )
+        .space_and_pattern_fields()
+        .is_ok());
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "exclude": ["en/"]}))
+                    .space_and_pattern_fields()
+            ),
+            "exclude"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "include": ["/a b"]}))
+                    .space_and_pattern_fields()
+            ),
+            "include"
+        );
+        let long = format!("/{}", "a".repeat(MAX_PATTERN_LEN));
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "include": [long]}))
+                    .space_and_pattern_fields()
+            ),
+            "include"
+        );
+    }
+
+    #[test]
+    fn crawl_limits_hold_their_bounds_and_the_schedule_is_cron() {
+        assert!(spec(serde_json::json!({"source": "website", "maxDepth": MAX_DEPTH, "maxPages": MAX_PAGES, "schedule": "0 3 * * *"}))
+            .crawl_limit_fields()
+            .is_ok());
+        for (field, value) in [
+            ("maxDepth", 0),
+            ("maxDepth", u32::from(MAX_DEPTH) + 1),
+            ("maxPages", 0),
+            ("maxPages", MAX_PAGES + 1),
+        ] {
+            let mut json = serde_json::json!({"source": "website"});
+            json[field] = serde_json::json!(value);
+            assert_eq!(
+                refused(spec(json).crawl_limit_fields()),
+                field,
+                "{field} {value}"
+            );
+        }
+        assert_eq!(
+            refused(
+                spec(
+                    serde_json::json!({"source": "website", "pdf": {"maxBytes": 0, "maxPages": 1}})
+                )
+                .crawl_limit_fields()
+            ),
+            "pdf.maxBytes"
+        );
+        assert_eq!(
+            refused(
+                spec(serde_json::json!({"source": "website", "schedule": "every night"}))
+                    .crawl_limit_fields()
+            ),
+            "schedule"
+        );
+    }
+}
+
+#[cfg(test)]
+mod deployment_spec_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// The documented deployment's spec, as JSON to change one field of.
+    fn golden() -> Value {
+        let manifest: Value = serde_norway::from_str(include_str!(
+            "../../tests/golden/029-AssistantDeployment-22-knowledge-assistant.yaml"
+        ))
+        .expect("the golden manifest");
+        manifest["spec"].clone()
+    }
+
+    fn with(change: impl FnOnce(&mut Value)) -> AssistantDeploymentSpec {
+        let mut spec = golden();
+        change(&mut spec);
+        serde_json::from_value(spec).expect("an AssistantDeployment spec")
+    }
+
+    fn refused(result: Result<()>) -> &'static str {
+        match result {
+            Err(Error::Name { field, .. }) => field,
+            other => panic!("expected a refused field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_piece_passes_the_documented_deployment() {
+        let spec = with(|_| {});
+        for check in [
+            AssistantDeploymentSpec::identity_fields,
+            AssistantDeploymentSpec::answer_fields,
+            AssistantDeploymentSpec::connector_fields,
+            AssistantDeploymentSpec::channel_fields,
+            AssistantDeploymentSpec::rate_limit_fields,
+            AssistantDeploymentSpec::budget_fields,
+            AssistantDeploymentSpec::model_fields,
+            AssistantDeploymentSpec::text_fields,
+            AssistantDeploymentSpec::scope_fields,
+            AssistantDeploymentSpec::theme_fields,
+        ] {
+            assert!(check(&spec).is_ok());
+        }
+    }
+
+    #[test]
+    fn identity_needs_a_label_something_to_answer_from_and_sources_in_scope() {
+        assert_eq!(
+            refused(with(|s| s["publicId"] = json!("BB Public")).identity_fields()),
+            "publicId"
+        );
+        let nothing = with(|s| {
+            s["sources"] = json!([]);
+            s["connectors"] = json!([]);
+        });
+        assert_eq!(refused(nothing.identity_fields()), "sources");
+        assert_eq!(
+            refused(with(|s| s["mcpServer"] = json!("no-slash")).identity_fields()),
+            "mcpServer"
+        );
+        assert!(with(|s| s["mcpServer"] = json!("org/hub"))
+            .identity_fields()
+            .is_ok());
+        assert_eq!(
+            refused(with(|s| s["sources"] = json!(["bbsk/web"])).identity_fields()),
+            "sources"
+        );
+        assert!(with(|s| {
+            s["sources"] = json!(["bbsk/web"]);
+            s["scope"] = json!({"projects": ["bbsk"]});
+        })
+        .identity_fields()
+        .is_ok());
+    }
+
+    #[test]
+    fn answer_routes_need_what_they_read_and_the_loop_is_bounded() {
+        let rag = with(|s| {
+            s["sources"] = json!([]);
+            s["answer"] = json!({"routes": "rag"});
+        });
+        assert_eq!(refused(rag.answer_fields()), "answer.routes");
+        let data = with(|s| {
+            s["connectors"] = json!([]);
+            s["answer"] = json!({"routes": "data"});
+        });
+        assert_eq!(refused(data.answer_fields()), "answer.routes");
+        assert_eq!(
+            refused(with(|s| s["answer"] = json!({"maxDataSteps": 26})).answer_fields()),
+            "answer.maxDataSteps"
+        );
+        assert_eq!(
+            refused(with(|s| s["answer"] = json!({"maxDataSeconds": 0})).answer_fields()),
+            "answer.maxDataSeconds"
+        );
+    }
+
+    #[test]
+    fn a_connector_names_an_endpoint_in_scope_its_tools_and_a_timeout() {
+        let one = |c: Value| with(|s| s["connectors"] = json!([c]));
+        assert_eq!(
+            refused(
+                one(json!({"endpoint": "Mesto", "tools": ["query_entities"]})).connector_fields()
+            ),
+            "connectors[].endpoint"
+        );
+        assert_eq!(
+            refused(
+                one(json!({"endpoint": "bbsk/kraj", "tools": ["query_entities"]}))
+                    .connector_fields()
+            ),
+            "connectors[].endpoint"
+        );
+        assert_eq!(
+            refused(one(json!({"endpoint": "mesto", "tools": [" "]})).connector_fields()),
+            "connectors[].tools"
+        );
+        assert_eq!(
+            refused(one(json!({"endpoint": "mesto", "tools": ["q"], "timeoutSeconds": MAX_TIMEOUT_SECONDS + 1})).connector_fields()),
+            "connectors[].timeoutSeconds"
+        );
+    }
+
+    #[test]
+    fn an_anonymous_channel_carries_origins_a_rate_limit_and_a_budget() {
+        assert_eq!(
+            refused(with(|s| s["allowedOrigins"] = json!(["https://*.example"])).channel_fields()),
+            "allowedOrigins"
+        );
+        assert_eq!(
+            refused(with(|s| s["allowedOrigins"] = json!([])).channel_fields()),
+            "allowedOrigins"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s
+                    .as_object_mut()
+                    .map(|o| o.remove("rateLimit"))
+                    .map(drop)
+                    .unwrap_or_default())
+                .channel_fields()
+            ),
+            "rateLimit"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s
+                    .as_object_mut()
+                    .map(|o| o.remove("budget"))
+                    .map(drop)
+                    .unwrap_or_default())
+                .channel_fields()
+            ),
+            "budget"
+        );
+        let internal = with(|s| {
+            s["channel"] = json!("internal");
+            s["allowedOrigins"] = json!([]);
+        });
+        assert!(internal.channel_fields().is_ok());
+    }
+
+    #[test]
+    fn rate_limits_and_budgets_hold_their_bounds() {
+        let limit = |l: Value| with(|s| s["rateLimit"] = l);
+        assert_eq!(
+            refused(
+                limit(json!({"requestsPerMinute": 601, "perClientPerMinute": 1}))
+                    .rate_limit_fields()
+            ),
+            "rateLimit.requestsPerMinute"
+        );
+        assert_eq!(
+            refused(
+                limit(json!({"requestsPerMinute": 5, "perClientPerMinute": 6})).rate_limit_fields()
+            ),
+            "rateLimit.perClientPerMinute"
+        );
+        assert_eq!(
+            refused(
+                limit(
+                    json!({"requestsPerMinute": 5, "perClientPerMinute": 5, "streamsPerClient": 11})
+                )
+                .rate_limit_fields()
+            ),
+            "rateLimit.streamsPerClient"
+        );
+        let budget = |b: Value| with(|s| s["budget"] = b);
+        assert_eq!(
+            refused(budget(json!({"tokensPerDay": 0, "tokensPerConversation": 1})).budget_fields()),
+            "budget.tokensPerDay"
+        );
+        assert_eq!(
+            refused(
+                budget(json!({"tokensPerDay": 10, "tokensPerConversation": 11})).budget_fields()
+            ),
+            "budget.tokensPerConversation"
+        );
+        assert_eq!(
+            refused(
+                budget(
+                    json!({"tokensPerDay": 10, "tokensPerConversation": 5, "costPerDayUsd": 0.0})
+                )
+                .budget_fields()
+            ),
+            "budget.costPerDayUsd"
+        );
+        assert_eq!(
+            refused(
+                budget(
+                    json!({"tokensPerDay": 10, "tokensPerConversation": 5, "questionChars": 99})
+                )
+                .budget_fields()
+            ),
+            "budget.questionChars"
+        );
+    }
+
+    #[test]
+    fn models_texts_scope_and_theme_are_checked() {
+        assert_eq!(
+            refused(
+                with(|s| s["systemPrompt"] = json!("x".repeat(MAX_PROMPT_LEN + 1))).model_fields()
+            ),
+            "systemPrompt"
+        );
+        assert_eq!(
+            refused(with(|s| s["model"] = json!({"router": "No Spaces Allowed"})).model_fields()),
+            "model.router"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s["model"] = json!({"provider": {"allowFallbacks": true}})).model_fields()
+            ),
+            "model.provider"
+        );
+        assert_eq!(
+            refused(with(|s| s["suggestions"] = json!({"de": ["Wie?"]})).text_fields()),
+            "suggestions"
+        );
+        assert_eq!(
+            refused(with(|s| s["disclaimer"] = json!({"sk": " "})).text_fields()),
+            "disclaimer"
+        );
+        assert_eq!(
+            refused(
+                with(|s| s["systemPrompt"] =
+                    json!("use sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef"))
+                .text_fields()
+            ),
+            "systemPrompt"
+        );
+        assert_eq!(
+            refused(with(|s| s["scope"] = json!({"projects": ["*"]})).scope_fields()),
+            "scope.projects"
+        );
+        assert_eq!(
+            refused(with(|s| s["scope"] = json!({"projects": ["bbsk", "bbsk"]})).scope_fields()),
+            "scope.projects"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["primaryColor"] = json!("blue")).theme_fields()),
+            "theme.primaryColor"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["title"] = json!(" ")).theme_fields()),
+            "theme.title"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["greeting"] = json!({"de": "Hallo"})).theme_fields()),
+            "theme.greeting"
+        );
+    }
 }

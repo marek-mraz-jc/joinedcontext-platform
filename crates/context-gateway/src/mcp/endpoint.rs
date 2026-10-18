@@ -3,6 +3,7 @@
 
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::{admit, admit_space, principal_of};
+use crate::auth::token;
 use crate::handlers::ngsi_ld::{broker_failure, view_request, MAX_VIEW_ID};
 use crate::handlers::respond::json_response;
 use crate::middleware::rate_limit::{self};
@@ -12,7 +13,7 @@ use crate::resolver::Endpoint;
 use crate::{mcp, middleware::tenancy, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderValue, Method, Response, StatusCode};
 use axum::response::IntoResponse;
 use jc_core::kinds::{Audience, Operation, Representation};
@@ -37,7 +38,7 @@ pub(crate) async fn mcp_message(
         .resolver
         .resolve(&slug)
         .is_some_and(|endpoint| endpoint.audience == Audience::Public);
-    let anonymous = request.headers().get(AUTHORIZATION).is_none();
+    let anonymous = !token::presents(request.headers());
     if !public && anonymous {
         return unauthorized(&gateway, &slug);
     }
@@ -79,6 +80,7 @@ pub(crate) async fn mcp_answer(
     reads_only: bool,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
+    let caller = crate::handlers::ngsi_ld::create_key(&subject, &parts.headers);
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
         return mcp::jsonrpc::parse_error();
     };
@@ -145,8 +147,13 @@ pub(crate) async fn mcp_answer(
     }
     let federates = member_names(&gateway, &endpoint);
     let (mut parts, _) = request.into_parts();
+    let mut reserved = None;
     if calls {
         capped_arguments(&mut message);
+        match mcp::writes::guarded(&gateway, &endpoint, &subject, &caller, &mut message).await {
+            Ok(held) => reserved = held,
+            Err(refusal) => return mcp::jsonrpc::json_response(StatusCode::OK, &refusal),
+        }
     }
     // The broker's Streamable HTTP refuses a request that does not accept both (406); the
     // façade took `application/json` alone, and the callers that send just that keep working.
@@ -174,8 +181,18 @@ pub(crate) async fn mcp_answer(
         .await
     {
         Ok(answer) => answer,
-        Err(error) => return ProblemDetails::from(error).into_response(),
+        Err(error) => {
+            if let Some(reserved) = reserved {
+                reserved.release(&gateway, &endpoint);
+            }
+            return ProblemDetails::from(error).into_response();
+        }
     };
+    // ponytail: a tool error inside a 200 keeps its create spent; reading every answer to
+    // find one would hold streamed results, so only a refused request gives it back.
+    if let Some(reserved) = reserved.filter(|_| !answer.status().is_success()) {
+        reserved.release(&gateway, &endpoint);
+    }
     if answer.status().is_server_error() {
         let (parts, body) = answer.into_parts();
         return broker_failure(
@@ -296,7 +313,7 @@ pub(crate) fn federated(answer: &mut Value, method: &str, members: &[String]) {
                 let read = tool
                     .get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(|name| MCP_READ_TOOLS.contains(&name));
+                    .is_some_and(mcp::writes::is_read_tool);
                 if !read {
                     continue;
                 }
@@ -338,7 +355,7 @@ pub(crate) fn federated(answer: &mut Value, method: &str, members: &[String]) {
 /// as a read is a write. It stands for the class of the call; the broker gates the tool's own
 /// clause.
 fn mcp_operation(tool: Option<&str>) -> Operation {
-    if tool.is_some_and(|tool| !MCP_READ_TOOLS.contains(&tool)) {
+    if tool.is_some_and(|tool| !mcp::writes::is_read_tool(tool)) {
         Operation::UpsertBatch
     } else {
         Operation::QueryEntity
@@ -364,10 +381,18 @@ pub(crate) async fn member_call(
         let held = axum::body::to_bytes(refusal.into_body(), MAX_BODY)
             .await
             .unwrap_or_default();
-        return member_refusal(id, problem_text(&held));
+        return member_refusal(id, mcp::writes::problem_text(&held));
     }
     let (mut parts, _) = request.into_parts();
     capped_arguments(&mut message);
+    // A caller without a token lists and calls reads alone here (T-4168), so a write's create
+    // is always a signed-in principal's.
+    let caller = crate::handlers::ngsi_ld::create_key(subject, &parts.headers);
+    let reserved =
+        match mcp::writes::guarded(gateway, endpoint, subject, &caller, &mut message).await {
+            Ok(reserved) => reserved,
+            Err(refusal) => return refusal,
+        };
     parts
         .headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -396,6 +421,9 @@ pub(crate) async fn member_call(
         Ok(answer) => answer,
         Err(error) => {
             tracing::warn!(slug = %endpoint.slug, %error, "the broker's view did not answer a member call");
+            if let Some(reserved) = reserved {
+                reserved.release(gateway, endpoint);
+            }
             return member_refusal(id, None);
         }
     };
@@ -403,6 +431,14 @@ pub(crate) async fn member_call(
     let held = axum::body::to_bytes(answer.into_body(), MAX_BODY)
         .await
         .unwrap_or_default();
+    if let Some(reserved) = reserved {
+        let taken = status.is_success()
+            && serde_json::from_slice::<Value>(&held)
+                .is_ok_and(|answer| answer["result"]["isError"] != true);
+        if !taken {
+            reserved.release(gateway, endpoint);
+        }
+    }
     match serde_json::from_slice::<Value>(&held) {
         Ok(mut answer) if status.is_success() && answer.get("jsonrpc").is_some() => {
             let federates = member_names(gateway, endpoint);
@@ -412,7 +448,7 @@ pub(crate) async fn member_call(
             mcp::units::readable(&mut answer);
             answer
         }
-        _ if status.is_client_error() => member_refusal(id, problem_text(&held)),
+        _ if status.is_client_error() => member_refusal(id, mcp::writes::problem_text(&held)),
         _ => {
             tracing::warn!(
                 slug = %endpoint.slug,
@@ -425,15 +461,6 @@ pub(crate) async fn member_call(
     }
 }
 
-/// The sentence of a Problem Details body: its `detail`, else its `title`.
-fn problem_text(body: &[u8]) -> Option<String> {
-    let problem = serde_json::from_slice::<Value>(body).ok()?;
-    problem["detail"]
-        .as_str()
-        .or_else(|| problem["title"].as_str())
-        .map(str::to_owned)
-}
-
 /// A member call that ended before the broker's tool answered, as the tool error MCP gives it.
 fn member_refusal(id: Value, why: Option<String>) -> Value {
     let why = why.unwrap_or_else(|| {
@@ -444,25 +471,6 @@ fn member_refusal(id: Value, why: Option<String>) -> Value {
 
 /// The listings the gateway adds its own entries to, by method and result member.
 const OWN_LISTINGS: &[(&str, &str)] = &[("tools/list", "tools"), ("resources/list", "resources")];
-
-/// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
-const MCP_READ_TOOLS: &[&str] = &[
-    "batch_query",
-    "batch_query_temporal",
-    "get_attribute",
-    "get_attribute_value",
-    "get_entity",
-    "get_subscription",
-    "get_type",
-    "list_attribute_details",
-    "list_attributes",
-    "list_subscriptions",
-    "list_type_details",
-    "list_types",
-    "query_entities",
-    "query_temporal",
-    "retrieve_temporal",
-];
 
 /// The two costs one call may put on the shared broker, capped as [`capped_query`] caps them
 /// on the NGSI-LD surface: `joinLevel` (AG-25) and `lastN` (GW26). A message whose `params` or
@@ -494,7 +502,7 @@ pub(crate) async fn space_mcp_message(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
-    let anonymous = request.headers().get(AUTHORIZATION).is_none();
+    let anonymous = !token::presents(request.headers());
     if anonymous {
         if let Err(refusal) = rate_limit::spend_anonymous_mcp(&gateway, request.headers()) {
             return *refusal;
