@@ -2992,6 +2992,123 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4611: one Endpoint's `list_types` hangs for 30 s and another's fails. Routing asks both at
+/// once, gives each three seconds, answers with what answered and tells the answer call which
+/// sources did not answer; a second question within the minute asks neither again.
+#[tokio::test]
+async fn a_hanging_and_a_failing_endpoint_cost_the_question_three_seconds_once() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.scope = Some(jc_core::kinds::AssistantScope {
+        projects: vec!["bbsk".into()],
+    });
+    let tools = vec!["list_types".to_owned(), "query_entities".to_owned()];
+    d.spec.connectors = ["ovzdusie", "bbsk/kraj"]
+        .into_iter()
+        .map(|endpoint| Connector {
+            endpoint: endpoint.into(),
+            tools: tools.clone(),
+            timeout_seconds: 20,
+        })
+        .collect();
+    let w = world("chatslowtypes", d).await;
+    for (slug, listed) in [
+        (
+            SLUG,
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{}"}]}}))
+                .set_delay(std::time::Duration::from_secs(30)),
+        ),
+        (REGION_SLUG, ResponseTemplate::new(500)),
+    ] {
+        let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{slug}/mcp")));
+        mcp().and(body_string_contains("tools/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+                {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+                {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object"}}
+            ]}})))
+            .with_priority(1)
+            .mount(&w.gateway)
+            .await;
+        mcp()
+            .and(body_string_contains("\"list_types\""))
+            .respond_with(listed)
+            .with_priority(1)
+            .mount(&w.gateway)
+            .await;
+    }
+    let route = || {
+        completion(
+            json!({"role": "assistant", "content": "{\"route\": \"search\", \"queries\": [\"knižnica\"]}"}),
+            300,
+        )
+    };
+    let answer = || streamed(&["Knižnica je otvorená do 18:00 [1]."], 300, 10);
+    script_routed(&w.proxy, vec![route()], vec![], vec![answer()]).await;
+
+    let at = std::time::Instant::now();
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Dokedy je otvorená knižnica?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    let took = at.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        events.iter().any(|(n, _)| n == "answer"),
+        "answered with what answered: {events:?}"
+    );
+    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+
+    let calls = model_calls(&w.proxy).await;
+    let rules = calls_of(&calls, None)[0]["messages"][0].to_string();
+    assert!(
+        rules.contains("did not answer in time")
+            && rules.contains("ovzdusie")
+            && rules.contains("bbsk/kraj"),
+        "{rules}"
+    );
+    let router = calls_of(&calls, Some(ROUTER))[0]["messages"][1]["content"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        !router.contains("- ovzdusie:") && !router.contains("- bbsk/kraj:"),
+        "{router}"
+    );
+
+    let listed = || async {
+        w.gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| String::from_utf8_lossy(&r.body).contains("\"list_types\""))
+            .count()
+    };
+    assert_eq!(listed().await, 2, "each asked once");
+
+    // Within the minute both are skipped at once.
+    script_routed(&w.proxy, vec![route()], vec![], vec![answer()]).await;
+    let at = std::time::Instant::now();
+    let (status, _, _) =
+        answer_of(&w.app, ask(json!({"message": "A v sobotu?"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        at.elapsed() < std::time::Duration::from_secs(2),
+        "took {:?}",
+        at.elapsed()
+    );
+    assert_eq!(
+        listed().await,
+        2,
+        "a failed Endpoint is not asked again within the minute"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// The gateway's `tools/call` bodies of `tool`, in order.
 async fn tool_calls_of(gateway: &MockServer, tool: &str) -> Vec<Value> {
     gateway
