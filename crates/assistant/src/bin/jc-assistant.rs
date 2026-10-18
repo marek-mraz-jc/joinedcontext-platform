@@ -20,6 +20,7 @@
 //! `JC_ASSISTANT_PORTAL_URL` (`https://portal.{domain}`, which a `guide` source's sections link
 //! into, AG-118).
 
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -31,6 +32,7 @@ use assistant::crawl::Crawler;
 use assistant::embed::{embed_missing, Embedder};
 use assistant::worker::{self, checkout_from_env};
 use jc_core::ClientCredential;
+use sqlx::PgPool;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -40,6 +42,35 @@ async fn main() -> ExitCode {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    match run().await {
+        Ok(()) => {
+            tracing::info!("stopping");
+            ExitCode::SUCCESS
+        }
+        Err(Startup { what, why }) => {
+            tracing::error!(%why, "{what}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Why the service did not start: what failed, and the error underneath.
+#[derive(Debug)]
+struct Startup {
+    what: &'static str,
+    why: String,
+}
+
+/// Turns an error into the [`Startup`] failure `what` names.
+fn fail<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Startup {
+    move |err| Startup {
+        what,
+        why: err.to_string(),
+    }
+}
+
+/// Starts the chat and the probe, then works the queue once a minute until SIGTERM or Ctrl-C.
+async fn run() -> Result<(), Startup> {
     let env = |key: &str| {
         std::env::var(key)
             .ok()
@@ -52,86 +83,91 @@ async fn main() -> ExitCode {
         env("JC_ASSISTANT_ORG_DOMAIN"),
         env("JC_ASSISTANT_MODEL_DIR"),
     ) else {
-        tracing::error!("JC_ASSISTANT_DATABASE_URL, JC_ASSISTANT_REPO_DIR, JC_ASSISTANT_ORG_DOMAIN and JC_ASSISTANT_MODEL_DIR are required");
-        return ExitCode::FAILURE;
+        return Err(Startup {
+            what: "JC_ASSISTANT_DATABASE_URL, JC_ASSISTANT_REPO_DIR, JC_ASSISTANT_ORG_DOMAIN and JC_ASSISTANT_MODEL_DIR are required",
+            why: "one of them is unset or empty".into(),
+        });
     };
-    let threads = match embed_threads(&env) {
-        Ok(threads) => threads,
-        Err(why) => {
-            tracing::error!(%why, "the embedding model is not configured");
-            return ExitCode::FAILURE;
-        }
-    };
-    let embedder = match Embedder::load(std::path::Path::new(&model_dir), threads) {
-        Ok(embedder) => embedder,
-        Err(err) => {
-            tracing::error!(%err, "the embedding model is not usable");
-            return ExitCode::FAILURE;
-        }
-    };
-    let pool = match sqlx::postgres::PgPoolOptions::new()
+    let threads = embed_threads(&env).map_err(fail("the embedding model is not configured"))?;
+    let embedder = Embedder::load(std::path::Path::new(&model_dir), threads)
+        .map_err(fail("the embedding model is not usable"))?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(&url)
         .await
-    {
-        Ok(pool) => pool,
-        Err(err) => {
-            tracing::error!(%err, "the assistant's database is not reachable");
-            return ExitCode::FAILURE;
-        }
-    };
+        .map_err(fail("the assistant's database is not reachable"))?;
     // As the `assistant` role, not a superuser, so the forced row-level security holds (T-3050).
-    if let Err(err) = assistant::MIGRATOR.run(&pool).await {
-        tracing::error!(%err, "the assistant's migrations did not run");
-        return ExitCode::FAILURE;
-    }
-    let crawler = match Crawler::public() {
-        Ok(crawler) => crawler,
-        Err(err) => {
-            tracing::error!(%err, "the crawler could not be built");
-            return ExitCode::FAILURE;
-        }
-    };
-    let name = env("HOSTNAME").unwrap_or_else(|| "jc-assistant".into());
+    assistant::MIGRATOR
+        .run(&pool)
+        .await
+        .map_err(fail("the assistant's migrations did not run"))?;
+    let crawler = Crawler::public().map_err(fail("the crawler could not be built"))?;
+    let (chat_state, reader) = chat_state(&env, &pool, &embedder, &organization)?;
 
-    let chat_config = chat_config(&env);
-    let (gateway, model_config) = match chat_config {
-        Ok(config) => config,
-        Err(why) => {
-            tracing::error!(%why, "the chat is not configured");
-            return ExitCode::FAILURE;
+    // Ready once the first look at the manifests went through; alive as long as the loop turns.
+    let ready = Arc::new(AtomicBool::new(false));
+    let bind = env("JC_ASSISTANT_BIND").unwrap_or_else(|| "0.0.0.0:8080".into());
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .map_err(|err| Startup {
+            what: "the chat and the health probe cannot listen",
+            why: format!("{bind}: {err}"),
+        })?;
+    let probe = probe(Arc::clone(&chat_state), Arc::clone(&ready));
+    tokio::spawn(async move {
+        if let Err(err) = axum::serve(listener, probe).await {
+            tracing::error!(%err, "the chat and the health probe stopped");
         }
+    });
+
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(fail("SIGTERM cannot be watched"))?;
+    let mut minute = Minute {
+        pool,
+        embedder,
+        crawler,
+        reader,
+        organization,
+        name: env("HOSTNAME").unwrap_or_else(|| "jc-assistant".into()),
+        checkout,
+        chat_state,
+        ready,
+        catalogue_digests: BTreeMap::new(),
     };
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = terminate.recv() => return Ok(()),
+            _ = tick.tick() => {}
+        }
+        minute.work().await;
+    }
+}
+
+/// The chat's shared state and the catalogue reader the crawl worker shares its client with.
+fn chat_state(
+    env: &impl Fn(&str) -> Option<String>,
+    pool: &PgPool,
+    embedder: &Embedder,
+    organization: &str,
+) -> Result<(Arc<ChatState>, assistant::catalogue::Reader), Startup> {
+    let (gateway, model_config) = chat_config(env).map_err(fail("the chat is not configured"))?;
     // No redirect of its own: a token or a question is never carried to a host nobody named.
-    let http = match reqwest::Client::builder()
+    let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
         .build()
-    {
-        Ok(http) => http,
-        Err(err) => {
-            tracing::error!(%err, "the HTTP client could not be built");
-            return ExitCode::FAILURE;
-        }
-    };
+        .map_err(fail("the HTTP client could not be built"))?;
     let reader = assistant::catalogue::Reader {
         http: http.clone(),
         gateway: url::Url::parse(&format!("{gateway}/")).ok(),
-        endpoint_base: match endpoint_base(&env) {
-            Ok(endpoint) => endpoint,
-            Err(why) => {
-                tracing::error!(%why, "the public Endpoint address is not usable");
-                return ExitCode::FAILURE;
-            }
-        },
-        portal: match optional_base(&env, "JC_ASSISTANT_PORTAL_URL") {
-            Ok(portal) => portal,
-            Err(why) => {
-                tracing::error!(%why, "the Portal address is not usable");
-                return ExitCode::FAILURE;
-            }
-        },
+        endpoint_base: endpoint_base(env)
+            .map_err(fail("the public Endpoint address is not usable"))?,
+        portal: optional_base(env, "JC_ASSISTANT_PORTAL_URL")
+            .map_err(fail("the Portal address is not usable"))?,
     };
     let chat_state = Arc::new(ChatState {
         pool: pool.clone(),
@@ -139,13 +175,8 @@ async fn main() -> ExitCode {
         model: Model::new(model_config, http.clone()),
         http,
         gateway,
-        functions: match optional_base(&env, "JC_ASSISTANT_FUNCTIONS_URL") {
-            Ok(functions) => functions,
-            Err(why) => {
-                tracing::error!(%why, "the sandbox address is not usable");
-                return ExitCode::FAILURE;
-            }
-        },
+        functions: optional_base(env, "JC_ASSISTANT_FUNCTIONS_URL")
+            .map_err(fail("the sandbox address is not usable"))?,
         portal_client: env("JC_ASSISTANT_PORTAL_CLIENT").unwrap_or_else(|| "portal-api".into()),
         public_origin: env("JC_ASSISTANT_PUBLIC_ORIGIN")
             .map(|o| o.trim_end_matches('/').to_owned()),
@@ -154,83 +185,72 @@ async fn main() -> ExitCode {
         questions: std::sync::Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
         endpoint_base: reader.endpoint_base.clone(),
-        organization: organization.clone(),
+        organization: organization.to_owned(),
     });
+    Ok((chat_state, reader))
+}
 
-    // Ready once the first look at the manifests went through; alive as long as the loop turns.
-    let ready = Arc::new(AtomicBool::new(false));
-    let bind = env("JC_ASSISTANT_BIND").unwrap_or_else(|| "0.0.0.0:8080".into());
-    let probe = probe(Arc::clone(&chat_state), Arc::clone(&ready));
-    let listener = match tokio::net::TcpListener::bind(&bind).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            tracing::error!(%err, %bind, "the chat and the health probe cannot listen");
-            return ExitCode::FAILURE;
-        }
-    };
-    tokio::spawn(async move {
-        if let Err(err) = axum::serve(listener, probe).await {
-            tracing::error!(%err, "the chat and the health probe stopped");
-        }
-    });
+/// What the minute's work reads and keeps between minutes.
+struct Minute {
+    pool: PgPool,
+    embedder: Embedder,
+    crawler: Crawler,
+    reader: assistant::catalogue::Reader,
+    organization: String,
+    name: String,
+    checkout: worker::Checkout,
+    chat_state: Arc<ChatState>,
+    ready: Arc<AtomicBool>,
+    catalogue_digests: BTreeMap<(String, String), String>,
+}
 
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(signal) => signal,
-            Err(err) => {
-                tracing::error!(%err, "SIGTERM cannot be watched");
-                return ExitCode::FAILURE;
-            }
-        };
-    let mut catalogue_digests = std::collections::BTreeMap::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(60));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("stopping");
-                return ExitCode::SUCCESS;
-            }
-            _ = terminate.recv() => {
-                tracing::info!("stopping");
-                return ExitCode::SUCCESS;
-            }
-            _ = tick.tick() => {}
-        }
-        let snapshot = match worker::snapshot(&checkout) {
+impl Minute {
+    /// Reads the manifests, queues what is due or changed, works the queue and embeds.
+    async fn work(&mut self) {
+        let snapshot = match worker::snapshot(&self.checkout) {
             Ok(snapshot) => Arc::new(snapshot),
             Err(err) => {
                 // A checkout mid-update is read again next minute; the queue keeps its jobs.
                 tracing::warn!(%err, "manifests not read this minute");
-                continue;
+                return;
             }
         };
-        if let Ok(mut held) = chat_state.snapshot.write() {
+        if let Ok(mut held) = self.chat_state.snapshot.write() {
             *held = Arc::clone(&snapshot);
         }
         // Routing's type lists, ahead of the first question (T-4611).
-        tokio::spawn(chat::warm_types(Arc::clone(&chat_state)));
+        tokio::spawn(chat::warm_types(Arc::clone(&self.chat_state)));
         let sources = &snapshot.sources;
-        ready.store(true, Ordering::Relaxed);
+        self.ready.store(true, Ordering::Relaxed);
+        let pool = &self.pool;
         let now = time::OffsetDateTime::now_utc()
             .replace_second(0)
             .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        if let Err(err) = chat::forget_expired(&pool).await {
+        if let Err(err) = chat::forget_expired(pool).await {
             tracing::warn!(%err, "expired conversations not deleted this minute");
         }
-        match worker::enqueue_due(&pool, sources, now).await {
+        match worker::enqueue_due(pool, sources, now).await {
             Ok(0) => {}
             Ok(queued) => tracing::info!(queued, "sources due"),
             Err(err) => tracing::warn!(%err, "sources not queued this minute"),
         }
-        match worker::enqueue_changed(&pool, sources, &mut catalogue_digests).await {
+        match worker::enqueue_changed(pool, sources, &mut self.catalogue_digests).await {
             Ok(0) => {}
             Ok(queued) => tracing::info!(queued, "catalogues changed"),
             Err(err) => tracing::warn!(%err, "changed catalogues not queued this minute"),
         }
         // Work what is ready, one job at a time, then wait for the next minute.
         loop {
-            match worker::work_one(&pool, &crawler, &reader, &organization, &name, sources).await {
+            let worked = worker::work_one(
+                pool,
+                &self.crawler,
+                &self.reader,
+                &self.organization,
+                &self.name,
+                sources,
+            )
+            .await;
+            match worked {
                 Ok(true) => continue,
                 Ok(false) => break,
                 Err(err) => {
@@ -247,7 +267,7 @@ async fn main() -> ExitCode {
             .map(|source| source.project.as_str())
             .collect();
         for project in projects {
-            match embed_missing(&pool, &embedder, project, EMBED_PER_MINUTE).await {
+            match embed_missing(pool, &self.embedder, project, EMBED_PER_MINUTE).await {
                 Ok(0) => {}
                 Ok(embedded) => tracing::info!(project, embedded, "passages embedded"),
                 Err(err) => tracing::warn!(project, %err, "passages not embedded this minute"),
