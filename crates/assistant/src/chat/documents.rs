@@ -76,6 +76,19 @@ fn proxied(headers: &HeaderMap) -> bool {
     headers.contains_key("x-forwarded-for") || headers.contains_key(header::FORWARDED)
 }
 
+/// A body that is not one of these requests: the gateway's own mistake, said plainly.
+fn unread(rejection: &JsonRejection) -> Response {
+    match rejection {
+        JsonRejection::MissingJsonContentType(_) => {
+            problem(415, "send the body as application/json")
+        }
+        _ => problem(
+            400,
+            "the body is not a request of API/05 §4: unknown, missing or mistyped members",
+        ),
+    }
+}
+
 fn unknown() -> Response {
     problem(404, "no such path")
 }
@@ -149,7 +162,7 @@ async fn search(
     }
     let Json(asked) = match body {
         Ok(body) => body,
-        Err(rejection) => return super::body_refused(&rejection),
+        Err(rejection) => return unread(&rejection),
     };
     if let Some(why) = refused(&asked) {
         return problem(400, why);
@@ -262,7 +275,7 @@ async fn sources(
     }
     let Json(listed) = match body {
         Ok(body) => body,
-        Err(rejection) => return super::body_refused(&rejection),
+        Err(rejection) => return unread(&rejection),
     };
     if listed.sources.is_empty() || listed.sources.len() > MAX_SOURCES {
         return problem(400, format!("sources must name 1 to {MAX_SOURCES} sources"));
