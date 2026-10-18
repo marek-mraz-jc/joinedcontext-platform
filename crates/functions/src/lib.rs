@@ -18,7 +18,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use context_gateway::auth::token::{bearer, Verifier};
+use jc_core::auth::token::{bearer, Verifier};
 use jc_core::ProblemDetails;
 use serde::Deserialize;
 use serde_json::Value;

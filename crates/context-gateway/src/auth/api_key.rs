@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 
 /// The prefix every platform API key carries, so a key is recognisable in a log or a leak
 /// scan before it is ever used (PF-37).
-pub const KEY_PREFIX: &str = "jc_";
+pub const KEY_PREFIX: &str = jc_core::auth::token::API_KEY_PREFIX;
 
 /// What the platform stores about one key. Never the secret (PF-36).
 #[derive(Debug, Clone, PartialEq, Eq)]
