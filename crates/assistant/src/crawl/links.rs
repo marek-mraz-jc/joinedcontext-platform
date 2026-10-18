@@ -126,3 +126,44 @@ pub fn extract_links(base_url: &Url, html_text: &str, site_host: &str) -> Vec<Ex
     }
     links
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn links_are_resolved_against_the_page_and_classified() {
+        let base = Url::parse("https://www.city.test/news/").expect("a test URL");
+        let html = r##"<html><body>
+            <a href="item#top">same site</a>
+            <a href="https://www.city.test:443/plan.PDF">document</a>
+            <a href="https://other.test/x">elsewhere</a>
+            <a href="MAILTO:office@city.test">mail</a>
+            <a href=" tel:+421 ">phone</a>
+            <a href="JavaScript:void(0)">script</a>
+            <a href="http://[bad">broken</a>
+            <a>no href</a>
+        </body></html>"##;
+        let links: Vec<_> = extract_links(&base, html, "www.city.test")
+            .into_iter()
+            .map(|l| (l.url.to_string(), l.kind))
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("https://www.city.test/news/item".to_owned(), LinkKind::Page),
+                (
+                    "https://www.city.test/plan.PDF".to_owned(),
+                    LinkKind::Document
+                ),
+                ("https://other.test/x".to_owned(), LinkKind::External),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_without_links_has_none() {
+        let base = Url::parse("https://www.city.test/").expect("a test URL");
+        assert!(extract_links(&base, "", "www.city.test").is_empty());
+    }
+}
