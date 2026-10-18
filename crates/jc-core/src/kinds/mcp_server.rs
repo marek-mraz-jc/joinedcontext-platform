@@ -86,6 +86,9 @@ pub struct Select {
     /// EU data themes of that classification, e.g. `ENVI`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub themes: Option<Vec<DataTheme>>,
+    /// NGSI-LD entity types the Endpoint serves, e.g. `OffStreetParking` (MF-61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<String>>,
     /// How the caller reaches the Endpoint; no wider than the server's audience admits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_level: Option<Vec<AccessLevel>>,
@@ -267,6 +270,7 @@ impl Select {
         bounded("spaces", &self.spaces)?;
         bounded("domains", &self.domains)?;
         bounded("themes", &self.themes)?;
+        bounded("types", &self.types)?;
         bounded("accessLevel", &self.access_level)?;
         for project in self.projects.iter().flatten() {
             names::validate_dns1123_label(project)?;
@@ -280,6 +284,14 @@ impl Select {
             };
             names::validate_dns1123_label(project)?;
             names::validate_dns1123_label(name)?;
+        }
+        for entity_type in self.types.iter().flatten() {
+            if names::validate_entity_type(entity_type).is_err() {
+                return Err(select_invalid(
+                    "types",
+                    format!("`{entity_type}` is no NGSI-LD entity type short name (MF-61)"),
+                ));
+            }
         }
         for domain in self.domains.iter().flatten() {
             if !crate::classification::is_domain(domain) {

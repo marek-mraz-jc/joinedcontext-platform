@@ -80,10 +80,113 @@
       ],
       "type": "object"
     },
+    "DataTheme": {
+      "description": "A theme of the EU data-theme table.",
+      "oneOf": [
+        {
+          "description": "Agriculture, fisheries, forestry and food.",
+          "enum": [
+            "AGRI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Economy and finance.",
+          "enum": [
+            "ECON"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Education, culture and sport.",
+          "enum": [
+            "EDUC"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Energy.",
+          "enum": [
+            "ENER"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Environment.",
+          "enum": [
+            "ENVI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Government and public sector.",
+          "enum": [
+            "GOVE"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Health.",
+          "enum": [
+            "HEAL"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "International issues.",
+          "enum": [
+            "INTR"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Justice, legal system and public safety.",
+          "enum": [
+            "JUST"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Regions and cities.",
+          "enum": [
+            "REGI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Population and society.",
+          "enum": [
+            "SOCI"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Science and technology.",
+          "enum": [
+            "TECH"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Transport.",
+          "enum": [
+            "TRAN"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "KnowledgeSourceSpec": {
       "additionalProperties": false,
       "description": "Desired specification of a [`KnowledgeSource`][crate::kinds::KnowledgeSource] (MF-51).",
       "properties": {
+        "categories": {
+          "description": "EU data-theme codes it is about, for the context page (MF-60, ADR-N-055 §2.4).",
+          "items": {
+            "$ref": "#/definitions/DataTheme"
+          },
+          "type": "array"
+        },
         "ckanInstanceRef": {
           "description": "The `CkanInstance` of this project a `ckan` source reads. Absent for `website`.",
           "type": [

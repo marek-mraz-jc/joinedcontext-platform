@@ -174,12 +174,35 @@ pub fn apply_render_prefix(urn: &str, prefix: &str) -> String {
         return urn.to_owned();
     }
     let mut parts: Vec<&str> = body.splitn(6, ':').collect();
-    if parts.len() < 6 || parts[4].is_empty() || parts[4].starts_with(prefix) {
+    // Only a `{orgDomain}:{space}:` prefix moves: the domain is a DNS name, the space a space
+    // name, so `urn:ngsi-ld:Vehicle:sk:ba:123` is an id with colons and stays as written.
+    if parts.len() < 6
+        || !parts[3].contains('.')
+        || names::validate_space_name(parts[4]).is_err()
+        || parts[4].starts_with(prefix)
+    {
         return urn.to_owned();
     }
     let prefixed = format!("{prefix}{}", parts[4]);
     parts[4] = &prefixed;
     format!("{anchor}{}", parts.join(":"))
+}
+
+/// The type an NGSI-LD id names: `urn:ngsi-ld:{Type}:{nss}`, the scheme in any case, type and
+/// rest both non-empty (PF-10, DM-70); anything else names no type.
+pub fn type_of_id(id: &str) -> Option<&str> {
+    let mut parts = id.splitn(4, ':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(urn), Some(ngsi), Some(kind), Some(nss))
+            if urn.eq_ignore_ascii_case("urn")
+                && ngsi.eq_ignore_ascii_case("ngsi-ld")
+                && !kind.is_empty()
+                && !nss.is_empty() =>
+        {
+            Some(kind)
+        }
+        _ => None,
+    }
 }
 
 impl fmt::Display for Urn {

@@ -301,3 +301,37 @@ fn apply_render_prefix_on_non_urn_returns_unchanged() {
         "urn:ngsi-ld:T:hel.fi:s:x"
     );
 }
+
+/// T-4591: only a `{orgDomain}:{space}:` prefix moves; an id whose colons are its own stays.
+#[test]
+fn apply_render_prefix_leaves_an_id_without_a_domain_and_space_alone() {
+    for text in [
+        "urn:ngsi-ld:Vehicle:sk:ba:123",
+        "urn:ngsi-ld:Vehicle:hel.fi:Helsinki:1",
+        "urn:ngsi-ld:Vehicle:hel.fi:a/b:1",
+    ] {
+        assert_eq!(jc_core::apply_render_prefix(text, "ws-a-"), text);
+    }
+}
+
+/// T-4591: one rule for the type an id names, where three copies disagreed on a bare type.
+#[test]
+fn type_of_id_needs_a_type_and_the_rest() {
+    assert_eq!(
+        jc_core::type_of_id("urn:ngsi-ld:Vehicle:1"),
+        Some("Vehicle")
+    );
+    assert_eq!(
+        jc_core::type_of_id("URN:NGSI-LD:Vehicle:a:b"),
+        Some("Vehicle")
+    );
+    for id in [
+        "urn:ngsi-ld:Vehicle",
+        "urn:ngsi-ld:Vehicle:",
+        "urn:ngsi-ld::1",
+        "urn:x:Vehicle:1",
+        "",
+    ] {
+        assert_eq!(jc_core::type_of_id(id), None, "{id}");
+    }
+}
