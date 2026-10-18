@@ -10,7 +10,7 @@
 //! the other language's words to a question. Ranking is BM25.
 
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// What the catalogue does not hold about an Endpoint and the search reads: its entity types,
 /// their SDM domains, its EU themes, and the words the classification gives them in sk and en.
@@ -31,6 +31,8 @@ struct Doc {
     served: Vec<(String, Vec<String>)>,
     domains: Vec<String>,
     themes: Vec<String>,
+    /// The words of its titles, so a hit can say it matched on the title.
+    titled: HashSet<String>,
     terms: HashMap<String, u32>,
     len: usize,
 }
@@ -42,7 +44,45 @@ pub(crate) struct Index {
     /// Per term, the documents holding it.
     df: HashMap<String, usize>,
     avg_len: f64,
+    /// The words that name a place: a publisher's name, or a keyword written as a proper name,
+    /// less the words of a topic and of an organisation (T-4568).
+    places: HashSet<String>,
 }
+
+/// Words of a publisher's name that name what it is, not where (ponytail: a short list, grown
+/// when a question is misread as a place).
+const ORGANISATION: &[&str] = &[
+    "of",
+    "the",
+    "and",
+    "city",
+    "mesto",
+    "mestska",
+    "obec",
+    "region",
+    "kraj",
+    "self",
+    "governing",
+    "samospravny",
+    "university",
+    "project",
+    "platform",
+    "joinedcontext",
+    "ministry",
+    "ministerstvo",
+    "institute",
+    "agency",
+    "office",
+    "urad",
+    "sr",
+    "shmu",
+    "su",
+    "podnik",
+    "statistics",
+    "statisticky",
+    "national",
+    "narodny",
+];
 
 /// Words one language says for what the other says (ponytail: a short table, grown when a miss
 /// is filed; embeddings only if T-4496 shows misses it cannot fix).
@@ -145,6 +185,18 @@ impl Index {
                 for name in names.values().filter_map(Value::as_str) {
                     text.push(' ');
                     text.push_str(name);
+                    index.places.extend(terms(name));
+                }
+            }
+            // A keyword whose every word is capitalised is a proper name: `Banská Bystrica`,
+            // never `air quality`, nor `PM10`, which has no small letter.
+            for keyword in strings(Some(&entity["keyword"]["value"])) {
+                let proper = keyword.split_whitespace().all(|word| {
+                    word.chars().next().is_some_and(char::is_uppercase)
+                        && word.chars().any(char::is_lowercase)
+                });
+                if proper {
+                    index.places.extend(terms(&keyword));
                 }
             }
             let mut doc = Doc {
@@ -160,6 +212,12 @@ impl Index {
                 themes: strings(Some(&entity["theme"]["value"]))
                     .iter()
                     .filter_map(|iri| iri.rsplit('/').next().map(str::to_owned))
+                    .collect(),
+                titled: entity["title"]["languageMap"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|titles| titles.values().filter_map(Value::as_str))
+                    .flat_map(terms)
                     .collect(),
                 terms: HashMap::new(),
                 len: 0,
@@ -201,6 +259,18 @@ impl Index {
         }
         let total: usize = index.docs.iter().map(|doc| doc.len).sum();
         index.avg_len = total as f64 / index.docs.len().max(1) as f64;
+        let topics: HashSet<String> = facts
+            .values()
+            .flat_map(|f| f.types.iter().chain(&f.words).chain(&f.domains))
+            .flat_map(|word| terms(word))
+            .chain(
+                SYNONYMS
+                    .iter()
+                    .flat_map(|(sk, en)| terms(sk).into_iter().chain(terms(en))),
+            )
+            .chain(ORGANISATION.iter().flat_map(|word| terms(word)))
+            .collect();
+        index.places.retain(|word| !topics.contains(word));
         index
     }
 
@@ -245,6 +315,16 @@ impl Index {
         };
 
         let mut words = question(&query);
+        // The place the question names, when the caller gives none apart (T-4568).
+        let named: Vec<String> = if place.is_empty() {
+            words
+                .iter()
+                .filter(|word| self.places.contains(*word))
+                .cloned()
+                .collect()
+        } else {
+            place.clone()
+        };
         words.extend(place.iter().cloned());
         let n = self.docs.len() as f64;
         let mut ranked: Vec<(f64, &Doc)> = self
@@ -274,21 +354,40 @@ impl Index {
             b.0.total_cmp(&a.0)
                 .then_with(|| a.1.dataset.cmp(&b.1.dataset))
         });
+        // A Dataset of the named place before any other, and another place's only when no
+        // Dataset names this one, said so (T-4568).
+        let local = |doc: &Doc| named.iter().all(|w| doc.terms.contains_key(w));
+        let elsewhere =
+            place.is_empty() && !named.is_empty() && !ranked.iter().any(|(_, doc)| local(doc));
+        if !elsewhere {
+            ranked.retain(|(_, doc)| local(doc));
+        }
+        let asked = Asked {
+            words: &words,
+            place: if elsewhere { &[] } else { &named },
+            kind: kind.as_deref(),
+            domain: domain.as_deref(),
+            theme: theme.as_deref(),
+        };
         let hits: Vec<Value> = ranked
             .iter()
             .take(limit)
-            .map(|(score, doc)| hit(doc, *score, &lang, kind.as_deref()))
+            .map(|(score, doc)| hit(doc, *score, &lang, &asked))
             .collect();
-        let mut text = String::from("endpoint | title | types | domain | dataset\n");
+        let mut text = String::from("endpoint | title | types | domain | dataset | why\n");
         for hit in &hits {
             text.push_str(&format!(
-                "{} | {} | {} | {} | {}\n",
+                "{} | {} | {} | {} | {} | {}\n",
                 hit["endpoint"].as_str().unwrap_or(""),
                 hit["title"].as_str().unwrap_or(""),
                 strings(Some(&hit["types"])).join(","),
                 strings(Some(&hit["domains"])).join(","),
                 hit["dataset"].as_str().unwrap_or(""),
+                hit["why"].as_str().unwrap_or(""),
             ));
+        }
+        if elsewhere {
+            text.push_str("no Dataset names the place asked; these are from other places\n");
         }
         text.push_str(&format!(
             "{} of {} matched; nextQuery is the call that reads a hit",
@@ -298,15 +397,28 @@ impl Index {
         let mut answer = super::jsonrpc::answered(&json!(hits), "hits");
         answer["content"][0]["text"] = json!(text);
         answer["structuredContent"]["total"] = json!(ranked.len());
+        if elsewhere {
+            answer["structuredContent"]["elsewhere"] = json!(true);
+        }
         Ok(answer)
     }
+}
+
+/// What a question asked, for a hit's reason.
+struct Asked<'a> {
+    words: &'a [String],
+    place: &'a [String],
+    kind: Option<&'a str>,
+    domain: Option<&'a str>,
+    theme: Option<&'a str>,
 }
 
 /// One hit: the Dataset, the Endpoint to read and the call that reads it.
 ///
 /// The Endpoint is the first that serves the asked `type`, else the first that serves any, and
 /// the hit names that Endpoint's types alone: each one answers its `nextQuery` (T-4567).
-fn hit(doc: &Doc, score: f64, lang: &str, kind: Option<&str>) -> Value {
+fn hit(doc: &Doc, score: f64, lang: &str, asked: &Asked<'_>) -> Value {
+    let kind = asked.kind;
     let title = doc
         .title
         .get(lang)
@@ -326,8 +438,10 @@ fn hit(doc: &Doc, score: f64, lang: &str, kind: Option<&str>) -> Value {
     if let Some(first) = types.iter().find(|t| named(t)).or(types.first()) {
         arguments["type"] = json!([first]);
     }
+    let why = reason(doc, types, asked);
     json!({
         "dataset": doc.dataset,
+        "why": why,
         "endpoint": endpoint,
         "endpoints": doc.slugs,
         "title": title,
@@ -337,6 +451,43 @@ fn hit(doc: &Doc, score: f64, lang: &str, kind: Option<&str>) -> Value {
         "score": (score * 100.0).round() / 100.0,
         "nextQuery": { "tool": "query_entities", "arguments": arguments },
     })
+}
+
+/// One line of why a Dataset matched: the place, the title, the types, the facets; else the
+/// rest of its text (T-4568).
+fn reason(doc: &Doc, types: &[String], asked: &Asked<'_>) -> String {
+    let topic: Vec<&String> = asked
+        .words
+        .iter()
+        .filter(|w| !asked.place.contains(w))
+        .collect();
+    let mut why = Vec::new();
+    if !asked.place.is_empty() {
+        why.push("place".to_owned());
+    }
+    if topic.iter().any(|w| doc.titled.contains(*w)) {
+        why.push("title".to_owned());
+    }
+    let typed: Vec<&str> = types
+        .iter()
+        .filter(|t| {
+            asked.kind.is_some_and(|k| t.to_lowercase() == k)
+                || terms(t).iter().any(|w| topic.contains(&w))
+        })
+        .map(String::as_str)
+        .collect();
+    if !typed.is_empty() {
+        why.push(format!("type {}", typed.join(", ")));
+    }
+    for (name, facet) in [("theme", asked.theme), ("domain", asked.domain)] {
+        if let Some(facet) = facet {
+            why.push(format!("{name} {facet}"));
+        }
+    }
+    if why.is_empty() {
+        why.push("description".to_owned());
+    }
+    why.join("; ")
 }
 
 /// The `search` tool as `tools/list` names it.
