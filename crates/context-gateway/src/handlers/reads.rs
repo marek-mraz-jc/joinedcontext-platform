@@ -157,11 +157,10 @@ async fn paged_view(
     limits: &tabular::Limits,
 ) -> Result<(Value, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
+    let window = window(params)?;
     view_hop(endpoint, subject, request)?;
-    let wanted = query::first(params, "limit")
-        .and_then(|limit| limit.parse::<u64>().ok())
-        .unwrap_or(u64::from(limits.max_rows))
-        .min(u64::from(limits.max_rows));
+    // The row ceiling is the refusal (EP-44); `limit` and `offset` cut the answer (T-4591).
+    let wanted = u64::from(limits.max_rows);
     let windowless: Vec<(String, String)> = params
         .iter()
         .filter(|(name, _)| name != "limit" && name != "offset")
@@ -241,7 +240,32 @@ async fn paged_view(
             return Err(Box::new(too_large()));
         }
     }
+    let (limit, offset) = window;
+    let rows = rows.into_iter().skip(offset);
+    let rows: Vec<Value> = match limit {
+        Some(limit) => rows.take(limit).collect(),
+        None => rows.collect(),
+    };
     Ok((Value::Array(rows), restricted))
+}
+
+/// The `limit` and `offset` a download asks for (T-4591): none is the whole answer from its
+/// start; a value that is no whole number is the caller's mistake, said, never a silent default.
+fn window(params: &[(String, String)]) -> Result<(Option<usize>, usize), Box<Response<Body>>> {
+    let read = |name: &str| -> Result<Option<usize>, Box<Response<Body>>> {
+        query::first(params, name)
+            .map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    Box::new(
+                        ProblemDetails::new(400, "bad-request", "Bad Request")
+                            .with_detail(format!("{name} must be a whole number, not `{value}`"))
+                            .into_response(),
+                    )
+                })
+            })
+            .transpose()
+    };
+    Ok((read("limit")?, read("offset")?.unwrap_or(0)))
 }
 
 /// The type list of an Endpoint as its reads show the caller (CIM 009 5.7.1, T-4080): every
