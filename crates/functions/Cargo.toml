@@ -10,9 +10,7 @@ name = "jc-functions"
 path = "src/main.rs"
 
 [dependencies]
-jc-core = { path = "../jc-core", version = "0.1.0", features = ["axum", "logs"] }
-# The realm's JWKS verifier the gateway already keeps current; the image builds the gateway anyway.
-context-gateway = { path = "../context-gateway", version = "0.1.0" }
+jc-core = { path = "../jc-core", version = "0.1.0", features = ["auth", "axum", "logs"] }
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 rquickjs = { version = "0.13", features = ["futures", "loader"] }

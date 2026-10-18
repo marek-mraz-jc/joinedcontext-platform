@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod api_key;
 pub mod dataspace_token;
-pub mod jwks;
 pub mod subject;
-pub mod token;
+
+// The verifier lives in jc-core so the functions runtime need not link the gateway (T-4605).
+pub use jc_core::auth::{jwks, token};
