@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
+const { notice, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -606,4 +606,75 @@ test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4
   const nonce = await solve(challenge, 10);
   assert.match(nonce, /^\d+$/);
   assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
+});
+
+test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
+  assert.deepEqual(markdown("| Stanica | NO₂ |\n|:---|---:|\n| **Centrum** | 12 \\| 14 |\nend"), [
+    { tag: "table", children: [
+      { tag: "tr", children: [{ tag: "th", children: ["Stanica"] }, { tag: "th", children: ["NO₂"] }] },
+      { tag: "tr", children: [{ tag: "td", children: [{ tag: "strong", children: ["Centrum"] }] }, { tag: "td", children: ["12 | 14"] }] },
+    ] },
+    { tag: "p", children: ["end"] },
+  ]);
+  assert.deepEqual(markdown("a | b"), [{ tag: "p", children: ["a | b"] }], "a pipe inside a sentence stays text");
+});
+
+test("a fenced block keeps its lines as code, markers and all", () => {
+  assert.deepEqual(markdown("```js\nconst a = \"**x**\";\n\n- y\n```\nafter"), [
+    { tag: "pre", children: [{ tag: "code", children: ["const a = \"**x**\";\n\n- y"] }] },
+    { tag: "p", children: ["after"] },
+  ]);
+});
+
+// Every text the tree would show, as one string.
+const shown = (nodes) => nodes.map((n) => (typeof n === "string" ? n : shown(n.children || []))).join("\n");
+
+const STREAMED = [
+  "## Doprava",
+  "",
+  "Máme **tri** zdroje [1, 2]:",
+  "",
+  "- **`type`**: typ entity [1]",
+  "- **`q`**: filter [2, 5]",
+  "",
+  "| Zdroj | Stav |",
+  "|---|---|",
+  "| **Parkoviská** | `live` |",
+  "",
+  "```",
+  "GET /ngsi-ld/v1/entities?type=OffStreetParking",
+  "```",
+  "Hotovo [docs](https://example.sk/a).",
+  "",
+].join("\n");
+
+test("no prefix of a streamed answer shows a marker, and the end equals the final render", () => {
+  const cited = upTo(5);
+  const linkable = (url) => linkHost(url, ["example.sk"]);
+  for (let at = 1; at <= STREAMED.length; at += 1) {
+    const tree = markdown(streamable(STREAMED.slice(0, at)), null, linkable);
+    const text = shown(tree.filter((block) => block.tag !== "pre"));
+    assert.ok(!/\*\*|`|^\s*\||^#|\[\d|\]\(/m.test(text), `prefix ${at} shows a marker: ${JSON.stringify(text)}`);
+  }
+  assert.deepEqual(markdown(streamable(STREAMED), cited, linkable), markdown(STREAMED, cited, linkable));
+});
+
+test("a token split across deltas waits for its close", () => {
+  assert.equal(streamable("Hello **bo"), "Hello bo");
+  assert.deepEqual(markdown(streamable("Hello **bo" + "ld**")), [{ tag: "p", children: ["Hello ", { tag: "strong", children: ["bold"] }] }]);
+  assert.equal(streamable("text\n| a | b"), "text\n", "half a table row waits for its line");
+  assert.equal(streamable("```py\nprint(1)"), "```py\nprint(1)\n```", "an open fence shows its code so far");
+  assert.equal(streamable("see [1, 2"), "see ", "half a citation shows nothing");
+  assert.equal(streamable("read [the page](https://exa"), "read the page");
+  assert.equal(streamable("- **`ty"), "- ty");
+  assert.equal(streamable("text\n##"), "text\n");
+});
+
+test("HTML in an answer, streamed or not, stays text", () => {
+  for (const text of ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "| <b>x</b> |"]) {
+    const tree = markdown(streamable(text + "\n"));
+    const tags = JSON.stringify(tree).match(/"tag":"[a-z]+"/g) || [];
+    assert.ok(tags.every((t) => /"(p|table|tr|td)"/.test(t)), JSON.stringify(tree));
+    assert.ok(shown(tree).includes("<"), "the angle brackets are shown as typed");
+  }
 });

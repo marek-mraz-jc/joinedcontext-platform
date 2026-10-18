@@ -398,7 +398,7 @@
     return a;
   }
 
-  var ALLOWED = { p: 1, ul: 1, ol: 1, li: 1, strong: 1, em: 1, code: 1, br: 1 };
+  var ALLOWED = { p: 1, ul: 1, ol: 1, li: 1, strong: 1, em: 1, code: 1, br: 1, table: 1, tr: 1, th: 1, td: 1, pre: 1 };
 
   // The renderer's tree as DOM nodes: text as text, only the elements it may produce.
   function build(node, ids, position) {
@@ -430,8 +430,28 @@
     return out;
   }
 
+  // The answer so far, formatted by the same renderer as the final view (T-4649): only the
+  // blocks from the first changed one on are rebuilt, and the log follows the end only while the
+  // visitor is at the bottom. Markers wait for their sources, which come with the final view.
+  function paint(item) {
+    item.frame = 0;
+    if (!item.streaming) return;
+    var follow = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    var linkable = function (url) { return JCRender.linkHost(url, config.linkHosts || []); };
+    var blocks = JCRender.markdown(JCRender.streamable(item.text), null, linkable);
+    var keys = blocks.map(function (block) { return JSON.stringify(block); });
+    var shown = item.painted || [];
+    var same = 0;
+    while (same < keys.length && keys[same] === shown[same]) same += 1;
+    while (item.streaming.childNodes.length > same) item.streaming.removeChild(item.streaming.lastChild);
+    blocks.slice(same).forEach(function (block) { item.streaming.appendChild(build(block, "", {})); });
+    item.painted = keys;
+    if (follow) log.scrollTop = log.scrollHeight;
+  }
+
   // The answer, formatted, its markers linked to the source cards under it, and its copy button.
   function show(item, text, citations, turn, at) {
+    if (item.frame) cancelAnimationFrame(item.frame);
     turns += 1;
     var ids = "jc-src-" + turns;
     var grouped = JCRender.sources(citations);
@@ -751,8 +771,8 @@
         item.streaming = el("div", "jc-answer jc-streaming");
         item.appendChild(item.streaming);
       }
-      item.streaming.textContent += data.text;
-      log.scrollTop = log.scrollHeight;
+      item.text = (item.text || "") + data.text;
+      if (!item.frame) item.frame = requestAnimationFrame(function () { paint(item); });
     } else if (name === "answer") {
       // Shown with its citations, which come next; `ask` shows it alone if they never do.
       if (item.status) {
@@ -872,7 +892,7 @@
       saved(item, item.pending, []);
       item.pending = null;
     } else if (item.streaming) {
-      show(item, item.streaming.textContent, [], item.turn);
+      show(item, item.text, [], item.turn);
     }
     log.scrollTop = log.scrollHeight;
   }
@@ -915,7 +935,7 @@
       if (controller.signal.aborted) {
         // What arrived stays; the visitor sees that they stopped it.
         if (item.status) item.status.remove();
-        if (item.streaming) show(item, item.streaming.textContent, []);
+        if (item.streaming) show(item, item.text, []);
         item.appendChild(el("p", "jc-status", w.stopped));
         return;
       }
