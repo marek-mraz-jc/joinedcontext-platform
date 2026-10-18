@@ -1274,6 +1274,53 @@ async fn a_place_in_the_question_ranks_that_place_first() {
         .is_none());
 }
 
+/// T-4570: a space whose Dataset lists the city's map Endpoint (air, events, organisations) and
+/// its events Endpoint: an events question, in either language, is sent to the events Endpoint
+/// with type Event, an air question to the only one serving air.
+#[tokio::test]
+async fn an_events_question_reaches_the_endpoint_serving_event() {
+    let realm = common::Realm::new();
+    let mut map = holding(
+        endpoint(
+            AIR,
+            "Air quality map",
+            "bb-verejne",
+            Audience::Public,
+            "public",
+        ),
+        "AirQualityObserved",
+        "Mapa ovzdušia",
+    );
+    map.models = vec![model(&["AirQualityObserved", "Event", "Organization"])];
+    let mut events = holding(
+        endpoint(BIKES, "Events", "bb-verejne", Audience::Public, "public"),
+        "Event",
+        "Podujatia",
+    );
+    events.models = vec![model(&["Event"])];
+    let app = app(&realm, vec![map, events]);
+    for (question, slug, kind) in [
+        ("events Banská Bystrica this weekend", BIKES, "Event"),
+        ("podujatia", BIKES, "Event"),
+        ("air quality", AIR, "AirQualityObserved"),
+    ] {
+        let answer = call(app.clone(), None, "search", json!({ "query": question })).await;
+        let hit = &answer["result"]["structuredContent"]["hits"][0];
+        assert_eq!(hit["endpoint"], json!(slug), "{question}: {answer}");
+        assert_eq!(
+            hit["nextQuery"]["arguments"]["type"],
+            json!([kind]),
+            "{question}"
+        );
+        assert!(
+            hit["why"]
+                .as_str()
+                .is_some_and(|w| w.contains(&format!("type {kind}"))),
+            "{question}: {hit}"
+        );
+    }
+}
+
 /// T-4497: a catalogue of `n` Datasets a person would search, one Endpoint each: an SDM topic
 /// in sk and en, a place read from dev's AdministrativeArea entities (`fixtures/places-dev.txt`),
 /// a year and a publisher, so near-duplicates differ by a year or a place only. Seeded: the
