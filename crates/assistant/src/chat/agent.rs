@@ -3,7 +3,7 @@
 //! most [`MAX_CALLS`] model calls. The tools are `search` and the switched-on connectors' allowed
 //! tools; a name the model makes up is refused here and never called.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -134,6 +134,10 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
     /// The unit symbol of each column (`µg/m³`), `null` where it has none (T-4650).
     pub units: Vec<Option<String>>,
+    /// Each column's labels per language from the data model, `null` where the model names none;
+    /// empty for a type without a model class (DM-100, T-4672).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Option<BTreeMap<String, String>>>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
