@@ -168,6 +168,18 @@ pub fn resolved<'a>(
         if tool.input_schema.pointer("/properties/count").is_some() {
             arguments["count"] = json!(true);
         }
+    } else if name == "query_entities"
+        && arguments.get("count") == Some(&json!(true))
+        && arguments.get("limit").is_none()
+    {
+        // A count asked without a page wants the total, not the default page of rows (T-4763):
+        // the smallest page the Endpoint takes.
+        let least = tool
+            .input_schema
+            .pointer("/properties/limit/minimum")
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
+        arguments["limit"] = json!(least);
     }
     if let Err(why) = fits(&tool.input_schema, &arguments) {
         return Err(format!(
