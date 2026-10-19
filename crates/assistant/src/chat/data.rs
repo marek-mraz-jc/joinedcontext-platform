@@ -549,6 +549,7 @@ mod tests {
             download: None,
             map: None,
             geometries: vec![None],
+            profile: None,
         };
         let tables = [(2, table)];
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
