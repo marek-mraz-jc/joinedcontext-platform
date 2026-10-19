@@ -1299,6 +1299,7 @@ mod tests {
     fn website(start_urls: &[&str]) -> KnowledgeSourceSpec {
         KnowledgeSourceSpec {
             source: SourceType::Website,
+            categories: Vec::new(),
             start_urls: start_urls.iter().map(|u| (*u).to_owned()).collect(),
             ckan_instance_ref: None,
             context_spaces: Vec::new(),
