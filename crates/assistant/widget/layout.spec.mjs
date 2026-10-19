@@ -25,9 +25,11 @@ const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").repla
 // The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
 let WIDGET;
 let TITLE;
+// T-4740: theme fields the next page is served with (subtitle, font).
+let THEME;
 const PAGE = () => `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/d/widget.css"></head>
-<body><main id="jc-chat" class="jc-chat" data-config="${attr(JSON.stringify({ ...CONFIG, ...(TITLE ? { title: TITLE } : {}), widget: WIDGET }))}"></main>
+<body><main id="jc-chat" class="jc-chat" data-config="${attr(JSON.stringify({ ...CONFIG, ...(TITLE ? { title: TITLE } : {}), ...THEME, widget: WIDGET }))}"></main>
 <script src="/d/widget.js" defer></script></body></html>`;
 const HOST = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -481,6 +483,23 @@ test("fixed mode ignores the browser, and languageToggle false hides the toggle"
   await expect(page.locator(".jc-langs")).toHaveCount(0);
   // Without the toggle the en-US browser still picks English.
   await expect(page.locator("#jc-question")).toHaveAttribute("placeholder", "Type your question");
+});
+
+test("the subtitle and a family-name font show; a font that would end the rule is ignored (T-4740)", async ({ page }) => {
+  WIDGET = undefined;
+  THEME = { subtitle: { sk: "Ukážka · otvorené dáta", en: "Demo · open data" }, font: '"Roboto", Arial, sans-serif' };
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await expect(page.locator(".jc-role")).toHaveText("Ukážka · otvorené dáta");
+  expect(await page.evaluate(() => getComputedStyle(document.body).fontFamily)).toBe('Roboto, Arial, sans-serif');
+  for (const font of ["Arial; } body { display: none", "url(https://evil.example/f.woff)", "Arial\nx", ""]) {
+    THEME = { font };
+    await page.goto(`${base}/d/bb?lang=en`);
+    // No subtitle: the role word in the chat's language; the system font, not the refused value.
+    await expect(page.locator(".jc-role")).toHaveText("Assistant");
+    expect(await page.evaluate(() => document.documentElement.style.getPropertyValue("--font")), font).toBe("");
+    await expect(page.locator("#jc-question")).toBeVisible();
+  }
+  THEME = undefined;
 });
 
 test("a token the service forgot is earned again once, and the question is answered (T-4653)", async ({ page }) => {
