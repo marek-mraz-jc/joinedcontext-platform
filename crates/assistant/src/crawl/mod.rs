@@ -198,6 +198,8 @@ impl Frontier {
 struct Walk {
     frontier: Frontier,
     seen_documents: HashSet<String>,
+    /// When the sitemap says each of its URLs last changed, by canonical URL (T-4749).
+    lastmod: HashMap<String, String>,
     /// The pages this crawl visited, whatever they answered.
     reached: HashSet<String>,
     report: CrawlReport,
@@ -314,7 +316,7 @@ pub async fn crawl_site(
     )
     .await;
 
-    let sitemap_urls = if spec.sitemap {
+    let listed = if spec.sitemap {
         let mut initial_sitemaps = Vec::new();
         if let Ok(default_sm) = start_url.join("/sitemap.xml") {
             initial_sitemaps.push(default_sm.to_string());
@@ -329,7 +331,7 @@ pub async fn crawl_site(
         )
         .await
     } else {
-        Vec::new()
+        sitemap::Listed::default()
     };
 
     // A WordPress site's own content list (T-4154): read before the sitemap, so with `maxPages`
@@ -353,7 +355,10 @@ pub async fn crawl_site(
         site_id,
         robots: &robots,
     };
-    let mut walk = Walk::default();
+    let mut walk = Walk {
+        lastmod: listed.lastmod,
+        ..Walk::default()
+    };
 
     for (i, url_str) in spec.start_urls.iter().enumerate() {
         let Ok(u) = Url::parse(url_str) else {
@@ -375,7 +380,7 @@ pub async fn crawl_site(
             walk.frontier.push(canon, None, 0);
         }
     }
-    for u in wordpress_urls.into_iter().chain(sitemap_urls) {
+    for u in wordpress_urls.into_iter().chain(listed.urls) {
         walk.frontier.push(u, None, 1);
     }
 
@@ -569,9 +574,11 @@ async fn read_page(
     let hash = hex::encode(Sha256::digest(body));
     let last_modified = headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok());
     let mut stated = meta::page(&body_str);
-    // A page that states no date of change has changed when its server says it did.
+    // A page that states no date of change has changed when its sitemap, else its server,
+    // says it did.
     stated.modified = stated
         .modified
+        .or_else(|| walk.lastmod.get(item.url.as_str()).cloned())
         .or_else(|| last_modified.and_then(meta::instant));
     let language = stated.language.clone();
     let page_id = upsert_page_fetched(
@@ -852,6 +859,7 @@ async fn handle_document(
             let mut stated = meta::pdf(&body);
             stated.modified = stated
                 .modified
+                .or_else(|| walk.lastmod.get(url_str).cloned())
                 .or_else(|| last_modified.and_then(meta::instant));
 
             let is_unchanged = stored_hash == Some(&hash);

@@ -698,6 +698,7 @@ mod tests {
                 endpoint: None,
                 title: None,
                 cards: Default::default(),
+                dates: Default::default(),
             }]),
         ] {
             seen.see(&event);

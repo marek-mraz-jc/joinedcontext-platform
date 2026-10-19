@@ -1687,3 +1687,82 @@ async fn a_page_removed_from_the_site_leaves_the_index_and_a_flaky_one_stays_two
     assert_eq!(rows(&pool).await, [("/".into(), 0), ("/doc.pdf".into(), 0)]);
     drop_database(admin, pool, &db_name).await;
 }
+
+/// T-4749: a page that states no date of change takes its sitemap's `<lastmod>`; one that states
+/// its own keeps it; both say when they were read.
+#[tokio::test]
+async fn a_page_without_its_own_date_takes_the_sitemaps_lastmod() {
+    let (admin, pool, db_name) = database("lastmod").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    let base = format!("http://www.city.test:{port}");
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sitemap.xml"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"<urlset><url><loc>{base}/plain</loc><lastmod>2026-03-12</lastmod></url>
+               <url><loc>{base}/stated</loc><lastmod>2026-03-12</lastmod></url></urlset>"#
+        )))
+        .mount(&server)
+        .await;
+    let html = |head: &str| {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/html; charset=utf-8")
+            .set_body_string(format!("<html><head>{head}</head><body>text</body></html>"))
+    };
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(html(""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/plain"))
+        .respond_with(html(""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/stated"))
+        .respond_with(html(
+            r#"<meta property="article:modified_time" content="2026-09-22T13:58:36+0300">"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let spec = test_spec(&format!("{base}/"));
+    crawl_site(
+        &pool,
+        &crawler,
+        "za",
+        "zilina",
+        "web",
+        &spec,
+        &mut RecordingSink::default(),
+    )
+    .await
+    .expect("crawl finishes");
+    let mut tx = project_scope(&pool, "zilina").await.expect("scope");
+    let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT regexp_replace(url, '^http://[^/]+', ''), \
+                to_char(modified AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
+                fetched_at IS NOT NULL \
+         FROM pages ORDER BY url",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("pages");
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        rows,
+        [
+            ("/".into(), None, true),
+            ("/plain".into(), Some("2026-03-12T00:00:00Z".into()), true),
+            ("/stated".into(), Some("2026-09-22T10:58:36Z".into()), true),
+        ]
+    );
+    drop_database(admin, pool, &db_name).await;
+}

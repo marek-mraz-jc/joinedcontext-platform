@@ -616,6 +616,7 @@ async fn recorded(
                 endpoint: Some(endpoint),
                 title: None,
                 cards: Vec::new(),
+                dates: Default::default(),
             });
             json!({"n": n, "tool": o.tool.name, "endpoint": o.connector.endpoint, "result": cut(&text, STEP_RESULT_CHARS)}).to_string()
         }

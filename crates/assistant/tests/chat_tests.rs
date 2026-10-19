@@ -2409,6 +2409,18 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         }),
     });
     let w = world("chatrouted", sources_only).await;
+    // T-4749: the library's page states when it changed and was read.
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query(
+        "UPDATE pages SET modified = '2026-03-12T09:00:00Z', fetched_at = '2026-10-19T03:12:40Z' \
+         WHERE url = 'https://hronov.example/kniznica'",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("dates");
+    tx.commit().await.expect("commit");
     script_routed(
         &w.proxy,
         vec![completion(
@@ -2540,6 +2552,13 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(citations.len(), 1, "{citations:?}");
     assert_eq!(citations[0]["n"], 1);
     assert_eq!(citations[0]["url"], first);
+    // T-4749: the passage and its citation carry its page's dates; none it never stated.
+    assert_eq!(first, "https://hronov.example/kniznica");
+    for said in [&passages["passages"][0], &citations[0]] {
+        assert_eq!(said["modified"], "2026-03-12T09:00:00Z", "{said}");
+        assert_eq!(said["crawled"], "2026-10-19T03:12:40Z", "{said}");
+        assert!(said.get("published").is_none(), "{said}");
+    }
 
     let done = &events[15].1;
     without_internals(done);
@@ -5121,7 +5140,8 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
         .expect("internal");
     sqlx::query(
         "UPDATE pages SET title = 'Mestská knižnica', description = 'Otváracie hodiny a kontakty', \
-         modified = '2026-09-30T08:12:00Z', language = 'sk' WHERE url = 'https://hronov.example/kniznica'",
+         modified = '2026-09-30T08:12:00Z', fetched_at = '2026-10-19T03:12:40Z', language = 'sk' \
+         WHERE url = 'https://hronov.example/kniznica'",
     )
     .execute(&mut *tx)
     .await
@@ -5160,6 +5180,7 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
     assert_eq!(library["description"], "Otváracie hodiny a kontakty");
     assert_eq!(library["modified"], "2026-09-30T08:12:00Z");
     assert_eq!(library["published"], Value::Null, "never guessed");
+    assert_eq!(library["crawled"], "2026-10-19T03:12:40Z");
     assert_eq!(library["publisher"], "hronov");
     assert_eq!(library["language"], "sk");
     // The air page has no title of its own: its first heading names it.

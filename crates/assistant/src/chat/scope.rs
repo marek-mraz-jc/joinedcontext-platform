@@ -561,6 +561,7 @@ mod tests {
             endpoint: None,
             title: None,
             cards: Vec::new(),
+            dates: Default::default(),
         }];
         let found = allowed_with(base.as_ref(), &cited);
         let csv = "```python\npd.read_csv('https://opendata.bbsk.sk/dataset/cyklotrasy/resource/1/download/cyklotrasy.csv')\n```";

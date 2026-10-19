@@ -90,6 +90,9 @@ pub struct Citation {
     /// What the cited passage publishes: a contact, a place, a procedure (T-4155).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub cards: Vec<super::cards::Card>,
+    /// A passage's page or document dates (T-4749).
+    #[serde(flatten)]
+    pub dates: crate::Dates,
 }
 
 /// One event of the answer's stream (API/05 §1.3).
@@ -859,6 +862,7 @@ async fn run_tool(
                         endpoint: None,
                         title: None,
                         cards: super::cards::of(&text),
+                        dates: Default::default(),
                     });
                     passages.push(json!({"n": n, "url": url, "text": text}));
                 }
@@ -942,6 +946,7 @@ async fn run_tool(
                     endpoint,
                     title: None,
                     cards: Vec::new(),
+                    dates: Default::default(),
                 });
                 // The model reads at most MAX_RESULT_CHARS of it; on a deployment with the sandbox
                 // the whole result is kept for run_script (AG-112).
@@ -1264,6 +1269,7 @@ mod tests {
                 endpoint: None,
                 title: None,
                 cards: Vec::new(),
+                dates: Default::default(),
             })
             .collect()
     }
