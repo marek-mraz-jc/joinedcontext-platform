@@ -67,7 +67,7 @@ fn bound() -> usize {
     })
 }
 
-/// Every hub, keyed by [`hub_key`]: one per Endpoint and caller identity (T-4755).
+/// Every hub, keyed by `hub_key`: one per Endpoint and caller identity (T-4755).
 #[derive(Default)]
 pub struct Hubs(Mutex<HashMap<String, (String, Arc<Hub>)>>);
 
