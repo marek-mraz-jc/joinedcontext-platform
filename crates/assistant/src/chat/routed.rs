@@ -1765,15 +1765,14 @@ pub(super) fn queried_type(tool: &str, arguments: &Value) -> Option<String> {
 /// page of an Endpoint over the same space that publishes the type (T-4625), else the page the
 /// sources hold about the connector's own Endpoint; `None` when neither is found.
 pub(super) async fn dataset_of(ask: &Ask<'_>, connector: &Connected, kind: &str) -> Option<String> {
+    // Its own slug always, so an Endpoint with no space recorded still finds its type's page.
+    let mut slugs = connector.siblings.clone();
+    if !slugs.contains(&connector.surface.slug) {
+        slugs.push(connector.surface.slug.clone());
+    }
     let found = async {
-        match crate::dataset_page_projects(
-            ask.pool,
-            &connector.siblings,
-            kind,
-            ask.sources,
-            ask.public_only,
-        )
-        .await?
+        match crate::dataset_page_projects(ask.pool, &slugs, kind, ask.sources, ask.public_only)
+            .await?
         {
             Some(page) => Ok(Some(page)),
             None => {
@@ -1792,6 +1791,18 @@ pub(super) async fn dataset_of(ask: &Ask<'_>, connector: &Connected, kind: &str)
         tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
         None
     })
+}
+
+/// The rows of `kind` as the Endpoint `slug` serves them to anyone: a table's download, and the
+/// link of a citation whose type no dataset page publishes (T-4747). `None` without a gateway
+/// address.
+pub(super) fn type_listing(ask: &Ask<'_>, slug: &str, kind: &str) -> Option<String> {
+    let mut url = ask
+        .endpoint_base?
+        .join(&format!("api/endpoint/{slug}/ngsi-ld/v1/entities"))
+        .ok()?;
+    url.query_pairs_mut().append_pair("type", kind);
+    Some(url.to_string())
 }
 
 /// How long the assistant waits for an Endpoint's model; past it the table keeps the name order.
@@ -1864,13 +1875,7 @@ pub(super) async fn table(
         Some(kind),
         found(dataset.is_some()),
     );
-    let download = ask.endpoint_base.and_then(|base| {
-        let mut url = base
-            .join(&format!("api/endpoint/{slug}/ngsi-ld/v1/entities"))
-            .ok()?;
-        url.query_pairs_mut().append_pair("type", kind);
-        Some(url.to_string())
-    });
+    let download = type_listing(ask, slug, kind);
     let mut table = Table {
         endpoint: connector.endpoint.clone(),
         entity_type: kind.to_owned(),
@@ -3212,12 +3217,14 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
     let mut data = Vec::new();
     for table in tables {
         let n = citations.len() + 1;
+        // Rows no dataset page publishes link their own listing, named by their type, never
+        // another dataset's page (T-4747).
         citations.push(Citation {
             n,
-            url: table.dataset.clone(),
+            url: table.dataset.clone().or_else(|| table.download.clone()),
             tool: Some("query_entities".into()),
             endpoint: Some(table.endpoint.clone()),
-            title: None,
+            title: table.dataset.is_none().then(|| table.entity_type.clone()),
             cards: Vec::new(),
         });
         let shown = if table.profile.is_some() {
