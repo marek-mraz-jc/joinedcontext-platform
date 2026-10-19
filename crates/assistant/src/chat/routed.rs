@@ -2313,6 +2313,13 @@ fn replayed(event: &Event) -> bool {
     )
 }
 
+/// Whether a replay may be kept: every event reached the visitor (`whole`), it holds the answer,
+/// and it is [`small_enough`]. A visitor who left mid-answer leaves a replay with no answer, which
+/// would replay as an empty reply for its whole life.
+fn keepable(replay: &[Event], whole: bool) -> bool {
+    whole && replay.iter().any(|e| matches!(e, Event::Answer(_))) && small_enough(replay)
+}
+
 /// Whether the events are small enough to keep: [`KEPT_CELLS`] table cells at most.
 fn small_enough(replay: &[Event]) -> bool {
     let cells: usize = replay
@@ -2408,21 +2415,22 @@ pub async fn answer(
         spent
     };
     let forwarding = async {
-        let mut replay = Vec::new();
+        let (mut replay, mut whole) = (Vec::new(), true);
         while let Some(event) = rx.recv().await {
             if replayed(&event) {
                 replay.push(event.clone());
             }
             // A reader who left closes this channel too, so the answer stops as it did.
             if events.send(event).await.is_err() {
+                whole = false;
                 rx.close();
             }
         }
-        replay
+        (replay, whole)
     };
-    let (spent, replay) = tokio::join!(answering, forwarding);
+    let (spent, (replay, whole)) = tokio::join!(answering, forwarding);
     if let Some(life) = keep.life() {
-        if small_enough(&replay) {
+        if keepable(&replay, whole) {
             ask.cache.put(key, replay, life);
         }
     }
@@ -4309,6 +4317,9 @@ mod tests {
         assert_eq!(replay.len(), 4);
         assert!(matches!(replay[0], Event::Data(_)) && matches!(replay[3], Event::Followups(_)));
         assert!(!replayed(&conversation_spent()));
+        assert!(keepable(&replay, true));
+        assert!(!keepable(&replay, false), "the visitor left mid-answer");
+        assert!(!keepable(&replay[..1], true), "no answer was sent");
 
         let cache = AnswerCache::default();
         let live = AnswerCache::key("bb/public", "Aké je NO2?", "1:1@2026-10-19");
