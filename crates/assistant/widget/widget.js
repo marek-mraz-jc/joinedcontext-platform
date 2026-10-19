@@ -1013,6 +1013,8 @@
       row.forEach(function (cell, i) {
         // A long text keeps two lines; the whole of it is its title.
         var td = tr.appendChild(el("td", shown.numeric[i] ? "jc-num" : "", ""));
+        // Below 600 px a row is a card and each value carries its column's name (T-4711).
+        td.setAttribute("data-label", shown.columns[i]);
         if (cell && typeof cell === "object") {
           // A long address reads as one short word, the whole of it its title (T-4682).
           var a = td.appendChild(link(cell.href, cell.text));

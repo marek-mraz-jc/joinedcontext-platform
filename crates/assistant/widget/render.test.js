@@ -231,7 +231,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   assert.deepEqual(sk.numeric, [false, true, true, false, false, false]);
   assert.equal(sk.rows[0][1], "21,5");
   assert.equal(sk.rows[0][2], "12");
-  assert.equal(sk.rows[1][1], "9,123");
+  assert.equal(sk.rows[1][1], "9,1", "a measured value to one decimal (T-4711)");
   assert.equal(sk.rows[1][2], "");
   assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
   assert.match(sk.rows[0][5], /^pred 5 min/);
@@ -239,7 +239,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   const en = table(data, "en", now);
   assert.equal(en.caption, "Air quality — first 2 of 12");
   assert.equal(en.columns[5], "Measured");
-  assert.equal(en.rows[1][1], "9.123");
+  assert.equal(en.rows[1][1], "9.1");
   assert.deepEqual([en.rows[0][3], en.rows[1][3]], ["Yes", "No"]);
   assert.match(en.rows[0][5], /^5 min\. ago$/);
   // A key the table does not know is spelt out; a language it does not know reads English.
@@ -685,7 +685,7 @@ test("a grid reads by meaning: no URN column, years and codes ungrouped, enums i
   assert.equal(sk.rows[0][1], "1\u00a0651,5".replace("\u00a0", new Intl.NumberFormat("sk").format(1000).charAt(1)));
   assert.equal(sk.rows[0][2], "1953");
   assert.equal(sk.rows[0][3], "12345");
-  assert.equal(sk.rows[1][1], "9,46");
+  assert.equal(sk.rows[1][1], "9,5", "a length in metres to one decimal (T-4711)");
   // An enum reads its words; one the model does not describe stays as written.
   assert.equal(sk.rows[0][4], "nie je chránená");
   assert.equal(table(data, "en").rows[0][4], "not protected");
@@ -932,4 +932,16 @@ test("a turn that opened a dataset keeps it, a forged one is dropped (T-4685)", 
     { ...turn, turn: 2, opened: { url: "javascript:alert(1)", title: "x" } }] }));
   assert.deepEqual(kept.turns[0].opened, { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" });
   assert.equal(kept.turns[1].opened, undefined);
+});
+
+test("a measured value shows one decimal and a plain number two, in the visitor's locale (T-4711)", () => {
+  const data = {
+    type: "AirQualityObserved",
+    columns: ["name", "pm10", "ratio", "count"],
+    units: [null, "µg/m³", null, null],
+    rows: [["Žilina, Obežná", 11.506, 0.12345, 42]],
+  };
+  const sk = table(data, "sk");
+  assert.deepEqual(sk.rows[0], ["Žilina, Obežná", "11,5", "0,12", "42"]);
+  assert.deepEqual(table(data, "en").rows[0].slice(1), ["11.5", "0.12", "42"]);
 });
