@@ -23,6 +23,7 @@ pub mod script;
 pub mod shape;
 pub mod trace;
 pub mod transcript;
+pub mod usage;
 pub mod visitor;
 pub mod viz;
 pub mod widget;

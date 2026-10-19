@@ -378,6 +378,18 @@ async fn only_the_portals_service_account_is_answered() {
         ),
         (
             "GET",
+            format!("{k}/conversations/usage"),
+            format!("{BASE}/conversations/usage"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/conversations/export"),
+            format!("{BASE}/conversations/export"),
+            None,
+        ),
+        (
+            "GET",
             format!("{k}/conversations/{{conversation}}/turns/{{turn}}/same"),
             format!("{BASE}/conversations/00000000-0000-4000-8000-000000000000/turns/1/same"),
             None,
