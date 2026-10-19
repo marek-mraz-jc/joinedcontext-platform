@@ -480,6 +480,7 @@ impl DataSourceSpec {
                         ),
                     });
                 }
+                refused_input("spec.type", name)?;
                 if !present.is_empty() {
                     return Err(Error::Name {
                         field: "spec",
@@ -699,6 +700,9 @@ impl DataSourceSpec {
         let mut strings = Vec::new();
         strings_of(input_val, "spec.input".to_string(), &mut strings);
         for (path, text) in strings {
+            // An input's Bloblang (`generate.mapping`, a `${! … }` in any field) runs in the same
+            // runner as a step's, so it is held to the same host rule (T-3833).
+            super::pipeline::validate_author_bloblang("spec.input", text)?;
             if let Some(reason) = refused_target(text) {
                 return Err(Error::Invalid {
                     field: path,
@@ -719,38 +723,8 @@ impl DataSourceSpec {
             }
         }
 
-        if bento_inputs::FILE_READERS.contains(&runner_name) {
-            let check_file_path = |field: &'static str, val: &str| -> Result<()> {
-                if !val.starts_with("/data/") || val.split('/').any(|seg| seg == "..") {
-                    return Err(Error::Name {
-                        field,
-                        value: val.to_string(),
-                        reason: "a file-reading input reads the runner's files volume under /data/",
-                    });
-                }
-                Ok(())
-            };
-
-            if let Some(paths) = input_obj.get("paths") {
-                if let Some(arr) = paths.as_array() {
-                    for item in arr {
-                        if let Some(s) = item.as_str() {
-                            check_file_path("spec.input.paths", s)?;
-                        }
-                    }
-                } else if let Some(s) = paths.as_str() {
-                    check_file_path("spec.input.paths", s)?;
-                }
-            }
-
-            if let Some(path) = input_obj.get("path") {
-                if let Some(s) = path.as_str() {
-                    check_file_path("spec.input.path", s)?;
-                }
-            }
-        }
-
-        Ok(())
+        let own: Vec<&str> = known_vars.into_iter().collect();
+        validate_input_tree(runner_name, input_obj, &own)
     }
 
     fn validate_mqtt(&self) -> Result<()> {
@@ -871,6 +845,134 @@ pub fn check_class(pipeline: &PipelineSpec, source: &DataSourceSpec) -> Result<(
                 source.source_type
             ),
         });
+    }
+    Ok(())
+}
+
+/// The runner inputs no DataSource names (T-3833): each works on the project's runner instead of
+/// reading a feed. `subprocess` runs a program and `stdin` reads the runner's own input;
+/// `kubernetes_watch` calls the cluster API as the runner's ServiceAccount; `inproc` and
+/// `resource` read what another stream of the runner declares; `dynamic`, `http_server` and
+/// `socket_server` open an API or a listener in the runner's pod. A feed that pushes writes to an
+/// Endpoint instead.
+const REFUSED_INPUTS: &[&str] = &[
+    "dynamic",
+    "http_server",
+    "inproc",
+    "kubernetes_watch",
+    "resource",
+    "socket_server",
+    "stdin",
+    "subprocess",
+];
+
+/// The inputs that carry inputs of their own, and the field that holds them.
+const WRAPPER_INPUTS: &[(&str, &str)] = &[
+    ("batched", "child"),
+    ("broker", "inputs"),
+    ("read_until", "input"),
+    ("sequence", "inputs"),
+];
+
+fn refused_input(field: &'static str, name: &str) -> Result<()> {
+    if REFUSED_INPUTS.contains(&name) {
+        return Err(Error::Invalid {
+            field: field.to_owned(),
+            reason: format!(
+                "input `{name}` works on the project's runner instead of reading a feed: it runs a \
+                 program, reads the runner's own process or the cluster API, or reaches another \
+                 stream; a feed that pushes writes to an Endpoint (PL-50, T-3833)"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// One runner input and every input nested in it (T-3833): no refused input, a file reader (and
+/// `fsevent`, which watches paths) under `/data/`, and its `processors` held to the rules of a
+/// pipeline step. `own` is the source's declared `envVar`s.
+fn validate_input_tree(
+    name: &str,
+    config: &serde_json::Map<String, serde_json::Value>,
+    own: &[&str],
+) -> Result<()> {
+    if bento_inputs::FILE_READERS.contains(&name) || name == "fsevent" {
+        let check_file_path = |field: &'static str, val: &str| -> Result<()> {
+            if !val.starts_with("/data/") || val.split('/').any(|seg| seg == "..") {
+                return Err(Error::Name {
+                    field,
+                    value: val.to_string(),
+                    reason: "a file-reading input reads the runner's files volume under /data/",
+                });
+            }
+            Ok(())
+        };
+        match config.get("paths") {
+            Some(serde_json::Value::Array(items)) => {
+                for s in items.iter().filter_map(serde_json::Value::as_str) {
+                    check_file_path("spec.input.paths", s)?;
+                }
+            }
+            Some(serde_json::Value::String(s)) => check_file_path("spec.input.paths", s)?,
+            _ => {}
+        }
+        if let Some(s) = config.get("path").and_then(serde_json::Value::as_str) {
+            check_file_path("spec.input.path", s)?;
+        }
+    }
+    validate_input_processors(config, own)?;
+    let Some((_, at)) = WRAPPER_INPUTS.iter().find(|(wrapper, _)| *wrapper == name) else {
+        return Ok(());
+    };
+    let children: Vec<&serde_json::Value> = match config.get(*at) {
+        Some(serde_json::Value::Array(items)) => items.iter().collect(),
+        Some(child) => vec![child],
+        None => Vec::new(),
+    };
+    for child in children {
+        let Some(child) = child.as_object() else {
+            return Err(Error::Invalid {
+                field: "spec.input".to_owned(),
+                reason: format!(
+                    "an input inside `{name}` is a map of its name to its configuration"
+                ),
+            });
+        };
+        validate_input_processors(child, own)?;
+        for (child_name, child_config) in child
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "label" | "processors"))
+        {
+            if !bento_inputs::INPUTS.contains(&child_name.as_str()) {
+                return Err(Error::Invalid {
+                    field: "spec.input".to_owned(),
+                    reason: format!("unknown input `{child_name}` inside `{name}`"),
+                });
+            }
+            refused_input("spec.input", child_name)?;
+            let empty = serde_json::Map::new();
+            validate_input_tree(child_name, child_config.as_object().unwrap_or(&empty), own)?;
+        }
+    }
+    Ok(())
+}
+
+/// An input's own `processors` run in the stream like a step's, so they pass the step check.
+fn validate_input_processors(
+    config: &serde_json::Map<String, serde_json::Value>,
+    own: &[&str],
+) -> Result<()> {
+    let Some(processors) = config.get("processors") else {
+        return Ok(());
+    };
+    let Some(processors) = processors.as_array() else {
+        return Err(Error::Invalid {
+            field: "spec.input.processors".to_owned(),
+            reason: "an input's processors are a list".to_owned(),
+        });
+    };
+    for processor in processors {
+        super::pipeline::validate_processor_reading("spec.input.processors", processor, own)?;
     }
     Ok(())
 }
