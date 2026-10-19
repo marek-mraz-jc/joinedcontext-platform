@@ -802,7 +802,8 @@ var JCRender = (function () {
   // The service's error titles (API/05 §1.6), English and stable, to the widget's own words.
   var TROUBLE = {
     "Conversation Budget Spent": "full", "Model Unavailable": "unreachable",
-    "No Answer": "unanswered", "Answer Took Too Long": "slow", "Declined": "declined"
+    "No Answer": "unanswered", "Answer Took Too Long": "slow", "Declined": "declined",
+    "Daily Limit Reached": "limit", "Monthly Limit Reached": "limit", "Visitor Limit Reached": "limit"
   };
 
   /**
@@ -819,11 +820,21 @@ var JCRender = (function () {
   }
 
   /**
-   * Whether asking the same again can help: not once the conversation's share is spent. A spent
-   * day is no error at all: the service answers it with links (T-4286).
+   * Whether asking the same again can help: not once the conversation's share is spent, and not
+   * past a limit before it resets (T-4671).
    */
   function retryable(word) {
-    return word !== "full" && word !== "declined";
+    return word !== "full" && word !== "declined" && word !== "limit";
+  }
+
+  /**
+   * The line a failed answer shows: the service's own sentence for a limit, which names when it
+   * resets, while the chat reads the service's language (Slovak); the widget's word otherwise.
+   */
+  function said(word, detail, lang, words) {
+    return word === "limit" && lang === "sk" && typeof detail === "string" && detail.trim()
+      ? detail.trim()
+      : words[word];
   }
 
   /**
@@ -979,7 +990,7 @@ var JCRender = (function () {
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
-    suggestions: suggestions, trouble: trouble, retryable: retryable, retry: retry,
+    suggestions: suggestions, trouble: trouble, retryable: retryable, said: said, retry: retry,
     vizOrigin: vizOrigin, vizSpec: vizSpec, mapFirst: mapFirst
   };
 })();
