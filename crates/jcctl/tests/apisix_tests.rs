@@ -822,6 +822,12 @@ fn an_app_host_routes_its_own_endpoint_slugs_only() {
         serde_json::json!([format!("/api/endpoint/{MAP_SLUG}/*")])
     );
     assert_eq!(map["upstream_id"], "upstream-context-gateway");
+    // T-3579: the edge session cookie never travels to the gateway, which takes the bearer.
+    assert_eq!(
+        map["plugins"]["proxy-rewrite"],
+        serde_json::json!({"headers": {"remove": ["Cookie"]}})
+    );
+    assert!(map["plugins"]["openid-connect"]["access_token_in_authorization_header"] == true);
     assert!(
         map["priority"].as_u64()
             > find(&document, "routes", "app-air-quality-map")["priority"].as_u64()
