@@ -122,17 +122,21 @@ async fn an_undeclared_language_is_detected() {
 }
 
 #[tokio::test]
-async fn a_heading_of_whitespace_alone_does_not_lose_the_page() {
-    // www.bbsk.sk/uradne-hodiny (T-4688): an empty `<h2>&nbsp;</h2>` of the CMS made the HTML
-    // converter panic, and the page with the office's hours was never indexed.
+async fn a_heading_or_paragraph_of_whitespace_alone_does_not_lose_the_page() {
+    // www.bbsk.sk/uradne-hodiny (T-4688): a block of whitespace alone before a heading, an empty
+    // `<h2>&nbsp;</h2>` or the CMS's `<p><strong>&nbsp;<br></strong></p>`, made the HTML converter
+    // panic, and the page with the office's hours was never indexed.
     for empty in [
         "<h2>&nbsp;</h2>",
         "<h3> </h3>",
         "<h2><span> </span></h2>",
         "<h4><a href=\"/x\">\u{a0}</a></h4>",
+        // The page's real shape: a paragraph of a space in bold before the next heading.
+        "<p>Ústredňa BBSK</p><p><strong>&nbsp;<br></strong></p>",
+        "<p><em> </em></p>",
     ] {
         let html = format!(
-            "<html><body><h1>Úradné hodiny</h1>{empty}<p>Podateľňa je otvorená v pondelok od 7.30 do 15.30.</p></body></html>"
+            "<html><body><h1>Úradné hodiny</h1>{empty}<h2>Podateľňa</h2><p>Podateľňa je otvorená v pondelok od 7.30 do 15.30.</p></body></html>"
         );
         let extracted = extract(html.as_bytes(), "text/html", Some("sk"), 500)
             .await
@@ -159,6 +163,73 @@ async fn a_pdf_page_becomes_a_passage_that_knows_its_page() {
         .await
         .expect("pdf extracts");
     assert!(capped.passages.is_empty() && capped.truncated);
+}
+
+/// One page whose content stream draws each `(x, y, text)` where it says: a table is its cells.
+fn drawn(cells: &[(u32, u32, &str)]) -> Vec<u8> {
+    let ops: String = cells
+        .iter()
+        .map(|(x, y, text)| format!("BT /F1 11 Tf {x} {y} Td ({text}) Tj ET "))
+        .collect();
+    let stream = ops.trim_end().to_owned();
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> >> >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// T-4688: a table of a PDF keeps each row together, so a road's length is read beside the road
+/// (www.bbsk.sk's lists of managed roads are tables).
+#[tokio::test]
+async fn a_pdf_table_keeps_each_row_on_its_line() {
+    let rows = [("II/526", "12,4"), ("II/531", "7,9"), ("III/2433", "3,1")];
+    let mut cells = vec![(72, 720, "Cesta"), (300, 720, "Dlzka km")];
+    for (i, (road, km)) in rows.iter().enumerate() {
+        let y = 700 - 20 * u32::try_from(i).unwrap_or(0);
+        cells.push((72, y, road));
+        cells.push((300, y, km));
+    }
+    let extracted = extract(&drawn(&cells), "application/pdf", None, 500)
+        .await
+        .expect("pdf extracts");
+    let text: String = extracted
+        .passages
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (road, km) in rows {
+        assert!(
+            text.lines().any(|line| line.contains(road)
+                && line.contains(km)
+                && line.find(road) < line.find(km)),
+            "{road} and {km} are not one row: {text}"
+        );
+    }
 }
 
 /// T-3314: a PDF longer than `pdf.maxPages` keeps the passages of its first pages and says it
