@@ -207,6 +207,7 @@ var JCRender = (function () {
    * letters, digits, dots and dashes (a `user@host`, a backslash) never matches.
    */
   function linkHost(url, hosts) {
+    if (machine(url)) return false;
     var match = /^https?:\/\/([^/?#]+)(?:[/?#]|$)/i.exec(String(url || ""));
     if (!match) return false;
     var host = match[1].toLowerCase();
@@ -268,9 +269,28 @@ var JCRender = (function () {
     return source.endpoint || "";
   }
 
-  /** An `http(s)` address as given, anything else (a `javascript:` link, a relative path) null. */
+  /**
+   * Whether `url` is an address for programs (T-4761): a schema, an MCP or NGSI-LD path, a JSON,
+   * JSON-LD or GeoJSON file, or a JSON format parameter. A person who clicks it gets raw JSON.
+   */
+  function machine(url) {
+    var parts = /^[^?#]*/.exec(String(url || ""))[0].toLowerCase();
+    var query = /\?([^#]*)/.exec(String(url || ""));
+    return /\/(schema|mcp|ngsi-ld)(\/|$)|\.(json|jsonld|geojson)$/.test(parts) ||
+      Boolean(query && /(^|&)(f|format)=(geo)?json(-?ld)?(&|$)/i.test(query[1]));
+  }
+
+  /**
+   * An `http(s)` address a person can open, as given; anything else (a `javascript:` link, a
+   * relative path, an address for programs) null.
+   */
   function safeUrl(url) {
-    return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) ? url : null;
+    return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) && !machine(url) ? url : null;
+  }
+
+  /** An `http(s)` address for programs, shown as text to copy and never as a link (T-4761). */
+  function machineUrl(url) {
+    return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) && machine(url) ? url : null;
   }
 
   /**
@@ -510,7 +530,9 @@ var JCRender = (function () {
       rows: rows,
       dataset: safeUrl(data.dataset),
       download: safeUrl(data.download),
-      geojson: safeUrl(data.geojson)
+      geojson: safeUrl(data.geojson),
+      // The data's address for programs, where the table names one: copyable text (T-4761).
+      address: machineUrl(data.dataset) || machineUrl(data.download) || machineUrl(data.geojson)
     };
   }
 
@@ -1085,7 +1107,7 @@ var JCRender = (function () {
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
+    safeUrl: safeUrl, machineUrl: machineUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
     suggestions: suggestions, trouble: trouble, retryable: retryable, said: said, retry: retry,
     vizOrigin: vizOrigin, vizSpec: vizSpec, mapFirst: mapFirst
   };
