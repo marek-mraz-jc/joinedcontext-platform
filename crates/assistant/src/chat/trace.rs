@@ -464,6 +464,7 @@ mod tests {
             total: Some(12),
             dataset: None,
             download: None,
+            geojson: None,
             map: None,
             geometries: vec![],
         };

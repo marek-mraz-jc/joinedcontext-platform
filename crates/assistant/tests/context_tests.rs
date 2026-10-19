@@ -234,6 +234,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
         viz: None,
         organization: "banskabystrica".into(),
         contexts: Default::default(),
+        turns: Default::default(),
     });
     assistant::chat::context::count(Arc::clone(&state)).await;
     (router(state), gateway, realm, database)
