@@ -2640,6 +2640,18 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
         ],
         "{events:?}"
     );
+    // The router's two queries are one round, searched at once (T-4729): the second has started
+    // before the first one's search is done.
+    let at =
+        |pick: &dyn Fn(&(String, Value)) -> bool| events.iter().position(pick).expect("the event");
+    let second_started = at(&|(n, d)| n == "stage" && d["topic"] == "knižnica otváracie hodiny");
+    let first_started = at(&|(n, d)| n == "stage" && d["topic"] == "library opening hours");
+    let first_done = first_started
+        + events[first_started..]
+            .iter()
+            .position(|(n, d)| n == "tool" && d["name"] == "search" && d["status"] == "done")
+            .expect("its search is done");
+    assert!(second_started < first_done, "{events:?}");
     let calls = model_calls(&w.proxy).await;
     // Router, two verdicts, the answer: the first round's "no" sent its query into the router's
     // round, and the "yes" after it ended the rounds.
@@ -4792,5 +4804,37 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
         held,
         json!({"passages": 2, "publishers": ["hronov"], "languages": {"sk": 1.0}})
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4729 (od-32 on dev): a data answer that reaches the conversation's token budget in its tool
+/// loop is answered from what it read, with one last call that offers no tool, rather than
+/// refused after its reads; the next turn is the one the budget refuses.
+#[tokio::test]
+async fn a_tool_loop_at_the_conversations_budget_answers_from_what_it_read() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatloopcap", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![], vec![
+        completion(tool_call("c1", "ovzdusie__query_entities", json!({"type": "AirQualityObserved"})), 49_000),
+        completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 900),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Aké je NO2 na Námestí SNP?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.iter().all(|(n, _)| n != "error"), "{events:?}");
+    assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
+    let calls = model_calls(&w.proxy).await;
+    let (_, last) = calls.last().expect("the answer call");
+    assert_ne!(last["tool_choice"], json!("auto"), "{last}");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
