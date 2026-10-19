@@ -377,6 +377,12 @@ async fn only_the_portals_service_account_is_answered() {
             None,
         ),
         (
+            "GET",
+            format!("{k}/conversations/{{conversation}}/turns/{{turn}}/same"),
+            format!("{BASE}/conversations/00000000-0000-4000-8000-000000000000/turns/1/same"),
+            None,
+        ),
+        (
             "POST",
             format!("{k}/deployments/{{deployment}}/chat"),
             format!("{BASE}/deployments/obcania/chat"),

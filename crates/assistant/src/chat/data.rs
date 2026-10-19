@@ -399,7 +399,7 @@ async fn step(
     match answered {
         Ok(text) => {
             send(events, tool("done")).await;
-            let mut rows = None;
+            let (mut rows, mut dataset) = (None, None);
             if o.tool.name == "query_entities" {
                 if let Some(kind) = type_of(&arguments) {
                     if let Some(table) = super::routed::table(
@@ -412,6 +412,7 @@ async fn step(
                     .await
                     {
                         rows = Some(table.rows.len());
+                        dataset = table.dataset.clone();
                         if !table.rows.is_empty() {
                             tables.push((citations.len() + 1, table.clone()));
                             send(events, Event::Data(table)).await;
@@ -424,7 +425,7 @@ async fn step(
             let n = citations.len() + 1;
             citations.push(Citation {
                 n,
-                url: None,
+                url: dataset,
                 tool: Some(o.tool.name.clone()),
                 endpoint: Some(endpoint),
                 title: None,
@@ -544,15 +545,21 @@ mod tests {
             endpoint: "ovzdusie".into(),
             entity_type: "AirQualityObserved".into(),
             columns: vec!["name".into(), "pm10".into()],
-            rows: vec![vec![json!("Námestie SNP"), json!(21)]],
+            // Three values: a chart of fewer is not drawn (T-4682).
+            rows: vec![
+                vec![json!("Námestie SNP"), json!(21)],
+                vec![json!("Zvolen"), json!(9)],
+                vec![json!("Žilina"), json!(14)],
+            ],
             units: vec![None, Some("µg/m³".into())],
             labels: Vec::new(),
+            enums: Vec::new(),
             summary: Vec::new(),
             total: None,
             dataset: None,
             download: None,
             map: None,
-            geometries: vec![None],
+            geometries: vec![None, None, None],
             profile: None,
         };
         let tables = [(2, table)];

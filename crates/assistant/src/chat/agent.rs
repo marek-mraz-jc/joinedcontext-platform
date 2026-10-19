@@ -59,6 +59,9 @@ pub struct Connected {
     pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
+    /// The slugs of the project's Endpoints over the same context space, its own included: one
+    /// that publishes a type as a CKAN dataset is the page its rows cite (T-4625).
+    pub siblings: Vec<String>,
 }
 
 /// A turn the channel sent back (AG-99).
@@ -126,6 +129,9 @@ pub enum Event {
     Done(Spent, u64),
 }
 
+/// An enum's values, each as its words per language (T-4682).
+pub type Words = BTreeMap<String, BTreeMap<String, String>>;
+
 /// What a data round read, as API/05 §1.3's `data` event carries it (T-4140).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Table {
@@ -140,6 +146,10 @@ pub struct Table {
     /// empty for a type without a model class (DM-100, T-4672).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Each column's enum values as words per language from the data model, `null` where the
+    /// column holds no enum the model describes; empty when none does (T-4682).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enums: Vec<Option<Words>>,
     /// Whether each column is one of the model's key attributes, which a map's popup shows
     /// (DM-99, T-4672); empty for a type without a model class.
     #[serde(skip)]
@@ -867,6 +877,7 @@ async fn run_tool(
                 "The call was not made: {why}. Correct the arguments, or answer without this tool."
             );
         }
+        let kind = super::routed::queried_type(&tool.name, &arguments);
         send(
             events,
             Event::Tool {
@@ -899,10 +910,15 @@ async fn run_tool(
                     },
                 )
                 .await;
+                // Rows of a type cite the dataset a visitor can open (T-4625).
+                let dataset = match kind.as_deref() {
+                    Some(kind) => super::routed::dataset_of(ask, connector, kind).await,
+                    None => None,
+                };
                 let n = citations.len() + 1;
                 citations.push(Citation {
                     n,
-                    url: None,
+                    url: dataset,
                     tool: Some(tool.name.clone()),
                     endpoint,
                     title: None,
@@ -1092,6 +1108,7 @@ mod tests {
             provider: None,
             reasoning: None,
             finish: None,
+            ..Default::default()
         };
         Spent::default().add(&completion);
         let so_far = std::sync::Arc::new(std::sync::Mutex::new(Spent::default()));

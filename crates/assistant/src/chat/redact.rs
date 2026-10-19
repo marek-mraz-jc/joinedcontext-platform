@@ -1,7 +1,9 @@
-//! What a stored turn must not keep (AG-99, T-4670): e-mail addresses, IBANs, payment card
-//! numbers, Slovak birth numbers and phone numbers, each replaced with a placeholder before the
-//! insert. Patterns with a checksum (IBAN, card, birth number) are replaced only when it holds, so
-//! an amount, a date or a postcode stays as it was typed.
+//! What a stored turn must not keep (AG-99, T-4670, T-4681). Always ([`secrets`]): access
+//! tokens, API keys, passwords, private key blocks and payment card numbers, which help no one
+//! debug and would be a breach to hold. Under `transcriptRedaction: personal` ([`redact`]) also
+//! e-mail addresses, IBANs, Slovak birth numbers and phone numbers. Patterns with a checksum
+//! (IBAN, card, birth number) are replaced only when it holds, so an amount, a date or a postcode
+//! stays as it was typed.
 
 use std::sync::LazyLock;
 
@@ -22,6 +24,49 @@ static PHONE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:\+|\b00)[1-9]\d{0,2}[ /-]?\d{2,4}(?:[ /-]?\d{2,4}){1,4}\b|\b0\d{1,3}[ /-]?\d{2,4}(?:[ -]?\d{2,4}){1,2}\b")
         .expect("valid regex")
 });
+
+static PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)",
+    )
+    .expect("valid regex")
+});
+/// A bearer or basic credential, a JWT, and the key shapes of the common providers (`sk-…`,
+/// GitHub, Slack, AWS, Google); each at least 16 characters past its prefix.
+static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i:\b(?:bearer|basic|token)\s+)[A-Za-z0-9._~+/=-]{16,}",
+        r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+        r"|\b(?:sk|pk|rk)-(?:[A-Za-z0-9]+-)*[A-Za-z0-9_]{16,}",
+        r"|\b(?:ghp|gho|ghu|ghs|ghr|github_pat|glpat|xox[abpors])[-_][A-Za-z0-9_-]{16,}",
+        r"|\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{35}"
+    ))
+    .expect("valid regex")
+});
+/// A password after its word: `heslo: x`, `password=x`, `moje heslo je x`.
+static PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(heslo|hesl[oa]m|password|passwd|pwd|pass|kód PIN|PIN)(\s*[:=]\s*|\s+(?:je|is|znie)\s+)(\S+)")
+        .expect("valid regex")
+});
+
+/// `text` with every private key, access token, API key, password and card number replaced:
+/// what every stored turn has masked (T-4681).
+pub fn secrets(text: &str) -> String {
+    let text = PRIVATE_KEY.replace_all(text, "[kľúč]");
+    let text = TOKEN.replace_all(&text, "[token]");
+    let text = PASSWORD.replace_all(&text, "$1$2[heslo]");
+    CARD.replace_all(&text, |c: &Captures| keep_unless(&c[0], luhn, "[karta]"))
+        .into_owned()
+}
+
+/// `text` as a deployment of `transcriptRedaction` `personal` (or not) stores it.
+pub fn masked(text: &str, personal: bool) -> String {
+    if personal {
+        redact(&secrets(text))
+    } else {
+        secrets(text)
+    }
+}
 
 /// `text` with every e-mail address, IBAN, card number, birth number and phone number replaced.
 pub fn redact(text: &str) -> String {
@@ -135,7 +180,64 @@ fn birth_number(date: &str, suffix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::{masked, redact, secrets};
+
+    #[test]
+    fn every_secret_is_masked_and_the_rest_stays_verbatim() {
+        let key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----";
+        assert_eq!(secrets(&format!("kľúč {key} koniec")), "kľúč [kľúč] koniec");
+        assert_eq!(
+            secrets("-----BEGIN RSA PRIVATE KEY-----\nMIIE useknuté"),
+            "[kľúč]"
+        );
+        assert_eq!(
+            secrets("Authorization: Bearer abcDEF0123456789xyz.QRS"),
+            "Authorization: [token]"
+        );
+        assert_eq!(
+            secrets(
+                "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N"
+            ),
+            "[token]"
+        );
+        assert_eq!(
+            secrets("kľúč sk-or-v1-0123456789abcdef0123"),
+            "kľúč [token]"
+        );
+        assert_eq!(secrets("ghp_0123456789abcdefABCDEF0123"), "[token]");
+        assert_eq!(secrets("AKIAIOSFODNN7EXAMPLE"), "[token]");
+        assert_eq!(secrets("heslo: Tajne123!"), "heslo: [heslo]");
+        assert_eq!(secrets("moje heslo je mačka7"), "moje heslo je [heslo]");
+        assert_eq!(
+            secrets("password=hunter2 a dosť"),
+            "password=[heslo] a dosť"
+        );
+        assert_eq!(secrets("karta 4111 1111 1111 1111"), "karta [karta]");
+    }
+
+    #[test]
+    fn secrets_alone_keep_an_address_a_phone_and_an_iban_as_typed() {
+        let text = "Som Ján, jan@mesto.sk, 0905 123 456, IBAN SK31 1200 0000 1987 4263 7541. Kedy je odvoz?";
+        assert_eq!(secrets(text), text);
+        assert_eq!(masked(text, false), text);
+        assert_eq!(
+            masked(text, true),
+            "Som Ján, [e-mail], [telefón], IBAN [IBAN]. Kedy je odvoz?"
+        );
+        for text in [
+            "Token pre API?",
+            "heslo",
+            "Aké je heslo k wifi v knižnici?",
+            "sk-12",
+            "4111 1111 1111 1112",
+        ] {
+            assert_eq!(secrets(text), text);
+        }
+        assert_eq!(
+            masked("heslo: x9 a a@b.sk", true),
+            "heslo: [heslo] a [e-mail]"
+        );
+    }
 
     #[test]
     fn each_pattern_is_replaced() {

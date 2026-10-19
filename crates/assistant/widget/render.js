@@ -345,10 +345,23 @@ var JCRender = (function () {
     OffStreetParking: { sk: "Parkoviská", cs: "Parkoviště", en: "Car parks", de: "Parkplätze" },
     WaterQualityObserved: { sk: "Kvalita vody", cs: "Kvalita vody", en: "Water quality", de: "Wasserqualität" },
     TrafficFlowObserved: { sk: "Doprava", cs: "Doprava", en: "Traffic", de: "Verkehr" },
-    KeyPerformanceIndicator: { sk: "Ukazovatele", cs: "Ukazatele", en: "Indicators", de: "Kennzahlen" }
+    KeyPerformanceIndicator: { sk: "Ukazovatele", cs: "Ukazatele", en: "Indicators", de: "Kennzahlen" },
+    Bridge: { sk: "Mosty", cs: "Mosty", en: "Bridges", de: "Brücken" },
+    GtfsStop: { sk: "Zastávky", cs: "Zastávky", en: "Stops", de: "Haltestellen" },
+    BikeHireDockingStation: { sk: "Stanice bicyklov", cs: "Stanice kol", en: "Bike stations", de: "Fahrradstationen" },
+    Event: { sk: "Podujatia", cs: "Akce", en: "Events", de: "Veranstaltungen" },
+    Vehicle: { sk: "Vozidlá", cs: "Vozidla", en: "Vehicles", de: "Fahrzeuge" }
   };
   var YES_NO = { sk: ["Áno", "Nie"], cs: ["Ano", "Ne"], en: ["Yes", "No"], de: ["Ja", "Nein"] };
   var OF = { sk: "z", cs: "z", en: "of", de: "von" };
+  var FIRST = { sk: "prvých", cs: "prvních", en: "first", de: "die ersten" };
+  // A long address in a cell reads as this word, a link (T-4682).
+  var LINK = { sk: "Zdroj", cs: "Zdroj", en: "Source", de: "Quelle" };
+  // The rows a table shows in the panel; the dataset holds the rest (T-4682).
+  var ROWS = 20;
+  // A row measured a day or more before the table's newest says so beside its time (T-4682).
+  var STALE = { sk: "neaktuálne", cs: "neaktuální", en: "out of date", de: "veraltet" };
+  var STALE_MS = 24 * 3600 * 1000;
 
   // `dateObserved` → "Date observed", `AirQualityObserved` → "Air quality observed".
   function spelt(key) {
@@ -370,11 +383,16 @@ var JCRender = (function () {
    * A spec as the visitor reads it (T-4657): a map's popup labels and a chart's axis titles in
    * `lang`, a unit in brackets kept. A copy; the renderer checks it again and sets it as text.
    */
-  function vizSpec(spec, lang) {
+  function vizSpec(spec, lang, labels) {
     var copy = JSON.parse(JSON.stringify(spec || {}));
+    // The model's words for a column (T-4682) before the shared table's.
+    var named = function (key) {
+      var own = labels && typeof labels === "object" && labels[key] && typeof labels[key] === "object" ? labels[key] : null;
+      return (own && (entry(own, lang) || entry(own, "en"))) || word(LABELS, key, lang);
+    };
     if (Array.isArray(copy.popup)) {
       copy.popup.forEach(function (f) {
-        if (f && typeof f.field === "string") f.label = word(LABELS, f.field, lang);
+        if (f && typeof f.field === "string") f.label = named(f.field);
       });
     }
     var encoding = copy.encoding && typeof copy.encoding === "object" ? copy.encoding : {};
@@ -382,7 +400,7 @@ var JCRender = (function () {
       var title = encoding[channel] && encoding[channel].title;
       if (typeof title !== "string") return;
       var parts = /^(.*?)( \([^()]*\))?$/.exec(title);
-      encoding[channel].title = word(LABELS, parts[1], lang) + (parts[2] || "");
+      encoding[channel].title = named(parts[1]) + (parts[2] || "");
     });
     return copy;
   }
@@ -408,10 +426,14 @@ var JCRender = (function () {
   }
 
   /**
-   * A `data` event as the table the widget shows (T-4650): the caption is the type's name and the
-   * row count, each header its label and unit, each cell text in `lang` — numbers with the
-   * locale's separator and at most three decimals, times as `when` says, booleans as words, an
-   * empty cell as "–". Everything is text; nothing here becomes HTML.
+   * A `data` event as the table the widget shows (T-4650, T-4682): the caption is the type's name
+   * and the row count, each header its label and unit, each cell text in `lang`. Numbers take the
+   * locale's separator and at most three decimals, but a year or a code (a column named for one)
+   * is never grouped: 1953, not "1 953". Times read as `when` says, booleans as words, and an enum
+   * as the words the table's `enums` give it. An http(s) address becomes `{text, href}`, a short
+   * link. An empty cell stays empty. The entity's URN is never a column: an unnamed row is called
+   * by the URN's last segment, and a column of references is left out. At most 20 rows; the
+   * caption says how many more the dataset holds. Everything is text; nothing here becomes HTML.
    */
   function table(data, lang, now) {
     if (!data || !Array.isArray(data.columns) || data.columns.length === 0) return null;
@@ -419,38 +441,63 @@ var JCRender = (function () {
     now = typeof now === "number" ? now : Date.now();
     var numbers = new Intl.NumberFormat(lang, { maximumFractionDigits: 3 });
     var units = Array.isArray(data.units) ? data.units : [];
-    var width = data.columns.length;
-    var cell = function (v, column) {
-      if (v === null || v === undefined || v === "") return "–";
-      if (typeof v === "number") return isFinite(v) ? numbers.format(v) : "–";
+    var modelled = Array.isArray(data.labels) ? data.labels : [];
+    var enums = Array.isArray(data.enums) ? data.enums : [];
+    var raw = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, ROWS);
+    var urn = function (v) { return typeof v === "string" && /^urn:/i.test(v); };
+    // The columns shown: an `id` column becomes the row's name, a column of references goes.
+    var keep = [];
+    data.columns.forEach(function (c, i) {
+      var filled = raw.filter(function (row) { return row[i] !== null && row[i] !== undefined && row[i] !== ""; });
+      if (c !== "id" && filled.length > 0 && filled.every(function (row) { return urn(row[i]); })) return;
+      keep.push(i);
+    });
+    var plain = function (column) { return /year|code$/i.test(String(column)) || /Id$|^id$/.test(String(column)); };
+    var cell = function (v, column, i) {
+      if (v === null || v === undefined || v === "") return "";
+      if (column === "id" && urn(v)) return String(v).split(":").pop();
+      if (typeof v === "number") {
+        if (!isFinite(v)) return "";
+        return plain(column) && Number.isInteger(v) ? String(v) : numbers.format(v);
+      }
       if (typeof v === "boolean") return YES_NO[lang][v ? 0 : 1];
       if (typeof v === "object") return JSON.stringify(v);
+      var words = enums[i] && typeof enums[i] === "object" && Object.prototype.hasOwnProperty.call(enums[i], v) ? enums[i][v] : null;
+      if (words && typeof words === "object") return entry(words, lang) || entry(words, "en") || String(v);
+      if (safeUrl(v)) return { text: LINK[lang], href: v };
       if (column === "observedAt" || (TIME.test(v) && v.length > 10)) return when(v, lang, now);
       return String(v);
     };
-    var rows = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, 50)
-      .map(function (row) {
-        var out = [];
-        for (var i = 0; i < width; i += 1) out.push(cell(row[i], data.columns[i]));
-        return out;
+    var at = data.columns.indexOf("observedAt");
+    var times = raw.map(function (row) { return at < 0 || typeof row[at] !== "string" ? NaN : Date.parse(row[at]); });
+    var newest = Math.max.apply(null, times.filter(isFinite).concat([-Infinity]));
+    var rows = raw.map(function (row, r) {
+      return keep.map(function (i) {
+        var shown = cell(row[i], data.columns[i], i);
+        return i === at && newest - times[r] >= STALE_MS ? shown + " · " + STALE[lang] : shown;
       });
-    var numeric = data.columns.map(function (_, i) {
-      return rows.length > 0 && (data.rows || []).filter(Array.isArray).slice(0, 50).every(function (row) {
+    });
+    var numeric = keep.map(function (i) {
+      return raw.length > 0 && raw.every(function (row) {
         return row[i] === null || row[i] === undefined || typeof row[i] === "number";
       });
     });
     // The data model's labels where the table carries them (T-4672), else the shared table's.
-    var modelled = Array.isArray(data.labels) ? data.labels : [];
-    var columns = data.columns.map(function (c, i) {
+    var columns = keep.map(function (i) {
+      var c = data.columns[i];
       var own = modelled[i] && typeof modelled[i] === "object" ? entry(modelled[i], lang) || entry(modelled[i], "en") : "";
-      var label = own || word(LABELS, String(c), lang);
+      var label = own || word(LABELS, c === "id" ? "name" : String(c), lang);
       return typeof units[i] === "string" && units[i] ? label + " (" + units[i] + ")" : label;
     });
-    var count = typeof data.total === "number" && data.total > rows.length
-      ? numbers.format(rows.length) + " " + OF[lang] + " " + numbers.format(data.total)
-      : numbers.format(rows.length);
+    var named = typeof data.type === "string" && data.type ? word(TYPES, data.type, lang) : "";
+    var caption = "";
+    if (named && typeof data.total === "number" && data.total > rows.length) {
+      caption = named + " — " + FIRST[lang] + " " + numbers.format(rows.length) + " " + OF[lang] + " " + numbers.format(data.total);
+    } else if (named) {
+      caption = named + " (" + numbers.format(rows.length) + ")";
+    }
     return {
-      caption: typeof data.type === "string" && data.type ? word(TYPES, data.type, lang) + " (" + count + ")" : "",
+      caption: caption,
       columns: columns,
       numeric: numeric,
       rows: rows,
@@ -600,6 +647,9 @@ var JCRender = (function () {
     var name = data && data.stage;
     if (name === "steps" || !Object.prototype.hasOwnProperty.call(words, name)) return null;
     var topic = text(data.topic, 60);
+    // A search names the visitor's own words; a read names its data in words or nothing, never an
+    // Endpoint slug or a type name (T-4682).
+    if (name !== "searching") topic = Object.prototype.hasOwnProperty.call(TYPES, topic) ? word(TYPES, topic, lang) : "";
     if (STEPS.indexOf(name) >= 0) {
       return words[name] + (topic ? ": „" + topic + "“…" : "…");
     }
@@ -614,7 +664,13 @@ var JCRender = (function () {
   function steps(stages, lang) {
     var lines = (Array.isArray(stages) ? stages : [])
       .filter(function (data) { return data && STEPS.indexOf(data.stage) >= 0; })
-      .map(function (data) { return stage(data, lang); })
+      .map(function (data) {
+        var line = stage(data, lang);
+        // Each step with when it began, in seconds after the question (T-4682).
+        var ms = data.ms;
+        if (!line || typeof ms !== "number" || !isFinite(ms) || ms < 0) return line;
+        return line + " (" + new Intl.NumberFormat(YES_NO[lang] ? lang : "en", { maximumFractionDigits: 1 }).format(ms / 1000) + " s)";
+      })
       .filter(Boolean);
     if (lines.length < 2) return null;
     return { summary: (STAGES[lang] || STAGES.en).steps + " (" + lines.length + ")", lines: lines };
