@@ -305,6 +305,15 @@ fn too_many(retry: u64, detail: &str) -> Response {
     response
 }
 
+/// A conversation at its question or cost cap (T-4737): `429` under the title the chat reads as
+/// "long", with the offer of a new conversation that asks the question again.
+fn conversation_long() -> Response {
+    let mut problem =
+        jc_core::ProblemDetails::for_status(429).with_detail(model::CONVERSATION_SPENT);
+    problem.title = "Conversation Budget Spent".into();
+    problem.into_response()
+}
+
 /// A visitor past their share of the day's cost (T-4653): `429` until UTC midnight, under a title
 /// the chat knows a retry cannot help with (T-4671).
 fn share_spent(retry: u64) -> Response {
@@ -594,13 +603,13 @@ async fn conversation(
     deployment: &Deployment,
     named: Option<&str>,
     origin: Option<&str>,
-) -> Result<Option<(String, u64, u32)>, crate::Error> {
+) -> Result<Option<(String, u64, u32, u64)>, crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
-    let found: Option<(String, i64, i32)> = match named {
+    let found: Option<(String, i64, i32, i64)> = match named {
         Some(id) => {
             if uuid_shaped(id) {
                 sqlx::query_as(
-                    "SELECT id::text, tokens, questions FROM conversations WHERE id = $1::uuid AND deployment = $2 \
+                    "SELECT id::text, tokens, questions, cost_micros FROM conversations WHERE id = $1::uuid AND deployment = $2 \
                      AND created_at > now() - make_interval(hours => $3) \
                      AND origin IS NOT DISTINCT FROM $4",
                 )
@@ -615,7 +624,7 @@ async fn conversation(
             }
         }
         None => Some(
-            sqlx::query_as("INSERT INTO conversations (project, deployment, origin) VALUES ($1, $2, $3) RETURNING id::text, tokens, questions")
+            sqlx::query_as("INSERT INTO conversations (project, deployment, origin) VALUES ($1, $2, $3) RETURNING id::text, tokens, questions, cost_micros")
                 .bind(&deployment.project)
                 .bind(&deployment.name)
                 .bind(origin)
@@ -624,11 +633,12 @@ async fn conversation(
         ),
     };
     tx.commit().await?;
-    Ok(found.map(|(id, tokens, questions)| {
+    Ok(found.map(|(id, tokens, questions, cost)| {
         (
             id,
             u64::try_from(tokens).unwrap_or(0),
             u32::try_from(questions).unwrap_or(0),
+            u64::try_from(cost).unwrap_or(0),
         )
     }))
 }
@@ -676,11 +686,12 @@ async fn record(
 ) -> Result<(), crate::Error> {
     let mut tx = crate::project_scope(pool, &deployment.project).await?;
     sqlx::query(
-        "UPDATE conversations SET tokens = tokens + $2, questions = questions + 1, last_at = now() \
-         WHERE id = $1::uuid",
+        "UPDATE conversations SET tokens = tokens + $2, questions = questions + 1, \
+         cost_micros = cost_micros + $3, last_at = now() WHERE id = $1::uuid",
     )
     .bind(conversation)
     .bind(i64::try_from(spent.total).unwrap_or(i64::MAX))
+    .bind(i64::try_from(spent.cost_micros).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1539,7 +1550,7 @@ async fn verdict(
     )
     .await
     {
-        Ok(Some((_, _, asked))) if feedback.turn <= asked => {}
+        Ok(Some((_, _, asked, _))) if feedback.turn <= asked => {}
         Ok(_) => return problem(
             400,
             "conversation: not a current conversation of this assistant, or no such answer in it",
@@ -1800,7 +1811,7 @@ async fn ask(
             .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
         return response;
     };
-    let (conversation, spent_before, asked_before) = match conversation(
+    let (conversation, spent_before, asked_before, cost_before) = match conversation(
         &state.pool,
         &deployment,
         question.conversation.as_deref(),
@@ -1822,11 +1833,14 @@ async fn ask(
         }
     };
 
-    if asked_before >= budget.messages_per_conversation {
-        return too_many(
-            1,
-            "Tento rozhovor dosiahol najväčší počet otázok. Začnite nový rozhovor.",
-        );
+    // Its questions or its model calls' cost at their cap (T-4737): the conversation is long, and
+    // the chat offers a new one that asks the question again. Checked as a question starts, so a
+    // question under way always finishes.
+    let cost_reached = budget
+        .cost_per_conversation_usd
+        .is_some_and(|usd| cost_before as f64 >= usd * 1_000_000.0);
+    if asked_before >= budget.messages_per_conversation || cost_reached {
+        return conversation_long();
     }
     let streams = rate.as_ref().map(|rate| rate.streams_per_client);
     if let Some(limit) = streams {

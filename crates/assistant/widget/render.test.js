@@ -505,6 +505,10 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
+    // T-4737: a long conversation is long, never a share the visitor used up.
+    const full = block.match(/\bfull: "([^"]*)"/)[1];
+    assert.match(full, /dlhý|long|dlouhý/, `${lang}.full`);
+    assert.doesNotMatch(full, /podiel|share|podíl|minul|vyčerpal/i, `${lang}.full`);
     // T-4283: the chips are the deployment's own; the widget invents no city questions.
     assert.doesNotMatch(block, /ideas: \[/, `${lang}.ideas`);
   }
@@ -987,4 +991,12 @@ test("a measured value shows one decimal and a plain number two, in the visitor'
   // A small reading keeps two significant digits and never reads as zero.
   const co = table({ columns: ["name", "co"], units: [null, "mg/m³"], rows: [["A", 0.0423], ["B", 0], ["C", -0.5]] }, "sk");
   assert.deepEqual(co.rows.map((r) => r[1]), ["0,042", "0", "-0,5"]);
+});
+
+test("a source badge draws its letter from CSS, so copied or read-out text never gains a stray 'DA' (T-4729)", () => {
+  const dir = require("node:path").join(__dirname);
+  const read = (f) => require("node:fs").readFileSync(require("node:path").join(dir, f), "utf8");
+  assert.doesNotMatch(read("widget.js"), /el\("span", "jc-badge", badge\.letter\)/);
+  assert.match(read("widget.js"), /setAttribute\("data-letter", badge\.letter\)/);
+  assert.match(read("widget.css"), /\.jc-badge::before\s*\{\s*content:\s*attr\(data-letter\)/);
 });
