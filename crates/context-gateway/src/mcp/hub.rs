@@ -614,6 +614,7 @@ impl Hub {
                 if self.server.is_some() {
                     server::fan_out_schemas(&mut tools);
                 }
+                super::titles::titled(&mut tools);
                 result(id, json!({ "tools": tools }))
             }
             "tools/call" => return self.call(id, params).await,

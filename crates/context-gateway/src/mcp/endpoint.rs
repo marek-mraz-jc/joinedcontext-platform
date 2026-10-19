@@ -258,6 +258,9 @@ pub(crate) async fn mcp_answer(
             if narrowed {
                 mcp::tools::keep_anonymous(items);
             }
+            if key == "tools" {
+                mcp::titles::titled(items);
+            }
         }
     }
     proxy::with_body(parts, listed.to_string().into_bytes())
