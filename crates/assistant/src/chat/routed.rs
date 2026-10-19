@@ -2702,9 +2702,7 @@ async fn answer_routed(
         first_counted(ask.deployment, &mut spent, first, question, true);
         return spent;
     }
-    for table in &tables {
-        send(events, Event::Data(table.clone())).await;
-    }
+    shown(&tables, events).await;
     let answering = Answering {
         messages,
         citations,
@@ -2998,6 +2996,14 @@ fn wanted<'a>(ask: &'a Ask<'_>, routing: &Routing) -> Vec<(Read, &'a Connected)>
 /// (T-4680).
 async fn read_all(ask: &Ask<'_>, wanted: &[(Read, &Connected)]) -> Vec<Result<Table, String>> {
     futures_util::future::join_all(wanted.iter().map(|(w, c)| read(ask, c, w))).await
+}
+
+/// The router's tables, sent before an answer that streams; a data answer sends them itself, and
+/// only when it cites one (T-4741).
+async fn shown(tables: &[Table], events: &Sender<Event>) {
+    for table in tables {
+        send(events, Event::Data(table.clone())).await;
+    }
 }
 
 /// The reads' steps, streamed in the router's order, and their tables in that order, so the tables
