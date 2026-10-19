@@ -3713,6 +3713,32 @@ async fn a_replys_tool_calls_run_at_once_and_keep_their_order() {
     // in a row: 6 s; the reply's two at once: 4 s
     eprintln!("a reply of two reads: {took:?}");
     assert!(took < pause * 5 / 2, "{took:?}");
+    // Each read's two lookups are steps of the turn, named with the type (T-4731 hint 4); the
+    // turn is stored once its stream has ended.
+    let mut looked: Vec<(String, Option<String>)> = Vec::new();
+    for _ in 0..50 {
+        let mut tx = assistant::project_scope(&w.pool, "hronov")
+            .await
+            .expect("scope");
+        looked = sqlx::query_as(
+            "SELECT name, input FROM turn_steps WHERE name IN ('data_model', 'dataset_page') \
+             ORDER BY ordinal",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .expect("steps");
+        tx.rollback().await.expect("rollback");
+        if !looked.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let kind = Some("AirQualityObserved".to_owned());
+    for name in ["data_model", "dataset_page"] {
+        let steps: Vec<_> = looked.iter().filter(|(n, _)| n == name).collect();
+        assert_eq!(steps.len(), 3, "{name}: {looked:?}");
+        assert!(steps.iter().all(|(_, input)| *input == kind), "{looked:?}");
+    }
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
