@@ -28,6 +28,7 @@ import yaml
 
 from common import (
     ModelError,
+    annotation_value,
     as_path,
     component_of,
     generator_version,
@@ -159,6 +160,7 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
         dsd = is_dsd(cls)
         if dsd:
             target["x-qb-dsd"] = True
+        target.update(_personal_class(cls))
         properties = target.get("properties", {})
         for slot in slots_of(view, cls):
             prop = properties.get(slot.alias or slot.name)
@@ -183,7 +185,44 @@ def _annotate(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
             role = component_of(slot) if dsd else None
             if role:
                 prop["x-qb-component"] = role
+            prop.update(_personal_slot(cls, slot))
     return schema
+
+
+#: What a personal slot's `ingest` may say reaches the broker (ADR-N-054 2.6, DM-121).
+INGEST = ("keep", "drop", "keyedHash")
+
+
+def _personal_class(cls: Any) -> dict[str, Any]:
+    """A class's personal data marks, as the gateway and the broker's retention read them (DM-120).
+
+    `x-personal-data` marks the class; its `maxRetention` and the slot naming the data subject
+    travel beside it. `legalBasis` and `purpose` stay in the LinkML source, which the Portal checks.
+    """
+    if (annotation_value(cls, "personalData") or "").lower() != "true":
+        return {}
+    marks: dict[str, Any] = {"x-personal-data": True}
+    for tag, keyword in (("maxRetention", "x-max-retention"), ("dataSubjectRef", "x-data-subject-ref")):
+        if (value := annotation_value(cls, tag)) is not None:
+            marks[keyword] = value
+    return marks
+
+
+def _personal_slot(cls: Any, slot: Any) -> dict[str, Any]:
+    """A slot's personal data mark and its `ingest` (DM-121, DM-122): the gateway keeps a marked
+    slot off a public Endpoint and applies `ingest` before a write reaches the broker."""
+    personal = (annotation_value(slot, "personalData") or "").lower() == "true"
+    ingest = annotation_value(slot, "ingest")
+    if ingest is not None and ingest not in INGEST:
+        raise ModelError(f"{cls.name}.{slot.name}: ingest {ingest!r} is none of {', '.join(INGEST)}")
+    if ingest not in (None, "keep") and not personal:
+        raise ModelError(f"{cls.name}.{slot.name}: ingest {ingest} needs personalData: true")
+    marks: dict[str, Any] = {}
+    if personal:
+        marks["x-personal-data"] = True
+        if ingest not in (None, "keep"):
+            marks["x-ingest"] = ingest
+    return marks
 
 
 def _text(value: Any) -> str | dict[str, str] | None:
@@ -248,6 +287,7 @@ def _relationships(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
         description = prop.get("description")
         kind = prop.get("x-ngsi-ld-kind")
         role = prop.get("x-qb-component")
+        personal = {k: v for k, v in prop.items() if k in ("x-personal-data", "x-ingest")}
         prop.clear()
         if stored.multivalued:
             prop.update({"type": "array", "items": urn})
@@ -261,6 +301,7 @@ def _relationships(schema: dict[str, Any], view: SchemaView) -> dict[str, Any]:
             prop["x-ngsi-ld-kind"] = kind
         if role:
             prop["x-qb-component"] = role
+        prop.update(personal)
         prop["x-ngsi-ld-relationship"] = {
             "target": other.cls,
             "inverse": other.slot,

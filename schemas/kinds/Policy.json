@@ -594,6 +594,25 @@
         }
       ]
     },
+    "PlatformAction": {
+      "description": "What a Policy grants beyond CIM 009's operations (ADR-N-054 2.4, 2.6; T-4666).",
+      "oneOf": [
+        {
+          "description": "`versions=all` on a temporal query (DM-114).",
+          "enum": [
+            "readVersions"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The data subject's rights on the space: export, rectification, erasure (DM-124..DM-126).",
+          "enum": [
+            "personalData"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "PolicyEffect": {
       "description": "Whether a policy grants access or takes it away (GW4, GW8).\n\nA prohibition subtracts from a grant that stays in force. It is not how a resource is kept private in the first place: the default verdict is already DENY (GW5), so a type nobody was granted is closed without any policy naming it.",
       "oneOf": [
@@ -617,6 +636,13 @@
       "additionalProperties": false,
       "description": "Desired specification of a [`Policy`][crate::kinds::Policy] resource (ADR 002, R1..R9).",
       "properties": {
+        "actions": {
+          "description": "Granted platform actions CIM 009 has no operation for (ADR-N-054, T-4666).",
+          "items": {
+            "$ref": "#/definitions/PlatformAction"
+          },
+          "type": "array"
+        },
         "assignee": {
           "allOf": [
             {
@@ -661,7 +687,8 @@
           "type": "array"
         },
         "operations": {
-          "description": "Granted CIM 009 operations or operation groups (R8).",
+          "default": [],
+          "description": "Granted CIM 009 operations or operation groups (R8); empty when the Policy grants `actions` alone.",
           "items": {
             "$ref": "#/definitions/OperationRef"
           },
@@ -703,8 +730,7 @@
       "required": [
         "assignee",
         "assigner",
-        "contextSpaceRef",
-        "operations"
+        "contextSpaceRef"
       ],
       "type": "object"
     },

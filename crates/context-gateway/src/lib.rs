@@ -19,6 +19,7 @@ pub mod domain_gate;
 pub mod fanout;
 pub mod federation;
 pub mod handlers;
+pub mod ingest;
 pub mod mcp;
 pub mod middleware;
 pub mod mqtt;

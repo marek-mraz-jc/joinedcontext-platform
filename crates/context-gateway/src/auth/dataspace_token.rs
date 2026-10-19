@@ -161,6 +161,7 @@ pub fn subject(
         did: Some(participant.to_owned()),
         agreement: Some(id.to_owned()),
         via: None,
+        client: None,
     })
 }
 

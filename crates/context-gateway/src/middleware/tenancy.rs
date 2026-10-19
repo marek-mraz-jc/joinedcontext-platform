@@ -33,11 +33,31 @@ pub const FORGEABLE: &[&str] = &[
 /// code reads yet (T-3816).
 pub const IDENTITY_PREFIX: &str = "x-jc-";
 
-/// Removes every header under [`IDENTITY_PREFIX`], each with all its values.
+/// The prefix of the provenance headers the broker stores with a write (ADR-N-054 2.3, DM-112):
+/// only the gateway sets one, so a client's is removed whatever its name.
+pub const PROVENANCE_PREFIX: &str = "jc-provenance-";
+/// The path a write came through: `pipeline`, `ui` or `api`.
+pub const PROVENANCE_CHANNEL: HeaderName = HeaderName::from_static("jc-provenance-channel");
+/// Who wrote, as the audit log names them (`user:…`, `serviceAccount:…`, a DID), percent-encoded.
+pub const PROVENANCE_ACTOR: HeaderName = HeaderName::from_static("jc-provenance-actor");
+/// The grant of `versions=all` (ADR-N-054 2.4): only the gateway may set it.
+pub const READ_VERSIONS: &str = "jc-read-versions";
+/// Why a write was made, in the caller's words (DM-113): the one provenance header a caller sets.
+pub const REASON: HeaderName = HeaderName::from_static("jc-reason");
+/// The Keycloak client of the Portal's UI: a person's write through it is channel `ui`.
+pub const PORTAL_UI_CLIENT: &str = "portal-ui";
+
+/// Removes every header under [`IDENTITY_PREFIX`] and [`PROVENANCE_PREFIX`], and
+/// [`READ_VERSIONS`], each with all its values.
 fn drop_identity(headers: &mut HeaderMap) {
     let names: Vec<HeaderName> = headers
         .keys()
-        .filter(|name| name.as_str().starts_with(IDENTITY_PREFIX))
+        .filter(|name| {
+            let name = name.as_str();
+            name.starts_with(IDENTITY_PREFIX)
+                || name.starts_with(PROVENANCE_PREFIX)
+                || name == READ_VERSIONS
+        })
         .cloned()
         .collect();
     for name in names {
@@ -109,6 +129,9 @@ pub fn pin_caller(
         while headers.remove(&name).is_some() {}
     }
     drop_identity(headers);
+    let (channel, actor) = provenance(subject);
+    headers.insert(PROVENANCE_CHANNEL, HeaderValue::from_static(channel));
+    one(headers, PROVENANCE_ACTOR, Some(&actor));
     if subject.agreement.is_some() {
         one(headers, DID, subject.did.as_deref());
         return Ok(());
@@ -123,6 +146,20 @@ pub fn pin_caller(
         headers.insert(RESTRICTED, HeaderValue::from_static("true"));
     }
     Ok(())
+}
+
+/// The channel and the actor of a write by `subject` (ADR-N-054 2.3, DM-111): a Pipeline's
+/// derived account is `pipeline`, a person signed in to the Portal's UI is `ui`, everyone else
+/// `api`; the actor is the verified principal, never anything the request says.
+pub fn provenance(subject: &Subject) -> (&'static str, String) {
+    let channel = match (&subject.user, &subject.service_account) {
+        (None, Some(account)) if jc_core::kinds::pipeline_identity::is_derived(account) => {
+            "pipeline"
+        }
+        (Some(_), _) if subject.client.as_deref() == Some(PORTAL_UI_CLIENT) => "ui",
+        _ => "api",
+    };
+    (channel, crate::auth::subject::principal_of(subject))
 }
 
 fn one(headers: &mut HeaderMap, name: HeaderName, value: Option<&str>) {
@@ -177,4 +214,53 @@ pub fn as_gateway(headers: &mut HeaderMap) {
     drop_identity(headers);
     headers.insert(CLIENT, HeaderValue::from_static(GATEWAY_CLIENT));
     headers.insert(ROLES, HeaderValue::from_static(""));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_channel_and_actor_come_from_the_verified_subject() {
+        let account = |name: &str| Subject {
+            service_account: Some(name.to_owned()),
+            ..Subject::default()
+        };
+        assert_eq!(
+            provenance(&account("pl-parking")),
+            ("pipeline", "serviceAccount:pl-parking".to_owned())
+        );
+        assert_eq!(provenance(&account("reporting")).0, "api");
+        let person = |client: Option<&str>| Subject {
+            user: Some("jana".to_owned()),
+            client: client.map(str::to_owned),
+            ..Subject::default()
+        };
+        assert_eq!(
+            provenance(&person(Some(PORTAL_UI_CLIENT))),
+            ("ui", "user:jana".to_owned())
+        );
+        assert_eq!(provenance(&person(Some("my-app"))).0, "api");
+        assert_eq!(provenance(&person(None)).0, "api");
+        // a person is never `pipeline`, whatever account their call names
+        let mut odd = person(None);
+        odd.service_account = Some("pl-x".to_owned());
+        assert_eq!(provenance(&odd).0, "api");
+        assert_eq!(
+            provenance(&Subject::default()),
+            ("api", "anonymous".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_clients_provenance_headers_never_survive() {
+        let mut headers = HeaderMap::new();
+        for name in ["jc-provenance-actor", "jc-provenance-x", "jc-read-versions"] {
+            headers.append(name, HeaderValue::from_static("forged"));
+            headers.append(name, HeaderValue::from_static("twice"));
+        }
+        headers.insert(REASON, HeaderValue::from_static("kept"));
+        drop_identity(&mut headers);
+        assert_eq!(headers.len(), 1, "{headers:?}");
+    }
 }

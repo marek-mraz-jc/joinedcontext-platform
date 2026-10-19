@@ -223,3 +223,61 @@ def test_an_enum_without_titles_gets_no_title_keywords():
         "        description: Roads and public transport\n", "").replace("        title: Weather\n", ""))
     enum = schema["definitions"]["AlertCategory"]
     assert "x-enum-titles" not in enum and "x-enum-descriptions" not in enum
+
+
+PERSONAL_MODEL = """id: https://banskabystrica.sk/ns/trips
+name: trips
+prefixes: {linkml: 'https://w3id.org/linkml/', bb: 'https://banskabystrica.sk/ns/'}
+default_prefix: bb
+default_range: string
+imports: [linkml:types]
+classes:
+  Station: {class_uri: 'bb:Station', slots: [id, startStation]}
+  BikeTrip:
+    class_uri: 'bb:BikeTrip'
+    annotations: {personalData: true, legalBasis: public-task, maxRetention: P90D, dataSubjectRef: rider}
+    slots: [id, rider, location, startStation, endStation]
+slots:
+  id: {identifier: true}
+  rider: {slot_uri: 'bb:rider', annotations: {personalData: true, ingest: keyedHash}}
+  location: {slot_uri: 'bb:location', annotations: {personalData: true, ingest: drop}}
+  startStation: {slot_uri: 'bb:startStation'}
+  endStation: {slot_uri: 'bb:endStation', annotations: {personalData: true}}
+"""
+
+
+def test_personal_data_marks_travel_with_the_schema(tmp_path):
+    """ADR-N-054 2.6 (DM-120..DM-122): the gateway reads which slots are personal and their
+    `ingest` from the schema; an unmarked slot of a personal class carries nothing."""
+    source = tmp_path / "trips.yaml"
+    source.write_text(PERSONAL_MODEL)
+    schema = compile_schema(str(source))
+    trip = schema["definitions"]["BikeTrip"]
+    assert trip["x-personal-data"] is True
+    assert (trip["x-max-retention"], trip["x-data-subject-ref"]) == ("P90D", "rider")
+    props = trip["properties"]
+    assert (props["rider"]["x-personal-data"], props["rider"]["x-ingest"]) == (True, "keyedHash")
+    assert props["location"]["x-ingest"] == "drop"
+    assert "x-personal-data" not in props["startStation"]
+    assert props["endStation"]["x-personal-data"] is True and "x-ingest" not in props["endStation"]
+    station = schema["definitions"]["Station"]
+    assert "x-personal-data" not in station and "x-personal-data" not in station["properties"]["startStation"]
+
+
+@pytest.mark.parametrize(
+    "slot, message",
+    [
+        ("rider: {slot_uri: 'bb:rider', annotations: {personalData: true, ingest: shred}}", "shred"),
+        ("rider: {slot_uri: 'bb:rider', annotations: {ingest: drop}}", "needs personalData"),
+    ],
+)
+def test_an_ingest_the_gateway_cannot_apply_is_refused(tmp_path, slot, message):
+    source = tmp_path / "trips.yaml"
+    source.write_text(
+        PERSONAL_MODEL.replace(
+            "  rider: {slot_uri: 'bb:rider', annotations: {personalData: true, ingest: keyedHash}}",
+            "  " + slot,
+        )
+    )
+    with pytest.raises(Exception, match=message):
+        compile_schema(str(source))

@@ -162,7 +162,9 @@ async fn send(
 ) -> (StatusCode, axum::http::HeaderMap, Value) {
     let mut request = Request::builder()
         .method(method)
-        .uri(format!("/api/endpoint/{slug}/odata/v4{rest}"));
+        .uri(format!("/api/endpoint/{slug}/odata/v4{rest}"))
+        // a delete names why (DM-113)
+        .header("jc-reason", "test");
     let body = match body {
         Some(body) => {
             request = request.header(header::CONTENT_TYPE, "application/json");

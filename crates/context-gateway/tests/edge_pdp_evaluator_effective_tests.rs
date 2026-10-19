@@ -61,6 +61,7 @@ fn jana() -> Subject {
         did: Some("did:web:banskabystrica.sk:agents:kpi".to_owned()),
         agreement: None,
         via: None,
+        client: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn a_principal_kind_matches_only_its_own_field() {
         agreement: None,
         // The account a delegated call came through is never a principal of it (AG-95).
         via: Some("shared-name".to_owned()),
+        client: Some("shared-name".to_owned()),
     };
 
     assert_eq!(
@@ -302,4 +304,64 @@ information:
     );
 
     assert_eq!(effective(&jana(), &[write_only], now()).len(), 1);
+}
+
+/// ADR-N-054, T-4666: `readVersions` is granted by a Policy naming it for this caller, in force,
+/// and not taken away by a prohibition; a Policy granting only operations grants no action.
+#[test]
+fn a_platform_action_is_granted_only_by_a_policy_that_names_it() {
+    use context_gateway::pdp::evaluator::grants_action;
+    use jc_core::kinds::PlatformAction::{PersonalData, ReadVersions};
+    let action = |assignee: &str, extra: &str| {
+        policy(&format!(
+            "contextSpaceRef: ovzdusie\nassigner: did:web:banskabystrica.sk\n\
+             assignee: {assignee}\nactions: [readVersions]\n{extra}"
+        ))
+    };
+    let steward = Subject {
+        user: Some("jana".to_owned()),
+        roles: BTreeSet::from(["steward".to_owned()]),
+        ..Subject::default()
+    };
+    let grant = action("{ kind: role, id: steward }", "");
+    assert!(grants_action(
+        &steward,
+        ReadVersions,
+        std::slice::from_ref(&grant),
+        now()
+    ));
+    assert!(!grants_action(
+        &steward,
+        PersonalData,
+        std::slice::from_ref(&grant),
+        now()
+    ));
+    assert!(!grants_action(
+        &steward,
+        ReadVersions,
+        &[to("role", "steward")],
+        now()
+    ));
+    assert!(!grants_action(
+        &steward,
+        ReadVersions,
+        &[action("{ kind: role, id: auditor }", "")],
+        now()
+    ));
+    assert!(!grants_action(
+        &steward,
+        ReadVersions,
+        &[action(
+            "{ kind: role, id: steward }",
+            "validity: { to: 2026-01-01T00:00:00Z }\n"
+        )],
+        now()
+    ));
+    let taken = action("{ kind: user, id: jana }", "effect: prohibition\n");
+    assert!(!grants_action(
+        &steward,
+        ReadVersions,
+        &[grant, taken],
+        now()
+    ));
 }
