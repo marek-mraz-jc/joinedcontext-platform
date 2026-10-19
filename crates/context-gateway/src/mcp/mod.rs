@@ -8,6 +8,7 @@ use axum::Router;
 use std::sync::{Arc, LazyLock};
 pub mod catalog;
 pub mod describe;
+pub mod documents;
 pub mod endpoint;
 pub mod hub;
 pub mod jsonrpc;
@@ -84,6 +85,19 @@ mod tests {
         }
     }
 
+    /// AG-124: list_endpoints names every EU theme code it filters by, with its label.
+    #[test]
+    fn list_endpoints_names_every_theme_code() {
+        let tool = hub::list_endpoints_tool();
+        let described = tool["inputSchema"]["properties"]["theme"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        for theme in jc_core::kinds::DataTheme::ALL {
+            let named = format!("{} {}", theme.code(), theme.label_in("en"));
+            assert!(described.contains(&named), "{named} in {described}");
+        }
+    }
+
     /// T-4502: an argument a tool takes is explained in the primer, so a new one without its
     /// line fails here.
     #[test]
@@ -95,6 +109,7 @@ mod tests {
         names(&hub::list_endpoints_tool()["inputSchema"], &mut arguments);
         names(&hub::get_endpoint_tool()["inputSchema"], &mut arguments);
         names(&super::search::tool()["inputSchema"], &mut arguments);
+        names(&super::documents::tool("")["inputSchema"], &mut arguments);
         arguments.sort();
         arguments.dedup();
         let unexplained: Vec<&String> = arguments

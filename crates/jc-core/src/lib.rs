@@ -12,6 +12,7 @@
 pub mod auth;
 pub mod classification;
 pub mod cron;
+pub mod display_order;
 pub mod envelope;
 pub mod error;
 pub mod field_order;
@@ -25,6 +26,7 @@ pub mod ngsi_catalog;
 pub mod project;
 pub mod qb;
 pub mod quality;
+pub mod reach;
 pub mod registry;
 pub mod secret;
 pub mod units;
@@ -65,4 +67,4 @@ pub use kinds::{
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
 pub use secret::{ClientCredential, Secret};
-pub use urn::{apply_render_prefix, EntityRef, Prefixed, Urn};
+pub use urn::{apply_render_prefix, type_of_id, EntityRef, Prefixed, Urn};

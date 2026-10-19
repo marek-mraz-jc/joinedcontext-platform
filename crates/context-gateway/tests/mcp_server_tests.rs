@@ -90,6 +90,7 @@ fn server(name: &str, members: &[&str], audience: Audience) -> McpServer {
         endpoints: None,
         audience,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     }
 }
 

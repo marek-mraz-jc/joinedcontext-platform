@@ -13,8 +13,8 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    endpoint_page, hybrid_search, project_scope, search_projects, sources_by_project, titles,
-    Search, DIMENSIONS, MIGRATOR,
+    dataset_page, dataset_page_projects, endpoint_page, hybrid_search, project_scope,
+    search_projects, sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -144,6 +144,7 @@ async fn search(
             sources: &sources,
             public_only,
             limit: 10,
+            lang: None,
         },
     )
     .await
@@ -490,6 +491,24 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
         Some("https://gw.example/api/endpoint/od-air/schema/index.json"),
         "with no dataset page the Endpoint's own page is still named"
     );
+    // T-4625: rows of type A read through another Endpoint of the space cite the dataset page
+    // whose NGSI-LD example serves A from a sibling; another type or no sibling finds nothing.
+    let siblings = ["od-all".to_owned(), "od-air".to_owned()];
+    let typed = dataset_page(&mut tx, &siblings, "A", &both, true)
+        .await
+        .expect("page");
+    assert_eq!(typed.as_deref(), Some("https://hel-ckan.example/#0"));
+    let projects = [("helsinki".to_owned(), both.to_vec())];
+    for (slugs, kind, found) in [
+        (&siblings[..], "A", Some("https://hel-ckan.example/#0")),
+        (&siblings[..], "B", None),
+        (&siblings[..1], "A", None),
+    ] {
+        let page = dataset_page_projects(&pool, slugs, kind, &projects, true)
+            .await
+            .expect("page");
+        assert_eq!(page.as_deref(), found, "{slugs:?} {kind}");
+    }
     tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
 }
@@ -626,19 +645,30 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
                     sources: &[],
                     public_only: true,
                     limit: 10,
+                    lang: None,
                 },
             )
             .await
             .expect("search");
-            hits.iter().map(|h| h.chunk).collect::<Vec<_>>()
+            hits.iter()
+                .map(|h| (h.chunk, h.site.clone()))
+                .collect::<Vec<_>>()
         }
     };
+    let chunks = |hits: Vec<(i64, String)>| hits.into_iter().map(|(c, _)| c).collect::<Vec<_>>();
     let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    let both = found(sources_by_project(
+    let sited = found(sources_by_project(
         "banskabystrica",
         &names(&["web", "bbsk/web"]),
     ))
     .await;
+    // T-4680: each passage names the source it is from, its project's own.
+    assert!(
+        sited.contains(&(city[0], "banskabystrica/web".to_owned()))
+            && sited.contains(&(region[0], "bbsk/web".to_owned())),
+        "{sited:?}"
+    );
+    let both = chunks(sited);
     assert_eq!(both.len(), 2, "{both:?}");
     assert!(
         both.contains(&city[0]) && both.contains(&region[0]),
@@ -648,9 +678,9 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
     // The closer vector ranks first across the two projects' rankings.
     assert_eq!(both[0], city[0]);
 
-    let own = found(sources_by_project("banskabystrica", &names(&["web"]))).await;
+    let own = chunks(found(sources_by_project("banskabystrica", &names(&["web"]))).await);
     assert_eq!(own, city);
-    let theirs = found(sources_by_project("banskabystrica", &names(&["bbsk/web"]))).await;
+    let theirs = chunks(found(sources_by_project("banskabystrica", &names(&["bbsk/web"]))).await);
     assert_eq!(theirs, region);
     app.close().await;
     drop_database(admin, pool, &name).await;

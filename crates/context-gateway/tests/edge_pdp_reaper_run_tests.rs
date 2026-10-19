@@ -81,11 +81,10 @@ fn gateway_on(dir: &Path) -> Arc<Gateway> {
     )
 }
 
-/// Lets the spawned loop run without moving the clock.
+/// Lets the spawned loop run its tick to the end: the tick is on the blocking pool (T-4591), and
+/// the paused clock moves this millisecond only once nothing runs, the blocking tick included.
 async fn settle() {
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 }
 
 /// Moves the clock by whole intervals and lets the loop run at each of them.
@@ -278,14 +277,15 @@ async fn a_withdrawal_is_served_for_less_than_one_interval() {
 
     let dir = repo("bound");
     let gateway = gateway_on(&dir);
-    let started = tokio::time::Instant::now();
     tokio::spawn(Reaper::new(Arc::clone(&gateway), &dir).run());
     settle().await;
+    let started = tokio::time::Instant::now();
 
     std::fs::remove_file(dir.join("endpoint.yaml")).expect("withdraw the endpoint");
     let mut waited = Duration::ZERO;
     while gateway.resolver.resolve(SLUG).is_some() && waited < Duration::from_secs(5) {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 49 + the settle's 1: one look every 50 ms.
+        tokio::time::sleep(Duration::from_millis(49)).await;
         settle().await;
         waited = started.elapsed();
     }

@@ -172,6 +172,7 @@ pub fn addressed(name: &str) -> Option<McpServer> {
         endpoints: None,
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     })
 }
 
@@ -184,6 +185,7 @@ fn server_of(connector: &Connector) -> Option<McpServer> {
         spaces: select.spaces,
         domains: select.domains,
         themes: select.themes,
+        types: None,
         access_level: select.access_level,
     });
     server.endpoints = select.endpoints;

@@ -27,7 +27,17 @@
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
       declined: "Na túto otázku asistent neodpovedá.",
-      choose: "Vyberte jazyk", moreInfo: "Viac", lessInfo: "Menej" },
+      choose: "Vyberte jazyk",
+      verify: "Dôležité informácie si prosím overte.", privacy: "Súkromie", aboutTitle: "O tomto asistentovi",
+      aboutAi: "Odpovede vytvára umelá inteligencia a môžu obsahovať chyby. Dôležité informácie si overte v oficiálnych zdrojoch. Nevkladajte citlivé osobné údaje.",
+      remember: "Zapamätať konverzáciu v tomto prehliadači",
+      rememberHint: "Konverzácia ostane v tomto prehliadači najviac 90 dní od poslednej zmeny; vypnutím ju hneď vymažete. Na zdieľanom zariadení túto možnosť nezapínajte.",
+      keptHeading: "Konverzácie",
+      keptDays: "Obsah konverzácie uchovávame {days} dní na poskytovanie služby, spätnú kontrolu a riešenie chýb. História zahŕňa otázky a zobrazené odpovede.",
+      keptNone: "Obsah konverzácií neuchovávame.",
+      askHeading: "Otázky k osobným údajom",
+      askData: "Chcete sa opýtať na spracúvanie údajov alebo požiadať o prístup, opravu či vymazanie? Napíšte nám:",
+      documents: "Informácie o ochrane osobných údajov", moreInfo: "Viac", lessInfo: "Menej", tabTable: "Tabuľka", tabMap: "Mapa", chart: "Graf" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -46,7 +56,17 @@
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
       declined: "The assistant does not answer this question.",
-      choose: "Choose your language", moreInfo: "More", lessInfo: "Less" },
+      choose: "Choose your language",
+      verify: "Please verify important information.", privacy: "Privacy", aboutTitle: "About this assistant",
+      aboutAi: "Answers are made by artificial intelligence and may contain mistakes. Check important information in official sources. Do not enter sensitive personal data.",
+      remember: "Remember the conversation in this browser",
+      rememberHint: "The conversation stays in this browser for at most 90 days after its last change; switching it off deletes it at once. Do not switch this on on a shared device.",
+      keptHeading: "Conversations",
+      keptDays: "We keep the content of conversations for {days} days to provide the service, review it and fix errors. The history holds the questions and the answers shown.",
+      keptNone: "We keep no conversation content.",
+      askHeading: "Questions about personal data",
+      askData: "Want to ask about how data is processed, or request access, correction or erasure? Write to us:",
+      documents: "Privacy information", moreInfo: "More", lessInfo: "Less", tabTable: "Table", tabMap: "Map", chart: "Chart" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -65,7 +85,17 @@
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
       declined: "Na tuto otázku asistent neodpovídá.",
-      choose: "Vyberte jazyk", moreInfo: "Více", lessInfo: "Méně" }
+      choose: "Vyberte jazyk",
+      verify: "Důležité informace si prosím ověřte.", privacy: "Soukromí", aboutTitle: "O tomto asistentovi",
+      aboutAi: "Odpovědi vytváří umělá inteligence a mohou obsahovat chyby. Důležité informace si ověřte v oficiálních zdrojích. Nevkládejte citlivé osobní údaje.",
+      remember: "Zapamatovat konverzaci v tomto prohlížeči",
+      rememberHint: "Konverzace zůstane v tomto prohlížeči nejvýše 90 dní od poslední změny; vypnutím ji hned smažete. Na sdíleném zařízení tuto možnost nezapínejte.",
+      keptHeading: "Konverzace",
+      keptDays: "Obsah konverzace uchováváme {days} dní pro poskytování služby, zpětnou kontrolu a řešení chyb. Historie zahrnuje otázky a zobrazené odpovědi.",
+      keptNone: "Obsah konverzací neuchováváme.",
+      askHeading: "Dotazy k osobním údajům",
+      askData: "Chcete se zeptat na zpracování údajů nebo požádat o přístup, opravu či smazání? Napište nám:",
+      documents: "Informace o ochraně osobních údajů", moreInfo: "Více", lessInfo: "Méně", tabTable: "Tabulka", tabMap: "Mapa", chart: "Graf" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -282,35 +312,38 @@
   form.appendChild(send);
   form.appendChild(stop);
   var foot = el("footer", "jc-foot");
-  // The disclaimer's first sentence, whole and wrapping, then a "More" link that opens the rest
-  // (T-4635); no button of its own shape.
-  var notice = el("p", "jc-notice");
-  var lead = el("span", "jc-disclaimer");
-  var rest = el("span", "jc-disclaimer-rest");
-  rest.id = "jc-disclaimer-rest";
-  rest.hidden = true;
-  var more = el("button", "jc-more");
-  more.type = "button";
-  more.setAttribute("aria-controls", "jc-disclaimer-rest");
-  more.setAttribute("aria-expanded", "false");
-  more.addEventListener("click", function () {
-    var open = more.getAttribute("aria-expanded") !== "true";
-    more.setAttribute("aria-expanded", String(open));
-    rest.hidden = !open;
-    more.textContent = open ? w.lessInfo : w.moreInfo;
-  });
-  notice.appendChild(lead);
-  notice.appendChild(document.createTextNode(" "));
-  notice.appendChild(rest);
-  notice.appendChild(document.createTextNode(" "));
-  notice.appendChild(more);
   foot.appendChild(form);
-  foot.appendChild(notice);
+  // Under every chat (API/05 §1.6, T-4670): verify what matters, and the privacy dialog, which
+  // carries the deployment's disclaimer.
+  var line = el("p", "jc-privacy-line");
+  line.appendChild(words(el("span"), "verify"));
+  line.appendChild(document.createTextNode(" · "));
+  var privacyOpen = button("jc-more", "privacy");
+  privacyOpen.setAttribute("aria-haspopup", "dialog");
+  line.appendChild(privacyOpen);
+  foot.appendChild(line);
+  // A modal <dialog>: Escape closes it, the page behind is inert, and Tab cycles inside it.
+  var about = el("dialog", "jc-about");
+  about.setAttribute("aria-labelledby", "jc-about-title");
+  var aboutTitle = words(el("h2"), "aboutTitle");
+  aboutTitle.id = "jc-about-title";
+  var aboutLead = el("p");
+  var aboutBody = el("div", "jc-about-body");
+  var rememberLabel = el("label", "jc-remember");
+  var rememberBox = el("input");
+  rememberBox.type = "checkbox";
+  rememberBox.setAttribute("role", "switch");
+  rememberLabel.appendChild(rememberBox);
+  rememberLabel.appendChild(words(el("span"), "remember"));
+  var rememberHint = words(el("p", "jc-hint"), "rememberHint");
+  var aboutClose = button("jc-about-close", "close");
+  [aboutTitle, aboutLead, rememberLabel, rememberHint, aboutBody, aboutClose].forEach(function (n) { about.appendChild(n); });
 
   root.appendChild(head);
   if (tools) root.appendChild(tools);
   root.appendChild(log);
   root.appendChild(foot);
+  root.appendChild(about);
   root.appendChild(announce);
 
   var conversation = null;
@@ -330,10 +363,71 @@
       if (kept) sessionStorage.setItem(KEY, JSON.stringify(kept));
       else sessionStorage.removeItem(KEY);
     } catch (e) { /* not kept */ }
+    if (remembering) {
+      try { localStorage.setItem(LOCAL, JCRender.lasting(kept, new Date())); } catch (e) { /* not kept */ }
+    }
   }
+  // The visitor's own switch (T-4670): off by default; the copy in localStorage lives 90 days
+  // after its last change, and an expired one is deleted here.
+  var LOCAL = "jc-chat-remember:" + config.publicId;
+  var remembering = false;
   function kept0() {
-    try { return JCRender.restore(sessionStorage.getItem(KEY)); } catch (e) { return null; }
+    var held = null;
+    try {
+      held = JCRender.recalled(localStorage.getItem(LOCAL), new Date());
+      if (!held) localStorage.removeItem(LOCAL);
+    } catch (e) { /* storage off */ }
+    remembering = Boolean(held);
+    var session = null;
+    try { session = JCRender.restore(sessionStorage.getItem(KEY)); } catch (e) { /* storage off */ }
+    return session || (held && held.kept);
   }
+  rememberBox.addEventListener("change", function () {
+    remembering = rememberBox.checked;
+    if (remembering) keep();
+    else {
+      try { localStorage.removeItem(LOCAL); } catch (e) { /* nothing kept */ }
+    }
+  });
+
+  function fillAbout() {
+    var lines = JCRender.privacyLines(w, config.transcriptDays, config.privacy, perLanguage(config.disclaimer));
+    aboutLead.textContent = lines[0].text;
+    aboutBody.textContent = "";
+    lines.slice(1).forEach(function (l) {
+      if (l.heading) aboutBody.appendChild(el("h3", "", l.heading));
+      var p = el("p");
+      if (l.href) p.appendChild(link(l.href, l.text));
+      else p.textContent = l.text;
+      if (l.mail) {
+        var a = el("a", "", l.mail);
+        a.href = JCRender.mailto(l.mail);
+        p.appendChild(document.createTextNode(" "));
+        p.appendChild(a);
+      }
+      aboutBody.appendChild(p);
+    });
+  }
+  privacyOpen.addEventListener("click", function () {
+    fillAbout();
+    rememberBox.checked = remembering;
+    about.showModal();
+  });
+  aboutClose.addEventListener("click", function () { about.close(); });
+  about.addEventListener("keydown", function (event) {
+    if (event.key !== "Tab") return;
+    var stops = about.querySelectorAll("a[href], input, button");
+    var first = stops[0];
+    var last = stops[stops.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  about.addEventListener("close", function () { privacyOpen.focus(); });
 
   function perLanguage(map) {
     if (!map) return null;
@@ -372,12 +466,7 @@
       Array.prototype.forEach.call(picker.children, function (b) { b.setAttribute("aria-pressed", String(b.value === code)); });
     }
     if (named) retitle();
-    var parts = JCRender.notice(perLanguage(config.disclaimer));
-    lead.textContent = parts.lead;
-    rest.textContent = parts.rest;
-    notice.hidden = !parts.lead;
-    more.hidden = !parts.rest;
-    more.textContent = more.getAttribute("aria-expanded") === "true" ? w.lessInfo : w.moreInfo;
+    if (about.open) fillAbout();
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
       welcome();
@@ -686,6 +775,78 @@
   }
 
   // A data round's rows as a table with the dataset and download links (T-4140).
+  // The renderer on viz.{domain} draws maps and charts (T-4657, ADR-N-053 §2.9): each frame gets
+  // its spec by message to that origin alone, and only its own messages size it.
+  var VIZ = JCRender.vizOrigin(config.viz);
+  var vizFrames = [];
+  function vizFrame(payload, title, broken) {
+    var frame = el("iframe", "jc-viz");
+    frame.title = title;
+    frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    var message = { type: "jc-viz-show", spec: JCRender.vizSpec(payload.spec, lang), rows: payload.rows, lang: lang };
+    frame.addEventListener("load", function () {
+      frame.contentWindow.postMessage(message, VIZ);
+    });
+    frame.src = VIZ + "/#show";
+    vizFrames.push({ frame: frame, broken: broken });
+    return frame;
+  }
+  window.addEventListener("message", function (event) {
+    if (!VIZ || event.origin !== VIZ) return;
+    var hit = vizFrames.filter(function (f) { return f.frame.contentWindow === event.source; })[0];
+    var data = event.data || {};
+    if (!hit) return;
+    if (data.type === "jc-viz-height" && typeof data.height === "number") {
+      hit.frame.style.height = Math.min(Math.max(Math.round(data.height), 120), 900) + "px";
+    }
+    if (data.type === "jc-viz-error") hit.broken();
+  });
+
+  // A chart the model asked for, drawn from a table's rows by the server's code (T-4657).
+  function showVisualization(item, data) {
+    if (!VIZ || !data || !data.spec || typeof data.spec !== "object") return;
+    var figure = el("figure", "jc-data jc-viz-card");
+    var title = typeof data.spec.title === "string" && data.spec.title ? data.spec.title : w.chart;
+    figure.appendChild(vizFrame(data, title, function () { figure.remove(); }));
+    item.insertBefore(figure, item.status && item.status.parentNode === item ? item.status : null);
+  }
+
+  // "Table | Map" over a data card whose rows have places; the map loads when it is first shown,
+  // so it never holds up the answer, and a map that fails leaves the table (T-4657).
+  function mapTabs(figure, scroll, drawn, data) {
+    var tabs = el("div", "jc-tabs");
+    tabs.setAttribute("role", "tablist");
+    var box = el("div", "jc-viz-box");
+    var tab = function (text) {
+      var b = tabs.appendChild(el("button", "jc-tab", text));
+      b.type = "button";
+      b.setAttribute("role", "tab");
+      return b;
+    };
+    var toTable = tab(w.tabTable);
+    var toMap = tab(w.tabMap);
+    var pick = function (map) {
+      toTable.setAttribute("aria-selected", String(!map));
+      toMap.setAttribute("aria-selected", String(map));
+      scroll.hidden = map;
+      if (drawn) drawn.hidden = map;
+      box.hidden = !map;
+      if (map && !box.firstChild) {
+        box.appendChild(vizFrame({ spec: data.map }, w.tabMap, function () {
+          tabs.remove();
+          box.remove();
+          pick(false);
+        }));
+      }
+    };
+    toTable.addEventListener("click", function () { pick(false); });
+    toMap.addEventListener("click", function () { pick(true); });
+    figure.insertBefore(tabs, scroll);
+    figure.insertBefore(box, scroll);
+    pick(JCRender.mapFirst(data));
+  }
+
   function showData(item, data) {
     var shown = JCRender.table(data, lang);
     if (!shown) return;
@@ -717,6 +878,7 @@
     figure.appendChild(scroll);
     var drawn = plot(JCRender.chart(data));
     if (drawn) figure.appendChild(drawn);
+    if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
     if (shown.dataset || shown.download) {
       var links = el("p", "jc-data-links");
       if (shown.dataset) links.appendChild(link(shown.dataset, w.dataset));
@@ -801,6 +963,8 @@
       item.appendChild(details);
     } else if (name === "data") {
       showData(item, data);
+    } else if (name === "visualization") {
+      showVisualization(item, data);
     } else if (name === "delta" && typeof data.text === "string") {
       if (item.status) {
         item.status.remove();
@@ -1037,6 +1201,8 @@
   });
   document.addEventListener("keydown", function (event) {
     // Expanded, Escape first brings the panel back to its size; then it closes.
+    // The privacy dialog closes itself on Escape; the panel stays.
+    if (about.open) return;
     if (event.key === "Escape" && expanded) resize(false);
     else if (event.key === "Escape") closePanel();
   });

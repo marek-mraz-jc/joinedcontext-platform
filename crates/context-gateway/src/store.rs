@@ -15,10 +15,13 @@ use crate::relationships::RelationshipRules;
 use crate::resolver::{DeclaredTypes, Endpoint, EndpointRoles, Model, Space};
 use crate::units::UnitRules;
 use crate::view_mapping::ViewMapping;
+use jc_core::kinds::mcp_server::{knowledge_source_id, Select};
 use jc_core::kinds::{
-    Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, MappingSpec,
-    McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind, ProjectSpec, Representation,
+    AssistantDeploymentSpec, Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec,
+    EndpointSpec, MappingSpec, McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind,
+    ProjectSpec, Representation,
 };
+use jc_core::reach::{resolve_connectors, EndpointFacts};
 use jc_core::Urn;
 use jc_manifest::loader::{RawManifest, Repository};
 use jc_manifest::model_schema::ModelSchema;
@@ -323,6 +326,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
     let endpoints = endpoints_from(repo, Some(root), &models);
     let homes = brokers_of(repo, &endpoints);
     let mappings = mappings_of(repo, Some(root), &endpoints);
+    let servers = servers_of(repo, &endpoints);
     (
         endpoints,
         spaces_from(repo, &models),
@@ -330,7 +334,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         federations_of(repo),
         agreements_of(repo),
         limits_of(repo),
-        servers_of(repo),
+        servers,
         homes,
         crate::mqtt::brokers_of(repo),
         mappings,
@@ -341,7 +345,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
 /// The named MCP servers the repository declares, each member resolved to its Endpoint's slug
 /// (ADR-N-043). A member that names no Endpoint here is left out with a line in the log; a
 /// server keeps serving the members that remain, which `jcctl validate` refuses before merge.
-pub fn servers_of(repo: &Repository) -> McpServers {
+pub fn servers_of(repo: &Repository, endpoints: &[Endpoint]) -> McpServers {
     let slugs: BTreeMap<(String, String), String> = repo
         .iter()
         .filter(|(id, _)| id.kind == "Endpoint")
@@ -376,14 +380,11 @@ pub fn servers_of(repo: &Repository) -> McpServers {
                 slug.cloned()
             })
             .collect();
-        let text = |key| {
-            let texts = language_map(&resource.manifest.metadata.rest, key);
-            texts
-                .get("")
-                .or_else(|| texts.get("en"))
-                .or_else(|| texts.values().next())
-                .cloned()
-        };
+        let text = |key| manifest_text(&resource.manifest, key);
+        let knowledge_sources = spec
+            .knowledge_source_ids(&project)
+            .map(|(project, source)| (project.to_owned(), source.to_owned()))
+            .collect();
         servers.push(McpServer {
             title: text("title"),
             description: text("description"),
@@ -392,8 +393,131 @@ pub fn servers_of(repo: &Repository) -> McpServers {
             select: spec.select,
             endpoints: None,
             audience: spec.audience,
+            knowledge_sources,
             allowed_projects: spec.allowed_projects,
             project,
+        });
+    }
+    let mut deployments = deployment_servers(repo, &slugs, endpoints);
+    // A publicId two deployments declare is nobody's: both answer as an unknown server (EP-137).
+    let twice: BTreeSet<String> = deployments
+        .iter()
+        .enumerate()
+        .filter(|(i, d)| deployments[..*i].iter().any(|e| e.name == d.name))
+        .map(|(_, d)| d.name.clone())
+        .collect();
+    for name in &twice {
+        tracing::warn!(public_id = %name, "two AssistantDeployments declare this publicId; neither MCP server is served");
+    }
+    deployments.retain(|d| !twice.contains(&d.name));
+    servers.extend(deployments);
+    servers
+}
+
+/// Every enabled AssistantDeployment as its own read-only server, `/api/mcp/d/{publicId}`
+/// (T-4691, EP-136): its Endpoints exactly as the one resolver gives them (connectors ∪ select ∪
+/// the named server it reads, − exclude, inside the project's reach, AG-121) and its knowledge
+/// sources. An anonymous channel resolves public Endpoints alone, and `serve` drops a narrower
+/// member again; `internal` asks for an organization token.
+fn deployment_servers(
+    repo: &Repository,
+    slugs: &BTreeMap<(String, String), String>,
+    endpoints: &[Endpoint],
+) -> McpServers {
+    let names: BTreeMap<&str, &(String, String)> =
+        slugs.iter().map(|(id, slug)| (slug.as_str(), id)).collect();
+    let facts: Vec<EndpointFacts> = endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let (_, name) = names.get(endpoint.slug.as_str())?;
+            Some(EndpointFacts {
+                name: name.clone(),
+                ..crate::mcp::server::facts(endpoint)
+            })
+        })
+        .collect();
+    let named: BTreeMap<(String, String), McpServerSpec> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "McpServer")
+        .filter_map(|(id, resource)| {
+            let spec = spec_of::<McpServerSpec>(&resource.manifest)?;
+            Some((
+                (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                spec,
+            ))
+        })
+        .collect();
+    // `org/all` has no manifest until the organization declares one (EP-122).
+    let org_all = McpServerSpec {
+        members: Vec::new(),
+        select: Some(Select::default()),
+        audience: Audience::Organization,
+        allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
+    };
+    let mut servers = Vec::new();
+    for (id, resource) in repo.iter() {
+        if id.kind != "AssistantDeployment" {
+            continue;
+        }
+        let Some(spec) = spec_of::<AssistantDeploymentSpec>(&resource.manifest) else {
+            continue;
+        };
+        if let Err(error) = spec.validate() {
+            tracing::warn!(deployment = %id.name, %error, "the AssistantDeployment's MCP server is not served");
+            continue;
+        }
+        if !spec.enabled {
+            continue;
+        }
+        let project = id.namespace.clone().unwrap_or_default();
+        let server = spec.mcp_server.as_deref().and_then(|reads| {
+            let (namespace, name) = reads.split_once('/')?;
+            let found = named
+                .get(&(namespace.to_owned(), name.to_owned()))
+                .or_else(|| {
+                    (namespace == jc_core::envelope::ORG_NAMESPACE
+                        && name == crate::mcp::server::ORG_ALL)
+                        .then_some(&org_all)
+                });
+            if found.is_none() {
+                tracing::warn!(deployment = %id.name, server = %reads, "the McpServer it reads is not declared");
+            }
+            Some((namespace, found?))
+        });
+        let resolution = resolve_connectors(&project, &spec, &facts, server);
+        if !resolution.omitted.is_empty() {
+            tracing::warn!(deployment = %id.name, omitted = resolution.omitted.len(), "the deployment resolves more Endpoints than it may read; the first by slug are served");
+        }
+        let members = resolution.endpoints.into_iter().map(|e| e.slug).collect();
+        // The chat's title when the manifest has none; never the system prompt, which stays
+        // the assistant's own.
+        let title = manifest_text(&resource.manifest, "title").or_else(|| {
+            let theme = spec.theme.as_ref()?.title.as_ref()?;
+            theme.texts().first().map(|(_, text)| (*text).to_owned())
+        });
+        servers.push(McpServer {
+            project: crate::mcp::server::DEPLOYMENTS.to_owned(),
+            name: spec.public_id.clone(),
+            title,
+            description: manifest_text(&resource.manifest, "description"),
+            members,
+            select: None,
+            endpoints: None,
+            audience: if spec.channel.is_anonymous() {
+                Audience::Public
+            } else {
+                Audience::Organization
+            },
+            allowed_projects: Vec::new(),
+            knowledge_sources: spec
+                .sources
+                .iter()
+                .map(|named| {
+                    let (project, source) = knowledge_source_id(named, &project);
+                    (project.to_owned(), source.to_owned())
+                })
+                .collect(),
         });
     }
     servers
@@ -510,7 +634,9 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
         let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
         let app_client = app_of(repo, &project, &id.name);
         let mut bound = match &spec.policy_ref {
-            Some(policy_ref) => bound_policy(&id.name, policy_ref, &space, named),
+            Some(policy_ref) => {
+                bound_policy(&id.name, policy_ref, (repo.org_domain(), &space), named)
+            }
             None => named.to_vec(),
         };
         if app_client.is_some() {
@@ -796,6 +922,16 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
 /// to no locale and is kept under the empty key; the legacy `{locale: text}` map is kept
 /// as it is. Anything else is a manifest the Portal would have rejected, and here it
 /// simply describes nothing.
+/// `metadata.{key}` in the default language, else English, else the first one given.
+fn manifest_text(manifest: &RawManifest, key: &str) -> Option<String> {
+    let texts = language_map(&manifest.metadata.rest, key);
+    texts
+        .get("")
+        .or_else(|| texts.get("en"))
+        .or_else(|| texts.values().next())
+        .cloned()
+}
+
 fn language_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -868,18 +1004,21 @@ fn is_own_grant(policy: &PolicySpec, project: &str, endpoint: &str) -> bool {
 ///
 /// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
 /// that Policy alone, which is how several endpoints over one space each publish a different
-/// slice of it. A reference to a Policy of another space, or to none the repository has, binds
-/// nothing and says so: an endpoint that widened to the whole space instead would publish
-/// exactly what its author narrowed away.
+/// slice of it. A reference to a Policy of another space or another organization's domain (when
+/// the load knows its own), or to none the repository has, binds nothing and says so: an
+/// endpoint that widened to the whole space instead would publish exactly what its author
+/// narrowed away.
 fn bound_policy(
     endpoint: &str,
     policy_ref: &Urn,
-    space: &str,
+    (domain, space): (Option<&str>, &str),
     named: &[(String, PolicySpec)],
 ) -> Vec<(String, PolicySpec)> {
+    let ours = domain.is_none_or(|domain| policy_ref.org_domain() == Some(domain))
+        && policy_ref.space() == Some(space);
     let bound: Vec<(String, PolicySpec)> = named
         .iter()
-        .filter(|(name, _)| policy_ref.space() == Some(space) && name == policy_ref.local_id())
+        .filter(|(name, _)| ours && name == policy_ref.local_id())
         .cloned()
         .collect();
     if bound.is_empty() {

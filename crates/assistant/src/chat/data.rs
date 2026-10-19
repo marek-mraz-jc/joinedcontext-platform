@@ -13,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 
 use super::agent::{
     fits, markers, name_sources, quoted, send, without_dangling, Ask, Citation, Connected, Event,
-    Spent, Stage, MAX_ARGUMENTS, MAX_CALLS_PER_REPLY,
+    Spent, Stage, Table, MAX_ARGUMENTS, MAX_CALLS_PER_REPLY,
 };
 use super::mcp::{cut, Tool};
 use super::model::Call;
@@ -137,6 +137,8 @@ pub struct Start {
     pub messages: Vec<Value>,
     /// Their citations, numbered from 1.
     pub citations: Vec<Citation>,
+    /// The router's tables by their citation number; the loop adds the ones it reads.
+    pub tables: Vec<(usize, Table)>,
     /// The tool calls already made: the router's reads.
     pub steps: usize,
     pub started: Instant,
@@ -153,11 +155,18 @@ pub async fn answer(
     let Start {
         mut messages,
         mut citations,
+        mut tables,
         mut steps,
         started,
     } = start;
     let offered = offered(ask.connectors);
-    let tools = specs(&offered);
+    let mut tools = specs(&offered);
+    // A chart or a map of a table, drawn by code (T-4657): offered beside the connectors' tools.
+    let viz = ask.viz.and_then(super::viz::domain);
+    if viz.is_some() && !tools.is_empty() {
+        tools.push(super::viz::tool());
+    }
+    let mut shown = false;
     let call = Call {
         model: ask.answer_model,
         max_tokens: ask.output_tokens,
@@ -226,6 +235,8 @@ pub async fn answer(
                 allow,
             )
             .await;
+        let model = call.model.unwrap_or(ask.model.name());
+        ask.trace.model("data", model, at, stepped.as_ref());
         super::agent::Stages::add(&mut spent.stages.answer, at);
         let completion = match stepped {
             Ok(completion) => completion,
@@ -276,9 +287,12 @@ pub async fn answer(
             } else {
                 steps += 1;
                 let key = format!("{name}\u{0}{arguments}");
-                match seen.get(&key) {
-                    Some(earlier) => earlier.clone(),
-                    None => {
+                match (seen.get(&key), viz) {
+                    (Some(earlier), _) => earlier.clone(),
+                    (None, Some(domain)) if name == super::viz::TOOL => {
+                        show(&tables, arguments, domain, &mut shown, events).await
+                    }
+                    (None, _) => {
                         let left = ask.data_time.saturating_sub(started.elapsed());
                         let content = step(
                             ask,
@@ -286,6 +300,7 @@ pub async fn answer(
                             (name, arguments),
                             left,
                             &mut citations,
+                            &mut tables,
                             events,
                         )
                         .await;
@@ -296,6 +311,28 @@ pub async fn answer(
             };
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
         }
+    }
+}
+
+/// One `show_visualization` call (T-4657): built from a table of this answer and sent as a
+/// `visualization` event, at most once; what is wrong goes back to the model.
+async fn show(
+    tables: &[(usize, Table)],
+    arguments: &str,
+    domain: &str,
+    shown: &mut bool,
+    events: &Sender<Event>,
+) -> String {
+    if *shown {
+        return "Not shown: one chart per answer, and this answer has one. Answer in text.".into();
+    }
+    match super::viz::build(arguments, tables, domain) {
+        Ok(visualization) => {
+            *shown = true;
+            send(events, Event::Visualization(visualization)).await;
+            "Shown to the person. Do not describe the picture; answer in text, naming the few values that matter.".into()
+        }
+        Err(why) => why,
     }
 }
 
@@ -310,6 +347,7 @@ async fn step(
     (name, arguments): (&str, &str),
     left: Duration,
     citations: &mut Vec<Citation>,
+    tables: &mut Vec<(usize, Table)>,
     events: &Sender<Event>,
 ) -> String {
     let Some(o) = offered.iter().find(|o| o.name == name) else {
@@ -343,11 +381,13 @@ async fn step(
     )
     .await
     .unwrap_or_else(|_| Err("the source did not answer within the question's time".into()));
+    ask.trace
+        .tool(&o.tool.name, Some(&endpoint), &arguments, began, &answered);
     let ms = began.elapsed().as_millis() as u64;
     match answered {
         Ok(text) => {
             send(events, tool("done")).await;
-            let mut rows = None;
+            let (mut rows, mut dataset) = (None, None);
             if o.tool.name == "query_entities" {
                 if let Some(kind) = type_of(&arguments) {
                     if let Some(table) = super::routed::table(
@@ -360,7 +400,9 @@ async fn step(
                     .await
                     {
                         rows = Some(table.rows.len());
+                        dataset = table.dataset.clone();
                         if !table.rows.is_empty() {
+                            tables.push((citations.len() + 1, table.clone()));
                             send(events, Event::Data(table)).await;
                         }
                     }
@@ -371,7 +413,7 @@ async fn step(
             let n = citations.len() + 1;
             citations.push(Citation {
                 n,
-                url: None,
+                url: dataset,
                 tool: Some(o.tool.name.clone()),
                 endpoint: Some(endpoint),
                 title: None,
@@ -481,5 +523,48 @@ mod tests {
             ("reading", None)
         );
         assert_eq!(type_of(&json!({"type": []})), None);
+    }
+
+    /// T-4657: an accepted call sends one `visualization` event; a second call in the answer and
+    /// a call naming a table the answer did not read are told to the model and send nothing.
+    #[tokio::test]
+    async fn one_chart_per_answer_and_only_from_its_own_tables() {
+        let table = Table {
+            endpoint: "ovzdusie".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["name".into(), "pm10".into()],
+            rows: vec![vec![json!("Námestie SNP"), json!(21)]],
+            units: vec![None, Some("µg/m³".into())],
+            labels: Vec::new(),
+            summary: Vec::new(),
+            total: None,
+            dataset: None,
+            download: None,
+            map: None,
+            geometries: vec![None],
+        };
+        let tables = [(2, table)];
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let mut shown = false;
+        let bar = r#"{"kind":"bar","data":2,"label":"name","value":"pm10","title":"PM10"}"#;
+        let missing = r#"{"kind":"bar","data":7,"label":"name","value":"pm10","title":"PM10"}"#;
+        assert!(show(&tables, missing, "dev.example.org", &mut shown, &tx)
+            .await
+            .contains("no table 7"));
+        assert!(!shown);
+        assert!(show(&tables, bar, "dev.example.org", &mut shown, &tx)
+            .await
+            .starts_with("Shown"));
+        assert!(show(&tables, bar, "dev.example.org", &mut shown, &tx)
+            .await
+            .contains("one chart per answer"));
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        assert!(
+            matches!(events.as_slice(), [Event::Visualization(v)] if v["rows"][0]["value"] == 21)
+        );
     }
 }

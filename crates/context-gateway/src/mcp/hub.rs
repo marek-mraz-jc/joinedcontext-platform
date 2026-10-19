@@ -492,6 +492,66 @@ pub(crate) enum Answer {
 }
 
 impl Hub {
+    /// The knowledge sources this request's `search_documents` searches: the server's own, or
+    /// the hub's (MF-57).
+    fn knowledge_sources<'a>(
+        &'a self,
+        documents: &'a super::documents::Documents,
+    ) -> &'a [super::documents::Source] {
+        match &self.server {
+            Some(server) => &server.knowledge_sources,
+            None => &documents.hub,
+        }
+    }
+
+    /// The resources this server offers: an assistant's `context` (EP-136), nothing elsewhere.
+    fn resources(&self) -> Vec<Value> {
+        self.server
+            .as_ref()
+            .filter(|server| server.has_context() && self.gateway.documents.is_some())
+            .map(|server| {
+                vec![json!({
+                    "uri": server.context_uri(),
+                    "name": "context",
+                    "title": "What this assistant knows",
+                    "description": "Its categories, its Endpoints with their entity counts, and its knowledge sources with their pages and last crawl (API/05 §1.9).",
+                    "mimeType": "application/json",
+                })]
+            })
+            .unwrap_or_default()
+    }
+
+    /// `resources/read` of the `context` resource: the assistant's own document, as any visitor
+    /// reads it; any other URI is unknown (MCP `-32002`).
+    async fn read_resource(&self, id: Value, params: &Value) -> Value {
+        let uri = params
+            .get("uri")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let (Some(server), Some(documents)) = (
+            self.server
+                .as_ref()
+                .filter(|s| s.has_context() && s.context_uri() == uri),
+            self.gateway.documents.as_ref(),
+        ) else {
+            return error(id, -32002, "resource not found: this server offers `context` alone; resources/list names its URI");
+        };
+        match documents.context(&server.name).await {
+            Ok(context) => result(
+                id,
+                json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": context.to_string() }] }),
+            ),
+            Err(err) => {
+                tracing::warn!(%err, server = %server.path(), "the assistant's context could not be read");
+                error(
+                    id,
+                    -32603,
+                    "what this assistant knows could not be read just now; try again shortly",
+                )
+            }
+        }
+    }
+
     pub(crate) async fn answer(&self, message: Value) -> Answer {
         let params = message.get("params").cloned().unwrap_or(json!({}));
         let Some(id) = message.get("id").cloned() else {
@@ -531,6 +591,9 @@ impl Hub {
                     list_endpoints_tool(),
                     get_endpoint_tool(),
                 ];
+                if let Some(documents) = &self.gateway.documents {
+                    tools.extend(documents.tool(self.knowledge_sources(documents)).await);
+                }
                 tools.extend(tools::hub_tools(&self.gateway, &self.reach));
                 if self.reads_only {
                     tools::keep_anonymous(&mut tools);
@@ -554,6 +617,8 @@ impl Hub {
                 result(id, json!({ "tools": tools }))
             }
             "tools/call" => return self.call(id, params).await,
+            "resources/list" => result(id, json!({ "resources": self.resources() })),
+            "resources/read" => return Answer::Json(self.read_resource(id, &params).await),
             _ => error(id, -32601, "method not found"),
         })
     }
@@ -585,6 +650,16 @@ impl Hub {
         }
         if name == "search" {
             return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments));
+        }
+        if name == super::documents::NAME {
+            if let Some(documents) = &self.gateway.documents {
+                let sources = self.knowledge_sources(documents);
+                return Answer::Json(
+                    documents
+                        .call(&self.gateway, &self.caller, sources, id, &arguments)
+                        .await,
+                );
+            }
         }
 
         // The one routing argument, one string, never a list (ADR-N-025 2.5, 2.6).
@@ -1082,6 +1157,13 @@ fn attributes_of(
 
 /// The tool that answers the caller's list (ADR-N-025 2.1).
 pub(crate) fn list_endpoints_tool() -> Value {
+    // The codes an agent may filter by, each with its English label (AG-124).
+    let themes = jc_core::kinds::DataTheme::ALL
+        .iter()
+        .map(|theme| format!("{} {}", theme.code(), theme.label_in("en")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let themes = format!("An EU data theme code: {themes}");
     json!({
         "name": "list_endpoints",
         "description": "The Endpoints you may read, open ones without a login. One line each: \
@@ -1097,7 +1179,7 @@ pub(crate) fn list_endpoints_tool() -> Value {
                 "space": { "type": "string", "minLength": 1, "maxLength": 200, "description": "The context space" },
                 "access": { "type": "string", "enum": ["public", "internal"] },
                 "domain": { "type": "string", "minLength": 1, "maxLength": 200, "description": "A Smart Data Model domain, e.g. Environment" },
-                "theme": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An EU data theme code, e.g. ENVI" },
+                "theme": { "type": "string", "minLength": 1, "maxLength": 200, "description": themes },
                 "lang": { "type": "string", "minLength": 2, "maxLength": 8, "description": "The language of the titles, e.g. sk; English otherwise" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "cursor": { "type": "string", "maxLength": 20, "description": "The previous page's nextCursor, passed back as given" },

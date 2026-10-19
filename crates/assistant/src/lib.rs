@@ -109,7 +109,7 @@ pub async fn project_scope<'c>(
 }
 
 /// A DNS label, which is what a project's `metadata.name` is.
-fn is_project_name(name: &str) -> bool {
+pub(crate) fn is_project_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
         && name
@@ -132,6 +132,9 @@ pub struct Search<'a> {
     pub public_only: bool,
     /// How many passages come back.
     pub limit: i64,
+    /// Passages in this language and those of no known language only; `None` reads every one
+    /// (T-4659).
+    pub lang: Option<&'a str>,
 }
 
 /// One passage, with where it came from and its fused score.
@@ -145,6 +148,8 @@ pub struct Hit {
     pub text: String,
     /// `Σ 1 / (60 + rank)` over the rankings it appears in.
     pub score: f64,
+    /// The source it is from, as `{project}/{source}`.
+    pub site: String,
 }
 
 /// The pgvector literal of an embedding, refused unless it is [`DIMENSIONS`] finite numbers.
@@ -179,12 +184,16 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 /// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first. A page under a
 /// news path (`/aktuality/`, `/novinky/`, `/news/`, …) counts 0.9 of its score and loses a tie:
 /// opening hours, prices and contacts are kept on the pages beside the news, and a news item about
-/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370).
+/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370). `scope` is read twice, so
+/// Postgres would materialize it, copying every chunk's tsvector and embedding of the sources
+/// before either ranking, with no index left to serve them: the worker logged it as a slow
+/// statement on dev (T-4663). Inlined, the GIN index serves the lexical match.
 const HYBRID: &str = r#"
-WITH scope AS (
+WITH scope AS NOT MATERIALIZED (
     SELECT c.id, c.fts, c.embedding
     FROM chunks c JOIN sites s ON s.id = c.site_id
     WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
+      AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
 ),
 question AS (
     SELECT jc_any_word('english', $1) || jc_any_word('finnish', $1)
@@ -204,11 +213,12 @@ semantic AS (
     ORDER BY rank
     LIMIT $5
 )
-SELECT c.id, c.url, c.text,
+SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
        ((COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))
         * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score
 FROM lexical FULL OUTER JOIN semantic USING (id)
 JOIN chunks c ON c.id = COALESCE(lexical.id, semantic.id)
+JOIN sites site ON site.id = c.site_id
 CROSS JOIN LATERAL (SELECT c.url ~* '/(aktuality|aktualita|aktualne|novinky|spravy|tlacove-spravy|clanky|news|uutiset|tiedotteet|blog)(/|$|\?|#)' AS item) news
 ORDER BY score DESC, news.item, c.id
 LIMIT $7
@@ -231,6 +241,7 @@ pub async fn hybrid_search(
         .bind(CANDIDATES)
         .bind(RRF_K)
         .bind(search.limit)
+        .bind(search.lang)
         .fetch_all(conn)
         .await?;
     rows.iter()
@@ -240,6 +251,7 @@ pub async fn hybrid_search(
                 url: row.try_get("url")?,
                 text: row.try_get("text")?,
                 score: row.try_get("score")?,
+                site: row.try_get("site")?,
             })
         })
         .collect::<Result<_, sqlx::Error>>()
@@ -297,12 +309,7 @@ pub async fn endpoint_page(
     sources: &[String],
     public_only: bool,
 ) -> Result<Option<String>, Error> {
-    let label = !slug.is_empty()
-        && slug.len() <= 63
-        && slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !label || sources.is_empty() {
+    if !is_slug(slug) || sources.is_empty() {
         return Ok(None);
     }
     let url: Option<String> = sqlx::query_scalar(
@@ -317,6 +324,81 @@ pub async fn endpoint_page(
     .fetch_optional(conn)
     .await?;
     Ok(url)
+}
+
+/// A slug the platform could have minted: a DNS label, so it goes into a pattern as itself.
+fn is_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 63
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// What a page publishing `kind` from one of `slugs` says (T-4625): the CKAN publisher writes
+/// each dataset's NGSI-LD example as `/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}`.
+/// `None` for a type name or slug that is not plain, or no slug at all.
+fn dataset_pattern(slugs: &[String], kind: &str) -> Option<String> {
+    let plain = (1..=100).contains(&kind.len())
+        && kind.starts_with(|c: char| c.is_ascii_alphabetic())
+        && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !plain || slugs.is_empty() || !slugs.iter().all(|s| is_slug(s)) {
+        return None;
+    }
+    Some(format!(
+        "/api/endpoint/({})/ngsi-ld/v1/entities\\?type={kind}([^A-Za-z0-9_]|$)",
+        slugs.join("|")
+    ))
+}
+
+/// The page of `sources`, not an Endpoint's own, that publishes `kind` from one of `slugs`: the
+/// CKAN dataset of the Endpoint over the same space that serves the type (T-4625).
+pub async fn dataset_page(
+    conn: &mut PgConnection,
+    slugs: &[String],
+    kind: &str,
+    sources: &[String],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    let Some(pattern) = dataset_pattern(slugs, kind) else {
+        return Ok(None);
+    };
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    let url: Option<String> = sqlx::query_scalar(
+        "SELECT c.url FROM chunks c JOIN sites s ON s.id = c.site_id \
+         WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
+         AND c.url !~ '/api/endpoint/' AND c.text ~ $1 ORDER BY c.id LIMIT 1",
+    )
+    .bind(pattern)
+    .bind(sources)
+    .bind(public_only)
+    .fetch_optional(conn)
+    .await?;
+    Ok(url)
+}
+
+/// [`dataset_page`] across the projects that hold the sources, in their order.
+pub async fn dataset_page_projects(
+    pool: &sqlx::PgPool,
+    slugs: &[String],
+    kind: &str,
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    if dataset_pattern(slugs, kind).is_none() {
+        return Ok(None);
+    }
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        let page = dataset_page(&mut tx, slugs, kind, names, public_only).await?;
+        tx.rollback().await?;
+        if page.is_some() {
+            return Ok(page);
+        }
+    }
+    Ok(None)
 }
 
 /// A deployment's sources by the project that holds them, its own project first: a source named
@@ -337,6 +419,23 @@ pub fn sources_by_project(own: &str, sources: &[String]) -> Vec<(String, Vec<Str
     }
     grouped.retain(|(_, names)| !names.is_empty());
     grouped
+}
+
+/// The sources a deployment names, `{project}/{source}`, that crawl a website (T-4680): their
+/// passages are capped so the catalogue's records and the Endpoints' descriptions come first.
+pub fn website_sources(own: &str, named: &[String], sources: &[worker::Source]) -> Vec<String> {
+    sources_by_project(own, named)
+        .into_iter()
+        .flat_map(|(project, names)| names.into_iter().map(move |name| (project.clone(), name)))
+        .filter(|(project, name)| {
+            sources.iter().any(|s| {
+                &s.project == project
+                    && &s.name == name
+                    && s.spec.source == jc_core::kinds::assistant::SourceType::Website
+            })
+        })
+        .map(|(project, name)| format!("{project}/{name}"))
+        .collect()
 }
 
 /// [`hybrid_search`] over every project's sources, each ranked in its own project; the best
@@ -424,7 +523,71 @@ mod tests {
         );
         assert!(sources_by_project("bbsk", &[]).is_empty());
     }
+
+    /// T-4680: the website sources a deployment names, its own and another project's, and none
+    /// of its catalogue or CKAN sources.
+    #[test]
+    fn a_deployments_website_sources_are_named_with_their_project() {
+        let source = |project: &str, name: &str, spec: serde_json::Value| worker::Source {
+            project: project.into(),
+            name: name.into(),
+            spec: serde_json::from_value(spec).expect("a source spec"),
+            ckan_url: None,
+            catalogue: Vec::new(),
+        };
+        let web =
+            || serde_json::json!({"source": "website", "startUrls": ["https://www.bbsk.sk/"]});
+        let sources = [
+            source("bbsk", "web", web()),
+            source("banskabystrica", "web", web()),
+            source(
+                "bbsk",
+                "catalogue",
+                serde_json::json!({"source": "catalogue"}),
+            ),
+            source("zilina", "web", web()),
+        ];
+        let named = ["catalogue", "web", "banskabystrica/web", "praha/web"].map(String::from);
+        assert_eq!(
+            website_sources("bbsk", &named, &sources),
+            ["bbsk/web", "banskabystrica/web"]
+        );
+        assert!(website_sources("bbsk", &[], &sources).is_empty());
+    }
     use super::*;
+
+    /// T-4625: the pattern matches a dataset's NGSI-LD example of the type from a sibling, and
+    /// neither another type that starts the same, another slug, nor a name that is not plain.
+    #[test]
+    fn a_dataset_is_found_by_its_type_from_an_endpoint_of_the_same_space() {
+        let slugs = ["bkc4".to_owned(), "w3st".to_owned()];
+        let pattern = dataset_pattern(&slugs, "Organization").expect("plain");
+        let compiled = regex::Regex::new(&pattern).expect("a pattern");
+        let re = |text: &str| compiled.is_match(text);
+        assert!(re("curl 'https://api.dev/api/endpoint/bkc4/ngsi-ld/v1/entities?type=Organization&limit=10'"));
+        assert!(re(
+            "/api/endpoint/w3st/ngsi-ld/v1/entities?type=Organization"
+        ));
+        assert!(!re(
+            "/api/endpoint/bkc4/ngsi-ld/v1/entities?type=OrganizationUnit"
+        ));
+        assert!(!re(
+            "/api/endpoint/other/ngsi-ld/v1/entities?type=Organization"
+        ));
+        assert!(!re(
+            "/api/endpoint/bkc4/ngsi-ld/v1/entitiesXtype=Organization"
+        ));
+        assert_eq!(dataset_pattern(&slugs, "Org.*"), None);
+        assert_eq!(dataset_pattern(&slugs, ""), None);
+        assert_eq!(dataset_pattern(&["a|b".to_owned()], "Organization"), None);
+        assert_eq!(dataset_pattern(&[], "Organization"), None);
+    }
+
+    /// T-4663: the scope of a search is inlined into both rankings, never materialized.
+    #[test]
+    fn the_search_scope_is_not_materialized() {
+        assert!(HYBRID.contains("WITH scope AS NOT MATERIALIZED ("));
+    }
 
     #[test]
     fn a_passage_is_titled_by_the_heading_it_opens_with() {

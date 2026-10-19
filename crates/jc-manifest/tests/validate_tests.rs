@@ -1236,6 +1236,41 @@ fn a_named_mcp_server_wider_than_its_members_or_naming_what_is_not_there_is_refu
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// MF-57 (T-4659): a server attaches declared public knowledge sources only; an unknown one and
+/// an internal one are each named with the rule.
+#[test]
+fn a_named_mcp_server_attaches_declared_public_knowledge_sources_only() {
+    let dir = valid_repo("mcp-server-knowledge");
+    knowledge_source(&dir, "web", "public", None);
+    knowledge_source(&dir, "intranet", "internal", None);
+    write(
+        &dir,
+        "projects/ovzdusie/mcp/air.yaml",
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: McpServer\nmetadata:\n  name: air\n  namespace: ovzdusie\nspec:\n  audience: public\n  knowledgeSources: [web, intranet, ovzdusie/nowhere]\n  members:\n{}", member("public-air")),
+    );
+    let report = validate::run(&dir);
+    let found: Vec<&str> = report
+        .findings
+        .iter()
+        .filter(|f| f.message.contains("MF-57"))
+        .map(|f| f.message.as_str())
+        .collect();
+    assert_eq!(found.len(), 2, "{:?}", report.findings);
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`ovzdusie/intranet`") && m.contains("not `visibility: public`")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("`ovzdusie/nowhere`") && m.contains("no manifest declares")),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// MF-53: the kind refuses an empty member list and a member that is not an Endpoint.
 #[test]
 fn a_named_mcp_server_without_endpoint_members_is_refused_by_its_kind() {
@@ -1851,5 +1886,79 @@ fn an_assistant_names_a_declared_server_its_channel_may_read() {
     let found = citing(&report, "MF-56");
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].contains("no manifest declares"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- T-4690: an assistant's selector, exclusions and the 50 it serves (MF-58, MF-59, AG-122) ---
+
+fn selecting_deployment(dir: &Path, extra: &str) -> validate::Report {
+    write(
+        dir,
+        "projects/ovzdusie/assistant/deployments/chat.yaml",
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: AssistantDeployment\nmetadata:\n  name: chat\n  namespace: ovzdusie\nspec:\n  publicId: bb-chat\n  channel: public\n{extra}  allowedOrigins: [https://www.banskabystrica.sk]\n  rateLimit: {{ requestsPerMinute: 60, perClientPerMinute: 10 }}\n  budget: {{ tokensPerDay: 1000000, tokensPerConversation: 20000 }}\n"),
+    );
+    validate::run(dir)
+}
+
+/// MF-58, MF-59: a selector names its own project and space, or those of `scope.projects`;
+/// an excluded Endpoint is one the repository declares.
+#[test]
+fn an_assistant_selects_inside_its_reach_and_excludes_declared_endpoints() {
+    let dir = valid_repo("assistant-select");
+    write(&dir, ENDPOINT_PATH, ENDPOINT);
+    let report = selecting_deployment(
+        &dir,
+        "  select: { projects: [ovzdusie], spaces: [ovzdusie/ovzdusie], themes: [ENVI] }\n  exclude: [public-air]\n",
+    );
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+    let report = selecting_deployment(
+        &dir,
+        "  scope: { projects: [doprava] }\n  select: { projects: [doprava], spaces: [ovzdusie/nothing] }\n  exclude: [missing, doprava/roads]\n",
+    );
+    let found = citing(&report, "MF-58");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].contains("`doprava`") && found[0].contains("does not declare"));
+    assert!(found[1].contains("`ovzdusie/nothing`"));
+    let found = citing(&report, "MF-59");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].contains("`missing`") && found[0].contains("project `ovzdusie`"));
+    assert!(found[1].contains("`doprava/roads`"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AG-122: one deployment serves at most 50 Endpoints; a selector that reaches more is refused
+/// with the count and the slugs left out, and an exclusion brings it back under.
+#[test]
+fn an_assistant_resolving_more_than_fifty_endpoints_is_refused() {
+    let dir = valid_repo("assistant-fifty");
+    const BASE32: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
+    // The repository's own `public-air` is the 51st.
+    for i in 0..50usize {
+        let tail: String = [i / 32, i % 32]
+            .iter()
+            .map(|&k| BASE32[k] as char)
+            .collect();
+        write(
+            &dir,
+            &format!("projects/ovzdusie/spaces/ovzdusie/endpoints/e{i}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: e{i}\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  slug: zt4qm7ge2xdv6ksb3ncf5ar{tail}x\n  audience: public\n"),
+        );
+    }
+    let report = selecting_deployment(&dir, "  select: {}\n");
+    let found = citing(&report, "AG-122");
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(found[0].contains("resolves 51 Endpoints"), "{}", found[0]);
+    assert!(
+        found[0].contains("zt4qm7ge2xdv6ksb3ncf5arw2y"),
+        "{}",
+        found[0]
+    );
+    let report = selecting_deployment(&dir, "  select: {}\n  exclude: [e0]\n");
+    assert!(
+        citing(&report, "AG-122").is_empty(),
+        "{:?}",
+        report.findings
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

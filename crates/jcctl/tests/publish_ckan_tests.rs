@@ -11,7 +11,7 @@ use jcctl::commands::publish_ckan::{
     TokenSource,
 };
 use jcctl::loader::Repository;
-use jcctl::publish::ckan::{self, CkanApi, CkanError, InMemoryCkan, Outcome, Settings};
+use jcctl::publish::ckan::{self, CkanApi, CkanError, InMemoryCkan, Outcome, Settings, Views};
 use jcctl::publish::ckan_datastore;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -99,6 +99,7 @@ fn answer(csv: &str) -> Rows {
     Rows {
         csv: csv.to_owned(),
         schema: None,
+        linkml: None,
     }
 }
 
@@ -187,6 +188,7 @@ fn a_second_run_over_an_unchanged_repository_writes_nothing() {
             mirror: None,
             // The record lists no model, so no LinkML is missing (T-3886, EP-68).
             no_linkml: false,
+            views: Views::default(),
         }
     );
     assert_eq!(
@@ -1140,6 +1142,7 @@ fn every_entity_type_gets_its_own_table_with_every_model_attribute() {
     let rows = Rows {
         csv: MIXED.to_owned(),
         schema: Some(mixed_schema()),
+        linkml: None,
     };
 
     let line = publish_one(

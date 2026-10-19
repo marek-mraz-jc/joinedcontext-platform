@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use jc_core::kinds::assistant::{AssistantDeploymentSpec, KnowledgeSourceSpec, SourceType};
+use jc_core::kinds::catalog::DataTheme;
 use jc_core::kinds::ckan::CkanInstanceSpec;
+use jc_core::kinds::{EndpointSpec, McpServerSpec};
+use jc_core::reach::{resolve_connectors, EndpointFacts, Resolution};
 use sqlx::PgPool;
 
 use crate::ckan::{sync_ckan, Catalogue};
@@ -52,6 +55,21 @@ pub struct EndpointRef {
     pub slug: String,
     /// The Endpoint's `spec.audience`: `public`, `organization` or `project-list`.
     pub audience: String,
+    /// The context space it reads (`spec.contextSpaceRef`), empty when the manifest names none.
+    pub space: String,
+    /// What it holds, in its manifest's words (`metadata.title`, English first), so the router
+    /// tells apart Endpoints that serve the same type (T-4680).
+    pub title: Option<String>,
+}
+
+/// What a visitor of the context page may read of one Endpoint (AG-123, T-4692).
+#[derive(Debug, Clone)]
+pub struct Page {
+    /// The project that publishes it.
+    pub project: String,
+    pub page: crate::catalogue::EndpointPage,
+    /// Its EU data themes, as the resolver matches them (EP-78).
+    pub themes: Vec<DataTheme>,
 }
 
 /// The manifests the service works from, read in one pass every minute.
@@ -61,6 +79,13 @@ pub struct Snapshot {
     pub deployments: Vec<Deployment>,
     /// Every Endpoint, by project and name.
     pub endpoints: BTreeMap<(String, String), EndpointRef>,
+    /// What a selector reads of each Endpoint (types, domains, themes), by project and name; an
+    /// Endpoint without facts is matched by its connector alone (AG-121).
+    pub facts: BTreeMap<(String, String), EndpointFacts>,
+    /// The named servers a deployment's `mcpServer` may read, by namespace and name.
+    pub servers: BTreeMap<(String, String), McpServerSpec>,
+    /// Every Endpoint's page by slug, for the context (T-4692).
+    pub pages: BTreeMap<String, Page>,
 }
 
 /// Every `KnowledgeSource` of the organization, by project and name; a manifest that does not
@@ -156,7 +181,7 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
         };
         let spec = &resource.manifest.spec;
         match id.kind.as_str() {
-            "Endpoint" => match endpoint_ref(spec) {
+            "Endpoint" => match endpoint_ref(spec, resource.manifest.metadata.rest.get("title")) {
                 Some(endpoint) => {
                     snapshot
                         .endpoints
@@ -187,13 +212,147 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
             _ => {}
         }
     }
+    resolver_inputs(&mut snapshot, &assembly.repository, &catalogues);
     for (public_id, owners) in snapshot.claimed_twice() {
         tracing::warn!(%public_id, deployments = %owners.join(" and "), "a publicId is declared twice; neither deployment answers until one gives it up (MF-52)");
     }
     Ok(snapshot)
 }
 
+/// What the resolver and the context page read of every Endpoint (AG-121, AG-123): its page
+/// (title, types, CKAN dataset) and the facts a selector matches, plus the named servers a
+/// deployment may read.
+fn resolver_inputs(
+    snapshot: &mut Snapshot,
+    repository: &jc_manifest::loader::Repository,
+    catalogues: &BTreeMap<(String, String), String>,
+) {
+    let mut languages: Vec<String> = Vec::new();
+    for language in snapshot.deployments.iter().flat_map(|d| &d.spec.languages) {
+        if !languages.contains(language) {
+            languages.push(language.clone());
+        }
+    }
+    let projects: std::collections::BTreeSet<String> =
+        snapshot.endpoints.keys().map(|(p, _)| p.clone()).collect();
+    for project in projects {
+        let instances: BTreeMap<String, String> = catalogues
+            .iter()
+            .filter(|((owner, _), _)| *owner == project)
+            .map(|((_, name), url)| (name.clone(), url.clone()))
+            .collect();
+        for page in
+            crate::catalogue::pages_of(repository, &project, &[], false, &languages, &instances)
+        {
+            let Some(spec) = repository
+                .iter()
+                .find(|(id, _)| {
+                    id.kind == "Endpoint"
+                        && id.namespace.as_deref() == Some(project.as_str())
+                        && id.name == page.name
+                })
+                .and_then(|(_, r)| {
+                    serde_json::from_value::<EndpointSpec>(r.manifest.spec.clone()).ok()
+                })
+            else {
+                continue;
+            };
+            let facts = EndpointFacts::of(
+                &project,
+                &page.name,
+                &spec,
+                page.types.iter().map(|t| t.class.clone()),
+            );
+            snapshot.pages.insert(
+                page.slug.clone(),
+                Page {
+                    project: project.clone(),
+                    themes: facts.themes.iter().copied().collect(),
+                    page,
+                },
+            );
+            snapshot
+                .facts
+                .insert((project.clone(), facts.name.clone()), facts);
+        }
+    }
+    for (id, resource) in repository.iter() {
+        if id.kind != "McpServer" {
+            continue;
+        }
+        if let Ok(spec) = serde_json::from_value::<McpServerSpec>(resource.manifest.spec.clone()) {
+            snapshot.servers.insert(
+                (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                spec,
+            );
+        }
+    }
+}
+
 impl Snapshot {
+    /// The Endpoints `deployment` reads, by the one resolver (AG-121, ADR-N-055 §2.3): its
+    /// connectors, its selector and its named server's reach, less `exclude`, inside its
+    /// project's candidates, sorted by slug, at most 50.
+    pub fn reach(&self, deployment: &Deployment) -> Resolution {
+        let catalog: Vec<EndpointFacts> = self
+            .endpoints
+            .iter()
+            .filter_map(|((project, name), endpoint)| {
+                if let Some(facts) = self.facts.get(&(project.clone(), name.clone())) {
+                    return Some(facts.clone());
+                }
+                Some(EndpointFacts {
+                    project: project.clone(),
+                    name: name.clone(),
+                    slug: endpoint.slug.clone(),
+                    space: String::new(),
+                    audience: serde_json::from_value(serde_json::json!(endpoint.audience)).ok()?,
+                    types: Default::default(),
+                    domains: Default::default(),
+                    themes: Default::default(),
+                })
+            })
+            .collect();
+        // `org/all` has no manifest until the organization declares one (EP-122).
+        let org_all = McpServerSpec {
+            members: Vec::new(),
+            select: Some(Default::default()),
+            audience: jc_core::kinds::Audience::Organization,
+            allowed_projects: Vec::new(),
+            knowledge_sources: Vec::new(),
+        };
+        let server = deployment.spec.mcp_server.as_deref().and_then(|reads| {
+            let (namespace, name) = reads.split_once('/')?;
+            let spec = self
+                .servers
+                .get(&(namespace.to_owned(), name.to_owned()))
+                .or_else(|| {
+                    (namespace == jc_core::envelope::ORG_NAMESPACE && name == "all")
+                        .then_some(&org_all)
+                })?;
+            Some((namespace, spec))
+        });
+        resolve_connectors(&deployment.project, &deployment.spec, &catalog, server)
+    }
+
+    /// The knowledge sources `deployment` names, its own project's by name and another's as
+    /// `{project}/{source}`.
+    pub fn sources_of<'a>(
+        &'a self,
+        deployment: &'a Deployment,
+    ) -> impl Iterator<Item = &'a Source> {
+        self.sources.iter().filter(move |source| {
+            deployment
+                .spec
+                .sources
+                .iter()
+                .any(|named| match named.split_once('/') {
+                    Some((project, name)) => source.project == project && source.name == name,
+                    None => source.project == deployment.project && source.name == *named,
+                })
+        })
+    }
+
     /// The anonymous deployment of `public_id`, when exactly one deployment of the organization
     /// declares that id. Two that claim it answer neither: no load order decides which project
     /// speaks on a public address (MF-52, T-3283).
@@ -478,26 +637,101 @@ pub fn checkout_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Chec
 /// An Endpoint's slug and audience, when its slug is one the platform mints (EP-02, T-3314): the
 /// slug becomes a path segment of the connector's address on the gateway, so a manifest can never
 /// steer the chat's client to another path or host.
-fn endpoint_ref(spec: &serde_json::Value) -> Option<EndpointRef> {
+fn endpoint_ref(
+    spec: &serde_json::Value,
+    title: Option<&serde_json::Value>,
+) -> Option<EndpointRef> {
     let slug = spec.get("slug").and_then(|v| v.as_str())?;
     let audience = spec.get("audience").and_then(|v| v.as_str())?;
     jc_core::kinds::endpoint::EndpointSlug::new(slug).ok()?;
+    let space = spec.get("contextSpaceRef");
+    let space = space
+        .and_then(|s| s.get("name"))
+        .or(space)
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
     Some(EndpointRef {
         slug: slug.to_owned(),
         audience: audience.to_owned(),
+        space: space.to_owned(),
+        title: title.and_then(title_line),
     })
+}
+
+/// The most characters of an Endpoint's title the router is shown.
+const TITLE_CHARS: usize = 80;
+
+/// A manifest title as one short line of a prompt: English, else the first language; control
+/// characters dropped, at most [`TITLE_CHARS`]; `None` when nothing is left.
+fn title_line(title: &serde_json::Value) -> Option<String> {
+    let text: jc_core::i18n::Text = serde_json::from_value(title.clone()).ok()?;
+    let line: String = text
+        .resolve(&["en".to_owned()], "en")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(TITLE_CHARS)
+        .collect();
+    (!line.is_empty()).then_some(line)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// T-4625: the space is read in either form of `contextSpaceRef`, and is empty without one.
+    #[test]
+    fn an_endpoints_space_is_read_in_either_form() {
+        let slug = "bkc4g3zfirh6zae3owdike7am2upayjs";
+        let space = |reference: serde_json::Value| {
+            endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public", "contextSpaceRef": reference}), None)
+                .expect("an Endpoint")
+                .space
+        };
+        assert_eq!(space(serde_json::json!("verejne")), "verejne");
+        assert_eq!(
+            space(serde_json::json!({"kind": "ContextSpace", "name": "verejne"})),
+            "verejne"
+        );
+        assert_eq!(space(serde_json::Value::Null), "");
+    }
+
+    /// T-4680: an Endpoint's title reaches the router as one short line, English first.
+    #[test]
+    fn an_endpoint_title_is_one_short_line_english_first() {
+        let line = |v: serde_json::Value| title_line(&v);
+        assert_eq!(
+            line(serde_json::json!({"sk": "Nezamestnanosť", "en": "Unemployment"})).as_deref(),
+            Some("Unemployment")
+        );
+        assert_eq!(
+            line(serde_json::json!({"sk": "Nezamestnanosť"})).as_deref(),
+            Some("Nezamestnanosť")
+        );
+        assert_eq!(
+            line(serde_json::json!("Air\nquality\u{7}  now")).as_deref(),
+            Some("Air quality now")
+        );
+        assert_eq!(
+            line(serde_json::json!("x".repeat(200))).map(|t| t.chars().count()),
+            Some(TITLE_CHARS)
+        );
+        assert_eq!(line(serde_json::json!("  ")), None);
+        assert_eq!(line(serde_json::json!(7)), None);
+    }
+
     /// T-3314: a slug that is not one the platform mints never becomes part of an address.
     #[test]
     fn only_a_minted_slug_is_connected() {
         let minted = "abcdefghijklmnopqrstuvwxyz234567";
-        let of =
-            |slug: &str| endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public"}));
+        let of = |slug: &str| {
+            endpoint_ref(
+                &serde_json::json!({"slug": slug, "audience": "public"}),
+                None,
+            )
+        };
         assert_eq!(of(minted).map(|e| e.slug), Some(minted.to_owned()));
         for bad in [
             "../../admin",
@@ -509,7 +743,7 @@ mod tests {
             assert!(of(bad).is_none(), "{bad}");
         }
         assert!(
-            endpoint_ref(&serde_json::json!({"slug": minted})).is_none(),
+            endpoint_ref(&serde_json::json!({"slug": minted}), None).is_none(),
             "no audience"
         );
     }
@@ -526,6 +760,90 @@ mod tests {
             name: name.into(),
             spec,
         }
+    }
+
+    /// AG-121, T-4692: the chat and the context read one list, the resolver's: a connector
+    /// matched by its name alone, a selected Endpoint by its facts, `exclude` winning, and a
+    /// public deployment's organization connector left out.
+    #[test]
+    fn a_deployment_reads_the_resolver_s_endpoints() {
+        let mut snapshot = Snapshot::default();
+        for (name, slug, audience, themes) in [
+            ("bikes", "bbbbbbbbbbbbbbbbbbbbbbbbbb", "public", None),
+            ("staff", "ssssssssssssssssssssssssss", "organization", None),
+            (
+                "parking",
+                "pppppppppppppppppppppppppp",
+                "public",
+                Some(DataTheme::Tran),
+            ),
+            (
+                "buses",
+                "uuuuuuuuuuuuuuuuuuuuuuuuuu",
+                "public",
+                Some(DataTheme::Tran),
+            ),
+            (
+                "air",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "public",
+                Some(DataTheme::Envi),
+            ),
+        ] {
+            let key = ("bb".to_owned(), name.to_owned());
+            snapshot.endpoints.insert(
+                key.clone(),
+                EndpointRef {
+                    slug: slug.into(),
+                    audience: audience.into(),
+                    title: None,
+                    space: String::new(),
+                },
+            );
+            if let Some(theme) = themes {
+                snapshot.facts.insert(
+                    key,
+                    EndpointFacts {
+                        project: "bb".into(),
+                        name: name.into(),
+                        slug: slug.into(),
+                        space: "doprava".into(),
+                        audience: jc_core::kinds::Audience::Public,
+                        types: Default::default(),
+                        domains: Default::default(),
+                        themes: [theme].into(),
+                    },
+                );
+            }
+        }
+        let spec = |channel: &str| -> AssistantDeploymentSpec {
+            serde_json::from_value(serde_json::json!({
+                "publicId": "bb-doprava",
+                "channel": channel,
+                "connectors": [
+                    {"endpoint": "bikes", "tools": ["query_entities"]},
+                    {"endpoint": "staff", "tools": ["query_entities"]},
+                ],
+                "select": {"themes": ["TRAN"]},
+                "exclude": ["buses"],
+            }))
+            .expect("a spec")
+        };
+        let reached = |channel: &str| -> Vec<String> {
+            let deployment = Deployment {
+                project: "bb".into(),
+                name: "doprava".into(),
+                spec: spec(channel),
+            };
+            snapshot
+                .reach(&deployment)
+                .endpoints
+                .into_iter()
+                .map(|e| e.name)
+                .collect()
+        };
+        assert_eq!(reached("public"), ["bikes", "parking"]);
+        assert_eq!(reached("internal"), ["bikes", "parking", "staff"]);
     }
 
     /// MF-52, T-3283: a publicId two deployments declare answers neither, in any load order;

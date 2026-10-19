@@ -3,7 +3,7 @@
 //! most [`MAX_CALLS`] model calls. The tools are `search` and the switched-on connectors' allowed
 //! tools; a name the model makes up is refused here and never called.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -55,8 +55,13 @@ const RULES: &str = "You answer the questions of a city's residents from what th
 #[derive(Debug, Clone)]
 pub struct Connected {
     pub endpoint: String,
+    /// The Endpoint's title ([`crate::worker::EndpointRef::title`]).
+    pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
+    /// The slugs of the project's Endpoints over the same context space, its own included: one
+    /// that publishes a type as a CKAN dataset is the page its rows cite (T-4625).
+    pub siblings: Vec<String>,
 }
 
 /// A turn the channel sent back (AG-99).
@@ -116,6 +121,8 @@ pub enum Event {
     Delta(String),
     /// Rows a data round read from a connector, for the person to see as a table (T-4140).
     Data(Table),
+    /// A chart or a map the model asked for, built by code from a table's rows (T-4657).
+    Visualization(Value),
     /// Up to three questions to offer after the answer (T-4174).
     Followups(Vec<String>),
     /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
@@ -132,6 +139,14 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
     /// The unit symbol of each column (`µg/m³`), `null` where it has none (T-4650).
     pub units: Vec<Option<String>>,
+    /// Each column's labels per language from the data model, `null` where the model names none;
+    /// empty for a type without a model class (DM-100, T-4672).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Whether each column is one of the model's key attributes, which a map's popup shows
+    /// (DM-99, T-4672); empty for a type without a model class.
+    #[serde(skip)]
+    pub summary: Vec<bool>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -139,6 +154,12 @@ pub struct Table {
     pub dataset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<String>,
+    /// The map spec of the located rows (ADR-N-053 §2.9), when the deployment has a renderer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map: Option<Value>,
+    /// Each row's location, checked and rounded, for the maps; never sent as it is (T-4657).
+    #[serde(skip)]
+    pub geometries: Vec<Option<Value>>,
 }
 
 /// Everything one question is answered with.
@@ -154,6 +175,8 @@ pub struct Ask<'a> {
     /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
     /// `answer.routes` is `data`.
     pub sources: &'a [(String, Vec<String>)],
+    /// The sources above that crawl a website, `{project}/{source}` ([`crate::website_sources`]).
+    pub websites: &'a [String],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,
@@ -176,6 +199,8 @@ pub struct Ask<'a> {
     pub cache: &'a super::routed::AnswerCache,
     /// The public origin `/api/endpoint/{slug}` is served under: a data table's download link.
     pub endpoint_base: Option<&'a url::Url>,
+    /// The chart renderer's origin (T-4657); `None` draws no chart and offers no tool for one.
+    pub viz: Option<&'a url::Url>,
     /// The most tool calls of a data question's loop (`answer.maxDataSteps`, T-4294).
     pub data_steps: usize,
     /// How long after the question the loop may still call a tool (`answer.maxDataSeconds`).
@@ -184,6 +209,8 @@ pub struct Ask<'a> {
     pub now: time::OffsetDateTime,
     /// The deployment's local time zone; UTC only when `None`.
     pub zone: Option<super::clock::Zone>,
+    /// What the turn did, step by step, for its stored transcript (AG-99, T-4670).
+    pub trace: &'a super::trace::Trace,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
@@ -602,7 +629,8 @@ pub async fn answer(
             // on the last call and its text came back empty, "No Answer" on dev (T-3205).
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
         }
-        let completion = match ask
+        let at = std::time::Instant::now();
+        let completed = ask
             .model
             .complete(
                 ask.deployment,
@@ -611,8 +639,10 @@ pub async fn answer(
                 &tools,
                 allow_tools,
             )
-            .await
-        {
+            .await;
+        ask.trace
+            .model("agent", ask.model.name(), at, completed.as_ref());
+        let completion = match completed {
             Ok(completion) => completion,
             // The day ran out between the calls: the limit, never a quiet switch (T-4671).
             Err(CallError::DaySpent(_)) => {
@@ -827,6 +857,7 @@ async fn run_tool(
                 "The call was not made: {why}. Correct the arguments, or answer without this tool."
             );
         }
+        let kind = super::routed::queried_type(&tool.name, &arguments);
         send(
             events,
             Event::Tool {
@@ -836,11 +867,19 @@ async fn run_tool(
             },
         )
         .await;
-        match connector
+        let began = std::time::Instant::now();
+        let answered = connector
             .surface
-            .call(ask.http, &tool.name, arguments)
-            .await
-        {
+            .call(ask.http, &tool.name, arguments.clone())
+            .await;
+        ask.trace.tool(
+            &tool.name,
+            endpoint.as_deref(),
+            &arguments,
+            began,
+            &answered,
+        );
+        match answered {
             Ok(text) => {
                 send(
                     events,
@@ -851,10 +890,15 @@ async fn run_tool(
                     },
                 )
                 .await;
+                // Rows of a type cite the dataset a visitor can open (T-4625).
+                let dataset = match kind.as_deref() {
+                    Some(kind) => super::routed::dataset_of(ask, connector, kind).await,
+                    None => None,
+                };
                 let n = citations.len() + 1;
                 citations.push(Citation {
                     n,
-                    url: None,
+                    url: dataset,
                     tool: Some(tool.name.clone()),
                     endpoint,
                     title: None,
@@ -1019,6 +1063,7 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<(String, String)>, cra
             sources: &[],
             public_only: ask.public_only,
             limit: PASSAGES,
+            lang: None,
         },
     )
     .await?;
@@ -1043,6 +1088,7 @@ mod tests {
             provider: None,
             reasoning: None,
             finish: None,
+            ..Default::default()
         };
         Spent::default().add(&completion);
         let so_far = std::sync::Arc::new(std::sync::Mutex::new(Spent::default()));

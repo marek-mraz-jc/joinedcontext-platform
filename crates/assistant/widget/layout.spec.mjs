@@ -18,7 +18,8 @@ const CONFIG = {
     en: ["When is the client centre open?", "How do I pay for parking?", "What is the air quality?"] },
   disclaimer: { sk: "Odpovede tvorí umelá inteligencia z webov mesta a kraja. Môžu obsahovať chyby, overte si ich v zdrojoch. Nezadávajte osobné údaje.",
     en: "Answers are written by AI from the city's and the region's websites. They may contain mistakes; check them in the sources. Do not enter personal data." },
-  enabled: true, connectors: [],
+  enabled: true, connectors: [], viz: "https://viz.dev.joinedcontext.com",
+  transcriptDays: 30, privacy: { contact: "dpo@banskabystrica.sk", documentsUrl: "https://www.banskabystrica.sk/gdpr" },
 };
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
@@ -40,11 +41,19 @@ const DATA = {
   rows: [["Banská Bystrica, Štefánikovo nábrežie, stanica merania kvality ovzdušia", 21.5, 14, "2026-10-16T12:00:00Z"],
     ["Zvolen, J. Alexyho", null, 9.25, "2026-10-16T11:00:00Z"]],
 };
+// T-4657: the same rows with places, and the map spec the server builds of them.
+const MAP = { $schema: "urn:joinedcontext:map:v1", label: "name", time: "observedAt", popup: [{ field: "pm10", label: "pm10", unit: "µg/m³" }],
+  data: { type: "FeatureCollection", features: [
+    { type: "Feature", geometry: { type: "Point", coordinates: [19.1462, 48.7363] }, properties: { name: "Banská Bystrica", pm10: 21.5, observedAt: "2026-10-16T12:00:00Z" } },
+    { type: "Feature", geometry: { type: "Point", coordinates: [19.1237, 48.5762] }, properties: { name: "Zvolen", pm10: null, observedAt: "2026-10-16T11:00:00Z" } }] } };
+// The renderer stands in as a page that keeps what it was sent and tells its height.
+const VIZ_PAGE = `<!doctype html><script>addEventListener("message", (e) => { window.got = { origin: e.origin, data: e.data };
+  parent.postMessage({ type: "jc-viz-height", height: 300 }, e.origin); });</script>`;
 function sse(res, data) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   send("conversation", { id: "c1", at: "2026-10-16T12:17:05Z" });
-  if (data) send("data", DATA);
+  if (data) send("data", data === "map" ? { ...DATA, map: MAP } : DATA);
   send("answer", { text: LONG });
   send("citations", [1, 2, 3, 4, 5].map((n) => ({ n, url: `https://${n < 3 ? "example" : "site" + n}.sk/strana-${n}`, title: `Source ${n}` })));
   send("followups", { questions: ["Where is the client centre?", "Do I need an appointment?"] });
@@ -107,7 +116,9 @@ test.beforeAll(async () => {
       if (SLOW) return slow(res);
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
-      return req.on("end", () => sse(res, body.includes("ovzdušia")));
+      // The question asked now, not the history the request carries beside it.
+      const asked = () => { try { return String(JSON.parse(body).message || ""); } catch { return body; } };
+      return req.on("end", () => sse(res, asked().includes("mape") ? "map" : asked().includes("ovzdušia")));
     }
     res.writeHead(404).end();
   });
@@ -164,8 +175,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return greeting.y - (top.y + top.height);
     }, { message: "the greeting sits under the header" }).toBeLessThanOrEqual(24);
 
-    // T-4635 option C: a labelled send button inside the bar, no circle in the footer, the
-    // disclaimer's sentence whole with a "More" link that opens the rest.
+    // T-4635 option C: a labelled send button inside the bar, no circle in the footer.
     const bar = await frame.locator(".jc-form").boundingBox();
     const send = frame.locator(".jc-form .jc-submit");
     await expect(send).toHaveText("Send");
@@ -178,19 +188,11 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return box.width > 4 && Math.abs(box.width - box.height) < 2 && radius >= box.width / 2 - 1;
     }).map((el) => el.className));
     expect(circles, "no circle in the footer").toEqual([]);
-    const lead = await frame.locator(".jc-notice .jc-disclaimer").evaluate((span) => ({
-      text: span.textContent, wraps: getComputedStyle(span.parentElement).whiteSpace !== "nowrap",
-      cut: getComputedStyle(span.parentElement).textOverflow === "ellipsis" }));
-    expect(lead, "the disclaimer's sentence is whole").toEqual({ text: "Answers are written by AI from the city's and the region's websites.", wraps: true, cut: false });
-    const more = frame.locator(".jc-notice .jc-more");
-    await expect(more).toHaveText("More");
-    await expect(more).toHaveAttribute("aria-expanded", "false");
-    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
-    await more.click();
-    await expect(more).toHaveAttribute("aria-expanded", "true");
-    await expect(frame.locator("#jc-disclaimer-rest")).toHaveText("They may contain mistakes; check them in the sources. Do not enter personal data.");
-    await more.click();
-    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
+    // T-4670: the footer is one line, whole and wrapping; the disclaimer moved into the privacy dialog.
+    const line = await frame.locator(".jc-privacy-line").evaluate((p) => ({
+      text: p.textContent, wraps: getComputedStyle(p).whiteSpace !== "nowrap", cut: getComputedStyle(p).textOverflow === "ellipsis" }));
+    expect(line, "the footer line is whole").toEqual({ text: "Please verify important information. · Privacy", wraps: true, cut: false });
+    await expect(frame.locator(".jc-disclaimer")).toHaveCount(0);
 
     // The name and its subtitle keep one line each, whole, at every size.
     const header = await frame.locator(".jc-title").evaluate((title) => {
@@ -264,7 +266,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     // Boxes are in the page's coordinates: each part lies within the frame, the frame within the window.
     const frameBox = await page.locator("[data-jc-assistant] iframe").boundingBox();
     expect(inside(frameBox, width, height), "the frame lies within the window").toBe(true);
-    for (const part of [".jc-head", ".jc-form", ".jc-notice"]) {
+    for (const part of [".jc-head", ".jc-form", ".jc-privacy-line"]) {
       const box = await frame.locator(part).boundingBox();
       expect(box.y >= frameBox.y - 0.5 && box.y + box.height <= frameBox.y + frameBox.height + 0.5, `${part} is whole`).toBe(true);
     }
@@ -272,7 +274,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     expect(head.y, "the header stays at the top after a long answer").toBeLessThanOrEqual(frameBox.y + 1);
     expect(await panel.boundingBox(), "a long answer leaves the panel as it opened").toEqual(opened);
     if (width <= 480) {
-      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-notice .jc-more"].map((s) => s + ":visible").join(", ");
+      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-privacy-line .jc-more"].map((s) => s + ":visible").join(", ");
       for (const control of await frame.locator(controls).all()) {
         const box = await control.boundingBox();
         expect(Math.min(box.width, box.height), "a tap target of 44 px").toBeGreaterThanOrEqual(44);
@@ -311,6 +313,36 @@ test("a data table at 400 px shows the name and the first value", async ({ page 
   const value = await table.locator("tbody tr").first().locator("td").nth(1).boundingBox();
   expect(value.x + value.width, "the first value lies in view without scrolling").toBeLessThanOrEqual(scroll.x + scroll.width + 0.5);
   expect(await table.locator("td.jc-num").count(), "values align as numbers").toBeGreaterThan(0);
+});
+
+// T-4657: a data card whose rows all have places opens on its map, framed from the viz origin
+// alone; the spec goes in by message, labels in the visitor's language, and the table is one tab away.
+test("a data card with places opens on its map from the viz origin", async ({ page, context }) => {
+  await context.route("https://viz.dev.joinedcontext.com/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: VIZ_PAGE }));
+  await page.setViewportSize({ width: 400, height: 800 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await page.locator("#jc-question").fill("Ukáž kvalitu ovzdušia na mape");
+  await page.locator(".jc-form .jc-submit").click();
+  await expect(page.locator(".jc-tab[aria-selected=true]")).toHaveText("Mapa");
+  const frame = page.locator("iframe.jc-viz");
+  await expect(frame).toHaveAttribute("src", "https://viz.dev.joinedcontext.com/#show");
+  await expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox");
+  await expect.poll(() => frame.evaluate((f) => f.style.height)).toBe("300px");
+  const viz = page.frames().find((f) => f.url().startsWith("https://viz.dev.joinedcontext.com/"));
+  const got = await viz.evaluate(() => window.got);
+  expect(got.data.type).toBe("jc-viz-show");
+  expect(got.data.lang).toBe("sk");
+  expect(got.data.spec.popup[0].label).toBe("PM10");
+  expect(got.data.spec.data.features).toHaveLength(2);
+  await expect(page.locator(".jc-data-scroll")).toBeHidden();
+  await page.locator(".jc-tab", { hasText: "Tabuľka" }).click();
+  await expect(page.locator(".jc-data-scroll")).toBeVisible();
+  await expect(frame).toBeHidden();
+  // A data card without places has no tabs.
+  await page.locator("#jc-question").fill("Aká je kvalita ovzdušia?");
+  await page.locator(".jc-form .jc-submit").click();
+  await expect(page.locator(".jc-data")).toHaveCount(2);
+  await expect(page.locator(".jc-data").nth(1).locator(".jc-tab")).toHaveCount(0);
 });
 
 // T-4343: the deployment's widget.language decides; the browser's languages never leave the page.
@@ -479,4 +511,67 @@ test("on a phone the panel already fills the screen and offers no expand button 
   const chat = page.frameLocator("[data-jc-assistant] iframe");
   await expect(chat.locator(".jc-close")).toBeVisible();
   await expect(chat.locator(".jc-size")).toHaveCount(0);
+});
+
+// T-4670: the footer's privacy link opens a modal dialog that holds focus and closes on Escape
+// alone; its switch keeps the conversation in localStorage for 90 days, and off deletes it.
+test("the privacy dialog holds focus, closes on Escape, and its switch keeps or deletes the browser's copy (T-4670)", async ({ page, context }) => {
+  WIDGET = undefined;
+  SLOW = false;
+  await page.setViewportSize({ width: 420, height: 720 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await expect(page.locator(".jc-privacy-line")).toHaveText("Dôležité informácie si prosím overte. · Súkromie");
+  const open = page.locator(".jc-privacy-line .jc-more");
+  await open.click();
+  const dialog = page.locator("dialog.jc-about");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("h2")).toHaveText("O tomto asistentovi");
+  await expect(dialog.locator("p").first()).toHaveText(CONFIG.disclaimer.sk);
+  await expect(dialog).toContainText("30 dní");
+  await expect(dialog.locator('a[href="mailto:dpo@banskabystrica.sk"]')).toBeVisible();
+  await expect(dialog.locator('a[href="https://www.banskabystrica.sk/gdpr"]')).toBeVisible();
+  const box = await dialog.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(420);
+  for (const key of ["Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab"]) {
+    await page.keyboard.press(key);
+    expect(await page.evaluate(() => Boolean(document.activeElement && document.activeElement.closest("dialog")))).toBe(true);
+  }
+  const toggle = dialog.locator('input[role="switch"]');
+  await expect(toggle).not.toBeChecked();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("#jc-question")).toBeVisible();
+  await expect(open).toBeFocused();
+
+  const KEY = "jc-chat-remember:bb";
+  expect(await page.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+  await open.click();
+  await toggle.check();
+  expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k), KEY)).kept).toBeNull();
+
+  // The copy a later visit finds: shown in a new tab (no sessionStorage), the switch still on.
+  const conversation = {
+    conversation: "00000000-0000-4000-8000-000000000001", asked: 1,
+    turns: [{ question: "Kedy má otvorené klientske centrum?", text: "V pracovné dni od 8:00.", turn: 1, citations: [] }],
+  };
+  await page.evaluate(([k, kept]) => localStorage.setItem(k, JSON.stringify({ savedAt: new Date().toISOString(), kept })), [KEY, conversation]);
+  const later = await context.newPage();
+  await later.goto(`${base}/d/bb?lang=sk`);
+  await expect(later.locator(".jc-log")).toContainText("V pracovné dni od 8:00.");
+  await later.locator(".jc-privacy-line .jc-more").click();
+  const laterToggle = later.locator('dialog.jc-about input[role="switch"]');
+  await expect(laterToggle).toBeChecked();
+  await laterToggle.uncheck();
+  expect(await later.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+  await later.close();
+
+  // Past 90 days the copy is not shown and is deleted on the visit.
+  const old = new Date(Date.now() - 91 * 24 * 3600 * 1000).toISOString();
+  await page.evaluate(([k, kept, at]) => localStorage.setItem(k, JSON.stringify({ savedAt: at, kept })), [KEY, conversation, old]);
+  const stale = await context.newPage();
+  await stale.goto(`${base}/d/bb?lang=sk`);
+  await expect(stale.locator("#jc-question")).toBeVisible();
+  await expect(stale.locator(".jc-log")).not.toContainText("V pracovné dni od 8:00.");
+  expect(await stale.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
 });

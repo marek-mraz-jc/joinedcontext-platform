@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -631,15 +631,6 @@ test("opening hours read as a list of bold days and their times, not one paragra
   ]);
 });
 
-test("the disclaimer shows its first sentence and keeps the rest for More (T-4635)", () => {
-  assert.deepEqual(notice("Answers are written by AI. They may contain mistakes; check them. Do not enter personal data."),
-    { lead: "Answers are written by AI.", rest: "They may contain mistakes; check them. Do not enter personal data." });
-  assert.deepEqual(notice("  One sentence only.  "), { lead: "One sentence only.", rest: "" });
-  assert.deepEqual(notice("No full stop at all"), { lead: "No full stop at all", rest: "" });
-  assert.deepEqual(notice("Ask!\n  Then   read."), { lead: "Ask!", rest: "Then read." });
-  for (const empty of ["", "   ", null, undefined, 3]) assert.deepEqual(notice(empty), { lead: "", rest: "" });
-});
-
 test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4653)", async () => {
   const { solve, zeroBits } = require("./visitor.js");
   const { createHash } = require("node:crypto");
@@ -659,6 +650,18 @@ test("the table's labels are jc-core's field-order.json, the CKAN publisher's an
   for (const key of Object.keys(fields.labels)) {
     assert.equal(table({ columns: [key], rows: [] }, "cs").columns[0], fields.labels[key].cs, key);
   }
+});
+
+test("the data model's labels win where the table carries them, as text (T-4672)", () => {
+  const shown = table({
+    columns: ["name", "pm10", "url"],
+    units: [null, "µg/m³", null],
+    labels: [{ sk: "Názov stanice", en: "Station" }, { en: "PM10 <b>dust</b>" }, null],
+    rows: [["A", 21.5, "https://x.sk"]]
+  }, "sk");
+  // sk where the model has it, else its English, else the shared table's.
+  assert.deepEqual(shown.columns, ["Názov stanice", "PM10 <b>dust</b> (µg/m³)", "Odkaz"]);
+  assert.deepEqual(table({ columns: ["url"], labels: "nope", rows: [] }, "sk").columns, ["Odkaz"]);
 });
 
 test("a pipe table becomes rows, its rule making the first one the header (T-4649)", () => {
@@ -732,6 +735,24 @@ test("HTML in an answer, streamed or not, stays text", () => {
   }
 });
 
+test("a chart or a map reaches only the viz origin, in the visitor's language, map first when every row has a place (T-4657)", () => {
+  assert.equal(vizOrigin("https://viz.dev.joinedcontext.com"), "https://viz.dev.joinedcontext.com");
+  for (const bad of ["http://viz.dev.joinedcontext.com", "https://viz.dev.joinedcontext.com/", "https://evil.example", "javascript:alert(1)", null, 7]) {
+    assert.equal(vizOrigin(bad), null, String(bad));
+  }
+  const map = { $schema: "urn:joinedcontext:map:v1", label: "name", popup: [{ field: "pm10", label: "pm10", unit: "µg/m³" }, { field: "temperature", label: "temperature" }],
+    data: { type: "FeatureCollection", features: [{}, {}] } };
+  const shown = vizSpec(map, "sk");
+  assert.deepEqual(shown.popup.map((f) => f.label), ["PM10", "Teplota"]);
+  assert.equal(map.popup[0].label, "pm10", "the event's spec stays as it came");
+  const bar = { encoding: { x: { field: "value", title: "no2 (µg/m³)" }, y: { field: "label", title: null } } };
+  assert.equal(vizSpec(bar, "en").encoding.x.title, "NO₂ (µg/m³)");
+  assert.equal(vizSpec(bar, "en").encoding.y.title, null);
+  assert.equal(mapFirst({ rows: [[1], [2]], map }), true);
+  assert.equal(mapFirst({ rows: [[1], [2], [3]], map }), false, "a row without a place: the table first");
+  assert.equal(mapFirst({ rows: [[1]] }), false);
+});
+
 test("the close message goes to the framing page's origin alone, never to any (T-4654)", () => {
   const framers = ["https://www.banskabystrica.sk", "https://data.dev.joinedcontext.com"];
   assert.deepEqual(closeTargets(["https://www.banskabystrica.sk"], framers), ["https://www.banskabystrica.sk"]);
@@ -751,4 +772,37 @@ test("a limit reads the service's sentence with its reset time in Slovak, the wi
   assert.equal(said("limit", "  ", "sk", words), words.limit);
   assert.equal(said("limit", undefined, "sk", words), words.limit);
   assert.equal(said("slow", "Answer Took Too Long detail", "sk", words), words.slow, "only a limit reads the detail");
+});
+
+test("a remembered conversation comes back for 90 days after its last change and not after (T-4670)", () => {
+  const id = "00000000-0000-4000-8000-000000000000";
+  const kept = remember(null, id, 1, { question: "Kedy?", text: "Zajtra.", turn: 1, citations: [] });
+  const saved = new Date("2026-10-18T12:00:00Z");
+  const raw = lasting(kept, saved);
+  assert.equal(recalled(raw, new Date("2027-01-15T12:00:00Z")).kept.turns[0].question, "Kedy?");
+  assert.equal(recalled(raw, new Date("2027-01-17T12:00:00Z")), null, "past 90 days");
+  // Switched on before the first question: remembered, nothing to show yet.
+  assert.deepEqual(recalled(lasting(null, saved), saved), { kept: null });
+  for (const bad of [null, "", "{", "[]", '{"kept":{}}', '{"savedAt":"yesterday"}',
+    JSON.stringify({ savedAt: "2030-01-01T00:00:00Z", kept })]) {
+    assert.equal(recalled(bad, saved), null, String(bad));
+  }
+  // A planted conversation of the wrong shape is not shown.
+  assert.deepEqual(recalled(JSON.stringify({ savedAt: saved.toISOString(), kept: { conversation: "x", turns: [] } }), saved), { kept: null });
+});
+
+test("the privacy dialog leads with the deployment's disclaimer, says what is kept, and names only a contact and an https page it was given (T-4670)", () => {
+  const words = { aboutAi: "AI", keptHeading: "Kept", keptDays: "kept {days} days", keptNone: "kept nothing", askHeading: "Ask",
+    askData: "write to", documents: "documents" };
+  assert.deepEqual(privacyLines(words, 30, null), [{ text: "AI" }, { heading: "Kept", text: "kept 30 days" }]);
+  assert.deepEqual(privacyLines(words, 0, {}, "  "), [{ text: "AI" }, { heading: "Kept", text: "kept nothing" }]);
+  assert.equal(privacyLines(words, 30, null, " The city's own words. ")[0].text, "The city's own words.");
+  assert.deepEqual(privacyLines(words, 7, { contact: "dpo@banskabystrica.sk", documentsUrl: "https://www.banskabystrica.sk/gdpr" }), [
+    { text: "AI" }, { heading: "Kept", text: "kept 7 days" },
+    { heading: "Ask", text: "write to", mail: "dpo@banskabystrica.sk" },
+    { text: "documents", href: "https://www.banskabystrica.sk/gdpr" },
+  ]);
+  assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "https://x.sk/gdpr" }).length, 2, "no contact, no section");
+  assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "javascript:alert(1)" }).length, 3);
+  assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "http://x.sk/gdpr" }).length, 3, "https only");
 });

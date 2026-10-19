@@ -28,6 +28,7 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use jc_core::kinds::mcp_server::{breadth, AccessLevel, Select};
 use jc_core::kinds::{Audience, Representation};
+use jc_core::reach::EndpointFacts;
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -48,6 +49,13 @@ pub(crate) const MAX_FAN_OUT: usize = 10;
 
 /// The name of the server every organization has without a manifest (EP-122).
 pub const ORG_ALL: &str = "all";
+
+/// The first segment of an assistant's own server, `/api/mcp/d/{publicId}`: an
+/// AssistantDeployment's reach, read-only for every caller (T-4691).
+pub const DEPLOYMENTS: &str = "d";
+
+/// The scheme of an assistant's `context` resource, `context://{publicId}`.
+pub const CONTEXT_SCHEME: &str = "context://";
 
 /// One named server as the gateway serves it (MF-53).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +78,8 @@ pub struct McpServer {
     pub audience: Audience,
     /// The projects a `project-list` server admits besides its own.
     pub allowed_projects: Vec<String>,
+    /// The knowledge sources its `search_documents` searches, as `(project, source)` (MF-57).
+    pub knowledge_sources: Vec<(String, String)>,
 }
 
 /// Every named server the repository declares.
@@ -93,6 +103,7 @@ impl McpServer {
             endpoints: None,
             audience: Audience::Organization,
             allowed_projects: Vec::new(),
+            knowledge_sources: Vec::new(),
         }
     }
 
@@ -112,38 +123,7 @@ impl McpServer {
         {
             return false;
         }
-        let any = |values: &Option<Vec<String>>, wanted: &str| {
-            values
-                .as_ref()
-                .is_none_or(|values| values.iter().any(|v| v == wanted))
-        };
-        if !any(&select.projects, &endpoint.project)
-            || !any(
-                &select.spaces,
-                &format!("{}/{}", endpoint.project, endpoint.space),
-            )
-        {
-            return false;
-        }
-        if select.domains.is_none() && select.themes.is_none() {
-            return true;
-        }
-        let classified = crate::handlers::endpoint_surface::classification(endpoint);
-        let domains = select.domains.as_ref().is_none_or(|wanted| {
-            wanted
-                .iter()
-                .any(|d| classified.domains.contains(d.as_str()))
-        });
-        // A theme set by hand wins over the derived one, as on the DCAT record (T-4498).
-        let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
-            Some(catalog) => catalog.themes.iter().copied().collect(),
-            None => classified.themes,
-        };
-        domains
-            && select
-                .themes
-                .as_ref()
-                .is_none_or(|wanted| wanted.iter().any(|t| themes.contains(t)))
+        select.matches(&facts(endpoint))
     }
 
     /// Whether the selector's `accessLevel` takes an Endpoint this caller reads as `subject`.
@@ -158,6 +138,17 @@ impl McpServer {
             .as_ref()
             .and_then(|select| select.access_level.as_ref())
             .is_none_or(|levels| levels.contains(&level))
+    }
+
+    /// Whether it offers the resource `context` (EP-136, API/05 §1.9): an assistant's server on
+    /// an anonymous channel, whose context the assistant answers any visitor.
+    pub fn has_context(&self) -> bool {
+        self.project == DEPLOYMENTS && self.audience == Audience::Public
+    }
+
+    /// The URI of its `context` resource.
+    pub fn context_uri(&self) -> String {
+        format!("{CONTEXT_SCHEME}{}", self.name)
     }
 
     /// Its address under the gateway's base URL (EP-92).
@@ -182,6 +173,30 @@ impl McpServer {
                 .iter()
                 .any(|caller| *caller == self.project || self.allowed_projects.contains(caller)),
         }
+    }
+}
+
+/// What a selector reads of `endpoint` (MF-55, MF-61): its types, their classification, and its
+/// themes, a theme set by hand winning over the derived one as on the DCAT record (T-4498). The
+/// table holds no manifest name, so the slug stands in; matching never reads it.
+pub(crate) fn facts(endpoint: &Endpoint) -> EndpointFacts {
+    let classified = crate::handlers::endpoint_surface::classification(endpoint);
+    let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
+        Some(catalog) => catalog.themes.iter().copied().collect(),
+        None => classified.themes,
+    };
+    EndpointFacts {
+        project: endpoint.project.clone(),
+        name: endpoint.slug.clone(),
+        slug: endpoint.slug.clone(),
+        space: endpoint.space.clone(),
+        audience: endpoint.audience,
+        types: crate::handlers::endpoint_surface::classes(endpoint)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        domains: classified.domains.into_iter().map(str::to_owned).collect(),
+        themes,
     }
 }
 
@@ -214,6 +229,9 @@ pub(crate) async fn serve(
         .members
         .iter()
         .filter_map(|slug| gateway.resolver.resolve(slug))
+        // Never wider than its narrowest member (EP-93): a public server's internal member
+        // is not served, whoever calls.
+        .filter(|endpoint| breadth(endpoint.audience) >= breadth(server.audience))
         .chain(
             gateway
                 .resolver
@@ -280,7 +298,8 @@ pub(crate) async fn serve(
                 })
                 .filter(level)
                 .collect();
-            (format!("subject:{}", claims.sub), reach, false)
+            let reads_only = server.project == DEPLOYMENTS;
+            (format!("subject:{}", claims.sub), reach, reads_only)
         }
     };
 
@@ -369,9 +388,17 @@ pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
          not answer; every other tool names one Endpoint in `endpoint`.\n\n",
     );
     instructions.push_str(&super::PRIMER);
+    let mut capabilities = json!({ "tools": { "listChanged": false } });
+    if server.is_some_and(McpServer::has_context) {
+        instructions.push_str(
+            "\n\nThe resource `context` says what this assistant knows: its categories, its \
+             Endpoints with their counts and its knowledge sources. Read it first.",
+        );
+        capabilities["resources"] = json!({ "listChanged": false });
+    }
     json!({
         "protocolVersion": jsonrpc::PROTOCOL_VERSION,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": capabilities,
         "serverInfo": {
             "name": name,
             "title": title.unwrap_or(name),
@@ -663,6 +690,17 @@ pub async fn protected_resource(
 mod tests {
     use super::*;
 
+    /// EP-122, MF-57: the organization's built-in server selects everything an organization
+    /// member reads and attaches no knowledge sources, so it lists no `search_documents`.
+    #[test]
+    fn org_all_is_an_organization_server_with_no_knowledge_sources() {
+        let all = McpServer::org_all();
+        assert_eq!((all.project.as_str(), all.name.as_str()), ("org", ORG_ALL));
+        assert_eq!(all.audience, Audience::Organization);
+        assert_eq!(all.select, Some(Select::default()));
+        assert!(all.members.is_empty() && all.knowledge_sources.is_empty());
+    }
+
     fn server(audience: Audience) -> McpServer {
         McpServer {
             project: "helsinki".into(),
@@ -674,6 +712,7 @@ mod tests {
             endpoints: None,
             audience,
             allowed_projects: vec!["espoo".into()],
+            knowledge_sources: Vec::new(),
         }
     }
 

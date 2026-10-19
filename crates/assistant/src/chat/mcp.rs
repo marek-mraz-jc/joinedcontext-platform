@@ -8,7 +8,8 @@
 //! `POST /api/mcp/{project}/{name}` (EP-92): its `list_endpoints` names the Endpoints this
 //! asker reads through it, and each becomes a connector of its own Endpoint, as above (MF-56).
 
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -105,6 +106,41 @@ pub struct Lent {
     pub public: bool,
 }
 
+/// How long a public Endpoint's tool listing is kept: a changed Endpoint is offered with its
+/// new tools within this time.
+pub const LISTING_LIFE: Duration = Duration::from_secs(300);
+
+/// The most public listings kept; past it the oldest goes.
+const MAX_LISTINGS: usize = 512;
+
+/// Public Endpoints' tool listings, kept per gateway and slug for [`LISTING_LIFE`], at most
+/// `MAX_LISTINGS` (T-4680).
+// ponytail: in memory, one replica; each replica lists for itself, as the answer cache does.
+#[derive(Default)]
+pub struct Listings(Mutex<Vec<(String, Instant, Vec<Value>)>>);
+
+impl Listings {
+    fn kept(&self, key: &str, now: Instant) -> Option<Vec<Value>> {
+        let listings = self.0.lock().ok()?;
+        listings
+            .iter()
+            .find(|(k, at, _)| k == key && now.saturating_duration_since(*at) < LISTING_LIFE)
+            .map(|(_, _, listed)| listed.clone())
+    }
+
+    fn keep(&self, key: String, listed: Vec<Value>, now: Instant) {
+        let Ok(mut listings) = self.0.lock() else {
+            return;
+        };
+        listings
+            .retain(|(k, at, _)| *k != key && now.saturating_duration_since(*at) < LISTING_LIFE);
+        if listings.len() >= MAX_LISTINGS {
+            listings.remove(0);
+        }
+        listings.push((key, now, listed));
+    }
+}
+
 /// A named MCP server on the gateway, `{project}/{name}` (EP-92).
 #[derive(Debug, Clone)]
 pub struct Server {
@@ -187,11 +223,39 @@ impl Surface {
         .await
     }
 
+    /// The surface's `tools/list`. A public listing is the same for anyone, so it is kept for
+    /// [`LISTING_LIFE`] per gateway and slug (T-4680); one read with a person's token is never
+    /// kept, because their grants shape it. A failure is never kept.
+    async fn listed(
+        &self,
+        http: &reqwest::Client,
+        listings: &Listings,
+    ) -> Result<Vec<Value>, String> {
+        let key = (self.token.is_none()).then(|| format!("{}/{}", self.gateway, self.slug));
+        if let Some(listed) = key
+            .as_deref()
+            .and_then(|key| listings.kept(key, Instant::now()))
+        {
+            return Ok(listed);
+        }
+        let result = self.rpc(http, "tools/list", json!({})).await?;
+        let listed = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(key) = key {
+            listings.keep(key, listed.clone(), Instant::now());
+        }
+        Ok(listed)
+    }
+
     /// The tools the surface offers that `allowed` names and [`READ_ONLY_TOOLS`] holds, in the
     /// order `allowed` names them.
     pub async fn tools(
         &self,
         http: &reqwest::Client,
+        listings: &Listings,
         allowed: &[String],
     ) -> Result<Vec<Tool>, String> {
         let allowed: Vec<&String> = allowed
@@ -201,12 +265,7 @@ impl Surface {
         if allowed.is_empty() {
             return Ok(Vec::new());
         }
-        let result = self.rpc(http, "tools/list", json!({})).await?;
-        let listed = result
-            .get("tools")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let listed = self.listed(http, listings).await?;
         Ok(allowed
             .iter()
             .filter_map(|name| {
@@ -275,8 +334,35 @@ pub fn cut(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cut, lent, Lent, MAX_SERVER_ENDPOINTS};
+
+    /// T-4680: a kept listing serves until its life ends, a new one replaces the old for its key,
+    /// and the store never holds more than [`MAX_LISTINGS`].
+    #[test]
+    fn a_public_listing_is_kept_for_its_life_and_the_store_is_bounded() {
+        let listings = Listings::default();
+        let at = Instant::now();
+        let tool = |name: &str| vec![json!({"name": name})];
+        listings.keep("kept-test/a".into(), tool("list_types"), at);
+        assert_eq!(
+            listings.kept("kept-test/a", at + Duration::from_secs(299)),
+            Some(tool("list_types"))
+        );
+        assert_eq!(listings.kept("kept-test/a", at + LISTING_LIFE), None);
+        assert_eq!(listings.kept("kept-test/b", at), None);
+        listings.keep("kept-test/a".into(), tool("get_entity"), at);
+        assert_eq!(listings.kept("kept-test/a", at), Some(tool("get_entity")));
+        for n in 0..MAX_LISTINGS + 5 {
+            listings.keep(format!("kept-test/many/{n}"), Vec::new(), at);
+        }
+        assert!(listings.0.lock().map(|l| l.len()).unwrap_or(usize::MAX) <= MAX_LISTINGS);
+        assert_eq!(
+            listings.kept(&format!("kept-test/many/{}", MAX_LISTINGS + 4), at),
+            Some(Vec::new())
+        );
+    }
+    use super::{cut, lent, Lent, Listings, LISTING_LIFE, MAX_LISTINGS, MAX_SERVER_ENDPOINTS};
     use serde_json::json;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn a_server_lends_its_listed_slugs_at_most_ten() {

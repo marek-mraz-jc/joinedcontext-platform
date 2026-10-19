@@ -408,6 +408,7 @@ async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
         endpoints: None,
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
+        knowledge_sources: Vec::new(),
     };
     let app = app_with(
         "http://127.0.0.1:1",

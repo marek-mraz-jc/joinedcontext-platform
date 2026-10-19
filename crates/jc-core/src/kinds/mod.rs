@@ -34,6 +34,7 @@ pub mod space;
 pub mod subscription;
 pub mod sync;
 pub mod ui_schema;
+pub mod visualization;
 
 pub use agent_profile::{
     AgentEgress, AgentLimits, AgentModel, AgentProfileRole, AgentProfileSpec, AgentRuntime,
@@ -48,7 +49,7 @@ pub use assistant::{
     AnswerSpec, AssistantDeploymentSpec, AssistantScope, Budget, Channel, ChatWidget, Connector,
     KnowledgeSourceSpec, Localised, ModelChoice, PdfPolicy, PdfPolicyKind, ProviderRouting,
     ProviderSort, RateLimit, ReasoningEffort, Routes, SourceType, StageReasoning, Theme,
-    UploadLimits, Visibility, WidgetLanguage,
+    TranscriptRedaction, UploadLimits, Visibility, WidgetLanguage,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use catalog::{

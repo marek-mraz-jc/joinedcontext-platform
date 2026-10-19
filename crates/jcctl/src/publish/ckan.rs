@@ -510,6 +510,117 @@ pub fn publish(
     }
 }
 
+/// The CKAN view type a visualization is published as (ADR-N-053 §2.7, EP-132).
+pub const VISUALIZATION_VIEW: &str = "jc_visualization";
+
+/// What one run did to an Endpoint's visualization views.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Views {
+    /// Views created for a visualization CKAN did not hold yet.
+    pub created: usize,
+    /// Views whose title, description, spec or source changed.
+    pub updated: usize,
+    /// `jc_visualization` views the list no longer names, or names twice.
+    pub deleted: usize,
+}
+
+/// Publishes each of the Endpoint's `spec.catalog.visualizations` as a `jc_visualization` view
+/// of its dataset, after [`publish`] (EP-132).
+///
+/// The views hang off the dataset's first resource; each holds the visualization's `jc_name`,
+/// its title and description in the publisher's language, its `spec` and `data` as JSON text
+/// and the Endpoint slug, and the renderer finds it by its id alone. Every `jc_visualization`
+/// view on the dataset that the list does not name, or names a second time, is deleted, since
+/// only this publisher writes that type; views of any other type are never touched.
+/// Idempotent: an unchanged list makes no writing call.
+pub fn publish_views(
+    api: &mut impl CkanApi,
+    endpoint: &RawManifest,
+    settings: &Settings,
+) -> Result<Views, PublishError> {
+    let spec: EndpointSpec = serde_json::from_value(endpoint.spec.clone())
+        .map_err(|e| PublishError::Spec(e.to_string()))?;
+    let Some(publication) = spec.publish.as_ref().and_then(|p| p.ckan.as_ref()) else {
+        return Ok(Views::default());
+    };
+    let name = publication.dataset_name(&endpoint.metadata.name);
+    let Some(live) = api.show("package_show", name)?.filter(|p| !deleted(p)) else {
+        return Ok(Views::default());
+    };
+    let resources: Vec<String> = live
+        .get("resources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let Some(target) = resources.first() else {
+        return Ok(Views::default());
+    };
+    let language = settings.language.as_deref();
+    let items = spec
+        .catalog
+        .as_ref()
+        .map(|c| c.visualizations.as_slice())
+        .unwrap_or_default();
+    let mut desired: BTreeMap<&str, Value> = BTreeMap::new();
+    for item in items {
+        let text =
+            |value| serde_json::to_string(value).map_err(|e| PublishError::Spec(e.to_string()));
+        desired.insert(
+            item.name.as_str(),
+            json!({
+                "resource_id": target,
+                "view_type": VISUALIZATION_VIEW,
+                "title": in_language(&item.title, language).unwrap_or_else(|| item.name.clone()),
+                "description": in_language(&item.description, language).unwrap_or_default(),
+                "jc_name": item.name,
+                "spec": text(&item.spec)?,
+                "data": text(&serde_json::to_value(&item.data).map_err(|e| PublishError::Spec(e.to_string()))?)?,
+                "endpoint": spec.slug.as_str(),
+            }),
+        );
+    }
+
+    let mut done = Views::default();
+    for resource in &resources {
+        let views = api
+            .show("resource_view_list", resource)?
+            .unwrap_or_default();
+        for view in views.as_array().into_iter().flatten() {
+            if view.get("view_type").and_then(Value::as_str) != Some(VISUALIZATION_VIEW) {
+                continue;
+            }
+            let id = view.get("id").cloned().unwrap_or_default();
+            let wanted = view
+                .get("jc_name")
+                .and_then(Value::as_str)
+                .filter(|_| resource == target)
+                .and_then(|n| desired.remove(n));
+            match wanted {
+                Some(want) if VIEW_FIELDS.iter().all(|f| view.get(*f) == want.get(*f)) => {}
+                Some(mut want) => {
+                    want["id"] = id;
+                    api.action("resource_view_update", &want)?;
+                    done.updated += 1;
+                }
+                None => {
+                    api.action("resource_view_delete", &json!({ "id": id }))?;
+                    done.deleted += 1;
+                }
+            }
+        }
+    }
+    for want in desired.into_values() {
+        api.action("resource_view_create", &want)?;
+        done.created += 1;
+    }
+    Ok(done)
+}
+
+/// What a visualization view holds; an update is sent when one of them differs.
+const VIEW_FIELDS: [&str; 5] = ["title", "description", "spec", "data", "endpoint"];
+
 /// The dataset's first publication, when the live one carries it and this run does not: the
 /// `issued` a restoration wrote after the datasets were re-created (T-4644) is the dataset's own,
 /// so it is neither drift nor dropped by the `package_update` that replaces the extras.
@@ -1163,6 +1274,16 @@ impl InMemoryCkan {
             .map(|(fields, _)| fields.as_slice())
     }
 
+    /// A DataStore table or a resource of a dataset.
+    fn holds_resource(&self, id: &str) -> bool {
+        self.tables.contains_key(id)
+            || self.packages.values().any(|p| {
+                p["resources"]
+                    .as_array()
+                    .is_some_and(|rs| rs.iter().any(|r| r["id"] == json!(id)))
+            })
+    }
+
     fn rejected(action: &str, message: &str) -> CkanError {
         CkanError::Rejected {
             action: action.to_owned(),
@@ -1184,10 +1305,7 @@ impl CkanApi for InMemoryCkan {
                 .get(name)
                 .map(|(fields, _)| json!({ "resource_id": name, "id": name, "fields": fields }))),
             // CKAN answers 404 for a resource it does not hold, and a list for one it does.
-            "resource_view_list" => Ok(self
-                .tables
-                .contains_key(name)
-                .then(|| json!(self.views(name)))),
+            "resource_view_list" => Ok(self.holds_resource(name).then(|| json!(self.views(name)))),
             other => Err(Self::rejected(other, "unknown show action")),
         }
     }
@@ -1199,14 +1317,30 @@ impl CkanApi for InMemoryCkan {
         }
         if action == "resource_view_create" {
             let id = Self::resource_of(action, payload)?;
-            if !self.tables.contains_key(&id) {
+            if !self.holds_resource(&id) {
                 return Err(Self::rejected(action, "unknown resource"));
             }
-            let views = self.views.entry(id).or_default();
+            self.revision += 1;
             let mut view = payload.clone();
-            view["id"] = json!(format!("view-{}", views.len() + 1));
-            views.push(view.clone());
+            view["id"] = json!(format!("view-{}", self.revision));
+            self.views.entry(id).or_default().push(view.clone());
             return Ok(view);
+        }
+        if action == "resource_view_update" || action == "resource_view_delete" {
+            let id = payload.get("id").cloned().unwrap_or_default();
+            let found = self.views.values_mut().find_map(|views| {
+                let at = views.iter().position(|v| v["id"] == id)?;
+                Some((views, at))
+            });
+            let Some((views, at)) = found else {
+                return Err(Self::rejected(action, "unknown view"));
+            };
+            if action == "resource_view_delete" {
+                views.remove(at);
+                return Ok(json!({}));
+            }
+            views[at] = payload.clone();
+            return Ok(payload.clone());
         }
         let name = payload
             .get("name")
@@ -1235,11 +1369,25 @@ impl CkanApi for InMemoryCkan {
                 // CKAN mints an id on creation and keeps it for the life of the dataset.
                 stored["id"] = json!(format!("pkg-{key}"));
                 stored["metadata_modified"] = json!(self.tick());
-                // and answers an empty `hash` for every resource that was given none.
+                // and answers an empty `hash` for every resource that was given none, and an id
+                // for every resource, kept across updates by its position.
+                let ids: Vec<Value> = self
+                    .packages
+                    .get(&key)
+                    .and_then(|p| p["resources"].as_array())
+                    .map(|rs| rs.iter().map(|r| r["id"].clone()).collect())
+                    .unwrap_or_default();
                 if let Some(resources) = stored["resources"].as_array_mut() {
-                    for resource in resources {
+                    for (i, resource) in resources.iter_mut().enumerate() {
                         if resource.get("hash").is_none() {
                             resource["hash"] = json!("");
+                        }
+                        if resource.get("id").is_none() {
+                            resource["id"] = ids
+                                .get(i)
+                                .filter(|id| id.is_string())
+                                .cloned()
+                                .unwrap_or_else(|| json!(format!("res-{key}-{i}")));
                         }
                     }
                 }

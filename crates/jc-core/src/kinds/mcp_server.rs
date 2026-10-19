@@ -20,6 +20,14 @@ pub const MAX_MEMBERS: usize = 10;
 /// The most values one `select` field may hold (MF-55).
 pub const MAX_SELECT_VALUES: usize = 50;
 
+/// The most knowledge sources one server attaches (MF-57).
+pub const MAX_KNOWLEDGE_SOURCES: usize = 20;
+
+/// `{project}/{source}` as its two parts, `{source}` as `namespace`'s.
+pub fn knowledge_source_id<'a>(named: &'a str, namespace: &'a str) -> (&'a str, &'a str) {
+    named.split_once('/').unwrap_or((namespace, named))
+}
+
 /// How a caller reaches an Endpoint, the levels of the per-caller catalogue (T-4503).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
@@ -78,6 +86,9 @@ pub struct Select {
     /// EU data themes of that classification, e.g. `ENVI`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub themes: Option<Vec<DataTheme>>,
+    /// NGSI-LD entity types the Endpoint serves, e.g. `OffStreetParking` (MF-61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub types: Option<Vec<String>>,
     /// How the caller reaches the Endpoint; no wider than the server's audience admits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_level: Option<Vec<AccessLevel>>,
@@ -101,6 +112,10 @@ pub struct McpServerSpec {
     /// The projects a `project-list` server admits; the server's own project when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_projects: Vec<String>,
+    /// The `KnowledgeSource`s its `search_documents` searches, up to twenty, each `{source}` of
+    /// its own project or `{project}/{source}`; each a `visibility: public` source (MF-57).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_sources: Vec<String>,
 }
 
 impl Kind for McpServerSpec {
@@ -165,6 +180,33 @@ impl McpServerSpec {
                 ));
             }
         }
+        if self.knowledge_sources.len() > MAX_KNOWLEDGE_SOURCES {
+            return Err(invalid(
+                "knowledgeSources",
+                format!(
+                    "a server attaches at most {MAX_KNOWLEDGE_SOURCES} knowledge sources, not {}",
+                    self.knowledge_sources.len()
+                ),
+            ));
+        }
+        let mut attached = BTreeSet::new();
+        for named in &self.knowledge_sources {
+            let (project, source) = knowledge_source_id(named, namespace);
+            names::validate_dns1123_label(source)?;
+            if project.is_empty() || project == crate::envelope::ORG_NAMESPACE {
+                return Err(invalid(
+                    "knowledgeSources",
+                    format!("`{named}` names no project: a server of the organization names each source as `{{project}}/{{source}}`"),
+                ));
+            }
+            names::validate_dns1123_label(project)?;
+            if !attached.insert((project.to_owned(), source.to_owned())) {
+                return Err(invalid(
+                    "knowledgeSources",
+                    format!("knowledge source `{project}/{source}` is named twice"),
+                ));
+            }
+        }
         if self.audience == Audience::ProjectList {
             for project in &self.allowed_projects {
                 names::validate_dns1123_label(project)?;
@@ -179,6 +221,17 @@ impl McpServerSpec {
             ));
         }
         Ok(())
+    }
+
+    /// The attached knowledge sources as `(project, source)`, one without a project in
+    /// `namespace` (MF-57).
+    pub fn knowledge_source_ids<'a>(
+        &'a self,
+        namespace: &'a str,
+    ) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.knowledge_sources
+            .iter()
+            .map(move |named| knowledge_source_id(named, namespace))
     }
 
     /// The members as `(project, name)`, a member without `namespace` in `namespace`.
@@ -217,6 +270,7 @@ impl Select {
         bounded("spaces", &self.spaces)?;
         bounded("domains", &self.domains)?;
         bounded("themes", &self.themes)?;
+        bounded("types", &self.types)?;
         bounded("accessLevel", &self.access_level)?;
         for project in self.projects.iter().flatten() {
             names::validate_dns1123_label(project)?;
@@ -230,6 +284,14 @@ impl Select {
             };
             names::validate_dns1123_label(project)?;
             names::validate_dns1123_label(name)?;
+        }
+        for entity_type in self.types.iter().flatten() {
+            if names::validate_entity_type(entity_type).is_err() {
+                return Err(select_invalid(
+                    "types",
+                    format!("`{entity_type}` is no NGSI-LD entity type short name (MF-61)"),
+                ));
+            }
         }
         for domain in self.domains.iter().flatten() {
             if !crate::classification::is_domain(domain) {
@@ -294,6 +356,7 @@ mod tests {
             select: None,
             audience,
             allowed_projects: Vec::new(),
+            knowledge_sources: Vec::new(),
         }
     }
 
@@ -412,6 +475,48 @@ mod tests {
         )
         .validate("org")
         .is_ok());
+    }
+
+    /// MF-57: up to twenty distinct knowledge sources, each with its project, the organization's
+    /// server naming it.
+    #[test]
+    fn a_server_attaches_up_to_twenty_distinct_knowledge_sources_of_named_projects() {
+        let attaching = |sources: &[&str], namespace: &str| {
+            let mut server = spec(vec![member("bikes", Some("helsinki"))], Audience::Public);
+            server.knowledge_sources = sources.iter().map(|s| (*s).to_owned()).collect();
+            server.validate(namespace)
+        };
+        assert!(attaching(&["web", "bbsk/web"], "banskabystrica").is_ok());
+        let ids: Vec<(String, String)> = {
+            let mut server = spec(Vec::new(), Audience::Public);
+            server.knowledge_sources = vec!["web".into(), "bbsk/web".into()];
+            server
+                .knowledge_source_ids("banskabystrica")
+                .map(|(p, s)| (p.to_owned(), s.to_owned()))
+                .collect()
+        };
+        assert_eq!(
+            ids,
+            [
+                ("banskabystrica".into(), "web".into()),
+                ("bbsk".into(), "web".into())
+            ]
+        );
+        assert!(attaching(&["web", "banskabystrica/web"], "banskabystrica")
+            .unwrap_err()
+            .to_string()
+            .contains("named twice"));
+        assert!(attaching(&["web"], "org")
+            .unwrap_err()
+            .to_string()
+            .contains("names no project"));
+        assert!(attaching(&["helsinki/web"], "org").is_ok());
+        for bad in ["Web", "bbsk/", "/web", "a/b/c", "../web"] {
+            assert!(attaching(&[bad], "banskabystrica").is_err(), "{bad}");
+        }
+        let many: Vec<String> = (0..21).map(|i| format!("s{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(attaching(&many, "banskabystrica").is_err());
     }
 
     #[test]

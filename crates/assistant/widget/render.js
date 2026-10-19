@@ -361,6 +361,39 @@ var JCRender = (function () {
     return entry ? entry[lang] || entry.en : spelt(key);
   }
 
+  /** The chart renderer the widget frames (T-4657): `https://viz.{domain}` exactly, else null. */
+  function vizOrigin(value) {
+    return typeof value === "string" && /^https:\/\/viz(\.[a-z0-9-]+)+$/.test(value) ? value : null;
+  }
+
+  /**
+   * A spec as the visitor reads it (T-4657): a map's popup labels and a chart's axis titles in
+   * `lang`, a unit in brackets kept. A copy; the renderer checks it again and sets it as text.
+   */
+  function vizSpec(spec, lang) {
+    var copy = JSON.parse(JSON.stringify(spec || {}));
+    if (Array.isArray(copy.popup)) {
+      copy.popup.forEach(function (f) {
+        if (f && typeof f.field === "string") f.label = word(LABELS, f.field, lang);
+      });
+    }
+    var encoding = copy.encoding && typeof copy.encoding === "object" ? copy.encoding : {};
+    Object.keys(encoding).forEach(function (channel) {
+      var title = encoding[channel] && encoding[channel].title;
+      if (typeof title !== "string") return;
+      var parts = /^(.*?)( \([^()]*\))?$/.exec(title);
+      encoding[channel].title = word(LABELS, parts[1], lang) + (parts[2] || "");
+    });
+    return copy;
+  }
+
+  /** Whether a data card opens on its map (T-4657): every row of the table has a place. */
+  function mapFirst(data) {
+    var features = data && data.map && data.map.data && data.map.data.features;
+    var rows = data && Array.isArray(data.rows) ? data.rows.length : 0;
+    return Array.isArray(features) && rows > 0 && features.length >= rows;
+  }
+
   /** A time as "pred 5 min.", "dnes 18:40" or "17. 10. 2026 18:40" in `lang`. */
   function when(stamp, lang, now) {
     var t = Date.parse(stamp);
@@ -406,8 +439,11 @@ var JCRender = (function () {
         return row[i] === null || row[i] === undefined || typeof row[i] === "number";
       });
     });
+    // The data model's labels where the table carries them (T-4672), else the shared table's.
+    var modelled = Array.isArray(data.labels) ? data.labels : [];
     var columns = data.columns.map(function (c, i) {
-      var label = word(LABELS, String(c), lang);
+      var own = modelled[i] && typeof modelled[i] === "object" ? entry(modelled[i], lang) || entry(modelled[i], "en") : "";
+      var label = own || word(LABELS, String(c), lang);
       return typeof units[i] === "string" && units[i] ? label + " (" + units[i] + ")" : label;
     });
     var count = typeof data.total === "number" && data.total > rows.length
@@ -647,6 +683,48 @@ var JCRender = (function () {
     return { conversation: conversation, asked: asked, turns: turns.slice(-MAX_KEPT) };
   }
 
+  // The copy the visitor chose to keep in this browser (T-4670): at most 90 days after its last
+  // change, then gone.
+  var REMEMBER_MS = 90 * 24 * 3600 * 1000;
+
+  /** What `localStorage` holds for a remembered conversation, stamped `now`; `kept` may be null. */
+  function lasting(kept, now) {
+    return JSON.stringify({ savedAt: now.toISOString(), kept: kept || null });
+  }
+
+  /**
+   * The remembered copy read back from `raw`: null when the visitor never switched it on, the
+   * value is not of its shape, or it is older than 90 days (the caller deletes it then); else
+   * `{ kept }`, the conversation or null when there was none yet.
+   */
+  function recalled(raw, now) {
+    var held;
+    try { held = JSON.parse(raw); } catch (e) { return null; }
+    if (!held || typeof held !== "object" || typeof held.savedAt !== "string") return null;
+    var at = new Date(held.savedAt).getTime();
+    if (isNaN(at) || at > now.getTime() + 60000 || now.getTime() - at > REMEMBER_MS) return null;
+    return { kept: held.kept ? restore(JSON.stringify(held.kept)) : null };
+  }
+
+  /**
+   * The paragraphs of the privacy dialog (API/05 §1.6, T-4670) in `words`: the deployment's
+   * `disclaimer`, else the widget's own; what is kept for how many `days` (none when 0); and,
+   * only when the deployment names a contact, whom to write (`mail`) with the page of its privacy
+   * documents (`href`, https only).
+   */
+  function privacyLines(words, days, privacy, disclaimer) {
+    var own = typeof disclaimer === "string" ? disclaimer.trim() : "";
+    var lines = [{ text: own || words.aboutAi }];
+    var n = Number.isInteger(days) && days > 0 ? days : 0;
+    lines.push({ heading: words.keptHeading, text: n > 0 ? words.keptDays.replace("{days}", String(n)) : words.keptNone });
+    var contact = privacy && typeof privacy.contact === "string" ? privacy.contact.trim() : "";
+    if (!contact || !mailto(contact)) return lines;
+    lines.push({ heading: words.askHeading, text: words.askData, mail: contact });
+    var docs = safeUrl(privacy.documentsUrl);
+    if (docs && /^https:/i.test(docs)) lines.push({ text: words.documents, href: docs });
+    return lines;
+  }
+
   /**
    * The questions an empty chat offers (T-4253): the deployment's own in the language the chat
    * speaks, else the widget's own, never another language's; at most four distinct ones.
@@ -778,15 +856,6 @@ var JCRender = (function () {
     return list;
   }
 
-  /**
-   * The disclaimer as its first sentence, always shown whole, and the rest that "More" opens
-   * (T-4635); a text of one sentence has no rest.
-   */
-  function notice(text) {
-    var whole = typeof text === "string" ? text.trim().replace(/\s+/g, " ") : "";
-    var split = /^(.+?[.!?])\s+(\S.*)$/.exec(whole);
-    return split ? { lead: split[1], rest: split[2] } : { lead: whole, rest: "" };
-  }
 
   /**
    * The origins the chat's close message goes to, never `*` (T-4654): the framing page's own,
@@ -804,13 +873,15 @@ var JCRender = (function () {
   }
 
   return {
-    notice: notice, closeTargets: closeTargets,
+    closeTargets: closeTargets,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
+    lasting: lasting, recalled: recalled, privacyLines: privacyLines,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
-    suggestions: suggestions, trouble: trouble, retryable: retryable, said: said, retry: retry
+    suggestions: suggestions, trouble: trouble, retryable: retryable, said: said, retry: retry,
+    vizOrigin: vizOrigin, vizSpec: vizSpec, mapFirst: mapFirst
   };
 })();
 if (typeof module !== "undefined") module.exports = JCRender;

@@ -254,6 +254,13 @@
           ],
           "description": "Who may connect: `public`, `organization` or `project-list`. No wider than the narrowest member's own audience; `public` takes the red lane (EP-16)."
         },
+        "knowledgeSources": {
+          "description": "The `KnowledgeSource`s its `search_documents` searches, up to twenty, each `{source}` of its own project or `{project}/{source}`; each a `visibility: public` source (MF-57).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "members": {
           "description": "The Endpoints the server reads, up to ten, by typed reference (`kind: Endpoint`); a member of another project names its project in `namespace`. At least one without `select`.",
           "items": {
@@ -441,6 +448,16 @@
           "description": "EU data themes of that classification, e.g. `ENVI`.",
           "items": {
             "$ref": "#/definitions/DataTheme"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "types": {
+          "description": "NGSI-LD entity types the Endpoint serves, e.g. `OffStreetParking` (MF-61).",
+          "items": {
+            "type": "string"
           },
           "type": [
             "array",
