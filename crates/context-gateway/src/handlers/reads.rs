@@ -27,7 +27,7 @@ use serde_json::Value;
 ///
 /// Asked on the gateway's own account (T-3790): no grant gives a caller the type list (5.7.5),
 /// and the broker's engine refuses it to them; the entity query that follows is the caller's.
-async fn dataset_types(
+pub(super) async fn dataset_types(
     gateway: &Gateway,
     slug: &str,
     headers: &HeaderMap,
@@ -119,7 +119,7 @@ pub(crate) fn too_large() -> Response<Body> {
 }
 
 /// How many broker pages one download reads at once (T-4082).
-const PARALLEL_PAGES: usize = 4;
+pub(super) const PARALLEL_PAGES: usize = 4;
 
 /// Every entity the query reaches, read from the broker one page at a time (EP-44).
 ///
@@ -260,59 +260,9 @@ fn window(params: &[(String, String)]) -> Result<(usize, usize), Box<Response<Bo
     Ok((read("offset", 0)?, read("limit", usize::MAX)?))
 }
 
-/// The type list of an Endpoint as its reads show the caller (CIM 009 5.7.1, T-4080): every
-/// type the space holds that the Endpoint's view answers at least one entity of to this caller.
-/// A read grant is enough to be shown it, as it is for the schema (EP-47), and each type is the
-/// view's decision, so no type name outside what the caller may read is listed. `None` when the
-/// view refuses the caller every type the space holds: the view then answers the operation
-/// itself.
-pub(crate) async fn listed_types(
-    gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
-    request: &mut Request,
-) -> Result<Option<Value>, Box<Response<Body>>> {
-    let slug = endpoint.slug.as_str();
-    view_hop(endpoint, subject, request)?;
-    let held = dataset_types(gateway, slug, request.headers()).await?;
-    let mut shown = Vec::new();
-    let mut refused = 0;
-    let headers = request.headers();
-    // PARALLEL_PAGES at a time, in the space's order (T-4734): asked one after another, the
-    // HSL Endpoint's list took 10-19 s on dev.
-    let probes: Vec<_> = held
-        .iter()
-        .map(|name| async move {
-            let target = format!(
-                "entities?{}&limit=1",
-                query::view_read(&[], std::slice::from_ref(name))
-            );
-            (name, view_page(gateway, slug, slug, &target, headers).await)
-        })
-        .collect();
-    let mut probed = stream::iter(probes).buffered(PARALLEL_PAGES);
-    while let Some((name, probe)) = probed.next().await {
-        match probe {
-            Ok((page, _, _, _)) if !page.is_empty() => shown.push(name.clone()),
-            Ok(_) => {}
-            // A type the view refuses this caller is a type they are not shown.
-            Err(answer) if answer.status() == StatusCode::FORBIDDEN => refused += 1,
-            Err(failed) => return Err(failed),
-        }
-    }
-    if !held.is_empty() && refused == held.len() {
-        return Ok(None);
-    }
-    Ok(Some(serde_json::json!({
-        "id": format!("urn:ngsi-ld:EntityTypeList:{slug}"),
-        "type": "EntityTypeList",
-        "typeList": shown,
-    })))
-}
-
 /// Pins the tenant and the verified caller for a hop to the view; a caller who asked about
 /// narrowing has the broker asked too (R22).
-fn view_hop(
+pub(super) fn view_hop(
     endpoint: &Endpoint,
     subject: &Subject,
     request: &mut Request,
@@ -342,7 +292,7 @@ async fn selector(
 /// One page of entities from `/x/views/{view}/ngsi-ld/v1/{target}`, whether the broker marked
 /// it narrowed, and its size. A space with no tenant at the broker yet is an empty page (EP-22);
 /// the engine's refusal is the platform's `403`; any other failure is [`broker_failed`].
-async fn view_page(
+pub(super) async fn view_page(
     gateway: &Gateway,
     slug: &str,
     view: &str,

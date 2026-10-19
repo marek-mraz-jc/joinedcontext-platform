@@ -414,7 +414,8 @@ pub(crate) async fn serve_ngsi_ld_view(
     // grant, and the details form, are the view's to answer.
     if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
     {
-        match crate::handlers::reads::listed_types(gateway, &endpoint, &subject, &mut request).await
+        match crate::handlers::types_list::listed_types(gateway, &endpoint, &subject, &mut request)
+            .await
         {
             Ok(Some(list)) => return typed_json_response(&list, "application/json"),
             Ok(None) => {}
