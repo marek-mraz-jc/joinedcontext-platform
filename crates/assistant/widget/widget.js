@@ -731,7 +731,9 @@
     var stack = el("span", "jc-badges");
     stack.setAttribute("aria-hidden", "true");
     JCRender.badges(grouped.list).forEach(function (badge) {
-      var b = el("span", "jc-badge", badge.letter);
+      // The letter is CSS content, so a copy or a page's text never reads "DA4 zdroje" (T-4729).
+      var b = el("span", "jc-badge");
+      b.setAttribute("data-letter", badge.letter);
       b.style.setProperty("--badge", "hsl(" + badge.hue + " 45% 38%)");
       stack.appendChild(b);
     });
