@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use jc_core::display_order::{display_order, Display, Field};
+use jc_core::display_order::{display_order, enum_words, Display, Field};
 
 const MODEL: &str = r#"
 id: https://example.org/models/city
@@ -219,4 +219,49 @@ classes:
     assert_eq!(slots(&fields), ["name", "startDate"]);
     assert!(fields[1].summary && !fields[0].summary);
     assert_eq!(fields[1].label("sk"), "Začiatok");
+}
+
+/// T-4682: an enum value reads as the words its model gives it, a label per language first, its
+/// description in the model's language where a label is missing; a slot whose range is no enum,
+/// or an enum whose values say nothing, has none, so the value shows as written.
+#[test]
+fn an_enum_value_reads_as_its_words_per_language() {
+    let model = r#"
+in_language: sk
+slots:
+  heritageStatus: {range: HeritageStatus}
+  status: {range: Plain}
+  name: {range: string}
+classes:
+  Bridge:
+    slots: [name, heritageStatus, status]
+    slot_usage:
+      status: {range: Plain}
+enums:
+  HeritageStatus:
+    permissible_values:
+      notListed:
+        description: nie je chránená
+        annotations:
+          label: {tag: label, value: '{"en": "not protected"}'}
+      listed:
+        annotations:
+          label: {tag: label, value: {sk: "národná kultúrna pamiatka", en: "listed monument"}}
+      unknown: {}
+  Plain:
+    permissible_values:
+      a: {}
+"#;
+    let words = enum_words(model, "Bridge", "heritageStatus").expect("an enum with words");
+    assert_eq!(words["notListed"]["sk"], "nie je chránená");
+    assert_eq!(words["notListed"]["en"], "not protected");
+    assert_eq!(words["listed"]["sk"], "národná kultúrna pamiatka");
+    assert!(
+        !words.contains_key("unknown"),
+        "a value without words stays as written"
+    );
+    assert_eq!(enum_words(model, "Bridge", "status"), None);
+    assert_eq!(enum_words(model, "Bridge", "name"), None);
+    assert_eq!(enum_words(model, "Bridge", "missing"), None);
+    assert_eq!(enum_words("classes: [", "Bridge", "heritageStatus"), None);
 }
