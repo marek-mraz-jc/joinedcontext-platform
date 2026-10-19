@@ -281,7 +281,10 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     await expect(toggle.locator(".jc-count")).toHaveText("5 sources");
     await expect(toggle).toHaveAccessibleName("5 sources");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
-    await expect(toggle.locator(".jc-badge")).toHaveText(["E", "S", "S"]);
+    // The badge letters are CSS content (T-4729 defect 6): drawn on screen, absent from the text.
+    await expect(toggle.locator(".jc-badge")).toHaveText(["", "", ""]);
+    expect(await toggle.locator(".jc-badge").evaluateAll((bs) =>
+      bs.map((b) => getComputedStyle(b, "::before").content))).toEqual(['"E"', '"S"', '"S"']);
     const listId = await toggle.getAttribute("aria-controls");
     await expect(bot.locator(`#${listId}`)).toHaveAttribute("aria-labelledby", await toggle.getAttribute("id"));
     // The count is one line beside its badges at every width, 320 px included.
