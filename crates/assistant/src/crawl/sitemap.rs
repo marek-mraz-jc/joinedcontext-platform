@@ -215,8 +215,20 @@ fn dated(into: &mut HashMap<String, String>, lastmod: HashMap<String, String>) {
         let (Ok(url), Some(at)) = (Url::parse(&loc), super::meta::instant(&date)) else {
             continue;
         };
-        into.insert(super::canonicalise_url(url).to_string(), at);
+        into.insert(canonical(url).to_string(), at);
     }
+}
+
+/// The URL without its fragment and its scheme's default port, as the crawl's frontier keys it.
+fn canonical(mut u: Url) -> Url {
+    u.set_fragment(None);
+    if u.scheme() == "http" && u.port() == Some(80) {
+        let _ = u.set_port(None);
+    }
+    if u.scheme() == "https" && u.port() == Some(443) {
+        let _ = u.set_port(None);
+    }
+    u
 }
 
 pub(super) fn add_filtered_urls(
@@ -230,7 +242,7 @@ pub(super) fn add_filtered_urls(
         if target.len() >= max {
             break;
         }
-        let mut u = match Url::parse(u_str) {
+        let u = match Url::parse(u_str) {
             Ok(u) => u,
             Err(_) => continue,
         };
@@ -240,13 +252,7 @@ pub(super) fn add_filtered_urls(
         if !is_url_allowed(&u, policy.allow_plain_http) {
             continue;
         }
-        u.set_fragment(None);
-        if u.scheme() == "http" && u.port() == Some(80) {
-            let _ = u.set_port(None);
-        }
-        if u.scheme() == "https" && u.port() == Some(443) {
-            let _ = u.set_port(None);
-        }
+        let u = canonical(u);
         if !target.contains(&u) {
             target.push(u);
         }
