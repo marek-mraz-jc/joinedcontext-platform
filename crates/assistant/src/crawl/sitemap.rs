@@ -30,81 +30,90 @@ pub struct Listed {
     pub lastmod: HashMap<String, String>,
 }
 
-/// Parses `<loc>` elements from `<urlset>` and `<sitemapindex>` XML documents.
+/// Where the parser stands in a sitemap: the element it is inside and the text read so far.
+#[derive(Default)]
+struct Cursor {
+    inside_url: bool,
+    inside_sitemap: bool,
+    /// Inside `<loc>` or `<lastmod>`, whose text is collected.
+    reading: bool,
+    text: String,
+    loc: String,
+    lastmod: String,
+}
+
+impl Cursor {
+    fn open(&mut self, name: &str) {
+        match name {
+            "url" => {
+                self.inside_url = true;
+                self.loc.clear();
+                self.lastmod.clear();
+            }
+            "sitemap" => self.inside_sitemap = true,
+            "loc" | "lastmod" => {
+                self.reading = true;
+                self.text.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn close(&mut self, name: &str, into: &mut ParsedSitemap) {
+        let text = std::mem::take(&mut self.text).trim().to_string();
+        match name {
+            "url" => {
+                self.inside_url = false;
+                if !self.loc.is_empty() && !self.lastmod.is_empty() {
+                    into.lastmod.insert(
+                        std::mem::take(&mut self.loc),
+                        std::mem::take(&mut self.lastmod),
+                    );
+                }
+            }
+            "sitemap" => self.inside_sitemap = false,
+            "lastmod" => {
+                self.reading = false;
+                self.lastmod = text;
+            }
+            "loc" => {
+                self.reading = false;
+                if text.is_empty() {
+                    return;
+                }
+                if self.inside_url {
+                    self.loc.clone_from(&text);
+                    into.urls.push(text);
+                } else if self.inside_sitemap {
+                    into.sub_sitemaps.push(text);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parses `<loc>` and `<lastmod>` elements from `<urlset>` and `<sitemapindex>` XML documents.
 pub fn parse_sitemap_xml(xml: &str) -> ParsedSitemap {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
     let mut result = ParsedSitemap::default();
-    let mut inside_url = false;
-    let mut inside_sitemap = false;
-    let mut inside_loc = false;
-    let mut inside_lastmod = false;
-    let mut current_text = String::new();
-    let mut loc = String::new();
-    let mut lastmod = String::new();
-
+    let mut at = Cursor::default();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => match e.local_name().as_ref() {
-                "url" => {
-                    inside_url = true;
-                    loc.clear();
-                    lastmod.clear();
-                }
-                "lastmod" => {
-                    inside_lastmod = true;
-                    current_text.clear();
-                }
-                "sitemap" => inside_sitemap = true,
-                "loc" => {
-                    inside_loc = true;
-                    current_text.clear();
-                }
-                _ => {}
-            },
-            Ok(Event::Text(ref e)) if inside_loc || inside_lastmod => {
-                current_text.push_str(&e.xml10_content())
-            }
+            Ok(Event::Start(ref e)) => at.open(e.local_name().as_ref()),
+            Ok(Event::Text(ref e)) if at.reading => at.text.push_str(&e.xml10_content()),
             // quick-xml 0.42 reports `&amp;` and the other references as events of their own;
             // a sitemap URL with a query string is full of them.
-            Ok(Event::GeneralRef(ref e)) if inside_loc => {
+            Ok(Event::GeneralRef(ref e)) if at.reading => {
                 if let Ok(text) = quick_xml::escape::unescape(&format!("&{};", e.as_ref() as &str))
                 {
-                    current_text.push_str(&text);
+                    at.text.push_str(&text);
                 }
             }
-            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
-                "url" => {
-                    inside_url = false;
-                    if !loc.is_empty() && !lastmod.is_empty() {
-                        result
-                            .lastmod
-                            .insert(std::mem::take(&mut loc), std::mem::take(&mut lastmod));
-                    }
-                }
-                "lastmod" => {
-                    inside_lastmod = false;
-                    lastmod = current_text.trim().to_string();
-                    current_text.clear();
-                }
-                "sitemap" => inside_sitemap = false,
-                "loc" => {
-                    inside_loc = false;
-                    let trimmed = current_text.trim();
-                    if !trimmed.is_empty() {
-                        if inside_url {
-                            loc = trimmed.to_string();
-                            result.urls.push(trimmed.to_string());
-                        } else if inside_sitemap {
-                            result.sub_sitemaps.push(trimmed.to_string());
-                        }
-                    }
-                    current_text.clear();
-                }
-                _ => {}
-            },
+            Ok(Event::End(ref e)) => at.close(e.local_name().as_ref(), &mut result),
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
