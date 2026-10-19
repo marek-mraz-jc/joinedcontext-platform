@@ -298,7 +298,8 @@ pub async fn titles(
         .collect())
 }
 
-/// The page the deployment's sources hold about an Endpoint: its dataset's page first, else the
+/// The page the deployment's sources hold about an Endpoint: its dataset's page first (a CKAN
+/// `…/dataset/{name}` page before any other that names it, T-4729), else the
 /// catalogue's page, which both give its address `…/api/endpoint/{slug}` (T-3325); a page whose
 /// own URL is an Endpoint address is a JSON file to a visitor and comes last (T-4366). A live-data citation
 /// links it, so a visitor reads where the data is described and never a tool's name. A slug that
@@ -316,7 +317,7 @@ pub async fn endpoint_page(
         "SELECT c.url FROM chunks c JOIN sites s ON s.id = c.site_id \
          WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
          AND c.text ~ ('/api/endpoint/' || $1 || '([^a-z0-9-]|$)') \
-         ORDER BY c.url ~ '/api/endpoint/', c.id LIMIT 1",
+         ORDER BY c.url !~ '/dataset/[^/]+/?$', c.url ~ '/api/endpoint/', c.id LIMIT 1",
     )
     .bind(slug)
     .bind(sources)
