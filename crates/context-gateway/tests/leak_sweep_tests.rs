@@ -237,6 +237,7 @@ fn endpoint() -> Endpoint {
                 "Depot": "https://hel.fi/schema/Depot" } }).into()),
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
     }
 }

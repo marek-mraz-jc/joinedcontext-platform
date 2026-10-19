@@ -1,6 +1,7 @@
 //! The two tools that describe an Endpoint rather than its data, `describe_access` and
 //! `describe_schema`, and the `access://` and `schema://` resources behind them (EP-46, EP-47,
-//! EP-55 to EP-60). The broker has no tool or resource for either (Antares `mcp-surface.md`
+//! EP-55 to EP-60), and the `card://` query card made from that schema (T-4760). The broker
+//! has no tool or resource for either (Antares `mcp-surface.md`
 //! section 9), so the gateway answers them from the documents its access and schema surfaces
 //! serve, and adds them to the broker's listings (T-3647, T-3648). Schemas are the broker's
 //! LinkML surface of the Endpoint's view, read as the REST `schema/` routes read it; the
@@ -10,7 +11,7 @@ use crate::app::Gateway;
 use crate::handlers::schema_routes;
 use crate::handlers::view_access::{self, AccessFormat};
 use crate::mcp::jsonrpc::{answered, error, refused, result};
-use crate::mcp::tools::{granted, validate, ACCESS_FORMATS, TOOLS};
+use crate::mcp::tools::{granted, reads_anything, validate, ACCESS_FORMATS, TOOLS};
 use crate::middleware::response::{self, Artifact};
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
@@ -21,7 +22,7 @@ use serde_json::{json, Map, Value};
 pub(crate) const DESCRIBE_TOOLS: &[&str] = &["describe_access", "describe_schema"];
 
 /// The resources the gateway serves itself, by URI scheme.
-pub(crate) const OWN_SCHEMES: &[&str] = &["schema://", "access://"];
+pub(crate) const OWN_SCHEMES: &[&str] = &["schema://", "access://", "card://"];
 
 /// The describe tools this caller may call, as `tools/list` lists them (EP-25, SP-15).
 pub(crate) fn tools(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Vec<Value> {
@@ -103,6 +104,14 @@ pub(crate) async fn resources(
         "description": "The caller's effective grants on this endpoint.",
         "mimeType": "application/json",
     })];
+    if reads_anything(gateway, endpoint, subject) {
+        listed.push(json!({
+            "uri": format!("card://{}", endpoint.slug),
+            "name": "card",
+            "description": "How to query this NGSI-LD Endpoint: its types and attributes with units and allowed values.",
+            "mimeType": "text/plain",
+        }));
+    }
     let index = schema_routes::index_for(gateway, endpoint, &endpoint.slug, subject).await;
     for model in index["models"].as_array().into_iter().flatten() {
         let Some(major) = schema_routes::major_of(model).and_then(|m| u32::try_from(m).ok()) else {
@@ -157,8 +166,51 @@ pub(crate) async fn read(
                 Err(message) => result(id, refused(&message, &Value::Null)),
             }
         }
-        None => error(id, -32602, "unknown resource"),
+        // An Endpoint the caller reads nothing of has no card for them, the same answer as a
+        // URI it does not serve (SP-20, T-4760).
+        Some(Resource::Card) if reads_anything(gateway, endpoint, subject) => {
+            match card(gateway, endpoint, subject).await {
+                Ok(card) => result(
+                    id,
+                    json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": card }] }),
+                ),
+                Err(message) => result(id, refused(&message, &Value::Null)),
+            }
+        }
+        Some(Resource::Card) | None => error(id, -32602, "unknown resource"),
     }
+}
+
+/// The Endpoint's NGSI-LD query card for this caller (T-4759, T-4760): from the LinkML its view
+/// serves them, naming only the read tools their grants cover. Without a model, the query rules.
+async fn card(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Result<String, String> {
+    let mut asked = Map::new();
+    asked.insert("format".to_owned(), Value::from("linkml"));
+    let model = match describe_schema(gateway, endpoint, subject, &asked).await {
+        Ok(document) => document["document"].as_str().map(str::to_owned),
+        Err(message) if message == NO_MODEL => None,
+        Err(message) => return Err(message),
+    };
+    let offers = |name: &str| {
+        TOOLS
+            .iter()
+            .any(|tool| tool.name == name && granted(gateway, endpoint, subject, tool.operations))
+    };
+    let title = endpoint
+        .title
+        .get("en")
+        .or_else(|| endpoint.title.values().next())
+        .map(String::as_str);
+    let name = match endpoint.manifest_name.as_str() {
+        "" => endpoint.slug.clone(),
+        name => format!("{}/{name}", endpoint.project),
+    };
+    Ok(jc_core::query_card::served(
+        &name,
+        title,
+        offers,
+        model.as_deref(),
+    ))
 }
 
 /// The two resource shapes the gateway serves.
@@ -167,6 +219,8 @@ enum Resource {
     Access(String),
     /// `schema://{endpointSlug}/v{major}/{artifact}`
     Schema { major: u64, format: String },
+    /// `card://{endpointSlug}`
+    Card,
 }
 
 /// Names the resource a URI addresses, or `None` when this Endpoint does not serve it: the slug
@@ -179,6 +233,9 @@ fn parse_resource(endpoint: &Endpoint, uri: &str) -> Option<Resource> {
         };
         return (slug == endpoint.slug && ACCESS_FORMATS.contains(&format))
             .then(|| Resource::Access(format.to_owned()));
+    }
+    if let Some(slug) = uri.strip_prefix("card://") {
+        return (slug == endpoint.slug).then_some(Resource::Card);
     }
     let rest = uri.strip_prefix("schema://")?;
     let (slug, path) = rest.split_once('/')?;

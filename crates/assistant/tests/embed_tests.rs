@@ -8,7 +8,7 @@ mod db;
 #[path = "common/model.rs"]
 mod model;
 
-use assistant::embed::{embed_missing, Embedder, MODEL_FILES};
+use assistant::embed::{embed_missing, embed_until, Embedder, MODEL_FILES};
 use assistant::{Error, DIMENSIONS};
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -172,5 +172,109 @@ async fn missing_embeddings_are_filled_for_the_project_alone_and_a_second_pass_f
         embed_missing(&pool, &embedder, "Not A Project", 10).await,
         Err(Error::Project(_))
     ));
+    db::drop_database(admin, pool, &name).await;
+}
+
+/// T-4749: a passage whose text the project already has a vector for takes that vector, and a
+/// text the batch holds twice is embedded once; both chunks of it get the vector.
+#[tokio::test]
+async fn a_text_seen_before_takes_its_vector_without_the_model() {
+    let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
+    let (admin, pool, name) = db::database("embedonce").await;
+    let footer = "Mestský úrad, Námestie 1, telefón 048 000 000.";
+    let ids = corpus::pages(
+        &pool,
+        "hronov",
+        "web",
+        &[
+            ("https://hronov.example/a", "sk", footer),
+            ("https://hronov.example/b", "sk", footer),
+            (
+                "https://hronov.example/c",
+                "sk",
+                "Úradné hodiny sú v pondelok.",
+            ),
+            (
+                "https://hronov.example/d",
+                "sk",
+                "Úradné hodiny sú v pondelok.",
+            ),
+        ],
+    )
+    .await;
+    // The footer's vector is already known, and it is not what the model would say: a chunk
+    // that takes it was never read by the model.
+    let known = format!("[{}]", vec!["0.0625"; assistant::DIMENSIONS].join(","));
+    let mut tx = assistant::project_scope(&pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query("UPDATE chunks SET embedding = $2::vector WHERE id = $1")
+        .bind(ids[0])
+        .bind(&known)
+        .execute(&mut *tx)
+        .await
+        .expect("known vector");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(
+        embed_missing(&pool, &embedder, "hronov", 100)
+            .await
+            .expect("embedded"),
+        3
+    );
+    let mut tx = assistant::project_scope(&pool, "hronov")
+        .await
+        .expect("scope");
+    let vectors: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, embedding::text FROM chunks ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("vectors");
+    tx.rollback().await.expect("rollback");
+    let of = |id: i64| &vectors.iter().find(|(i, _)| *i == id).expect("chunk").1;
+    assert_eq!(of(ids[1]), of(ids[0]), "the footer's known vector");
+    assert!(of(ids[1]).starts_with("[0.0625,"), "{}", of(ids[1]));
+    assert_eq!(of(ids[2]), of(ids[3]), "one vector for the text read twice");
+    assert_ne!(of(ids[2]), of(ids[0]));
+    db::drop_database(admin, pool, &name).await;
+}
+
+/// T-4749: the worker's minute embeds until its time budget is spent, not up to a count, and a
+/// budget already spent embeds nothing.
+#[tokio::test]
+async fn passages_are_embedded_until_the_budget_is_spent() {
+    let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
+    let (admin, pool, name) = db::database("embedbudget").await;
+    let texts: Vec<String> = (0..400)
+        .map(|i| format!("Odstavec číslo {i} o meste a jeho úrade, ktorý je otvorený."))
+        .collect();
+    let pages: Vec<(String, &str, &str)> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| (format!("https://hronov.example/{i}"), "sk", text.as_str()))
+        .collect();
+    let rows: Vec<(&str, &str, &str)> =
+        pages.iter().map(|(u, l, t)| (u.as_str(), *l, *t)).collect();
+    corpus::pages(&pool, "hronov", "web", &rows).await;
+
+    let spent = std::time::Instant::now();
+    assert_eq!(
+        embed_until(&pool, &embedder, "hronov", spent)
+            .await
+            .expect("none"),
+        0
+    );
+    let budget = std::time::Duration::from_millis(1500);
+    let began = std::time::Instant::now();
+    let embedded = embed_until(&pool, &embedder, "hronov", began + budget)
+        .await
+        .expect("some");
+    let took = began.elapsed();
+    assert!(embedded >= assistant::embed::BATCH, "{embedded}");
+    assert!(embedded < 400, "it stopped at the budget: {embedded}");
+    assert!(
+        took < budget + std::time::Duration::from_secs(5),
+        "at most one batch past the budget: {took:?}"
+    );
     db::drop_database(admin, pool, &name).await;
 }

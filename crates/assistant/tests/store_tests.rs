@@ -98,7 +98,8 @@ async fn site(
     let site: i64 = sqlx::query_scalar("INSERT INTO sites (organization, project, source, visibility) VALUES ('hel', $1, $2, 'public') RETURNING id")
         .bind(project).bind(source).fetch_one(&mut *tx).await.expect("site");
     let page: i64 = sqlx::query_scalar(
-        "INSERT INTO pages (site_id, project, url, depth) VALUES ($1, $2, $3, 0) RETURNING id",
+        "INSERT INTO pages (site_id, project, url, depth, modified, fetched_at) \
+         VALUES ($1, $2, $3, 0, '2026-09-30T10:12:00+02:00', '2026-10-19T03:12:40Z') RETURNING id",
     )
     .bind(site)
     .bind(project)
@@ -150,6 +151,12 @@ async fn search(
     .await
     .expect("search");
     tx.rollback().await.expect("rollback");
+    // T-4749: every passage carries its page's dates, in UTC; the one the page never stated is none.
+    for hit in &hits {
+        assert_eq!(hit.dates.modified.as_deref(), Some("2026-09-30T08:12:00Z"));
+        assert_eq!(hit.dates.crawled.as_deref(), Some("2026-10-19T03:12:40Z"));
+        assert_eq!(hit.dates.published, None);
+    }
     hits.iter().map(|hit| hit.chunk).collect()
 }
 

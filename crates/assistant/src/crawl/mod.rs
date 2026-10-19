@@ -98,6 +98,18 @@ pub struct CrawlReport {
     pub too_large: u32,
     /// Number of fetch failures (network, HTTP errors, etc.).
     pub failed: u32,
+    /// Pages and documents deleted with their chunks: gone (404/410), or failed or unreached
+    /// in [`GONE_AFTER_RUNS`] runs in a row (T-4749).
+    pub removed: u32,
+}
+
+/// Runs in a row a page or document may fail to read, or a complete crawl may not reach it,
+/// before it is deleted: one flaky day keeps it, a page gone for good leaves the index.
+pub const GONE_AFTER_RUNS: i16 = 3;
+
+/// An answer that says the resource is gone for good (RFC 9110 §15.5.5, §15.5.11).
+fn is_gone(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 404 | 410)
 }
 
 /// The consumer of crawled pages and documents (T-3052).
@@ -186,6 +198,12 @@ impl Frontier {
 struct Walk {
     frontier: Frontier,
     seen_documents: HashSet<String>,
+    /// A sitemap check: the pages it reads queue none of their links (T-4749).
+    sitemap_only: bool,
+    /// When the sitemap says each of its URLs last changed, by canonical URL (T-4749).
+    lastmod: HashMap<String, String>,
+    /// The pages this crawl visited, whatever they answered.
+    reached: HashSet<String>,
     report: CrawlReport,
     /// The robots.txt of each other host a document of the site lives on, read once a crawl.
     foreign_robots: HashMap<String, robots::Robots>,
@@ -284,6 +302,56 @@ pub async fn crawl_site(
     spec: &KnowledgeSourceSpec,
     sink: &mut impl Sink,
 ) -> Result<CrawlReport, Error> {
+    let names = Names {
+        organization,
+        project,
+        source,
+    };
+    crawl(pool, crawler, names, spec, sink, false).await
+}
+
+/// The daily sitemap check of a website knowledge source (T-4749): only the pages its sitemap
+/// lists as new to the store, or as changed since the crawl last read them, are read, with the
+/// documents they link; no link is followed further and nothing unreached is aged. The site's
+/// scheduled full crawl stays what finds what the sitemap misses.
+pub async fn check_sitemap(
+    pool: &PgPool,
+    crawler: &Crawler,
+    organization: &str,
+    project: &str,
+    source: &str,
+    spec: &KnowledgeSourceSpec,
+    sink: &mut impl Sink,
+) -> Result<CrawlReport, Error> {
+    let names = Names {
+        organization,
+        project,
+        source,
+    };
+    crawl(pool, crawler, names, spec, sink, true).await
+}
+
+/// Whose source a crawl reads.
+#[derive(Clone, Copy)]
+struct Names<'a> {
+    organization: &'a str,
+    project: &'a str,
+    source: &'a str,
+}
+
+async fn crawl(
+    pool: &PgPool,
+    crawler: &Crawler,
+    names: Names<'_>,
+    spec: &KnowledgeSourceSpec,
+    sink: &mut impl Sink,
+    sitemap_only: bool,
+) -> Result<CrawlReport, Error> {
+    let Names {
+        organization,
+        project,
+        source,
+    } = names;
     let (start_url, site_host) = start_of(source, spec)?;
     let (start_url, site_host) = settle_start(crawler, start_url, site_host).await;
     let site_id = upsert_site(pool, project, organization, source, spec.visibility).await?;
@@ -300,7 +368,7 @@ pub async fn crawl_site(
     )
     .await;
 
-    let sitemap_urls = if spec.sitemap {
+    let mut listed = if spec.sitemap {
         let mut initial_sitemaps = Vec::new();
         if let Ok(default_sm) = start_url.join("/sitemap.xml") {
             initial_sitemaps.push(default_sm.to_string());
@@ -315,20 +383,8 @@ pub async fn crawl_site(
         )
         .await
     } else {
-        Vec::new()
+        sitemap::Listed::default()
     };
-
-    // A WordPress site's own content list (T-4154): read before the sitemap, so with `maxPages`
-    // reached it is the site's content that is kept, newest change first.
-    let wordpress_urls = wordpress::fetch_wordpress_urls(
-        &crawler.client,
-        &crawler.policy,
-        &site_host,
-        &start_url,
-        &spec.wordpress_types,
-        spec.max_pages,
-    )
-    .await;
 
     let run = DocRun {
         pool,
@@ -339,8 +395,100 @@ pub async fn crawl_site(
         site_id,
         robots: &robots,
     };
-    let mut walk = Walk::default();
+    let mut walk = Walk {
+        lastmod: std::mem::take(&mut listed.lastmod),
+        sitemap_only,
+        ..Walk::default()
+    };
+    if sitemap_only {
+        let read = read_at(pool, project, site_id).await?;
+        for u in listed.urls {
+            if changed_since_read(&read, &walk.lastmod, u.as_str()) {
+                walk.frontier.push(u, None, 1);
+            }
+        }
+    } else {
+        seed(run, &start_url, listed.urls, &mut walk, sink).await?;
+    }
 
+    let mut complete = !sitemap_only;
+    while let Some(item) = walk.frontier.queue.pop_front() {
+        if walk.report.pages_fetched + walk.report.pages_unchanged >= spec.max_pages {
+            complete = false;
+            break;
+        }
+        if item.url.host_str() != Some(&site_host) || item.depth > spec.max_depth {
+            continue;
+        }
+        walk.reached.insert(item.url.to_string());
+        visit(run, &item, &mut walk, sink).await?;
+    }
+    // Only a crawl that walked the whole site, under a robots.txt it could read, from a start
+    // that answered, says what the site no longer links: a capped or blind run says nothing.
+    let answered = walk.report.pages_fetched + walk.report.pages_unchanged > 0;
+    if complete && answered && !matches!(robots, robots::Robots::DisallowAll) {
+        walk.report.removed += age_unreached(pool, project, site_id, &walk).await?;
+    }
+    if !sitemap_only {
+        update_site_last_crawl(pool, project, site_id).await?;
+    }
+    Ok(walk.report)
+}
+
+/// Whether a sitemap URL is new to the store, never read, or listed as changed after the crawl
+/// last read it; one without a `<lastmod>` waits for the full crawl. Both dates are RFC 3339 in
+/// UTC with whole seconds, so their text orders as their instants do.
+fn changed_since_read(
+    read: &HashMap<String, Option<String>>,
+    lastmod: &HashMap<String, String>,
+    url: &str,
+) -> bool {
+    match (read.get(url), lastmod.get(url)) {
+        (None | Some(None), _) => true,
+        (Some(Some(at)), Some(changed)) => changed > at,
+        (Some(Some(_)), None) => false,
+    }
+}
+
+/// When the crawl last read each page of the site, by URL; `None` for a page it never read.
+async fn read_at(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+) -> Result<HashMap<String, Option<String>>, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT url, to_char(fetched_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+         FROM pages WHERE site_id = $1",
+    )
+    .bind(site_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Queues what a full crawl starts from: the start addresses, the WordPress site's own content
+/// list, then the sitemap's pages.
+async fn seed(
+    run: DocRun<'_>,
+    start_url: &Url,
+    sitemap_urls: Vec<Url>,
+    walk: &mut Walk,
+    sink: &mut impl Sink,
+) -> Result<(), Error> {
+    let (crawler, spec, site_host) = (run.crawler, run.spec, run.site_host);
+    // A WordPress site's own content list (T-4154): read before the sitemap, so with `maxPages`
+    // reached it is the site's content that is kept, newest change first.
+    let wordpress_urls = wordpress::fetch_wordpress_urls(
+        &crawler.client,
+        &crawler.policy,
+        site_host,
+        start_url,
+        &spec.wordpress_types,
+        spec.max_pages,
+    )
+    .await;
     for (i, url_str) in spec.start_urls.iter().enumerate() {
         let Ok(u) = Url::parse(url_str) else {
             continue;
@@ -350,13 +498,13 @@ pub async fn crawl_site(
         let u = if i == 0 {
             start_url.clone()
         } else {
-            rehost(u, &site_host)
+            rehost(u, site_host)
         };
         let canon = canonicalise_url(u);
         // A start address that names a document is one document of the site (T-3293),
         // under the `pdf` policy and its bounds, not a page of its bytes.
         if links::is_document_url(&canon) {
-            handle_document(run, None, &canon, &mut walk, sink, false).await?;
+            handle_document(run, None, &canon, walk, sink, false).await?;
         } else {
             walk.frontier.push(canon, None, 0);
         }
@@ -364,19 +512,7 @@ pub async fn crawl_site(
     for u in wordpress_urls.into_iter().chain(sitemap_urls) {
         walk.frontier.push(u, None, 1);
     }
-
-    while let Some(item) = walk.frontier.queue.pop_front() {
-        if walk.report.pages_fetched + walk.report.pages_unchanged >= spec.max_pages {
-            break;
-        }
-        if item.url.host_str() != Some(&site_host) || item.depth > spec.max_depth {
-            continue;
-        }
-        visit(run, &item, &mut walk, sink).await?;
-    }
-
-    update_site_last_crawl(pool, project, site_id).await?;
-    Ok(walk.report)
+    Ok(())
 }
 
 /// Reads one queued page of the site and records what it answered.
@@ -438,12 +574,20 @@ async fn visit(
         }
         fetch::FetchOutcome::Failed(ref why) => {
             walk.report.failed += 1;
-            run.fail(item, included, why).await
+            walk.report.removed += run.fail(item, included, why).await?;
+            Ok(())
+        }
+        fetch::FetchOutcome::Status(status) if is_gone(status) => {
+            walk.report.removed +=
+                forget(pool, project, site_id, Table::Pages, item.url.as_str()).await?;
+            Ok(())
         }
         fetch::FetchOutcome::Status(status) => {
             walk.report.failed += 1;
-            run.fail(item, included, &format!("HTTP {}", status.as_u16()))
-                .await
+            walk.report.removed += run
+                .fail(item, included, &format!("HTTP {}", status.as_u16()))
+                .await?;
+            Ok(())
         }
         fetch::FetchOutcome::RedirectExternal { target_url } => {
             if let Some(pid) = item.parent_id {
@@ -491,7 +635,7 @@ async fn revisit(
             continue;
         };
         match kind.as_str() {
-            "page" if item.depth < run.spec.max_depth => {
+            "page" if item.depth < run.spec.max_depth && !walk.sitemap_only => {
                 walk.frontier.push(to_url, Some(page_id), item.depth + 1);
             }
             "document" => {
@@ -538,9 +682,11 @@ async fn read_page(
     let hash = hex::encode(Sha256::digest(body));
     let last_modified = headers.get(LAST_MODIFIED).and_then(|v| v.to_str().ok());
     let mut stated = meta::page(&body_str);
-    // A page that states no date of change has changed when its server says it did.
+    // A page that states no date of change has changed when its sitemap, else its server,
+    // says it did.
     stated.modified = stated
         .modified
+        .or_else(|| walk.lastmod.get(item.url.as_str()).cloned())
         .or_else(|| last_modified.and_then(meta::instant));
     let language = stated.language.clone();
     let page_id = upsert_page_fetched(
@@ -590,7 +736,7 @@ async fn read_page(
             continue;
         }
         match link.kind {
-            links::LinkKind::Page if item.depth < run.spec.max_depth => {
+            links::LinkKind::Page if item.depth < run.spec.max_depth && !walk.sitemap_only => {
                 walk.frontier.push(link.url, Some(page_id), item.depth + 1);
             }
             links::LinkKind::Document => {
@@ -652,8 +798,9 @@ impl DocRun<'_> {
         .map(drop)
     }
 
-    /// Records a queued page whose read failed, and why.
-    async fn fail(self, item: &FrontierItem, included: bool, why: &str) -> Result<(), Error> {
+    /// Records a queued page whose read failed, and why; 1 when that was its last allowed run
+    /// and it is deleted.
+    async fn fail(self, item: &FrontierItem, included: bool, why: &str) -> Result<u32, Error> {
         record_failed_page(
             self.pool,
             self.project,
@@ -665,7 +812,6 @@ impl DocRun<'_> {
             why,
         )
         .await
-        .map(drop)
     }
 }
 
@@ -776,7 +922,10 @@ async fn handle_document(
                 off_domain,
                 reason: why,
             };
-            record_failed_doc(pool, project, site_id, &failed).await?;
+            report.removed += record_failed_doc(pool, project, site_id, &failed).await?;
+        }
+        fetch::FetchOutcome::Status(status) if is_gone(status) => {
+            report.removed += forget(pool, project, site_id, Table::Documents, url_str).await?;
         }
         fetch::FetchOutcome::Status(status) => {
             report.failed += 1;
@@ -787,7 +936,7 @@ async fn handle_document(
                 off_domain,
                 reason: &reason,
             };
-            record_failed_doc(pool, project, site_id, &failed).await?;
+            report.removed += record_failed_doc(pool, project, site_id, &failed).await?;
         }
         fetch::FetchOutcome::RedirectExternal { .. } => {
             report.failed += 1;
@@ -798,7 +947,7 @@ async fn handle_document(
                 off_domain,
                 reason,
             };
-            record_failed_doc(pool, project, site_id, &failed).await?;
+            report.removed += record_failed_doc(pool, project, site_id, &failed).await?;
         }
         fetch::FetchOutcome::NotModified { .. } => {
             report.documents_unchanged += 1;
@@ -818,6 +967,7 @@ async fn handle_document(
             let mut stated = meta::pdf(&body);
             stated.modified = stated
                 .modified
+                .or_else(|| walk.lastmod.get(url_str).cloned())
                 .or_else(|| last_modified.and_then(meta::instant));
 
             let is_unchanged = stored_hash == Some(&hash);
@@ -980,7 +1130,8 @@ async fn record_skipped_page(
          VALUES ($1, $2, $3, $4, $5, 'skipped', $6) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              parent_id = COALESCE(pages.parent_id, EXCLUDED.parent_id), \
-             status = 'skipped' \
+             status = 'skipped', \
+             failed_runs = 0 \
          RETURNING id",
     )
     .bind(site_id)
@@ -1011,16 +1162,17 @@ async fn record_failed_page(
     depth: i16,
     included: bool,
     why: &str,
-) -> Result<i64, Error> {
+) -> Result<u32, Error> {
     let mut tx = crate::project_scope(pool, project).await?;
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO pages (site_id, project, url, parent_id, depth, status, included, error) \
-         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7) \
+    let (id, runs): (i64, i16) = sqlx::query_as(
+        "INSERT INTO pages (site_id, project, url, parent_id, depth, status, included, error, failed_runs) \
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7, 1) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              parent_id = COALESCE(pages.parent_id, EXCLUDED.parent_id), \
              status = 'failed', \
-             error = EXCLUDED.error \
-         RETURNING id",
+             error = EXCLUDED.error, \
+             failed_runs = pages.failed_runs + 1 \
+         RETURNING id, failed_runs",
     )
     .bind(site_id)
     .bind(project)
@@ -1031,8 +1183,120 @@ async fn record_failed_page(
     .bind(reason(why))
     .fetch_one(&mut *tx)
     .await?;
+    let removed = drop_if_spent(&mut tx, Table::Pages, id, runs).await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(removed)
+}
+
+/// The two tables of what a crawl read, each with the statements that remove from it.
+#[derive(Clone, Copy)]
+enum Table {
+    Pages,
+    Documents,
+}
+
+impl Table {
+    fn delete_id(self) -> &'static str {
+        match self {
+            Table::Pages => "DELETE FROM pages WHERE id = $1",
+            Table::Documents => "DELETE FROM documents WHERE id = $1",
+        }
+    }
+
+    fn delete_url(self) -> &'static str {
+        match self {
+            Table::Pages => "DELETE FROM pages WHERE site_id = $1 AND url = $2",
+            Table::Documents => "DELETE FROM documents WHERE site_id = $1 AND url = $2",
+        }
+    }
+
+    fn age_unreached(self) -> &'static str {
+        match self {
+            Table::Pages => {
+                "UPDATE pages SET failed_runs = failed_runs + 1 \
+                 WHERE site_id = $1 AND NOT (url = ANY($2))"
+            }
+            Table::Documents => {
+                "UPDATE documents SET failed_runs = failed_runs + 1 \
+                 WHERE site_id = $1 AND NOT (url = ANY($2))"
+            }
+        }
+    }
+
+    fn delete_spent(self) -> &'static str {
+        match self {
+            Table::Pages => "DELETE FROM pages WHERE site_id = $1 AND failed_runs >= $2",
+            Table::Documents => "DELETE FROM documents WHERE site_id = $1 AND failed_runs >= $2",
+        }
+    }
+}
+
+/// Deletes a page or document (its chunks and links go with it) whose failed runs reached
+/// [`GONE_AFTER_RUNS`]; 1 when it did.
+async fn drop_if_spent(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table: Table,
+    id: i64,
+    runs: i16,
+) -> Result<u32, Error> {
+    if runs < GONE_AFTER_RUNS {
+        return Ok(0);
+    }
+    let res = sqlx::query(table.delete_id())
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(u32::from(res.rows_affected() > 0))
+}
+
+/// Deletes the page or document of the site at `url`, which answered that it is gone; its
+/// chunks and links go with it. 1 when there was one.
+async fn forget(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+    table: Table,
+    url: &str,
+) -> Result<u32, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let res = sqlx::query(table.delete_url())
+        .bind(site_id)
+        .bind(url)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(u32::from(res.rows_affected() > 0))
+}
+
+/// Counts one more missed run for every page and document of the site this crawl did not
+/// reach, and deletes those that missed [`GONE_AFTER_RUNS`] in a row; how many it deleted.
+async fn age_unreached(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+    walk: &Walk,
+) -> Result<u32, Error> {
+    let mut removed = 0;
+    let mut tx = crate::project_scope(pool, project).await?;
+    for (table, reached) in [
+        (Table::Pages, &walk.reached),
+        (Table::Documents, &walk.seen_documents),
+    ] {
+        let reached: Vec<&str> = reached.iter().map(String::as_str).collect();
+        sqlx::query(table.age_unreached())
+            .bind(site_id)
+            .bind(&reached)
+            .execute(&mut *tx)
+            .await?;
+        let res = sqlx::query(table.delete_spent())
+            .bind(site_id)
+            .bind(GONE_AFTER_RUNS)
+            .execute(&mut *tx)
+            .await?;
+        removed += res.rows_affected() as u32;
+    }
+    tx.commit().await?;
+    Ok(removed)
 }
 
 /// What tells a later crawl whether a resource changed: its SHA-256 and the server's validators.
@@ -1089,7 +1353,8 @@ async fn upsert_page_fetched(
              included = EXCLUDED.included, \
              etag = EXCLUDED.etag, \
              last_modified = EXCLUDED.last_modified, \
-             fetched_at = now() \
+             fetched_at = now(), \
+             failed_runs = 0 \
          RETURNING id",
     )
     .bind(site_id)
@@ -1114,10 +1379,12 @@ async fn upsert_page_fetched(
 
 async fn mark_page_not_modified(pool: &PgPool, project: &str, page_id: i64) -> Result<(), Error> {
     let mut tx = crate::project_scope(pool, project).await?;
-    sqlx::query("UPDATE pages SET fetched_at = now(), status = 'fetched' WHERE id = $1")
-        .bind(page_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE pages SET fetched_at = now(), status = 'fetched', failed_runs = 0 WHERE id = $1",
+    )
+    .bind(page_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1186,6 +1453,7 @@ async fn record_skipped_doc(
              page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
              off_domain = EXCLUDED.off_domain, \
              status = 'skipped', \
+             failed_runs = 0, \
              included = EXCLUDED.included \
          RETURNING id",
     )
@@ -1214,18 +1482,19 @@ async fn record_failed_doc(
     project: &str,
     site_id: i64,
     failed: &Failed<'_>,
-) -> Result<i64, Error> {
+) -> Result<u32, Error> {
     let mut tx = crate::project_scope(pool, project).await?;
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included, error) \
-         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7) \
+    let (id, runs): (i64, i16) = sqlx::query_as(
+        "INSERT INTO documents (site_id, project, page_id, url, off_domain, status, included, error, failed_runs) \
+         VALUES ($1, $2, $3, $4, $5, 'failed', $6, $7, 1) \
          ON CONFLICT (site_id, url) DO UPDATE SET \
              page_id = COALESCE(documents.page_id, EXCLUDED.page_id), \
              off_domain = EXCLUDED.off_domain, \
              status = 'failed', \
              included = EXCLUDED.included, \
-             error = EXCLUDED.error \
-         RETURNING id",
+             error = EXCLUDED.error, \
+             failed_runs = documents.failed_runs + 1 \
+         RETURNING id, failed_runs",
     )
     .bind(site_id)
     .bind(project)
@@ -1236,8 +1505,9 @@ async fn record_failed_doc(
     .bind(reason(failed.reason))
     .fetch_one(&mut *tx)
     .await?;
+    let removed = drop_if_spent(&mut tx, Table::Documents, id, runs).await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(removed)
 }
 
 /// What a fetched document is, beside its validators.
@@ -1293,7 +1563,8 @@ async fn upsert_doc_fetched(
              included = EXCLUDED.included, \
              etag = EXCLUDED.etag, \
              last_modified = EXCLUDED.last_modified, \
-             fetched_at = now() \
+             fetched_at = now(), \
+             failed_runs = 0 \
          RETURNING id",
     )
     .bind(site_id)
@@ -1319,7 +1590,7 @@ async fn upsert_doc_fetched(
 
 async fn mark_doc_not_modified(pool: &PgPool, project: &str, doc_id: i64) -> Result<(), Error> {
     let mut tx = crate::project_scope(pool, project).await?;
-    sqlx::query("UPDATE documents SET fetched_at = now(), status = 'fetched' WHERE id = $1")
+    sqlx::query("UPDATE documents SET fetched_at = now(), status = 'fetched', failed_runs = 0 WHERE id = $1")
         .bind(doc_id)
         .execute(&mut *tx)
         .await?;

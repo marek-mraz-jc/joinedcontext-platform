@@ -100,6 +100,9 @@ pub struct Endpoint {
     pub roles: EndpointRoles,
     /// The opaque slug the client uses; the key of the table.
     pub slug: String,
+    /// The Endpoint's own `metadata.name`: with [`Self::project`], the readable
+    /// `{project}/{name}` an agent may name it by (T-4748). Empty for a space's canonical surface.
+    pub manifest_name: String,
     /// The context space behind it, which becomes the pinned `NGSILD-Tenant` (EP-22).
     pub space: String,
     /// The project the space belongs to, for audience checks (EP-14, EP-15).

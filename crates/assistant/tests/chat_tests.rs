@@ -32,6 +32,8 @@ const HIDDEN_SLUG: &str = "zyxwvutsrqponmlkjihgfedcba765432";
 const REGION_SLUG: &str = "regionabcdefghijklmnopqrstuvwxy";
 /// An Endpoint of a project no deployment's scope names.
 const ELSEWHERE_SLUG: &str = "elsewhereabcdefghijklmnopqrstuv";
+/// The deployment's catalogue Endpoint, `hronov/catalog`.
+const CATALOG_SLUG: &str = "catalogabcdefghijklmnopqrstuvwx";
 const PORTAL_TOKEN: &str = "the-portals-token";
 const PERSON_TOKEN: &str = "the-persons-own-token";
 
@@ -214,6 +216,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 title: None,
             },
         ),
+        (("hronov".into(), "catalog".into()), public(CATALOG_SLUG)),
         (
             ("hronov".into(), "interne".into()),
             EndpointRef {
@@ -604,6 +607,78 @@ async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answ
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4746: "which organizations publish?" reads the catalogue's Organizations; a catalogue that
+/// lists none answers "none" in the question's language, and no answer call guesses at it.
+#[tokio::test]
+async fn an_empty_catalogue_answers_none_without_an_answer_call() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[1] = Connector {
+        endpoint: "catalog".into(),
+        tools: vec!["list_types".into(), "query_entities".into()],
+        timeout_seconds: 5,
+    };
+    let w = world("chatcatalognone", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{CATALOG_SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object"}}
+        ]}})))
+        .mount(&w.gateway).await;
+    let types = json!({"entityTypes": {"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList", "typeList": ["Dataset", "Organization"]}});
+    let answer = |text: String| {
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}]
+        }}))
+    };
+    mcp()
+        .and(body_string_contains("\"list_types\""))
+        .respond_with(answer(types.to_string()))
+        .mount(&w.gateway)
+        .await;
+    mcp()
+        .and(body_string_contains("\"query_entities\""))
+        .respond_with(answer(json!({"entities": []}).to_string()))
+        .mount(&w.gateway)
+        .await;
+    script_routed(
+        &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": json!({"route": "data", "queries": [], "data": []}).to_string()}),
+            400,
+        )],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 100)],
+        vec![completion(json!({"role": "assistant", "content": "Publikuje ich mnoho."}), 300)],
+    )
+    .await;
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Ktoré organizácie publikujú dáta?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let answers: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "answer")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(
+        answers,
+        [&json!({"text": "Katalóg nezverejňuje žiadne organizácie."})],
+        "{events:?}"
+    );
+    let calls = model_calls(&w.proxy).await;
+    assert!(
+        calls_of(&calls, None).is_empty(),
+        "no answer call: {calls:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4140, AG-102, AG-105, AG-106, AG-108: a data question is routed to the public Endpoint's
 /// live values: the router sees the types `list_types` gives, the service reads them with
 /// `query_entities` alone (a write tool the manifest names is never offered or called), the
@@ -759,12 +834,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         );
         assert!(!body["messages"][0].to_string().contains(&at[..16]));
     }
-    // The router is offered no tool; the answer call the first read-only ones of the Endpoint it
-    // read and the way to every other (T-4294, T-4731), never the write.
+    // The router is offered no tool; the answer call the standard read-only tools, the Endpoint
+    // an argument (T-4294, T-4748), never the write.
     assert!(calls_of(&calls, Some(ROUTER))[0].get("tools").is_none());
     assert_eq!(
         offered_tools(calls_of(&calls, None)[0]),
-        ["ovzdusie__query_entities", "more_tools"]
+        ["list_types", "query_entities"]
     );
     let sent: Vec<String> = w
         .gateway
@@ -876,7 +951,7 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
         &w.proxy,
         vec![
             completion(
-                tool_call("c1", "ovzdusie__delete_everything", json!({})),
+                tool_call("c1", "delete_everything", json!({"endpoint": "ovzdusie"})),
                 100,
             ),
             completion(tool_call("c2", "search", json!({"query": "knižnica"})), 100),
@@ -904,7 +979,7 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     assert_eq!(calls.len(), 4);
     assert_eq!(
         offered_tools(&calls[0].1),
-        ["search", "ovzdusie__query_entities"],
+        ["search", "query_entities"],
         "the made-up tool is never offered"
     );
     assert_eq!(
@@ -1160,7 +1235,11 @@ async fn arguments_that_break_the_tools_schema_are_never_sent() {
         &w.proxy,
         vec![
             completion(
-                tool_call("c1", "ovzdusie__query_entities", json!({"type": 7})),
+                tool_call(
+                    "c1",
+                    "query_entities",
+                    json!({"endpoint": "ovzdusie", "type": 7}),
+                ),
                 100,
             ),
             completion(json!({"role": "assistant", "content": "Neviem."}), 100),
@@ -1450,7 +1529,7 @@ async fn two_tables_of_one_endpoint_both_cite_its_dataset_page() {
     // No type named, so the citations' pages come from naming the sources, not from the type's
     // dataset (T-4625).
     let calls: Vec<Value> = [5, 10].iter().enumerate()
-        .map(|(n, limit)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"limit": limit}).to_string()}}))
+        .map(|(n, limit)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "query_entities", "arguments": json!({"endpoint": "ovzdusie", "q": "no2>=0", "limit": limit}).to_string()}}))
         .collect();
     let both = json!({"role": "assistant", "content": null, "tool_calls": calls});
     script(
@@ -1510,7 +1589,7 @@ async fn each_type_of_a_shared_endpoint_cites_its_own_page_or_its_listing() {
     )
     .await;
     let calls: Vec<Value> = ["Person", "School", "CycleRoute"].iter().enumerate()
-        .map(|(n, kind)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": [kind]}).to_string()}}))
+        .map(|(n, kind)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "query_entities", "arguments": json!({"endpoint": "ovzdusie", "type": [kind]}).to_string()}}))
         .collect();
     script(
         &w.proxy,
@@ -1737,7 +1816,7 @@ async fn a_deployment_without_sources_offers_no_search() {
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(offered, ["ovzdusie__query_entities"]);
+    assert_eq!(offered, ["query_entities"]);
     let refused = calls[1].1["messages"][3]["content"]
         .as_str()
         .expect("refusal");
@@ -1781,7 +1860,11 @@ async fn a_long_result_is_filtered_by_a_script_in_the_sandbox() {
         &w.proxy,
         vec![
             completion(
-                tool_call("c1", "ovzdusie__query_entities", json!({"type": ["Event"]})),
+                tool_call(
+                    "c1",
+                    "query_entities",
+                    json!({"endpoint": "ovzdusie", "type": ["Event"]}),
+                ),
                 500,
             ),
             completion(
@@ -1817,10 +1900,7 @@ async fn a_long_result_is_filtered_by_a_script_in_the_sandbox() {
         .iter()
         .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    assert_eq!(
-        offered,
-        ["search", "run_script", "ovzdusie__query_entities"]
-    );
+    assert_eq!(offered, ["search", "run_script", "query_entities"]);
     let cut_result = calls[1].1["messages"][3]["content"]
         .as_str()
         .expect("the cut result");
@@ -1860,7 +1940,10 @@ async fn no_script_runs_without_the_sandbox() {
     script(
         &w.proxy,
         vec![
-            completion(tool_call("c0", "ovzdusie__query_entities", json!({})), 100),
+            completion(
+                tool_call("c0", "query_entities", json!({"endpoint": "ovzdusie"})),
+                100,
+            ),
             completion(
                 tool_call(
                     "c1",
@@ -2235,6 +2318,25 @@ fn offered_tools(body: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The Endpoints a model call is told it may name as `endpoint` (T-4748): the data tools are the
+/// same for every Endpoint, so the list says which ones they read.
+fn offered_endpoints(body: &Value) -> Vec<String> {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["role"] == "system")
+        .map(text_of)
+        .filter_map(|text| {
+            text.split_once("The Endpoints the data tools read")
+                .map(|(_, list)| list.to_owned())
+        })
+        .flat_map(|list| list.lines().skip(1).map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|line| line.strip_prefix("- ").map(str::to_owned))
+        .map(|line| line.split(' ').next().unwrap_or_default().to_owned())
+        .collect()
+}
+
 /// AG-115: an internal assistant searches internal passages and reads the organization's own
 /// Endpoint with the person's token, and with nothing else; the public Endpoint gets no token.
 #[tokio::test]
@@ -2244,7 +2346,7 @@ async fn the_portal_asks_an_internal_assistant_as_the_person() {
     hidden_endpoint(&w.gateway).await;
     script(&w.proxy, vec![
         completion(tool_call("c1", "search", json!({"query": "platové tabuľky zamestnancov"})), 400),
-        completion(tool_call("c2", "interne__query_entities", json!({})), 500),
+        completion(tool_call("c2", "query_entities", json!({"endpoint": "interne"})), 500),
         completion(json!({"role": "assistant", "content": "Tabuľky sú na intranete [1], otvorené sú 3 [2]."}), 600),
     ]).await;
     let (status, events, _) = answer_of(
@@ -2284,12 +2386,12 @@ async fn the_portal_asks_an_internal_assistant_as_the_person() {
         "{citations}"
     );
     let calls = model_calls(&w.proxy).await;
-    let tools = offered_tools(&calls[0].1);
+    let endpoints = offered_endpoints(&calls[0].1);
     assert!(
-        tools.contains(&"interne__query_entities".to_owned())
-            && tools.contains(&"ovzdusie__query_entities".to_owned()),
-        "{tools:?}"
+        endpoints.contains(&"interne".to_owned()) && endpoints.contains(&"ovzdusie".to_owned()),
+        "{endpoints:?}"
     );
+    assert!(offered_tools(&calls[0].1).contains(&"query_entities".to_owned()));
     // The person's token went to the organization's Endpoint alone, and to no model call.
     for request in w.gateway.received_requests().await.unwrap_or_default() {
         let bearer = request
@@ -2338,15 +2440,8 @@ async fn without_the_persons_token_the_organizations_endpoint_is_not_offered() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{events:?}");
-    let tools = offered_tools(&model_calls(&w.proxy).await[0].1);
-    assert!(
-        !tools.iter().any(|t| t.starts_with("interne__")),
-        "{tools:?}"
-    );
-    assert!(
-        tools.contains(&"ovzdusie__query_entities".to_owned()),
-        "{tools:?}"
-    );
+    let endpoints = offered_endpoints(&model_calls(&w.proxy).await[0].1);
+    assert_eq!(endpoints, ["ovzdusie"]);
     assert!(w
         .gateway
         .received_requests()
@@ -2393,9 +2488,7 @@ async fn a_public_assistant_answers_the_portal_as_it_answers_a_visitor() {
     .await;
     assert_eq!(status, StatusCode::OK, "{events:?}");
     let calls = model_calls(&w.proxy).await;
-    assert!(!offered_tools(&calls[0].1)
-        .iter()
-        .any(|t| t.starts_with("interne__")));
+    assert!(!offered_endpoints(&calls[0].1).contains(&"interne".to_owned()));
     assert!(
         !calls[1].1.to_string().contains("Platové tabuľky"),
         "an internal passage reached a public channel"
@@ -2487,6 +2580,18 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         }),
     });
     let w = world("chatrouted", sources_only).await;
+    // T-4749: the library's page states when it changed and was read.
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query(
+        "UPDATE pages SET modified = '2026-03-12T09:00:00Z', fetched_at = '2026-10-19T03:12:40Z' \
+         WHERE url = 'https://hronov.example/kniznica'",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("dates");
+    tx.commit().await.expect("commit");
     script_routed(
         &w.proxy,
         vec![completion(
@@ -2618,6 +2723,13 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(citations.len(), 1, "{citations:?}");
     assert_eq!(citations[0]["n"], 1);
     assert_eq!(citations[0]["url"], first);
+    // T-4749: the passage and its citation carry its page's dates; none it never stated.
+    assert_eq!(first, "https://hronov.example/kniznica");
+    for said in [&passages["passages"][0], &citations[0]] {
+        assert_eq!(said["modified"], "2026-03-12T09:00:00Z", "{said}");
+        assert_eq!(said["crawled"], "2026-10-19T03:12:40Z", "{said}");
+        assert!(said.get("published").is_none(), "{said}");
+    }
 
     let done = &events[15].1;
     without_internals(done);
@@ -3860,7 +3972,7 @@ async fn a_replys_tool_calls_run_at_once_and_keep_their_order() {
     d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
     let w = world("chatreplyonce", d).await;
     recorded_air_after(&w.gateway, SLUG, pause).await;
-    let read = |id: &str, limit: u64| json!({"id": id, "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": ["AirQualityObserved"], "limit": limit}).to_string()}});
+    let read = |id: &str, limit: u64| json!({"id": id, "type": "function", "function": {"name": "query_entities", "arguments": json!({"endpoint": "ovzdusie", "type": ["AirQualityObserved"], "q": "no2>=0", "limit": limit}).to_string()}});
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
     ], vec![
@@ -3952,8 +4064,8 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
     ], vec![
         completion(json!({"role": "assistant", "content": null, "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":5}"}},
-            {"id": "c2", "type": "function", "function": {"name": "ovzdusie__delete_entity", "arguments": "{}"}}
+            {"id": "c1", "type": "function", "function": {"name": "query_entities", "arguments": "{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"limit\":5}"}},
+            {"id": "c2", "type": "function", "function": {"name": "delete_entity", "arguments": "{\"endpoint\":\"ovzdusie\"}"}}
         ]}), 1_000),
         completion(json!({"role": "assistant", "content": "Najvyššie NO2 má Železničná stanica, 34 [2]."}), 1_200),
     ]).await;
@@ -3993,10 +4105,7 @@ async fn a_data_question_reads_again_until_the_model_answers() {
 
     let all = model_calls(&w.proxy).await;
     let calls = calls_of(&all, None);
-    assert_eq!(
-        offered_tools(calls[0]),
-        ["ovzdusie__query_entities", "more_tools"]
-    );
+    assert_eq!(offered_tools(calls[0]), ["list_types", "query_entities"]);
     let last = calls[1]["messages"].as_array().cloned().unwrap_or_default();
     let tools: Vec<&Value> = last.iter().filter(|m| m["role"] == "tool").collect();
     assert_eq!(tools.len(), 2);
@@ -4026,11 +4135,107 @@ async fn a_data_question_reads_again_until_the_model_answers() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4731: the loop starts on the first tools of the Endpoint the router read; a question that
-/// needs another tool asks for `more_tools`, which costs no step, and the next call is offered
-/// every read-only tool and reads with it. The write is never offered, before or after.
+/// T-4759: the loop's first call on an Endpoint comes back with its NGSI-LD query card, made from
+/// the LinkML it serves (units, allowed values), never the LinkML itself; its next call does not.
 #[tokio::test]
-async fn a_question_that_needs_another_tool_gets_every_tool_one_call_later() {
+async fn the_first_call_on_an_endpoint_carries_its_query_card_once() {
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "describe_schema".into(),
+    ];
+    let w = world("chatcard", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    // Mounted before the recorded ones: the same priority, so these answer first.
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "q": {"type": "string"}}}},
+            {"name": "describe_schema", "description": "The model.", "inputSchema": {"type": "object", "properties": {"format": {"type": "string"}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    let linkml = "slots:\n  name: {}\n  no2:\n    range: float\n    unit: { ucum_code: ug/m3 }\n    description: A long text the card leaves out.\nclasses:\n  AirQualityObserved:\n    slots: [name, no2]\n";
+    mcp()
+        .and(body_string_contains("\"describe_schema\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json!({"format": "linkml", "mediaType": "text/yaml", "document": linkml}).to_string()}]
+        }})))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    recorded_air(&w.gateway, SLUG).await;
+    let read = |id: &str, q: &str| {
+        completion(
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": id, "type": "function", "function": {"name": "query_entities", "arguments": format!("{{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"q\":\"{q}\"}}")}}
+            ]}),
+            1_000,
+        )
+    };
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
+        read("c1", "no2>30"),
+        read("c2", "no2>20"),
+        completion(json!({"role": "assistant", "content": "Jedna stanica má NO2 nad 30 µg/m³ [2]."}), 1_200),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 30?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let all = model_calls(&w.proxy).await;
+    let calls = calls_of(&all, None);
+    assert_eq!(calls.len(), 3);
+    // The legend is in the rules, once, the same for every question.
+    assert!(text_of(&calls[0]["messages"][0])
+        .contains("`attr:range[unit]` a number stored in that UCUM unit"));
+    let after_tools = |call: &Value| -> Vec<(String, String)> {
+        let messages = call["messages"].as_array().cloned().unwrap_or_default();
+        let at = messages
+            .iter()
+            .position(|m| m["role"] == "tool")
+            .expect("a result");
+        messages[at..]
+            .iter()
+            .map(|m| {
+                (
+                    m["role"].as_str().unwrap_or_default().to_owned(),
+                    m["content"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let first = after_tools(calls[1]);
+    // The result stays JSON; the card is the text after it, before the budget line.
+    assert!(first[0].1.starts_with('{'), "{first:?}");
+    assert_eq!(first[1].0, "user");
+    let card = &first[1].1;
+    assert!(card.starts_with("NGSI-LD Endpoint ovzdusie"), "{card}");
+    assert!(
+        card.ends_with("\nAirQualityObserved: name, no2:float[ug/m3]\n  e.g. q=no2>0"),
+        "{card}"
+    );
+    assert!(!card.contains("A long text"), "{card}");
+    assert!(first[2].1.starts_with("Budget:"), "{first:?}");
+    let second = after_tools(calls[2]);
+    let cards = second
+        .iter()
+        .filter(|(_, text)| text.starts_with("NGSI-LD Endpoint"))
+        .count();
+    assert_eq!(cards, 1, "the second read brings no card: {second:?}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4748: the loop is offered the standard read-only tools from its first call, the Endpoint an
+/// argument: a call without `endpoint` is refused with the Endpoints to name and costs a step, the
+/// corrected one reads, and the write is never offered.
+#[tokio::test]
+async fn every_read_only_tool_is_offered_once_and_names_its_endpoint() {
     let mut d = deployment(Channel::Public, 80_000, 10);
     d.spec.connectors[0].tools = vec![
         "list_types".into(),
@@ -4049,10 +4254,10 @@ async fn a_question_that_needs_another_tool_gets_every_tool_one_call_later() {
         completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
     ], vec![
         completion(json!({"role": "assistant", "content": null, "tool_calls": [
-            {"id": "m1", "type": "function", "function": {"name": "more_tools", "arguments": "{}"}}
+            {"id": "m1", "type": "function", "function": {"name": "list_types", "arguments": "{}"}}
         ]}), 1_000),
         completion(json!({"role": "assistant", "content": null, "tool_calls": [
-            {"id": "c1", "type": "function", "function": {"name": "ovzdusie__list_types", "arguments": "{}"}}
+            {"id": "c1", "type": "function", "function": {"name": "list_types", "arguments": "{\"endpoint\":\"ovzdusie\"}"}}
         ]}), 1_100),
         completion(json!({"role": "assistant", "content": "Ovzdušie má typ AirQualityObserved [2]."}), 1_200),
     ]).await;
@@ -4078,13 +4283,16 @@ async fn a_question_that_needs_another_tool_gets_every_tool_one_call_later() {
     let all = model_calls(&w.proxy).await;
     let calls = calls_of(&all, None);
     assert_eq!(calls.len(), 3);
-    assert_eq!(
-        offered_tools(calls[0]),
-        ["ovzdusie__query_entities", "more_tools"]
-    );
-    assert_eq!(
-        offered_tools(calls[1]),
-        ["ovzdusie__list_types", "ovzdusie__query_entities"]
+    for call in &calls {
+        assert_eq!(offered_tools(call), ["list_types", "query_entities"]);
+    }
+    let parameters = &calls[0]["tools"][0]["function"]["parameters"];
+    assert_eq!(parameters["required"][0], "endpoint", "{parameters}");
+    // The rules name the Endpoints to give as `endpoint`.
+    assert!(
+        text_of(&calls[0]["messages"][0]).contains("Give its name as `endpoint`:\n- ovzdusie"),
+        "{}",
+        calls[0]["messages"][0]
     );
     let told: Vec<Value> = calls[1]["messages"]
         .as_array()
@@ -4095,11 +4303,10 @@ async fn a_question_that_needs_another_tool_gets_every_tool_one_call_later() {
         .collect();
     assert_eq!(
         told[0]["content"],
-        "Every tool of every Endpoint is offered now. Call the one the question needs."
+        "The call was not made: `endpoint` is required; name one of: ovzdusie."
     );
-    // The hatch cost no step: the router's read and list_types are two of the three, and the
-    // model was still free to read on its second call.
-    assert!(calls[1].get("tool_choice").is_none());
+    // The refused call cost a step: the router's read and the two calls are the three, so the
+    // last call is told to answer.
     assert!(text_of(
         &calls[2]["messages"]
             .as_array()
@@ -4107,9 +4314,12 @@ async fn a_question_that_needs_another_tool_gets_every_tool_one_call_later() {
             .cloned()
             .unwrap_or_default()
     )
-    .starts_with("Budget: 1 of 3 tool steps"));
-    // Routing lists the types once; the loop's list_types is the second call.
-    assert_eq!(tool_calls_of(&w.gateway, "list_types").await.len(), 2);
+    .starts_with("No more tool calls"));
+    // Routing lists the types once; the loop's list_types is the second call, sent without
+    // `endpoint`.
+    let listed = tool_calls_of(&w.gateway, "list_types").await;
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[1]["params"]["arguments"], json!({}));
     assert!(tool_calls_of(&w.gateway, "delete_entity").await.is_empty());
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
@@ -4127,7 +4337,7 @@ async fn the_tenth_tool_call_is_the_last_and_the_answer_comes_from_what_was_read
     let reply = |limits: &[u32]| {
         let calls: Vec<Value> = limits
             .iter()
-            .map(|n| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": format!("{{\"type\":[\"AirQualityObserved\"],\"limit\":{n}}}")}}))
+            .map(|n| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "query_entities", "arguments": format!("{{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"q\":\"no2>=0\",\"limit\":{n}}}")}}))
             .collect();
         completion(
             json!({"role": "assistant", "content": null, "tool_calls": calls}),
@@ -4244,7 +4454,7 @@ async fn a_deployments_max_data_steps_ends_its_loop() {
     });
     let w = world("chatsteps", d).await;
     recorded_air(&w.gateway, SLUG).await;
-    let call = |n: u32| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": format!("{{\"type\":[\"AirQualityObserved\"],\"limit\":{n}}}")}});
+    let call = |n: u32| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "query_entities", "arguments": format!("{{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"q\":\"no2>=0\",\"limit\":{n}}}")}});
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
     ], vec![
@@ -4312,7 +4522,7 @@ async fn a_hanging_tool_costs_the_question_its_data_seconds_and_no_more() {
         .mount(&w.gateway)
         .await;
     recorded_air(&w.gateway, SLUG).await;
-    let hang = json!({"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":7}"}});
+    let hang = json!({"id": "c1", "type": "function", "function": {"name": "query_entities", "arguments": "{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"q\":\"no2>=0\",\"limit\":7}"}});
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
     ], vec![
@@ -4363,7 +4573,7 @@ async fn a_question_that_spent_its_tokens_answers_from_what_it_has() {
     d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
     let w = world("chattokens", d).await;
     recorded_air(&w.gateway, SLUG).await;
-    let read = json!({"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":1}"}});
+    let read = json!({"id": "c1", "type": "function", "function": {"name": "query_entities", "arguments": "{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"limit\":1}"}});
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
     ], vec![
@@ -4885,7 +5095,7 @@ async fn an_internal_deployment_reads_its_named_servers_endpoints_as_the_person(
         &w.proxy,
         vec![
             completion(
-                tool_call("c1", &format!("{HIDDEN_SLUG}__query_entities"), json!({})),
+                tool_call("c1", "query_entities", json!({"endpoint": HIDDEN_SLUG})),
                 500,
             ),
             completion(
@@ -4912,12 +5122,9 @@ async fn an_internal_deployment_reads_its_named_servers_endpoints_as_the_person(
             .any(|(n, d)| n == "tool" && d["endpoint"] == HIDDEN_SLUG && d["status"] == "done"),
         "{events:?}"
     );
-    let tools = offered_tools(&model_calls(&w.proxy).await[0].1);
+    let endpoints = offered_endpoints(&model_calls(&w.proxy).await[0].1);
     for slug in [SLUG, HIDDEN_SLUG] {
-        assert!(
-            tools.contains(&format!("{slug}__query_entities")),
-            "{tools:?}"
-        );
+        assert!(endpoints.contains(&slug.to_owned()), "{endpoints:?}");
     }
     for request in w.gateway.received_requests().await.unwrap_or_default() {
         let bearer = request
@@ -5199,7 +5406,8 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
         .expect("internal");
     sqlx::query(
         "UPDATE pages SET title = 'Mestská knižnica', description = 'Otváracie hodiny a kontakty', \
-         modified = '2026-09-30T08:12:00Z', language = 'sk' WHERE url = 'https://hronov.example/kniznica'",
+         modified = '2026-09-30T08:12:00Z', fetched_at = '2026-10-19T03:12:40Z', language = 'sk' \
+         WHERE url = 'https://hronov.example/kniznica'",
     )
     .execute(&mut *tx)
     .await
@@ -5238,6 +5446,7 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
     assert_eq!(library["description"], "Otváracie hodiny a kontakty");
     assert_eq!(library["modified"], "2026-09-30T08:12:00Z");
     assert_eq!(library["published"], Value::Null, "never guessed");
+    assert_eq!(library["crawled"], "2026-10-19T03:12:40Z");
     assert_eq!(library["publisher"], "hronov");
     assert_eq!(library["language"], "sk");
     // The air page has no title of its own: its first heading names it.
@@ -5324,7 +5533,7 @@ async fn a_tool_loop_at_the_conversations_budget_answers_from_what_it_read() {
     script_routed(&w.proxy, vec![
         completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
     ], vec![], vec![
-        completion(tool_call("c1", "ovzdusie__query_entities", json!({"type": "AirQualityObserved"})), 49_000),
+        completion(tool_call("c1", "query_entities", json!({"endpoint": "ovzdusie", "type": "AirQualityObserved"})), 49_000),
         completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 900),
     ]).await;
     let (status, events, _) = answer_of(

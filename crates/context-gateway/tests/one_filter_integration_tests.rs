@@ -121,6 +121,7 @@ impl Shape {
             slug: self.slug.to_owned(),
             title: BTreeMap::new(),
             description: BTreeMap::new(),
+            manifest_name: String::new(),
             base_path: format!("/api/endpoint/{}", self.slug),
             space: SPACE.to_owned(),
             project: SPACE.to_owned(),

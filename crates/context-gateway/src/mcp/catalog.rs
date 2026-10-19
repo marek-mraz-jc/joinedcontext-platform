@@ -108,8 +108,12 @@ fn is_catalog_space(endpoint: &Endpoint) -> bool {
 /// to reach it happened to hold. Without that Endpoint in
 /// reach the list is empty; a read that fails keeps the last one it had.
 async fn public_entities(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Vec<Value>> {
-    type Held = (String, Instant, Arc<Vec<Value>>);
-    static HELD: OnceLock<Mutex<Option<Held>>> = OnceLock::new();
+    // By the catalogue Endpoint's slug: a reload that changed it reads afresh.
+    type Held = HashMap<String, (Instant, Arc<Vec<Value>>)>;
+    static HELD: OnceLock<Mutex<Held>> = OnceLock::new();
+    // ponytail: one read at a time for every catalogue; per-slug locks if an installation ever
+    // serves more than one.
+    static READING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let Some((endpoint, _)) = reach
         .iter()
         .find(|(endpoint, _)| endpoint.space == NAME && endpoint.audience == Audience::Public)
@@ -117,30 +121,40 @@ async fn public_entities(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) 
         return Arc::new(Vec::new());
     };
     let held = HELD.get_or_init(Mutex::default);
-    // What was read through this Endpoint; a reload that changed its slug reads afresh.
-    let last = held
-        .lock()
-        .ok()
-        .and_then(|held| held.clone())
-        .filter(|(slug, _, _)| *slug == endpoint.slug);
-    if let Some((_, read, entities)) = &last {
-        if read.elapsed() < PUBLIC_FOR {
-            return Arc::clone(entities);
-        }
+    let last = || {
+        held.lock()
+            .ok()
+            .and_then(|held| held.get(&endpoint.slug).cloned())
+    };
+    let fresh = |(read, _): &(Instant, Arc<Vec<Value>>)| read.elapsed() < PUBLIC_FOR;
+    let before = last();
+    if let Some((_, entities)) = before.as_ref().filter(|kept| fresh(kept)) {
+        return Arc::clone(entities);
+    }
+    // Single flight: while one caller reads, the others answer from the expired list, or wait
+    // for the first read when there is none, so an expiry costs the broker one read.
+    let _reading = match (READING.try_lock(), &before) {
+        (Ok(guard), _) => guard,
+        (Err(_), Some((_, entities))) => return Arc::clone(entities),
+        (Err(_), None) => READING.lock().await,
+    };
+    let before = last();
+    if let Some((_, entities)) = before.as_ref().filter(|kept| fresh(kept)) {
+        return Arc::clone(entities);
     }
     let anonymous = crate::auth::subject::anonymous_on(endpoint);
     let read = match read_public(gateway, endpoint, &anonymous).await {
         Ok(entities) => Arc::new(entities),
         Err(why) => {
             tracing::warn!(slug = %endpoint.slug, %why, "the public catalogue did not read");
-            match last {
-                Some((_, _, entities)) => entities,
+            match before {
+                Some((_, entities)) => entities,
                 None => Arc::new(Vec::new()),
             }
         }
     };
     if let Ok(mut held) = held.lock() {
-        *held = Some((endpoint.slug.clone(), Instant::now(), Arc::clone(&read)));
+        held.insert(endpoint.slug.clone(), (Instant::now(), Arc::clone(&read)));
     }
     read
 }
@@ -616,6 +630,7 @@ mod tests {
             base_path: String::new(),
             models: Vec::new(),
             policy_names: Vec::new(),
+            manifest_name: String::new(),
             policies: Vec::new(),
         }
     }

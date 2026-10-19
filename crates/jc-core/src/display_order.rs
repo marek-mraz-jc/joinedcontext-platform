@@ -98,6 +98,11 @@ struct Slot {
     hidden: bool,
     labels: BTreeMap<String, String>,
     title: Option<String>,
+    range: Option<String>,
+    unit: Option<String>,
+    multivalued: bool,
+    /// The `ngsi_ld_kind` annotation: Property, Relationship, GeoProperty, LanguageProperty.
+    kind: Option<String>,
 }
 
 /// The attributes of `class` the caller is served, in display order, each with its labels and
@@ -242,6 +247,93 @@ pub fn enum_words(
     (!words.is_empty()).then_some(words)
 }
 
+/// One attribute as a query names it (T-4759).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryAttribute {
+    /// The attribute (slot) name.
+    pub slot: String,
+    /// `attr` for text, `attr:range`, `attr:range[unit]` for a number in a UCUM unit, `attr:a|b`
+    /// for the only allowed values, `attr:Type` for a Relationship, `:ref` for a link value, and
+    /// `[]` after any of them for several values.
+    pub written: String,
+    /// A `q` on it: `attr>0` for a number, `attr=="a"` for the first allowed value; `None` for
+    /// any other attribute.
+    pub example: Option<String>,
+}
+
+/// The most allowed values one attribute lists; more end in `|…`.
+const ENUM_VALUES: usize = 12;
+
+/// Every class of the served LinkML with its attributes in written order, inherited ones
+/// included, as [`QueryAttribute`]s (T-4759). The schema is the one the caller is served, so it
+/// holds only what the caller may read; `id` and `type` are not listed.
+pub fn query_attributes(linkml: &str) -> Result<BTreeMap<String, Vec<QueryAttribute>>, String> {
+    let schema: Value = serde_norway::from_str(linkml).map_err(|err| err.to_string())?;
+    let enums = schema.get("enums");
+    let allowed = |range: &str| -> Option<Vec<String>> {
+        let values = enums?.get(range)?.get("permissible_values")?.as_mapping()?;
+        Some(
+            values
+                .keys()
+                .filter_map(|k| k.as_str().map(str::to_owned))
+                .collect(),
+        )
+    };
+    let classes = schema.get("classes").and_then(Value::as_mapping);
+    Ok(classes
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, _)| name.as_str())
+        .map(|class| {
+            let (written, slots) = model_slots(&schema, class);
+            let attributes = written
+                .iter()
+                .filter(|name| !matches!(name.as_str(), "id" | "type"))
+                .map(|name| {
+                    let slot = &slots[name];
+                    let range = slot.range.as_deref().unwrap_or("string");
+                    let values = allowed(range);
+                    let (mut text, example) = match (&values, slot.kind.as_deref()) {
+                        (Some(values), _) => {
+                            let mut shown = values[..values.len().min(ENUM_VALUES)].join("|");
+                            if values.len() > ENUM_VALUES {
+                                shown.push_str("|…");
+                            }
+                            let first = values.first().filter(|v| !v.contains(['"', '\\']));
+                            (
+                                format!("{name}:{shown}"),
+                                first.map(|v| format!("{name}==\"{v}\"")),
+                            )
+                        }
+                        (None, Some("GeoProperty")) => (format!("{name}:GeoJSON"), None),
+                        (None, _) => match range {
+                            "string" => (name.clone(), None),
+                            "uriorcurie" | "uri" => (format!("{name}:ref"), None),
+                            "integer" | "float" | "double" | "decimal" => {
+                                let unit = slot.unit.as_ref().map(|u| format!("[{u}]"));
+                                (
+                                    format!("{name}:{range}{}", unit.unwrap_or_default()),
+                                    Some(format!("{name}>0")),
+                                )
+                            }
+                            other => (format!("{name}:{other}"), None),
+                        },
+                    };
+                    if slot.multivalued {
+                        text.push_str("[]");
+                    }
+                    QueryAttribute {
+                        slot: name.clone(),
+                        written: text,
+                        example,
+                    }
+                })
+                .collect();
+            (class.to_owned(), attributes)
+        })
+        .collect())
+}
+
 /// The class's slots in written order (own `slots`, own `attributes`, then each ancestor's
 /// through `is_a` and `mixins`, nearest first) and what the model says about each. A class the
 /// model does not declare has none.
@@ -318,6 +410,12 @@ fn slot(sources: &[Option<&Value>]) -> Slot {
             .filter_map(|(l, t)| Some((l.as_str()?.to_owned(), t.as_str()?.to_owned())))
             .collect(),
         title: first(&|n| n.get("title").cloned()).and_then(|v| v.as_str().map(str::to_owned)),
+        range: first(&|n| n.get("range").cloned()).and_then(|v| v.as_str().map(str::to_owned)),
+        unit: first(&|n| n.get("unit")?.get("ucum_code").cloned())
+            .and_then(|v| v.as_str().map(str::to_owned)),
+        multivalued: first(&|n| n.get("multivalued").cloned()).and_then(|v| v.as_bool())
+            == Some(true),
+        kind: first(&|n| annotation(n, "ngsi_ld_kind")).and_then(|v| v.as_str().map(str::to_owned)),
     }
 }
 

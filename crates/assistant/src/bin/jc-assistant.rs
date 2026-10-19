@@ -30,7 +30,7 @@ use std::time::Duration;
 use assistant::chat::model::{Model, ModelConfig};
 use assistant::chat::{self, ChatState};
 use assistant::crawl::Crawler;
-use assistant::embed::{embed_missing, Embedder};
+use assistant::embed::{embed_until, Embedder};
 use assistant::worker::{self, checkout_from_env};
 use jc_core::ClientCredential;
 use sqlx::PgPool;
@@ -266,14 +266,16 @@ impl Minute {
             }
         }
         // Then the passages without an embedding: what this minute's crawls stored and what an
-        // earlier failure left. A minute embeds at most EMBED_PER_MINUTE per project and the
-        // rest waits for the next one, so a large first crawl never starves the queue.
+        // earlier failure left. The projects share EMBED_BUDGET of the minute and the rest waits
+        // for the next one, so a large first crawl never starves the queue; a question still goes
+        // before any passage (T-4751).
         let projects: std::collections::BTreeSet<&str> = sources
             .iter()
             .map(|source| source.project.as_str())
             .collect();
+        let until = std::time::Instant::now() + EMBED_BUDGET;
         for project in projects {
-            match embed_missing(pool, &self.embedder, project, EMBED_PER_MINUTE).await {
+            match embed_until(pool, &self.embedder, project, until).await {
                 Ok(0) => {}
                 Ok(embedded) => tracing::info!(project, embedded, "passages embedded"),
                 Err(err) => tracing::warn!(project, %err, "passages not embedded this minute"),
@@ -282,8 +284,9 @@ impl Minute {
     }
 }
 
-/// Passages embedded per project and minute: a few seconds of the model's time.
-const EMBED_PER_MINUTE: i64 = 256;
+/// The share of each worker minute that embeds passages (T-4749): a count of 256 used a few
+/// seconds and left a first full index waiting for days.
+const EMBED_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// The chat route beside `/healthz` and `/readyz`, which answers 503 until `ready` is set.
 fn probe(chat_state: Arc<ChatState>, ready: Arc<AtomicBool>) -> axum::Router {

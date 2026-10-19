@@ -80,6 +80,7 @@ fn endpoint(slug: &str, title: &str, space: &str, audience: Audience, role: &str
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![grant(role)],
     }
 }
@@ -1892,4 +1893,44 @@ async fn ten_thousand_generated_datasets_are_found_fast() {
         assert!(p95.as_millis() < target, "{path}: p95 {p95:?}");
     }
     assert!(relevance >= 0.9, "top-3 rate {relevance}");
+}
+
+/// T-4746 review: callers that reach the hub together, with no public catalogue read yet, cost
+/// the broker one read, not one each.
+#[tokio::test]
+async fn callers_at_once_read_the_public_catalogue_once() {
+    const CATALOG: &str = "jjjjjjjjjjjjjjjjjjjjjjjjjj";
+    let realm = common::Realm::new();
+    let mut endpoints = city();
+    endpoints.push(endpoint(
+        CATALOG,
+        "Open data catalogue",
+        "catalog",
+        Audience::Public,
+        "public",
+    ));
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = app_on(&broker.url, &realm, endpoints);
+    let answers = futures_util::future::join_all((0..8).map(|_| {
+        call(
+            app.clone(),
+            None,
+            "query_entities",
+            json!({ "endpoint": "catalog", "type": "Dataset" }),
+        )
+    }))
+    .await;
+    assert!(
+        answers.iter().all(|answer| answer["error"].is_null()),
+        "{answers:?}"
+    );
+    let reads = broker
+        .hops()
+        .iter()
+        .filter(|hop| hop.path == "/mcp")
+        .count();
+    assert_eq!(
+        reads, 1,
+        "eight callers at once read the public catalogue once"
+    );
 }
