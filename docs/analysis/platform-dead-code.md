@@ -63,6 +63,9 @@ assistant 2 while context-gateway (39) and jcctl (31) fell below their lines unr
 the slice below, on a graph of the branch: agent-proxy 3, assistant 1, context-gateway 39,
 jc-core 46, jcctl 31, wasm-host 6; the baseline holds these. T-4452 then took context-gateway
 from 39 to 31, and 32 with T-4444's `Reaper::files_walked` (test API) merged meanwhile; jcctl, wasm-host and agent-proxy rows are all reasoned below and stay.
+T-4728: the walk keyed a trait impl by cg's `self_type` with its arguments (`Reference<'_>`), so
+a reached type with a lifetime or generic never reached its `Drop` or `Display`; keyed by the
+name alone, jcctl's `commands::import::Reference::fmt` is reached and jcctl falls to 28.
 
 `ci/cg-dead-code-baseline.txt` holds the after column. The check is red when a crate has more
 rows than its line (new code nothing calls, or a caller deleted and its callees kept) and red
@@ -160,7 +163,7 @@ Checked with GREP; the graph has no edge for these uses.
 |---|---|
 | `jc_core::envelope::Kind::PLURAL` | read as `<$spec as Kind>::PLURAL` inside the `catalogue!` macro |
 | `jc_core::registry::catalogue` | a `macro_rules!`, invoked once in its own file |
-| `urn::EntityRef::fmt`, `jcctl::commands::import::Reference::fmt`, `organization::String::from` | `Display` in `format!` and `From` through `.into()` on a type the walk reaches only from tests |
+| `urn::EntityRef::fmt`, `organization::String::from` | `Display` in `format!` and `From` through `.into()` on a type the walk reaches only from tests |
 | `jc_core::kinds::bento_inputs::RUNNER_VERSION` | a generated file; the Portal's `bento-inputs.mjs` writes it |
 
 ### 3.5 Checks no production path calls: decision pending
