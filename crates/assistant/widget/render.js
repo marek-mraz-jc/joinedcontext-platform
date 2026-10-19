@@ -568,16 +568,40 @@ var JCRender = (function () {
     var isTime = function (i) {
       return rows.every(function (row) { return typeof row[i] === "string" && TIME.test(row[i]) && isFinite(Date.parse(row[i])); });
     };
+    // T-4711, owner 04:46Z: no chart unless every check passes; a failed check is no chart, never
+    // a repaired one. A line needs time with 3 distinct moments; one moment is categories (bars).
     var time = named.filter(isTime)[0];
+    if (time !== undefined) {
+      var moments = {};
+      rows.forEach(function (row) { moments[Date.parse(row[time])] = true; });
+      var distinct = Object.keys(moments).length;
+      if (distinct === 2) return null;
+      if (distinct < 3) {
+        named = named.filter(function (i) { return i !== time; });
+        time = undefined;
+      }
+    }
     var by = time !== undefined ? time : named[0];
     if (by === undefined) return null;
+    // Nothing truncated: a chart of the first rows of more would mislead.
+    if (typeof data.total === "number" && data.total > rows.length) return null;
     var v = values[0];
     var points = rows.filter(function (row) { return finite(row[v]); }).slice(0, 50).map(function (row) {
       var name = row[by] === null || row[by] === undefined ? "" : String(row[by]);
       return { label: name.slice(0, 40), value: row[v] };
     });
     if (time !== undefined) points.sort(function (a, b) { return Date.parse(a.label) - Date.parse(b.label); });
-    if (points.length < 2) return null;
+    if (points.length < (time !== undefined ? 3 : 2)) return null;
+    if (time === undefined) {
+      // Bars name each category once, by a person's name, never a slug or an id.
+      var labels = points.map(function (p) { return p.label; });
+      var SLUG = /^[a-z0-9]+(-[a-z0-9]+){2,}$|^urn:/i;
+      if (labels.some(function (l) { return !l.trim() || SLUG.test(l); })) return null;
+      if (labels.some(function (l, i) { return labels.indexOf(l) !== i; })) return null;
+      // No total drawn beside its own parts: one bar that is the sum of the others.
+      var sum = points.reduce(function (a, p) { return a + p.value; }, 0);
+      if (points.length > 2 && points.some(function (p) { return Math.abs(p.value * 2 - sum) <= Math.abs(p.value) * 0.005; })) return null;
+    }
     return { kind: time !== undefined ? "line" : "bar", value: String(data.columns[v]), by: String(data.columns[by]), points: points };
   }
 
