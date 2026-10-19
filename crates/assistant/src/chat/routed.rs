@@ -1827,11 +1827,30 @@ pub(super) async fn table(
     asked: &[String],
 ) -> Option<Table> {
     let total = total_of(text);
+    // Both lookups are steps of their own (T-4731): they sat in the untracked time, so whether
+    // they are worth running beside the rows is read from these steps first.
+    let began = Instant::now();
     let model = model_of(ask, connector).await;
+    let found = |some: bool| Some(if some { "found" } else { "none" });
+    ask.trace.note(
+        "tool",
+        "data_model",
+        began,
+        Some(kind),
+        found(model.is_some()),
+    );
     let (columns, rows, units, fields) = table_of(text, READ_ROWS, asked, model.as_deref())?;
     let enums = enums_of(model.as_deref(), kind, &columns);
     let slug = connector.surface.slug.as_str();
+    let began = Instant::now();
     let dataset = dataset_of(ask, connector, kind).await;
+    ask.trace.note(
+        "tool",
+        "dataset_page",
+        began,
+        Some(kind),
+        found(dataset.is_some()),
+    );
     let download = ask.endpoint_base.and_then(|base| {
         let mut url = base
             .join(&format!("api/endpoint/{slug}/ngsi-ld/v1/entities"))
