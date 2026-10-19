@@ -992,3 +992,11 @@ test("a measured value shows one decimal and a plain number two, in the visitor'
   const co = table({ columns: ["name", "co"], units: [null, "mg/m³"], rows: [["A", 0.0423], ["B", 0], ["C", -0.5]] }, "sk");
   assert.deepEqual(co.rows.map((r) => r[1]), ["0,042", "0", "-0,5"]);
 });
+
+test("a source badge draws its letter from CSS, so copied or read-out text never gains a stray 'DA' (T-4729)", () => {
+  const dir = require("node:path").join(__dirname);
+  const read = (f) => require("node:fs").readFileSync(require("node:path").join(dir, f), "utf8");
+  assert.doesNotMatch(read("widget.js"), /el\("span", "jc-badge", badge\.letter\)/);
+  assert.match(read("widget.js"), /setAttribute\("data-letter", badge\.letter\)/);
+  assert.match(read("widget.css"), /\.jc-badge::before\s*\{\s*content:\s*attr\(data-letter\)/);
+});
