@@ -372,8 +372,8 @@ mod tests {
         );
         assert_eq!(config["enabled"], json!(true));
         assert_eq!(config["questionChars"], json!(500));
-        // T-4670: thirty days unless told, and no contact the deployment did not name.
-        assert_eq!(config["transcriptDays"], json!(30));
+        // T-4670, T-4681: ninety days unless told, and no contact the deployment did not name.
+        assert_eq!(config["transcriptDays"], json!(90));
         assert_eq!(config["privacy"], json!(null));
         let mut named = public.clone();
         named.spec.transcript_retention = Some("P7D".into());
