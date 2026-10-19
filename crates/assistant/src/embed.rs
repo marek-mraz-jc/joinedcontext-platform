@@ -12,14 +12,16 @@
 
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ort::session::Session;
 use ort::value::Tensor;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokenizers::{Tokenizer, TruncationParams};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{vector_literal, Error, DIMENSIONS};
 
@@ -52,11 +54,74 @@ struct Model {
 }
 
 /// The loaded model. Cloning shares it; one embedding runs at a time, on `threads` ONNX Runtime
-/// threads, off the async runtime.
+/// threads, off the async runtime, and a visitor's question before any passage ([`Turns`]).
 #[derive(Clone)]
 pub struct Embedder {
     model: Arc<Mutex<Model>>,
-    turn: Arc<Semaphore>,
+    turns: Turns,
+}
+
+/// How long a question's embedding waited for the model and how long the model took (T-4751).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Took {
+    pub waited: Duration,
+    pub ran: Duration,
+}
+
+/// Whose turn the model is: one text at a time, and a question before every passage (T-4751).
+/// The passages of the minute's indexing take the model one text each and give it back at once
+/// when a question waits, so a question waits at most for the one passage already running, never
+/// for a batch or a backlog.
+#[derive(Clone)]
+struct Turns {
+    model: Arc<Semaphore>,
+    questions: Arc<AtomicUsize>,
+}
+
+/// One waiting question, counted until it has the model or is given up.
+struct Waiting(Arc<AtomicUsize>);
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Turns {
+    fn new() -> Self {
+        Self {
+            model: Arc::new(Semaphore::new(1)),
+            questions: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn take(&self) -> Result<OwnedSemaphorePermit, Error> {
+        Arc::clone(&self.model)
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Model("the embedder was shut down".into()))
+    }
+
+    /// The model for a question: queued in order with the other questions, ahead of passages.
+    async fn question(&self) -> Result<OwnedSemaphorePermit, Error> {
+        self.questions.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting(Arc::clone(&self.questions));
+        self.take().await
+    }
+
+    /// The model for one passage, once no question waits for it.
+    async fn passage(&self) -> Result<OwnedSemaphorePermit, Error> {
+        loop {
+            let turn = self.take().await?;
+            if self.questions.load(Ordering::SeqCst) == 0 {
+                return Ok(turn);
+            }
+            // The waiting question is queued on the semaphore already, or about to be: handing
+            // the turn back puts this passage behind it.
+            drop(turn);
+            tokio::task::yield_now().await;
+        }
+    }
 }
 
 fn read_checked(dir: &Path, file: &str, sha: &str) -> Result<Vec<u8>, Error> {
@@ -175,42 +240,51 @@ impl Embedder {
         drop(onnx);
         Ok(Self {
             model: Arc::new(Mutex::new(Model { tokenizer, session })),
-            turn: Arc::new(Semaphore::new(1)),
+            turns: Turns::new(),
         })
     }
 
-    async fn run(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, Error> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let _turn = self
-            .turn
-            .acquire()
-            .await
-            .map_err(|_| Error::Model("the embedder was shut down".into()))?;
+    /// One text through the model, holding `turn` until it is done.
+    async fn run(&self, _turn: OwnedSemaphorePermit, text: String) -> Result<Vec<f32>, Error> {
         let model = Arc::clone(&self.model);
         tokio::task::spawn_blocking(move || {
-            let mut model = model
+            model
                 .lock()
-                .map_err(|_| Error::Model("an earlier embedding panicked".into()))?;
-            texts.iter().map(|text| model.embed(text)).collect()
+                .map_err(|_| Error::Model("an earlier embedding panicked".into()))?
+                .embed(&text)
         })
         .await
         .map_err(|err| Error::Model(format!("embedding failed: {err}")))?
     }
 
-    /// The embeddings of passages to index, in order.
+    /// The embeddings of passages to index, in order, one text per turn of the model.
     pub async fn passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
-        self.run(texts.iter().map(|t| format!("passage: {t}")).collect())
-            .await
+        let mut vectors = Vec::with_capacity(texts.len());
+        for text in texts {
+            let turn = self.turns.passage().await?;
+            vectors.push(self.run(turn, format!("passage: {text}")).await?);
+        }
+        Ok(vectors)
     }
 
     /// The embedding of a question.
     pub async fn query(&self, text: &str) -> Result<Vec<f32>, Error> {
-        let mut vectors = self.run(vec![format!("query: {text}")]).await?;
-        vectors
-            .pop()
-            .ok_or_else(|| Error::Model("the model answered no vector".into()))
+        Ok(self.query_timed(text).await?.0)
+    }
+
+    /// The embedding of a question, and how long it waited for the model and ran on it.
+    pub async fn query_timed(&self, text: &str) -> Result<(Vec<f32>, Took), Error> {
+        let began = Instant::now();
+        let turn = self.turns.question().await?;
+        let waited = began.elapsed();
+        let vector = self.run(turn, format!("query: {text}")).await?;
+        Ok((
+            vector,
+            Took {
+                waited,
+                ran: began.elapsed().saturating_sub(waited),
+            },
+        ))
     }
 }
 
@@ -250,4 +324,98 @@ pub async fn embed_missing(
         done += ids.len();
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One turn of "the model": holds it for `millis`, then records `who`.
+    async fn work(
+        turn: OwnedSemaphorePermit,
+        millis: u64,
+        done: Arc<Mutex<Vec<String>>>,
+        who: String,
+    ) {
+        tokio::time::sleep(Duration::from_millis(millis)).await;
+        done.lock().expect("lock").push(who);
+        drop(turn);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_question_goes_before_500_queued_passages() {
+        let turns = Turns::new();
+        let done = Arc::new(Mutex::new(Vec::new()));
+        let indexing = {
+            let (turns, done) = (turns.clone(), Arc::clone(&done));
+            tokio::spawn(async move {
+                for i in 0..500 {
+                    let turn = turns.passage().await.expect("turn");
+                    work(turn, 10, Arc::clone(&done), format!("passage {i}")).await;
+                }
+            })
+        };
+        // The question comes while the third passage runs.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let began = tokio::time::Instant::now();
+        let turn = turns.question().await.expect("turn");
+        let waited = began.elapsed();
+        work(turn, 10, Arc::clone(&done), "question".into()).await;
+        indexing.await.expect("indexing");
+        let done = done.lock().expect("lock");
+        let at = done
+            .iter()
+            .position(|who| who == "question")
+            .expect("answered");
+        assert_eq!(
+            at,
+            3,
+            "only the passage running when it came went before it: {:?}",
+            &done[..5]
+        );
+        assert!(waited <= Duration::from_millis(10), "waited {waited:?}");
+        assert_eq!(done.len(), 501);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn questions_keep_their_order_and_passages_wait_for_all_of_them() {
+        let turns = Turns::new();
+        let done = Arc::new(Mutex::new(Vec::new()));
+        let first = turns.question().await.expect("turn");
+        let mut waiting = Vec::new();
+        for who in ["passage", "question 2", "question 3"] {
+            let (turns, done) = (turns.clone(), Arc::clone(&done));
+            waiting.push(tokio::spawn(async move {
+                let turn = if who == "passage" {
+                    turns.passage().await
+                } else {
+                    turns.question().await
+                };
+                work(turn.expect("turn"), 5, done, who.into()).await;
+            }));
+            tokio::task::yield_now().await;
+        }
+        work(first, 5, Arc::clone(&done), "question 1".into()).await;
+        for task in waiting {
+            task.await.expect("task");
+        }
+        assert_eq!(
+            *done.lock().expect("lock"),
+            ["question 1", "question 2", "question 3", "passage"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_question_given_up_no_longer_holds_the_passages_back() {
+        let turns = Turns::new();
+        let busy = turns.passage().await.expect("turn");
+        let gone = tokio::time::timeout(Duration::from_millis(5), turns.question()).await;
+        assert!(gone.is_err(), "the model was busy");
+        drop(busy);
+        let next = tokio::time::timeout(Duration::from_millis(5), turns.passage()).await;
+        assert!(
+            next.is_ok(),
+            "the passage takes the model once the question is gone"
+        );
+    }
 }

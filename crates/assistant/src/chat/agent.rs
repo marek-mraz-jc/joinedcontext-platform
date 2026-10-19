@@ -933,18 +933,25 @@ async fn run_tool(
                     },
                 )
                 .await;
-                // Rows of a type cite the dataset a visitor can open (T-4625).
-                let dataset = match kind.as_deref() {
-                    Some(kind) => super::routed::dataset_of(ask, connector, kind).await,
-                    None => None,
+                // Rows of a type cite the dataset a visitor can open (T-4625); when no dataset page
+                // publishes the type, its own listing, named by the type (T-4747).
+                let (url, title) = match kind.as_deref() {
+                    Some(kind) => match super::routed::dataset_of(ask, connector, kind).await {
+                        Some(page) => (Some(page), None),
+                        None => (
+                            super::routed::type_listing(ask, &connector.surface.slug, kind),
+                            Some(kind.to_owned()),
+                        ),
+                    },
+                    None => (None, None),
                 };
                 let n = citations.len() + 1;
                 citations.push(Citation {
                     n,
-                    url: dataset,
+                    url,
                     tool: Some(tool.name.clone()),
                     endpoint,
-                    title: None,
+                    title,
                     cards: Vec::new(),
                     dates: Default::default(),
                 });
@@ -1104,11 +1111,14 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
             .into_iter()
             .collect();
         let titles = crate::titles_projects(ask.pool, &urls, ask.sources, ask.public_only).await?;
+        // A page's title where the sources hold one; else the name the citation came with (a
+        // type's listing, T-4747).
         for citation in citations.iter_mut() {
             citation.title = citation
                 .url
                 .as_ref()
-                .and_then(|url| titles.get(url).cloned());
+                .and_then(|url| titles.get(url).cloned())
+                .or(citation.title.take());
         }
         Ok(())
     }

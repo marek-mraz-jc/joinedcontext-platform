@@ -327,7 +327,9 @@ pub async fn titles(
 /// catalogue's page, which both give its address `…/api/endpoint/{slug}` (T-3325); a page whose
 /// own URL is an Endpoint address is a JSON file to a visitor and comes last (T-4366). A live-data citation
 /// links it, so a visitor reads where the data is described and never a tool's name. A slug that
-/// is no DNS label is never looked up.
+/// is no DNS label is never looked up. An Endpoint that two or more dataset pages name serves
+/// several datasets, and none of their pages is its own: they are left out, so a citation never
+/// borrows another type's dataset (T-4747); [`dataset_page`] finds the one for a type.
 pub async fn endpoint_page(
     conn: &mut PgConnection,
     slug: &str,
@@ -338,10 +340,13 @@ pub async fn endpoint_page(
         return Ok(None);
     }
     let url: Option<String> = sqlx::query_scalar(
-        "SELECT c.url FROM chunks c JOIN sites s ON s.id = c.site_id \
-         WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
-         AND c.text ~ ('/api/endpoint/' || $1 || '([^a-z0-9-]|$)') \
-         ORDER BY c.url !~ '/dataset/[^/]+/?$', c.url ~ '/api/endpoint/', c.id LIMIT 1",
+        "WITH named AS (SELECT c.url, c.id, c.url ~ '/dataset/[^/]+/?$' AS dataset \
+             FROM chunks c JOIN sites s ON s.id = c.site_id \
+             WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
+             AND c.text ~ ('/api/endpoint/' || $1 || '([^a-z0-9-]|$)')) \
+         SELECT url FROM named \
+         WHERE NOT dataset OR (SELECT count(DISTINCT url) FROM named WHERE dataset) = 1 \
+         ORDER BY NOT dataset, url ~ '/api/endpoint/', id LIMIT 1",
     )
     .bind(slug)
     .bind(sources)

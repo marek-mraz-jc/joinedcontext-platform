@@ -685,10 +685,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "download": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
         })
     );
-    // No page of the sources gives this Endpoint's address: the live data stays unlinked.
+    // No page of the sources publishes the type: the rows cite their own listing, named by the
+    // type, never another dataset's page (T-4747).
     assert_eq!(
         events[8].1,
-        json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
+        json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie", "title": "AirQualityObserved",
+                "url": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")}])
     );
     let done = &events[9].1;
     // T-4654: a visitor's `done` carries no tokens or calls; the two calls are counted below.
@@ -1475,6 +1477,82 @@ async fn two_tables_of_one_endpoint_both_cite_its_dataset_page() {
         .filter_map(|c| c["url"].as_str())
         .collect();
     assert_eq!(urls, [page, page], "{citations}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4747: one Endpoint serves members, schools and bike routes. Each type's rows cite the
+/// dataset page that publishes that type; bike routes, which no dataset page publishes, cite
+/// their own listing named by the type, never the members' page (the owner saw cyklotrasy
+/// cited as "Členovia samosprávy").
+#[tokio::test]
+async fn each_type_of_a_shared_endpoint_cites_its_own_page_or_its_listing() {
+    let mut d = looped(50_000);
+    d.spec.sources.push("catalogue".into());
+    let w = world("chatshared", d).await;
+    let members = "https://opendata.hronov.example/dataset/clenovia-samospravy";
+    let schools = "https://opendata.hronov.example/dataset/stredne-skoly";
+    corpus::pages(
+        &w.pool,
+        "hronov",
+        "catalogue",
+        &[
+            (
+                members,
+                "sk",
+                &format!("# Členovia samosprávy\n\nNGSI-LD: https://api.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=Person"),
+            ),
+            (
+                schools,
+                "sk",
+                &format!("# Stredné školy\n\nNGSI-LD: https://api.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=School"),
+            ),
+        ],
+    )
+    .await;
+    let calls: Vec<Value> = ["Person", "School", "CycleRoute"].iter().enumerate()
+        .map(|(n, kind)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": [kind]}).to_string()}}))
+        .collect();
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                json!({"role": "assistant", "content": null, "tool_calls": calls}),
+                100,
+            ),
+            completion(
+                json!({"role": "assistant", "content": "Členovia [1], školy [2], cyklotrasy [3]."}),
+                100,
+            ),
+        ],
+    )
+    .await;
+    let (_, events, _) =
+        answer_of(&w.app, ask_looped(json!({"message": "Kde sú cyklotrasy?"}))).await;
+    let (_, citations) = events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations");
+    let cited: Vec<(&str, &str)> = citations
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|c| {
+            (
+                c["url"].as_str().unwrap_or(""),
+                c["title"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(cited[0], (members, "Členovia samosprávy"), "{citations}");
+    assert_eq!(cited[1], (schools, "Stredné školy"), "{citations}");
+    assert_eq!(
+        cited[2],
+        (
+            format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=CycleRoute").as_str(),
+            "CycleRoute"
+        ),
+        "{citations}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
