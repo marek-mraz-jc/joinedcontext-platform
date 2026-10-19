@@ -44,7 +44,6 @@ struct World {
 
 fn source_spec() -> KnowledgeSourceSpec {
     KnowledgeSourceSpec {
-        categories: Vec::new(),
         source: SourceType::Website,
         categories: Vec::new(),
         start_urls: vec!["https://hronov.example/".into()],

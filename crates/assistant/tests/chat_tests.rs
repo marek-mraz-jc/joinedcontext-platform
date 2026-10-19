@@ -53,9 +53,6 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
         project: "hronov".into(),
         name: "obcania".into(),
         spec: AssistantDeploymentSpec {
-            select: None,
-            exclude: Vec::new(),
-            categories: Vec::new(),
             public_id: "hronov-obcania".into(),
             channel,
             system_prompt: Some("Odpovedaj stručne.".into()),
