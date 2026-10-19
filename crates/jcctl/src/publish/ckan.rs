@@ -11,7 +11,9 @@
 //! in a payload, a manifest or a log line (EP-67, CC-06).
 
 use crate::loader::RawManifest;
+use jc_core::kinds::catalog::Texts;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
+use jc_core::kinds::visualization::{Visualization, VisualizationData, MAX_VISUALIZATIONS};
 use jc_core::kinds::{Audience, EndpointSpec, Licence, Representation};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -525,10 +527,12 @@ pub struct Views {
 }
 
 /// Publishes each of the Endpoint's `spec.catalog.visualizations` as a `jc_visualization` view
-/// of its dataset, after [`publish`] (EP-132).
+/// of its dataset, after [`publish`] (EP-132). An Endpoint that declares none gets a line chart
+/// of each value its types observe over time, read from `schema`, its `model.schema.json`
+/// ([`series_charts`], T-4742).
 ///
 /// The views hang off the dataset's first resource; each holds the visualization's `jc_name`,
-/// its title and description in the publisher's language, its `spec` and `data` as JSON text
+/// its title and description in the publisher's language, its `spec` and `source` as JSON text
 /// and the Endpoint slug, and the renderer finds it by its id alone. Every `jc_visualization`
 /// view on the dataset that the list does not name, or names a second time, is deleted, since
 /// only this publisher writes that type; views of any other type are never touched.
@@ -537,6 +541,7 @@ pub fn publish_views(
     api: &mut impl CkanApi,
     endpoint: &RawManifest,
     settings: &Settings,
+    schema: Option<&Value>,
 ) -> Result<Views, PublishError> {
     let spec: EndpointSpec = serde_json::from_value(endpoint.spec.clone())
         .map_err(|e| PublishError::Spec(e.to_string()))?;
@@ -558,11 +563,19 @@ pub fn publish_views(
         return Ok(Views::default());
     };
     let language = settings.language.as_deref();
-    let items = spec
+    let declared = spec
         .catalog
         .as_ref()
         .map(|c| c.visualizations.as_slice())
         .unwrap_or_default();
+    let automatic;
+    // Every Endpoint serves NGSI-LD, which a `temporal` source reads (EP-10).
+    let items = if declared.is_empty() {
+        automatic = schema.map(series_charts).unwrap_or_default();
+        automatic.as_slice()
+    } else {
+        declared
+    };
     let mut desired: BTreeMap<&str, Value> = BTreeMap::new();
     for item in items {
         let text =
@@ -576,7 +589,8 @@ pub fn publish_views(
                 "description": in_language(&item.description, language).unwrap_or_default(),
                 "jc_name": item.name,
                 "spec": text(&item.spec)?,
-                "data": text(&serde_json::to_value(&item.data).map_err(|e| PublishError::Spec(e.to_string()))?)?,
+                // The renderer and the catalogue's view schema read `source` (T-4742).
+                "source": text(&serde_json::to_value(&item.data).map_err(|e| PublishError::Spec(e.to_string()))?)?,
                 "endpoint": spec.slug.as_str(),
             }),
         );
@@ -619,7 +633,76 @@ pub fn publish_views(
 }
 
 /// What a visualization view holds; an update is sent when one of them differs.
-const VIEW_FIELDS: [&str; 5] = ["title", "description", "spec", "data", "endpoint"];
+const VIEW_FIELDS: [&str; 5] = ["title", "description", "spec", "source", "endpoint"];
+
+/// How far back an automatic chart reads a value's history.
+pub const SERIES_WINDOW: &str = "P7D";
+
+/// A line chart of each value observed over time, for an Endpoint that declares no chart of its
+/// own (T-4742): per type of `schema` (a `model.schema.json`) whose `dateObserved` is a
+/// date-time, one chart per numeric Property, its history over [`SERIES_WINDOW`] per entity. At
+/// most [`MAX_VISUALIZATIONS`], in type and attribute order, so the views are stable.
+pub fn series_charts(schema: &Value) -> Vec<Visualization> {
+    let mut out = Vec::new();
+    let definitions = schema.get("definitions").and_then(Value::as_object);
+    for (kind, definition) in definitions.into_iter().flatten() {
+        let Some(properties) = definition.get("properties").and_then(Value::as_object) else {
+            continue;
+        };
+        let dated = properties
+            .get("dateObserved")
+            .and_then(|p| p.get("format"))
+            .and_then(Value::as_str)
+            == Some("date-time");
+        if !dated {
+            continue;
+        }
+        for (attr, property) in properties {
+            let numeric = matches!(
+                property.get("type").and_then(Value::as_str),
+                Some("number" | "integer")
+            );
+            let measured =
+                property.get("x-ngsi-ld-kind").and_then(Value::as_str) == Some("Property");
+            let name = format!("auto-{kind}-{attr}").to_ascii_lowercase();
+            if !numeric || !measured || !is_view_name(&name) || out.len() == MAX_VISUALIZATIONS {
+                continue;
+            }
+            let columns = BTreeMap::from([
+                ("x".to_owned(), "observedAt".to_owned()),
+                ("y".to_owned(), attr.clone()),
+                ("color".to_owned(), "name".to_owned()),
+            ]);
+            let Some(spec) = jc_core::kinds::visualization::template("line", &columns) else {
+                continue;
+            };
+            out.push(Visualization {
+                name,
+                title: Texts::from([("en".to_owned(), format!("{attr}, {kind}"))]),
+                description: Texts::default(),
+                data: VisualizationData::Temporal {
+                    entity_type: kind.clone(),
+                    attrs: vec![attr.clone()],
+                    last: SERIES_WINDOW.to_owned(),
+                    aggr_method: None,
+                    aggr_period: None,
+                },
+                spec,
+            });
+        }
+    }
+    out
+}
+
+/// A view name the manifest rule accepts: a DNS label of at most 63 characters.
+fn is_view_name(name: &str) -> bool {
+    name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
 
 /// The dataset's first publication, when the live one carries it and this run does not: the
 /// `issued` a restoration wrote after the datasets were re-created (T-4644) is the dataset's own,
