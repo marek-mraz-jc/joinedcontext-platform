@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -847,4 +847,54 @@ test("the privacy dialog leads with the deployment's disclaimer, says what is ke
   assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "https://x.sk/gdpr" }).length, 2, "no contact, no section");
   assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "javascript:alert(1)" }).length, 3);
   assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "http://x.sk/gdpr" }).length, 3, "https only");
+});
+
+const C = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
+const T = "0a1b2c3d-4e5f-4a7b-8c9d-0e1f2a3b4c5d";
+
+test("an answer about one dataset opens it, a broad or an outside one never (T-4685)", () => {
+  const cyklo = "https://opendata.dev.example/dataset/cyklotrasy-bbsk";
+  // One dataset, cited first, twice and once by a tool: open it, the trailing slash and query dropped.
+  assert.deepEqual(dataset([{ n: 1, url: cyklo + "/", title: "Cyklotrasy BBSK" }, { n: 2, url: "https://www.bbsk.sk/doprava" },
+    { n: 3, tool: "query_entities", url: cyklo + "?x=1", title: "Cyklotrasy" }]), { url: cyklo, title: "Cyklotrasy BBSK" });
+  // Two datasets: a list, stay.
+  assert.equal(dataset([{ n: 1, url: cyklo }, { n: 2, url: "https://opendata.dev.example/dataset/zastavky" }]), null);
+  // The dataset is not the first citation: the answer is about something else.
+  assert.equal(dataset([{ n: 1, url: "https://www.bbsk.sk/doprava" }, { n: 2, url: cyklo }]), null);
+  // No citation, a tool without a page, http, a resource of the dataset, or a lookalike path.
+  assert.equal(dataset([]), null);
+  assert.equal(dataset(null), null);
+  assert.equal(dataset([{ n: 1, tool: "query_entities" }]), null);
+  assert.equal(dataset([{ n: 1, url: "http://opendata.dev.example/dataset/cyklotrasy-bbsk" }]), null);
+  assert.deepEqual(dataset([{ n: 1, url: "http://127.0.0.1:8080/dataset/cyklotrasy-bbsk" }]), { url: "http://127.0.0.1:8080/dataset/cyklotrasy-bbsk", title: "" });
+  assert.equal(dataset([{ n: 1, url: cyklo + "/resource/1" }]), null);
+  assert.equal(dataset([{ n: 1, url: "https://evil.example/x/dataset/cyklotrasy" }]), null);
+  assert.equal(dataset([{ n: 1, url: "javascript:alert(1)//dataset/x" }]), null);
+  // A hostile title is cut, never markup: the widget writes it as text.
+  assert.equal(dataset([{ n: 1, url: cyklo, title: "<img src=x>".repeat(50) }]).title.length, 200);
+});
+
+test("the panel's view comes back after a page change: draft, caret, scroll and a streaming answer (T-4685)", () => {
+  const saved = { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320,
+    streaming: { turn: T, conversation: C, number: 2, question: "Aké cyklotrasy?", text: "Cyklotrasy sú", askedAt: "2026-10-19T08:00:00Z" } };
+  assert.deepEqual(view(JSON.stringify(saved)), { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320,
+    streaming: { turn: T, conversation: C, number: 2, question: "Aké cyklotrasy?", text: "Cyklotrasy sú", askedAt: "2026-10-19T08:00Z" } });
+  // A caret past the draft is at its end; a bad scroll is none; a turn that is no UUID streams nothing.
+  assert.deepEqual(view(JSON.stringify({ draft: "ab", caret: 9, scroll: -1, streaming: { ...saved.streaming, turn: "../x" } })),
+    { draft: "ab", caret: 2, scroll: null, streaming: null });
+  assert.deepEqual(view(JSON.stringify({ draft: 7 })), { draft: "", caret: 0, scroll: null, streaming: null });
+  assert.equal(view("not json"), null);
+  assert.equal(view(null), null);
+  assert.equal(view(JSON.stringify("x")), null);
+  // Overlong pieces are cut.
+  assert.equal(view(JSON.stringify({ draft: "x".repeat(5000) })).draft.length, 4000);
+});
+
+test("a turn that opened a dataset keeps it, a forged one is dropped (T-4685)", () => {
+  const turn = { question: "q", text: "a", turn: 1, citations: [] };
+  const kept = restore(JSON.stringify({ conversation: C, asked: 1, turns: [
+    { ...turn, opened: { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" } },
+    { ...turn, turn: 2, opened: { url: "javascript:alert(1)", title: "x" } }] }));
+  assert.deepEqual(kept.turns[0].opened, { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" });
+  assert.equal(kept.turns[1].opened, undefined);
 });
