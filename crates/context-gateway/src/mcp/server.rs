@@ -50,6 +50,13 @@ pub(crate) const MAX_FAN_OUT: usize = 10;
 /// The name of the server every organization has without a manifest (EP-122).
 pub const ORG_ALL: &str = "all";
 
+/// The first segment of an assistant's own server, `/api/mcp/d/{publicId}`: an
+/// AssistantDeployment's reach, read-only for every caller (T-4691).
+pub const DEPLOYMENTS: &str = "d";
+
+/// The scheme of an assistant's `context` resource, `context://{publicId}`.
+pub const CONTEXT_SCHEME: &str = "context://";
+
 /// One named server as the gateway serves it (MF-53).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
@@ -133,6 +140,17 @@ impl McpServer {
             .is_none_or(|levels| levels.contains(&level))
     }
 
+    /// Whether it offers the resource `context` (EP-136, API/05 §1.9): an assistant's server on
+    /// an anonymous channel, whose context the assistant answers any visitor.
+    pub fn has_context(&self) -> bool {
+        self.project == DEPLOYMENTS && self.audience == Audience::Public
+    }
+
+    /// The URI of its `context` resource.
+    pub fn context_uri(&self) -> String {
+        format!("{CONTEXT_SCHEME}{}", self.name)
+    }
+
     /// Its address under the gateway's base URL (EP-92).
     pub fn path(&self) -> String {
         format!("{HUB_PATH}/{}/{}", self.project, self.name)
@@ -161,7 +179,7 @@ impl McpServer {
 /// What a selector reads of `endpoint` (MF-55, MF-61): its types, their classification, and its
 /// themes, a theme set by hand winning over the derived one as on the DCAT record (T-4498). The
 /// table holds no manifest name, so the slug stands in; matching never reads it.
-fn facts(endpoint: &Endpoint) -> EndpointFacts {
+pub(crate) fn facts(endpoint: &Endpoint) -> EndpointFacts {
     let classified = crate::handlers::endpoint_surface::classification(endpoint);
     let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
         Some(catalog) => catalog.themes.iter().copied().collect(),
@@ -211,6 +229,9 @@ pub(crate) async fn serve(
         .members
         .iter()
         .filter_map(|slug| gateway.resolver.resolve(slug))
+        // Never wider than its narrowest member (EP-93): a public server's internal member
+        // is not served, whoever calls.
+        .filter(|endpoint| breadth(endpoint.audience) >= breadth(server.audience))
         .chain(
             gateway
                 .resolver
@@ -277,7 +298,8 @@ pub(crate) async fn serve(
                 })
                 .filter(level)
                 .collect();
-            (format!("subject:{}", claims.sub), reach, false)
+            let reads_only = server.project == DEPLOYMENTS;
+            (format!("subject:{}", claims.sub), reach, reads_only)
         }
     };
 
@@ -366,9 +388,17 @@ pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
          not answer; every other tool names one Endpoint in `endpoint`.\n\n",
     );
     instructions.push_str(&super::PRIMER);
+    let mut capabilities = json!({ "tools": { "listChanged": false } });
+    if server.is_some_and(McpServer::has_context) {
+        instructions.push_str(
+            "\n\nThe resource `context` says what this assistant knows: its categories, its \
+             Endpoints with their counts and its knowledge sources. Read it first.",
+        );
+        capabilities["resources"] = json!({ "listChanged": false });
+    }
     json!({
         "protocolVersion": jsonrpc::PROTOCOL_VERSION,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": capabilities,
         "serverInfo": {
             "name": name,
             "title": title.unwrap_or(name),

@@ -19,6 +19,7 @@ const CONFIG = {
   disclaimer: { sk: "Odpovede tvorí umelá inteligencia z webov mesta a kraja. Môžu obsahovať chyby, overte si ich v zdrojoch. Nezadávajte osobné údaje.",
     en: "Answers are written by AI from the city's and the region's websites. They may contain mistakes; check them in the sources. Do not enter personal data." },
   enabled: true, connectors: [], viz: "https://viz.dev.joinedcontext.com",
+  transcriptDays: 30, privacy: { contact: "dpo@banskabystrica.sk", documentsUrl: "https://www.banskabystrica.sk/gdpr" },
 };
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
@@ -174,8 +175,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return greeting.y - (top.y + top.height);
     }, { message: "the greeting sits under the header" }).toBeLessThanOrEqual(24);
 
-    // T-4635 option C: a labelled send button inside the bar, no circle in the footer, the
-    // disclaimer's sentence whole with a "More" link that opens the rest.
+    // T-4635 option C: a labelled send button inside the bar, no circle in the footer.
     const bar = await frame.locator(".jc-form").boundingBox();
     const send = frame.locator(".jc-form .jc-submit");
     await expect(send).toHaveText("Send");
@@ -188,19 +188,11 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
       return box.width > 4 && Math.abs(box.width - box.height) < 2 && radius >= box.width / 2 - 1;
     }).map((el) => el.className));
     expect(circles, "no circle in the footer").toEqual([]);
-    const lead = await frame.locator(".jc-notice .jc-disclaimer").evaluate((span) => ({
-      text: span.textContent, wraps: getComputedStyle(span.parentElement).whiteSpace !== "nowrap",
-      cut: getComputedStyle(span.parentElement).textOverflow === "ellipsis" }));
-    expect(lead, "the disclaimer's sentence is whole").toEqual({ text: "Answers are written by AI from the city's and the region's websites.", wraps: true, cut: false });
-    const more = frame.locator(".jc-notice .jc-more");
-    await expect(more).toHaveText("More");
-    await expect(more).toHaveAttribute("aria-expanded", "false");
-    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
-    await more.click();
-    await expect(more).toHaveAttribute("aria-expanded", "true");
-    await expect(frame.locator("#jc-disclaimer-rest")).toHaveText("They may contain mistakes; check them in the sources. Do not enter personal data.");
-    await more.click();
-    await expect(frame.locator("#jc-disclaimer-rest")).toBeHidden();
+    // T-4670: the footer is one line, whole and wrapping; the disclaimer moved into the privacy dialog.
+    const line = await frame.locator(".jc-privacy-line").evaluate((p) => ({
+      text: p.textContent, wraps: getComputedStyle(p).whiteSpace !== "nowrap", cut: getComputedStyle(p).textOverflow === "ellipsis" }));
+    expect(line, "the footer line is whole").toEqual({ text: "Please verify important information. · Privacy", wraps: true, cut: false });
+    await expect(frame.locator(".jc-disclaimer")).toHaveCount(0);
 
     // The name and its subtitle keep one line each, whole, at every size.
     const header = await frame.locator(".jc-title").evaluate((title) => {
@@ -274,7 +266,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     // Boxes are in the page's coordinates: each part lies within the frame, the frame within the window.
     const frameBox = await page.locator("[data-jc-assistant] iframe").boundingBox();
     expect(inside(frameBox, width, height), "the frame lies within the window").toBe(true);
-    for (const part of [".jc-head", ".jc-form", ".jc-notice"]) {
+    for (const part of [".jc-head", ".jc-form", ".jc-privacy-line"]) {
       const box = await frame.locator(part).boundingBox();
       expect(box.y >= frameBox.y - 0.5 && box.y + box.height <= frameBox.y + frameBox.height + 0.5, `${part} is whole`).toBe(true);
     }
@@ -282,7 +274,7 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     expect(head.y, "the header stays at the top after a long answer").toBeLessThanOrEqual(frameBox.y + 1);
     expect(await panel.boundingBox(), "a long answer leaves the panel as it opened").toEqual(opened);
     if (width <= 480) {
-      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-notice .jc-more"].map((s) => s + ":visible").join(", ");
+      const controls = [".jc-head button", ".jc-form button", ".jc-answer-tools button", ".jc-cards > li", ".jc-followups button", ".jc-privacy-line .jc-more"].map((s) => s + ":visible").join(", ");
       for (const control of await frame.locator(controls).all()) {
         const box = await control.boundingBox();
         expect(Math.min(box.width, box.height), "a tap target of 44 px").toBeGreaterThanOrEqual(44);
@@ -528,4 +520,67 @@ test("on a phone the panel already fills the screen and offers no expand button 
   const chat = page.frameLocator("[data-jc-assistant] iframe");
   await expect(chat.locator(".jc-close")).toBeVisible();
   await expect(chat.locator(".jc-size")).toHaveCount(0);
+});
+
+// T-4670: the footer's privacy link opens a modal dialog that holds focus and closes on Escape
+// alone; its switch keeps the conversation in localStorage for 90 days, and off deletes it.
+test("the privacy dialog holds focus, closes on Escape, and its switch keeps or deletes the browser's copy (T-4670)", async ({ page, context }) => {
+  WIDGET = undefined;
+  SLOW = false;
+  await page.setViewportSize({ width: 420, height: 720 });
+  await page.goto(`${base}/d/bb?lang=sk`);
+  await expect(page.locator(".jc-privacy-line")).toHaveText("Dôležité informácie si prosím overte. · Súkromie");
+  const open = page.locator(".jc-privacy-line .jc-more");
+  await open.click();
+  const dialog = page.locator("dialog.jc-about");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("h2")).toHaveText("O tomto asistentovi");
+  await expect(dialog.locator("p").first()).toHaveText(CONFIG.disclaimer.sk);
+  await expect(dialog).toContainText("30 dní");
+  await expect(dialog.locator('a[href="mailto:dpo@banskabystrica.sk"]')).toBeVisible();
+  await expect(dialog.locator('a[href="https://www.banskabystrica.sk/gdpr"]')).toBeVisible();
+  const box = await dialog.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(420);
+  for (const key of ["Tab", "Tab", "Tab", "Tab", "Tab", "Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab", "Shift+Tab"]) {
+    await page.keyboard.press(key);
+    expect(await page.evaluate(() => Boolean(document.activeElement && document.activeElement.closest("dialog")))).toBe(true);
+  }
+  const toggle = dialog.locator('input[role="switch"]');
+  await expect(toggle).not.toBeChecked();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("#jc-question")).toBeVisible();
+  await expect(open).toBeFocused();
+
+  const KEY = "jc-chat-remember:bb";
+  expect(await page.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+  await open.click();
+  await toggle.check();
+  expect(JSON.parse(await page.evaluate((k) => localStorage.getItem(k), KEY)).kept).toBeNull();
+
+  // The copy a later visit finds: shown in a new tab (no sessionStorage), the switch still on.
+  const conversation = {
+    conversation: "00000000-0000-4000-8000-000000000001", asked: 1,
+    turns: [{ question: "Kedy má otvorené klientske centrum?", text: "V pracovné dni od 8:00.", turn: 1, citations: [] }],
+  };
+  await page.evaluate(([k, kept]) => localStorage.setItem(k, JSON.stringify({ savedAt: new Date().toISOString(), kept })), [KEY, conversation]);
+  const later = await context.newPage();
+  await later.goto(`${base}/d/bb?lang=sk`);
+  await expect(later.locator(".jc-log")).toContainText("V pracovné dni od 8:00.");
+  await later.locator(".jc-privacy-line .jc-more").click();
+  const laterToggle = later.locator('dialog.jc-about input[role="switch"]');
+  await expect(laterToggle).toBeChecked();
+  await laterToggle.uncheck();
+  expect(await later.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+  await later.close();
+
+  // Past 90 days the copy is not shown and is deleted on the visit.
+  const old = new Date(Date.now() - 91 * 24 * 3600 * 1000).toISOString();
+  await page.evaluate(([k, kept, at]) => localStorage.setItem(k, JSON.stringify({ savedAt: at, kept })), [KEY, conversation, old]);
+  const stale = await context.newPage();
+  await stale.goto(`${base}/d/bb?lang=sk`);
+  await expect(stale.locator("#jc-question")).toBeVisible();
+  await expect(stale.locator(".jc-log")).not.toContainText("V pracovné dni od 8:00.");
+  expect(await stale.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
 });

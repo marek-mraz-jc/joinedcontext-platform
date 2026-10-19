@@ -156,6 +156,10 @@ fn config(
         // How the chat picks its language and whether it shows the toggle (T-4343).
         "widget": spec.widget.unwrap_or_default(),
         "questionChars": spec.budget.as_ref().map(|b| b.question_chars),
+        // What the privacy dialog tells the visitor: how long the service keeps a turn and whom
+        // to write about their data (AG-99, T-4670).
+        "transcriptDays": spec.transcript_days(),
+        "privacy": spec.privacy,
     })
 }
 
@@ -338,6 +342,18 @@ mod tests {
         );
         assert_eq!(config["enabled"], json!(true));
         assert_eq!(config["questionChars"], json!(500));
+        // T-4670: thirty days unless told, and no contact the deployment did not name.
+        assert_eq!(config["transcriptDays"], json!(30));
+        assert_eq!(config["privacy"], json!(null));
+        let mut named = public.clone();
+        named.spec.transcript_retention = Some("P7D".into());
+        named.spec.privacy = Some(jc_core::kinds::assistant::Privacy {
+            contact: Some("dpo@banskabystrica.sk".into()),
+            documents_url: None,
+        });
+        let told = super::config(&named, &[], None);
+        assert_eq!(told["transcriptDays"], json!(7));
+        assert_eq!(told["privacy"], json!({"contact": "dpo@banskabystrica.sk"}));
         // T-4343: a deployment that names no widget opens in the browser's language, toggle on.
         assert_eq!(
             config["widget"],

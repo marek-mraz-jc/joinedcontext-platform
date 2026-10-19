@@ -235,6 +235,11 @@ impl Model {
             && audience.contains(&self.config.client_id.as_str()))
     }
 
+    /// The service's model, which a call asks when it names none.
+    pub fn name(&self) -> &str {
+        &self.config.model
+    }
+
     /// One completion for `deployment` (`{project}/{name}`) under its day's `tokens_per_day`.
     pub async fn complete(
         &self,

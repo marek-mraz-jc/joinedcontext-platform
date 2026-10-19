@@ -235,6 +235,8 @@ pub async fn answer(
                 allow,
             )
             .await;
+        let model = call.model.unwrap_or(ask.model.name());
+        ask.trace.model("data", model, at, stepped.as_ref());
         super::agent::Stages::add(&mut spent.stages.answer, at);
         let completion = match stepped {
             Ok(completion) => completion,
@@ -391,6 +393,8 @@ async fn step(
     )
     .await
     .unwrap_or_else(|_| Err("the source did not answer within the question's time".into()));
+    ask.trace
+        .tool(&o.tool.name, Some(&endpoint), &arguments, began, &answered);
     let ms = began.elapsed().as_millis() as u64;
     match answered {
         Ok(text) => {

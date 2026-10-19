@@ -1,0 +1,21 @@
+/* What an assistant knows (/d/{publicId}/context, T-4692): one readable column, tables that
+   scroll sideways on a phone, the widget's colours, AA contrast in both schemes. */
+:root { --fg: #1a1d21; --muted: #555e69; --bg: #ffffff; --line: #d9dee4; --link: #1f5fae; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #eef1f5; --muted: #aab4c0; --bg: #15181c; --line: #343b44; --link: #9cc3ff; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: var(--bg); }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 1.5rem; margin: 0 0 4px; }
+h2 { font-size: 1.1rem; margin: 28px 0 8px; }
+.jc-assistant { margin: 0; color: var(--muted); }
+section { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+thead th { color: var(--muted); font-weight: 600; }
+a { color: var(--link); }
+a:focus-visible { outline: 3px solid var(--link); outline-offset: 2px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+dt { color: var(--muted); }
+dd { margin: 0; }
