@@ -329,7 +329,7 @@ var JCRender = (function () {
 
   /**
    * A `data` event as a table to show (T-4138, T-4140): its columns and at most 50 rows of
-   * text, and its dataset and download links when they are http(s); null when nothing to show.
+   * text, and its dataset, download and GeoJSON links when they are http(s); null when nothing to show.
    */
   // Headers a person reads (T-4650): the common Smart Data Models attributes and types in the
   // widget's languages; any other key is spelt out from its camelCase.
@@ -502,7 +502,8 @@ var JCRender = (function () {
       numeric: numeric,
       rows: rows,
       dataset: safeUrl(data.dataset),
-      download: safeUrl(data.download)
+      download: safeUrl(data.download),
+      geojson: safeUrl(data.geojson)
     };
   }
 
@@ -708,6 +709,10 @@ var JCRender = (function () {
       var at = typeof t.at === "string" && stamp(t.at);
       if (askedAt) turn.askedAt = askedAt.datetime;
       if (at) turn.at = at.datetime;
+      var opened = t.opened && dataset([{ url: t.opened.url, title: t.opened.title }]);
+      if (opened) turn.opened = opened;
+      var more = followups({ questions: t.followups });
+      if (more.length > 0) turn.followups = more;
       return turn;
     });
     var asked = Number.isInteger(kept.asked) && kept.asked >= 0 ? kept.asked : 0;
@@ -919,6 +924,56 @@ var JCRender = (function () {
    * framed by (its `frame-ancestors`); a target that is not the parent drops the message.
    * Anything but an http(s) origin is left out.
    */
+  // A catalogue dataset page (T-4685): https (http on this machine alone), a path
+  // /dataset/{name}, nothing after it.
+  var DATASET = /^(?:https:\/\/[a-z0-9.-]+|http:\/\/(?:localhost|127\.0\.0\.1))(?::\d{1,5})?\/dataset\/[a-z0-9_-]{2,100}\/?$/i;
+
+  /**
+   * The one dataset an answer is about (T-4685, API/05 §1.6.1): `{ url, title }` when the
+   * citations link exactly one catalogue dataset page and the first citation is it; null for a
+   * broad answer that links several, or none.
+   */
+  function dataset(citations) {
+    var pages = (Array.isArray(citations) ? citations : []).filter(function (c) {
+      return c && typeof c.url === "string" && DATASET.test(c.url.split(/[?#]/)[0]);
+    }).map(function (c) {
+      return { url: c.url.split(/[?#]/)[0].replace(/\/$/, ""), title: typeof c.title === "string" ? c.title.slice(0, 200) : "" };
+    });
+    if (pages.length === 0 || !citations[0] || typeof citations[0].url !== "string") return null;
+    var first = pages[0];
+    var one = pages.every(function (p) { return p.url === first.url; });
+    return one && citations[0].url.split(/[?#]/)[0].replace(/\/$/, "") === first.url ? first : null;
+  }
+
+  /**
+   * The panel's view kept across a page change (T-4685) read back from `raw`: the draft, its
+   * caret, the scroll, whether the input had focus and an answer still streaming; null when it
+   * is not of that shape.
+   */
+  function view(raw) {
+    var v;
+    try { v = JSON.parse(raw); } catch (e) { return null; }
+    if (!v || typeof v !== "object") return null;
+    var draft = typeof v.draft === "string" ? v.draft.slice(0, 4000) : "";
+    var out = {
+      draft: draft,
+      caret: Number.isInteger(v.caret) ? Math.max(0, Math.min(v.caret, draft.length)) : draft.length,
+      scroll: typeof v.scroll === "number" && isFinite(v.scroll) && v.scroll >= 0 ? v.scroll : null,
+      focused: v.focused === true,
+      streaming: null
+    };
+    var s = v.streaming;
+    if (s && typeof s === "object" && typeof s.turn === "string" && UUID.test(s.turn) &&
+        typeof s.conversation === "string" && UUID.test(s.conversation) &&
+        Number.isInteger(s.number) && s.number >= 1 && typeof s.question === "string") {
+      out.streaming = { turn: s.turn, conversation: s.conversation, number: s.number,
+        question: s.question.slice(0, 4000), text: typeof s.text === "string" ? s.text.slice(0, 64000) : "" };
+      var askedAt = typeof s.askedAt === "string" && stamp(s.askedAt);
+      if (askedAt) out.streaming.askedAt = askedAt.datetime;
+    }
+    return out;
+  }
+
   function closeTargets(ancestors, frameOrigins) {
     var origin = function (value) {
       var match = /^(https?:\/\/[a-z0-9.-]+(?::\d{1,5})?)\/?$/i.exec(String(value || ""));
@@ -989,7 +1044,7 @@ var JCRender = (function () {
   }
 
   return {
-    closeTargets: closeTargets, connector: connector,
+    closeTargets: closeTargets, connector: connector, dataset: dataset, view: view,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,
