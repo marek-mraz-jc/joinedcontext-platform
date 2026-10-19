@@ -210,9 +210,21 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
             _ => {}
         }
     }
-    // What the resolver and the context page read of every Endpoint (AG-121, AG-123): its page
-    // (title, types, CKAN dataset) and the facts a selector matches, plus the named servers a
-    // deployment may read.
+    resolver_inputs(&mut snapshot, &assembly.repository, &catalogues);
+    for (public_id, owners) in snapshot.claimed_twice() {
+        tracing::warn!(%public_id, deployments = %owners.join(" and "), "a publicId is declared twice; neither deployment answers until one gives it up (MF-52)");
+    }
+    Ok(snapshot)
+}
+
+/// What the resolver and the context page read of every Endpoint (AG-121, AG-123): its page
+/// (title, types, CKAN dataset) and the facts a selector matches, plus the named servers a
+/// deployment may read.
+fn resolver_inputs(
+    snapshot: &mut Snapshot,
+    repository: &jc_manifest::loader::Repository,
+    catalogues: &BTreeMap<(String, String), String>,
+) {
     let mut languages: Vec<String> = Vec::new();
     for language in snapshot.deployments.iter().flat_map(|d| &d.spec.languages) {
         if !languages.contains(language) {
@@ -227,16 +239,10 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
             .filter(|((owner, _), _)| *owner == project)
             .map(|((_, name), url)| (name.clone(), url.clone()))
             .collect();
-        for page in crate::catalogue::pages_of(
-            &assembly.repository,
-            &project,
-            &[],
-            false,
-            &languages,
-            &instances,
-        ) {
-            let Some(spec) = assembly
-                .repository
+        for page in
+            crate::catalogue::pages_of(repository, &project, &[], false, &languages, &instances)
+        {
+            let Some(spec) = repository
                 .iter()
                 .find(|(id, _)| {
                     id.kind == "Endpoint"
@@ -268,7 +274,7 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
                 .insert((project.clone(), facts.name.clone()), facts);
         }
     }
-    for (id, resource) in assembly.repository.iter() {
+    for (id, resource) in repository.iter() {
         if id.kind != "McpServer" {
             continue;
         }
@@ -279,10 +285,6 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
             );
         }
     }
-    for (public_id, owners) in snapshot.claimed_twice() {
-        tracing::warn!(%public_id, deployments = %owners.join(" and "), "a publicId is declared twice; neither deployment answers until one gives it up (MF-52)");
-    }
-    Ok(snapshot)
 }
 
 impl Snapshot {

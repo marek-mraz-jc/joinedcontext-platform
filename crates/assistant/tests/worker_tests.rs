@@ -131,7 +131,6 @@ fn spec(start: &str, schedule: Option<&str>) -> KnowledgeSourceSpec {
         schedule: schedule.map(str::to_owned),
         languages: Vec::new(),
         visibility: Visibility::Public,
-        categories: Vec::new(),
     }
 }
 

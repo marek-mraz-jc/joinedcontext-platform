@@ -183,7 +183,6 @@ fn test_spec(start_url: &str) -> KnowledgeSourceSpec {
         schedule: None,
         languages: Vec::new(),
         visibility: Visibility::Public,
-        categories: Vec::new(),
     }
 }
 

@@ -172,7 +172,7 @@ fn hosts<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 }
 
 /// The deployment's own document from `snapshot`, the store and the gateway's counts.
-pub async fn compute(
+async fn compute(
     state: &ChatState,
     snapshot: &Snapshot,
     deployment: &Deployment,
