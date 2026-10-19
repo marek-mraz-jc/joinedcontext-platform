@@ -2331,6 +2331,38 @@ fn personal(ask: &Ask<'_>) -> bool {
     ask.connectors.iter().any(|c| c.surface.token.is_some())
 }
 
+/// The data loop's answer, sent with its citations and the router's follow-ups; a whole one of a
+/// `first` question is kept for [`LIVE_LIFE`] when [`keeps_live`] allows (T-4294, T-4731).
+async fn answer_data(
+    q: Question<'_, '_>,
+    spent: &mut Spent,
+    start: super::data::Start,
+    followups: Vec<String>,
+    missing: &[String],
+    first: bool,
+) {
+    let Question { ask, events, .. } = q;
+    let Some((text, citations, whole)) = super::data::answer(ask, start, spent, events).await
+    else {
+        return;
+    };
+    let text = without_invented_absence(&text, missing);
+    if first && whole && keeps_live(ask, missing, &text) {
+        q.keep.after(LIVE_LIFE);
+    }
+    send(events, Event::Answer(text)).await;
+    send(events, Event::Citations(citations)).await;
+    if !followups.is_empty() {
+        send(events, Event::Followups(followups)).await;
+    }
+}
+
+/// Whether an answer of live data may be kept (T-4731): every source answered, it read as anyone,
+/// it is at least a sentence and it names no moment.
+fn keeps_live(ask: &Ask<'_>, missing: &[String], text: &str) -> bool {
+    missing.is_empty() && !personal(ask) && worth_text(text) && !tells_time(ask, text)
+}
+
 /// Whether the answer names the moment it was written, which a later visitor must not read.
 fn tells_time(ask: &Ask<'_>, text: &str) -> bool {
     super::clock::readings(ask.now, ask.zone)
@@ -2521,40 +2553,21 @@ async fn answer_routed(
     }
     // A data question goes on in the loop, which may read more before it answers (T-4294).
     if routing.data {
-        // The tables by the number the model cites them with, for a chart it may ask for.
-        let numbered = citations
-            .iter()
-            .filter(|c| c.tool.is_some())
-            .map(|c| c.n)
-            .zip(tables.iter().cloned())
-            .collect();
         let start = super::data::Start {
             messages,
+            // The tables by the number the model cites them with, for a chart it may ask for.
+            tables: citations
+                .iter()
+                .filter(|c| c.tool.is_some())
+                .map(|c| c.n)
+                .zip(tables.iter().cloned())
+                .collect(),
             citations,
-            tables: numbered,
             steps: routing.reads.len(),
             started,
         };
-        if let Some((text, citations, whole)) =
-            super::data::answer(ask, start, &mut spent, events).await
-        {
-            let text = without_invented_absence(&text, &missing);
-            // A whole answer of live data, read as anyone, with every source answering (T-4731).
-            if key.is_some()
-                && whole
-                && missing.is_empty()
-                && !personal(ask)
-                && worth_text(&text)
-                && !tells_time(ask, &text)
-            {
-                keep.after(LIVE_LIFE);
-            }
-            send(events, Event::Answer(text)).await;
-            send(events, Event::Citations(citations)).await;
-            if !routing.followups.is_empty() {
-                send(events, Event::Followups(routing.followups)).await;
-            }
-        }
+        let first = key.is_some();
+        answer_data(q, &mut spent, start, routing.followups, &missing, first).await;
         return spent;
     }
     let answering = Answering {
