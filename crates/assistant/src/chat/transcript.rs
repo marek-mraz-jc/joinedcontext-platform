@@ -1,5 +1,5 @@
 //! The stored transcripts of a deployment's conversations (AG-99, API/05 §3.1, T-4670): what a
-//! turn showed the visitor, read off the events as they pass, and the steps of its [`Trace`],
+//! turn showed the visitor, read off the events as they pass, and the steps of its `Trace`,
 //! redacted and written once the turn ends; and the reads and the erasure the Portal's
 //! administration routes answer.
 

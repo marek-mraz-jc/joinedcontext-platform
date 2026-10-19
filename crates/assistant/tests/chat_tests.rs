@@ -242,6 +242,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
         viz: None,
         organization: "hronov".into(),
+        contexts: Default::default(),
     });
     World {
         admin,
