@@ -1,7 +1,6 @@
 //! Spatial grants intersected with the caller's own area (T-0149, GW11, R14).
 
-use context_gateway::pdp::geo::{granted_polygon, intersect, Areas};
-use serde_json::json;
+use context_gateway::pdp::geo::{granted_polygon, intersect};
 
 /// A `within` polygon geoQ from a ring of `(lon, lat)` pairs.
 fn within(ring: &[(f64, f64)]) -> String {
@@ -45,14 +44,6 @@ fn straddling() -> String {
     ])
 }
 
-fn station(lon: f64, lat: f64) -> serde_json::Value {
-    json!({
-        "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:s1",
-        "type": "AirQualityObserved",
-        "location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [lon, lat] } },
-    })
-}
-
 /// Containment is exact for the simple shapes a policy draws: inside, straddling, and a
 /// polygon that only touches the boundary.
 #[test]
@@ -91,25 +82,13 @@ fn a_contained_caller_area_is_forwarded_as_is() {
     assert!(!outcome.restricted);
 }
 
-/// GW11 and R14: a partial overlap forwards the grant, so the broker cannot answer past
-/// it, and the caller's own area is applied on the way back.
+/// GW11 and R14: a partial overlap forwards the grant, so the broker cannot answer past it.
 #[test]
 fn a_straddling_caller_area_forwards_the_grant_and_post_filters() {
     let outcome = intersect(Some(&straddling()), &[district().as_str()]);
     assert_eq!(outcome.geo_q.as_deref(), Some(district().as_str()));
     assert_eq!(outcome.caller.as_deref(), Some(straddling().as_str()));
     assert!(outcome.restricted);
-
-    let areas = Areas::of(&outcome.grants, outcome.caller.as_deref()).expect("something to filter");
-    assert!(areas.admits(&station(19.17, 48.73)), "inside both");
-    assert!(
-        !areas.admits(&station(19.11, 48.73)),
-        "inside the grant, outside what the caller asked for"
-    );
-    assert!(
-        !areas.admits(&station(19.25, 48.73)),
-        "inside the caller's area but the broker would never have returned it; the gateway does not either"
-    );
 }
 
 /// No caller area: the grant is the query. No grant: the caller's area stands.
@@ -122,14 +101,13 @@ fn one_side_missing() {
     let free = intersect(Some(&block()), &[]);
     assert_eq!(free.geo_q.as_deref(), Some(block().as_str()));
     assert!(!free.restricted);
-    assert!(Areas::of(&free.grants, free.caller.as_deref()).is_none());
+    assert!(free.grants.is_empty() && free.caller.is_none());
 }
 
-/// Several grants are several areas and `geoQ` has no union: the caller's area goes to
-/// the broker and every grant area is applied here. An entity in either district passes;
-/// one in neither does not.
+/// Several grants are several areas and `geoQ` has no union: the broker's view applies each
+/// grant's area (T-4755), so nothing is forwarded as one `geoQ`.
 #[test]
-fn several_grant_areas_are_applied_at_the_gateway() {
+fn several_grant_areas_are_no_single_geo_q() {
     let za = within(&[
         (18.70, 49.20),
         (18.80, 49.20),
@@ -141,63 +119,13 @@ fn several_grant_areas_are_applied_at_the_gateway() {
     assert_eq!(outcome.geo_q, None);
     assert_eq!(outcome.grants.len(), 2);
     assert!(outcome.restricted);
-
-    let areas = Areas::of(&outcome.grants, None).expect("areas");
-    assert!(areas.admits(&station(19.15, 48.73)), "Banská Bystrica");
-    assert!(areas.admits(&station(18.75, 49.23)), "Žilina");
-    assert!(
-        !areas.admits(&station(17.10, 48.15)),
-        "Bratislava is in neither"
-    );
-}
-
-/// A spatial query against a type that carries no location: the entity cannot be placed,
-/// so it cannot be shown to be inside the area, and it is not served. The same holds for
-/// an area nobody can parse.
-#[test]
-fn an_entity_without_a_location_or_an_unreadable_area_is_not_admitted() {
-    let outcome = intersect(Some(&straddling()), &[district().as_str()]);
-    let areas = Areas::of(&outcome.grants, outcome.caller.as_deref()).expect("areas");
-
-    let no_location = json!({
-        "id": "urn:ngsi-ld:District:banskabystrica.sk:ovzdusie:radvan",
-        "type": "District",
-        "name": { "type": "Property", "value": "Radvaň" },
-    });
-    assert!(!areas.admits(&no_location));
-
-    let line = json!({
-        "id": "urn:ngsi-ld:Road:banskabystrica.sk:ovzdusie:r1",
-        "type": "Road",
-        "location": { "type": "GeoProperty", "value": { "type": "LineString", "coordinates": [[19.15, 48.73], [19.16, 48.73]] } },
-    });
-    assert!(
-        !areas.admits(&line),
-        "a shape the parser does not read is not placed"
-    );
-
-    let unreadable = intersect(
-        Some("georel=near;maxDistance==200;geometry=Point;coordinates=[19.15,48.73]"),
-        &[district().as_str()],
-    );
-    assert_eq!(
-        unreadable.geo_q.as_deref(),
-        Some(district().as_str()),
-        "the grant is still what the broker gets"
-    );
-    let areas = Areas::of(&unreadable.grants, unreadable.caller.as_deref()).expect("areas");
-    assert!(
-        !areas.admits(&station(19.15, 48.73)),
-        "an area nobody can read admits nothing"
-    );
 }
 
 /// A grant whose polygon has a hole, and a caller area that encloses that hole (GW11, T-2327).
 ///
 /// This is the leak the carve-out exists to prevent: the caller's own area was forwarded whole,
-/// with nothing to filter against, so the broker answered from inside the hole and the gateway
-/// passed it on. The grant is forwarded now and applied here as well, and `Polygon::contains`
-/// excludes the hole, so the carve-out holds on the way back.
+/// with nothing to filter against, so the broker answered from inside the hole. The grant is
+/// forwarded now, and its polygon keeps the hole.
 #[test]
 fn a_read_enclosing_a_carve_out_is_filtered_against_the_grant() {
     // The district with the protected site in the middle of it cut out.
@@ -220,18 +148,10 @@ fn a_read_enclosing_a_carve_out_is_filtered_against_the_grant() {
     );
     assert!(outcome.restricted, "the caller was narrowed (R22)");
 
-    let areas = Areas::of(&outcome.grants, outcome.caller.as_deref())
-        .expect("a grant with a carve-out always needs the answer filtered");
+    let area = granted_polygon(grant).expect("the grant parses");
     assert!(
-        !areas.admits(&station(19.15, 48.73)),
-        "a station inside the carve-out is not readable"
+        !area.contains((19.15, 48.73)),
+        "a point inside the carve-out is outside the grant"
     );
-    assert!(
-        areas.admits(&station(19.135, 48.73)),
-        "a station between the carve-out and the edge of what was asked for is"
-    );
-    assert!(
-        !areas.admits(&station(19.11, 48.73)),
-        "and one outside the area asked for is not, as for any other grant"
-    );
+    assert!(area.contains((19.135, 48.73)), "one beside it is inside");
 }

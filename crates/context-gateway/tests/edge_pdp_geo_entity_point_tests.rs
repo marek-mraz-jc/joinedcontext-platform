@@ -4,7 +4,7 @@
 //! GeoJSON `Point` — normalized under `value` or simplified — whose first two coordinates are
 //! numbers; everything else is `None`, which every caller turns into a refusal.
 //!
-//! The refusal is the point of the function. `Areas::admits` does not show an entity it cannot
+//! The refusal is the point of the function. An area filter does not show an entity it cannot
 //! place, and `write_guard::check_location` refuses a write whose `location` it cannot read, so a
 //! shape read half-way — a Polygon taken for its first position, a string parsed as WKT — would
 //! place an entity outside the granted area inside it.

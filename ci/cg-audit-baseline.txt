@@ -14,7 +14,7 @@ platform | memory-body-copy | 19
 platform | memory-per-request-build | 0
 platform | memory-unbounded-global | 6
 platform | memory-uncapped-read | 20
-platform | modularity-file-cycle | 24
+platform | modularity-file-cycle | 23
 platform | modularity-server-as-library | 1
 platform | security-fetch-from-route | 23
 platform | security-log-secret-field | 0
