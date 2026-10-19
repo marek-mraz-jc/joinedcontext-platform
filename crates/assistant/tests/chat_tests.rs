@@ -497,6 +497,11 @@ async fn model_calls(proxy: &MockServer) -> Vec<(axum::http::HeaderMap, Value)> 
 
 /// The recorded answers of the public Endpoint's `list_types` and `query_entities` (T-4140).
 async fn recorded_air(gateway: &MockServer, slug: &str) {
+    recorded_air_after(gateway, slug, std::time::Duration::ZERO).await;
+}
+
+/// [`recorded_air`] whose `query_entities` answers after `delay`.
+async fn recorded_air_after(gateway: &MockServer, slug: &str, delay: std::time::Duration) {
     let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{slug}/mcp")));
     mcp().and(body_string_contains("tools/list"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
@@ -527,11 +532,13 @@ async fn recorded_air(gateway: &MockServer, slug: &str) {
     ]});
     mcp()
         .and(body_string_contains("\"query_entities\""))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"jsonrpc": "2.0", "id": 1, "result": {
-                "content": [{"type": "text", "text": entities.to_string()}]
-            }}),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+                    "content": [{"type": "text", "text": entities.to_string()}]
+                }}))
+                .set_delay(delay),
+        )
         .with_priority(1)
         .mount(gateway)
         .await;
@@ -2268,6 +2275,9 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(router["reasoning"], json!({"enabled": false}));
     assert_eq!(answering["reasoning"], json!({"effort": "medium"}));
     assert_eq!(router["response_format"]["type"], "json_object");
+    // T-4680: routing is deterministic; the answer keeps the model's own temperature.
+    assert_eq!(router["temperature"], 0);
+    assert!(answering.get("temperature").is_none());
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
     // The router hears the sources' language.
     let routed = router["messages"][1]["content"]
@@ -3287,6 +3297,58 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4680: the router's two reads run at once, so two Endpoints that each take two seconds cost
+/// the answer two seconds, not four (the owner's population question timed out on prod after two
+/// reads in a row), and the tables still come in the router's order.
+#[tokio::test]
+async fn two_routed_reads_run_at_once_and_keep_the_routers_order() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.scope = Some(jc_core::kinds::AssistantScope {
+        projects: vec!["bbsk".into(), "hronov".into()],
+    });
+    let tools = vec!["list_types".to_owned(), "query_entities".to_owned()];
+    d.spec.connectors = ["bbsk/kraj", "ovzdusie"]
+        .into_iter()
+        .map(|endpoint| Connector {
+            endpoint: endpoint.into(),
+            tools: tools.clone(),
+            timeout_seconds: 20,
+        })
+        .collect();
+    let w = world("chatreadsatonce", d).await;
+    let slow = std::time::Duration::from_secs(2);
+    for slug in [SLUG, REGION_SLUG] {
+        recorded_air_after(&w.gateway, slug, slow).await;
+    }
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"bbsk/kraj\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [1]."}), 930),
+    ]).await;
+    let at = std::time::Instant::now();
+    let (status, events, _) =
+        answer_of(&w.app, ask(json!({"message": "Aké je NO2?"}), Some(ORIGIN))).await;
+    let took = at.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let downloads: Vec<String> = events
+        .iter()
+        .filter(|(n, _)| n == "data")
+        .map(|(_, d)| d["download"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(downloads.len(), 2, "{events:?}");
+    assert!(
+        downloads[0].contains(SLUG) && downloads[1].contains(REGION_SLUG),
+        "{downloads:?}"
+    );
+    assert!(
+        took < 2 * slow - std::time::Duration::from_millis(300),
+        "took {took:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4611: one Endpoint's `list_types` hangs for 30 s and another's fails. Routing asks both at
 /// once, gives each three seconds, answers with what answered and tells the answer call which
 /// sources did not answer; a second question within the minute asks neither again.
@@ -3844,6 +3906,84 @@ async fn a_direct_message_is_answered_without_a_search_a_read_or_a_step() {
     let sent = answers[0]["messages"].to_string();
     assert!(sent.contains("This message needs none of them"), "{sent}");
     assert!(!sent.contains("passages"), "{sent}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4680: a broad read of a connector that offers `summarize` reads the type's profile beside
+/// its rows and the answer call gets both; a read narrowed by `q` reads the rows alone.
+#[tokio::test]
+async fn a_broad_read_gives_the_answer_the_types_profile_and_a_narrow_one_its_rows() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "summarize".into(),
+    ];
+    let w = world("chatprofile", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}}, "q": {"type": "string"}, "limit": {"type": "integer", "maximum": 1000}}}},
+            {"name": "summarize", "description": "Profiles a type.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    let profile = "type=AirQualityObserved count=2 basis=2 of 2 (all) computed=2026-10-19T00:00:00Z\nno2: n=2 min=21 max=34 mean=27.5 median=27.5";
+    mcp()
+        .and(body_string_contains("\"summarize\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": profile}]
+            }}),
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    recorded_air(&w.gateway, SLUG).await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 300),
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\", \"q\": \"no2>30\"}]}"}), 300),
+    ], vec![], vec![
+        streamed(&["Priemer NO2 je 27,5 [1]."], 300, 12),
+        streamed(&["Nad 30 je stanica [1]."], 300, 12),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Aké je priemerné NO2?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.iter().any(|(n, _)| n == "data"), "{events:?}");
+    let data = &events.iter().find(|(n, _)| n == "data").expect("data").1;
+    assert!(
+        data.get("profile").is_none(),
+        "the data event carries no profile: {data}"
+    );
+    assert_eq!(tool_calls_of(&w.gateway, "summarize").await.len(), 1);
+    let answers = calls_of(&model_calls(&w.proxy).await, None)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let sent = answers.last().map(ToString::to_string).unwrap_or_default();
+    assert!(sent.contains("mean=27.5"), "{sent}");
+
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 30?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tool_calls_of(&w.gateway, "summarize").await.len(),
+        1,
+        "a narrowed read reads no profile"
+    );
+    let answers = calls_of(&model_calls(&w.proxy).await, None)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let sent = answers.last().map(ToString::to_string).unwrap_or_default();
+    assert!(!sent.contains("mean=27.5"), "{sent}");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 

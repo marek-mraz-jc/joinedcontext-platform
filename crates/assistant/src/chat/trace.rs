@@ -467,6 +467,7 @@ mod tests {
             geojson: None,
             map: None,
             geometries: vec![],
+            profile: None,
         };
         trace.visual(&Event::Data(table));
         trace.visual(&Event::Visualization(

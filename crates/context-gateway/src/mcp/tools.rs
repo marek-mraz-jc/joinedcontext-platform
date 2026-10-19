@@ -105,6 +105,7 @@ pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "list_attribute_details",
     "get_attribute",
     "query_entities",
+    "summarize",
     "get_entity",
     "get_attribute_value",
     "query_temporal",
@@ -495,6 +496,18 @@ const QUERY: &[Arg] = &[
     opt("count", Kind::Flag),
     opt("limit", Kind::Int(1, 1000)),
     opt("cursor", Kind::Text(CURSOR_LEN)),
+];
+/// The broker's `summarize` (Antares T-4680): one type and the filters of `query_entities`; it
+/// pages by itself.
+const SUMMARIZE: &[Arg] = &[
+    req("type", Kind::Types),
+    opt("q", Kind::Text(4096)),
+    opt("scopeQ", Kind::Text(1024)),
+    opt("georel", Kind::Text(256)),
+    opt("geometry", Kind::Word(GEOMETRIES)),
+    opt("coordinates", Kind::Coordinates),
+    opt("geoproperty", Kind::Attr),
+    opt("lang", Kind::Text(64)),
 ];
 const BATCH_QUERY: &[Arg] = &[
     req("type", Kind::Types),
@@ -887,6 +900,13 @@ pub(crate) const TOOLS: &[Tool] = &[
         "Read the history of one Entity (TS 104 175 11.3.2) between timeAt and endTimeAt; lastN bounds each Attribute's instances.",
         TEMPORAL_ONE,
         "entity",
+    ),
+    broker(
+        "summarize",
+        &[Operation::QueryEntity],
+        "Profile one Entity type: its count and, per Attribute, statistics (min, max, mean, median, the most common values, the area) over at most 1,000 of the Entities the caller reads, and five of them. Use it for a broad question; use query_entities for specific Entities.",
+        SUMMARIZE,
+        "summary",
     ),
     broker(
         "update_attribute",
@@ -1439,6 +1459,19 @@ mod tests {
         );
     }
 
+    /// T-4680: the broker's `summarize` reads what `query_entities` reads, under the same view and
+    /// Policy, and answers a profile; a visitor's assistant may list and call it.
+    #[test]
+    fn an_anonymous_caller_may_summarize_a_type() {
+        assert!(anonymous_may("summarize"));
+        let mut tools = vec![
+            json!({"name": "summarize"}),
+            json!({"name": "delete_entity"}),
+        ];
+        keep_anonymous(&mut tools);
+        assert_eq!(tools, [json!({"name": "summarize"})]);
+    }
+
     #[test]
     fn an_anonymous_refusal_is_a_json_rpc_error_naming_what_it_may_call() {
         let refusal = anonymous_refusal(json!(4), "delete_subscription");
@@ -1498,6 +1531,7 @@ mod tests {
         "query_entities",
         "query_temporal",
         "retrieve_temporal",
+        "summarize",
     ];
 
     /// EP-112: the hub lists the broker's tools by the broker's names and argument names, so the
@@ -1659,6 +1693,19 @@ mod tests {
                     "aggrPeriodDuration",
                     "format",
                     "sysAttrs",
+                ],
+            ),
+            (
+                "summarize",
+                &[
+                    "type",
+                    "q",
+                    "scopeQ",
+                    "georel",
+                    "geometry",
+                    "coordinates",
+                    "geoproperty",
+                    "lang",
                 ],
             ),
             ("update_attribute", &["id", "attrId", "attribute"]),

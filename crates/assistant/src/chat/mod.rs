@@ -2211,6 +2211,7 @@ mod tests {
             geojson: None,
             map: None,
             geometries: Vec::new(),
+            profile: None,
         });
         for event in [&tool, &table] {
             let shown = |anonymous| format!("{:?}", sse(event, anonymous));

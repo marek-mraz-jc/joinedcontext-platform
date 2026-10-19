@@ -26,6 +26,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "get_type",
     "list_attributes",
     "query_entities",
+    "summarize",
     "get_entity",
     "get_attribute_value",
     "query_temporal",
