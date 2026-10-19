@@ -515,6 +515,27 @@ test("a token the service forgot is earned again once, and the question is answe
   await expect(page.locator(".jc-error")).toHaveCount(0);
 });
 
+test("an answer's copy button copies, and where the browser refuses it selects the answer and says Ctrl+C (T-4762)", async ({ page, context }) => {
+  WIDGET = undefined;
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto(`${base}/d/bb?lang=en`);
+  await page.locator("#jc-question").fill("When is the client centre open?");
+  await page.locator("#jc-question").press("Enter");
+  const copy = page.locator(".jc-bot .jc-copy").last();
+  await expect(copy).toBeVisible();
+  await copy.click();
+  await expect(page.locator("p.jc-sr[aria-live]").first()).toHaveText("The answer is copied.");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("The client centre is open on weekdays");
+  // A host frame without clipboard-write and no copy command: the answer is selected, and said so.
+  await page.evaluate(() => {
+    Clipboard.prototype.writeText = () => Promise.reject(new DOMException("denied", "NotAllowedError"));
+    document.execCommand = () => false;
+  });
+  await copy.click();
+  await expect(page.locator("p.jc-sr[aria-live]").first()).toHaveText("The answer is selected: press Ctrl+C.");
+  expect(await page.evaluate(() => String(getSelection()))).toContain("The client centre is open on weekdays");
+});
+
 test("a streamed answer is formatted while it streams, never raw markers, and ends as it streamed (T-4649)", async ({ page }) => {
   WIDGET = undefined;
   SLOW = true;
