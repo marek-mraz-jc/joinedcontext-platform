@@ -2189,56 +2189,24 @@ async fn searched(ask: &Ask<'_>, events: &Sender<Event>, query: &str) -> Option<
     hits
 }
 
-/// The router call beside the question's first search round (T-4293), and whether the route is
-/// `direct`. A direct message drops the round (T-4655): its search is stopped, its passages never
+/// The router call and how long it took. It runs beside the question's first search round
+/// (T-4293); a direct message drops the round (T-4655): its search is stopped, its passages never
 /// reach the answer, and the widget is shown no step of it, which is why the round searches
-/// quietly and its step is shown here, once the route needs it.
-async fn route_beside_search(
-    q: Question<'_, '_>,
-    spent: &Spent,
-    (router, judge): (&Call<'_>, &Call<'_>),
+/// quietly and its step is shown once the route needs it.
+async fn route_call(
+    ask: &Ask<'_>,
+    router: &Call<'_>,
     messages: &[Value],
-    live: &[Shown],
-    reserve: u64,
-) -> (
-    (Result<Completion, CallError>, Duration),
-    (Option<Vec<Hit>>, Duration, Judged),
-    bool,
-) {
-    let ask = q.ask;
-    let route = async {
-        let at = Instant::now();
-        let model = router.model.unwrap_or(ask.model.name());
-        let pending = ask.trace.pending("router", model, at, messages);
-        let reply = ask
-            .model
-            .ask(ask.deployment, ask.tokens_per_day, router, messages)
-            .await;
-        pending.done(reply.as_ref());
-        (reply, at.elapsed())
-    };
-    let search = search_first(q, spent, judge, reserve);
-    tokio::pin!(route, search);
-    let mut first = None;
-    let routed = tokio::select! {
-        out = &mut route => out,
-        out = &mut search => {
-            first = Some(out);
-            (&mut route).await
-        }
-    };
-    // A refused (`out`) message is dropped like a direct one: no search, no judge (T-4730).
-    let direct = matches!(&routed.0, Ok(reply) if super::scope::routed_out(&reply.text)
-        || routing(&reply.text, q.question, live).direct);
-    let first = match first {
-        Some(out) => out,
-        None if direct => (None, Duration::ZERO, None),
-        None => search.await,
-    };
-    if !direct {
-        search_steps(q.events, q.question, first.0.is_some()).await;
-    }
-    (routed, first, direct)
+) -> (Result<Completion, CallError>, Duration) {
+    let at = Instant::now();
+    let model = router.model.unwrap_or(ask.model.name());
+    let pending = ask.trace.pending("router", model, at, messages);
+    let reply = ask
+        .model
+        .ask(ask.deployment, ask.tokens_per_day, router, messages)
+        .await;
+    pending.done(reply.as_ref());
+    (reply, at.elapsed())
 }
 
 /// The steps of a search that already ran, as `searched` shows them while it runs.
@@ -2546,30 +2514,88 @@ async fn answer_routed(
     send(events, stage("understanding", None)).await;
     // The question is searched as asked and its passages judged while the router call runs
     // (T-4293): the first round costs no wait of its own, and when it covers the question the
-    // router's queries only add to it. The judgement keeps room for the router's own call.
+    // router's queries only add to it. The judgement keeps room for the router's own call, and
+    // is weighed against nothing spent, as nothing is counted before the router: `spent` stays
+    // free for the data loop the round may finish beside (T-4731).
     let reserve = tokens_of(&messages) + ROUTER_TOKENS;
-    let ((routed, route_took), (first_hits, first_took, judged), direct) =
-        route_beside_search(q, &spent, (&router, &judge), &messages, &live, reserve).await;
+    let unspent = Spent::default();
+    let route = route_call(ask, &router, &messages);
+    let search = search_first(q, &unspent, &judge, reserve);
+    tokio::pin!(route, search);
+    let mut first = None;
+    let (routed, route_took) = tokio::select! {
+        out = &mut route => out,
+        out = &mut search => {
+            first = Some(out);
+            (&mut route).await
+        }
+    };
     spent.stages.route = Some(millis(route_took));
-    spent.stages.search = (!direct).then(|| millis(first_took));
-    let first_covers = first_hits.as_deref().is_some_and(covers);
-    spent.stages.judge_skipped = first_covers;
-    let (judged_answers, more) = first_judgement(ask.deployment, &mut spent, judged, question);
-    let routing = match routed {
-        Ok(reply) => {
+    // A refused (`out`) message is dropped like a direct one: no search, no judge (T-4730).
+    let early = match &routed {
+        Ok(reply) if !super::scope::routed_out(&reply.text) => {
+            Some(routing(&reply.text, question, &live))
+        }
+        _ => None,
+    };
+    let direct = routed.is_ok() && early.as_ref().is_none_or(|r| r.direct);
+    // The reads start once the route is known, beside the round still searching or judging
+    // (T-4731): they used to wait for both, and the data loop began 16 s into the turn on dev.
+    let wanted = match &early {
+        Some(r) if !r.direct => wanted(ask, r),
+        _ => Vec::new(),
+    };
+    let reading = read_all(ask, &wanted);
+    tokio::pin!(reading);
+    let read = tokio::select! {
+        out = &mut reading => out,
+        out = &mut search, if first.is_none() && !direct => {
+            first = Some(out);
+            (&mut reading).await
+        }
+    };
+    // A data question whose rows came back leaves the round's passages out of its answer
+    // (`first_round`), so it does not wait for the round: the round finishes beside the data
+    // loop, where its judgement is still counted, and the widget is shown no step of it.
+    let beside = early
+        .as_ref()
+        .is_some_and(|r| r.data && !r.rag && !r.catalogue && !r.direct)
+        && read
+            .iter()
+            .any(|r| r.as_ref().is_ok_and(|t| !t.rows.is_empty()));
+    let first_round_left = if beside { first.take() } else { None };
+    let (first_hits, first_covers, judged_answers, more) = if beside {
+        (None, false, false, Vec::new())
+    } else {
+        let first = match first.take() {
+            Some(out) => out,
+            None if direct => (None, Duration::ZERO, None),
+            None => (&mut search).await,
+        };
+        if !direct {
+            search_steps(events, question, first.0.is_some()).await;
+        }
+        let (first_hits, first_took, judged) = first;
+        spent.stages.search = (!direct).then(|| millis(first_took));
+        let first_covers = first_hits.as_deref().is_some_and(covers);
+        spent.stages.judge_skipped = first_covers;
+        let (judged_answers, more) = first_judgement(ask.deployment, &mut spent, judged, question);
+        (first_hits, first_covers, judged_answers, more)
+    };
+    let routing = match (routed, early) {
+        (Ok(reply), early) => {
             count(&mut spent, &reply);
             spent.served(Stage::Route, &reply);
             // Outside the catalogue and the published pages: the template, no answer call (T-4730).
-            if super::scope::routed_out(&reply.text) {
+            let Some(routing) = early else {
                 let lang = super::scope::router_lang(&reply.text);
                 super::scope::refuse(ask, question, lang.as_deref(), events).await;
                 return spent;
-            }
-            let routing = routing(&reply.text, question, &live);
+            };
             note_route(ask, &routing);
             routing
         }
-        Err(err) => {
+        (Err(err), _) => {
             send(events, refusal(ask, &err)).await;
             return spent;
         }
@@ -2579,7 +2605,7 @@ async fn answer_routed(
     }
     let missing = missing_for(&routing, missing);
 
-    let Some(tables) = read_tables(ask, &routing, events).await else {
+    let Some(tables) = read_tables(ask, &wanted, read, events).await else {
         return spent;
     };
     let (best, rounds, searches) = if routing.catalogue {
@@ -2637,7 +2663,21 @@ async fn answer_routed(
             named: routing.reads.iter().map(|r| r.endpoint.clone()).collect(),
         };
         let first = key.is_some();
-        answer_data(q, &mut spent, start, routing.followups, &missing, first).await;
+        let answering = answer_data(q, &mut spent, start, routing.followups, &missing, first);
+        if !beside {
+            answering.await;
+            return spent;
+        }
+        let rest = async {
+            match first_round_left {
+                Some(out) => out,
+                None => (&mut search).await,
+            }
+        };
+        let ((), (hits, took, judged)) = tokio::join!(answering, rest);
+        spent.stages.search = Some(millis(took));
+        spent.stages.judge_skipped = hits.as_deref().is_some_and(covers);
+        first_judgement(ask.deployment, &mut spent, judged, question);
         return spent;
     }
     let answering = Answering {
@@ -2797,18 +2837,32 @@ fn first_judgement(
     }
 }
 
-/// The routed reads, run at once and streamed in the router's order, so the tables are numbered
-/// the same way every time; a failed or empty read adds no table. `None` once the client is gone.
-async fn read_tables(
-    ask: &Ask<'_>,
-    routing: &Routing,
-    events: &Sender<Event>,
-) -> Option<Vec<Table>> {
-    let wanted: Vec<_> = routing
+/// The routed reads a connector of the deployment answers, in the router's order.
+fn wanted<'a>(ask: &'a Ask<'_>, routing: &Routing) -> Vec<(Read, &'a Connected)> {
+    routing
         .reads
         .iter()
-        .filter_map(|w| Some((w, ask.connectors.iter().find(|c| c.endpoint == w.endpoint)?)))
-        .collect();
+        .filter_map(|w| {
+            let c = ask.connectors.iter().find(|c| c.endpoint == w.endpoint)?;
+            Some((w.clone(), c))
+        })
+        .collect()
+}
+
+/// The reads, run at once: two of a slow Endpoint used to take their sum of the answer's time
+/// (T-4680).
+async fn read_all(ask: &Ask<'_>, wanted: &[(Read, &Connected)]) -> Vec<Result<Table, String>> {
+    futures_util::future::join_all(wanted.iter().map(|(w, c)| read(ask, c, w))).await
+}
+
+/// The reads' steps and tables, streamed in the router's order, so the tables are numbered the
+/// same way every time; a failed or empty read adds no table. `None` once the client is gone.
+async fn read_tables(
+    ask: &Ask<'_>,
+    wanted: &[(Read, &Connected)],
+    read: Vec<Result<Table, String>>,
+    events: &Sender<Event>,
+) -> Option<Vec<Table>> {
     if events.is_closed() {
         return None;
     }
@@ -2817,12 +2871,10 @@ async fn read_tables(
         endpoint: Some(endpoint.to_owned()),
         status,
     };
-    for (w, _) in &wanted {
+    for (w, _) in wanted {
         send(events, stage("reading", Some(w.kind.to_string()))).await;
         send(events, tool(&w.endpoint, "started")).await;
     }
-    // Two reads of a slow Endpoint used to take their sum of the answer's time (T-4680).
-    let read = futures_util::future::join_all(wanted.iter().map(|(w, c)| read(ask, c, w))).await;
     let mut tables: Vec<Table> = Vec::new();
     for ((w, _), result) in wanted.iter().zip(read) {
         match result {

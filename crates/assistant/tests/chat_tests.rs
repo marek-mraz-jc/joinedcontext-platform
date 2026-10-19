@@ -588,9 +588,6 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "stage",
             "tool",
             "tool",
-            "stage",
-            "tool",
-            "tool",
             "data",
             "stage",
             "answer",
@@ -605,18 +602,17 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         at.len() == 20 && at.ends_with('Z') && at.as_bytes()[10] == b'T',
         "{at}"
     );
-    // The question itself is searched while the router call runs (T-4293).
+    // The question itself is searched while the router call runs (T-4293), but rows came back
+    // and the round's passages are left out of the answer: it waits for no search and shows no
+    // step of one (T-4731).
+    assert_eq!(events[2].1["stage"], "reading", "{events:?}");
     assert_eq!(
-        events[2].1,
-        json!({"stage": "searching", "topic": "Aké je NO2 na Námestí SNP?"})
-    );
-    assert_eq!(
-        events[7].1,
+        events[4].1,
         // T-4654: a visitor's stream names no Endpoint.
         json!({"name": "query_entities", "status": "done"})
     );
     assert_eq!(
-        events[8].1,
+        events[5].1,
         json!({
             "type": "AirQualityObserved",
             "columns": ["name", "no2", "observedAt"],
@@ -631,10 +627,10 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     );
     // No page of the sources gives this Endpoint's address: the live data stays unlinked.
     assert_eq!(
-        events[11].1,
+        events[8].1,
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    let done = &events[12].1;
+    let done = &events[9].1;
     // T-4654: a visitor's `done` carries no tokens or calls; the two calls are counted below.
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
@@ -3616,6 +3612,54 @@ async fn tool_calls_of(gateway: &MockServer, tool: &str) -> Vec<Value> {
         .collect()
 }
 
+/// T-4731: a data question whose rows came back starts its data loop without waiting for the
+/// first round's judgement, which finishes beside it and is still counted. With the judge and
+/// the answer each taking 2 s, the turn used to take both one after another.
+#[tokio::test]
+async fn a_data_question_with_rows_does_not_wait_for_the_first_rounds_judgement() {
+    let pause = std::time::Duration::from_secs(2);
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatbeside", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50).set_delay(pause),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "Najvyššie NO2 má Železničná stanica, 34 [1]."}), 1_200).set_delay(pause),
+    ]).await;
+    let began = std::time::Instant::now();
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 najvyššie?"}), Some(ORIGIN)),
+    )
+    .await;
+    let took = began.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let answer = events
+        .iter()
+        .find(|(n, _)| n == "answer")
+        .map(|(_, d)| d["text"].clone());
+    assert_eq!(
+        answer,
+        Some(json!("Najvyššie NO2 má Železničná stanica, 34 [1].")),
+        "{events:?}"
+    );
+    let all = model_calls(&w.proxy).await;
+    assert_eq!(
+        calls_of(&all, Some(JUDGE)).len(),
+        1,
+        "the judgement still runs"
+    );
+    // one after another: at least 4 s; beside each other: about 2 s
+    assert!(
+        took < pause * 2 - std::time::Duration::from_millis(500),
+        "{took:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4294: after the router's read the model filters once more and then answers on its own; a
 /// tool it makes up is refused to it and never sent, the write the manifest names is never
 /// offered, and both reads are tables the answer can cite.
@@ -3659,13 +3703,8 @@ async fn a_data_question_reads_again_until_the_model_answers() {
             .iter()
             .map(|s| s["stage"].as_str().unwrap_or_default().to_owned())
             .collect::<Vec<_>>(),
-        [
-            "understanding",
-            "searching",
-            "reading",
-            "answering",
-            "reading"
-        ]
+        // rows came back: the first round finishes beside the loop, its step not shown (T-4731)
+        ["understanding", "reading", "answering", "reading"]
     );
     assert_eq!(
         named("answer")[0]["text"],
