@@ -264,6 +264,31 @@ pub struct QueryAttribute {
 /// The most allowed values one attribute lists; more end in `|…`.
 const ENUM_VALUES: usize = 12;
 
+/// The longest allowed value a card shows; a longer one is prose, not a value.
+const VALUE_CHARS: usize = 64;
+
+/// A class, slot, range or unit name a card may write: an NGSI-LD term or UCUM code, never prose.
+/// The LinkML is the publisher's, and the card reaches a model as data (T-4779): a name with
+/// spaces or line breaks could pose as a rule.
+fn is_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-:./#[]{}*^'%".contains(c))
+}
+
+/// An allowed value a card may list: one short line without the card's own `|`, `` ` `` or
+/// angle brackets (T-4779).
+fn is_value(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.chars().count() <= VALUE_CHARS
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '|' | '`' | '<' | '>'))
+}
+
 /// Every class of the served LinkML with its attributes in written order, inherited ones
 /// included, as [`QueryAttribute`]s (T-4759). The schema is the one the caller is served, so it
 /// holds only what the caller may read; `id` and `type` are not listed.
@@ -275,20 +300,22 @@ pub fn query_attributes(linkml: &str) -> Result<BTreeMap<String, Vec<QueryAttrib
         Some(
             values
                 .keys()
-                .filter_map(|k| k.as_str().map(str::to_owned))
-                .collect(),
+                .filter_map(|k| k.as_str().filter(|v| is_value(v)).map(str::to_owned))
+                .collect::<Vec<_>>(),
         )
+        .filter(|values| !values.is_empty())
     };
     let classes = schema.get("classes").and_then(Value::as_mapping);
     Ok(classes
         .into_iter()
         .flatten()
         .filter_map(|(name, _)| name.as_str())
+        .filter(|class| is_name(class))
         .map(|class| {
             let (written, slots) = model_slots(&schema, class);
             let attributes = written
                 .iter()
-                .filter(|name| !matches!(name.as_str(), "id" | "type"))
+                .filter(|name| !matches!(name.as_str(), "id" | "type") && is_name(name))
                 .map(|name| {
                     let slot = &slots[name];
                     let range = slot.range.as_deref().unwrap_or("string");
@@ -310,13 +337,18 @@ pub fn query_attributes(linkml: &str) -> Result<BTreeMap<String, Vec<QueryAttrib
                             "string" => (name.clone(), None),
                             "uriorcurie" | "uri" => (format!("{name}:ref"), None),
                             "integer" | "float" | "double" | "decimal" => {
-                                let unit = slot.unit.as_ref().map(|u| format!("[{u}]"));
+                                let unit = slot
+                                    .unit
+                                    .as_ref()
+                                    .filter(|u| is_name(u))
+                                    .map(|u| format!("[{u}]"));
                                 (
                                     format!("{name}:{range}{}", unit.unwrap_or_default()),
                                     Some(format!("{name}>0")),
                                 )
                             }
-                            other => (format!("{name}:{other}"), None),
+                            other if is_name(other) => (format!("{name}:{other}"), None),
+                            _ => (name.clone(), None),
                         },
                     };
                     if slot.multivalued {
