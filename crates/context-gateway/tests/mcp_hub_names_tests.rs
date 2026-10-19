@@ -160,7 +160,9 @@ async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
     // schema trim measured by the agent benchmark. With get_endpoint and search (T-4492, T-4493)
     // and no copy of each description in its outputSchema it measured 12,831; with the `endpoint`
     // sentence and the output members' meanings said once in the instructions, 11,546 (T-4506).
-    assert!(sizes[0] < 12_000, "{sizes:?}");
+    // The broker's `summarize` (T-4680, the seventh read tool) adds 1,918 bytes: 13,814, so the
+    // ceiling for this tool set is 13,900, and it again only comes down (T-4725).
+    assert!(sizes[0] < 13_900, "{sizes:?}");
 }
 
 #[tokio::test]

@@ -871,18 +871,28 @@ async fn the_whole_path_through_the_gateway_to_a_real_broker() {
     .await;
     assert_eq!(aimed["result"]["isError"], json!(true), "{aimed}");
 
-    // Delete, and it is gone.
-    let (status, body) = call(
-        &app,
-        Request::builder()
-            .method("DELETE")
-            .uri(format!(
-                "/api/endpoint/{PUBLIC_SLUG}/ngsi-ld/v1/entities/{STATION}"
-            ))
-            .body(Body::empty())
-            .expect("a request"),
-    )
-    .await;
+    // A delete that names no reason is refused before the broker, and the entity stays
+    // (ADR-N-054 2.3, DM-113).
+    let delete = |reason: Option<&str>| {
+        let mut request = Request::builder().method("DELETE").uri(format!(
+            "/api/endpoint/{PUBLIC_SLUG}/ngsi-ld/v1/entities/{STATION}"
+        ));
+        if let Some(reason) = reason {
+            request = request.header("jc-reason", reason);
+        }
+        request.body(Body::empty()).expect("a request")
+    };
+    let (status, _) = call(&app, delete(None)).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a delete without JC-Reason"
+    );
+    let (status, _) = call(&app, get(PUBLIC_SLUG, &format!("/entities/{STATION}"))).await;
+    assert_eq!(status, StatusCode::OK, "the refused delete left the entity");
+
+    // Delete with a reason, and it is gone.
+    let (status, body) = call(&app, delete(Some("station%20retired"))).await;
     assert_eq!(
         status,
         StatusCode::NO_CONTENT,
@@ -1167,6 +1177,8 @@ information:
                 .uri(format!(
                     "/api/endpoint/{WRITER_SLUG}/ngsi-ld/v1/entities/{STATION}"
                 ))
+                // Refused without a reason (T-4666), so a rerun would not start clean.
+                .header("jc-reason", "cleanup")
                 .body(Body::empty())
                 .expect("a request"),
             &granted,

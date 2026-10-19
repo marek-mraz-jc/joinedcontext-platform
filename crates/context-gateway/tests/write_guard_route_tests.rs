@@ -94,6 +94,16 @@ fn endpoint() -> Endpoint {
 }
 
 async fn send(method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Vec<String>) {
+    send_with(method, uri, body, Some("test")).await
+}
+
+/// `send`, with `reason` as the JC-Reason a delete names (ADR-N-054 2.3, DM-113).
+async fn send_with(
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    reason: Option<&str>,
+) -> (StatusCode, Vec<String>) {
     let (upstream, hops) = broker().await;
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
@@ -103,6 +113,9 @@ async fn send(method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Ve
         .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1{uri}"));
     if body.is_some() {
         request = request.header("content-type", "application/ld+json");
+    }
+    if let Some(reason) = reason {
+        request = request.header("jc-reason", reason);
     }
     let response = router(gateway)
         .oneshot(
@@ -128,6 +141,19 @@ async fn a_batch_delete_inside_the_grant_reaches_the_broker() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(asked, vec!["POST /ngsi-ld/v1/entityOperations/delete"]);
+
+    // The same batch without a reason is refused before the broker.
+    let (status, asked) = send_with(
+        Method::POST,
+        "/entityOperations/delete",
+        Some(json!([
+            "urn:ngsi-ld:Device:banskabystrica.sk:ovzdusie:lamps-7"
+        ])),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(asked.is_empty(), "the broker was asked: {asked:?}");
 }
 
 type Bodies = Arc<Mutex<Vec<Value>>>;
