@@ -369,6 +369,18 @@ test("the full page that names ?lang= does not ask", async ({ page }) => {
   await expect(page.locator(".jc-langs button[aria-pressed=true]")).toHaveText("EN");
 });
 
+// T-4761: a dark system paints the chat dark, but a light host page that asks ?scheme=light
+// keeps it light: a cross-origin frame never inherits the host's colours.
+test("a light host page keeps the embedded chat light on a dark system", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const background = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  await page.goto(`${base}/d/bb?lang=en`);
+  expect(await background()).toBe("rgb(21, 24, 28)");
+  await page.goto(`${base}/d/bb?lang=en&scheme=light`);
+  await expect(page.locator("#jc-question")).toBeVisible();
+  expect(await background()).toBe("rgb(255, 255, 255)");
+});
+
 // T-4650: at a phone's width the table reads from the left: the name, then the first value whole.
 test("a data table at 400 px shows the name and the first value", async ({ page }) => {
   await page.setViewportSize({ width: 400, height: 800 });
