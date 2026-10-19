@@ -162,7 +162,9 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   background-position: right; background-size: 24px 100%, 8px 100%; background-repeat: no-repeat; background-attachment: local, scroll; }
 .jc-data table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
 .jc-data th, .jc-data td { padding: var(--cell-y) var(--cell-x); border-top: 1px solid var(--line); text-align: left; vertical-align: top;
-  max-width: 28ch; overflow-wrap: anywhere; }
+  max-width: 28ch; overflow-wrap: break-word; }
+/* T-4711: a text column is never squeezed to a letter a line; it wraps at words. */
+.jc-data td:not(.jc-num) { min-width: 12ch; }
 .jc-data thead th { position: sticky; top: 0; z-index: 1; border-top: 0; background: var(--soft); font-weight: 600; }
 .jc-data tbody tr:nth-child(even) td { background: var(--soft); }
 .jc-data td:first-child { font-weight: 600; }
@@ -170,6 +172,20 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-data td a { color: var(--link); }
 .jc-data .jc-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 420px) { .jc-data { --cell-y: 6px; --cell-x: 8px; } }
+/* T-4711: on a phone each row is a card: its first value the title, then "label: value" lines;
+   the header row stays for a screen reader only. */
+@media (max-width: 599px) {
+  .jc-data table, .jc-data tbody, .jc-data tr, .jc-data td { display: block; width: auto; max-width: none; min-width: 0; }
+  .jc-data thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .jc-data tbody tr { padding: 6px 0; border-top: 1px solid var(--line); }
+  .jc-data tbody tr:first-child { border-top: 0; }
+  .jc-data tbody tr:nth-child(even) td { background: transparent; }
+  .jc-data td { display: flex; gap: 12px; justify-content: space-between; border-top: 0; padding-block: 2px; text-align: right; }
+  .jc-data td::before { content: attr(data-label); flex: 0 1 50%; color: var(--muted); font-weight: 400; text-align: left; overflow-wrap: break-word; }
+  .jc-data td:first-child { display: block; text-align: left; font-size: 14px; }
+  .jc-data td:first-child::before { content: none; }
+  .jc-data .jc-num { white-space: normal; }
+}
 .jc-data-chart { display: block; width: 100%; height: auto; margin: 6px 0 0; }
 .jc-chart-axis { stroke: var(--line); }
 .jc-chart-line { fill: none; stroke: var(--accent); stroke-width: 2; }

@@ -352,7 +352,9 @@ fn dataset_pattern(slugs: &[String], kind: &str) -> Option<String> {
 }
 
 /// The page of `sources`, not an Endpoint's own, that publishes `kind` from one of `slugs`: the
-/// CKAN dataset of the Endpoint over the same space that serves the type (T-4625).
+/// CKAN dataset of the Endpoint over the same space that serves the type (T-4625). The newest
+/// indexed page wins: a dataset renamed or moved leaves its old page behind in the index until it
+/// is swept, and that page answers 404 (T-4711: `/dataset/ovzdusie` beside `public-air`).
 pub async fn dataset_page(
     conn: &mut PgConnection,
     slugs: &[String],
@@ -369,7 +371,7 @@ pub async fn dataset_page(
     let url: Option<String> = sqlx::query_scalar(
         "SELECT c.url FROM chunks c JOIN sites s ON s.id = c.site_id \
          WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
-         AND c.url !~ '/api/endpoint/' AND c.text ~ $1 ORDER BY c.id LIMIT 1",
+         AND c.url !~ '/api/endpoint/' AND c.text ~ $1 ORDER BY c.id DESC LIMIT 1",
     )
     .bind(pattern)
     .bind(sources)

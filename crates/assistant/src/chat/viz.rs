@@ -282,11 +282,23 @@ pub fn build(arguments: &str, tables: &[(usize, Table)], domain: &str) -> Result
             request.value
         ));
     }
+    // What a chart can tell apart, not how many rows it has: a line its distinct times, a bar its
+    // distinct labels. The same KPI read twice at one observedAt is one point (T-4727).
+    let apart = match (request.kind, time) {
+        (Kind::Line, Some(t)) => t,
+        _ => label,
+    };
     let points = table
         .rows
         .iter()
         .filter(|row| row.get(value).is_some_and(Value::is_number))
-        .count();
+        .filter_map(|row| {
+            row.get(apart)
+                .filter(|v| !v.is_null())
+                .map(Value::to_string)
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     if request.kind != Kind::Map && points < MIN_POINTS {
         return Err(format!(
             "Column `{}` has {points} values; a chart of fewer than {MIN_POINTS} says nothing a sentence does not. Answer in text.",
@@ -572,7 +584,10 @@ mod tests {
         assert_eq!(bar["spec"]["config"]["axis"]["labelFontSize"], 12);
         assert_eq!(bar["spec"]["layer"][1]["mark"]["type"], "text");
         assert_eq!(bar["spec"]["width"], "container");
-        let line = build(r#"{"kind":"line","data":3,"label":"name","value":"no2","time":"observedAt","title":"constructor"}"#, &tables, "dev.example.org")
+        // A line needs three distinct times (T-4727): the row without a location gets one.
+        let mut timed = air();
+        timed.rows[2][4] = json!("2026-10-18T13:00:00Z");
+        let line = build(r#"{"kind":"line","data":3,"label":"name","value":"no2","time":"observedAt","title":"constructor"}"#, &[(3, timed)], "dev.example.org")
             .expect("a line");
         assert_eq!(line["rows"][0]["time"], "2026-10-18T15:00:00Z");
         assert!(
@@ -617,6 +632,41 @@ mod tests {
         )
         .expect_err("two values are no chart");
         assert!(refused.contains("fewer than 3"), "{refused}");
+    }
+
+    /// T-4727: od-10 drew a line of one point, the same KPI read twice at one observedAt, and a
+    /// bar of the same name three times says one value too. A chart counts what it can tell apart.
+    #[test]
+    fn a_chart_counts_distinct_times_and_labels_not_rows() {
+        let mut once = air();
+        for row in &mut once.rows {
+            row[0] = json!("obyvatelstvo-stav-mesto");
+            row[1] = json!(79617);
+            row[4] = json!("2026-08-31T00:00:00Z");
+        }
+        let tables = [(1, once)];
+        for args in [
+            r#"{"kind":"line","data":1,"label":"name","value":"no2","time":"observedAt","title":"Obyvatelia"}"#,
+            r#"{"kind":"bar","data":1,"label":"name","value":"no2","title":"Obyvatelia"}"#,
+        ] {
+            let refused =
+                build(args, &tables, "dev.example.org").expect_err("one point is no chart");
+            assert!(refused.contains("Answer in text"), "{refused}");
+        }
+        // Three stations at one hour are still a bar; three hours of one station still a line.
+        let mut hours = air();
+        for (row, hour) in hours.rows.iter_mut().zip(["13", "14", "15"]) {
+            row[0] = json!("Zvolen");
+            row[1] = json!(9.0);
+            row[4] = json!(format!("2026-10-18T{hour}:00:00Z"));
+        }
+        let tables = [(1, hours)];
+        build(
+            r#"{"kind":"line","data":1,"label":"name","value":"no2","time":"observedAt","title":"NO2"}"#,
+            &tables,
+            "dev.example.org",
+        )
+        .expect("three hours are a line");
     }
 
     #[test]

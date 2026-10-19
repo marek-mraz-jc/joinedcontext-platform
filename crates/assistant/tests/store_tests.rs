@@ -510,6 +510,32 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
         assert_eq!(page.as_deref(), found, "{slugs:?} {kind}");
     }
     tx.rollback().await.expect("rollback");
+
+    // T-4711: a dataset renamed in the catalogue leaves its old page in the index; the page
+    // indexed later for the same Endpoint and type is the one cited, never the stale 404.
+    site(
+        &pool,
+        "helsinki",
+        "hel-ckan-new",
+        &[(
+            "# Air quality, renamed\n\nReadings (API) (https://gw.example/api/endpoint/od-air/ngsi-ld/v1/entities?type=A)",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+    let three = ["hel-ckan".to_owned(), "hel-ckan-new".to_owned()];
+    let newest = dataset_page(&mut tx, &siblings, "A", &three, true)
+        .await
+        .expect("page");
+    assert_eq!(newest.as_deref(), Some("https://hel-ckan-new.example/#0"));
+    tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
 }
 
