@@ -879,11 +879,6 @@ async fn run_tool(
             }
         }
     } else if READ_ONLY_TOOLS.contains(&name) {
-        let arguments = if arguments.is_object() {
-            arguments
-        } else {
-            json!({})
-        };
         // Its Endpoint named and the arguments checked against that Endpoint's own schema before
         // anything is sent (T-3314, T-4748).
         let (connector, tool, arguments) =

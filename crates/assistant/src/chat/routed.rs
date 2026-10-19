@@ -1683,6 +1683,25 @@ fn sentences(text: &str) -> Vec<&str> {
     out
 }
 
+/// [`answer_rules`], the Endpoints the data loop reads when it reads any (T-4748) and the
+/// catalogue rule when the route asks it.
+fn routed_rules(
+    routing: &Routing,
+    steps: usize,
+    no_tables: bool,
+    missing: &[String],
+    live: &[Shown],
+) -> String {
+    let mut more = answer_rules(routing.data, steps, no_tables, missing);
+    if routing.data && !live.is_empty() {
+        more.push_str(&super::data::endpoints(live));
+    }
+    if routing.catalogue {
+        more.push_str(CATALOGUE_RULE);
+    }
+    more
+}
+
 /// The answer model's extra rules: the data loop's when the route reads data, and the sources
 /// that missed the routing deadline only when no table came back. With rows in hand the question
 /// is answered, and a "could not be reached" sentence is noise citing a dataset that does not say
@@ -2747,13 +2766,7 @@ async fn answer_routed(
         )
     };
     let (citations, passages, data) = evidence(&best, &tables);
-    let mut more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
-    if routing.data && !live.is_empty() {
-        more.push_str(&super::data::endpoints(&live));
-    }
-    if routing.catalogue {
-        more.push_str(CATALOGUE_RULE);
-    }
+    let more = routed_rules(&routing, ask.data_steps, tables.is_empty(), &missing, &live);
     let messages = messages_with(
         ask.system_prompt,
         &more,
