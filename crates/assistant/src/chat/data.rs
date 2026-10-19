@@ -36,6 +36,7 @@ const DATA_RULES: &str = "\n\nYou may read more live data before you answer, wit
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
 - A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
 - get_type, list_attributes and describe_schema tell you a type's attributes when you do not know which one holds what you need.\n\
+- When a more_tools tool is offered and the tools you have cannot answer, because the data is on another Endpoint or needs another tool (list_types, list_attributes, describe_schema, get_entity, retrieve_temporal), call more_tools first: it offers every tool of every Endpoint.\n\
 - When a tool refuses, correct the arguments once; when it still refuses, answer from what you have and say which data you could not find.";
 
 /// The data rules for a deployment whose loop ends after `steps` tool calls.
@@ -57,7 +58,56 @@ pub fn budget(left: usize, most: usize, secs: u64) -> String {
 /// What the last call is told when a bound is reached.
 const ANSWER_NOW: &str = "No more tool calls: answer the question now from the tables and tool results above, citing them as [n]. Say plainly which data you could not find.";
 
+/// The tools a question's loop is offered first, on the Endpoints the router named (T-4731): a
+/// read, a history, a summary and a type's attributes. Every connector's whole toolset went on
+/// every call before, about 125k tokens of a 4-step loop; the rest is one [`MORE_TOOLS`] away.
+const FIRST_TOOLS: &[&str] = &["query_entities", "query_temporal", "summarize", "get_type"];
+
+/// The loop's escape hatch (T-4731): a question the router scoped too narrowly gets every tool
+/// of every Endpoint one call later, and that call costs no step of the question.
+pub const MORE_TOOLS: &str = "more_tools";
+
+fn more_tools() -> Value {
+    json!({"type": "function", "function": {
+        "name": MORE_TOOLS,
+        "description": "Offers every read-only tool of every Endpoint of this assistant, when the tools you have cannot answer: the data is on another Endpoint, or it needs list_types, list_attributes, describe_schema, get_entity or retrieve_temporal. Costs no tool step.",
+        "parameters": {"type": "object", "additionalProperties": false, "properties": {}},
+    }})
+}
+
+/// The tools offered first: [`FIRST_TOOLS`] of the Endpoints `named`, and whether that is fewer
+/// than all. No Endpoint named, or none of them a connector's, offers all, as before T-4731.
+fn first<'a>(all: &[Offered<'a>], named: &[String]) -> (Vec<Offered<'a>>, bool) {
+    let few: Vec<Offered<'a>> = all
+        .iter()
+        .filter(|o| {
+            named.contains(&o.connector.endpoint) && FIRST_TOOLS.contains(&o.tool.name.as_str())
+        })
+        .cloned()
+        .collect();
+    if few.is_empty() || few.len() == all.len() {
+        (all.to_vec(), false)
+    } else {
+        (few, true)
+    }
+}
+
+/// What the model is offered: the connectors' tools, the chart tool beside them and, while the
+/// tools are the first few, [`MORE_TOOLS`].
+fn tool_specs(offered: &[Offered<'_>], viz: bool, narrowed: bool) -> Vec<Value> {
+    let mut tools = specs(offered);
+    // A chart or a map of a table, drawn by code (T-4657): offered beside the connectors' tools.
+    if viz && !tools.is_empty() {
+        tools.push(super::viz::tool());
+    }
+    if narrowed {
+        tools.push(more_tools());
+    }
+    tools
+}
+
 /// One tool the loop offers: the name the model sees, its connector and the tool.
+#[derive(Clone)]
 struct Offered<'a> {
     name: String,
     connector: &'a Connected,
@@ -141,6 +191,8 @@ pub struct Start {
     pub tables: Vec<(usize, Table)>,
     /// The tool calls already made: the router's reads.
     pub steps: usize,
+    /// The Endpoints the router read, whose first tools the loop is offered (T-4731).
+    pub named: Vec<String>,
     pub started: Instant,
 }
 
@@ -159,14 +211,12 @@ pub async fn answer(
         mut tables,
         mut steps,
         started,
+        named,
     } = start;
-    let offered = offered(ask.connectors);
-    let mut tools = specs(&offered);
-    // A chart or a map of a table, drawn by code (T-4657): offered beside the connectors' tools.
+    let all = offered(ask.connectors);
+    let (mut offered, mut narrowed) = first(&all, &named);
     let viz = ask.viz.and_then(super::viz::domain);
-    if viz.is_some() && !tools.is_empty() {
-        tools.push(super::viz::tool());
-    }
+    let mut tools = tool_specs(&offered, viz.is_some(), narrowed);
     let mut shown = false;
     let call = Call {
         model: ask.answer_model,
@@ -287,6 +337,14 @@ pub async fn answer(
                 || !may_call(steps, started.elapsed(), ask.data_steps, ask.data_time)
             {
                 "Not run: the question's tool calls are used up. Answer from what you have."
+                    .to_owned()
+            } else if narrowed && name == MORE_TOOLS {
+                // The escape hatch costs no step: the question's reads are still its own.
+                narrowed = false;
+                offered = all.clone();
+                tools = tool_specs(&offered, viz.is_some(), narrowed);
+                tracing::info!(deployment = %ask.deployment, tools = offered.len(), "the data loop asked for every tool");
+                "Every tool of every Endpoint is offered now. Call the one the question needs."
                     .to_owned()
             } else if arguments.len() > MAX_ARGUMENTS {
                 format!("Not run: the arguments are longer than {MAX_ARGUMENTS} characters; call it with fewer.")
@@ -438,6 +496,92 @@ async fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connector(endpoint: &str, tools: &[&str]) -> Connected {
+        Connected {
+            endpoint: endpoint.into(),
+            title: None,
+            surface: super::super::mcp::Surface {
+                gateway: "http://gateway".into(),
+                slug: endpoint.into(),
+                timeout: Duration::from_secs(1),
+                token: None,
+            },
+            tools: tools
+                .iter()
+                .map(|name| Tool {
+                    name: (*name).into(),
+                    description: String::new(),
+                    input_schema: json!({"type": "object"}),
+                })
+                .collect(),
+            label: None,
+            siblings: Vec::new(),
+        }
+    }
+
+    fn names(offered: &[Offered<'_>]) -> Vec<String> {
+        offered.iter().map(|o| o.name.clone()).collect()
+    }
+
+    /// T-4731: the loop starts on the four first tools of the Endpoints the router read, with the
+    /// escape hatch beside them; no Endpoint named, an unknown one, or nothing to cut offers every
+    /// tool as before, without the hatch.
+    #[test]
+    fn the_loop_offers_the_routers_endpoints_first_and_everything_one_call_away() {
+        let all_tools = [
+            "list_types",
+            "get_type",
+            "list_attributes",
+            "query_entities",
+            "summarize",
+            "get_entity",
+            "query_temporal",
+            "describe_schema",
+        ];
+        let connectors = [
+            connector("bbsk/registre", &all_tools),
+            connector("ovzdusie", &all_tools),
+        ];
+        let all = offered(&connectors);
+        let (few, narrowed) = first(&all, &["ovzdusie".to_owned()]);
+        assert!(narrowed);
+        assert_eq!(
+            names(&few),
+            [
+                "ovzdusie__get_type",
+                "ovzdusie__query_entities",
+                "ovzdusie__summarize",
+                "ovzdusie__query_temporal"
+            ]
+        );
+        let tools = tool_specs(&few, true, narrowed);
+        let offered_names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(offered_names.len(), 6, "{offered_names:?}");
+        assert_eq!(offered_names[4], super::super::viz::TOOL);
+        assert_eq!(offered_names[5], MORE_TOOLS);
+
+        for named in [Vec::new(), vec!["praha".to_owned()]] {
+            let (every, narrowed) = first(&all, &named);
+            assert!(!narrowed, "{named:?}");
+            assert_eq!(names(&every), names(&all));
+            let tools = tool_specs(&every, false, narrowed);
+            assert!(tools.iter().all(|t| t["function"]["name"] != MORE_TOOLS));
+        }
+        // A connector that offers no more than the first tools has nothing to cut.
+        let small = [connector("ovzdusie", &["query_entities", "get_type"])];
+        let all = offered(&small);
+        assert!(!first(&all, &["ovzdusie".to_owned()]).1);
+        // The rules say when to reach for the hatch, the same text for every question.
+        assert!(DATA_RULES.contains("When a more_tools tool is offered"));
+        assert_eq!(
+            more_tools()["function"]["parameters"]["properties"],
+            json!({})
+        );
+    }
 
     #[test]
     fn a_history_question_is_answered_with_values_and_never_points_to_the_api() {

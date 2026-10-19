@@ -700,12 +700,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         );
         assert!(!body["messages"][0].to_string().contains(&at[..16]));
     }
-    // The router is offered no tool; the answer call the read-only ones, never the write
-    // (T-4294).
+    // The router is offered no tool; the answer call the first read-only ones of the Endpoint it
+    // read and the way to every other (T-4294, T-4731), never the write.
     assert!(calls_of(&calls, Some(ROUTER))[0].get("tools").is_none());
     assert_eq!(
         offered_tools(calls_of(&calls, None)[0]),
-        ["ovzdusie__list_types", "ovzdusie__query_entities"]
+        ["ovzdusie__query_entities", "more_tools"]
     );
     let sent: Vec<String> = w
         .gateway
@@ -3591,7 +3591,7 @@ async fn a_data_question_reads_again_until_the_model_answers() {
     let calls = calls_of(&all, None);
     assert_eq!(
         offered_tools(calls[0]),
-        ["ovzdusie__list_types", "ovzdusie__query_entities"]
+        ["ovzdusie__query_entities", "more_tools"]
     );
     let last = calls[1]["messages"].as_array().cloned().unwrap_or_default();
     let tools: Vec<&Value> = last.iter().filter(|m| m["role"] == "tool").collect();
@@ -3618,6 +3618,94 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         reads[1]["params"]["arguments"],
         json!({"type": ["AirQualityObserved"], "limit": 5})
     );
+    assert!(tool_calls_of(&w.gateway, "delete_entity").await.is_empty());
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4731: the loop starts on the first tools of the Endpoint the router read; a question that
+/// needs another tool asks for `more_tools`, which costs no step, and the next call is offered
+/// every read-only tool and reads with it. The write is never offered, before or after.
+#[tokio::test]
+async fn a_question_that_needs_another_tool_gets_every_tool_one_call_later() {
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "delete_entity".into(),
+    ];
+    d.spec.answer = Some(jc_core::kinds::AnswerSpec {
+        max_data_steps: Some(3),
+        ..Default::default()
+    });
+    let w = world("chatmore", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "m1", "type": "function", "function": {"name": "more_tools", "arguments": "{}"}}
+        ]}), 1_000),
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "ovzdusie__list_types", "arguments": "{}"}}
+        ]}), 1_100),
+        completion(json!({"role": "assistant", "content": "Ovzdušie má typ AirQualityObserved [2]."}), 1_200),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Aké typy dát má ovzdušie?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let answer: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "answer")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(
+        answer[0]["text"], "Ovzdušie má typ AirQualityObserved [2].",
+        "{events:?}"
+    );
+
+    let all = model_calls(&w.proxy).await;
+    let calls = calls_of(&all, None);
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        offered_tools(calls[0]),
+        ["ovzdusie__query_entities", "more_tools"]
+    );
+    assert_eq!(
+        offered_tools(calls[1]),
+        ["ovzdusie__list_types", "ovzdusie__query_entities"]
+    );
+    let told: Vec<Value> = calls[1]["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["role"] == "tool")
+        .cloned()
+        .collect();
+    assert_eq!(
+        told[0]["content"],
+        "Every tool of every Endpoint is offered now. Call the one the question needs."
+    );
+    // The hatch cost no step: the router's read and list_types are two of the three, and the
+    // model was still free to read on its second call.
+    assert!(calls[1].get("tool_choice").is_none());
+    assert!(text_of(
+        &calls[2]["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .cloned()
+            .unwrap_or_default()
+    )
+    .starts_with("Budget: 1 of 3 tool steps"));
+    // Routing lists the types once; the loop's list_types is the second call.
+    assert_eq!(tool_calls_of(&w.gateway, "list_types").await.len(), 2);
     assert!(tool_calls_of(&w.gateway, "delete_entity").await.is_empty());
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
