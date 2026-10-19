@@ -33,11 +33,8 @@ const MAX_HELD: usize = 1_000;
 const COUNT_DEADLINE: Duration = Duration::from_secs(3);
 
 pub fn router(state: Arc<ChatState>) -> Router {
+    // `/api/v1/d/{publicId}/context` is the chat router's, beside its preflight.
     Router::new()
-        .route(
-            "/api/v1/d/{public_id}/context",
-            get(document).options(super::preflight),
-        )
         .route("/d/{public_id}/context", get(page))
         .route("/d/context.css", get(style))
         .with_state(state)
@@ -310,7 +307,7 @@ fn failed(err: &crate::Error) -> Response {
 
 /// `GET /api/v1/d/{publicId}/context`: any page may read it; a browser on one of the
 /// deployment's origins gets the CORS header the chat gives it.
-async fn document(
+pub(super) async fn document(
     State(state): State<Arc<ChatState>>,
     Path(public_id): Path<String>,
     Query(asked): Query<Asked>,
@@ -336,7 +333,12 @@ async fn document(
             })
         })
         .cloned();
-    super::with_cors(response, origin)
+    if let Some(origin) = origin {
+        let headers = response.headers_mut();
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    }
+    response
 }
 
 /// `<`, `>`, `&` and quotes as entities (T-4681): every name on the page is someone's text.

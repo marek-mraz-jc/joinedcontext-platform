@@ -378,6 +378,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             post(feedback).options(preflight),
         )
         .route(
+            "/api/v1/d/{public_id}/context",
+            get(context::document).options(preflight),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat",
             post(chat_in_portal),
         )
