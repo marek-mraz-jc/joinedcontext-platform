@@ -594,7 +594,7 @@ pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     sqlx::query("DELETE FROM answer_timings")
         .execute(pool)
         .await?;
-    // Transcripts until their deployment's retention ran out, steps with them (migration 0016).
+    // Transcripts until their deployment's retention ran out, steps with them (migration 0017).
     // ponytail: one statement a minute holds one minute's expired turns; a sweep after a long
     // outage deletes its backlog at once (batches need a cross-project SELECT policy, T-4681).
     sqlx::query("DELETE FROM turns").execute(pool).await?;
