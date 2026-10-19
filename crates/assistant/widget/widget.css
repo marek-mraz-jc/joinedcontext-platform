@@ -32,7 +32,10 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   border-radius: 50%; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 14px; letter-spacing: .02em; }
 .jc-avatar .jc-icon { width: 18px; height: 18px; }
 .jc-title { margin: 0; display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
-.jc-name { font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* T-4711: the whole name, never "Otvoren…": it wraps at a space to a second line and shrinks a
+   little in a narrow frame (the docked panel's buttons take the width) before anything is cut. */
+.jc-name { font-size: clamp(14px, 3.6vw, 16px); font-weight: 650; overflow-wrap: normal; text-wrap: balance;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .jc-role { font-size: 12px; font-weight: 400; color: var(--muted); }
 .jc-actions { flex: none; display: flex; align-items: center; gap: 6px; }
 .jc-actions [hidden], .jc-form[hidden] { display: none; }
