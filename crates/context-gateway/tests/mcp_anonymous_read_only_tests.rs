@@ -86,7 +86,9 @@ async fn broker() -> (String, Arc<AtomicUsize>) {
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&seen);
     let tools = json!([
-        { "name": "query_entities", "inputSchema": { "type": "object" } },
+        // Annotated as the broker's view annotates a read (Antares antares-mcp, dev 2026-10-19).
+        { "name": "query_entities", "inputSchema": { "type": "object" },
+          "annotations": { "readOnlyHint": true, "openWorldHint": false } },
         { "name": "create_subscription", "inputSchema": { "type": "object" } },
         { "name": "update_subscription", "inputSchema": { "type": "object" } },
         { "name": "a_tool_the_broker_added_later", "inputSchema": { "type": "object" } },
@@ -266,6 +268,12 @@ async fn every_surface_lists_each_tool_with_its_own_title() {
                 titles.insert(title.to_owned()),
                 "{path}: two tools titled {title}"
             );
+            for hint in ["readOnlyHint", "destructiveHint", "openWorldHint"] {
+                assert!(
+                    tool["annotations"][hint].is_boolean(),
+                    "{path}: {hint} of {tool}"
+                );
+            }
         }
         assert!(titles.contains("Query entities"), "{path}: {titles:?}");
     }

@@ -163,8 +163,10 @@ async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
     // The broker's `summarize` (T-4680, the seventh read tool) adds 1,918 bytes: 13,814, so the
     // ceiling for this tool set is 13,900, and it again only comes down (T-4725). Each tool's
     // human title, at the top and in its annotations as a connector directory requires (T-4732),
-    // adds 426 bytes: 14,240, so the ceiling is 14,300, and it only comes down.
-    assert!(sizes[0] < 14_300, "{sizes:?}");
+    // adds 426 bytes: 14,240. `openWorldHint` as an explicit boolean on each tool, which the
+    // directories also require (T-4732), adds 198: 14,438, so the ceiling is 14,500, and it only
+    // comes down.
+    assert!(sizes[0] < 14_500, "{sizes:?}");
 }
 
 #[tokio::test]
