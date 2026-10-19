@@ -475,7 +475,7 @@ mod tests {
                     "banskabystrica",
                     "data",
                     ckan,
-                    Some("https://data.dev.joinedcontext.com"),
+                    Some("https://opendata.dev.joinedcontext.com"),
                 ),
                 source(
                     "banskabystrica",
@@ -496,9 +496,9 @@ mod tests {
             [
                 "banskabystrica.sk",
                 "bbsk.sk",
-                "data.dev.joinedcontext.com",
                 "data.gov.sk",
                 "mapy.banskabystrica.sk",
+                "opendata.dev.joinedcontext.com",
             ]
         );
         assert_eq!(config(&public, &hosts, None)["linkHosts"], json!(hosts));
