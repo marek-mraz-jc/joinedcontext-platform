@@ -282,11 +282,23 @@ pub fn build(arguments: &str, tables: &[(usize, Table)], domain: &str) -> Result
             request.value
         ));
     }
+    // What a chart can tell apart, not how many rows it has: a line its distinct times, a bar its
+    // distinct labels. The same KPI read twice at one observedAt is one point (T-4727).
+    let apart = match (request.kind, time) {
+        (Kind::Line, Some(t)) => t,
+        _ => label,
+    };
     let points = table
         .rows
         .iter()
         .filter(|row| row.get(value).is_some_and(Value::is_number))
-        .count();
+        .filter_map(|row| {
+            row.get(apart)
+                .filter(|v| !v.is_null())
+                .map(Value::to_string)
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     if request.kind != Kind::Map && points < MIN_POINTS {
         return Err(format!(
             "Column `{}` has {points} values; a chart of fewer than {MIN_POINTS} says nothing a sentence does not. Answer in text.",
@@ -299,7 +311,7 @@ pub fn build(arguments: &str, tables: &[(usize, Table)], domain: &str) -> Result
         ));
     }
     if request.kind != Kind::Map {
-        if let Some(why) = refusal(table, request.kind, label, value, time) {
+        if let Some(why) = refusal(table, request.kind, label, value) {
             return Err(format!(
                 "{why} Answer with the text and the table, without a chart."
             ));
@@ -325,13 +337,7 @@ pub fn build(arguments: &str, tables: &[(usize, Table)], domain: &str) -> Result
 /// Why a bar or line chart of these columns would mislead (T-4711, owner 2026-10-19 04:46Z: no
 /// chart unless every check passes), `None` when it may be drawn. The answer then keeps its text
 /// and table, and the refusal stays in the stored turn as the tool's result.
-fn refusal(
-    table: &Table,
-    kind: Kind,
-    label: usize,
-    value: usize,
-    time: Option<usize>,
-) -> Option<String> {
+fn refusal(table: &Table, kind: Kind, label: usize, value: usize) -> Option<String> {
     let rows: Vec<&Vec<Value>> = table
         .rows
         .iter()
@@ -347,17 +353,8 @@ fn refusal(
             table.total.unwrap_or_default()
         ));
     }
-    if let (Kind::Line, Some(time)) = (kind, time) {
-        let moments: std::collections::BTreeSet<String> = rows
-            .iter()
-            .filter_map(|row| row.get(time).and_then(Value::as_str).map(str::to_owned))
-            .collect();
-        if moments.len() < MIN_POINTS {
-            return Some(format!(
-                "A line needs at least {MIN_POINTS} distinct times; this table has {}.",
-                moments.len()
-            ));
-        }
+    if kind == Kind::Line {
+        // Its distinct times are counted before this (T-4727).
         return None;
     }
     let names: Vec<String> = rows
@@ -665,10 +662,10 @@ mod tests {
         assert_eq!(bar["spec"]["config"]["axis"]["labelFontSize"], 12);
         assert_eq!(bar["spec"]["layer"][1]["mark"]["type"], "text");
         assert_eq!(bar["spec"]["width"], "container");
+        // A line needs three distinct times (T-4727): the row without a location gets one.
         let mut timed = air();
         timed.rows[2][4] = json!("2026-10-18T13:00:00Z");
-        let tables = [(3, timed)];
-        let line = build(r#"{"kind":"line","data":3,"label":"name","value":"no2","time":"observedAt","title":"constructor"}"#, &tables, "dev.example.org")
+        let line = build(r#"{"kind":"line","data":3,"label":"name","value":"no2","time":"observedAt","title":"constructor"}"#, &[(3, timed)], "dev.example.org")
             .expect("a line");
         assert_eq!(line["rows"][0]["time"], "2026-10-18T15:00:00Z");
         assert!(
@@ -741,9 +738,8 @@ mod tests {
             }
             table
         };
-        // Two moments are no line (the owner's "kpiValue over one load date" had one).
-        let refused = call("line", air()).expect_err("two moments");
-        assert!(refused.contains("at least 3 distinct times"), "{refused}");
+        // Two moments are no line (the owner's "kpiValue over one load date" had one; T-4727 counts them).
+        assert!(call("line", air()).is_err(), "two moments");
         // Slugs, a name twice, or the total beside its own parts are no bars.
         let slugs = named(
             [
@@ -754,7 +750,11 @@ mod tests {
             [1.0, 2.0, 3.0],
         );
         assert!(call("bar", slugs).expect_err("slugs").contains("holds ids"));
-        let twice = named(["Brezno", "Brezno", "Detva"], [1.0, 2.0, 3.0]);
+        let mut twice = named(["Brezno", "Brezno", "Detva"], [1.0, 2.0, 3.0]);
+        let mut fourth = twice.rows[2].clone();
+        fourth[0] = json!("Zvolen");
+        twice.rows.push(fourth);
+        twice.geometries.push(None);
         assert!(call("bar", twice).expect_err("twice").contains("twice"));
         let total = named(
             ["Banskobystrický kraj", "Okres Brezno", "Okres Detva"],
@@ -776,6 +776,41 @@ mod tests {
             )
         )
         .is_ok());
+    }
+
+    /// T-4727: od-10 drew a line of one point, the same KPI read twice at one observedAt, and a
+    /// bar of the same name three times says one value too. A chart counts what it can tell apart.
+    #[test]
+    fn a_chart_counts_distinct_times_and_labels_not_rows() {
+        let mut once = air();
+        for row in &mut once.rows {
+            row[0] = json!("obyvatelstvo-stav-mesto");
+            row[1] = json!(79617);
+            row[4] = json!("2026-08-31T00:00:00Z");
+        }
+        let tables = [(1, once)];
+        for args in [
+            r#"{"kind":"line","data":1,"label":"name","value":"no2","time":"observedAt","title":"Obyvatelia"}"#,
+            r#"{"kind":"bar","data":1,"label":"name","value":"no2","title":"Obyvatelia"}"#,
+        ] {
+            let refused =
+                build(args, &tables, "dev.example.org").expect_err("one point is no chart");
+            assert!(refused.contains("Answer in text"), "{refused}");
+        }
+        // Three stations at one hour are still a bar; three hours of one station still a line.
+        let mut hours = air();
+        for (row, hour) in hours.rows.iter_mut().zip(["13", "14", "15"]) {
+            row[0] = json!("Zvolen");
+            row[1] = json!(9.0);
+            row[4] = json!(format!("2026-10-18T{hour}:00:00Z"));
+        }
+        let tables = [(1, hours)];
+        build(
+            r#"{"kind":"line","data":1,"label":"name","value":"no2","time":"observedAt","title":"NO2"}"#,
+            &tables,
+            "dev.example.org",
+        )
+        .expect("three hours are a line");
     }
 
     #[test]
