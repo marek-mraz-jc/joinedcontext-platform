@@ -38,7 +38,7 @@ pub fn per_space() -> usize {
 const LINGER: Duration = Duration::from_secs(60);
 /// The upstream's reconnect delay grows to this.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// How often a hub re-decides its connections and reports its table.
+/// How often a hub checks its Endpoint and reports its table.
 const TICK: Duration = Duration::from_secs(5);
 /// The server pings this often and ends a connection that answered no ping for twice as long
 /// (API/07 §3).
@@ -67,7 +67,7 @@ fn bound() -> usize {
     })
 }
 
-/// Every Endpoint's hub, keyed by slug.
+/// Every hub, keyed by `hub_key`: one per Endpoint and caller identity (T-4755).
 #[derive(Default)]
 pub struct Hubs(Mutex<HashMap<String, (String, Arc<Hub>)>>);
 
@@ -76,11 +76,14 @@ pub struct Hubs(Mutex<HashMap<String, (String, Arc<Hub>)>>);
 pub enum Refused {
     /// The space holds [`per_space`] connections.
     SpaceFull,
+    /// The caller's identity is no header value.
+    NoIdentity,
 }
 
 impl Hubs {
-    /// Opens a connection on the Endpoint's hub, starting the hub and its upstream when it has
-    /// none; under the registry's lock, so a hub never stops between the join and the open.
+    /// Opens a connection on the hub of the Endpoint and the caller's identity, starting the hub
+    /// and its upstream when it has none; under the registry's lock, so a hub never stops between
+    /// the join and the open.
     pub fn join(
         &self,
         gateway: &Arc<Gateway>,
@@ -88,7 +91,8 @@ impl Hubs {
         subject: Subject,
         principal: String,
     ) -> Result<hub::Joined, Refused> {
-        let constraints = hub::decide(&*gateway.pdp, &subject, &endpoint);
+        let headers = upstream_headers(&endpoint.space, &subject).ok_or(Refused::NoIdentity)?;
+        let key = hub_key(&endpoint.slug, &headers);
         let mut hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let in_space: usize = hubs
             .values()
@@ -98,23 +102,16 @@ impl Hubs {
         if in_space >= per_space() {
             return Err(Refused::SpaceFull);
         }
-        let hub = match hubs.get(&endpoint.slug) {
+        let hub = match hubs.get(&key) {
             Some((_, hub)) => Arc::clone(hub),
             None => {
                 let hub = Arc::new(Hub::new(&endpoint.slug, bound()));
-                hubs.insert(
-                    endpoint.slug.clone(),
-                    (endpoint.space.clone(), Arc::clone(&hub)),
-                );
-                tokio::spawn(upstream(
-                    Arc::clone(gateway),
-                    Arc::clone(&hub),
-                    endpoint.space.clone(),
-                ));
+                hubs.insert(key, (endpoint.space.clone(), Arc::clone(&hub)));
+                tokio::spawn(upstream(Arc::clone(gateway), Arc::clone(&hub), headers));
                 hub
             }
         };
-        let (conn, queue) = hub.open(endpoint, subject, principal, constraints);
+        let (conn, queue) = hub.open(endpoint, principal);
         Ok(hub::Joined::new(hub, conn, queue))
     }
 
@@ -124,12 +121,7 @@ impl Hubs {
         if !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
             return false;
         }
-        if hubs
-            .get(&hub.slug)
-            .is_some_and(|(_, held)| Arc::ptr_eq(held, hub))
-        {
-            hubs.remove(&hub.slug);
-        }
+        hubs.retain(|_, (_, held)| !Arc::ptr_eq(held, hub));
         true
     }
 }
@@ -137,12 +129,29 @@ impl Hubs {
 type Upstream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// The headers of every upstream hop: the space's tenant and the gateway's own account.
-fn upstream_headers(space: &str) -> Option<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert(tenancy::TENANT, HeaderValue::from_str(space).ok()?);
-    tenancy::as_gateway(&mut headers);
+/// The headers of a hub's upstream hops: the space's tenant and the caller's identity, as a REST
+/// read through the view carries them (T-4755). The broker's view and engine decide what the
+/// upstream subscription and its snapshot read, so a delivery holds only what this caller may
+/// read; nothing in the gateway cuts it again. `None` when the identity is no header value.
+fn upstream_headers(space: &str, subject: &Subject) -> Option<HeaderMap> {
+    let mut request = axum::extract::Request::new(Body::empty());
+    tenancy::pin_caller(&mut request, space, subject).ok()?;
+    let mut headers = std::mem::take(request.headers_mut());
+    // Provenance names a writer; the upstream writes nothing, and a hub is shared by identity.
+    headers.remove(tenancy::PROVENANCE_CHANNEL);
+    headers.remove(tenancy::PROVENANCE_ACTOR);
     Some(headers)
+}
+
+/// The registry key of a hub: the Endpoint and every header its upstream speaks with, so two
+/// callers share a hub only when the broker cannot tell them apart.
+fn hub_key(slug: &str, headers: &HeaderMap) -> String {
+    let mut pairs: Vec<String> = headers
+        .iter()
+        .map(|(name, value)| format!("{name}={}", String::from_utf8_lossy(value.as_bytes())))
+        .collect();
+    pairs.sort_unstable();
+    format!("{slug}\n{}", pairs.join("\n"))
 }
 
 async fn connect(gateway: &Gateway, slug: &str, headers: &HeaderMap) -> Result<Upstream, String> {
@@ -187,11 +196,7 @@ fn upstream_subscription() -> Value {
 /// A hub's upstream: connect, subscribe once (or resume where the last connection ended), read
 /// the snapshot, then apply every notification; reconnect with backoff; stop once the hub has
 /// been idle for [`LINGER`].
-async fn upstream(gateway: Arc<Gateway>, hub: Arc<Hub>, space: String) {
-    let Some(headers) = upstream_headers(&space) else {
-        tracing::error!(slug = %hub.slug, "the space is no header value; the fan-out stays down");
-        return;
-    };
+async fn upstream(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
     let mut backoff = Duration::from_secs(1);
     // The broker's connection name, resume token and last x-seq, after a clean lifetime end.
     let mut resume: Option<(String, String, u64)> = None;
@@ -253,7 +258,9 @@ async fn run(
             frame = from_broker.next() => frame,
             _ = tick.tick() => {
                 let now = gateway.resolver.resolve(&hub.slug);
-                hub.redecide(&*gateway.pdp, now.as_ref());
+                hub.recheck(now.as_ref());
+                // ponytail: an Endpoint with several identities' hubs reports the last one's
+                // table; a sum over the registry when a dashboard needs the Endpoint's total.
                 metrics::gauge!("jc_gateway_ws_entities", "endpoint" => hub.slug.clone())
                     .set(hub.entities() as f64);
                 if gateway.hubs.leave_if_idle(hub) {
@@ -695,15 +702,10 @@ mod tests {
     fn hub_with_closed(sent: &[u64]) -> (Hub, u64) {
         let hub = Hub::new("s", 10);
         let endpoint = crate::fanout::hub::tests_support::endpoint();
-        let (old, _) = hub.open(
-            Arc::clone(&endpoint),
-            Subject::anonymous(),
-            "anonymous".into(),
-            None,
-        );
+        let (old, _) = hub.open(Arc::clone(&endpoint), "anonymous".into());
         let held: VecDeque<(u64, String)> = sent.iter().map(|n| (*n, format!("n{n}"))).collect();
         hub.close(old, "name", "token", held);
-        let (new, _) = hub.open(endpoint, Subject::anonymous(), "anonymous".into(), None);
+        let (new, _) = hub.open(endpoint, "anonymous".into());
         (hub, new)
     }
 
@@ -720,14 +722,40 @@ mod tests {
         )
     }
 
+    /// T-4755: the upstream speaks as the caller, as a REST read through the view does, so the
+    /// broker cuts each delivery; callers share a hub only when the broker cannot tell them apart.
     #[test]
-    fn the_upstream_speaks_as_the_gateway_for_the_space_and_nobody_else() {
-        let headers = upstream_headers("helsinki").expect("a header value");
-        assert_eq!(headers[tenancy::TENANT], "helsinki");
-        assert_eq!(headers["x-jc-client"], tenancy::GATEWAY_CLIENT);
-        assert_eq!(headers["x-jc-roles"], "");
-        assert_eq!(headers.len(), 3, "{headers:?}");
-        assert!(upstream_headers("bad\nspace").is_none());
+    fn the_upstream_speaks_as_the_caller_and_hubs_are_shared_by_identity() {
+        let anonymous = upstream_headers("helsinki", &Subject::anonymous()).expect("headers");
+        assert_eq!(anonymous[tenancy::TENANT], "helsinki");
+        assert_eq!(anonymous["x-jc-roles"], "public");
+        assert!(anonymous.get("x-jc-client").is_none(), "{anonymous:?}");
+        assert!(
+            anonymous.get(tenancy::PROVENANCE_ACTOR).is_none(),
+            "{anonymous:?}"
+        );
+        let jana = Subject {
+            user: Some("jana".to_owned()),
+            roles: ["steward".to_owned()].into(),
+            ..Subject::default()
+        };
+        let person = upstream_headers("helsinki", &jana).expect("headers");
+        assert_eq!(person["x-jc-subject"], "jana");
+        assert_eq!(person["x-jc-roles"], "steward");
+        // A token of the gateway's own client never makes the upstream the gateway's.
+        let posing = Subject {
+            service_account: Some(tenancy::GATEWAY_CLIENT.to_owned()),
+            ..Subject::default()
+        };
+        let posing = upstream_headers("helsinki", &posing).expect("headers");
+        assert!(posing.get("x-jc-client").is_none(), "{posing:?}");
+
+        let again = upstream_headers("helsinki", &Subject::anonymous()).expect("headers");
+        assert_eq!(hub_key("e", &anonymous), hub_key("e", &again));
+        assert_ne!(hub_key("e", &anonymous), hub_key("e", &person));
+        assert_ne!(hub_key("e", &anonymous), hub_key("f", &anonymous));
+        assert!(upstream_headers("bad\nspace", &Subject::anonymous()).is_none());
+
         let subscription = upstream_subscription();
         assert_eq!(subscription["body"]["entities"], json!([{"type": "*"}]));
         assert!(subscription["body"]["notification"]
