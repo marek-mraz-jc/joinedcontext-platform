@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tokio::sync::mpsc::Sender;
 
-use super::mcp::{cut, Surface, Tool, MAX_RESULT_CHARS};
+use super::mcp::{cut, Surface, Tool, MAX_RESULT_CHARS, READ_ONLY_TOOLS};
 use super::model::{CallError, Completion, Model};
 use crate::embed::Embedder;
 use crate::Search;
@@ -243,19 +243,8 @@ pub(super) fn quoted(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// A connector tool's name as the model sees it: `{endpoint}__{tool}`, at most 64 characters of
-/// letters, digits, `_` and `-`, or not offered.
-fn tool_name(endpoint: &str, tool: &str) -> Option<String> {
-    let name = format!("{endpoint}__{tool}");
-    (name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-    .then_some(name)
-}
-
 /// `search` when the deployment has sources, `run_script` when it has the sandbox, then the
-/// connectors' tools.
+/// standard data tools, the Endpoint an argument (T-4748).
 fn tool_specs(searchable: bool, scripts: bool, connectors: &[Connected]) -> Vec<Value> {
     let mut tools = Vec::new();
     if searchable {
@@ -289,17 +278,24 @@ fn tool_specs(searchable: bool, scripts: bool, connectors: &[Connected]) -> Vec<
             }
         }));
     }
-    for connector in connectors {
-        for tool in &connector.tools {
-            if let Some(name) = tool_name(&connector.endpoint, &tool.name) {
-                tools.push(json!({
-                    "type": "function",
-                    "function": {"name": name, "description": tool.description, "parameters": tool.input_schema}
-                }));
-            }
+    tools.extend(super::data::standard(connectors));
+    tools
+}
+
+/// The Endpoints the data tools read, one line each, for the model to name as `endpoint`; empty
+/// without a connector.
+fn endpoint_lines(connectors: &[Connected]) -> String {
+    let mut out = String::new();
+    for c in connectors {
+        out.push_str(&format!("\n- {}", c.endpoint));
+        if let Some(title) = &c.title {
+            out.push_str(&format!(" ({title})"));
         }
     }
-    tools
+    if out.is_empty() {
+        return out;
+    }
+    format!("\n\nThe Endpoints the data tools read; give one as `endpoint`:{out}")
 }
 
 /// The messages every call of a question starts with: the cached rules and prompt, then the
@@ -639,6 +635,10 @@ async fn answer_in_scope(
     let mut kept: HashMap<usize, String> = HashMap::new();
     let now = super::clock::now_line(ask.now, ask.zone);
     let mut messages = opening(ask.system_prompt, history, question, &now);
+    // In the cached rules: the same for every question of the deployment.
+    if let Some(Value::String(rules)) = messages[0].pointer_mut("/content/0/text") {
+        rules.push_str(&endpoint_lines(ask.connectors));
+    }
     let mut citations: Vec<Citation> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut spent = Spent::default();
@@ -878,24 +878,20 @@ async fn run_tool(
                 "The search is not available right now. Answer without it, and say so.".into()
             }
         }
-    } else if let Some((connector, tool)) = ask.connectors.iter().find_map(|c| {
-        c.tools
-            .iter()
-            .find(|t| tool_name(&c.endpoint, &t.name).as_deref() == Some(name))
-            .map(|t| (c, t))
-    }) {
-        let endpoint = Some(connector.endpoint.clone());
+    } else if READ_ONLY_TOOLS.contains(&name) {
         let arguments = if arguments.is_object() {
             arguments
         } else {
             json!({})
         };
-        // Checked against the tool's own schema before anything is sent (T-3314).
-        if let Err(why) = fits(&tool.input_schema, &arguments) {
-            return format!(
-                "The call was not made: {why}. Correct the arguments, or answer without this tool."
-            );
-        }
+        // Its Endpoint named and the arguments checked against that Endpoint's own schema before
+        // anything is sent (T-3314, T-4748).
+        let (connector, tool, arguments) =
+            match super::data::resolved(ask.connectors, name, arguments) {
+                Ok(resolved) => resolved,
+                Err(why) => return why,
+            };
+        let endpoint = Some(connector.endpoint.clone());
         let kind = super::routed::queried_type(&tool.name, &arguments);
         send(
             events,
@@ -1316,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn markers_are_the_bracketed_numbers_and_tool_names_are_bounded() {
+    fn markers_are_the_bracketed_numbers() {
         assert_eq!(
             markers("A [1], b [3] and [x] [ 2 ]"),
             HashSet::from([1, 3, 2])
@@ -1328,11 +1324,47 @@ mod tests {
             markers("A [1, 2], b [3,4] and [5][6]; not [1, x] nor [2 3]"),
             HashSet::from([1, 2, 3, 4, 5, 6])
         );
+    }
+
+    /// T-4748: the agent's data tools are the standard ones, named once whatever the number of
+    /// Endpoints, and the Endpoints are listed for it to name.
+    #[test]
+    fn the_agent_offers_the_standard_tools_and_lists_the_endpoints() {
+        let connector = |endpoint: &str, title: Option<&str>| Connected {
+            endpoint: endpoint.into(),
+            title: title.map(str::to_owned),
+            surface: Surface {
+                gateway: "http://gateway".into(),
+                slug: endpoint.into(),
+                timeout: std::time::Duration::from_secs(1),
+                token: None,
+            },
+            tools: vec![Tool {
+                name: "query_entities".into(),
+                description: "Query Entities".into(),
+                input_schema: json!({"type": "object", "properties": {"type": {"type": "array"}}}),
+            }],
+            label: None,
+            siblings: Vec::new(),
+        };
+        let connectors = [
+            connector("ovzdusie", Some("Ovzdušie")),
+            connector("bbsk/registre", None),
+        ];
+        let tools = tool_specs(true, false, &connectors);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(names, ["search", "query_entities"]);
         assert_eq!(
-            tool_name("ovzdusie", "query_entities").as_deref(),
-            Some("ovzdusie__query_entities")
+            tools[1]["function"]["parameters"]["required"],
+            json!(["endpoint"])
         );
-        assert_eq!(tool_name("a", &"t".repeat(70)), None);
-        assert_eq!(tool_name("a", "with space"), None);
+        assert_eq!(
+            endpoint_lines(&connectors),
+            "\n\nThe Endpoints the data tools read; give one as `endpoint`:\n- ovzdusie (Ovzdušie)\n- bbsk/registre"
+        );
+        assert_eq!(endpoint_lines(&[]), "");
     }
 }
