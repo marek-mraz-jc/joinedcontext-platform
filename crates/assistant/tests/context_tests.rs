@@ -197,6 +197,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
                 slug: slug.into(),
                 audience: page.page.audience.clone(),
                 title: None,
+                space: String::new(),
             },
         );
         snapshot
