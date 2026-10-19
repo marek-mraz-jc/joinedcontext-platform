@@ -945,6 +945,15 @@ pub(crate) async fn view_payload(
             })?;
         }
     }
+    // Last, so every check above judged the value the caller sent and only the broker sees it
+    // minimised (DM-121): MCP writes pass here too.
+    if operation.is_write() && !sent.is_empty() {
+        if let Some(schema) = declared.and_then(|declared| declared.schema.as_deref()) {
+            crate::handlers::writes::minimised(gateway, endpoint, path, schema, sent)
+                .await
+                .map_err(|problem| answer(*problem))?;
+        }
+    }
     if sent.len() != before {
         headers.remove(CONTENT_LENGTH);
         headers.insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));

@@ -119,6 +119,9 @@ pub struct Gateway {
     /// What one client address without a token may spend a minute over every MCP surface
     /// together (T-4168).
     pub anonymous_mcp_rate_limit: RateLimits,
+    /// Where each space's personal-data key is mounted, one file per space
+    /// (`JC_GATEWAY_PERSONAL_KEYS`, DM-121); `None` refuses every write a model hashes.
+    pub personal_keys: Option<std::path::PathBuf>,
     /// The largest request body read, from the Organization's `spec.limits.gateway`
     /// (ADR-N-035); swapped with the tables when the repository changes.
     max_request_body: AtomicUsize,
@@ -198,6 +201,7 @@ impl Gateway {
             )),
             personal: None,
             documents: None,
+            personal_keys: None,
             hub_rate_limit: HUB_RATE_LIMIT,
             anonymous_mcp_rate_limit: ANONYMOUS_MCP_RATE_LIMIT,
             max_request_body: AtomicUsize::new(crate::store::Limits::default().max_request_body),
@@ -215,6 +219,12 @@ impl Gateway {
             .max(1);
         self.writes = Arc::new(tokio::sync::Semaphore::new(kib as usize));
         self.write_budget_kib = kib;
+        self
+    }
+
+    /// Reads each space's personal-data key from `dir/{space}` (DM-121).
+    pub fn personal_keys_in(mut self, dir: std::path::PathBuf) -> Self {
+        self.personal_keys = Some(dir);
         self
     }
 

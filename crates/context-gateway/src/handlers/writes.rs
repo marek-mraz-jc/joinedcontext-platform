@@ -800,6 +800,65 @@ pub(crate) fn filled_units(
     Ok(filled)
 }
 
+/// DM-121: the write as the broker may keep it, every personal slot the model drops or hashes
+/// (ADR-N-054 2.6) minimised in `sent`. A refusal names the attribute, never its value.
+pub(crate) async fn minimised(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    path: &str,
+    schema: &jc_manifest::model_schema::ModelSchema,
+    sent: &mut Vec<u8>,
+) -> Result<(), Box<ProblemDetails>> {
+    use crate::ingest::{self, Refusal};
+    let key = if ingest::wants_key(schema) {
+        ingest::key_of(gateway.personal_keys.as_deref(), &endpoint.space)
+    } else {
+        None
+    };
+    let Ok(mut payload) = serde_json::from_slice::<Value>(sent) else {
+        return Err(Box::new(
+            ProblemDetails::bad_request().with_detail("the body is not JSON"),
+        ));
+    };
+    let addressed = operations::addressed_entity(path).map(query::decode);
+    let shape = crate::units::Shape {
+        addressed: addressed.as_deref(),
+        targeted: operations::targeted_attribute(path),
+    };
+    match ingest::apply(&mut payload, shape, schema, key.as_ref()) {
+        Ok(false) => Ok(()),
+        Ok(true) => {
+            *sent = serde_json::to_vec(&payload).map_err(|error| {
+                tracing::error!(%error, "a minimised write does not serialize");
+                Box::new(ProblemDetails::internal())
+            })?;
+            Ok(())
+        }
+        Err(Refusal::NoKey { attribute }) => {
+            tracing::error!(slug = %endpoint.slug, space = %endpoint.space, %attribute,
+                "write refused: the space's personal-data key is not mounted");
+            Err(Box::new(
+                ProblemDetails::new(503, "service-unavailable", "Service Unavailable").with_detail(
+                    format!(
+                    "`{attribute}` is stored as a keyed hash and the space's key is not available"
+                ),
+                ),
+            ))
+        }
+        Err(Refusal::Unknown { attribute, mode }) => {
+            tracing::error!(slug = %endpoint.slug, %attribute, %mode,
+                "write refused: the model names an ingest the gateway does not know");
+            Err(Box::new(ProblemDetails::internal()))
+        }
+        Err(Refusal::Unfit { attribute }) => {
+            tracing::info!(slug = %endpoint.slug, %attribute, "write refused: a personal slot it cannot minimise");
+            Err(Box::new(ProblemDetails::bad_request().with_detail(format!(
+                "the model stores `{attribute}` as a keyed hash of a Property's value, or not at all"
+            ))))
+        }
+    }
+}
+
 /// The quarantine mark is written by the space's rules alone (DM-90): a write whose path
 /// addresses it is refused, a `DELETE` included, and a body's own copy is dropped. `true` when
 /// the body changed.

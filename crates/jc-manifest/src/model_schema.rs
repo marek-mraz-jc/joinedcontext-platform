@@ -289,6 +289,25 @@ impl ModelSchema {
         }
     }
 
+    /// The attributes of `class` whose `x-ingest` (the LinkML `ingest`, ADR-N-054 2.6, DM-121)
+    /// is anything but `keep`, with that mode as the schema writes it, in name order.
+    pub fn ingest(&self, class: &str) -> Vec<(String, String)> {
+        self.definitions
+            .get(class)
+            .and_then(|definition| definition.get("properties"))
+            .and_then(Value::as_object)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .filter_map(|(name, p)| {
+                        let mode = p.get("x-ingest")?.as_str()?;
+                        (mode != "keep").then(|| (name.clone(), mode.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The attributes of `class` the model marks as personal data (`x-personal-data`, ADR-N-054
     /// 2.6, DM-122), in name order; none for a class it does not declare.
     pub fn personal_attributes(&self, class: &str) -> Vec<String> {
