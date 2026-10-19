@@ -194,7 +194,9 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-data-links { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0 0; font-size: 13px; }
 .jc-data-links a { color: var(--link); }
 .jc-steps { margin-top: 6px; font-size: 13px; color: var(--muted); }
-.jc-steps summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.jc-steps summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 6px; }
+.jc-steps summary::before { content: "▸"; }
+.jc-steps[open] summary::before { content: "▾"; }
 .jc-steps ol { margin: 0 0 4px; padding-left: 20px; }
 .jc-script summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 .jc-script pre { font-size: 12px; overflow-x: auto; background: var(--soft); padding: 8px; border-radius: 6px; }

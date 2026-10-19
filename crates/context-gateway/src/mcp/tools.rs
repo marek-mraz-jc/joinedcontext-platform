@@ -66,13 +66,13 @@ impl Tool {
     /// the call, so it has to state what the tool does. A tool that writes at all is not
     /// read-only: *any* write is a write, and a rule that asked whether *any* operation reads
     /// would announce a mixed tool as a read.
-    fn read_only(&self) -> bool {
+    pub(crate) fn read_only(&self) -> bool {
         !self.operations.iter().any(Operation::is_write)
     }
 
     /// Whether a call can remove or overwrite what is there, as the broker annotates it: the
     /// three writes that only add are not (Antares `docs/src/mcp.md` section 2).
-    fn destructive(&self) -> bool {
+    pub(crate) fn destructive(&self) -> bool {
         !self.read_only()
             && !matches!(
                 self.name,
