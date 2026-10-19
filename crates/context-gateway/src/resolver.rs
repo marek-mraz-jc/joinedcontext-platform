@@ -233,12 +233,17 @@ impl Endpoint {
     }
 
     /// The personal attributes this Endpoint would serve to anyone, as `Class.attribute`
-    /// (ADR-N-054 2.6, DM-122): none unless its audience is public; an attribute its projection
-    /// leaves out, or `hiddenAttributes` hides, is not served.
+    /// (ADR-N-054 2.6, DM-122): none unless its audience is public.
     pub fn public_personal_attributes(&self) -> Vec<String> {
         if self.audience != Audience::Public {
             return Vec::new();
         }
+        self.personal_attributes()
+    }
+
+    /// The personal attributes this Endpoint serves, as `Class.attribute` (ADR-N-054 2.6): an
+    /// attribute its projection leaves out, or `hiddenAttributes` hides, is not served.
+    pub fn personal_attributes(&self) -> Vec<String> {
         let Some(schema) = self
             .declared_types
             .as_ref()
