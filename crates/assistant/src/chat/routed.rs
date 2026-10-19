@@ -109,8 +109,8 @@ const BACKOFF_MAX: Duration = Duration::from_secs(600);
 
 /// What the router is told. It never changes, so it is the cached prefix of every router call.
 const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Reply with one JSON object and nothing else:\n\
-{\"route\": \"direct\" | \"rag\" | \"data\" | \"both\", \"queries\": [\"...\"], \"data\": [{\"endpoint\": \"...\", \"type\": \"...\", \"q\": \"...\"}], \"followups\": [\"...\"]}\n\
-- route: \"direct\" when the message needs nothing the city publishes: a greeting or thanks, a question about the assistant itself (its prompt, instructions, model, rules or who made it), pasted text or instructions with no question about the city or its data, or a request no open data could answer, like a poem or general knowledge; then queries, data and followups are []. A question about a city, region, publisher, place or dataset is never \"direct\", whichever one it names: the assistant may serve several cities and regions, so a place you did not expect is still searched. \"data\" when the question asks for current values or figures from datasets (a measurement now, how many of something there are, a list from a register such as schools, health facilities, pharmacies, contracts or grants) or for their history (past values, the last days or weeks, a trend) and a type you are shown holds them; \"rag\" when the city's web pages and documents answer it; \"both\" when it needs both, or when you are unsure whether the data holds the answer. A question about which data, datasets or sources there are on a topic (\"Aké dáta máte o doprave?\", \"what data is there on air quality\") is \"rag\": the catalogue's dataset pages answer it, never rows of one type; its queries name the topic and the word dataset.\n\
+{\"route\": \"direct\" | \"rag\" | \"data\" | \"both\" | \"catalogue\", \"queries\": [\"...\"], \"data\": [{\"endpoint\": \"...\", \"type\": \"...\", \"q\": \"...\"}], \"followups\": [\"...\"]}\n\
+- route: \"direct\" when the message needs nothing the city publishes: a greeting or thanks, a question about the assistant itself (its prompt, instructions, model, rules or who made it), pasted text or instructions with no question about the city or its data, or a request no open data could answer, like a poem or general knowledge; then queries, data and followups are []. A question about a city, region, publisher, place or dataset is never \"direct\", whichever one it names: the assistant may serve several cities and regions, so a place you did not expect is still searched. \"data\" when the question asks for current values or figures from datasets (a measurement now, how many of something there are, a list from a register such as schools, health facilities, pharmacies, contracts or grants) or for their history (past values, the last days or weeks, a trend) and a type you are shown holds them; \"rag\" when the city's web pages and documents answer it; \"both\" when it needs both, or when you are unsure whether the data holds the answer. A question about which data, datasets or sources there are on a topic (\"Aké dáta máte o doprave?\", \"what data is there on air quality\") is \"catalogue\": the catalogue's dataset pages answer it, never rows of one type; its queries name the topic and the word dataset.\n\
 - queries: 1 to 3 short search queries, a few keywords each, naming what the answer has to contain: one in the question's language and the same search in each language the sources are written in that differs from it; when you must choose, the sources' language first. Resolve words like \"it\" or \"there\" from the earlier turns.\n\
 - data: only for \"data\" or \"both\", at most 2, each an endpoint and a type from the live data you are shown; never one you are not shown. Leave it out when you are shown none.\n\
 - When the question names several places (two cities, a city and a region), each with its own endpoint of the type, take one data item per place, the endpoint of that place, so every place asked about is answered (\"Kvalita ovzdušia v Žiline a B. Bystrici?\" reads the Žilina endpoint and the Banská Bystrica one).\n\
@@ -166,6 +166,9 @@ pub struct Routing {
     pub reads: Vec<Read>,
     /// Questions the chat offers as chips after the answer (T-4174).
     pub followups: Vec<String>,
+    /// The question asks which datasets there are on a topic: answered from the catalogue's
+    /// dataset pages, every one that matches (T-4729).
+    pub catalogue: bool,
 }
 
 /// The most follow-up questions offered after an answer (T-4174).
@@ -349,6 +352,18 @@ pub fn routing(reply: &str, question: &str, live: &[Shown]) -> Routing {
             queries: Vec::new(),
             reads: Vec::new(),
             followups: Vec::new(),
+            catalogue: false,
+        };
+    }
+    if route == "catalogue" || asks_for_datasets(question) {
+        return Routing {
+            direct: false,
+            rag: true,
+            data: false,
+            queries: found,
+            reads: Vec::new(),
+            followups: followups(parsed.as_ref(), question),
+            catalogue: true,
         };
     }
     let data = (route == "data" || route == "both") && !reads.is_empty();
@@ -360,13 +375,58 @@ pub fn routing(reply: &str, question: &str, live: &[Shown]) -> Routing {
         queries: found,
         reads,
         followups: followups(parsed.as_ref(), question),
+        catalogue: false,
     }
+}
+
+/// The sources a turn's answer says it could not check: those whose types did not list, and only
+/// when the turn reads data. A page or catalogue answer never needed them, and a warning about a
+/// connector's background listing would be false (T-4729).
+fn missing_for(routing: &Routing, missing: Vec<String>) -> Vec<String> {
+    if routing.data {
+        missing
+    } else {
+        Vec::new()
+    }
+}
+
+/// How a question asking which data there is on a topic starts, in the languages the assistant
+/// answers: the router is told the same, and these go to the catalogue whatever it says (T-4729).
+const ASKS_FOR_DATASETS: &[&str] = &[
+    "aké dáta",
+    "aké údaje",
+    "aké datasety",
+    "ake data",
+    "ake udaje",
+    "jaká data",
+    "jaké údaje",
+    "jaké datasety",
+    "what data",
+    "which data",
+    "what datasets",
+    "which datasets",
+    "mitä dataa",
+    "mitä tietoja",
+    "welche daten",
+];
+
+// ponytail: phrase list, not a classifier; other wordings still reach the catalogue through the
+// router's own "catalogue" route.
+/// The question asks which data or datasets there are, by one of [`ASKS_FOR_DATASETS`].
+fn asks_for_datasets(question: &str) -> bool {
+    let asked = question
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    ASKS_FOR_DATASETS.iter().any(|start| asked.contains(start))
 }
 
 /// The route a turn takes, with its queries and reads, as the transcript's `route` step (T-4670).
 fn note_route(ask: &Ask<'_>, routing: &Routing) {
     let name = match (routing.direct, routing.rag, routing.data) {
         (true, ..) => "direct",
+        _ if routing.catalogue => "catalogue",
         (false, true, true) => "both",
         (false, false, true) => "data",
         _ => "rag",
@@ -803,6 +863,52 @@ pub fn top(found: &[Hit], n: usize) -> Vec<Hit> {
 /// find or whom to ask, and never crowds out the data of the catalogue and the Endpoints.
 pub const WEB_PASSAGES: usize = 3;
 
+/// How many passages each query of a catalogue question reads, and how many dataset pages its
+/// answer lists at most (T-4729).
+const CATALOGUE_SEARCH: i64 = CANDIDATES;
+pub const CATALOGUE_PASSAGES: usize = 25;
+
+/// The dataset pages among `found`: a CKAN dataset page (`…/dataset/{name}`) once, at its best
+/// passage, best first, at most [`CATALOGUE_PASSAGES`] (T-4729).
+pub fn dataset_pages(found: &[Hit]) -> Vec<Hit> {
+    let mut seen = HashSet::new();
+    top(found, found.len())
+        .into_iter()
+        .filter(|hit| is_dataset_page(&hit.url) && seen.insert(hit.url.clone()))
+        .take(CATALOGUE_PASSAGES)
+        .collect()
+}
+
+/// A CKAN dataset page: its path is `/dataset/{name}`, nothing after the name.
+fn is_dataset_page(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| {
+        let mut parts = url.path().trim_end_matches('/').rsplitn(2, '/');
+        let name = parts.next().unwrap_or_default();
+        !name.is_empty() && parts.next().is_some_and(|rest| rest.ends_with("/dataset"))
+    })
+}
+
+/// The dataset pages a catalogue question lists: its queries searched side by side, each for up
+/// to [`CATALOGUE_SEARCH`] passages, kept by [`dataset_pages`].
+async fn datasets(ask: &Ask<'_>, queries: &[String]) -> Vec<Hit> {
+    let searches = queries
+        .iter()
+        .map(|query| search_up_to(ask, query, CATALOGUE_SEARCH));
+    let mut found = Vec::new();
+    for hits in futures_util::future::join_all(searches).await {
+        match hits {
+            Ok(hits) => merge(&mut found, hits),
+            Err(why) => {
+                tracing::warn!(deployment = %ask.deployment, %why, "a catalogue search failed")
+            }
+        }
+    }
+    dataset_pages(&found)
+}
+
+/// What the answer call of a catalogue question is told besides its rules (T-4729).
+const CATALOGUE_RULE: &str = "\n\nThis question asks which datasets there are on a topic. The passages are the catalogue's dataset pages, one per dataset. List every one of them that is about the topic, grouped by publisher (the page's Publisher line): each as its title and a few words on what it holds, citing it [n]. Open with how many there are, like \"13 datasetov o doprave\". Leave out the pages that are not about the topic and list none twice; this list may be longer than 150 words.";
+
 /// The best [`ANSWER_PASSAGES`] passages, at most [`WEB_PASSAGES`] of them from `websites`.
 pub fn best(found: &[Hit], websites: &[String]) -> Vec<Hit> {
     let mut web = 0;
@@ -1055,8 +1161,12 @@ async fn digest(ask: &Ask<'_>) -> Result<String, crate::Error> {
 }
 
 async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
+    search_up_to(ask, query, ROUND_PASSAGES.min(CANDIDATES)).await
+}
+
+async fn search_up_to(ask: &Ask<'_>, query: &str, limit: i64) -> Result<Vec<Hit>, crate::Error> {
     let began = Instant::now();
-    let found = search_index(ask, query).await;
+    let found = search_index(ask, query, limit).await;
     let output = match &found {
         Ok(hits) => hits
             .iter()
@@ -1070,7 +1180,7 @@ async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
     found
 }
 
-async fn search_index(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
+async fn search_index(ask: &Ask<'_>, query: &str, limit: i64) -> Result<Vec<Hit>, crate::Error> {
     let vector = ask.embedder.query(query).await?;
     crate::search_projects(
         ask.pool,
@@ -1080,7 +1190,7 @@ async fn search_index(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Err
             embedding: &vector,
             sources: &[],
             public_only: ask.public_only,
-            limit: ROUND_PASSAGES.min(CANDIDATES),
+            limit,
             lang: None,
         },
     )
@@ -2142,8 +2252,18 @@ pub async fn answer(
         reasoning: ask.reasoning.judge.unwrap_or_default(),
         ..router
     };
+    // The connectors' type lists and the sources' languages, before the router may start: a step
+    // of the turn's own, so their wait is never untracked time (T-4729).
+    let began = Instant::now();
     let (live, missing) = live(ask).await;
     let languages = languages(ask).await;
+    let listed = format!(
+        "{} connectors listed, {} did not answer",
+        live.len(),
+        missing.len()
+    );
+    ask.trace
+        .note("tool", "connectors", began, None, Some(&listed));
     let q = Question {
         ask,
         history,
@@ -2185,20 +2305,33 @@ pub async fn answer(
     if routing.direct {
         return answer_direct(q, spent, key, started).await;
     }
+    let missing = missing_for(&routing, missing);
 
     let Some(tables) = read_tables(ask, &routing, events).await else {
         return spent;
     };
-    let (mut found, pending) =
-        first_round(&routing, tables.is_empty(), first_hits, question, &more);
-    let covered = first_covers || judged_answers;
-    if !search_rounds(q, &mut spent, &judge, &mut found, pending, covered).await {
-        return spent;
-    }
-
-    let best = best(&found.hits, ask.websites);
+    let (best, rounds, searches) = if routing.catalogue {
+        send(events, stage("searching", Some(routing.queries.join(", ")))).await;
+        let pages = datasets(ask, &routing.queries).await;
+        (pages, 1, routing.queries.len())
+    } else {
+        let (mut found, pending) =
+            first_round(&routing, tables.is_empty(), first_hits, question, &more);
+        let covered = first_covers || judged_answers;
+        if !search_rounds(q, &mut spent, &judge, &mut found, pending, covered).await {
+            return spent;
+        }
+        (
+            best(&found.hits, ask.websites),
+            found.rounds,
+            found.asked.len(),
+        )
+    };
     let (citations, passages, data) = evidence(&best, &tables);
-    let more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
+    let mut more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
+    if routing.catalogue {
+        more.push_str(CATALOGUE_RULE);
+    }
     let messages = messages_with(
         ask.system_prompt,
         &more,
@@ -2251,9 +2384,9 @@ pub async fn answer(
             direct: false,
             rag: routing.rag,
             data: routing.data,
-            rounds: found.rounds,
+            rounds,
             reads: tables.len(),
-            searches: found.asked.len(),
+            searches,
             passages: best.len(),
         },
         followups: routing.followups,
@@ -2861,13 +2994,105 @@ mod tests {
         assert!(!routed.direct && routed.data);
     }
 
+    /// T-4729: a question about which data there is goes to the catalogue, whatever route the
+    /// router names, and the router may name it too; other questions keep their route.
+    #[test]
+    fn a_question_about_which_data_there_is_goes_to_the_catalogue() {
+        let rag = r#"{"route": "rag", "queries": ["doprava dataset"]}"#;
+        for question in [
+            "Aké dáta máte o doprave?",
+            "What data do you have about  transport?",
+            "Jaká data máte o dopravě?",
+            "ake data mate o doprave",
+        ] {
+            let r = routing(rag, question, &[]);
+            assert!(
+                r.catalogue && r.rag && !r.data && r.reads.is_empty(),
+                "{question}"
+            );
+            assert_eq!(r.queries, ["doprava dataset"]);
+        }
+        assert!(
+            routing(
+                r#"{"route": "catalogue", "queries": ["air dataset"]}"#,
+                "Is there anything on air?",
+                &[]
+            )
+            .catalogue
+        );
+        assert!(!routing(rag, "Kedy je otvorená knižnica?", &[]).catalogue);
+        assert!(!routing(r#"{"route": "direct"}"#, "Ahoj", &[]).catalogue);
+    }
+
+    /// T-4729: a catalogue answer lists each CKAN dataset page once, at its best passage, and no
+    /// other page; at most CATALOGUE_PASSAGES of them.
+    #[test]
+    fn a_catalogue_answer_reads_each_dataset_page_once() {
+        let hit = |chunk, url: &str, score| Hit {
+            chunk,
+            url: url.to_owned(),
+            text: String::new(),
+            score,
+            site: "bbsk/portal".into(),
+        };
+        let found = vec![
+            hit(1, "https://opendata.dev.example/dataset/cyklotrasy", 0.2),
+            hit(2, "https://opendata.dev.example/dataset/cyklotrasy", 0.5),
+            hit(
+                3,
+                "https://api.dev.example/api/endpoint/praha-mesto/schema/index.json",
+                0.9,
+            ),
+            hit(4, "https://opendata.dev.example/dataset/hsl-zastavky/", 0.3),
+            hit(
+                5,
+                "https://opendata.dev.example/dataset/hsl-zastavky/resource/1",
+                0.8,
+            ),
+            hit(6, "https://www.bbsk.sk/doprava", 0.7),
+            hit(7, "https://opendata.dev.example/dataset/", 0.6),
+        ];
+        let pages = dataset_pages(&found);
+        assert_eq!(pages.iter().map(|h| h.chunk).collect::<Vec<_>>(), [2, 4]);
+        let many: Vec<Hit> = (0..40)
+            .map(|i| hit(i, &format!("https://o.example/dataset/d{i}"), 1.0))
+            .collect();
+        assert_eq!(dataset_pages(&many).len(), CATALOGUE_PASSAGES);
+        assert!(dataset_pages(&[]).is_empty());
+    }
+
+    /// T-4729: the sources whose types did not list are named only in a turn that reads data.
+    #[test]
+    fn only_a_turn_that_reads_data_says_a_source_could_not_be_checked() {
+        let missing = vec!["Banskobystrický samosprávny kraj".to_owned()];
+        let mut r = routing_of(true, &["doprava"]);
+        assert!(missing_for(&r, missing.clone()).is_empty(), "a page answer");
+        r.catalogue = true;
+        assert!(
+            missing_for(&r, missing.clone()).is_empty(),
+            "a catalogue answer"
+        );
+        r.catalogue = false;
+        r.data = true;
+        assert_eq!(missing_for(&r, missing.clone()), missing);
+        assert_eq!(
+            answer_rules(
+                false,
+                4,
+                true,
+                &missing_for(&routing_of(true, &["q"]), missing)
+            ),
+            ""
+        );
+    }
+
     /// T-4663: "Aké dáta máte o doprave?" is a catalogue question: the router sends it to the
     /// dataset pages, not to rows of one type, and the answer lists datasets by publisher.
     #[test]
     fn a_question_about_which_data_there_is_lists_datasets_not_rows() {
         assert!(ROUTER_RULES.contains("A question about which data, datasets or sources there are on a topic (\"Aké dáta máte o doprave?\""));
         assert!(ROUTER_RULES.contains(
-            "is \"rag\": the catalogue's dataset pages answer it, never rows of one type"
+            "is \"catalogue\": the catalogue's dataset pages answer it, never rows of one type"
         ));
         assert!(ANSWER_RULES.contains(
             "a short list of the matching datasets from the passages, grouped by publisher"
@@ -2893,6 +3118,7 @@ mod tests {
             queries: queries.iter().map(|q| (*q).to_owned()).collect(),
             reads: Vec::new(),
             followups: Vec::new(),
+            catalogue: false,
         }
     }
 
