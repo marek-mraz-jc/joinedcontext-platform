@@ -415,14 +415,22 @@ const ASKS_FOR_DATASETS: &[&str] = &[
 
 // ponytail: phrase list, not a classifier; other wordings still reach the catalogue through the
 // router's own "catalogue" route.
-/// The question asks which data or datasets there are, by one of [`ASKS_FOR_DATASETS`].
+/// The question asks which data or datasets there are, by one of [`ASKS_FOR_DATASETS`] at a
+/// word's start, so "make data" is no "ake data".
 fn asks_for_datasets(question: &str) -> bool {
     let asked = question
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    ASKS_FOR_DATASETS.iter().any(|start| asked.contains(start))
+    ASKS_FOR_DATASETS.iter().any(|phrase| {
+        asked.match_indices(phrase).any(|(at, _)| {
+            asked[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+        })
+    })
 }
 
 /// The route a turn takes, with its queries and reads, as the transcript's `route` step (T-4670).
@@ -477,6 +485,9 @@ pub fn type_names(text: &str) -> Vec<String> {
         .filter(|name| is_type_name(name))
         .map(str::to_owned)
         .collect();
+    // Sorted, so the router's cached prefix reads the same whatever order the broker lists
+    // them in (T-4731).
+    names.sort_unstable();
     names.dedup();
     names.truncate(MAX_TYPES);
     names
@@ -880,8 +891,13 @@ pub fn dataset_pages(found: &[Hit]) -> Vec<Hit> {
     top(found, found.len())
         .into_iter()
         .filter(|hit| {
-            (is_dataset_page(&hit.url) || super::agent::endpoint_slug(&hit.url).is_some())
-                && seen.insert(hit.url.clone())
+            // One Endpoint is one dataset, whichever of its pages was found (T-4729).
+            let key = match super::agent::endpoint_slug(&hit.url) {
+                Some(slug) => format!("endpoint:{slug}"),
+                None if is_dataset_page(&hit.url) => hit.url.clone(),
+                None => return false,
+            };
+            seen.insert(key)
         })
         .take(CATALOGUE_PASSAGES)
         .collect()
@@ -1802,7 +1818,23 @@ fn turns(history: &[Turn], most: usize) -> String {
 }
 
 fn system(rules: &str) -> Value {
-    json!({"role": "system", "content": [{"type": "text", "text": rules, "cache_control": {"type": "ephemeral"}}]})
+    json!({"role": "system", "content": [cached(rules)]})
+}
+
+/// A text part the provider may cache: the prefix up to and including it is kept for the next
+/// call that starts with the same bytes.
+fn cached(text: &str) -> Value {
+    json!({"type": "text", "text": text, "cache_control": {"type": "ephemeral"}})
+}
+
+/// `shared` cached, then `own`, which changes per question, in one message (T-4731). A provider
+/// that keeps only the last breakpoint of a call (Gemini through OpenRouter) caches nothing when
+/// that breakpoint closes on per-question text, nor a rules block alone below its minimum size.
+fn split(role: &str, shared: &str, own: &str) -> Value {
+    if shared.is_empty() {
+        return json!({"role": role, "content": [{"type": "text", "text": own}]});
+    }
+    json!({"role": role, "content": [cached(shared), {"type": "text", "text": own}]})
 }
 
 /// The sources' languages as the router and the follow-up read them.
@@ -1843,15 +1875,12 @@ pub fn router_messages(
             asked.push('\n');
         }
     }
-    asked.push_str(&turns(history, ROUTER_TURNS));
-    asked.push_str(&format!(
-        "{now}\nThe question:\n{}",
+    let own = format!(
+        "{}{now}\nThe question:\n{}",
+        turns(history, ROUTER_TURNS),
         quoted(question.trim())
-    ));
-    vec![
-        system(ROUTER_RULES),
-        json!({"role": "user", "content": asked}),
-    ]
+    );
+    vec![system(ROUTER_RULES), split("user", &asked, &own)]
 }
 
 /// The follow-up call's messages: the last earlier turns, the question, the searches so far, the
@@ -1901,16 +1930,24 @@ fn messages_with(
     tables: &[Value],
 ) -> Vec<Value> {
     let mut rules = ANSWER_RULES.to_owned();
+    let mut own = String::new();
     if let Some(prompt) = system_prompt.map(str::trim).filter(|p| !p.is_empty()) {
         rules.push_str("\n\nThe administrator of this assistant adds:\n");
         rules.push_str(prompt);
         if !more.is_empty() {
-            rules.push_str("\n\nFor this question:");
+            own.push_str("\n\nFor this question:");
         }
     }
-    rules.push_str(more);
+    own.push_str(more);
+    // The rules and the prompt are the cached part; what changes per question follows them in
+    // a part of its own, so the breakpoint closes on the same bytes for every question (T-4731).
+    let system = if own.is_empty() {
+        system(&rules)
+    } else {
+        json!({"role": "system", "content": [cached(&rules), {"type": "text", "text": own}]})
+    };
     vec![
-        system(&rules),
+        system,
         json!({"role": "user", "content": format!(
             "{}{now}\nThe question:\n{}",
             turns(history, ANSWER_TURNS),
@@ -2844,6 +2881,22 @@ pub fn worth_keeping(completion: &Completion, text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A message's text: its string content, or its parts' texts one after the other.
+    fn text(message: &Value) -> String {
+        let content = &message["content"];
+        content.as_str().map_or_else(
+            || {
+                content
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect()
+            },
+            str::to_owned,
+        )
+    }
+
     /// T-4671: the day's limit names the next UTC midnight as the deployment's zone reads it,
     /// today or tomorrow, and never a number of the budget.
     #[test]
@@ -3029,6 +3082,8 @@ mod tests {
             .catalogue
         );
         assert!(!routing(rag, "Kedy je otvorená knižnica?", &[]).catalogue);
+        assert!(!asks_for_datasets("Can you make data easier to read?"));
+        assert!(asks_for_datasets("Prosím, aké dáta máte o doprave?"));
         // A data question keeps its reads, whatever its wording.
         let live = vec![Shown {
             endpoint: "ovzdusie".into(),
@@ -3073,6 +3128,11 @@ mod tests {
             ),
             hit(6, "https://www.bbsk.sk/doprava", 0.7),
             hit(7, "https://opendata.dev.example/dataset/", 0.6),
+            hit(
+                8,
+                "https://api.dev.example/api/endpoint/praha-mesto/ngsi-ld/v1/types",
+                0.4,
+            ),
         ];
         let pages = dataset_pages(&found);
         assert_eq!(pages.iter().map(|h| h.chunk).collect::<Vec<_>>(), [3, 2, 4]);
@@ -3709,7 +3769,7 @@ mod tests {
         };
         let plain = shown("slovensko/ovzdusie-sk", &["AirQualityObserved"], &[]);
         let messages = router_messages(&[], "Nezamestnanosť?", &[titled, plain], &[], "now");
-        let asked = messages[1]["content"].as_str().expect("text");
+        let asked = &text(&messages[1]);
         assert!(asked.contains("- slovensko/susr-pr (Unemployment, Slovak statistics): KeyPerformanceIndicator; indicator\n"), "{asked}");
         assert!(
             asked.contains("- slovensko/ovzdusie-sk: AirQualityObserved\n"),
@@ -3777,7 +3837,7 @@ mod tests {
             &["sk".into()],
             NOW,
         );
-        let content = asked[1]["content"].as_str().unwrap_or_default();
+        let content = &text(&asked[1]);
         for line in [
             "- bbsk/bbsk-otvorene-data: PointOfInterest, School, StatisticalObservation, RoadAccident, Grant, Contract, EVChargingStation; category, druhZariadenia, okresPoskytovania, mestoPoskytovania, nazovSkoly, okres, name\n",
             "- banskabystrica-verejne: AirQualityObserved, WeatherObserved; pm10, pm2_5, no2, dateObserved\n",
@@ -4140,7 +4200,7 @@ mod tests {
             },
         ];
         let router = router_messages(&earlier, "ake su tam historicke udaje??", &[], &[], NOW);
-        let read = router[1]["content"].as_str().unwrap_or_default();
+        let read = &text(&router[1]);
         assert!(
             read.contains("SK0020A") && read.contains("SK0263A"),
             "{read}"
@@ -4175,7 +4235,7 @@ mod tests {
             router[0]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
-        let asked = router[1]["content"].as_str().unwrap_or_default();
+        let asked = &text(&router[1]);
         // T-4680: the sources and live data come before the turns, the shared part first.
         let live = vec![Shown {
             title: None,
@@ -4186,8 +4246,8 @@ mod tests {
         let sk = ["sk".to_owned()];
         let fresh = router_messages(&[], "Iné?", &live, &sk, NOW);
         let later = router_messages(&history, "A čo tam?", &live, &sk, NOW);
-        let fresh = fresh[1]["content"].as_str().unwrap_or_default();
-        let later = later[1]["content"].as_str().unwrap_or_default();
+        let fresh = &text(&fresh[1]);
+        let later = &text(&later[1]);
         let shared = fresh.split(NOW).next().unwrap_or_default();
         assert!(
             shared.contains("bbsk-registre: Bridge; yearBuilt"),
@@ -4239,14 +4299,12 @@ mod tests {
         let plain = messages_with(Some("Buď stručný."), "", &[], "Kde?", "now", &[], &[]);
         let with_data = messages_with(Some("Buď stručný."), &missed, &[], "Kde?", "now", &[], &[]);
         let plain = plain[0]["content"][0]["text"].as_str().unwrap_or_default();
-        let with_data = with_data[0]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default();
+        let with_data = &text(&with_data[0]);
         assert!(with_data.starts_with(plain) && plain.ends_with("Buď stručný."));
         assert!(with_data.contains("For this question:") && with_data.ends_with(missed.as_str()));
         for (with, more) in [("answer", ""), ("data", data_rules.as_str())] {
             let all = messages_with(None, more, &[], "Kde?", "now", &passages, &[]);
-            let text = all[0]["content"][0]["text"].as_str().unwrap_or_default();
+            let text = text(&all[0]);
             assert!(!text.contains("what you could not read"), "{with}: {text}");
         }
         let data = one[2]["content"].as_str().unwrap_or_default();
@@ -4289,6 +4347,75 @@ mod tests {
     /// T-4339: every call of the routed answer reads the injected moment beside the question,
     /// while the cached rules stay byte for byte the same a minute later; "today" is bounded by the
     /// local day the router is told.
+    /// T-4731: the router was 0 % cached on dev and prod. Its only breakpoint closed on the
+    /// rules, below the provider's minimum, while the live list sat uncached beside the question.
+    /// The cached part is now the rules and the deployment's sources, byte for byte the same for
+    /// any question, date and conversation; the turns, the moment and the question come after it.
+    #[test]
+    fn the_router_s_cached_prefix_is_the_same_for_every_question_and_date() {
+        let live = vec![Shown {
+            title: Some("Registre".into()),
+            endpoint: "bbsk/bbsk-registre".into(),
+            types: vec!["Bridge".into(), "School".into()],
+            attributes: vec!["yearBuilt".into()],
+        }];
+        let sk = ["sk".to_owned()];
+        let history = [Turn {
+            role: "user".into(),
+            text: "Koľko je mostov?".into(),
+        }];
+        let later = "Now: Saturday 2026-10-17 08:00 UTC (2026-10-17T08:00Z).";
+        let calls = [
+            router_messages(&[], "Aké dáta máte o doprave?", &live, &sk, NOW),
+            router_messages(&[], "Koľko je škôl?", &live, &sk, later),
+            router_messages(&history, "A v okrese Brezno?", &live, &sk, later),
+        ];
+        let shared = &calls[0][1]["content"][0];
+        assert_eq!(shared["cache_control"]["type"], "ephemeral");
+        let prefix = shared["text"].as_str().expect("text");
+        assert!(prefix.contains("bbsk/bbsk-registre (Registre): Bridge, School; yearBuilt"));
+        for call in &calls {
+            assert_eq!(call[0], calls[0][0], "the rules");
+            assert_eq!(&call[1]["content"][0], shared, "the sources");
+            let own = &call[1]["content"][1];
+            assert!(own.get("cache_control").is_none());
+            assert!(own["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("The question:\n")));
+            assert!(!prefix.contains("Now:") && !prefix.contains("The question"));
+        }
+        // No sources and no languages: nothing to cache beside the rules, one plain part.
+        let bare = router_messages(&[], "Ahoj", &[], &[], NOW);
+        assert_eq!(bare[1]["content"].as_array().map(Vec::len), Some(1));
+        assert!(bare[1]["content"][0].get("cache_control").is_none());
+        // A broker that lists its types in another order changes nothing the router reads.
+        let one = type_names(r#"["School","Bridge","School"]"#);
+        assert_eq!(one, type_names(r#"["Bridge","School"]"#));
+        assert_eq!(one, ["Bridge", "School"]);
+    }
+
+    /// T-4731: the answer call's cached part is the rules and the administrator's prompt alone;
+    /// the rules of one question (the data loop's, a source that did not answer) follow it.
+    #[test]
+    fn the_answer_s_cached_part_closes_before_the_rules_of_one_question() {
+        let plain = messages_with(Some("Buď stručný."), "", &[], "Kde?", NOW, &[], &[]);
+        let more = "\nA source did not answer.";
+        let with_more = messages_with(Some("Buď stručný."), more, &[], "Kde?", NOW, &[], &[]);
+        assert_eq!(plain[0]["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(with_more[0]["content"][0], plain[0]["content"][0]);
+        assert_eq!(
+            with_more[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        let own = &with_more[0]["content"][1];
+        assert!(own.get("cache_control").is_none());
+        assert_eq!(own["text"], format!("\n\nFor this question:{more}"));
+        // Without a prompt the per-question rules still follow the cached rules.
+        let bare = messages_with(None, more, &[], "Kde?", NOW, &[], &[]);
+        assert_eq!(bare[0]["content"][0]["text"], ANSWER_RULES);
+        assert_eq!(bare[0]["content"][1]["text"], more);
+    }
+
     #[test]
     fn every_routed_call_reads_the_moment_and_the_prefix_stays_cached() {
         use super::super::clock::{now_line, Zone};
@@ -4308,7 +4435,7 @@ mod tests {
         );
         let answer = messages_with(None, "", &[], question, &at, &[], &[]);
         for messages in [&router, &follow, &answer] {
-            let user = messages[1]["content"].as_str().unwrap_or_default();
+            let user = &text(&messages[1]);
             assert!(
                 user.contains(&format!("{local}\nThe question:\n")),
                 "{user}"
@@ -4405,7 +4532,7 @@ mod tests {
             &["sk".into(), "en".into()],
             NOW,
         );
-        let content = asked[1]["content"].as_str().unwrap_or_default();
+        let content = &text(&asked[1]);
         assert!(
             content.starts_with("The sources are written in: sk, en.\n"),
             "{content}"
