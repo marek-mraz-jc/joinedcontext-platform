@@ -5,7 +5,6 @@
 //! without a tool call is the answer. The bounds, the allowlist and the arguments are checked
 //! here, never left to the model.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -25,10 +24,6 @@ const STEP_RESULT_CHARS: usize = 8_000;
 /// The tokens one question's loop may spend before its next call must be the answer (T-4651).
 /// ponytail: one number for every deployment; an `answer` field when one needs another.
 pub const QUESTION_TOKENS: u64 = 60_000;
-
-/// The most input tokens one call of the loop carries, its tool specs counted (T-4731, owner's
-/// order): calls of 125k-140k tokens were most of a data answer's time and cost on dev.
-const CALL_TOKENS: u64 = 100_000;
 
 /// What the answering model is told beside the routed answer's rules: when to call a tool, how
 /// NGSI-LD is asked, and that every number comes from a result. `{steps}` is the deployment's
@@ -283,23 +278,24 @@ pub async fn answer(
             )
             .await;
         }
-        let sent = capped(&messages, &tools, &tables);
         let at = Instant::now();
-        let pending = ask
-            .trace
-            .pending("data", call.model.unwrap_or(ask.model.name()), at, &sent);
+        let pending = ask.trace.pending(
+            "data",
+            call.model.unwrap_or(ask.model.name()),
+            at,
+            &messages,
+        );
         let stepped = ask
             .model
             .step(
                 ask.deployment,
                 ask.tokens_per_day,
                 &call,
-                &sent,
+                &messages,
                 &tools,
                 allow,
             )
             .await;
-        drop(sent);
         pending.done(stepped.as_ref());
         super::agent::Stages::add(&mut spent.stages.answer, at);
         let completion = match stepped {
@@ -339,112 +335,107 @@ pub async fn answer(
             .collect();
         messages
             .push(json!({"role": "assistant", "content": completion.text, "tool_calls": calls}));
-        for (at, (id, name, arguments)) in completion.calls.iter().enumerate() {
-            // Every call is answered, so the history stays whole; what is refused is never sent.
-            let content = if at >= MAX_CALLS_PER_REPLY
+        // Every call is answered, so the history stays whole; what is refused is never sent. The
+        // calls to send go out at once and are numbered in the reply's order (T-4731): one after
+        // another, a reply of two reads lost about 0.9 s on dev.
+        let mut replies: Vec<Reply<'_>> = Vec::new();
+        for (at, (_, name, arguments)) in completion.calls.iter().enumerate() {
+            let reply = if at >= MAX_CALLS_PER_REPLY
                 || !may_call(steps, started.elapsed(), ask.data_steps, ask.data_time)
             {
-                "Not run: the question's tool calls are used up. Answer from what you have."
-                    .to_owned()
+                Reply::Said(
+                    "Not run: the question's tool calls are used up. Answer from what you have."
+                        .to_owned(),
+                )
             } else if narrowed && name == MORE_TOOLS {
                 // The escape hatch costs no step: the question's reads are still its own.
                 narrowed = false;
                 offered = all.clone();
                 tools = tool_specs(&offered, viz.is_some(), narrowed);
                 tracing::info!(deployment = %ask.deployment, tools = offered.len(), "the data loop asked for every tool");
-                "Every tool of every Endpoint is offered now. Call the one the question needs."
-                    .to_owned()
+                Reply::Said(
+                    "Every tool of every Endpoint is offered now. Call the one the question needs."
+                        .to_owned(),
+                )
             } else if arguments.len() > MAX_ARGUMENTS {
-                format!("Not run: the arguments are longer than {MAX_ARGUMENTS} characters; call it with fewer.")
+                Reply::Said(format!("Not run: the arguments are longer than {MAX_ARGUMENTS} characters; call it with fewer."))
             } else {
                 steps += 1;
                 let key = format!("{name}\u{0}{arguments}");
                 match (seen.get(&key), viz) {
-                    (Some(earlier), _) => earlier.clone(),
+                    (Some(earlier), _) => Reply::Said(earlier.clone()),
                     (None, Some(domain)) if name == super::viz::TOOL => {
-                        show(&tables, arguments, domain, &mut shown, events).await
+                        Reply::Chart(arguments, domain)
                     }
-                    (None, _) => {
-                        let left = ask.data_time.saturating_sub(started.elapsed());
-                        let content = step(
-                            ask,
-                            &offered,
-                            (name, arguments),
-                            left,
-                            &mut citations,
-                            &mut tables,
-                            events,
-                        )
-                        .await;
-                        seen.insert(key, content.clone());
-                        content
-                    }
+                    (None, _) => match replies.iter().position(|r| r.runs(&key)) {
+                        Some(earlier) => Reply::Same(earlier),
+                        None => match checked(ask, &offered, (name, arguments)) {
+                            Ok(c) => Reply::Run(c, key),
+                            Err(refused) => {
+                                seen.insert(key, refused.clone());
+                                Reply::Said(refused)
+                            }
+                        },
+                    },
                 }
             };
+            replies.push(reply);
+        }
+        let left = ask.data_time.saturating_sub(started.elapsed());
+        for reply in &replies {
+            if let Reply::Run(c, _) = reply {
+                self::started(c, events).await;
+            }
+        }
+        let outs = futures_util::future::join_all(replies.iter().map(|reply| async move {
+            match reply {
+                Reply::Run(c, _) => Some(sent(ask, c, left).await),
+                _ => None,
+            }
+        }))
+        .await;
+        let mut contents: Vec<String> = Vec::new();
+        for (reply, out) in replies.iter().zip(outs) {
+            let content = match (reply, out) {
+                (Reply::Run(c, key), Some(out)) => {
+                    let content = recorded(ask, c, out, &mut citations, &mut tables, events).await;
+                    seen.insert(key.clone(), content.clone());
+                    content
+                }
+                (Reply::Same(earlier), _) => contents.get(*earlier).cloned().unwrap_or_default(),
+                (Reply::Chart(arguments, domain), _) => {
+                    show(&tables, arguments, domain, &mut shown, events).await
+                }
+                (Reply::Said(text), _) => text.clone(),
+                // every call to send has its answer; this is the pairing's other half
+                (Reply::Run(..), None) => {
+                    "The call was not made. Answer from what you have.".into()
+                }
+            };
+            contents.push(content);
+        }
+        for ((id, _, _), content) in completion.calls.iter().zip(contents) {
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
         }
     }
 }
 
-/// A rough token count of `values`, four characters a token, as the loop's own estimate.
-fn tokens_in(values: &[Value]) -> u64 {
-    (values
-        .iter()
-        .map(|v| v.to_string().chars().count())
-        .sum::<usize>()
-        / 4) as u64
+/// What one tool call of a reply is answered with.
+enum Reply<'a> {
+    /// A text that needs no call: a refusal, a repeat of an earlier step, the escape hatch.
+    Said(String),
+    /// A checked call to send, with its key in the question's `seen`.
+    Run(Checked<'a>, String),
+    /// The same call as an earlier one of this reply, by its place.
+    Same(usize),
+    /// A chart of the tables read so far, this reply's earlier reads included.
+    Chart(&'a str, &'a str),
 }
 
-/// The messages one call sends: within [`CALL_TOKENS`] with its `tools`, the oldest step results
-/// shortened first to a line naming their tool, Endpoint and rows. The newest two step results,
-/// the rules, the question and the router's tables and passages stay whole, and a call that is
-/// still over goes as it is: size never refuses a question (T-4731).
-fn capped<'m>(
-    messages: &'m [Value],
-    tools: &[Value],
-    tables: &[(usize, Table)],
-) -> Cow<'m, [Value]> {
-    let mut size = tokens_in(messages) + tokens_in(tools);
-    if size <= CALL_TOKENS {
-        return Cow::Borrowed(messages);
+impl Reply<'_> {
+    fn runs(&self, key: &str) -> bool {
+        matches!(self, Reply::Run(_, k) if k == key)
     }
-    let results: Vec<usize> = (0..messages.len())
-        .filter(|&i| messages[i]["role"] == "tool")
-        .collect();
-    let mut out = messages.to_vec();
-    for &i in &results[..results.len().saturating_sub(2)] {
-        if size <= CALL_TOKENS {
-            break;
-        }
-        let Some(short) = shortened(&out[i]["content"], tables) else {
-            continue;
-        };
-        let before = tokens_in(&out[i..=i]);
-        out[i]["content"] = Value::String(short);
-        size = size - before + tokens_in(&out[i..=i]);
-    }
-    Cow::Owned(out)
-}
-
-/// A step result as one line: its number, tool, Endpoint and rows, without what it read. `None`
-/// for a message that is no step result (a refusal, the escape hatch's reply), which is short.
-fn shortened(content: &Value, tables: &[(usize, Table)]) -> Option<String> {
-    let result: Value = serde_json::from_str(content.as_str()?).ok()?;
-    let n = result.get("n")?.as_u64()?;
-    let rows = tables
-        .iter()
-        .find(|(at, _)| *at as u64 == n)
-        .map(|(_, t)| t.rows.len());
-    Some(
-        json!({
-            "n": n,
-            "tool": result["tool"],
-            "endpoint": result["endpoint"],
-            "rows": rows,
-            "result": "shortened to keep the call small: call the tool again for its values",
-        })
-        .to_string(),
-    )
 }
 
 /// One `show_visualization` call (T-4657): built from a table of this answer and sent as a
@@ -469,42 +460,63 @@ async fn show(
     }
 }
 
-/// One tool call of the model: refused unless it names an offered tool with arguments its schema
-/// admits, else sent, shown as a stage and a `tool` event, and numbered for citing. It waits at
-/// most `left` of the question's data seconds: up to four calls of one reply run one after the
-/// other, and each waiting out its connector's own timeout took a question to the 45 s cut
-/// (T-4663).
-async fn step(
+/// One tool call of the model, checked: an offered tool with arguments its schema admits.
+struct Checked<'a> {
+    o: Offered<'a>,
+    arguments: Value,
+}
+
+/// What a sent call came back with: the answer or why it failed, the table a read makes, and how
+/// long the call took.
+type Sent = (Result<String, String>, Option<Table>, u64);
+
+/// A tool call checked before it is sent: refused unless it names an offered tool with arguments
+/// its schema admits.
+fn checked<'a>(
     ask: &Ask<'_>,
-    offered: &[Offered<'_>],
+    offered: &[Offered<'a>],
     (name, arguments): (&str, &str),
-    left: Duration,
-    citations: &mut Vec<Citation>,
-    tables: &mut Vec<(usize, Table)>,
-    events: &Sender<Event>,
-) -> String {
+) -> Result<Checked<'a>, String> {
     let Some(o) = offered.iter().find(|o| o.name == name) else {
         tracing::warn!(deployment = %ask.deployment, tool = %name, "the model asked for a tool it was not offered");
-        return "There is no tool of that name. Use only the tools you were given.".into();
+        return Err("There is no tool of that name. Use only the tools you were given.".into());
     };
     let arguments: Value = serde_json::from_str(arguments)
         .ok()
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     if let Err(why) = fits(&o.tool.input_schema, &arguments) {
-        return format!(
+        return Err(format!(
             "The call was not made: {why}. Correct the arguments, or answer without this tool."
-        );
+        ));
     }
-    let endpoint = o.connector.endpoint.clone();
-    let (stage, topic) = stage_of(&o.tool.name, &endpoint, &arguments);
-    send(events, Event::Stage { stage, topic }).await;
-    let tool = |status| Event::Tool {
-        name: o.tool.name.clone(),
-        endpoint: Some(endpoint.clone()),
+    Ok(Checked {
+        o: o.clone(),
+        arguments,
+    })
+}
+
+/// A checked call's `tool` event with `status`.
+fn tool_event(c: &Checked<'_>, status: &'static str) -> Event {
+    Event::Tool {
+        name: c.o.tool.name.clone(),
+        endpoint: Some(c.o.connector.endpoint.clone()),
         status,
-    };
-    send(events, tool("started")).await;
+    }
+}
+
+/// A call about to be sent, shown as a stage and a started `tool` event.
+async fn started(c: &Checked<'_>, events: &Sender<Event>) {
+    let (stage, topic) = stage_of(&c.o.tool.name, &c.o.connector.endpoint, &c.arguments);
+    send(events, Event::Stage { stage, topic }).await;
+    send(events, tool_event(c, "started")).await;
+}
+
+/// Sends a checked call and makes a read's table, waiting at most `left` of the question's data
+/// seconds: each waiting out its connector's own timeout took a question to the 45 s cut
+/// (T-4663). Sends no event, so the calls of one reply run at once (T-4731).
+async fn sent(ask: &Ask<'_>, c: &Checked<'_>, left: Duration) -> Sent {
+    let Checked { o, arguments } = c;
     let began = Instant::now();
     let answered = tokio::time::timeout(
         left,
@@ -514,31 +526,51 @@ async fn step(
     )
     .await
     .unwrap_or_else(|_| Err("the source did not answer within the question's time".into()));
-    ask.trace
-        .tool(&o.tool.name, Some(&endpoint), &arguments, began, &answered);
-    let ms = began.elapsed().as_millis() as u64;
+    ask.trace.tool(
+        &o.tool.name,
+        Some(&o.connector.endpoint),
+        arguments,
+        began,
+        &answered,
+    );
+    let mut table = None;
+    if let (Ok(text), "query_entities", Some(kind)) =
+        (&answered, o.tool.name.as_str(), type_of(arguments))
+    {
+        table = super::routed::table(
+            ask,
+            o.connector,
+            &kind,
+            text,
+            &super::routed::asked_of(arguments),
+        )
+        .await;
+    }
+    (answered, table, began.elapsed().as_millis() as u64)
+}
+
+/// A sent call's result, in the order of the reply's calls: its `tool` event, its table, and the
+/// number it is cited by.
+async fn recorded(
+    ask: &Ask<'_>,
+    c: &Checked<'_>,
+    (answered, table, ms): Sent,
+    citations: &mut Vec<Citation>,
+    tables: &mut Vec<(usize, Table)>,
+    events: &Sender<Event>,
+) -> String {
+    let o = &c.o;
+    let endpoint = o.connector.endpoint.clone();
     match answered {
         Ok(text) => {
-            send(events, tool("done")).await;
+            send(events, tool_event(c, "done")).await;
             let (mut rows, mut dataset) = (None, None);
-            if o.tool.name == "query_entities" {
-                if let Some(kind) = type_of(&arguments) {
-                    if let Some(table) = super::routed::table(
-                        ask,
-                        o.connector,
-                        &kind,
-                        &text,
-                        &super::routed::asked_of(&arguments),
-                    )
-                    .await
-                    {
-                        rows = Some(table.rows.len());
-                        dataset = table.dataset.clone();
-                        if !table.rows.is_empty() {
-                            tables.push((citations.len() + 1, table.clone()));
-                            send(events, Event::Data(table)).await;
-                        }
-                    }
+            if let Some(table) = table {
+                rows = Some(table.rows.len());
+                dataset = table.dataset.clone();
+                if !table.rows.is_empty() {
+                    tables.push((citations.len() + 1, table.clone()));
+                    send(events, Event::Data(table)).await;
                 }
             }
             // What a step did, never what it read (T-4294's per-step record).
@@ -556,7 +588,7 @@ async fn step(
         }
         Err(why) => {
             tracing::info!(deployment = %ask.deployment, tool = %o.tool.name, endpoint = %endpoint, status = "failed", ms, "data step");
-            send(events, tool("failed")).await;
+            send(events, tool_event(c, "failed")).await;
             format!("The tool refused or failed ({}). Correct the arguments once, or answer without it and say so.", quoted(&why))
         }
     }
@@ -565,83 +597,6 @@ async fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A step result of `chars` characters, as [`step`] writes it.
-    fn result(n: usize, chars: usize) -> Value {
-        let content = json!({"n": n, "tool": "query_entities", "endpoint": "ovzdusie", "result": "x".repeat(chars)});
-        json!({"role": "tool", "tool_call_id": format!("c{n}"), "content": content.to_string()})
-    }
-
-    /// The rules, a question of `question` characters and `results` step results of 40 000
-    /// characters each (10 000 tokens), numbered from 2.
-    fn conversation(question: usize, results: usize) -> Vec<Value> {
-        let mut messages = vec![
-            json!({"role": "system", "content": "rules"}),
-            json!({"role": "user", "content": "q".repeat(question)}),
-        ];
-        for n in 2..2 + results {
-            messages.push(json!({"role": "assistant", "content": "", "tool_calls": []}));
-            messages.push(result(n, 40_000));
-        }
-        messages
-    }
-
-    fn rows(n: usize, rows: usize) -> (usize, Table) {
-        let table = Table {
-            rows: vec![vec![json!(1)]; rows],
-            ..Table::default()
-        };
-        (n, table)
-    }
-
-    #[test]
-    fn a_call_under_the_cap_or_empty_is_sent_as_it_is() {
-        let messages = conversation(4_000, 3);
-        assert!(matches!(capped(&messages, &[], &[]), Cow::Borrowed(_)));
-        assert!(matches!(capped(&[], &[], &[]), Cow::Borrowed(_)));
-    }
-
-    /// 75 000 tokens of question and tables and four results of 10 000: the two oldest are
-    /// shortened, the newest two and the question stay whole, and the call fits (T-4731).
-    #[test]
-    fn a_call_over_the_cap_shortens_the_oldest_results_first() {
-        let messages = conversation(300_000, 4);
-        let tables = [rows(2, 7), rows(3, 2)];
-        let sent = capped(&messages, &[], &tables);
-        assert!(tokens_in(&sent) <= CALL_TOKENS, "{}", tokens_in(&sent));
-        assert_eq!(sent[1], messages[1], "the question is whole");
-        let short: Value = serde_json::from_str(sent[3]["content"].as_str().unwrap_or_default())
-            .unwrap_or_default();
-        assert_eq!(
-            (&short["n"], &short["endpoint"], &short["rows"]),
-            (&json!(2), &json!("ovzdusie"), &json!(7))
-        );
-        assert_ne!(sent[5], messages[5], "the second oldest is shortened too");
-        assert_eq!(sent[7], messages[7]);
-        assert_eq!(sent[9], messages[9]);
-    }
-
-    /// The tool specs count, and a call still over once only the newest two are whole goes as it
-    /// is: the question is never cut and never refused for its size.
-    #[test]
-    fn a_call_that_stays_over_keeps_the_newest_two_and_the_question() {
-        let messages = conversation(380_000, 3);
-        let tools = vec![json!({"description": "t".repeat(40_000)})];
-        let sent = capped(&messages, &tools, &[]);
-        assert!(tokens_in(&sent) + tokens_in(&tools) > CALL_TOKENS);
-        assert_eq!(sent.len(), messages.len());
-        assert_eq!(sent[1], messages[1]);
-        assert_ne!(sent[3], messages[3]);
-        assert_eq!((&sent[5], &sent[7]), (&messages[5], &messages[7]));
-        // a reply that is no step result is never rewritten
-        let refused = vec![
-            json!({"role": "user", "content": "q".repeat(420_000)}),
-            json!({"role": "tool", "tool_call_id": "c", "content": "The tool refused or failed."}),
-            result(2, 10),
-            result(3, 10),
-        ];
-        assert_eq!(capped(&refused, &[], &[]).as_ref(), &refused[..]);
-    }
 
     fn connector(endpoint: &str, tools: &[&str]) -> Connected {
         Connected {
