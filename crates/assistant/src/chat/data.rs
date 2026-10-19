@@ -545,15 +545,21 @@ mod tests {
             endpoint: "ovzdusie".into(),
             entity_type: "AirQualityObserved".into(),
             columns: vec!["name".into(), "pm10".into()],
-            rows: vec![vec![json!("Námestie SNP"), json!(21)]],
+            // Three values: a chart of fewer is not drawn (T-4682).
+            rows: vec![
+                vec![json!("Námestie SNP"), json!(21)],
+                vec![json!("Zvolen"), json!(9)],
+                vec![json!("Žilina"), json!(14)],
+            ],
             units: vec![None, Some("µg/m³".into())],
             labels: Vec::new(),
+            enums: Vec::new(),
             summary: Vec::new(),
             total: None,
             dataset: None,
             download: None,
             map: None,
-            geometries: vec![None],
+            geometries: vec![None, None, None],
         };
         let tables = [(2, table)];
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);

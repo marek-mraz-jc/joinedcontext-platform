@@ -189,6 +189,59 @@ pub fn display_order(
         .collect())
 }
 
+/// The words each value of `class`'s `slot` reads as, per language (T-4682): the slot's range is
+/// one of the model's `enums`, and each `permissible_values` entry's `label` annotation (a language
+/// map) says it, its `description` in the model's language where the label has none. `None` when
+/// the range is no enum of the model or no value says anything; a value without words is left out,
+/// so it is shown as written. Text, never markup.
+pub fn enum_words(
+    linkml: &str,
+    class: &str,
+    slot: &str,
+) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
+    let schema: Value = serde_norway::from_str(linkml).ok()?;
+    let node = schema.get("classes").and_then(|c| c.get(class));
+    let range = [
+        node.and_then(|n| n.get("slot_usage"))
+            .and_then(|u| u.get(slot)),
+        node.and_then(|n| n.get("attributes"))
+            .and_then(|a| a.get(slot)),
+        schema.get("slots").and_then(|s| s.get(slot)),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|n| n.get("range")?.as_str())?;
+    let values = schema
+        .get("enums")?
+        .get(range)?
+        .get("permissible_values")?
+        .as_mapping()?;
+    let language = schema
+        .get("in_language")
+        .or_else(|| schema.get("default_language"))
+        .and_then(Value::as_str)
+        .unwrap_or("en");
+    let words: BTreeMap<String, BTreeMap<String, String>> = values
+        .iter()
+        .filter_map(|(value, about)| {
+            let mut said: BTreeMap<String, String> = annotation(about, "label")
+                .as_ref()
+                .and_then(Value::as_mapping)
+                .into_iter()
+                .flatten()
+                .filter_map(|(l, t)| Some((l.as_str()?.to_owned(), t.as_str()?.to_owned())))
+                .collect();
+            if let Some(text) = about.get("description").and_then(Value::as_str) {
+                said.entry(language.to_owned())
+                    .or_insert_with(|| text.to_owned());
+            }
+            let value = value.as_str()?.to_owned();
+            (!said.is_empty()).then_some((value, said))
+        })
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
 /// The class's slots in written order (own `slots`, own `attributes`, then each ancestor's
 /// through `is_a` and `mixins`, nearest first) and what the model says about each. A class the
 /// model does not declare has none.
