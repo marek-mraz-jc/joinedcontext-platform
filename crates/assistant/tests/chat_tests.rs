@@ -3660,6 +3660,62 @@ async fn a_data_question_with_rows_does_not_wait_for_the_first_rounds_judgement(
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4731: the two reads of one reply go out at once and are numbered in the reply's order. Each
+/// read takes 2 s: the router's read and the reply's two used to take 6 s in a row.
+#[tokio::test]
+async fn a_replys_tool_calls_run_at_once_and_keep_their_order() {
+    let pause = std::time::Duration::from_secs(2);
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatreplyonce", d).await;
+    recorded_air_after(&w.gateway, SLUG, pause).await;
+    let read = |id: &str, limit: u64| json!({"id": id, "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": ["AirQualityObserved"], "limit": limit}).to_string()}});
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 50),
+    ], vec![
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [read("c1", 5), read("c2", 7)]}), 1_000),
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [2] a 34 [3]."}), 1_200),
+    ]).await;
+    let began = std::time::Instant::now();
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 najvyššie?"}), Some(ORIGIN)),
+    )
+    .await;
+    let took = began.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let statuses: Vec<&str> = events
+        .iter()
+        .filter(|(n, _)| n == "tool")
+        .filter_map(|(_, d)| d["status"].as_str())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["started", "done", "started", "started", "done", "done"]
+    );
+    let all = model_calls(&w.proxy).await;
+    let last = calls_of(&all, None)
+        .last()
+        .and_then(|c| c["messages"].as_array().cloned())
+        .unwrap_or_default();
+    let results: Vec<(Value, Value)> = last
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| {
+            let r: Value =
+                serde_json::from_str(m["content"].as_str().unwrap_or_default()).unwrap_or_default();
+            (m["tool_call_id"].clone(), r["n"].clone())
+        })
+        .collect();
+    assert_eq!(results, [(json!("c1"), json!(2)), (json!("c2"), json!(3))]);
+    // in a row: 6 s; the reply's two at once: 4 s
+    eprintln!("a reply of two reads: {took:?}");
+    assert!(took < pause * 5 / 2, "{took:?}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4294: after the router's read the model filters once more and then answers on its own; a
 /// tool it makes up is refused to it and never sent, the write the manifest names is never
 /// offered, and both reads are tables the answer can cite.
