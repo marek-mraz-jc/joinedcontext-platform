@@ -182,6 +182,13 @@
           ],
           "description": "How often the data changes, from the EU frequency table: `dct:accrualPeriodicity`."
         },
+        "harvest": {
+          "description": "Whether the installation's and the project's feeds list the record (EP-139, EP-84, EP-127). `false` for a door over data other datasets already publish, such as a whole space split into one dataset per type: its own record stays, a harvester never takes the same data twice. Unset is `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "keywords": {
           "additionalProperties": {
             "items": {

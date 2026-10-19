@@ -151,6 +151,55 @@ async fn the_feed_lists_every_public_endpoint_and_nothing_else() {
     }
 }
 
+/// EP-139, T-4744: a door over a space whose types are split into datasets of their own stays
+/// public with its record, licence included, and the feed leaves it out; `harvest: true` is
+/// listed as an unset one is.
+#[tokio::test]
+async fn a_door_with_harvest_false_keeps_its_record_and_leaves_the_feed() {
+    let realm = common::Realm::new();
+    let block = |harvest| {
+        Some(Arc::new(jc_core::kinds::Catalog {
+            harvest,
+            license: Some(jc_core::kinds::catalog::Licence::CcBy4),
+            ..Default::default()
+        }))
+    };
+    let mut door = endpoint(OPEN, "ovzdusie", Audience::Public);
+    door.catalog = block(Some(false));
+    let mut dataset = endpoint(ALSO_OPEN, "doprava", Audience::Public);
+    dataset.catalog = block(Some(true));
+    let served = || vec![door.clone(), dataset.clone()];
+
+    let (status, _, _, body) = get(app_of(&realm, served()), "/catalog.jsonld", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let feed: Value = serde_json::from_str(&body).expect("JSON-LD");
+    let datasets: Vec<&str> = feed["dcat:dataset"]
+        .as_array()
+        .expect("datasets")
+        .iter()
+        .filter_map(|d| d["@id"].as_str())
+        .collect();
+    assert_eq!(datasets, vec![format!("{HOST}/api/endpoint/{ALSO_OPEN}")]);
+    assert!(!body.contains(OPEN), "the feed names the door: {body}");
+    let (_, _, _, turtle) = get(app_of(&realm, served()), "/catalog.ttl", None).await;
+    assert!(
+        !turtle.contains(OPEN),
+        "the Turtle names the door: {turtle}"
+    );
+
+    let (status, _, _, record) = get(
+        app_of(&realm, served()),
+        &format!("/api/endpoint/{OPEN}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert!(
+        record.contains("licence/CC_BY_4_0"),
+        "the door keeps its licence: {record}"
+    );
+}
+
 #[tokio::test]
 async fn the_turtle_says_the_same_and_a_members_token_widens_nothing() {
     let realm = common::Realm::new();
