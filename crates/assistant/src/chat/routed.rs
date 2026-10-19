@@ -2519,11 +2519,10 @@ async fn answer_routed(
     let mut opened = opening(q, &router, &judge, &messages, &live, reserve).await;
     spent.stages.route = Some(millis(opened.took));
     let beside = opened.beside();
-    let first_round_left = if beside { opened.first.take() } else { None };
-    let (first_hits, first_covers, judged_answers, more) = if beside {
-        (None, false, false, Vec::new())
+    let (first_round_left, (first_hits, first_covers, judged_answers, more)) = if beside {
+        (opened.first.take(), (None, false, false, Vec::new()))
     } else {
-        opened.settle(q, &mut spent).await
+        (None, opened.settle(q, &mut spent).await)
     };
     let Opening {
         routed,
