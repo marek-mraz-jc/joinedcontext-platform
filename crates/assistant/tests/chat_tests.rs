@@ -685,10 +685,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "download": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
         })
     );
-    // No page of the sources gives this Endpoint's address: the live data stays unlinked.
+    // No page of the sources publishes the type: the rows cite their own listing, named by the
+    // type, never another dataset's page (T-4747).
     assert_eq!(
         events[8].1,
-        json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
+        json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie", "title": "AirQualityObserved",
+                "url": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")}])
     );
     let done = &events[9].1;
     // T-4654: a visitor's `done` carries no tokens or calls; the two calls are counted below.
@@ -1475,6 +1477,82 @@ async fn two_tables_of_one_endpoint_both_cite_its_dataset_page() {
         .filter_map(|c| c["url"].as_str())
         .collect();
     assert_eq!(urls, [page, page], "{citations}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4747: one Endpoint serves members, schools and bike routes. Each type's rows cite the
+/// dataset page that publishes that type; bike routes, which no dataset page publishes, cite
+/// their own listing named by the type, never the members' page (the owner saw cyklotrasy
+/// cited as "Členovia samosprávy").
+#[tokio::test]
+async fn each_type_of_a_shared_endpoint_cites_its_own_page_or_its_listing() {
+    let mut d = looped(50_000);
+    d.spec.sources.push("catalogue".into());
+    let w = world("chatshared", d).await;
+    let members = "https://opendata.hronov.example/dataset/clenovia-samospravy";
+    let schools = "https://opendata.hronov.example/dataset/stredne-skoly";
+    corpus::pages(
+        &w.pool,
+        "hronov",
+        "catalogue",
+        &[
+            (
+                members,
+                "sk",
+                &format!("# Členovia samosprávy\n\nNGSI-LD: https://api.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=Person"),
+            ),
+            (
+                schools,
+                "sk",
+                &format!("# Stredné školy\n\nNGSI-LD: https://api.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=School"),
+            ),
+        ],
+    )
+    .await;
+    let calls: Vec<Value> = ["Person", "School", "CycleRoute"].iter().enumerate()
+        .map(|(n, kind)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": [kind]}).to_string()}}))
+        .collect();
+    script(
+        &w.proxy,
+        vec![
+            completion(
+                json!({"role": "assistant", "content": null, "tool_calls": calls}),
+                100,
+            ),
+            completion(
+                json!({"role": "assistant", "content": "Členovia [1], školy [2], cyklotrasy [3]."}),
+                100,
+            ),
+        ],
+    )
+    .await;
+    let (_, events, _) =
+        answer_of(&w.app, ask_looped(json!({"message": "Kde sú cyklotrasy?"}))).await;
+    let (_, citations) = events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations");
+    let cited: Vec<(&str, &str)> = citations
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|c| {
+            (
+                c["url"].as_str().unwrap_or(""),
+                c["title"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(cited[0], (members, "Členovia samosprávy"), "{citations}");
+    assert_eq!(cited[1], (schools, "Stredné školy"), "{citations}");
+    assert_eq!(
+        cited[2],
+        (
+            format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=CycleRoute").as_str(),
+            "CycleRoute"
+        ),
+        "{citations}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -4522,6 +4600,119 @@ async fn a_broad_read_gives_the_answer_the_types_profile_and_a_narrow_one_its_ro
         .collect::<Vec<_>>();
     let sent = answers.last().map(ToString::to_string).unwrap_or_default();
     assert!(!sent.contains("mean=27.5"), "{sent}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4740: the owner asked for the schools of one district and got 20 of 433 other organizations,
+/// because a read whose `q` failed was read again whole. A failed narrowed read now shows no
+/// table and the answer never sees the type's first rows; a narrowed read that answers shows
+/// exactly the rows its `q` kept.
+#[tokio::test]
+async fn a_narrowed_read_that_fails_is_never_read_whole_and_one_that_answers_shows_its_rows() {
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatnarrowed", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    let answer = |text: String, error: bool| {
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}], "isError": error
+        }}))
+    };
+    // Mounted before the recorded answers, so these win: a schema that offers `q`, and an answer
+    // for each `q`.
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}}, "q": {"type": "string"}, "count": {"type": "boolean"}, "limit": {"type": "integer", "maximum": 1000}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    mcp()
+        .and(body_string_contains("no2>30"))
+        .respond_with(answer(
+            "the broker did not answer within ten seconds; narrow the window or the types and ask again".into(),
+            true,
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    let kept = json!({"entities": [
+        {"id": "urn:ngsi-ld:AirQualityObserved:stanica", "type": "AirQualityObserved",
+         "name": {"type": "Property", "value": "Železničná stanica"},
+         "no2": {"type": "Property", "value": 34, "observedAt": "2026-10-15T18:00:00Z"}}
+    ], "total": 1});
+    mcp()
+        .and(body_string_contains("no2>33"))
+        .respond_with(answer(kept.to_string(), false))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    recorded_air(&w.gateway, SLUG).await;
+    let routed = |q: &str| {
+        completion(
+            json!({"role": "assistant", "content": json!({"route": "data", "queries": ["NO2"], "data": [{"endpoint": "ovzdusie", "type": "AirQualityObserved", "q": q}]}).to_string()}),
+            300,
+        )
+    };
+    let judged = || {
+        completion(
+            json!({"role": "assistant", "content": "{\"answers\": true, \"missing\": \"\", \"queries\": []}"}),
+            200,
+        )
+    };
+    script_routed(
+        &w.proxy,
+        vec![routed("no2>33"), routed("no2>30")],
+        vec![judged(), judged(), judged()],
+        vec![
+            streamed(&["Nad 33 je Železničná stanica [1]."], 300, 12),
+            streamed(&["Údaje teraz nevieme overiť."], 300, 12),
+        ],
+    )
+    .await;
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 33?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let data = &events
+        .iter()
+        .find(|(n, _)| n == "data")
+        .unwrap_or_else(|| panic!("a table: {events:?}"))
+        .1;
+    let shown = data.to_string();
+    assert!(shown.contains("Železničná stanica"), "{data}");
+    assert!(
+        !shown.contains("Námestie SNP"),
+        "only the rows the q kept: {data}"
+    );
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 30?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reads = tool_calls_of(&w.gateway, "query_entities").await;
+    assert_eq!(
+        reads.len(),
+        2,
+        "the failed q is read once and never without it: {reads:?}"
+    );
+    assert_eq!(reads[1]["params"]["arguments"]["q"], "no2>30");
+    assert!(
+        !events.iter().any(|(n, _)| n == "data"),
+        "no table of rows the q did not keep: {events:?}"
+    );
+    let sent = calls_of(&model_calls(&w.proxy).await, None)
+        .last()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert!(
+        !sent.contains("Námestie SNP"),
+        "the answer never reads the type's first rows: {sent}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 

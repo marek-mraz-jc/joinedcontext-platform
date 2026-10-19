@@ -4,7 +4,7 @@
 //! robots.txt rules, path glob patterns, and byte caps. Results are recorded in the store's
 //! tenant tables under project-scoped transactions and passed to the caller's [`Sink`](crate::crawl::Sink).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use jc_core::kinds::assistant::{KnowledgeSourceSpec, PdfPolicyKind, SourceType, Visibility};
@@ -187,6 +187,8 @@ struct Walk {
     frontier: Frontier,
     seen_documents: HashSet<String>,
     report: CrawlReport,
+    /// The robots.txt of each other host a document of the site lives on, read once a crawl.
+    foreign_robots: HashMap<String, robots::Robots>,
 }
 
 /// The first start URL and its host; a source that is not a website, or names no usable start
@@ -210,6 +212,51 @@ fn start_of(source: &str, spec: &KnowledgeSourceSpec) -> Result<(Url, String), E
         .ok_or_else(|| Error::Crawl(format!("start URL '{first}' has no host")))?
         .to_owned();
     Ok((start_url, host))
+}
+
+/// The start address and host a site answers under (T-4749). `www.zilina.sk` and `www.praha.eu`
+/// send every request to `zilina.sk` and `praha.eu`, and a crawl that kept the name it was given
+/// read nothing: each answer "left the site". Only the start host's twin with or without
+/// `www.`, on the same scheme and port, is adopted, so a source still reads only the site its
+/// author named; any other redirect leaves the start as it was.
+async fn settle_start(crawler: &Crawler, start_url: Url, host: String) -> (Url, String) {
+    let outcome = fetch::fetch_url(
+        &crawler.client,
+        &crawler.policy,
+        &host,
+        &start_url,
+        crawler.policy.max_page_bytes,
+        None,
+        None,
+    )
+    .await;
+    match outcome {
+        fetch::FetchOutcome::RedirectExternal { target_url }
+            if target_url.scheme() == start_url.scheme()
+                && target_url.port_or_known_default() == start_url.port_or_known_default()
+                && target_url.host_str().is_some_and(|to| is_twin(&host, to)) =>
+        {
+            let twin = target_url.host_str().unwrap_or(&host).to_owned();
+            tracing::info!(from = %host, to = %twin, "the site answers under its twin host");
+            (target_url, twin)
+        }
+        _ => (start_url, host),
+    }
+}
+
+/// Whether two hosts are one site's name with and without `www.`.
+fn is_twin(a: &str, b: &str) -> bool {
+    let a = a.to_ascii_lowercase();
+    let b = b.to_ascii_lowercase();
+    a.strip_prefix("www.") == Some(b.as_str()) || b.strip_prefix("www.") == Some(a.as_str())
+}
+
+/// `url` on `host` when it names the host's twin; any other address as it was.
+fn rehost(mut url: Url, host: &str) -> Url {
+    if url.host_str().is_some_and(|h| is_twin(h, host)) {
+        let _ = url.set_host(Some(host));
+    }
+    url
 }
 
 /// A response's media type, without its parameters.
@@ -238,6 +285,7 @@ pub async fn crawl_site(
     sink: &mut impl Sink,
 ) -> Result<CrawlReport, Error> {
     let (start_url, site_host) = start_of(source, spec)?;
+    let (start_url, site_host) = settle_start(crawler, start_url, site_host).await;
     let site_id = upsert_site(pool, project, organization, source, spec.visibility).await?;
 
     let robots_url_str = match start_url.join("/robots.txt") {
@@ -293,24 +341,22 @@ pub async fn crawl_site(
     };
     let mut walk = Walk::default();
 
-    for url_str in &spec.start_urls {
+    for (i, url_str) in spec.start_urls.iter().enumerate() {
         let Ok(u) = Url::parse(url_str) else {
             continue;
+        };
+        // The first start address is where its redirect led; any other on the named host
+        // moves to the host the site answers under.
+        let u = if i == 0 {
+            start_url.clone()
+        } else {
+            rehost(u, &site_host)
         };
         let canon = canonicalise_url(u);
         // A start address that names a document is one document of the site (T-3293),
         // under the `pdf` policy and its bounds, not a page of its bytes.
         if links::is_document_url(&canon) {
-            handle_document(
-                run,
-                None,
-                &canon,
-                &mut walk.seen_documents,
-                &mut walk.report,
-                sink,
-                false,
-            )
-            .await?;
+            handle_document(run, None, &canon, &mut walk, sink, false).await?;
         } else {
             walk.frontier.push(canon, None, 0);
         }
@@ -449,16 +495,7 @@ async fn revisit(
                 walk.frontier.push(to_url, Some(page_id), item.depth + 1);
             }
             "document" => {
-                handle_document(
-                    run,
-                    Some(page_id),
-                    &to_url,
-                    &mut walk.seen_documents,
-                    &mut walk.report,
-                    sink,
-                    false,
-                )
-                .await?;
+                handle_document(run, Some(page_id), &to_url, walk, sink, false).await?;
             }
             _ => {}
         }
@@ -495,16 +532,7 @@ async fn read_page(
     // ponytail: one extra fetch per such address; pass the body on if they turn common.
     if let Some(mime) = media_type(headers).filter(|m| links::is_document_type(m)) {
         let pdf = mime.eq_ignore_ascii_case("application/pdf");
-        return handle_document(
-            run,
-            item.parent_id,
-            final_url,
-            &mut walk.seen_documents,
-            &mut walk.report,
-            sink,
-            pdf,
-        )
-        .await;
+        return handle_document(run, item.parent_id, final_url, walk, sink, pdf).await;
     }
     let body_str = String::from_utf8_lossy(body);
     let hash = hex::encode(Sha256::digest(body));
@@ -566,16 +594,7 @@ async fn read_page(
                 walk.frontier.push(link.url, Some(page_id), item.depth + 1);
             }
             links::LinkKind::Document => {
-                handle_document(
-                    run,
-                    Some(page_id),
-                    &link.url,
-                    &mut walk.seen_documents,
-                    &mut walk.report,
-                    sink,
-                    false,
-                )
-                .await?;
+                handle_document(run, Some(page_id), &link.url, walk, sink, false).await?;
             }
             links::LinkKind::Page | links::LinkKind::External => {}
         }
@@ -654,8 +673,7 @@ async fn handle_document(
     run: DocRun<'_>,
     page_id: Option<i64>,
     doc_url: &Url,
-    seen_documents: &mut HashSet<String>,
-    report: &mut CrawlReport,
+    walk: &mut Walk,
     sink: &mut impl Sink,
     answered_pdf: bool,
 ) -> Result<(), Error> {
@@ -671,9 +689,10 @@ async fn handle_document(
     let canon_doc_url = canonicalise_url(doc_url.clone());
     let url_str = canon_doc_url.as_str();
 
-    if !seen_documents.insert(url_str.to_owned()) {
+    if !walk.seen_documents.insert(url_str.to_owned()) {
         return Ok(());
     }
+    let report = &mut walk.report;
 
     let off_domain = canon_doc_url.host_str() != Some(site_host);
     let is_pdf = answered_pdf || canon_doc_url.path().to_ascii_lowercase().ends_with(".pdf");
@@ -695,7 +714,24 @@ async fn handle_document(
         return Ok(());
     }
 
-    if canon_doc_url.host_str() == Some(site_host) && !robots.is_allowed(url_str) {
+    // A document on another host answers to that host's robots.txt (T-4749): the site linking
+    // it is not the one that decides whether a crawler may read it.
+    let robots = match canon_doc_url.host_str() {
+        Some(host) if host != site_host => {
+            if !walk.foreign_robots.contains_key(host) {
+                let robots_url = canon_doc_url
+                    .join("/robots.txt")
+                    .map(|u| u.to_string())
+                    .unwrap_or_default();
+                let (rules, _) =
+                    robots::fetch_robots(&crawler.client, &crawler.policy, host, &robots_url).await;
+                walk.foreign_robots.insert(host.to_owned(), rules);
+            }
+            walk.foreign_robots.get(host).unwrap_or(robots)
+        }
+        _ => robots,
+    };
+    if !robots.is_allowed(url_str) {
         report.disallowed += 1;
         record_skipped_doc(pool, project, site_id, page_id, url_str, off_domain, true).await?;
         return Ok(());

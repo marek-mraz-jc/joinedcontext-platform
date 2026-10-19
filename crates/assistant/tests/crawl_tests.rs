@@ -1370,3 +1370,182 @@ async fn wordpress_types_are_paged_newest_first_on_the_site_host_only() {
         wordpress::fetch_wordpress_urls(&client, &policy, "www.city.test", &start, &[], 10).await;
     assert!(none.is_empty());
 }
+
+/// T-4749: www.zilina.sk and www.praha.eu answer every request with a redirect to the same name
+/// without `www.`, and the crawl skipped its start page as "leaving the site" and read nothing.
+/// The twin host is adopted; a redirect to any other host is not.
+#[tokio::test]
+async fn a_start_host_that_redirects_to_its_twin_is_crawled_under_the_twin() {
+    use wiremock::matchers::header;
+    let (admin, pool, db_name) = database("twinhost").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(
+        FixtureResolver::new(&[
+            ("www.city.test", port),
+            ("city.test", port),
+            ("other.test", port),
+        ]),
+        None,
+    );
+    let www = format!("www.city.test:{port}");
+    let bare = format!("city.test:{port}");
+    Mock::given(method("GET"))
+        .and(header("host", www.as_str()))
+        .respond_with(
+            ResponseTemplate::new(301).insert_header("location", format!("http://{bare}/web/")),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(header("host", bare.as_str()))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(header("host", bare.as_str()))
+        .and(path("/web/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(r#"<html lang="sk"><a href="/web/urad">Úrad</a></html>"#),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(header("host", bare.as_str()))
+        .and(path("/web/urad"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string("<p>Úradné hodiny</p>"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut spec = test_spec(&format!("http://{www}/"));
+    spec.sitemap = false;
+    let mut sink = RecordingSink::default();
+    let report = crawl_site(&pool, &crawler, "za", "zilina", "web", &spec, &mut sink)
+        .await
+        .expect("crawl finishes");
+    let read: Vec<&str> = sink.pages.iter().map(|p| p.1.as_str()).collect();
+    assert_eq!(
+        read,
+        [
+            format!("http://{bare}/web/").as_str(),
+            format!("http://{bare}/web/urad").as_str()
+        ]
+    );
+    assert_eq!(report.pages_fetched, 2);
+
+    // A start address that redirects to an unrelated host is not adopted: nothing is read.
+    let elsewhere = MockServer::start().await;
+    let eport = elsewhere.address().port();
+    let crawler = test_crawler(
+        FixtureResolver::new(&[("www.town.test", eport), ("other.test", eport)]),
+        None,
+    );
+    Mock::given(method("GET"))
+        .and(header("host", format!("www.town.test:{eport}").as_str()))
+        .respond_with(
+            ResponseTemplate::new(301)
+                .insert_header("location", format!("http://other.test:{eport}/")),
+        )
+        .mount(&elsewhere)
+        .await;
+    Mock::given(method("GET"))
+        .and(header("host", format!("other.test:{eport}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<p>another site</p>"))
+        .mount(&elsewhere)
+        .await;
+    let mut spec = test_spec(&format!("http://www.town.test:{eport}/"));
+    spec.sitemap = false;
+    let mut sink = RecordingSink::default();
+    crawl_site(&pool, &crawler, "tw", "town", "web", &spec, &mut sink)
+        .await
+        .expect("crawl finishes");
+    assert!(sink.pages.is_empty(), "{:?}", sink.pages);
+    drop_database(admin, pool, &db_name).await;
+}
+
+/// T-4749: Banská Bystrica keeps its documents on its Azure storage. With `offDomainDocuments`
+/// they are read, each under its own host's robots.txt, never the linking site's.
+#[tokio::test]
+async fn a_document_on_another_host_answers_to_that_hosts_robots() {
+    let (admin, pool, db_name) = database("foreignrobots").await;
+    let site = MockServer::start().await;
+    let files = MockServer::start().await;
+    let (sport, fport) = (site.address().port(), files.address().port());
+    let crawler = test_crawler(
+        FixtureResolver::new(&[("www.city.test", sport), ("files.test", fport)]),
+        None,
+    );
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&site)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(format!(
+                    r#"<a href="http://files.test:{fport}/open/vzn.pdf">VZN</a>
+                       <a href="http://files.test:{fport}/private/plat.pdf">Plat</a>"#
+                )),
+        )
+        .mount(&site)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string("User-agent: *\nDisallow: /private/\n"),
+        )
+        .expect(1)
+        .mount(&files)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/open/vzn.pdf"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/pdf")
+                .set_body_bytes(b"%PDF-1.4 vzn".to_vec()),
+        )
+        .mount(&files)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/private/plat.pdf"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-1.4 plat".to_vec()))
+        .expect(0)
+        .mount(&files)
+        .await;
+
+    let mut spec = test_spec(&format!("http://www.city.test:{sport}/"));
+    spec.sitemap = false;
+    spec.off_domain_documents = true;
+    let mut sink = RecordingSink::default();
+    let report = crawl_site(
+        &pool,
+        &crawler,
+        "bb",
+        "banskabystrica",
+        "web",
+        &spec,
+        &mut sink,
+    )
+    .await
+    .expect("crawl finishes");
+    let read: Vec<&str> = sink.documents.iter().map(|d| d.1.as_str()).collect();
+    assert_eq!(
+        read,
+        [format!("http://files.test:{fport}/open/vzn.pdf").as_str()]
+    );
+    assert_eq!(
+        report.disallowed, 1,
+        "the private file is refused by its host's robots.txt"
+    );
+    drop_database(admin, pool, &db_name).await;
+}
