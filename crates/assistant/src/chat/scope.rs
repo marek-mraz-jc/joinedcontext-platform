@@ -5,6 +5,7 @@
 //! questions. A script in an answer may name only this deployment's hosts.
 
 use super::agent::{send, Ask, Citation, Event};
+use jc_core::kinds::Localised;
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 use url::Url;
@@ -338,19 +339,22 @@ fn first_language<'a>(ask: &'a Ask<'_>) -> &'a str {
     ask.languages.first().map_or("sk", String::as_str)
 }
 
+/// The deployment's title in `lang`, else its unkeyed or first-language text.
+fn publisher<'a>(title: &'a Localised, lang: &str, first: &str) -> Option<&'a str> {
+    let texts = title.texts();
+    texts
+        .iter()
+        .find(|(l, _)| *l == Some(lang))
+        .or_else(|| texts.iter().find(|(l, _)| l.is_none() || *l == Some(first)))
+        .map(|(_, text)| *text)
+}
+
 /// Refuses a question outside the assistant's scope with the fixed template: no tool, no answer
 /// call. The turn's route is `out`, so its transcript and the summary count it.
 pub async fn refuse(ask: &Ask<'_>, question: &str, router: Option<&str>, events: &Sender<Event>) {
     let first = first_language(ask);
     let lang = language(question, router, first);
-    let publisher = ask.title.and_then(|title| {
-        let texts = title.texts();
-        texts
-            .iter()
-            .find(|(l, _)| *l == Some(lang))
-            .or_else(|| texts.iter().find(|(l, _)| l.is_none() || *l == Some(first)))
-            .map(|(_, text)| *text)
-    });
+    let publisher = ask.title.and_then(|title| publisher(title, lang, first));
     let examples = ask
         .suggestions
         .get(lang)

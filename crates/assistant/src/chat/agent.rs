@@ -617,6 +617,16 @@ pub async fn answer(
         super::scope::refuse(ask, question, None, events).await;
         return Spent::default();
     }
+    answer_in_scope(ask, history, question, events).await
+}
+
+/// [`answer`] for a question the pre-check let through: the routed or the model-driven loop.
+async fn answer_in_scope(
+    ask: &Ask<'_>,
+    history: &[Turn],
+    question: &str,
+    events: &Sender<Event>,
+) -> Spent {
     if ask.public_only && ask.functions.is_none() {
         return super::routed::answer(ask, history, question, events).await;
     }
