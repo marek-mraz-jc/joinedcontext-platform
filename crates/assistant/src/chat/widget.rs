@@ -182,7 +182,7 @@ pub fn html(deployment: &Deployment, config: &serde_json::Value, full: bool) -> 
     )
 }
 
-/// [`config`] as this host serves it, with the deployment's own MCP connector: the address a
+/// `config` as this host serves it, with the deployment's own MCP connector: the address a
 /// visitor adds to their own AI assistant (T-4694, T-4691), offered by a public deployment only,
 /// since an internal one answers no anonymous client.
 pub fn configuration(state: &ChatState, deployment: &Deployment) -> serde_json::Value {
