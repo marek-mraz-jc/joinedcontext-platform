@@ -30,8 +30,8 @@ use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -378,7 +378,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
         )
         .route(
             "/api/v1/d/{public_id}/turns/{turn}/resume",
-            get(resume::resume).options(preflight),
+            get(resume).options(preflight),
         )
         .route(
             "/api/v1/d/{public_id}/feedback",
@@ -1289,6 +1289,96 @@ async fn token(
         }
     };
     with_cors(response, origin)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct After {
+    #[serde(default)]
+    after: usize,
+}
+
+/// `GET /api/v1/d/{publicId}/turns/{turn}/resume?after=n` (API/05 §1.6.2).
+async fn resume(
+    State(state): State<Arc<ChatState>>,
+    Path((public_id, id)): Path<(String, String)>,
+    query: Result<Query<After>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let response = match query {
+        Err(_) => problem(400, "after: the number of events already read, 0 or more"),
+        Ok(Query(After { after })) => {
+            replay(&state, &deployment, &public_id, &id, after, &headers).await
+        }
+    };
+    with_cors(response, origin)
+}
+
+async fn replay(
+    state: &ChatState,
+    deployment: &Deployment,
+    public_id: &str,
+    id: &str,
+    after: usize,
+    headers: &HeaderMap,
+) -> Response {
+    let token = headers
+        .get(VISITOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let mut limits = state.limits.lock().await;
+    if limits
+        .signer
+        .visitor(public_id, token, unix_now())
+        .is_none()
+    {
+        return problem(
+            401,
+            "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
+        );
+    }
+    let visitor = limits.visitor(&client_of(headers), today());
+    let key = format!(
+        "{}/{}\u{0}{visitor}\u{0}resume",
+        deployment.project, deployment.name
+    );
+    let admitted = limits.admit(
+        &[(&key, resume::RESUMES_PER_MINUTE, MINUTE)],
+        Instant::now(),
+    );
+    drop(limits);
+    if let Err(retry) = admitted {
+        return too_many(
+            retry,
+            "Z tejto siete prišlo veľa obnovení za krátky čas. Počkajte chvíľu a skúste to znova.",
+        );
+    }
+    let turn = match state.turns.find(public_id, &visitor, id, Instant::now()) {
+        resume::Found::Live(turn) => turn,
+        resume::Found::Gone => {
+            return problem(410, "This answer can no longer be resumed; ask again.")
+        }
+        resume::Found::Missing => return problem(404, "No such answer of this visitor."),
+    };
+    let anonymous = deployment.spec.channel.is_anonymous();
+    let stream = futures_util::StreamExt::map(turn.events_from(after), move |(index, event)| {
+        Ok::<_, Infallible>(sse(&event, anonymous).id(index.to_string()))
+    });
+    let mut response: Response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    let h = response.headers_mut();
+    h.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn feedback(
