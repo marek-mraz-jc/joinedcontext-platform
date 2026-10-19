@@ -7,7 +7,7 @@
 //! every grant, because a write is decided against the grant and not against what was forwarded
 //! (T-0807).
 
-use context_gateway::pdp::geo::{intersect, Areas};
+use context_gateway::pdp::geo::{entity_point, granted_polygon, intersect};
 use serde_json::json;
 
 /// `georel=within` over a box, the shape a policy's `geoQ` actually carries.
@@ -26,13 +26,27 @@ fn at(lon: f64, lat: f64) -> serde_json::Value {
     })
 }
 
-/// What a caller of this result would actually be shown, grants and own area both applied.
+/// What a caller of this result would be shown with the areas the broker was not given applied
+/// to the answer: every grant area and the caller's own, an unreadable one admitting nothing.
 fn admits(result: &context_gateway::pdp::geo::Intersected, entity: &serde_json::Value) -> bool {
-    match Areas::of(&result.grants, result.caller.as_deref()) {
-        Some(areas) => areas.admits(entity),
+    if result.grants.is_empty() && result.caller.is_none() {
         // No second filter: the broker was given a `geo_q` that is already the narrower area.
-        None => true,
+        return true;
     }
+    let grants: Vec<_> = result
+        .grants
+        .iter()
+        .map(|grant| granted_polygon(grant))
+        .collect();
+    let caller = result.caller.as_deref().map(granted_polygon);
+    if grants.iter().any(Option::is_none) || matches!(caller, Some(None)) {
+        return false;
+    }
+    let Some(point) = entity_point(entity) else {
+        return false;
+    };
+    caller.flatten().is_none_or(|area| area.contains(point))
+        && (grants.is_empty() || grants.iter().flatten().any(|area| area.contains(point)))
 }
 
 /// The first case, and the one most likely to be red: two areas that only overlap. The broker may
@@ -100,7 +114,7 @@ fn without_a_grant_and_without_a_question_no_area_is_invented() {
 
     assert_eq!(held, Default::default(), "every field empty");
     assert!(
-        Areas::of(&held.grants, held.caller.as_deref()).is_none(),
+        held.grants.is_empty() && held.caller.is_none(),
         "and no filter is built for the answer"
     );
 }

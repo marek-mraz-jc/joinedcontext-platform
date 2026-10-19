@@ -203,8 +203,9 @@
     close: "M6 6l12 12M18 6L6 18",
     expand: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
     collapse: "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5",
-    dock: "M4 4h16v16H4zM14 4v16",
-    undock: "M4 4h16v16H4zM11 11h6v6h-6z",
+    // Dock: a window with a panel at its right edge; undock: a window with a title bar (T-4767).
+    dock: "M6 5h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM15 5v14",
+    undock: "M6 5h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM4 9h16",
     chat: "M4 5h16v11H9l-5 4z",
     page: "M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6",
     table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",

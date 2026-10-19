@@ -4,8 +4,8 @@
 //! non-empty array of rings of numeric positions — the first ring the outer one, the rest holes —
 //! and every other shape answers `None`, never a polygon built from the part that parsed.
 //!
-//! That last half is the security half. The callers turn `None` into a refusal (`Areas::of` marks
-//! the area set unreadable, `write_guard::check_location` refuses the write), so a polygon that
+//! That last half is the security half. The callers turn `None` into a refusal (an area set is marked
+//! unreadable, `write_guard::check_location` refuses the write), so a polygon that
 //! silently dropped the hole it could not read, or kept the outer ring of a malformed list, would
 //! be a grant area wider than the one the policy drew.
 //!
