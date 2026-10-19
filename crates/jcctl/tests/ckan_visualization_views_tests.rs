@@ -6,7 +6,8 @@
 use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
-    publish, publish_views, CkanApi, InMemoryCkan, Settings, Views, VISUALIZATION_VIEW,
+    publish, publish_views, series_charts, CkanApi, InMemoryCkan, Settings, Views, SERIES_WINDOW,
+    VISUALIZATION_VIEW,
 };
 use serde_json::{json, Value};
 
@@ -106,7 +107,7 @@ fn each_visualization_becomes_a_view_holding_its_spec_source_and_slug() {
         chart("no2-day", "NO2 za deň"),
     ]);
     let (mut ckan, first) = published(&endpoint);
-    let done = publish_views(&mut ckan, &endpoint, &settings()).expect("views");
+    let done = publish_views(&mut ckan, &endpoint, &settings(), None).expect("views");
     assert_eq!(
         done,
         Views {
@@ -127,8 +128,9 @@ fn each_visualization_becomes_a_view_holding_its_spec_source_and_slug() {
     let spec: Value =
         serde_json::from_str(now["spec"].as_str().expect("spec as text")).expect("JSON");
     assert_eq!(spec["data"], json!({ "name": "source" }));
+    // `source`, the member the renderer and the catalogue's view schema read (T-4742).
     let data: Value =
-        serde_json::from_str(now["data"].as_str().expect("data as text")).expect("JSON");
+        serde_json::from_str(now["source"].as_str().expect("source as text")).expect("JSON");
     assert_eq!(
         data,
         json!({ "source": "csv", "type": "AirQualityObserved" })
@@ -145,9 +147,9 @@ fn each_visualization_becomes_a_view_holding_its_spec_source_and_slug() {
 fn an_unchanged_list_writes_nothing() {
     let endpoint = endpoint(&[chart("no2-now", "NO2 teraz")]);
     let (mut ckan, _) = published(&endpoint);
-    publish_views(&mut ckan, &endpoint, &settings()).expect("first run");
+    publish_views(&mut ckan, &endpoint, &settings(), None).expect("first run");
     let before = writes(&ckan).len();
-    let again = publish_views(&mut ckan, &endpoint, &settings()).expect("second run");
+    let again = publish_views(&mut ckan, &endpoint, &settings(), None).expect("second run");
     assert_eq!(again, Views::default());
     assert_eq!(writes(&ckan).len(), before, "no second write");
 }
@@ -159,7 +161,7 @@ fn a_changed_visualization_is_updated_in_place_and_a_removed_one_deleted() {
         chart("no2-day", "NO2 za deň"),
     ]);
     let (mut ckan, first) = published(&first_list);
-    publish_views(&mut ckan, &first_list, &settings()).expect("first run");
+    publish_views(&mut ckan, &first_list, &settings(), None).expect("first run");
     let id = ours(&ckan, &first)
         .iter()
         .find(|v| v["jc_name"] == "no2-now")
@@ -167,7 +169,7 @@ fn a_changed_visualization_is_updated_in_place_and_a_removed_one_deleted() {
         .expect("an id");
 
     let renamed = endpoint(&[chart("no2-now", "NO2 práve teraz")]);
-    let done = publish_views(&mut ckan, &renamed, &settings()).expect("second run");
+    let done = publish_views(&mut ckan, &renamed, &settings(), None).expect("second run");
     assert_eq!(
         done,
         Views {
@@ -184,7 +186,7 @@ fn a_changed_visualization_is_updated_in_place_and_a_removed_one_deleted() {
     );
     assert_eq!(views[0]["title"], "NO2 práve teraz");
 
-    let done = publish_views(&mut ckan, &endpoint(&[]), &settings()).expect("emptied");
+    let done = publish_views(&mut ckan, &endpoint(&[]), &settings(), None).expect("emptied");
     assert_eq!(
         done,
         Views {
@@ -217,7 +219,7 @@ fn other_view_types_are_never_touched_and_a_forged_or_duplicate_view_goes() {
             .expect("a view made through the API");
     }
 
-    let done = publish_views(&mut ckan, &endpoint, &settings()).expect("views");
+    let done = publish_views(&mut ckan, &endpoint, &settings(), None).expect("views");
     assert_eq!(
         done,
         Views {
@@ -249,7 +251,7 @@ fn no_dataset_or_no_publication_does_nothing() {
     let endpoint = endpoint(&[chart("no2-now", "NO2 teraz")]);
     let mut empty = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
     assert_eq!(
-        publish_views(&mut empty, &endpoint, &settings()).expect("no dataset"),
+        publish_views(&mut empty, &endpoint, &settings(), None).expect("no dataset"),
         Views::default()
     );
     assert!(writes(&empty).is_empty());
@@ -259,7 +261,103 @@ fn no_dataset_or_no_publication_does_nothing() {
     )
     .expect("parses");
     assert_eq!(
-        publish_views(&mut empty, &unpublished, &settings()).expect("none"),
+        publish_views(&mut empty, &unpublished, &settings(), None).expect("none"),
         Views::default()
     );
+}
+
+/// A `model.schema.json` as the gateway serves it: one type observed over time, one register.
+fn schema() -> Value {
+    json!({ "definitions": {
+        "WaterQualityObserved": { "type": "object", "properties": {
+            "dateObserved": { "type": "string", "format": "date-time", "x-ngsi-ld-kind": "Property" },
+            "temperature": { "type": "number", "x-ngsi-ld-kind": "Property" },
+            "location": { "type": "object", "x-ngsi-ld-kind": "GeoProperty" },
+            "name": { "type": "string", "x-ngsi-ld-kind": "LanguageProperty" },
+            "refPointOfInterest": { "type": "string", "x-ngsi-ld-kind": "Relationship" }
+        }},
+        "School": { "type": "object", "properties": {
+            "name": { "type": "string", "x-ngsi-ld-kind": "Property" },
+            "capacity": { "type": "integer", "x-ngsi-ld-kind": "Property" }
+        }}
+    }})
+}
+
+#[test]
+fn a_value_observed_over_time_gets_a_chart_of_its_history_and_a_register_none() {
+    // T-4742: helsinki-beach-water's temperature had a table and a map, and no chart.
+    let endpoint = endpoint(&[]);
+    let (mut ckan, first) = published(&endpoint);
+    let done = publish_views(&mut ckan, &endpoint, &settings(), Some(&schema())).expect("views");
+    assert_eq!(
+        done.created, 1,
+        "one numeric value over time; School has no dateObserved"
+    );
+    let [view] = ours(&ckan, &first).try_into().expect("one view");
+    assert_eq!(view["jc_name"], "auto-waterqualityobserved-temperature");
+    assert_eq!(view["endpoint"], "zt4qm7ge2xdv6ksb3ncf5arw2y");
+    let source: Value = serde_json::from_str(view["source"].as_str().expect("text")).expect("JSON");
+    assert_eq!(
+        source,
+        json!({ "source": "temporal", "type": "WaterQualityObserved", "attrs": ["temperature"], "last": SERIES_WINDOW })
+    );
+    let spec: Value = serde_json::from_str(view["spec"].as_str().expect("text")).expect("JSON");
+    assert_eq!(spec["encoding"]["x"]["field"], "observedAt");
+    assert_eq!(spec["encoding"]["y"]["field"], "temperature");
+    jc_core::kinds::visualization::check_spec(&spec)
+        .expect("the chart passes the manifest's own rules");
+
+    // Stable: a second run writes nothing.
+    let before = writes(&ckan).len();
+    publish_views(&mut ckan, &endpoint, &settings(), Some(&schema())).expect("again");
+    assert_eq!(writes(&ckan).len(), before);
+}
+
+#[test]
+fn a_declared_list_replaces_the_automatic_charts_and_no_schema_gives_none() {
+    let declared = endpoint(&[chart("no2-now", "NO2 teraz")]);
+    let (mut ckan, first) = published(&declared);
+    publish_views(&mut ckan, &declared, &settings(), Some(&schema())).expect("views");
+    let names: Vec<Value> = ours(&ckan, &first)
+        .iter()
+        .map(|v| v["jc_name"].clone())
+        .collect();
+    assert_eq!(names, [json!("no2-now")]);
+
+    let bare = endpoint(&[]);
+    let (mut ckan, first) = published(&bare);
+    assert_eq!(
+        publish_views(&mut ckan, &bare, &settings(), None).expect("views"),
+        Views::default()
+    );
+    assert!(ours(&ckan, &first).is_empty());
+}
+
+#[test]
+fn the_automatic_charts_stop_at_the_visualization_limit() {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "dateObserved".into(),
+        json!({ "type": "string", "format": "date-time", "x-ngsi-ld-kind": "Property" }),
+    );
+    for i in 0..30 {
+        properties.insert(
+            format!("value{i:02}"),
+            json!({ "type": "number", "x-ngsi-ld-kind": "Property" }),
+        );
+    }
+    let wide = json!({ "definitions": { "AirQualityObserved": { "properties": properties } } });
+    let charts = series_charts(&wide);
+    assert_eq!(
+        charts.len(),
+        jc_core::kinds::visualization::MAX_VISUALIZATIONS
+    );
+    assert_eq!(charts[0].name, "auto-airqualityobserved-value00");
+    assert!(
+        series_charts(&json!({})).is_empty(),
+        "a schema without definitions"
+    );
+    assert!(series_charts(&json!({ "definitions": { "T": {
+        "properties": { "dateObserved": { "type": "string" }, "v": { "type": "number", "x-ngsi-ld-kind": "Property" } }
+    }}})).is_empty(), "a dateObserved that is not a date-time");
 }

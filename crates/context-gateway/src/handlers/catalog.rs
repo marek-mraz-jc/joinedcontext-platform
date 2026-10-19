@@ -97,8 +97,11 @@ async fn public_records(
     for endpoint in gateway.resolver.endpoints() {
         // An App's own door re-serves a space for that App and carries no catalogue block: it
         // is no dataset of the publisher, and a national catalogue would harvest it as one.
+        // A door over data other datasets already publish (EP-139): its record stays, the
+        // feeds leave it out, so a harvester never takes the same data twice.
         if endpoint.audience != Audience::Public
             || endpoint.roles.app_client.is_some()
+            || endpoint.catalog.as_deref().is_some_and(|c| !c.harvested())
             || project.is_some_and(|project| endpoint.project != project)
         {
             continue;
