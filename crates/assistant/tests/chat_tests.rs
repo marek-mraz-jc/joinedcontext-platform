@@ -186,6 +186,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     let public = |slug: &str| EndpointRef {
         slug: slug.into(),
         audience: "public".into(),
+        publisher: None,
         space: String::new(),
         title: None,
     };
@@ -196,6 +197,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                publisher: None,
                 space: String::new(),
                 title: None,
             },
@@ -206,6 +208,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: SLUG.into(),
                 audience: "public".into(),
+                publisher: None,
                 space: String::new(),
                 title: None,
             },
@@ -215,6 +218,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                publisher: None,
                 space: String::new(),
                 title: None,
             },
@@ -245,7 +249,6 @@ async fn world(test: &str, deployment: Deployment) -> World {
         limits: tokio::sync::Mutex::default(),
         questions: Arc::clone(&questions),
         answers: Default::default(),
-        listings: Default::default(),
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
         viz: None,
         organization: "hronov".into(),
@@ -3356,10 +3359,11 @@ async fn a_hanging_and_a_failing_endpoint_cost_the_question_three_seconds_once()
 
     let calls = model_calls(&w.proxy).await;
     let rules = calls_of(&calls, None)[0]["messages"][0].to_string();
+    // T-4683: named by their publishers, never by an Endpoint's name or slug; these name none
     assert!(
-        rules.contains("did not answer in time")
-            && rules.contains("ovzdusie")
-            && rules.contains("bbsk/kraj"),
+        rules.contains("Some data sources did not answer in time")
+            && !rules.contains("ovzdusie")
+            && !rules.contains("bbsk/kraj"),
         "{rules}"
     );
     let router = calls_of(&calls, Some(ROUTER))[0]["messages"][1]["content"]

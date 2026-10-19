@@ -98,8 +98,6 @@ pub struct ChatState {
     pub questions: Arc<tokio::sync::Semaphore>,
     /// Answers to first questions asked before (T-4139).
     pub answers: routed::AnswerCache,
-    /// Public Endpoints' tool listings (T-4680).
-    pub listings: mcp::Listings,
     /// The public origin `/api/endpoint/{slug}` is served under (`JC_ASSISTANT_ENDPOINT_URL`):
     /// a data table's download link; `None` offers none.
     pub endpoint_base: Option<url::Url>,
@@ -864,22 +862,35 @@ async fn connected(
             token,
         };
         let near = siblings(&snapshot.endpoints, &resolved.project, &endpoint.space);
-        reachable.push((connector, endpoint.title.clone(), near, surface));
+        reachable.push((
+            connector,
+            endpoint.title.clone(),
+            endpoint.publisher.clone(),
+            near,
+            surface,
+        ));
     }
     // Every listing at once, so a question waits for the slowest connector, not their sum (T-4680).
-    let listed =
-        futures_util::future::join_all(reachable.iter().map(|(connector, _, _, surface)| {
-            surface.tools(&state.http, &state.listings, &connector.tools)
-        }))
-        .await;
+    let listed = futures_util::future::join_all(reachable.iter().map(
+        |(connector, _, _, _, surface)| async move {
+            match mcp::reads_any(&connector.tools) {
+                true => routed::listing(&state.answers, &state.http, surface)
+                    .await
+                    .map(|listed| mcp::picked(&listed, &connector.tools)),
+                false => Ok(Vec::new()),
+            }
+        },
+    ))
+    .await;
     let mut connected = Vec::new();
-    for ((connector, title, near, surface), listed) in reachable.into_iter().zip(listed) {
+    for ((connector, title, label, near, surface), listed) in reachable.into_iter().zip(listed) {
         match listed {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
                 title,
                 surface,
                 tools,
+                label,
                 siblings: near,
             }),
             Ok(_) => {
@@ -983,8 +994,13 @@ async fn lent(
             timeout: Duration::from_secs(SERVER_SECONDS),
             token,
         };
-        match surface.tools(&state.http, &state.listings, &tools).await {
+        let listed = match mcp::reads_any(&tools) {
+            true => routed::listing(&state.answers, &state.http, &surface).await,
+            false => Ok(Vec::new()),
+        };
+        match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
+                label: publisher_of(state, &endpoint.slug),
                 title: None,
                 endpoint: endpoint.slug,
                 surface,
@@ -997,6 +1013,16 @@ async fn lent(
             }
         }
     }
+}
+
+/// The publisher's name of the Endpoint with `slug`, when the manifests name one (T-4683).
+fn publisher_of(state: &ChatState, slug: &str) -> Option<String> {
+    let snapshot = state.snapshot.read().ok()?;
+    snapshot
+        .endpoints
+        .values()
+        .find(|endpoint| endpoint.slug == slug)
+        .and_then(|endpoint| endpoint.publisher.clone())
 }
 
 /// The slugs of `project`'s Endpoints over `space` (T-4625); none when the space is unknown.
@@ -2110,6 +2136,7 @@ mod tests {
             slug: slug.into(),
             audience: "public".into(),
             space: space.into(),
+            publisher: None,
             title: None,
         };
         let endpoints = std::collections::BTreeMap::from([

@@ -197,6 +197,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
                 slug: slug.into(),
                 audience: page.page.audience.clone(),
                 title: None,
+                publisher: None,
                 space: String::new(),
             },
         );
@@ -229,7 +230,6 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
         limits: tokio::sync::Mutex::default(),
         questions: Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
-        listings: Default::default(),
         endpoint_base: Some(url::Url::parse("https://api.example.sk/").expect("a url")),
         viz: None,
         organization: "banskabystrica".into(),

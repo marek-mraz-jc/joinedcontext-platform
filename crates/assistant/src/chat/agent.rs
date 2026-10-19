@@ -59,6 +59,8 @@ pub struct Connected {
     pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
+    /// Its publisher's name, how an answer names it when it could not be reached (T-4683).
+    pub label: Option<String>,
     /// The slugs of the project's Endpoints over the same context space, its own included: one
     /// that publishes a type as a CKAN dataset is the page its rows cite (T-4625).
     pub siblings: Vec<String>,

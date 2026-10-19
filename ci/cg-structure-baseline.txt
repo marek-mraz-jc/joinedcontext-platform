@@ -1,7 +1,7 @@
 # crate | functions with cc >= 25 | pub functions of 20+ lines no test reaches within 3 calls
 # (dev/cg-structure.py, T-4587); only ever lowered, in the commit that improves it.
 agent-proxy | 3 | 1
-assistant | 4 | 13
+assistant | 4 | 12
 context-gateway | 16 | 17
 jc-app-sdk | 0 | 1
 jc-core | 17 | 18

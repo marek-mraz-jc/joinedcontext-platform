@@ -55,6 +55,9 @@ pub struct EndpointRef {
     pub slug: String,
     /// The Endpoint's `spec.audience`: `public`, `organization` or `project-list`.
     pub audience: String,
+    /// Its publisher's name (`spec.catalog.publisher.name`), what an answer calls it by when it
+    /// could not be reached; never the slug (T-4683).
+    pub publisher: Option<String>,
     /// The context space it reads (`spec.contextSpaceRef`), empty when the manifest names none.
     pub space: String,
     /// What it holds, in its manifest's words (`metadata.title`, English first), so the router
@@ -653,9 +656,27 @@ fn endpoint_ref(
     Some(EndpointRef {
         slug: slug.to_owned(),
         audience: audience.to_owned(),
+        publisher: spec
+            .pointer("/catalog/publisher/name")
+            .and_then(publisher_name),
         space: space.to_owned(),
         title: title.and_then(title_line),
     })
+}
+
+/// A publisher's name in the first of the languages the platform's cities write that it has,
+/// else in any language it has.
+// ponytail: a fixed order; the question's language when an answer names publishers more often
+fn publisher_name(names: &serde_json::Value) -> Option<String> {
+    let names = names.as_object()?;
+    ["sk", "cs", "fi", "en"]
+        .iter()
+        .find_map(|lang| names.get(*lang))
+        .or_else(|| names.values().next())
+        .and_then(|name| name.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 /// The most characters of an Endpoint's title the router is shown.
@@ -680,6 +701,28 @@ fn title_line(title: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4683: the publisher's name an answer calls an unreachable Endpoint by.
+    #[test]
+    fn an_endpoint_is_named_by_its_publisher() {
+        let minted = "abcdefghijklmnopqrstuvwxyz234567";
+        let of = |catalog: serde_json::Value| {
+            endpoint_ref(
+                &serde_json::json!({"slug": minted, "audience": "public", "catalog": catalog}),
+                None,
+            )
+            .and_then(|e| e.publisher)
+        };
+        let names = serde_json::json!({"publisher": {"name": {"en": "BBSK", "sk": "Banskobystrický kraj"}}});
+        assert_eq!(of(names).as_deref(), Some("Banskobystrický kraj"));
+        let finnish = serde_json::json!({"publisher": {"name": {"sv": "Helsingfors", "fi": "Helsingin kaupunki"}}});
+        assert_eq!(of(finnish).as_deref(), Some("Helsingin kaupunki"));
+        assert_eq!(
+            of(serde_json::json!({"publisher": {"name": {"sk": " "}}})),
+            None
+        );
+        assert_eq!(of(serde_json::json!({})), None);
+    }
 
     /// T-4625: the space is read in either form of `contextSpaceRef`, and is empty without one.
     #[test]
@@ -797,6 +840,7 @@ mod tests {
                     slug: slug.into(),
                     audience: audience.into(),
                     title: None,
+                    publisher: None,
                     space: String::new(),
                 },
             );
