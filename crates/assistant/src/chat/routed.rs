@@ -2892,17 +2892,22 @@ async fn search_rounds(
 ) -> bool {
     while found.rounds < MAX_ROUNDS && !pending.is_empty() {
         found.rounds += 1;
-        for query in pending.drain(..) {
-            if q.events.is_closed() {
-                return false;
-            }
-            let at = Instant::now();
-            if let Some(hits) = searched(q.ask, q.events, &query).await {
-                merge(&mut found.hits, hits);
-            }
-            Stages::add(&mut spent.stages.search, at);
-            found.asked.push(query);
+        if q.events.is_closed() {
+            return false;
         }
+        // A round's queries are searched at once, their passages merged in the queries' order
+        // (T-4729): one after another, they were most of a 15.9 s search phase.
+        let at = Instant::now();
+        let searches = pending.iter().map(|query| searched(q.ask, q.events, query));
+        for hits in futures_util::future::join_all(searches)
+            .await
+            .into_iter()
+            .flatten()
+        {
+            merge(&mut found.hits, hits);
+        }
+        Stages::add(&mut spent.stages.search, at);
+        found.asked.append(&mut pending);
         // A first round that answers needs only what the router adds to it; the last round is
         // never judged.
         if covered || found.rounds == MAX_ROUNDS {

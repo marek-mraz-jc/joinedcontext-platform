@@ -91,6 +91,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
                 output_tokens_per_answer: 700,
                 messages_per_conversation: 30,
                 question_chars: 1_000,
+                cost_per_conversation_usd: None,
             }),
             theme: None,
             languages: vec!["sk".into()],
@@ -1137,6 +1138,83 @@ async fn arguments_that_break_the_tools_schema_are_never_sent() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4737: a conversation's model calls add up in `conversations.cost_micros`; once they reach
+/// `budget.costPerConversationUsd`, or its questions `messagesPerConversation`, the next question
+/// is told the conversation is long, and the model is asked nothing more.
+#[tokio::test]
+async fn a_conversation_at_its_cost_cap_is_long_and_asks_the_model_nothing() {
+    let mut capped = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(budget) = capped.spec.budget.as_mut() {
+        budget.cost_per_conversation_usd = Some(0.05);
+    }
+    let w = world("chatconversationcost", capped).await;
+    // The router's call reports its cost; the judge's and the answer's report none.
+    script_routed(
+        &w.proxy,
+        vec![ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"ahoj\"]}"}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50, "cost": 0.001}
+        }))],
+        vec![completion(json!({"role": "assistant", "content": "{\"queries\": []}"}), 20)],
+        vec![streamed(&["Áno."], 15, 5)],
+    )
+    .await;
+    let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(first.iter().all(|(name, _)| name != "error"), "{first:?}");
+    let id = first[0].1["id"].as_str().expect("an id").to_owned();
+    let calls = model_calls(&w.proxy).await.len() as i64;
+    assert!(calls >= 1);
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let cost: i64 = sqlx::query_scalar("SELECT cost_micros FROM conversations")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the conversation");
+    assert_eq!(
+        cost, 1_000,
+        "the router call's cost counts against the conversation"
+    );
+    // As if its earlier answers had spent the cap.
+    tx.rollback().await.expect("rollback");
+
+    // As if its earlier answers had spent the cost cap, then asked the 30 questions it may.
+    for spent in [
+        "UPDATE conversations SET cost_micros = 50000",
+        "UPDATE conversations SET cost_micros = 0, questions = 30",
+    ] {
+        let mut tx = assistant::project_scope(&w.pool, "hronov")
+            .await
+            .expect("scope");
+        sqlx::query(spent).execute(&mut *tx).await.expect(spent);
+        tx.commit().await.expect("commit");
+        let (status, refused, _) = answer_of(
+            &w.app,
+            ask(
+                json!({"message": "Druhá otázka", "conversation": id,
+                    "history": [{"role": "user", "text": "Ahoj"}, {"role": "assistant", "text": "Áno."}]}),
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        // The title the widget reads as a long conversation, with its new-conversation offer.
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{spent}");
+        let body = &refused[0].1;
+        assert_eq!(body["title"], "Conversation Budget Spent", "{spent}");
+        assert_eq!(
+            body["detail"],
+            "Tento rozhovor je už dlhý. Pokračujte v novom rozhovore, otázku v ňom položím znova."
+        );
+        assert_eq!(
+            model_calls(&w.proxy).await.len() as i64,
+            calls,
+            "no call past the cap: {spent}"
+        );
+    }
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// AG-104, AG-107: a spent conversation, a spent day and a model that does not answer are each
 /// an error event with a sentence, and the stream still ends with `done`.
 #[tokio::test]
@@ -1161,7 +1239,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
     // T-4192: the visitor reads it in Slovak, like the chat's other sentences.
     assert_eq!(
         error["detail"],
-        "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor."
+        "Tento rozhovor je už dlhý. Pokračujte v novom rozhovore, otázku v ňom položím znova."
     );
     assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
     assert!(model_calls(&w.proxy).await.is_empty(), "nothing was spent");
@@ -2640,6 +2718,18 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
         ],
         "{events:?}"
     );
+    // The router's two queries are one round, searched at once (T-4729): the second has started
+    // before the first one's search is done.
+    let at =
+        |pick: &dyn Fn(&(String, Value)) -> bool| events.iter().position(pick).expect("the event");
+    let second_started = at(&|(n, d)| n == "stage" && d["topic"] == "knižnica otváracie hodiny");
+    let first_started = at(&|(n, d)| n == "stage" && d["topic"] == "library opening hours");
+    let first_done = first_started
+        + events[first_started..]
+            .iter()
+            .position(|(n, d)| n == "tool" && d["name"] == "search" && d["status"] == "done")
+            .expect("its search is done");
+    assert!(second_started < first_done, "{events:?}");
     let calls = model_calls(&w.proxy).await;
     // Router, two verdicts, the answer: the first round's "no" sent its query into the router's
     // round, and the "yes" after it ended the rounds.
@@ -2747,9 +2837,11 @@ async fn the_owner_s_limits_hold_before_any_model_call() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body:?}");
-    assert!(headers.contains_key("retry-after"));
+    // T-4737: a long conversation, which a retry never helps: the widget offers a new one.
+    assert!(!headers.contains_key("retry-after"));
+    assert_eq!(body[0].1["title"], "Conversation Budget Spent");
     let detail = body[0].1["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains("nový rozhovor"), "{detail}");
+    assert!(detail.contains("novom rozhovore"), "{detail}");
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         before,
@@ -4800,5 +4892,37 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
         held,
         json!({"passages": 2, "publishers": ["hronov"], "languages": {"sk": 1.0}})
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4729 (od-32 on dev): a data answer that reaches the conversation's token budget in its tool
+/// loop is answered from what it read, with one last call that offers no tool, rather than
+/// refused after its reads; the next turn is the one the budget refuses.
+#[tokio::test]
+async fn a_tool_loop_at_the_conversations_budget_answers_from_what_it_read() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatloopcap", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![], vec![
+        completion(tool_call("c1", "ovzdusie__query_entities", json!({"type": "AirQualityObserved"})), 49_000),
+        completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 900),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Aké je NO2 na Námestí SNP?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.iter().all(|(n, _)| n != "error"), "{events:?}");
+    assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
+    let calls = model_calls(&w.proxy).await;
+    let (_, last) = calls.last().expect("the answer call");
+    assert_ne!(last["tool_choice"], json!("auto"), "{last}");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

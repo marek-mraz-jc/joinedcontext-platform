@@ -24,7 +24,7 @@
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
       missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
       thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup", retry: "Skúsiť znova",
-      full: "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor.",
+      full: "Tento rozhovor je už dlhý. Pokračujte v novom rozhovore, otázku v ňom položím znova.",
       unreachable: "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.",
       unanswered: "Asistent nevedel zostaviť odpoveď. Skúste sa opýtať inými slovami.",
       slow: "Odpoveď trvala príliš dlho. Skúste otázku položiť kratšie alebo inak.",
@@ -55,7 +55,7 @@
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
       missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
       thanks: "Thank you for the feedback.", more: "More questions", contact: "Contact", map: "Show on the map", steps: "Steps", retry: "Try again",
-      full: "This conversation has used up its share of the assistant. To ask more, start a new conversation.",
+      full: "This conversation is already long. Continue in a new conversation; I will ask your question there again.",
       unreachable: "The assistant cannot reach its model right now. Try again in a minute.",
       unanswered: "The assistant could not put an answer together. Try asking in other words.",
       slow: "The answer took too long. Try a shorter or different question.",
@@ -86,7 +86,7 @@
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
       missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
       thanks: "Děkujeme za hodnocení.", more: "Další otázky", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup", retry: "Zkusit znovu",
-      full: "Tento rozhovor už vyčerpal svůj podíl asistenta. Chcete-li se ptát dál, začněte novou konverzaci.",
+      full: "Tento rozhovor je už dlouhý. Pokračujte v novém rozhovoru, otázku v něm položím znovu.",
       unreachable: "Asistent se teď nemůže spojit se svým modelem. Zkuste to za minutu znovu.",
       unanswered: "Asistent nedokázal sestavit odpověď. Zkuste se zeptat jinými slovy.",
       slow: "Odpověď trvala příliš dlouho. Zkuste otázku položit kratší nebo jinak.",
@@ -731,7 +731,9 @@
     var stack = el("span", "jc-badges");
     stack.setAttribute("aria-hidden", "true");
     JCRender.badges(grouped.list).forEach(function (badge) {
-      var b = el("span", "jc-badge", badge.letter);
+      // The letter is CSS content, so a copy or a page's text never reads "DA4 zdroje" (T-4729).
+      var b = el("span", "jc-badge");
+      b.setAttribute("data-letter", badge.letter);
       b.style.setProperty("--badge", "hsl(" + badge.hue + " 45% 38%)");
       stack.appendChild(b);
     });
