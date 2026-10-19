@@ -145,13 +145,14 @@ pub struct Start {
 }
 
 /// Runs the loop to its answer; every outcome reaches `events`, and `spent` counts each call.
-/// Returns the answer's text and citations, or `None` when an error was sent instead.
+/// Returns the answer's text, its citations and whether its call ended on its own, or `None` when
+/// an error was sent instead.
 pub async fn answer(
     ask: &Ask<'_>,
     start: Start,
     spent: &mut Spent,
     events: &Sender<Event>,
-) -> Option<(String, Vec<Citation>)> {
+) -> Option<(String, Vec<Citation>, bool)> {
     let Start {
         mut messages,
         mut citations,
@@ -271,7 +272,7 @@ pub async fn answer(
             // Whether the model stopped early or ran into the cap (T-4651).
             let steps_left_at_answer = ask.data_steps.saturating_sub(steps);
             tracing::info!(deployment = %ask.deployment, steps, steps_left_at_answer, calls = spent.calls, tokens = spent.total, reasoning = spent.reasoning.answer.unwrap_or_default(), ms = started.elapsed().as_millis() as u64, cited = citations.len(), "data loop answered");
-            return Some((text, citations));
+            return Some((text, citations, completion.whole()));
         }
         let calls: Vec<Value> = completion
             .calls

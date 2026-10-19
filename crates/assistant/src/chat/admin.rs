@@ -123,6 +123,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             post(erase_mentioning),
         )
         .route(
+            "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/answers",
+            delete(forget_answers),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/conversations/{conversation}/turns/{turn}/same",
             get(same),
         )
@@ -279,6 +283,21 @@ async fn erase(
         Ok(false) | Err(crate::Error::Project(_)) => problem(404, "no such conversation"),
         Err(err) => failed(err),
     }
+}
+
+/// Forgets the answers a deployment keeps (API/05 §3, T-4731), answered with
+/// `{"forgotten": n}`; an unknown project or deployment keeps none, so it answers 0.
+async fn forget_answers(
+    State(state): State<Arc<ChatState>>,
+    Path((project, deployment)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let forgotten = state.answers.forget(&format!("{project}/{deployment}"));
+    tracing::info!(%project, %deployment, forgotten, "the deployment's kept answers were forgotten");
+    Json(json!({ "forgotten": forgotten })).into_response()
 }
 
 /// What a data subject's erasure searches the stored conversations for.
