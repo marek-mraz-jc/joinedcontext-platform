@@ -3421,9 +3421,10 @@ async fn a_hanging_and_a_failing_endpoint_cost_the_question_three_seconds_once()
 
     let calls = model_calls(&w.proxy).await;
     let rules = calls_of(&calls, None)[0]["messages"][0].to_string();
-    // T-4683: named by their publishers, never by an Endpoint's name or slug; these name none
+    // T-4729: a page question reads no data, so the sources whose types did not list are no
+    // warning of its answer; T-4683: and never named by an Endpoint's name or slug.
     assert!(
-        rules.contains("Some data sources did not answer in time")
+        !rules.contains("did not answer in time")
             && !rules.contains("ovzdusie")
             && !rules.contains("bbsk/kraj"),
         "{rules}"
