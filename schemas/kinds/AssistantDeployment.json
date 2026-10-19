@@ -315,6 +315,14 @@
       "additionalProperties": false,
       "description": "How many model tokens the deployment may spend; `jc-agent-proxy` holds it to this.",
       "properties": {
+        "costPerConversationUsd": {
+          "description": "What all model calls of one conversation may cost, in US dollars; 0.01 to `costPerDayUsd`, no cap when absent. No call starts once the conversation has spent it (AG-107, T-4737).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "costPerDayUsd": {
           "default": 3.0,
           "description": "What the deployment's model calls may cost per day, in US dollars; 0.01 to 1,000, default 3. Past it an answer lists the matching sources' links only (AG-107).",

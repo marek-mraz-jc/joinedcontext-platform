@@ -658,6 +658,11 @@ pub struct Budget {
     /// The longest question, in characters; 100 to 4,000, default 1,000.
     #[serde(default = "default_question_chars")]
     pub question_chars: u32,
+    /// What all model calls of one conversation may cost, in US dollars; 0.01 to
+    /// `costPerDayUsd`, no cap when absent. No call starts once the conversation has spent it
+    /// (AG-107, T-4737).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_conversation_usd: Option<f64>,
 }
 
 /// The models a deployment names for `jc-agent-proxy` (MF-52): the router and answer calls.
@@ -1454,6 +1459,15 @@ impl AssistantDeploymentSpec {
                     budget.cost_per_day_usd.to_string(),
                     "costPerDayUsd is 0.01 to 1000",
                 ));
+            }
+            if let Some(cap) = budget.cost_per_conversation_usd {
+                if !(0.01..=budget.cost_per_day_usd).contains(&cap) {
+                    return Err(name(
+                        "budget.costPerConversationUsd",
+                        cap.to_string(),
+                        "costPerConversationUsd is 0.01 to costPerDayUsd",
+                    ));
+                }
             }
             for (field, value, range, reason) in [
                 (
@@ -2304,6 +2318,27 @@ mod deployment_spec_tests {
             ),
             "budget.questionChars"
         );
+        // T-4737: a conversation's cost is a cent at least and never more than the day's.
+        for cap in [0.0, 0.009, 1.01] {
+            assert_eq!(
+                refused(
+                    budget(json!({"tokensPerDay": 10, "tokensPerConversation": 5,
+                        "costPerDayUsd": 1, "costPerConversationUsd": cap}))
+                    .budget_fields()
+                ),
+                "budget.costPerConversationUsd",
+                "{cap}"
+            );
+        }
+        for cap in [0.01, 0.15, 1.0] {
+            assert!(
+                budget(json!({"tokensPerDay": 10, "tokensPerConversation": 5,
+                    "costPerDayUsd": 1, "costPerConversationUsd": cap}))
+                .budget_fields()
+                .is_ok(),
+                "{cap}"
+            );
+        }
     }
 
     #[test]
