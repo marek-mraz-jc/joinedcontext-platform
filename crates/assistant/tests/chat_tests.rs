@@ -1366,6 +1366,58 @@ async fn one_reply_may_carry_four_calls_and_none_with_overlong_arguments() {
     );
 }
 
+/// T-4729: two tables of one Endpoint are looked up once and both cite the dataset page that
+/// names the Endpoint, so a visitor reads where the data is described, never a tool's name.
+#[tokio::test]
+async fn two_tables_of_one_endpoint_both_cite_its_dataset_page() {
+    let mut d = looped(50_000);
+    d.spec.sources.push("catalogue".into());
+    let w = world("chatnamed", d).await;
+    let page = "https://opendata.hronov.example/dataset/ovzdusie";
+    corpus::pages(
+        &w.pool,
+        "hronov",
+        "catalogue",
+        &[(
+            page,
+            "sk",
+            &format!("# Ovzdušie\n\nNGSI-LD: https://api.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"),
+        )],
+    )
+    .await;
+    // No type named, so the citations' pages come from naming the sources, not from the type's
+    // dataset (T-4625).
+    let calls: Vec<Value> = [5, 10].iter().enumerate()
+        .map(|(n, limit)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"limit": limit}).to_string()}}))
+        .collect();
+    let both = json!({"role": "assistant", "content": null, "tool_calls": calls});
+    script(
+        &w.proxy,
+        vec![
+            completion(both, 100),
+            completion(
+                json!({"role": "assistant", "content": "NO2 je 21 [1], PM10 tiež 21 [2]."}),
+                100,
+            ),
+        ],
+    )
+    .await;
+    let (_, events, _) =
+        answer_of(&w.app, ask_looped(json!({"message": "Aké je ovzdušie?"}))).await;
+    let (_, citations) = events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations");
+    let urls: Vec<&str> = citations
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|c| c["url"].as_str())
+        .collect();
+    assert_eq!(urls, [page, page], "{citations}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 #[tokio::test]
 async fn the_route_refuses_before_it_spends() {
     let w = world("chatrefuse", deployment(Channel::Public, 50_000, 2)).await;
