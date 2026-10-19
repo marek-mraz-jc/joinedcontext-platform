@@ -87,6 +87,15 @@ fn iso639_1(code: &str) -> Option<&'static str> {
     }
 }
 
+/// A heading with no text, only spaces, `&nbsp;` or tags: html-to-markdown-rs 3.17 panics on one
+/// and the whole page fails (www.bbsk.sk/uradne-hodiny, T-4688), so it goes before conversion. It
+/// says nothing a reader could find.
+// ponytail: a regex over the HTML, not a parse; drop it when the converter trims such a heading.
+static EMPTY_HEADING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?is)<h[1-6]\b[^>]*>(?:\s|&nbsp;|&#160;|&#xa0;|<[^>]*>)*</h[1-6]\s*>")
+        .unwrap_or_else(|err| unreachable!("the pattern is fixed: {err}"))
+});
+
 /// Extracts `bytes` of `mime`, keeping passages that start on a page up to `max_pages`.
 pub async fn extract(
     bytes: &[u8],
@@ -96,6 +105,7 @@ pub async fn extract(
 ) -> Result<Extracted, Error> {
     let mut cut = false;
     let shortened;
+    let cleaned;
     let bytes = if mime.starts_with("application/pdf") {
         if max_pages == 0 {
             // No page is kept: nothing is read at all.
@@ -112,6 +122,14 @@ pub async fn extract(
                 &shortened[..]
             }
             None => bytes,
+        }
+    } else if mime.starts_with("text/html") {
+        match std::str::from_utf8(bytes) {
+            Ok(html) => {
+                cleaned = EMPTY_HEADING.replace_all(html, "");
+                cleaned.as_bytes()
+            }
+            Err(_) => bytes,
         }
     } else {
         bytes
