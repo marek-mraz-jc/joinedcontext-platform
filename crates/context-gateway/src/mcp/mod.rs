@@ -15,6 +15,7 @@ pub mod jsonrpc;
 pub mod personal;
 pub mod search;
 pub mod server;
+pub mod titles;
 pub mod tools;
 pub mod units;
 pub mod writes;
@@ -142,7 +143,7 @@ mod tests {
             super::documents::tool(""),
         ]);
         let names: Vec<Value> = listed.iter().map(|tool| tool["name"].clone()).collect();
-        tools::titled(&mut listed);
+        super::titles::titled(&mut listed);
         let mut titles = std::collections::HashSet::new();
         for (tool, name) in listed.iter().zip(&names) {
             assert_eq!(&tool["name"], name, "the name never changes");
@@ -163,7 +164,7 @@ mod tests {
             serde_json::json!({ "name": "get_entity", "title": "Read one entity" }),
             serde_json::json!({ "name": "list_types", "title": " ", "annotations": null }),
         ];
-        tools::titled(&mut broker);
+        super::titles::titled(&mut broker);
         assert_eq!(broker[0]["title"], "Query temporal");
         assert_eq!(
             broker[0]["annotations"],

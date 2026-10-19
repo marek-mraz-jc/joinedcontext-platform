@@ -259,7 +259,7 @@ pub(crate) async fn mcp_answer(
                 mcp::tools::keep_anonymous(items);
             }
             if key == "tools" {
-                mcp::tools::titled(items);
+                mcp::titles::titled(items);
             }
         }
     }
