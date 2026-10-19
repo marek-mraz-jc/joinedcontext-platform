@@ -173,6 +173,17 @@
           ],
           "description": "The router and answer models; the service's default when absent."
         },
+        "privacy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Privacy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whom a visitor asks about their data (T-4670)."
+        },
         "publicId": {
           "description": "The id in the widget's address, `/w/{publicId}`; a DNS label.",
           "type": "string"
@@ -249,6 +260,13 @@
             }
           ],
           "description": "How the chat looks."
+        },
+        "transcriptRetention": {
+          "description": "How long each turn of a conversation is kept, `P{n}D` with `n` 0 to 365; `P30D` when absent, `P0D` keeps none (AG-99, T-4670).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "widget": {
           "anyOf": [
@@ -762,6 +780,27 @@
           "type": "string"
         }
       ]
+    },
+    "Privacy": {
+      "additionalProperties": false,
+      "description": "Whom a visitor of an assistant asks about their data, shown in the widget's privacy panel (API/05 §1.6, T-4670).",
+      "properties": {
+        "contact": {
+          "description": "An e-mail address, at most 254 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "documentsUrl": {
+          "description": "An `https` page of the operator's privacy documents, at most 2,000 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ProviderRouting": {
       "additionalProperties": false,

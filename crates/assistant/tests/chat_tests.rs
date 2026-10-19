@@ -101,6 +101,8 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             answer: None,
             feedback: true,
             widget: None,
+            transcript_retention: None,
+            privacy: None,
         },
     }
 }
