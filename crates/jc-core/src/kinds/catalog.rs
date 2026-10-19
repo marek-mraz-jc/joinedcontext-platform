@@ -61,6 +61,11 @@ pub struct Catalog {
     /// `pu:osobní-údaje` (API/08 section 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personal_data: Option<PersonalData>,
+    /// Charts on the dataset, Vega-Lite 5 or Vega 5 over the Endpoint's own sources, published as
+    /// CKAN `jc_visualization` views (ADR-N-053, EP-130); validated by the Endpoint, which knows
+    /// what it serves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visualizations: Vec<crate::kinds::visualization::Visualization>,
 }
 
 /// The publisher's statement about personal data in a dataset (API/08 section 5).
@@ -329,6 +334,145 @@ impl DataTheme {
             Self::Tran => "Transport",
         }
     }
+
+    /// Every theme of the table, in its code order.
+    pub const ALL: [Self; 13] = [
+        Self::Agri,
+        Self::Econ,
+        Self::Educ,
+        Self::Ener,
+        Self::Envi,
+        Self::Gove,
+        Self::Heal,
+        Self::Intr,
+        Self::Just,
+        Self::Regi,
+        Self::Soci,
+        Self::Tech,
+        Self::Tran,
+    ];
+
+    /// The category label in `lang`, one of `sk`, `en`, `cs`, `hu`, `de`, `fi` and `uk`, else
+    /// the English one (AG-124, ADR-N-055 §2.4). The EU Vocabularies labels for the EU languages; the
+    /// Ukrainian ones are a reviewed translation, since the table has none. The Portal, the
+    /// assistant's context page and the CKAN groups read their labels from here.
+    pub const fn label_in(self, lang: &str) -> &'static str {
+        let row: [&'static str; 6] = match self {
+            Self::Agri => [
+                "Poľnohospodárstvo, rybárstvo, lesníctvo a potraviny",
+                "Zemědělství, rybářství, lesnictví a potraviny",
+                "Mezőgazdaság, halászat, erdészet és élelmiszer",
+                "Landwirtschaft, Fischerei, Forstwirtschaft und Nahrungsmittel",
+                "Maatalous, kalastus, metsätalous ja elintarvikkeet",
+                "Сільське господарство, рибальство, лісове господарство та продовольство",
+            ],
+            Self::Econ => [
+                "Hospodárstvo a financie",
+                "Hospodářství a finance",
+                "Gazdaság és pénzügyek",
+                "Wirtschaft und Finanzen",
+                "Talous ja raha-asiat",
+                "Економіка та фінанси",
+            ],
+            Self::Educ => [
+                "Vzdelávanie, kultúra a šport",
+                "Vzdělávání, kultura a sport",
+                "Oktatás, kultúra és sport",
+                "Bildung, Kultur und Sport",
+                "Koulutus, kulttuuri ja urheilu",
+                "Освіта, культура та спорт",
+            ],
+            Self::Ener => [
+                "Energetika",
+                "Energie",
+                "Energia",
+                "Energie",
+                "Energia",
+                "Енергетика",
+            ],
+            Self::Envi => [
+                "Životné prostredie",
+                "Životní prostředí",
+                "Környezet",
+                "Umwelt",
+                "Ympäristö",
+                "Довкілля",
+            ],
+            Self::Gove => [
+                "Vláda a verejný sektor",
+                "Vláda a veřejný sektor",
+                "Kormányzat és közszféra",
+                "Regierung und öffentlicher Sektor",
+                "Hallinto ja julkinen sektori",
+                "Уряд і державний сектор",
+            ],
+            Self::Heal => [
+                "Zdravie",
+                "Zdraví",
+                "Egészségügy",
+                "Gesundheit",
+                "Terveys",
+                "Охорона здоров’я",
+            ],
+            Self::Intr => [
+                "Medzinárodné otázky",
+                "Mezinárodní otázky",
+                "Nemzetközi ügyek",
+                "Internationale Themen",
+                "Kansainväliset kysymykset",
+                "Міжнародні питання",
+            ],
+            Self::Just => [
+                "Spravodlivosť, právny systém a verejná bezpečnosť",
+                "Spravedlnost, právní systém a veřejná bezpečnost",
+                "Igazságügy, jogrendszer és közbiztonság",
+                "Justiz, Rechtssystem und öffentliche Sicherheit",
+                "Oikeus, oikeusjärjestelmä ja yleinen turvallisuus",
+                "Правосуддя, правова система та громадська безпека",
+            ],
+            Self::Regi => [
+                "Regióny a mestá",
+                "Regiony a města",
+                "Régiók és városok",
+                "Regionen und Städte",
+                "Alueet ja kaupungit",
+                "Регіони та міста",
+            ],
+            Self::Soci => [
+                "Obyvateľstvo a spoločnosť",
+                "Obyvatelstvo a společnost",
+                "Népesség és társadalom",
+                "Bevölkerung und Gesellschaft",
+                "Väestö ja yhteiskunta",
+                "Населення та суспільство",
+            ],
+            Self::Tech => [
+                "Veda a technika",
+                "Věda a technika",
+                "Tudomány és technológia",
+                "Wissenschaft und Technologie",
+                "Tiede ja teknologia",
+                "Наука і технології",
+            ],
+            Self::Tran => [
+                "Doprava",
+                "Doprava",
+                "Közlekedés",
+                "Verkehr",
+                "Liikenne",
+                "Транспорт",
+            ],
+        };
+        match lang.as_bytes() {
+            b"sk" => row[0],
+            b"cs" => row[1],
+            b"hu" => row[2],
+            b"de" => row[3],
+            b"fi" => row[4],
+            b"uk" => row[5],
+            _ => self.label(),
+        }
+    }
 }
 
 /// An update frequency of the EU frequency table.
@@ -572,6 +716,22 @@ fn email(value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_theme_has_a_label_in_every_category_language() {
+        for theme in DataTheme::ALL {
+            for lang in ["sk", "en", "cs", "hu", "de", "fi", "uk"] {
+                assert!(!theme.label_in(lang).trim().is_empty(), "{theme:?} {lang}");
+            }
+            assert_eq!(theme.label_in("en"), theme.label());
+            assert_eq!(theme.label_in("xx"), theme.label());
+        }
+        assert_eq!(DataTheme::Tran.label_in("sk"), "Doprava");
+        assert_eq!(DataTheme::Envi.label_in("de"), "Umwelt");
+        let codes: std::collections::BTreeSet<_> =
+            DataTheme::ALL.iter().map(|t| t.code()).collect();
+        assert_eq!(codes.len(), 13);
+    }
+
     use super::*;
 
     fn parse(yaml: &str) -> Result<Catalog> {

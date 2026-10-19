@@ -8,10 +8,13 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
+use crate::kinds::catalog::DataTheme;
+use crate::kinds::mcp_server::AccessLevel;
+use crate::kinds::mcp_server::Select;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The most start URLs one source may name.
 pub const MAX_START_URLS: usize = 20;
@@ -37,6 +40,8 @@ pub const MAX_TITLE_LEN: usize = 60;
 pub const MAX_TIMEOUT_SECONDS: u16 = 120;
 /// The most WordPress post types one `website` source may list (T-4154).
 pub const MAX_WORDPRESS_TYPES: usize = 40;
+/// The most Endpoints one deployment may exclude (MF-59).
+pub const MAX_EXCLUDE: usize = 50;
 
 /// The most CKAN organizations one `ckan` source may narrow to.
 pub const MAX_ORGANIZATIONS: usize = 10;
@@ -252,6 +257,9 @@ pub struct KnowledgeSourceSpec {
     /// `public` (any channel) or `internal` (the internal channel only); default `internal`.
     #[serde(default)]
     pub visibility: Visibility,
+    /// EU data-theme codes it is about, for the context page (MF-60, ADR-N-055 §2.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<DataTheme>,
 }
 
 impl Kind for KnowledgeSourceSpec {
@@ -287,6 +295,7 @@ impl KnowledgeSourceSpec {
         self.wordpress_fields()?;
         self.space_and_pattern_fields()?;
         self.crawl_limit_fields()?;
+        categories(&self.categories)?;
         languages(&self.languages)
     }
 
@@ -579,6 +588,16 @@ impl Channel {
     /// Whether the channel answers people nobody signed in (MF-52).
     pub fn is_anonymous(self) -> bool {
         !matches!(self, Channel::Internal)
+    }
+
+    /// Its name in a manifest.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Channel::Public => "public",
+            Channel::Internal => "internal",
+            Channel::Ckan => "ckan",
+            Channel::Iframe => "iframe",
+        }
     }
 }
 
@@ -896,6 +915,16 @@ pub struct AssistantDeploymentSpec {
     /// ADR-N-043 §7.6); on every channel but `internal` a `public` one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server: Option<String>,
+    /// The Endpoints it reads beside its connectors, picked by the McpServer grammar (MF-58,
+    /// ADR-N-055 §2.2); resolved inside the project's reach by [`crate::reach::resolve_connectors`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<Select>,
+    /// Endpoints it never reads, named as a connector names one (MF-59).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// EU data-theme codes it is about, for display (MF-60); `theme` is the chat's look.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<DataTheme>,
     /// The pages it may be placed on, each `https://host[:port]`; no wildcard, no path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_origins: Vec<String>,
@@ -938,7 +967,32 @@ pub struct AssistantDeploymentSpec {
     /// How the chat picks its language and whether it shows the toggle (T-4343).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget: Option<ChatWidget>,
+    /// How long each turn of a conversation is kept, `P{n}D` with `n` 0 to 365; `P30D` when
+    /// absent, `P0D` keeps none (AG-99, T-4670).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_retention: Option<String>,
+    /// Whom a visitor asks about their data (T-4670).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<Privacy>,
 }
+
+/// Whom a visitor of an assistant asks about their data, shown in the widget's privacy panel
+/// (API/05 §1.6, T-4670).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Privacy {
+    /// An e-mail address, at most 254 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    /// An `https` page of the operator's privacy documents, at most 2,000 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documents_url: Option<String>,
+}
+
+/// The days a turn is kept when `transcriptRetention` is absent (AG-99).
+pub const TRANSCRIPT_DAYS: u32 = 30;
+/// The most days `transcriptRetention` may name.
+pub const MAX_TRANSCRIPT_DAYS: u32 = 365;
 
 impl Kind for AssistantDeploymentSpec {
     const KIND: &'static str = "AssistantDeployment";
@@ -985,6 +1039,15 @@ impl AssistantDeploymentSpec {
             .unwrap_or(10)
     }
 
+    /// The days each turn is kept (AG-99): `transcriptRetention`'s, [`TRANSCRIPT_DAYS`] when
+    /// absent, 0 for `P0D` or a value [`Self::validate`] refuses.
+    pub fn transcript_days(&self) -> u32 {
+        self.transcript_retention
+            .as_deref()
+            .map_or(Some(TRANSCRIPT_DAYS), retention_days)
+            .unwrap_or(0)
+    }
+
     /// The seconds a data question's loop may call tools; 20 when absent.
     pub fn data_seconds(&self) -> u32 {
         self.answer
@@ -1006,7 +1069,51 @@ impl AssistantDeploymentSpec {
         self.text_fields()?;
         self.scope_fields()?;
         self.theme_fields()?;
+        self.privacy_fields()?;
         languages(&self.languages)
+    }
+
+    /// `transcriptRetention` and `privacy` (T-4670).
+    fn privacy_fields(&self) -> Result<()> {
+        if let Some(retention) = &self.transcript_retention {
+            if retention_days(retention).is_none() {
+                return Err(name(
+                    "transcriptRetention",
+                    retention.clone(),
+                    "transcriptRetention is P{n}D with n from 0 to 365",
+                ));
+            }
+        }
+        let Some(privacy) = &self.privacy else {
+            return Ok(());
+        };
+        if let Some(contact) = &privacy.contact {
+            let (local, host) = contact.split_once('@').unwrap_or_default();
+            let plain = |part: &str| {
+                !part.is_empty()
+                    && part
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
+            };
+            if contact.len() > 254 || !plain(local) || !plain(host) || !host.contains('.') {
+                return Err(name(
+                    "privacy.contact",
+                    contact.clone(),
+                    "privacy.contact is one e-mail address of at most 254 characters",
+                ));
+            }
+        }
+        if let Some(url) = &privacy.documents_url {
+            let host = url.strip_prefix("https://").unwrap_or_default();
+            if url.len() > 2_000 || host.is_empty() || url.chars().any(char::is_whitespace) {
+                return Err(name(
+                    "privacy.documentsUrl",
+                    url.clone(),
+                    "privacy.documentsUrl is an https address of at most 2,000 characters",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The public id, what it answers from, its MCP server and its sources (MF-52).
@@ -1018,11 +1125,11 @@ impl AssistantDeploymentSpec {
                 "publicId is a DNS label: lowercase letters, digits and dashes",
             )
         })?;
-        if self.sources.is_empty() && self.connectors.is_empty() && self.mcp_server.is_none() {
+        if self.sources.is_empty() && !self.reads_endpoints() {
             return Err(name(
                 "sources",
                 String::new(),
-                "a deployment answers from at least one source, connector or mcpServer",
+                "a deployment answers from at least one source, connector, select or mcpServer",
             ));
         }
         if let Some(server) = &self.mcp_server {
@@ -1069,11 +1176,11 @@ impl AssistantDeploymentSpec {
                     "routes rag answers from the sources; name at least one",
                 ))
             }
-            Routes::Data if self.connectors.is_empty() && self.mcp_server.is_none() => {
+            Routes::Data if !self.reads_endpoints() => {
                 return Err(name(
                     "answer.routes",
                     "data".into(),
-                    "routes data answers from the connectors; name at least one or an mcpServer",
+                    "routes data answers from the connectors; name at least one, a select or an mcpServer",
                 ))
             }
             _ => {}
@@ -1131,6 +1238,87 @@ impl AssistantDeploymentSpec {
                     "connectors[].timeoutSeconds",
                     connector.timeout_seconds.to_string(),
                     "timeoutSeconds is 1 to 120",
+                ));
+            }
+        }
+        self.select_fields()?;
+        categories(&self.categories)
+    }
+
+    /// Whether it names any way to reach an Endpoint.
+    fn reads_endpoints(&self) -> bool {
+        !self.connectors.is_empty() || self.select.is_some() || self.mcp_server.is_some()
+    }
+
+    /// The selector and the exclusions (MF-58, MF-59). Whether a project, space or Endpoint
+    /// exists, and whether a project is this one, is `jcctl validate`'s.
+    fn select_fields(&self) -> Result<()> {
+        if let Some(select) = &self.select {
+            if self.channel.is_anonymous() {
+                if let Some(level) = select
+                    .access_level
+                    .iter()
+                    .flatten()
+                    .find(|level| **level != AccessLevel::Public)
+                {
+                    return Err(Error::Invalid {
+                        field: "spec.select.accessLevel".into(),
+                        reason: format!(
+                            "a `{}` deployment answers people nobody signed in, so it selects `public` Endpoints only, not `{level}`; use channel `internal` (MF-58)",
+                            self.channel.as_str()
+                        ),
+                    });
+                }
+            }
+            // Every level fits a project-list audience: the channel's bound is the one above.
+            select.validate(crate::kinds::Audience::ProjectList)?;
+            let scope = self.scope_projects();
+            let foreign = select.projects.iter().flatten().map(String::as_str).chain(
+                select
+                    .spaces
+                    .iter()
+                    .flatten()
+                    .filter_map(|space| space.split_once('/').map(|(project, _)| project)),
+            );
+            // Its own project is the one name not in scope; jcctl tells the two apart.
+            let mut outside: BTreeSet<&str> = BTreeSet::new();
+            for project in foreign.filter(|p| !scope.iter().any(|s| s == p)) {
+                outside.insert(project);
+            }
+            if outside.len() > 1 {
+                return Err(Error::Invalid {
+                    field: "spec.select.projects".into(),
+                    reason: format!(
+                        "a selector reaches the deployment's own project and those of scope.projects; add {} to scope.projects or drop them (MF-58)",
+                        outside.into_iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ")
+                    ),
+                });
+            }
+        }
+        if self.exclude.len() > MAX_EXCLUDE {
+            return Err(name(
+                "exclude",
+                self.exclude.len().to_string(),
+                "exclude names at most 50 Endpoints",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for excluded in &self.exclude {
+            let (project, endpoint) = connector_target(excluded);
+            if project.is_some_and(|p| names::validate_dns1123_label(p).is_err())
+                || names::validate_dns1123_label(endpoint).is_err()
+            {
+                return Err(name(
+                    "exclude",
+                    excluded.clone(),
+                    "exclude names an Endpoint of this project, or one of another project as {project}/{endpoint}",
+                ));
+            }
+            if !seen.insert(excluded.as_str()) {
+                return Err(name(
+                    "exclude",
+                    excluded.clone(),
+                    "exclude names an Endpoint once",
                 ));
             }
         }
@@ -1544,6 +1732,17 @@ fn is_ckan_name(value: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
+/// The days of a `P{n}D` retention with `n` 0 to [`MAX_TRANSCRIPT_DAYS`]; `None` otherwise.
+fn retention_days(value: &str) -> Option<u32> {
+    let days = value.strip_prefix('P')?.strip_suffix('D')?;
+    if days.is_empty() || days.len() > 3 || !days.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    days.parse()
+        .ok()
+        .filter(|days| *days <= MAX_TRANSCRIPT_DAYS)
+}
+
 fn name(field: &'static str, value: String, reason: &'static str) -> Error {
     Error::Name {
         field,
@@ -1586,6 +1785,19 @@ fn host_and_port(authority: &str) -> Option<&str> {
                 && !label.ends_with('-')
         });
     labels_ok.then_some(host)
+}
+
+/// Each EU data-theme code once (MF-60); an unknown code is refused by [`DataTheme`] itself.
+fn categories(codes: &[DataTheme]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    match codes.iter().find(|code| !seen.insert(code.code())) {
+        Some(code) => Err(name(
+            "categories",
+            code.code().to_owned(),
+            "categories names each EU data-theme code once",
+        )),
+        None => Ok(()),
+    }
 }
 
 /// ISO 639-1: two lowercase letters each.
@@ -2134,5 +2346,61 @@ mod deployment_spec_tests {
             refused(with(|s| s["theme"]["greeting"] = json!({"de": "Hallo"})).theme_fields()),
             "theme.greeting"
         );
+    }
+
+    #[test]
+    fn transcripts_keep_thirty_days_unless_told_and_privacy_names_a_real_address() {
+        assert_eq!(with(|_| {}).transcript_days(), TRANSCRIPT_DAYS);
+        for (value, days) in [("P0D", 0), ("P7D", 7), ("P365D", 365)] {
+            let spec = with(|s| s["transcriptRetention"] = json!(value));
+            assert!(spec.privacy_fields().is_ok(), "{value}");
+            assert_eq!(spec.transcript_days(), days, "{value}");
+        }
+        for value in ["P366D", "30", "P30", "PT30D", "P-1D", "P1W", "P0030D", ""] {
+            let spec = with(|s| s["transcriptRetention"] = json!(value));
+            assert_eq!(
+                refused(spec.privacy_fields()),
+                "transcriptRetention",
+                "{value}"
+            );
+            assert_eq!(
+                spec.transcript_days(),
+                0,
+                "a refused value keeps nothing: {value}"
+            );
+        }
+        let ok = with(|s| {
+            s["privacy"] = json!({"contact": "dpo@banskabystrica.sk",
+                "documentsUrl": "https://www.banskabystrica.sk/ochrana-osobnych-udajov/"})
+        });
+        assert!(ok.privacy_fields().is_ok());
+        for contact in ["dpo", "@x.sk", "dpo@sk", "a b@x.sk", "<x>@x.sk"] {
+            let spec = with(|s| s["privacy"] = json!({ "contact": contact }));
+            assert_eq!(
+                refused(spec.privacy_fields()),
+                "privacy.contact",
+                "{contact}"
+            );
+        }
+        for url in [
+            "http://x.sk/p",
+            "https://",
+            "javascript:alert(1)",
+            "https://x.sk/a b",
+        ] {
+            let spec = with(|s| s["privacy"] = json!({ "documentsUrl": url }));
+            assert_eq!(
+                refused(spec.privacy_fields()),
+                "privacy.documentsUrl",
+                "{url}"
+            );
+        }
+        let unknown: std::result::Result<AssistantDeploymentSpec, serde_json::Error> =
+            serde_json::from_value({
+                let mut s = golden();
+                s["privacy"] = json!({"phone": "+421"});
+                s
+            });
+        assert!(unknown.is_err(), "privacy refuses an unknown field");
     }
 }

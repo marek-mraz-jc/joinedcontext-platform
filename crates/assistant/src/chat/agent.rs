@@ -3,7 +3,7 @@
 //! most [`MAX_CALLS`] model calls. The tools are `search` and the switched-on connectors' allowed
 //! tools; a name the model makes up is refused here and never called.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -55,6 +55,8 @@ const RULES: &str = "You answer the questions of a city's residents from what th
 #[derive(Debug, Clone)]
 pub struct Connected {
     pub endpoint: String,
+    /// The Endpoint's title ([`crate::worker::EndpointRef::title`]).
+    pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
     /// The slugs of the project's Endpoints over the same context space, its own included: one
@@ -137,6 +139,14 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
     /// The unit symbol of each column (`µg/m³`), `null` where it has none (T-4650).
     pub units: Vec<Option<String>>,
+    /// Each column's labels per language from the data model, `null` where the model names none;
+    /// empty for a type without a model class (DM-100, T-4672).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Whether each column is one of the model's key attributes, which a map's popup shows
+    /// (DM-99, T-4672); empty for a type without a model class.
+    #[serde(skip)]
+    pub summary: Vec<bool>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -165,6 +175,8 @@ pub struct Ask<'a> {
     /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
     /// `answer.routes` is `data`.
     pub sources: &'a [(String, Vec<String>)],
+    /// The sources above that crawl a website, `{project}/{source}` ([`crate::website_sources`]).
+    pub websites: &'a [String],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,
@@ -200,6 +212,8 @@ pub struct Ask<'a> {
     pub now: time::OffsetDateTime,
     /// The deployment's local time zone; UTC only when `None`.
     pub zone: Option<super::clock::Zone>,
+    /// What the turn did, step by step, for its stored transcript (AG-99, T-4670).
+    pub trace: &'a super::trace::Trace,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
@@ -621,7 +635,8 @@ pub async fn answer(
             // on the last call and its text came back empty, "No Answer" on dev (T-3205).
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
         }
-        let completion = match ask
+        let at = std::time::Instant::now();
+        let completed = ask
             .model
             .complete(
                 ask.deployment,
@@ -630,8 +645,10 @@ pub async fn answer(
                 &tools,
                 allow_tools,
             )
-            .await
-        {
+            .await;
+        ask.trace
+            .model("agent", ask.model.name(), at, completed.as_ref());
+        let completion = match completed {
             Ok(completion) => completion,
             // A spent day answers as search, never as a refusal (T-4286).
             Err(CallError::DaySpent(_)) => {
@@ -859,11 +876,19 @@ async fn run_tool(
             },
         )
         .await;
-        match connector
+        let began = std::time::Instant::now();
+        let answered = connector
             .surface
-            .call(ask.http, &tool.name, arguments)
-            .await
-        {
+            .call(ask.http, &tool.name, arguments.clone())
+            .await;
+        ask.trace.tool(
+            &tool.name,
+            endpoint.as_deref(),
+            &arguments,
+            began,
+            &answered,
+        );
+        match answered {
             Ok(text) => {
                 send(
                     events,

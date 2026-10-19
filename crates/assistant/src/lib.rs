@@ -148,6 +148,8 @@ pub struct Hit {
     pub text: String,
     /// `Σ 1 / (60 + rank)` over the rankings it appears in.
     pub score: f64,
+    /// The source it is from, as `{project}/{source}`.
+    pub site: String,
 }
 
 /// The pgvector literal of an embedding, refused unless it is [`DIMENSIONS`] finite numbers.
@@ -211,11 +213,12 @@ semantic AS (
     ORDER BY rank
     LIMIT $5
 )
-SELECT c.id, c.url, c.text,
+SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
        ((COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))
         * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score
 FROM lexical FULL OUTER JOIN semantic USING (id)
 JOIN chunks c ON c.id = COALESCE(lexical.id, semantic.id)
+JOIN sites site ON site.id = c.site_id
 CROSS JOIN LATERAL (SELECT c.url ~* '/(aktuality|aktualita|aktualne|novinky|spravy|tlacove-spravy|clanky|news|uutiset|tiedotteet|blog)(/|$|\?|#)' AS item) news
 ORDER BY score DESC, news.item, c.id
 LIMIT $7
@@ -248,6 +251,7 @@ pub async fn hybrid_search(
                 url: row.try_get("url")?,
                 text: row.try_get("text")?,
                 score: row.try_get("score")?,
+                site: row.try_get("site")?,
             })
         })
         .collect::<Result<_, sqlx::Error>>()
@@ -417,6 +421,23 @@ pub fn sources_by_project(own: &str, sources: &[String]) -> Vec<(String, Vec<Str
     grouped
 }
 
+/// The sources a deployment names, `{project}/{source}`, that crawl a website (T-4680): their
+/// passages are capped so the catalogue's records and the Endpoints' descriptions come first.
+pub fn website_sources(own: &str, named: &[String], sources: &[worker::Source]) -> Vec<String> {
+    sources_by_project(own, named)
+        .into_iter()
+        .flat_map(|(project, names)| names.into_iter().map(move |name| (project.clone(), name)))
+        .filter(|(project, name)| {
+            sources.iter().any(|s| {
+                &s.project == project
+                    && &s.name == name
+                    && s.spec.source == jc_core::kinds::assistant::SourceType::Website
+            })
+        })
+        .map(|(project, name)| format!("{project}/{name}"))
+        .collect()
+}
+
 /// [`hybrid_search`] over every project's sources, each ranked in its own project; the best
 /// `search.limit` of all by fused score.
 pub async fn search_projects(
@@ -501,6 +522,37 @@ mod tests {
             vec![("banskabystrica".to_owned(), names(&["web"]))]
         );
         assert!(sources_by_project("bbsk", &[]).is_empty());
+    }
+
+    /// T-4680: the website sources a deployment names, its own and another project's, and none
+    /// of its catalogue or CKAN sources.
+    #[test]
+    fn a_deployments_website_sources_are_named_with_their_project() {
+        let source = |project: &str, name: &str, spec: serde_json::Value| worker::Source {
+            project: project.into(),
+            name: name.into(),
+            spec: serde_json::from_value(spec).expect("a source spec"),
+            ckan_url: None,
+            catalogue: Vec::new(),
+        };
+        let web =
+            || serde_json::json!({"source": "website", "startUrls": ["https://www.bbsk.sk/"]});
+        let sources = [
+            source("bbsk", "web", web()),
+            source("banskabystrica", "web", web()),
+            source(
+                "bbsk",
+                "catalogue",
+                serde_json::json!({"source": "catalogue"}),
+            ),
+            source("zilina", "web", web()),
+        ];
+        let named = ["catalogue", "web", "banskabystrica/web", "praha/web"].map(String::from);
+        assert_eq!(
+            website_sources("bbsk", &named, &sources),
+            ["bbsk/web", "banskabystrica/web"]
+        );
+        assert!(website_sources("bbsk", &[], &sources).is_empty());
     }
     use super::*;
 

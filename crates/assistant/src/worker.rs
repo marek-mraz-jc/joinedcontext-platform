@@ -54,6 +54,9 @@ pub struct EndpointRef {
     pub audience: String,
     /// The context space it reads (`spec.contextSpaceRef`), empty when the manifest names none.
     pub space: String,
+    /// What it holds, in its manifest's words (`metadata.title`, English first), so the router
+    /// tells apart Endpoints that serve the same type (T-4680).
+    pub title: Option<String>,
 }
 
 /// The manifests the service works from, read in one pass every minute.
@@ -158,7 +161,7 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
         };
         let spec = &resource.manifest.spec;
         match id.kind.as_str() {
-            "Endpoint" => match endpoint_ref(spec) {
+            "Endpoint" => match endpoint_ref(spec, resource.manifest.metadata.rest.get("title")) {
                 Some(endpoint) => {
                     snapshot
                         .endpoints
@@ -480,7 +483,10 @@ pub fn checkout_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Chec
 /// An Endpoint's slug and audience, when its slug is one the platform mints (EP-02, T-3314): the
 /// slug becomes a path segment of the connector's address on the gateway, so a manifest can never
 /// steer the chat's client to another path or host.
-fn endpoint_ref(spec: &serde_json::Value) -> Option<EndpointRef> {
+fn endpoint_ref(
+    spec: &serde_json::Value,
+    title: Option<&serde_json::Value>,
+) -> Option<EndpointRef> {
     let slug = spec.get("slug").and_then(|v| v.as_str())?;
     let audience = spec.get("audience").and_then(|v| v.as_str())?;
     jc_core::kinds::endpoint::EndpointSlug::new(slug).ok()?;
@@ -494,7 +500,27 @@ fn endpoint_ref(spec: &serde_json::Value) -> Option<EndpointRef> {
         slug: slug.to_owned(),
         audience: audience.to_owned(),
         space: space.to_owned(),
+        title: title.and_then(title_line),
     })
+}
+
+/// The most characters of an Endpoint's title the router is shown.
+const TITLE_CHARS: usize = 80;
+
+/// A manifest title as one short line of a prompt: English, else the first language; control
+/// characters dropped, at most [`TITLE_CHARS`]; `None` when nothing is left.
+fn title_line(title: &serde_json::Value) -> Option<String> {
+    let text: jc_core::i18n::Text = serde_json::from_value(title.clone()).ok()?;
+    let line: String = text
+        .resolve(&["en".to_owned()], "en")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(TITLE_CHARS)
+        .collect();
+    (!line.is_empty()).then_some(line)
 }
 
 #[cfg(test)]
@@ -506,7 +532,7 @@ mod tests {
     fn an_endpoints_space_is_read_in_either_form() {
         let slug = "bkc4g3zfirh6zae3owdike7am2upayjs";
         let space = |reference: serde_json::Value| {
-            endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public", "contextSpaceRef": reference}))
+            endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public", "contextSpaceRef": reference}), None)
                 .expect("an Endpoint")
                 .space
         };
@@ -518,12 +544,40 @@ mod tests {
         assert_eq!(space(serde_json::Value::Null), "");
     }
 
+    /// T-4680: an Endpoint's title reaches the router as one short line, English first.
+    #[test]
+    fn an_endpoint_title_is_one_short_line_english_first() {
+        let line = |v: serde_json::Value| title_line(&v);
+        assert_eq!(
+            line(serde_json::json!({"sk": "Nezamestnanosť", "en": "Unemployment"})).as_deref(),
+            Some("Unemployment")
+        );
+        assert_eq!(
+            line(serde_json::json!({"sk": "Nezamestnanosť"})).as_deref(),
+            Some("Nezamestnanosť")
+        );
+        assert_eq!(
+            line(serde_json::json!("Air\nquality\u{7}  now")).as_deref(),
+            Some("Air quality now")
+        );
+        assert_eq!(
+            line(serde_json::json!("x".repeat(200))).map(|t| t.chars().count()),
+            Some(TITLE_CHARS)
+        );
+        assert_eq!(line(serde_json::json!("  ")), None);
+        assert_eq!(line(serde_json::json!(7)), None);
+    }
+
     /// T-3314: a slug that is not one the platform mints never becomes part of an address.
     #[test]
     fn only_a_minted_slug_is_connected() {
         let minted = "abcdefghijklmnopqrstuvwxyz234567";
-        let of =
-            |slug: &str| endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public"}));
+        let of = |slug: &str| {
+            endpoint_ref(
+                &serde_json::json!({"slug": slug, "audience": "public"}),
+                None,
+            )
+        };
         assert_eq!(of(minted).map(|e| e.slug), Some(minted.to_owned()));
         for bad in [
             "../../admin",
@@ -535,7 +589,7 @@ mod tests {
             assert!(of(bad).is_none(), "{bad}");
         }
         assert!(
-            endpoint_ref(&serde_json::json!({"slug": minted})).is_none(),
+            endpoint_ref(&serde_json::json!({"slug": minted}), None).is_none(),
             "no audience"
         );
     }
