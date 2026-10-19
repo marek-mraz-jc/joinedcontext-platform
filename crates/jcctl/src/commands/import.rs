@@ -467,7 +467,7 @@ fn rewrite_urns(value: &mut Value, domain: &str) {
 }
 
 /// One URN, or one anchored `idPattern`, with its organisation domain replaced; `None` when
-/// the string is neither.
+/// the string is neither, or its second segment is no domain.
 ///
 /// A Policy and a registration anchor their coverage with a pattern rather than an id
 /// (`^urn:ngsi-ld:AirQualityObserved:hel\.fi:air-quality:.*$`, R33), which is the same scheme
@@ -483,6 +483,12 @@ fn with_domain(urn: &str, domain: &str) -> Option<String> {
     // Type, orgDomain, space, localId: a URN with fewer segments is not this scheme, and
     // rewriting one that is not would corrupt an identifier this command does not own.
     if segments.len() < 4 {
+        return None;
+    }
+    // An organisation domain is a DNS name; a segment without a dot is the NSS's own
+    // (`urn:ngsi-ld:Vehicle:sk:ba:123`, ADR-N-041) and rewriting it would corrupt the id
+    // (T-4591). A pattern escapes its dots, `hel\.fi`.
+    if !segments[1].contains('.') {
         return None;
     }
     segments[1] = if pattern {
@@ -590,4 +596,32 @@ fn path_of(manifest: &RawManifest) -> String {
         crate::loader::extract_space(&manifest.spec),
         &manifest.metadata.name,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_domain;
+
+    #[test]
+    fn only_a_domain_in_the_second_segment_is_rewritten() {
+        assert_eq!(
+            with_domain("urn:ngsi-ld:Vehicle:hel.fi:mobility:7", "praha.eu").as_deref(),
+            Some("urn:ngsi-ld:Vehicle:praha.eu:mobility:7")
+        );
+        assert_eq!(
+            with_domain(
+                r"^urn:ngsi-ld:AirQualityObserved:hel\.fi:air:.*$",
+                "praha.eu"
+            )
+            .as_deref(),
+            Some(r"^urn:ngsi-ld:AirQualityObserved:praha\.eu:air:.*$")
+        );
+        // T-4591: an NSS of its own keeps every segment.
+        assert_eq!(
+            with_domain("urn:ngsi-ld:Vehicle:sk:ba:123", "praha.eu"),
+            None
+        );
+        assert_eq!(with_domain("urn:ngsi-ld:Vehicle:42", "praha.eu"), None);
+        assert_eq!(with_domain("not a urn", "praha.eu"), None);
+    }
 }

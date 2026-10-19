@@ -48,7 +48,7 @@ const MQTT_INPUT: &str = r#"mqtt:
   - tls://mqtt.banskabystrica.sk:8883
   topics:
   - sensors/aq/+/reading
-  client_id: jc-bb-ovzdusie-aq-mqtt-ingest
+  client_id: jc-bb-ovzdusie-aq-mqtt-ingest-${JC_MQTT_NAMESPACE}
   qos: 1
   clean_session: false
   user: bb-collector

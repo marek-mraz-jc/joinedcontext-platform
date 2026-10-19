@@ -753,7 +753,7 @@ async fn connected(
     let Ok(snapshot) = state.snapshot.read().map(|s| s.clone()) else {
         return Vec::new();
     };
-    let mut connected = Vec::new();
+    let mut reachable = Vec::new();
     for connector in &deployment.spec.connectors {
         if chosen.is_some_and(|chosen| !chosen.contains(&connector.endpoint)) {
             continue;
@@ -806,16 +806,34 @@ async fn connected(
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
             token,
         };
-        let listed = match mcp::reads_any(&connector.tools) {
-            true => routed::listing(&state.answers, &state.http, &surface).await,
-            false => Ok(Vec::new()),
-        };
-        match listed.map(|listed| mcp::picked(&listed, &connector.tools)) {
+        reachable.push((
+            connector,
+            endpoint.title.clone(),
+            endpoint.publisher.clone(),
+            surface,
+        ));
+    }
+    // Every listing at once, so a question waits for the slowest connector, not their sum (T-4680).
+    let listed = futures_util::future::join_all(reachable.iter().map(
+        |(connector, _, _, surface)| async move {
+            match mcp::reads_any(&connector.tools) {
+                true => routed::listing(&state.answers, &state.http, surface)
+                    .await
+                    .map(|listed| mcp::picked(&listed, &connector.tools)),
+                false => Ok(Vec::new()),
+            }
+        },
+    ))
+    .await;
+    let mut connected = Vec::new();
+    for ((connector, title, label, surface), listed) in reachable.into_iter().zip(listed) {
+        match listed {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
+                title,
                 surface,
                 tools,
-                label: endpoint.publisher.clone(),
+                label,
             }),
             Ok(_) => {
                 tracing::warn!(endpoint = %connector.endpoint, "the Endpoint offers none of the connector's tools")
@@ -925,6 +943,7 @@ async fn lent(
         match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
                 label: publisher_of(state, &endpoint.slug),
+                title: None,
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
@@ -1683,6 +1702,17 @@ async fn ask(
         } else {
             crate::sources_by_project(&deployment.project, &deployment.spec.sources)
         };
+        let websites = state
+            .snapshot
+            .read()
+            .map(|snapshot| {
+                crate::website_sources(
+                    &deployment.project,
+                    &deployment.spec.sources,
+                    &snapshot.sources,
+                )
+            })
+            .unwrap_or_default();
         // The token reached the surfaces that need it; nothing else holds it past this point.
         drop(person);
         for event in failed {
@@ -1698,6 +1728,7 @@ async fn ask(
             deployment: &name,
             system_prompt: deployment.spec.system_prompt.as_deref(),
             sources: &sources,
+            websites: &websites,
             public_only: deployment.spec.channel.is_anonymous(),
             connectors: &connectors,
             tokens_per_day,
@@ -1869,6 +1900,8 @@ mod tests {
             columns: vec!["name".into()],
             rows: vec![vec![json!("Žilina")]],
             units: vec![None],
+            labels: Vec::new(),
+            summary: Vec::new(),
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,

@@ -7,6 +7,7 @@
 //! model's code, or refused in a space whose `spec.missingUnitCode` is `refuse`. Reads are not
 //! touched: `unitCode` comes back as stored (CIM 009).
 
+use jc_core::type_of_id;
 use std::collections::BTreeMap;
 
 use jc_core::kinds::MissingUnitCode;
@@ -151,19 +152,6 @@ pub struct Shape<'a> {
     pub addressed: Option<&'a str>,
     /// The attribute of the path, when the body is that attribute's bare value.
     pub targeted: Option<&'a str>,
-}
-
-/// The type an id names: `urn:ngsi-ld:{Type}:…` (PF-10).
-fn type_of_id(id: &str) -> Option<&str> {
-    let mut parts = id.splitn(4, ':');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(urn), Some(ngsi), Some(kind))
-            if urn.eq_ignore_ascii_case("urn") && ngsi.eq_ignore_ascii_case("ngsi-ld") =>
-        {
-            Some(kind)
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn types_of<'a>(

@@ -3,7 +3,7 @@
 //! most [`MAX_CALLS`] model calls. The tools are `search` and the switched-on connectors' allowed
 //! tools; a name the model makes up is refused here and never called.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -55,6 +55,8 @@ const RULES: &str = "You answer the questions of a city's residents from what th
 #[derive(Debug, Clone)]
 pub struct Connected {
     pub endpoint: String,
+    /// The Endpoint's title ([`crate::worker::EndpointRef::title`]).
+    pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
     /// Its publisher's name, how an answer names it when it could not be reached (T-4683).
@@ -136,6 +138,14 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
     /// The unit symbol of each column (`µg/m³`), `null` where it has none (T-4650).
     pub units: Vec<Option<String>>,
+    /// Each column's labels per language from the data model, `null` where the model names none;
+    /// empty for a type without a model class (DM-100, T-4672).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Whether each column is one of the model's key attributes, which a map's popup shows
+    /// (DM-99, T-4672); empty for a type without a model class.
+    #[serde(skip)]
+    pub summary: Vec<bool>,
     /// How many entities match in all, when the Endpoint counted them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -164,6 +174,8 @@ pub struct Ask<'a> {
     /// The sources by the project that holds them ([`crate::sources_by_project`]); empty when
     /// `answer.routes` is `data`.
     pub sources: &'a [(String, Vec<String>)],
+    /// The sources above that crawl a website, `{project}/{source}` ([`crate::website_sources`]).
+    pub websites: &'a [String],
     pub public_only: bool,
     pub connectors: &'a [Connected],
     pub tokens_per_day: u64,

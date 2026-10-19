@@ -57,6 +57,9 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             channel,
             system_prompt: Some("Odpovedaj stručne.".into()),
             sources: vec!["web".into()],
+            select: None,
+            exclude: Vec::new(),
+            categories: Vec::new(),
             connectors: vec![
                 Connector {
                     endpoint: "ovzdusie".into(),
@@ -179,6 +182,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         slug: slug.into(),
         audience: "public".into(),
         publisher: None,
+        title: None,
     };
     snapshot.endpoints = BTreeMap::from([
         (("bbsk".into(), "kraj".into()), public(REGION_SLUG)),
@@ -188,6 +192,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
                 publisher: None,
+                title: None,
             },
         ),
         (("helsinki".into(), "kraj".into()), public(ELSEWHERE_SLUG)),
@@ -197,6 +202,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 slug: SLUG.into(),
                 audience: "public".into(),
                 publisher: None,
+                title: None,
             },
         ),
         (
@@ -205,6 +211,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
                 publisher: None,
+                title: None,
             },
         ),
     ]);
@@ -251,7 +258,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
 }
 
 /// The chat route behind a stand-in widget (T-4653): a question without `X-JC-Visitor` gets one
-/// token per client address, earned from the service's own signer at no difficulty, so each
+/// token per client address (as the service reads it from `X-Forwarded-For`), earned from the service's own signer at no difficulty, so each
 /// address the tests name is one visitor, as it was before tokens.
 fn with_visitor_tokens(state: Arc<ChatState>) -> axum::Router {
     let minted = Arc::clone(&state);
@@ -266,10 +273,20 @@ fn with_visitor_tokens(state: Arc<ChatState>) -> axum::Router {
                     .and_then(|rest| rest.strip_suffix("/chat"));
                 if let Some(public_id) = public_id {
                     if !request.headers().contains_key(VISITOR_HEADER) {
-                        let address = request
+                        // The address the service keys on: the rightmost hop that is not the
+                        // cluster's own, so a caller's own entries in front never make a new one.
+                        let chain = request
                             .headers()
                             .get("x-forwarded-for")
                             .and_then(|v| v.to_str().ok())
+                            .unwrap_or_default();
+                        let address = chain
+                            .rsplit(',')
+                            .map(str::trim)
+                            .find(|hop| {
+                                hop.parse::<std::net::Ipv4Addr>()
+                                    .map_or(true, |ip| !ip.is_private() && !ip.is_loopback())
+                            })
                             .unwrap_or_default()
                             .to_owned();
                         let key = format!("{public_id}\u{0}{address}");
@@ -575,18 +592,20 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     );
     assert_eq!(
         events[7].1,
-        json!({"name": "query_entities", "endpoint": "ovzdusie", "status": "done"})
+        // T-4654: a visitor's stream names no Endpoint.
+        json!({"name": "query_entities", "status": "done"})
     );
     assert_eq!(
         events[8].1,
         json!({
-            "endpoint": "ovzdusie",
             "type": "AirQualityObserved",
             "columns": ["name", "no2", "observedAt"],
             "rows": [
                 ["Námestie SNP", 21, "2026-10-15T18:00:00Z"],
                 ["Železničná stanica", 34, "2026-10-15T18:00:00Z"]
             ],
+            // The model gives none of the three a unit.
+            "units": [null, null, null],
             "download": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
         })
     );
@@ -596,9 +615,10 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
     let done = &events[12].1;
+    // T-4654: a visitor's `done` carries no tokens or calls; the two calls are counted below.
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
-        (&json!(1330), &json!(2), &json!(false))
+        (&Value::Null, &Value::Null, &json!(false))
     );
     let stages = done["stagesMs"].as_object().expect("stagesMs");
     for stage in ["route", "search", "answer"] {
@@ -2778,7 +2798,10 @@ async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
         .to_owned();
     assert!(answer.contains("Tento mesiac"), "{answer}");
     assert!(answer.contains("znova tak odpovedá od 1. "), "{answer}");
-    assert_eq!(second.last().expect("done").1["modelCalls"], 0);
+    assert!(
+        second.last().expect("done").1.get("modelCalls").is_none(),
+        "T-4654"
+    );
     assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
 
     let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
@@ -3036,7 +3059,8 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
         .map(|(_, d)| d)
         .collect();
     assert_eq!(data.len(), 1, "{events:?}");
-    assert_eq!(data[0]["endpoint"], "bbsk/kraj");
+    // T-4654: a visitor's table names no Endpoint; its download link says where it came from.
+    assert!(data[0].get("endpoint").is_none(), "{:?}", data[0]);
     assert_eq!(
         data[0]["download"],
         format!("https://data.hronov.example/api/endpoint/{REGION_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
@@ -3260,7 +3284,9 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         named("citations")[0],
         json!([{"n": 2, "tool": "query_entities", "endpoint": "ovzdusie"}])
     );
-    assert_eq!(named("done")[0]["modelCalls"], 4);
+    // T-4654: a visitor's `done` carries no call count; the proxy saw the four.
+    assert!(named("done")[0].get("modelCalls").is_none());
+    assert_eq!(model_calls(&w.proxy).await.len(), 4);
 
     let all = model_calls(&w.proxy).await;
     let calls = calls_of(&all, None);
@@ -3494,7 +3520,7 @@ async fn a_hanging_tool_costs_the_question_its_data_seconds_and_no_more() {
                 .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{}"}]}}))
                 .set_delay(std::time::Duration::from_secs(30)),
         )
-        .with_priority(0)
+        .with_priority(1)
         .mount(&w.gateway)
         .await;
     recorded_air(&w.gateway, SLUG).await;
@@ -3626,6 +3652,48 @@ async fn a_direct_message_is_answered_without_a_search_a_read_or_a_step() {
     let sent = answers[0]["messages"].to_string();
     assert!(sent.contains("This message needs none of them"), "{sent}");
     assert!(!sent.contains("passages"), "{sent}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4680: a public Endpoint's tools are listed once for many questions, not once per question:
+/// a second question within the listing's life asks the gateway nothing to offer the connector.
+#[tokio::test]
+async fn a_public_endpoints_tools_are_listed_once_for_two_questions() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatlisted", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let direct = || {
+        completion(
+            json!({"role": "assistant", "content": "{\"route\": \"direct\", \"queries\": [], \"data\": []}"}),
+            300,
+        )
+    };
+    script_routed(
+        &w.proxy,
+        vec![direct(), direct()],
+        vec![],
+        vec![
+            streamed(&["Dobrý deň."], 300, 12),
+            streamed(&["Rado sa stalo."], 300, 12),
+        ],
+    )
+    .await;
+    for message in ["Dobrý deň", "Ďakujem"] {
+        let (status, events, _) =
+            answer_of(&w.app, ask(json!({"message": message}), Some(ORIGIN))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
+    }
+    let listings = w
+        .gateway
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains("tools/list"))
+        .count();
+    assert_eq!(listings, 1);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -3961,7 +4029,7 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
 
     script(
         &w.proxy,
-        vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 4],
+        vec![completion(json!({"role": "assistant", "content": "Áno."}), 50); 12],
     )
     .await;
     let with = |token: &str| {
@@ -3987,12 +4055,14 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
     // The month is the address's (integrator review): the fourth question of the address spends
     // it, and a token minted after is answered as search, with no model call.
     assert_eq!(answer_of(&w.app, with(&second)).await.0, StatusCode::OK);
-    assert_eq!(model_calls(&w.proxy).await.len(), 4);
+    // However many calls a question makes (the router, the answer), the four made some.
+    let spent = model_calls(&w.proxy).await.len();
+    assert!(spent >= 4, "{spent}");
     let (status, body, _) = answer_of(&w.app, with(&third)).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(
         model_calls(&w.proxy).await.len(),
-        4,
+        spent,
         "a fresh token buys no fresh month"
     );
 

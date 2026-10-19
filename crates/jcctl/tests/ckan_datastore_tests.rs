@@ -4,11 +4,12 @@
 //! are about where a row can come from and where it cannot: every cell comes out of the
 //! Endpoint's own tabular answer, and a notification contributes ids and nothing else.
 
+use jc_core::display_order::Display;
 use jc_core::kinds::ckan::CkanPublication;
 use jcctl::publish::ckan::{CkanApi, CkanError, InMemoryCkan};
 use jcctl::publish::ckan_datastore::{
-    drop_table, ensure, ensure_view, fields, importance, mirrored, records, sync, table,
-    table_fields, touched, MirrorError, Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY, UPSERT_BATCH,
+    arrange, drop_table, ensure, ensure_view, fields, mirrored, records, sync, table, table_fields,
+    touched, MirrorError, Outcome, GRID_VIEW, ID_COLUMN, PRIMARY_KEY, UPSERT_BATCH,
 };
 use serde_json::{json, Value};
 
@@ -1083,7 +1084,8 @@ fn a_tables_fields_carry_a_readable_label_and_read_in_importance_order() {
             "Price"
         ]
     );
-    let order: Vec<&str> = importance(&fields)
+    let mut fields = fields;
+    let order: Vec<&str> = arrange(&mut fields, None, "Event", None, "sk")
         .into_iter()
         .map(|i| fields[i]["id"].as_str().expect("an id"))
         .collect();
@@ -1098,6 +1100,126 @@ fn a_tables_fields_carry_a_readable_label_and_read_in_importance_order() {
             "location.value.coordinates[0]",
             PRIMARY_KEY,
         ]
+    );
+}
+
+/// T-4672: the model's ranks, key attributes, labels and hidden slots, and an Endpoint's own order.
+const EVENT_MODEL: &str = r#"
+in_language: sk
+classes:
+  Event:
+    slots: [name, address, startDate, source]
+    slot_usage:
+      startDate:
+        rank: 1
+        annotations:
+          summary: true
+          label: { sk: Začína, en: Starts }
+      source:
+        annotations: { hidden: true }
+"#;
+
+fn event_fields() -> Vec<Value> {
+    let columns: Vec<String> = [
+        "id",
+        "source.value",
+        "address.value.streetAddress",
+        "address.value.addressLocality",
+        "name.languageMap.sk",
+        "startDate.value",
+        "url.value",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    table_fields(&columns, None, "sk", |_| Some("text".to_owned()))
+}
+
+fn ids(fields: &[Value], order: &[usize]) -> Vec<String> {
+    order
+        .iter()
+        .map(|&i| fields[i]["id"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_tables_columns_follow_the_models_display_order_with_its_labels_and_key_flags() {
+    let mut fields = event_fields();
+    let order = arrange(
+        &mut fields,
+        Some(EVENT_MODEL),
+        "https://smartdatamodels.org/Event",
+        None,
+        "en",
+    );
+    assert_eq!(
+        ids(&fields, &order),
+        [
+            "startDate.value",
+            "name.languageMap.sk",
+            "address.value.streetAddress",
+            "address.value.addressLocality",
+            "url.value",
+            PRIMARY_KEY,
+        ],
+        "ranked, own slots as written (one attribute's columns together), unmodelled, the key; source hidden"
+    );
+    let start = &fields[order[0]]["info"];
+    assert_eq!(start["label"], "Starts");
+    // Every language the model names, for the map popup on a page in another one (T-4648).
+    assert_eq!(start["labels"], json!({ "en": "Starts", "sk": "Začína" }));
+    let name = &fields[order[1]]["info"]["labels"];
+    assert_eq!(
+        name,
+        &json!({ "en": "Name", "sk": "Názov" }),
+        "no model label: the heuristic's"
+    );
+    assert_eq!(start["summary"], true);
+    // A sub-part keeps the heuristic's label; no model label reaches it.
+    assert_eq!(fields[order[2]]["info"]["label"], "Ulica");
+    // `startDate` is the one key attribute the model marks: no other column is flagged.
+    assert_eq!(
+        order
+            .iter()
+            .filter(|&&i| fields[i]["info"]["summary"] == true)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_rank_change_in_the_model_rebuilds_the_table() {
+    let arranged = |model: &str| {
+        let mut fields = event_fields();
+        let order = arrange(&mut fields, Some(model), "Event", None, "sk");
+        order
+            .into_iter()
+            .map(|i| fields[i].clone())
+            .collect::<Vec<Value>>()
+    };
+    let mut ckan = InMemoryCkan::new();
+    let first = arranged(EVENT_MODEL);
+    let (resource, _) = ensure(&mut ckan, PACKAGE, TABLE, &first).expect("created");
+    let reranked = EVENT_MODEL.replace("slots: [name, address,", "slots: [address, name,");
+    let second = arranged(&reranked);
+    let (_, outcome) = ensure(&mut ckan, PACKAGE, TABLE, &second).expect("ensured");
+    assert_eq!(outcome, Outcome::Created);
+    assert_eq!(
+        ckan.table_fields(&resource).expect("the table"),
+        second.as_slice()
+    );
+}
+
+#[test]
+fn an_endpoints_display_narrows_the_table_and_keeps_its_key() {
+    let view = Display {
+        fields: vec!["name".into(), "url".into()],
+        summary: Vec::new(),
+    };
+    let mut fields = event_fields();
+    let order = arrange(&mut fields, Some(EVENT_MODEL), "Event", Some(&view), "sk");
+    assert_eq!(
+        ids(&fields, &order),
+        ["name.languageMap.sk", "url.value", PRIMARY_KEY]
     );
 }
 

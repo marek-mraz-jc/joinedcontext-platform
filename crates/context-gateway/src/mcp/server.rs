@@ -28,6 +28,7 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use jc_core::kinds::mcp_server::{breadth, AccessLevel, Select};
 use jc_core::kinds::{Audience, Representation};
+use jc_core::reach::EndpointFacts;
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -115,38 +116,7 @@ impl McpServer {
         {
             return false;
         }
-        let any = |values: &Option<Vec<String>>, wanted: &str| {
-            values
-                .as_ref()
-                .is_none_or(|values| values.iter().any(|v| v == wanted))
-        };
-        if !any(&select.projects, &endpoint.project)
-            || !any(
-                &select.spaces,
-                &format!("{}/{}", endpoint.project, endpoint.space),
-            )
-        {
-            return false;
-        }
-        if select.domains.is_none() && select.themes.is_none() {
-            return true;
-        }
-        let classified = crate::handlers::endpoint_surface::classification(endpoint);
-        let domains = select.domains.as_ref().is_none_or(|wanted| {
-            wanted
-                .iter()
-                .any(|d| classified.domains.contains(d.as_str()))
-        });
-        // A theme set by hand wins over the derived one, as on the DCAT record (T-4498).
-        let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
-            Some(catalog) => catalog.themes.iter().copied().collect(),
-            None => classified.themes,
-        };
-        domains
-            && select
-                .themes
-                .as_ref()
-                .is_none_or(|wanted| wanted.iter().any(|t| themes.contains(t)))
+        select.matches(&facts(endpoint))
     }
 
     /// Whether the selector's `accessLevel` takes an Endpoint this caller reads as `subject`.
@@ -185,6 +155,30 @@ impl McpServer {
                 .iter()
                 .any(|caller| *caller == self.project || self.allowed_projects.contains(caller)),
         }
+    }
+}
+
+/// What a selector reads of `endpoint` (MF-55, MF-61): its types, their classification, and its
+/// themes, a theme set by hand winning over the derived one as on the DCAT record (T-4498). The
+/// table holds no manifest name, so the slug stands in; matching never reads it.
+fn facts(endpoint: &Endpoint) -> EndpointFacts {
+    let classified = crate::handlers::endpoint_surface::classification(endpoint);
+    let themes = match endpoint.catalog.as_deref().filter(|c| !c.themes.is_empty()) {
+        Some(catalog) => catalog.themes.iter().copied().collect(),
+        None => classified.themes,
+    };
+    EndpointFacts {
+        project: endpoint.project.clone(),
+        name: endpoint.slug.clone(),
+        slug: endpoint.slug.clone(),
+        space: endpoint.space.clone(),
+        audience: endpoint.audience,
+        types: crate::handlers::endpoint_surface::classes(endpoint)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        domains: classified.domains.into_iter().map(str::to_owned).collect(),
+        themes,
     }
 }
 
