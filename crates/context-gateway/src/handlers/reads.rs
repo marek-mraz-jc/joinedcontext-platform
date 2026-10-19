@@ -277,12 +277,22 @@ pub(crate) async fn listed_types(
     let held = dataset_types(gateway, slug, request.headers()).await?;
     let mut shown = Vec::new();
     let mut refused = 0;
-    for name in &held {
-        let target = format!(
-            "entities?{}&limit=1",
-            query::view_read(&[], std::slice::from_ref(name))
-        );
-        match view_page(gateway, slug, slug, &target, request.headers()).await {
+    let headers = request.headers();
+    // PARALLEL_PAGES at a time, in the space's order (T-4734): asked one after another, the
+    // HSL Endpoint's list took 10-19 s on dev.
+    let probes: Vec<_> = held
+        .iter()
+        .map(|name| async move {
+            let target = format!(
+                "entities?{}&limit=1",
+                query::view_read(&[], std::slice::from_ref(name))
+            );
+            (name, view_page(gateway, slug, slug, &target, headers).await)
+        })
+        .collect();
+    let mut probed = stream::iter(probes).buffered(PARALLEL_PAGES);
+    while let Some((name, probe)) = probed.next().await {
+        match probe {
             Ok((page, _, _, _)) if !page.is_empty() => shown.push(name.clone()),
             Ok(_) => {}
             // A type the view refuses this caller is a type they are not shown.

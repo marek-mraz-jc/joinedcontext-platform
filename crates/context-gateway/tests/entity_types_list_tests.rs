@@ -194,3 +194,63 @@ async fn without_a_read_grant_the_view_answers() {
         "{asked:?}"
     );
 }
+
+/// The view is asked about the held types a few at a time, and the list keeps the space's order
+/// (T-4734): on dev the HSL Endpoint's list asked its types one after another and took 10-19 s,
+/// past the assistant's wait, so Helsinki read as a source that could not be checked.
+#[tokio::test]
+async fn the_view_is_asked_about_the_types_a_few_at_a_time() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let inside = Arc::new(AtomicUsize::new(0));
+    let most = Arc::new(AtomicUsize::new(0));
+    let (now, top) = (Arc::clone(&inside), Arc::clone(&most));
+    let app = Router::new().fallback(move |request: Request| {
+        let (now, top) = (Arc::clone(&now), Arc::clone(&top));
+        async move {
+            if request.uri().path() == "/ngsi-ld/v1/types" {
+                return axum::Json(json!({ "type": "EntityTypeList", "typeList": HELD }))
+                    .into_response();
+            }
+            let asked_type = request
+                .uri()
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .find(|(name, _)| *name == "type")
+                .map(|(_, value)| value.to_owned())
+                .unwrap_or_default();
+            top.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            now.fetch_sub(1, Ordering::SeqCst);
+            // The view shows nothing of Secret, so it is not listed.
+            let rows = if asked_type == "Secret" {
+                Vec::new()
+            } else {
+                vec![json!({ "id": format!("urn:ngsi-ld:{asked_type}:1"), "type": asked_type })]
+            };
+            axum::Json(Value::Array(rows)).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let port = listener.local_addr().expect("an address").port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let (status, answer) = types(
+        &format!("http://127.0.0.1:{port}"),
+        endpoint("[retrieveOps]", &[]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        listed(&answer),
+        ["Alert", "GtfsStop", "TransitRoute", "Vehicle"]
+    );
+    assert!(
+        most.load(Ordering::SeqCst) > 1,
+        "the types were asked one after another"
+    );
+}
