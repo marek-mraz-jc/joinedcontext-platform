@@ -135,7 +135,7 @@ pub enum Event {
 pub type Words = BTreeMap<String, BTreeMap<String, String>>;
 
 /// What a data round read, as API/05 §1.3's `data` event carries it (T-4140).
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct Table {
     pub endpoint: String,
     #[serde(rename = "type")]
@@ -668,6 +668,7 @@ async fn answer_in_scope(
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
         }
         let at = std::time::Instant::now();
+        let pending = ask.trace.pending("agent", ask.model.name(), at, &messages);
         let completed = ask
             .model
             .complete(
@@ -678,8 +679,7 @@ async fn answer_in_scope(
                 allow_tools,
             )
             .await;
-        ask.trace
-            .model("agent", ask.model.name(), at, completed.as_ref());
+        pending.done(completed.as_ref());
         let completion = match completed {
             Ok(completion) => completion,
             // The day ran out between the calls: the limit, never a quiet switch (T-4671).

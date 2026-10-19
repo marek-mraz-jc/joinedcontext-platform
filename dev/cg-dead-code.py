@@ -111,8 +111,9 @@ def unreachable(symbols: list[dict[str, str]], edges: list[dict[str, str]],
     impls = collections.defaultdict(set)
     for i, s in syms.items():
         if s["s.trait_name"] and s["s.self_type"]:
-            # by the type's name alone: an impl may sit in another crate than its type
-            impls[s["s.self_type"]].add(i)
+            # by the type's name alone: an impl may sit in another crate than its type, and cg
+            # names a lifetime or generic type with its arguments (`Pending<'_>`)
+            impls[s["s.self_type"].split("<", 1)[0]].add(i)
     entries = set()
     for i, s in syms.items():
         name = s["s.path"].rsplit("::", 1)[-1]
@@ -183,6 +184,8 @@ def selftest() -> None:
         sym("a", "g::used"),
         sym("t", "g::Thing", kind="Struct"),
         sym("f", "g::Thing::fmt", kind="Method", trait="Display", self_type="Thing"),
+        sym("g", "g::Guard", kind="Struct"),
+        sym("gd", "g::Guard::drop", kind="Method", trait="Drop", self_type="Guard<'_>"),
         sym("x", "g::cg_fixture_unreachable"),
         sym("k", "jc_core::Kind::new", kind="StaticMethod", pkg="jc-core", vis="pub",
             self_type="Kind"),
@@ -197,8 +200,8 @@ def selftest() -> None:
         sym("u", "g::Mode::is_unset", kind="Method", file="crates/g/src/mode.rs", self_type="Mode"),
         sym("v", "g::Thing::is_empty", kind="Method", self_type="Thing"),
     ]
-    # main -> used -> Thing; Thing holds `mode: Mode`
-    edges = [{"a.id": "m", "b.id": "a"}, {"a.id": "a", "b.id": "t"},
+    # main -> used -> Thing and Guard, whose Drop no call names; Thing holds `mode: Mode`
+    edges = [{"a.id": "m", "b.id": "a"}, {"a.id": "a", "b.id": "t"}, {"a.id": "a", "b.id": "g"},
              {"a.id": "t", "b.id": "fd"}, {"a.id": "fd", "b.id": "e"}]
     rows = unreachable(symbols, edges, {"Kind", "new"}, {("crates/g/src/lib.rs", "default_mode"),
                                                        ("crates/g", "LIMIT"),

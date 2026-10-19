@@ -103,6 +103,14 @@ pub fn router(state: Arc<ChatState>) -> Router {
             get(conversations),
         )
         .route(
+            "/internal/v1/projects/{project}/knowledge/conversations/usage",
+            get(conversation_usage),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/conversations/export",
+            get(conversation_export),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/conversations/{conversation}",
             get(conversation),
         )
@@ -113,6 +121,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .route(
             "/internal/v1/projects/{project}/knowledge/erasures",
             post(erase_mentioning),
+        )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/answers",
+            delete(forget_answers),
         )
         .route(
             "/internal/v1/projects/{project}/knowledge/conversations/{conversation}/turns/{turn}/same",
@@ -140,6 +152,76 @@ async fn conversations(
     }
     match super::transcript::list(&state.pool, &project, &filter).await {
         Ok((items, next)) => Json(json!({"items": items, "nextCursor": next})).into_response(),
+        Err(crate::Error::Project(_)) => problem(404, "no such project"),
+        Err(err) => failed(err),
+    }
+}
+
+/// The range of a usage summary or an export, or the refusal naming what is wrong.
+fn range(
+    range: Result<Query<super::usage::Range>, QueryRejection>,
+) -> Result<super::usage::Range, Refusal> {
+    let Query(range) = range.map_err(|rejection| Box::new(problem(400, rejection.body_text())))?;
+    match range.refusal() {
+        Some(why) => Err(Box::new(problem(400, why))),
+        None => Ok(range),
+    }
+}
+
+/// What the stored turns of a range add up to (API/05 §3.1, T-4728).
+async fn conversation_usage(
+    State(state): State<Arc<ChatState>>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    query: Result<Query<super::usage::Range>, QueryRejection>,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let range = match range(query) {
+        Ok(range) => range,
+        Err(refused) => return *refused,
+    };
+    match super::usage::summary(&state.pool, &project, &range).await {
+        Ok(summary) => Json(summary).into_response(),
+        Err(crate::Error::Project(_)) => problem(404, "no such project"),
+        Err(err) => failed(err),
+    }
+}
+
+/// The stored turns of a range as CSV (API/05 §3.1, T-4728).
+async fn conversation_export(
+    State(state): State<Arc<ChatState>>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    query: Result<Query<super::usage::Range>, QueryRejection>,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let range = match range(query) {
+        Ok(range) => range,
+        Err(refused) => return *refused,
+    };
+    match super::usage::export(&state.pool, &project, &range).await {
+        Ok(Some(csv)) => (
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"conversations.csv\"",
+                ),
+            ],
+            csv,
+        )
+            .into_response(),
+        Ok(None) => problem(
+            400,
+            format!(
+                "more than {} turns; narrow the range",
+                super::usage::MAX_EXPORT
+            ),
+        ),
         Err(crate::Error::Project(_)) => problem(404, "no such project"),
         Err(err) => failed(err),
     }
@@ -201,6 +283,21 @@ async fn erase(
         Ok(false) | Err(crate::Error::Project(_)) => problem(404, "no such conversation"),
         Err(err) => failed(err),
     }
+}
+
+/// Forgets the answers a deployment keeps (API/05 §3, T-4731), answered with
+/// `{"forgotten": n}`; an unknown project or deployment keeps none, so it answers 0.
+async fn forget_answers(
+    State(state): State<Arc<ChatState>>,
+    Path((project, deployment)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let forgotten = state.answers.forget(&format!("{project}/{deployment}"));
+    tracing::info!(%project, %deployment, forgotten, "the deployment's kept answers were forgotten");
+    Json(json!({ "forgotten": forgotten })).into_response()
 }
 
 /// What a data subject's erasure searches the stored conversations for.

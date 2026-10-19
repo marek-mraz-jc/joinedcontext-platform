@@ -15,7 +15,7 @@ use super::agent::{Event, Turn};
 use super::redact::masked;
 use super::trace::Step;
 
-static RFC3339: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static RFC3339: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$")
         .expect("valid regex")
 });
@@ -261,7 +261,7 @@ pub struct Filter {
     pub slow: Option<bool>,
     pub min_cost_usd: Option<f64>,
     pub q: Option<String>,
-    /// `lastAt` (default) or `costUsd`.
+    /// `lastAt` (default), `costUsd`, `tokens` or `totalMs`.
     pub sort: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
@@ -289,8 +289,11 @@ impl Filter {
         ) {
             return Some("feedback is up, down or none");
         }
-        if !matches!(self.sort.as_deref(), None | Some("lastAt" | "costUsd")) {
-            return Some("sort is lastAt or costUsd");
+        if !matches!(
+            self.sort.as_deref(),
+            None | Some("lastAt" | "costUsd" | "tokens" | "totalMs")
+        ) {
+            return Some("sort is lastAt, costUsd, tokens or totalMs");
         }
         if self
             .min_cost_usd
@@ -329,7 +332,7 @@ fn anywhere(text: &str) -> String {
     format!("%{escaped}%")
 }
 
-fn usd(micros: i64) -> f64 {
+pub(crate) fn usd(micros: i64) -> f64 {
     micros as f64 / 1_000_000.0
 }
 
@@ -344,7 +347,18 @@ macro_rules! list_sql {
              array_agg(DISTINCT t.route), max(t.total_ms), \
              count(*) FILTER (WHERE t.error IS NOT NULL AND NOT t.timed_out), \
              count(*) FILTER (WHERE t.timed_out), sum(t.cost_micros)::bigint, \
-             sum(t.uncosted)::bigint, coalesce(max(f.up), 0), coalesce(max(f.down), 0) \
+             sum(t.uncosted)::bigint, coalesce(max(f.up), 0), coalesce(max(f.down), 0), \
+             sum(t.tokens_in)::bigint, sum(t.tokens_out)::bigint, \
+             (SELECT sum(s.cached_tokens) FROM turn_steps s JOIN turns u ON u.id = s.turn_id \
+               WHERE u.conversation = t.conversation AND u.deployment = t.deployment \
+               AND ($2::timestamptz IS NULL OR u.at >= $2::timestamptz) \
+               AND ($3::timestamptz IS NULL OR u.at < $3::timestamptz))::bigint, \
+             (array_agg(t.first_token_ms ORDER BY t.turn))[1], \
+             (SELECT array_agg(DISTINCT s.model ORDER BY s.model) FROM turn_steps s \
+               JOIN turns u ON u.id = s.turn_id WHERE u.conversation = t.conversation \
+               AND u.deployment = t.deployment AND s.model IS NOT NULL \
+               AND ($2::timestamptz IS NULL OR u.at >= $2::timestamptz) \
+               AND ($3::timestamptz IS NULL OR u.at < $3::timestamptz)) \
              FROM turns t LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE verdict = 'up') AS up, \
              count(*) FILTER (WHERE verdict = 'down') AS down FROM feedback \
              WHERE feedback.project = t.project AND feedback.conversation = t.conversation) f ON true \
@@ -370,6 +384,25 @@ macro_rules! list_sql {
     };
 }
 
+/// One row of the list's query as the route answers it.
+fn list_row(r: &PgRow) -> Result<Value, sqlx::Error> {
+    let models: Option<Vec<String>> = r.try_get(19)?;
+    Ok(json!({
+        "id": r.try_get::<String, _>(0)?, "deployment": r.try_get::<String, _>(1)?,
+        "origin": r.try_get::<Option<String>, _>(2)?, "startedAt": r.try_get::<String, _>(3)?,
+        "lastAt": r.try_get::<String, _>(4)?, "firstQuestion": r.try_get::<String, _>(5)?,
+        "turns": r.try_get::<i64, _>(6)?, "routes": r.try_get::<Vec<String>, _>(7)?,
+        "totalMs": r.try_get::<i64, _>(8)?, "errors": r.try_get::<i64, _>(9)?,
+        "timeouts": r.try_get::<i64, _>(10)?, "costUsd": usd(r.try_get(11)?),
+        "uncosted": r.try_get::<i64, _>(12)?, "thumbsUp": r.try_get::<i64, _>(13)?,
+        "thumbsDown": r.try_get::<i64, _>(14)?, "tokensIn": r.try_get::<i64, _>(15)?,
+        "tokensOut": r.try_get::<i64, _>(16)?,
+        "cachedTokens": r.try_get::<Option<i64>, _>(17)?,
+        "firstTokenMs": r.try_get::<Option<i64>, _>(18)?,
+        "models": models.unwrap_or_default(),
+    }))
+}
+
 /// One page of `project`'s conversations, newest first or the most expensive first, and the
 /// cursor of the next page.
 pub async fn list(
@@ -383,30 +416,14 @@ pub async fn list(
         .as_deref()
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
-    type Row = (
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        String,
-        i64,
-        Vec<String>,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    );
-    let sql = if filter.sort.as_deref() == Some("costUsd") {
-        list_sql!("sum(t.cost_micros) DESC, max(t.at) DESC")
-    } else {
-        list_sql!("max(t.at) DESC")
+    let sql = match filter.sort.as_deref() {
+        Some("costUsd") => list_sql!("sum(t.cost_micros) DESC, max(t.at) DESC"),
+        Some("tokens") => list_sql!("sum(t.tokens_in + t.tokens_out) DESC, max(t.at) DESC"),
+        Some("totalMs") => list_sql!("max(t.total_ms) DESC, max(t.at) DESC"),
+        _ => list_sql!("max(t.at) DESC"),
     };
     let mut tx = crate::project_scope(pool, project).await?;
-    let rows: Vec<Row> = sqlx::query_as(sql)
+    let rows: Vec<PgRow> = sqlx::query(sql)
         .bind(filter.deployment.as_deref())
         .bind(filter.from.as_deref())
         .bind(filter.to.as_deref())
@@ -428,15 +445,8 @@ pub async fn list(
     let items = rows
         .into_iter()
         .take(limit as usize)
-        .map(|r| {
-            json!({
-                "id": r.0, "deployment": r.1, "origin": r.2, "startedAt": r.3, "lastAt": r.4,
-                "firstQuestion": r.5, "turns": r.6, "routes": r.7, "totalMs": r.8,
-                "errors": r.9, "timeouts": r.10, "costUsd": usd(r.11), "uncosted": r.12,
-                "thumbsUp": r.13, "thumbsDown": r.14,
-            })
-        })
-        .collect();
+        .map(|r| list_row(&r))
+        .collect::<Result<Vec<Value>, sqlx::Error>>()?;
     Ok((items, more.then(|| (offset + limit).to_string())))
 }
 
