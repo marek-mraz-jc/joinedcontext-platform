@@ -2408,13 +2408,15 @@ pub async fn answer(
     // The cache key and the connectors' lists are read at once (T-4731): one after another they
     // took about 2.4 s before the router started on dev. A cache hit does not wait for the lists.
     let listing = listed(ask, history);
-    tokio::pin!(listing);
+    let keying = cache_key(ask, history, question);
+    tokio::pin!(listing, keying);
     let mut early = None;
     let key = tokio::select! {
-        key = cache_key(ask, history, question) => key,
+        key = &mut keying => key,
         out = &mut listing => {
             early = Some(out);
-            cache_key(ask, history, question).await
+            // the key read so far goes on, never from the start
+            (&mut keying).await
         }
     };
     if let Some((replay, age)) = key.and_then(|key| ask.cache.get(&key)) {
