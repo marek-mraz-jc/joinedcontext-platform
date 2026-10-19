@@ -453,6 +453,16 @@
             "array",
             "null"
           ]
+        },
+        "types": {
+          "description": "NGSI-LD entity types the Endpoint serves, e.g. `OffStreetParking` (MF-61).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"

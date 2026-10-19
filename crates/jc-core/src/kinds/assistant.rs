@@ -8,10 +8,13 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
+use crate::kinds::catalog::DataTheme;
+use crate::kinds::mcp_server::AccessLevel;
+use crate::kinds::mcp_server::Select;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The most start URLs one source may name.
 pub const MAX_START_URLS: usize = 20;
@@ -37,6 +40,8 @@ pub const MAX_TITLE_LEN: usize = 60;
 pub const MAX_TIMEOUT_SECONDS: u16 = 120;
 /// The most WordPress post types one `website` source may list (T-4154).
 pub const MAX_WORDPRESS_TYPES: usize = 40;
+/// The most Endpoints one deployment may exclude (MF-59).
+pub const MAX_EXCLUDE: usize = 50;
 
 /// The most CKAN organizations one `ckan` source may narrow to.
 pub const MAX_ORGANIZATIONS: usize = 10;
@@ -252,6 +257,9 @@ pub struct KnowledgeSourceSpec {
     /// `public` (any channel) or `internal` (the internal channel only); default `internal`.
     #[serde(default)]
     pub visibility: Visibility,
+    /// EU data-theme codes it is about, for the context page (MF-60, ADR-N-055 §2.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<DataTheme>,
 }
 
 impl Kind for KnowledgeSourceSpec {
@@ -287,6 +295,7 @@ impl KnowledgeSourceSpec {
         self.wordpress_fields()?;
         self.space_and_pattern_fields()?;
         self.crawl_limit_fields()?;
+        categories(&self.categories)?;
         languages(&self.languages)
     }
 
@@ -579,6 +588,16 @@ impl Channel {
     /// Whether the channel answers people nobody signed in (MF-52).
     pub fn is_anonymous(self) -> bool {
         !matches!(self, Channel::Internal)
+    }
+
+    /// Its name in a manifest.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Channel::Public => "public",
+            Channel::Internal => "internal",
+            Channel::Ckan => "ckan",
+            Channel::Iframe => "iframe",
+        }
     }
 }
 
@@ -896,6 +915,16 @@ pub struct AssistantDeploymentSpec {
     /// ADR-N-043 §7.6); on every channel but `internal` a `public` one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_server: Option<String>,
+    /// The Endpoints it reads beside its connectors, picked by the McpServer grammar (MF-58,
+    /// ADR-N-055 §2.2); resolved inside the project's reach by [`crate::reach::resolve_connectors`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<Select>,
+    /// Endpoints it never reads, named as a connector names one (MF-59).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// EU data-theme codes it is about, for display (MF-60); `theme` is the chat's look.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<DataTheme>,
     /// The pages it may be placed on, each `https://host[:port]`; no wildcard, no path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_origins: Vec<String>,
@@ -1110,11 +1139,11 @@ impl AssistantDeploymentSpec {
                 "publicId is a DNS label: lowercase letters, digits and dashes",
             )
         })?;
-        if self.sources.is_empty() && self.connectors.is_empty() && self.mcp_server.is_none() {
+        if self.sources.is_empty() && !self.reads_endpoints() {
             return Err(name(
                 "sources",
                 String::new(),
-                "a deployment answers from at least one source, connector or mcpServer",
+                "a deployment answers from at least one source, connector, select or mcpServer",
             ));
         }
         if let Some(server) = &self.mcp_server {
@@ -1161,11 +1190,11 @@ impl AssistantDeploymentSpec {
                     "routes rag answers from the sources; name at least one",
                 ))
             }
-            Routes::Data if self.connectors.is_empty() && self.mcp_server.is_none() => {
+            Routes::Data if !self.reads_endpoints() => {
                 return Err(name(
                     "answer.routes",
                     "data".into(),
-                    "routes data answers from the connectors; name at least one or an mcpServer",
+                    "routes data answers from the connectors; name at least one, a select or an mcpServer",
                 ))
             }
             _ => {}
@@ -1223,6 +1252,87 @@ impl AssistantDeploymentSpec {
                     "connectors[].timeoutSeconds",
                     connector.timeout_seconds.to_string(),
                     "timeoutSeconds is 1 to 120",
+                ));
+            }
+        }
+        self.select_fields()?;
+        categories(&self.categories)
+    }
+
+    /// Whether it names any way to reach an Endpoint.
+    fn reads_endpoints(&self) -> bool {
+        !self.connectors.is_empty() || self.select.is_some() || self.mcp_server.is_some()
+    }
+
+    /// The selector and the exclusions (MF-58, MF-59). Whether a project, space or Endpoint
+    /// exists, and whether a project is this one, is `jcctl validate`'s.
+    fn select_fields(&self) -> Result<()> {
+        if let Some(select) = &self.select {
+            if self.channel.is_anonymous() {
+                if let Some(level) = select
+                    .access_level
+                    .iter()
+                    .flatten()
+                    .find(|level| **level != AccessLevel::Public)
+                {
+                    return Err(Error::Invalid {
+                        field: "spec.select.accessLevel".into(),
+                        reason: format!(
+                            "a `{}` deployment answers people nobody signed in, so it selects `public` Endpoints only, not `{level}`; use channel `internal` (MF-58)",
+                            self.channel.as_str()
+                        ),
+                    });
+                }
+            }
+            // Every level fits a project-list audience: the channel's bound is the one above.
+            select.validate(crate::kinds::Audience::ProjectList)?;
+            let scope = self.scope_projects();
+            let foreign = select.projects.iter().flatten().map(String::as_str).chain(
+                select
+                    .spaces
+                    .iter()
+                    .flatten()
+                    .filter_map(|space| space.split_once('/').map(|(project, _)| project)),
+            );
+            // Its own project is the one name not in scope; jcctl tells the two apart.
+            let mut outside: BTreeSet<&str> = BTreeSet::new();
+            for project in foreign.filter(|p| !scope.iter().any(|s| s == p)) {
+                outside.insert(project);
+            }
+            if outside.len() > 1 {
+                return Err(Error::Invalid {
+                    field: "spec.select.projects".into(),
+                    reason: format!(
+                        "a selector reaches the deployment's own project and those of scope.projects; add {} to scope.projects or drop them (MF-58)",
+                        outside.into_iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ")
+                    ),
+                });
+            }
+        }
+        if self.exclude.len() > MAX_EXCLUDE {
+            return Err(name(
+                "exclude",
+                self.exclude.len().to_string(),
+                "exclude names at most 50 Endpoints",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for excluded in &self.exclude {
+            let (project, endpoint) = connector_target(excluded);
+            if project.is_some_and(|p| names::validate_dns1123_label(p).is_err())
+                || names::validate_dns1123_label(endpoint).is_err()
+            {
+                return Err(name(
+                    "exclude",
+                    excluded.clone(),
+                    "exclude names an Endpoint of this project, or one of another project as {project}/{endpoint}",
+                ));
+            }
+            if !seen.insert(excluded.as_str()) {
+                return Err(name(
+                    "exclude",
+                    excluded.clone(),
+                    "exclude names an Endpoint once",
                 ));
             }
         }
@@ -1689,6 +1799,19 @@ fn host_and_port(authority: &str) -> Option<&str> {
                 && !label.ends_with('-')
         });
     labels_ok.then_some(host)
+}
+
+/// Each EU data-theme code once (MF-60); an unknown code is refused by [`DataTheme`] itself.
+fn categories(codes: &[DataTheme]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    match codes.iter().find(|code| !seen.insert(code.code())) {
+        Some(code) => Err(name(
+            "categories",
+            code.code().to_owned(),
+            "categories names each EU data-theme code once",
+        )),
+        None => Ok(()),
+    }
 }
 
 /// ISO 639-1: two lowercase letters each.

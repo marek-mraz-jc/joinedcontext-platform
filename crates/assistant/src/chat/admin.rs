@@ -56,6 +56,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             get(documents),
         )
         .route(
+            "/internal/v1/projects/{project}/knowledge/sources/{source}/search",
+            get(search),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/sources/{source}/pages/{page}/links",
             get(links),
         )
@@ -276,7 +280,9 @@ async fn sources(
            (SELECT count(*) FROM chunks c WHERE c.site_id = s.id AND c.embedding IS NOT NULL) AS embedded, \
            (SELECT count(*) FROM chunks c WHERE c.site_id = s.id AND c.embedding IS NULL) AS pending, \
            (SELECT count(*) FROM pages p WHERE p.site_id = s.id AND p.status = 'failed') \
-             + (SELECT count(*) FROM documents d WHERE d.site_id = s.id AND d.status = 'failed') AS failed \
+             + (SELECT count(*) FROM documents d WHERE d.site_id = s.id AND d.status = 'failed') AS failed, \
+           (SELECT jsonb_object_agg(l.lang, l.n) FROM (SELECT c.lang, count(*) AS n FROM chunks c \
+              WHERE c.site_id = s.id AND c.lang IS NOT NULL GROUP BY c.lang) l) AS languages \
          FROM sites s ORDER BY s.source"
     );
     let rows = match sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -312,6 +318,8 @@ async fn sources(
             "embedded": row.try_get::<i64, _>("embedded").unwrap_or(0),
             "pending": row.try_get::<i64, _>("pending").unwrap_or(0),
             "failed": row.try_get::<i64, _>("failed").unwrap_or(0),
+            // Passages per language, those of no known language left out (UI-99, T-4659).
+            "languages": row.try_get::<Option<Value>, _>("languages").unwrap_or(None).unwrap_or_else(|| json!({})),
             "job": job.map(|(state, attempts, error, started, finished)| json!({
                 "state": state, "attempts": attempts, "error": error,
                 "startedAt": started, "finishedAt": finished,
@@ -379,6 +387,28 @@ async fn errors(
 struct Level {
     #[serde(default)]
     parent: Option<i64>,
+    /// Instead of one level: the pages of the whole source whose title or address holds it.
+    #[serde(default)]
+    q: Option<String>,
+}
+
+/// The shortest and the longest `q` of a page search, in characters.
+const PAGE_QUERY: std::ops::RangeInclusive<usize> = 2..=100;
+
+/// What a page or document states of itself (AG-120), as `SELECT` columns of the row `{t}`.
+fn stated(t: &str) -> String {
+    format!(
+        "{t}.title, {t}.description, \
+         to_char({t}.published AT TIME ZONE 'UTC', {UTC}) AS published, \
+         to_char({t}.modified AT TIME ZONE 'UTC', {UTC}) AS modified"
+    )
+}
+
+/// Those columns of a row as members of its item.
+fn stated_members(row: &sqlx::postgres::PgRow, item: &mut Value) {
+    for column in ["title", "description", "published", "modified"] {
+        item[column] = json!(row.try_get::<Option<String>, _>(column).unwrap_or(None));
+    }
 }
 
 fn excluded_by(included: bool, by_admin: bool) -> Value {
@@ -407,17 +437,28 @@ async fn pages(
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
         return problem(404, "no such project");
     };
+    let q = level.q.as_deref().map(str::trim);
+    if q.is_some_and(|q| !PAGE_QUERY.contains(&q.chars().count())) {
+        let _ = tx.rollback().await;
+        return problem(400, "q must be 2 to 100 characters");
+    }
+    // A search reads the whole source, case and diacritics ignored, and answers 100 at most.
     let sql = format!(
         "SELECT p.id, p.url, p.depth::int AS depth, p.parent_id, p.status, p.included, p.excluded_by_admin, p.language, \
-           to_char(p.fetched_at AT TIME ZONE 'UTC', {UTC}) AS fetched_at, \
+           to_char(p.fetched_at AT TIME ZONE 'UTC', {UTC}) AS fetched_at, {}, \
            (SELECT count(*) FROM pages c WHERE c.parent_id = p.id) AS children, \
            (SELECT count(*) FROM documents d WHERE d.page_id = p.id) AS documents, \
            (SELECT count(*) FROM chunks k WHERE k.page_id = p.id) AS passages \
-         FROM pages p WHERE p.site_id = $1 AND p.parent_id IS NOT DISTINCT FROM $2 ORDER BY p.url LIMIT 1000"
+         FROM pages p WHERE p.site_id = $1 AND CASE WHEN $3::text IS NULL \
+           THEN p.parent_id IS NOT DISTINCT FROM $2 \
+           ELSE strpos(lower(unaccent(coalesce(p.title, '') || ' ' || p.url)), lower(unaccent($3))) > 0 END \
+         ORDER BY p.url LIMIT CASE WHEN $3::text IS NULL THEN 1000 ELSE 100 END",
+        stated("p")
     );
     let rows = match sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(site)
         .bind(level.parent)
+        .bind(q)
         .fetch_all(&mut *tx)
         .await
     {
@@ -430,7 +471,7 @@ async fn pages(
         .map(|row| {
             let included: bool = row.try_get("included").unwrap_or(true);
             let by_admin: bool = row.try_get("excluded_by_admin").unwrap_or(false);
-            json!({
+            let mut item = json!({
                 "id": row.try_get::<i64, _>("id").unwrap_or_default(),
                 "url": row.try_get::<String, _>("url").unwrap_or_default(),
                 "depth": row.try_get::<i32, _>("depth").unwrap_or_default(),
@@ -443,7 +484,9 @@ async fn pages(
                 "children": row.try_get::<i64, _>("children").unwrap_or(0),
                 "documents": row.try_get::<i64, _>("documents").unwrap_or(0),
                 "passages": row.try_get::<i64, _>("passages").unwrap_or(0),
-            })
+            });
+            stated_members(row, &mut item);
+            item
         })
         .collect();
     Json(json!({"items": items})).into_response()
@@ -464,14 +507,16 @@ async fn documents(
     let Ok(mut tx) = crate::project_scope(&state.pool, &project).await else {
         return problem(404, "no such project");
     };
-    let rows = match sqlx::query(
-        "SELECT d.id, d.url, d.page_id, d.mime, d.bytes, d.pages, d.off_domain, d.status, d.included, d.excluded_by_admin, \
+    let sql = format!(
+        "SELECT d.id, d.url, d.page_id, d.mime, d.bytes, d.pages, d.off_domain, d.status, d.included, d.excluded_by_admin, {}, \
            (SELECT count(*) FROM chunks k WHERE k.document_id = d.id) AS passages \
          FROM documents d WHERE d.site_id = $1 ORDER BY d.url LIMIT 2000",
-    )
-    .bind(site)
-    .fetch_all(&mut *tx)
-    .await
+        stated("d")
+    );
+    let rows = match sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(site)
+        .fetch_all(&mut *tx)
+        .await
     {
         Ok(rows) => rows,
         Err(err) => return failed(err),
@@ -482,7 +527,7 @@ async fn documents(
         .map(|row| {
             let included: bool = row.try_get("included").unwrap_or(true);
             let by_admin: bool = row.try_get("excluded_by_admin").unwrap_or(false);
-            json!({
+            let mut item = json!({
                 "id": row.try_get::<i64, _>("id").unwrap_or_default(),
                 "url": row.try_get::<String, _>("url").unwrap_or_default(),
                 "pageId": row.try_get::<Option<i64>, _>("page_id").unwrap_or(None),
@@ -494,10 +539,52 @@ async fn documents(
                 "included": included && !by_admin,
                 "excludedBy": excluded_by(included, by_admin),
                 "passages": row.try_get::<i64, _>("passages").unwrap_or(0),
-            })
+            });
+            stated_members(row, &mut item);
+            item
         })
         .collect();
     Json(json!({"items": items})).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tried {
+    q: String,
+    #[serde(default)]
+    limit: Option<u8>,
+}
+
+/// What `search_documents` would answer from this one source (UI-99, T-4659), whatever its
+/// visibility: the administration sees what an internal deployment would read.
+async fn search(
+    State(state): State<Arc<ChatState>>,
+    Path((project, source)): Path<(String, String)>,
+    tried: Result<Query<Tried>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let Ok(Query(tried)) = tried else {
+        return problem(400, "name q, and limit at most");
+    };
+    let q = tried.q.trim();
+    let limit = tried.limit.unwrap_or(super::documents::DEFAULT_HITS);
+    if q.is_empty() || q.chars().count() > super::documents::MAX_QUERY {
+        return problem(400, "q must be 1 to 300 characters");
+    }
+    if limit == 0 || limit > super::documents::MAX_HITS {
+        return problem(400, "limit must be 1 to 10");
+    }
+    if let Err(refused) = site(&state, &project, &source).await {
+        return *refused;
+    }
+    match super::documents::ranked(&state, &[(project, vec![source])], q, None, limit, false).await
+    {
+        Ok(hits) => Json(json!({"hits": hits})).into_response(),
+        Err(err) => failed(err),
+    }
 }
 
 async fn links(

@@ -662,18 +662,9 @@ fn relationship_problems(
             ));
             continue;
         }
-        let wrong = named.iter().position(|urn| {
-            let mut parts = urn.splitn(4, ':');
-            let kind = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-                (Some(urn), Some(ngsi), Some(kind), Some(_))
-                    if urn.eq_ignore_ascii_case("urn") && ngsi.eq_ignore_ascii_case("ngsi-ld") =>
-                {
-                    Some(kind)
-                }
-                _ => None,
-            };
-            kind.map(local) != Some(local(target))
-        });
+        let wrong = named
+            .iter()
+            .position(|urn| jc_core::type_of_id(urn).map(local) != Some(local(target)));
         if let Some(index) = wrong {
             // The message names the target's place, never the URN: a record may carry anything.
             problems.push(problem(
