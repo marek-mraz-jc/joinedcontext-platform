@@ -38,6 +38,8 @@ test("the bundle: the page's policy runs only its own scripts, asks only the cha
   assert.doesNotMatch(all, /sk-or-v1-|client_secret|BEGIN [A-Z ]*PRIVATE KEY|systemPrompt/);
   assert.doesNotMatch(files["app.js"] + files["widget.js"], /localStorage\.setItem\([^)]*[Tt]oken/, "the visitor token is never stored");
   assert.doesNotMatch(bundle(API).files["index.html"], /frame-src/, "no chart renderer, no frame");
+  const template = bundle(undefined, undefined, true).files["index.html"];
+  assert.match(template, /connect-src __API__; img-src 'self'; worker-src 'self'; __FRAMES__base-uri/, "a template keeps both placeholders");
   for (const bad of ["http://assistant.example", "https://assistant.example/path", "", "https://a b"]) {
     assert.throws(() => bundle(bad), /https origin/, bad);
   }
