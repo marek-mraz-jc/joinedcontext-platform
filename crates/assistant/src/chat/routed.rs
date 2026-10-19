@@ -2371,6 +2371,7 @@ mod tests {
             provider: None,
             reasoning: None,
             finish: None,
+            ..Default::default()
         };
         Some((Ok(reply), Duration::from_millis(40)))
     }
@@ -2768,6 +2769,7 @@ mod tests {
             provider: None,
             reasoning: None,
             finish: finish.map(str::to_owned),
+            ..Default::default()
         };
         let answer = "Knižnica je otvorená od 9:00 do 17:00 [1].";
         assert!(worth_keeping(&ended(Some("stop")), answer));

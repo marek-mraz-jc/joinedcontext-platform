@@ -602,7 +602,9 @@ pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     sqlx::query("DELETE FROM answer_timings")
         .execute(pool)
         .await?;
-    // Transcripts until their deployment's retention ran out, steps with them (migration 0015).
+    // Transcripts until their deployment's retention ran out, steps with them (migration 0017).
+    // ponytail: one statement a minute holds one minute's expired turns; a sweep after a long
+    // outage deletes its backlog at once (batches need a cross-project SELECT policy, T-4681).
     sqlx::query("DELETE FROM turns").execute(pool).await?;
     let gone = sqlx::query("DELETE FROM conversations")
         .execute(pool)
@@ -1778,6 +1780,7 @@ async fn ask(
             let mut seen = transcript::Seen::default();
             while let Some(event) = passing.recv().await {
                 seen.see(&event);
+                trace.visual(&event);
                 // A reader who left closes the answer's channel too, so the loop stops as it did.
                 if tx.send(event).await.is_err() {
                     passing.close();
@@ -1805,7 +1808,7 @@ async fn ask(
             }
         };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let steps = trace.steps();
+        let steps = trace::with_gaps(trace.steps(), trace.elapsed_ms());
         let route = trace.route();
         let kept = transcript::Record {
             project: &deployment.project,
@@ -1823,6 +1826,8 @@ async fn ask(
             total_ms,
             timed_out,
             days: deployment.spec.transcript_days(),
+            personal: deployment.spec.transcript_redaction
+                == Some(jc_core::kinds::TranscriptRedaction::Personal),
         };
         if let Err(err) = transcript::store(&state.pool, &kept).await {
             tracing::error!(%err, "a turn's transcript was not stored");
