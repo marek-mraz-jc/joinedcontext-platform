@@ -125,6 +125,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 .jc-answer-tools { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .jc-by { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .jc-by .jc-time { font-size: 12px; }
+.jc-opened { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
 .jc-sources { margin-left: auto; min-height: 32px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px;
   border: 0; border-radius: var(--pill); background: none; color: var(--muted); font: inherit; font-size: 12px;
   white-space: nowrap; cursor: pointer; }
@@ -146,18 +147,26 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; }
 .jc-thanks { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
 
-/* A data answer's table, chart and links (T-4140, T-4198). */
-.jc-data { margin: 0 0 10px; }
-.jc-data-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--bg); }
-.jc-data table { border-collapse: collapse; width: 100%; font-size: 13px; }
-.jc-data caption { text-align: left; padding: 6px 8px; color: var(--muted); }
-.jc-data th, .jc-data td { padding: 4px 8px; border-top: 1px solid var(--line); text-align: left; white-space: nowrap; vertical-align: top; }
-/* T-4650: the name wraps within 40 % of the table, so a value column shows at 400 px; a long text
-   keeps two lines, numbers line up on the right. */
-.jc-data th:first-child, .jc-data td:first-child { white-space: normal; max-width: 40%; min-width: 7em; }
-.jc-data td:first-child .jc-cell, .jc-data td .jc-cell { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
-.jc-data td:first-child .jc-cell { overflow-wrap: anywhere; }
-.jc-data .jc-num { text-align: right; font-variant-numeric: tabular-nums; }
+/* A data answer's table, chart and links (T-4140, T-4198). One grid for every table the assistant
+   shows (T-4682): cell padding from the tokens, a sticky header, numbers right in tabular figures,
+   columns at most 28ch wide and wrapping, zebra rows from the theme, and a horizontal scroll inside
+   the grid only, its fade edge the hint. */
+.jc-visuals { margin: 0 0 10px; }
+.jc-data { --cell-y: 8px; --cell-x: 12px; margin: 0 0 10px; }
+.jc-data > summary { cursor: pointer; min-height: 32px; display: flex; align-items: center; color: var(--muted); font-size: 13px; }
+.jc-data-scroll { position: relative; overflow: auto; max-height: 60vh; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--bg);
+  background-image: linear-gradient(to left, var(--bg), transparent), linear-gradient(to left, rgb(0 0 0 / 12%), transparent);
+  background-position: right; background-size: 24px 100%, 8px 100%; background-repeat: no-repeat; background-attachment: local, scroll; }
+.jc-data table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+.jc-data th, .jc-data td { padding: var(--cell-y) var(--cell-x); border-top: 1px solid var(--line); text-align: left; vertical-align: top;
+  max-width: 28ch; overflow-wrap: anywhere; }
+.jc-data thead th { position: sticky; top: 0; z-index: 1; border-top: 0; background: var(--soft); font-weight: 600; }
+.jc-data tbody tr:nth-child(even) td { background: var(--soft); }
+.jc-data td:first-child { font-weight: 600; }
+.jc-data td .jc-cell { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.jc-data td a { color: var(--link); }
+.jc-data .jc-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 420px) { .jc-data { --cell-y: 6px; --cell-x: 8px; } }
 .jc-data-chart { display: block; width: 100%; height: auto; margin: 6px 0 0; }
 .jc-chart-axis { stroke: var(--line); }
 .jc-chart-line { fill: none; stroke: var(--accent); stroke-width: 2; }

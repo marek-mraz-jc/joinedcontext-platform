@@ -46,6 +46,8 @@ struct World {
     app: axum::Router,
     /// The service's question permits, to fill in a test of the limit.
     questions: Arc<tokio::sync::Semaphore>,
+    /// The service's state, to mint a visitor token a test names itself.
+    state: Arc<ChatState>,
 }
 
 fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deployment {
@@ -184,6 +186,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     let public = |slug: &str| EndpointRef {
         slug: slug.into(),
         audience: "public".into(),
+        space: String::new(),
         title: None,
     };
     snapshot.endpoints = BTreeMap::from([
@@ -193,6 +196,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                space: String::new(),
                 title: None,
             },
         ),
@@ -202,6 +206,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: SLUG.into(),
                 audience: "public".into(),
+                space: String::new(),
                 title: None,
             },
         ),
@@ -210,6 +215,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                space: String::new(),
                 title: None,
             },
         ),
@@ -244,6 +250,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         viz: None,
         organization: "hronov".into(),
         contexts: Default::default(),
+        turns: Default::default(),
     });
     World {
         admin,
@@ -253,8 +260,9 @@ async fn world(test: &str, deployment: Deployment) -> World {
         proxy,
         gateway,
         functions,
-        app: with_visitor_tokens(state),
+        app: with_visitor_tokens(Arc::clone(&state)),
         questions,
+        state,
     }
 }
 
@@ -834,47 +842,140 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-3314: a visitor who leaves stops the question at the model's next call; the call already
-/// sent is let finish and counted.
+/// A visitor token of the test's own, earned at no difficulty from the service's signer.
+async fn visitor_token(state: &ChatState, public_id: &str, nonce: &str) -> String {
+    let now = unix_now();
+    let limits = state.limits.lock().await;
+    let challenge = limits.signer.challenge(public_id, 0, now);
+    limits
+        .signer
+        .redeem(public_id, &challenge, nonce, now)
+        .expect("a proof of no bits")
+        .0
+}
+
+fn resume_of(turn: &str, after: Option<usize>, token: Option<&str>) -> Request<Body> {
+    resume_from(turn, after, token, "203.0.113.7")
+}
+
+fn resume_from(
+    turn: &str,
+    after: Option<usize>,
+    token: Option<&str>,
+    client: &str,
+) -> Request<Body> {
+    let query = after.map(|n| format!("?after={n}")).unwrap_or_default();
+    let mut request = Request::builder()
+        .uri(format!(
+            "/api/v1/d/hronov-obcania/turns/{turn}/resume{query}"
+        ))
+        .header("x-forwarded-for", format!("{client}, 10.0.0.1"));
+    if let Some(token) = token {
+        request = request.header(VISITOR_HEADER, token);
+    }
+    request.body(Body::empty()).expect("a request")
+}
+
+/// The SSE `id`s of a resumed stream, in order.
+async fn ids_of(app: &axum::Router, request: Request<Body>) -> Vec<usize> {
+    let response = app.clone().oneshot(request).await.expect("an answer");
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("a body");
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|l| l.strip_prefix("id: "))
+        .map(|id| id.parse().expect("an index"))
+        .collect()
+}
+
+/// T-4685 (was T-3314's stop): a visitor who leaves mid-answer, a link clicked on the host page,
+/// leaves the answer running to its end; the next page reads it again from the index it reached,
+/// nothing repeated, and the turn is that address's alone.
 #[tokio::test]
-async fn a_question_stops_when_its_visitor_leaves() {
+async fn an_answer_whose_visitor_left_runs_to_its_end_and_resumes_on_the_next_page() {
     let w = world("chatgone", deployment(Channel::Public, 50_000, 10)).await;
     let slow = std::time::Duration::from_millis(300);
     script_routed(
         &w.proxy,
         vec![completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}"}), 100).set_delay(slow)],
         vec![completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100).set_delay(slow)],
-        vec![completion(
-            json!({"role": "assistant", "content": "Do 18:00 [1]."}),
-            100,
-        )],
+        vec![streamed(&["Do 18:00 ", "[1]."], 90, 10)],
     )
     .await;
-    let response = w
-        .app
-        .clone()
-        .oneshot(ask(
-            json!({"message": "Dokedy je otvorená knižnica?"}),
-            None,
-        ))
-        .await
-        .expect("an answer");
+    let token = visitor_token(&w.state, "hronov-obcania", "0").await;
+    let mut request = ask(json!({"message": "Dokedy je otvorená knižnica?"}), None);
+    request
+        .headers_mut()
+        .insert(VISITOR_HEADER, token.parse().expect("a header value"));
+    let response = w.app.clone().oneshot(request).await.expect("an answer");
     assert_eq!(response.status(), StatusCode::OK);
-    // The visitor leaves while the first call is with the model.
-    for _ in 0..100 {
-        if !model_calls(&w.proxy).await.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    drop(response);
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    // The router and the first round's judgement were with the model; no answer call followed.
-    let calls = model_calls(&w.proxy).await;
+    // The first event names the turn; the visitor leaves while the first call is with the model.
+    let mut body = response.into_body().into_data_stream();
+    let first = futures_util::StreamExt::next(&mut body)
+        .await
+        .expect("an event")
+        .expect("bytes");
+    let first = String::from_utf8_lossy(&first).to_string();
+    let data = first
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .expect("the conversation event");
+    let turn = serde_json::from_str::<Value>(data).expect("json")["turn"]
+        .as_str()
+        .expect("a visitor's stream names its turn")
+        .to_owned();
+    drop(body);
+    // The answer goes on: every event through `done`, numbered from 0.
+    let (status, events, headers) = answer_of(&w.app, resume_of(&turn, None, Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
     assert!(
-        calls_of(&calls, None).is_empty(),
-        "no call after the visitor left"
+        names.contains(&"answer") && names.contains(&"citations"),
+        "{events:?}"
     );
+    assert_eq!(names.last(), Some(&"done"));
+    let all = ids_of(&w.app, resume_of(&turn, Some(0), Some(&token))).await;
+    assert_eq!(all, (0..events.len()).collect::<Vec<_>>());
+    let rest = ids_of(&w.app, resume_of(&turn, Some(2), Some(&token))).await;
+    assert_eq!(
+        rest,
+        (2..events.len()).collect::<Vec<_>>(),
+        "from the index, nothing twice"
+    );
+    let calls = model_calls(&w.proxy).await;
+    assert_eq!(calls_of(&calls, None).len(), 1, "the answer call ran");
+    // The next page's new token reads it from the same address; another address, no token, an
+    // unknown turn and a bad index are refused.
+    let other = visitor_token(&w.state, "hronov-obcania", "1").await;
+    assert_ne!(other, token);
+    let app = &w.app;
+    let refused = |request| async move { answer_of(app, request).await.0 };
+    assert_eq!(
+        refused(resume_of(&turn, None, Some(&other))).await,
+        StatusCode::OK
+    );
+    let elsewhere = resume_from(&turn, None, Some(&other), "198.51.100.9");
+    assert_eq!(refused(elsewhere).await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        refused(resume_of(&turn, None, None)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let unknown = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
+    assert_eq!(
+        refused(resume_of(unknown, None, Some(&token))).await,
+        StatusCode::NOT_FOUND
+    );
+    let bad = Request::builder()
+        .uri(format!(
+            "/api/v1/d/hronov-obcania/turns/{turn}/resume?after=-1"
+        ))
+        .header(VISITOR_HEADER, token.as_str())
+        .body(Body::empty())
+        .expect("a request");
+    assert_eq!(refused(bad).await, StatusCode::BAD_REQUEST);
+    // The turn is stored as any other.
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
         .expect("scope");
@@ -885,9 +986,18 @@ async fn a_question_stops_when_its_visitor_leaves() {
     assert_eq!(
         tokens,
         100 * i64::try_from(calls.len()).expect("few"),
-        "every call that was sent is counted"
+        "every call is counted"
     );
     drop(tx);
+    // Past 20 resumes a minute from one address: 429.
+    let mut statuses = Vec::new();
+    for _ in 0..30 {
+        statuses.push(refused(resume_of(unknown, None, Some(&token))).await);
+    }
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "{statuses:?}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -1024,21 +1134,20 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .up_to_n_times(1)
         .mount(&w.proxy)
         .await;
-    // T-4286: a day the proxy refuses is answered as search, never as a refusal.
+    // T-4671: a day the proxy refuses mid-loop is the day's limit, never a quiet switch.
     let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
-    assert!(
-        events.iter().all(|(n, _)| n != "error"),
-        "no refusal: {events:?}"
-    );
-    let answer = events
+    let error = &events
         .iter()
-        .find(|(n, _)| n == "answer")
-        .expect("a search answer")
-        .1["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(answer.contains("denný rozpočet"), "{answer}");
+        .find(|(n, _)| n == "error")
+        .expect("the day's limit")
+        .1;
+    assert_eq!(error["title"], "Daily Limit Reached", "{events:?}");
+    assert!(
+        events
+            .iter()
+            .all(|(n, _)| n != "answer" && n != "citations"),
+        "{events:?}"
+    );
 
     Mock::given(method("POST"))
         .and(path("/v1/llm/chat/completions"))
@@ -2635,11 +2744,42 @@ async fn the_owner_s_limits_hold_before_any_model_call() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4149: the provider's cost of each answer adds up per day; once it reaches
-/// `budget.costPerDayUsd` the chat answers as search, the matching pages as citations under a
-/// Slovak sentence, and asks the model nothing more that day.
+/// T-4671: a capped question's whole stream is the limit and `done`: no answer, citation, card,
+/// table, follow-up or step, and no model call or search behind it (owner 2026-10-18).
+fn only_the_limit(events: &[(String, Value)], title: &str) -> String {
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["error", "done"], "{events:?}");
+    let error = &events[0].1;
+    assert_eq!(error["title"], title, "{events:?}");
+    without_internals(&events[1].1);
+    assert!(
+        events[1].1["stagesMs"]
+            .as_object()
+            .is_none_or(|s| s.is_empty()),
+        "nothing ran: {events:?}"
+    );
+    let detail = error["detail"].as_str().expect("a sentence").to_owned();
+    for internal in ["USD", "$", "0.01", "cost"] {
+        assert!(!detail.contains(internal), "{detail}");
+    }
+    detail
+}
+
+/// Whether a stream is a limit's refusal.
+fn limited(events: &[(String, Value)]) -> bool {
+    events.iter().any(|(n, d)| {
+        n == "error"
+            && d["title"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("Limit Reached"))
+    })
+}
+
+/// T-4149, T-4671: the provider's cost of each answer adds up per day; once it reaches
+/// `budget.costPerDayUsd` the chat refuses with the day's limit and when it resets, and asks the
+/// model nothing more that day.
 #[tokio::test]
-async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
+async fn past_the_day_s_cost_cap_the_chat_says_the_limit_and_nothing_else() {
     let mut capped = deployment(Channel::Public, 1_000_000, 10);
     if let Some(budget) = capped.spec.budget.as_mut() {
         budget.cost_per_day_usd = 0.01;
@@ -2653,8 +2793,10 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
         }))],
     )
     .await;
+    // A question that already started finishes its answer call past the cap.
     let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
     assert_eq!(status, StatusCode::OK);
+    assert!(!limited(&first), "{first:?}");
     // T-4178, T-4654: the day's cost is kept below; a visitor's stream does not carry it.
     let done = &first.last().expect("a done event").1;
     without_internals(done);
@@ -2671,30 +2813,24 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
 
     let (status, events, _) = answer_of(
         &w.app,
-        ask(
+        ask_from(
             json!({"message": "Dokedy je otvorená knižnica?"}),
             Some(ORIGIN),
+            "203.0.113.9",
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(
-        names,
-        ["conversation", "answer", "citations", "done"],
-        "{events:?}"
+    let detail = only_the_limit(&events, "Daily Limit Reached");
+    assert!(
+        detail.starts_with("Asistent dnes dosiahol denný limit. Skúste to znova "),
+        "{detail}"
     );
-    let answer = events[1].1["text"].as_str().expect("an answer");
-    assert!(answer.contains("denný rozpočet"), "{answer}");
-    let citations = events[2].1.as_array().expect("citations");
-    assert!(!citations.is_empty(), "the search found the library's page");
-    for (at, citation) in citations.iter().enumerate() {
-        assert!(citation["url"]
-            .as_str()
-            .is_some_and(|u| u.starts_with("http")));
-        assert!(answer.contains(&format!("[{}]", at + 1)), "{answer}");
-    }
-    without_internals(&events[3].1);
+    assert!(
+        detail.contains(" po ") && detail.ends_with(":00."),
+        "{detail}"
+    );
+    assert_eq!(events[0].1["status"], 429);
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         before,
@@ -2703,11 +2839,10 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4286: at 08:25Z on 2026-10-16 every visitor of the public assistant read "used up today's
-/// answers": the proxy's `tokensPerDay` refused the router call. Such a day now answers as
-/// search with the pages as links, like the cost cap, and nobody reads a refusal.
+/// T-4286, T-4671: a day the proxy's `tokensPerDay` refuses is the same limit, never links and
+/// never the proxy's own words.
 #[tokio::test]
-async fn a_day_the_proxy_refuses_answers_with_links_not_a_refusal() {
+async fn a_day_the_proxy_refuses_is_the_day_s_limit() {
     let w = world("chatproxyday", deployment(Channel::Public, 1_000_000, 10)).await;
     Mock::given(method("POST"))
         .and(path("/v1/llm/chat/completions"))
@@ -2725,34 +2860,33 @@ async fn a_day_the_proxy_refuses_answers_with_links_not_a_refusal() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(events.iter().all(|(n, _)| n != "error"), "{events:?}");
-    let answer = events
+    let error = &events
         .iter()
-        .find(|(n, _)| n == "answer")
-        .expect("an answer")
-        .1["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(answer.contains("Tu sú stránky"), "{answer}");
-    assert!(!answer.contains("vyčerpané"), "{answer}");
-    let citations = &events
-        .iter()
-        .find(|(n, _)| n == "citations")
-        .expect("citations")
+        .find(|(n, _)| n == "error")
+        .expect("the day's limit")
         .1;
+    assert_eq!(error["title"], "Daily Limit Reached", "{events:?}");
     assert!(
-        citations.as_array().is_some_and(|c| !c.is_empty()),
-        "the library's page as a link: {events:?}"
+        !error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tokensPerDay"),
+        "{error}"
     );
+    for kept_out in ["answer", "citations", "followups", "delta"] {
+        assert!(
+            events.iter().all(|(n, _)| n != kept_out),
+            "{kept_out}: {events:?}"
+        );
+    }
     assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4286: a visitor past `perClientPerMonth` gets links and the day it resets, without a model
-/// call, while another visitor is still answered by the model.
+/// T-4286, T-4671: a visitor past `perClientPerMonth` reads the month's limit and the day it
+/// resets, without a model call, while another visitor is still answered by the model.
 #[tokio::test]
-async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
+async fn a_visitor_past_their_month_reads_when_it_resets_and_others_are_answered() {
     let mut monthly = deployment(Channel::Public, 1_000_000, 10);
     if let Some(rate) = monthly.spec.rate_limit.as_mut() {
         rate.per_client_per_month = 1;
@@ -2771,46 +2905,100 @@ async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
     .await;
     let from =
         |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
-    // Whatever the model makes of it, the first question of the month is the model's.
-    let month_said = |events: &[(String, Value)]| {
-        events.iter().any(|(n, d)| {
-            n == "answer"
-                && d["text"]
-                    .as_str()
-                    .is_some_and(|t| t.contains("Tento mesiac"))
-        })
-    };
     let (status, first, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!month_said(&first), "{first:?}");
+    assert!(!limited(&first), "{first:?}");
     let calls = model_calls(&w.proxy).await.len();
     assert!(calls > 0, "the first question asks the model");
 
     let (status, second, _) =
         answer_of(&w.app, from("203.0.113.7", "Dokedy je otvorená knižnica?")).await;
-    assert_eq!(status, StatusCode::OK, "never a refusal");
-    let answer = second
-        .iter()
-        .find(|(n, _)| n == "answer")
-        .expect("an answer")
-        .1["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(answer.contains("Tento mesiac"), "{answer}");
-    assert!(answer.contains("znova tak odpovedá od 1. "), "{answer}");
+    assert_eq!(status, StatusCode::OK);
+    let detail = only_the_limit(&second, "Monthly Limit Reached");
     assert!(
-        second.last().expect("done").1.get("modelCalls").is_none(),
-        "T-4654"
+        detail.starts_with("Dosiahli ste mesačný limit otázok. Obnoví sa 1. "),
+        "{detail}"
     );
     assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
 
     let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
-    assert!(!month_said(&other), "{other:?}");
+    assert!(!limited(&other), "{other:?}");
     assert!(
         model_calls(&w.proxy).await.len() > calls,
         "another visitor is answered by the model"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4653, T-4671: a visitor past their tenth of the day's cost is refused `429` until UTC
+/// midnight, under a title the chat offers no retry for; another visitor is still answered.
+#[tokio::test]
+async fn a_visitor_past_their_share_of_the_day_is_refused_until_midnight() {
+    let mut shared = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(budget) = shared.spec.budget.as_mut() {
+        budget.cost_per_day_usd = 1.0;
+    }
+    let w = world("chatshare", shared).await;
+    let answered = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Áno."}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50, "cost": 0.2}
+        }))
+    };
+    script(&w.proxy, vec![answered(), answered(), answered()]).await;
+    let from =
+        |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
+    let (status, _, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
+    assert_eq!(status, StatusCode::OK);
+    let calls = model_calls(&w.proxy).await.len();
+
+    let (status, body, headers) = answer_of(&w.app, from("203.0.113.7", "A ešte?")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body:?}");
+    assert_eq!(body[0].1["title"], "Visitor Limit Reached");
+    assert_eq!(
+        body[0].1["detail"],
+        "Dnes ste položili veľa otázok. Skúste to znova neskôr."
+    );
+    let retry: u64 = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("Retry-After");
+    assert!((1..=86_400).contains(&retry), "{retry}");
+    assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
+
+    let (status, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!limited(&other), "{other:?}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4671: today's spend that cannot be read refuses the question (fail closed) rather than
+/// answering past a cap nobody can see.
+#[tokio::test]
+async fn an_unreadable_day_refuses_rather_than_answering() {
+    let w = world("chatspendgone", deployment(Channel::Public, 1_000_000, 10)).await;
+    // The database's owner takes the day's table away, so the service cannot read the spend.
+    let url = std::env::var("JC_ASSISTANT_TEST_DATABASE_URL").expect("the test database");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("a database URL");
+    let owner = PgPool::connect_with(options.database(&w.name))
+        .await
+        .expect("the owner connects");
+    sqlx::query("ALTER TABLE usage RENAME TO usage_gone")
+        .execute(&owner)
+        .await
+        .expect("the usage table is renamed");
+    owner.close().await;
+    let (status, events, _) =
+        answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    let detail = only_the_limit(&events, "Assistant Unavailable");
+    assert_eq!(
+        detail,
+        "Asistent je dočasne nedostupný. Skúste to o chvíľu."
+    );
+    assert_eq!(events[0].1["status"], 503);
+    assert!(model_calls(&w.proxy).await.is_empty(), "no model call");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -4053,13 +4241,14 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
         "a second visitor behind the same address has their own minute"
     );
     // The month is the address's (integrator review): the fourth question of the address spends
-    // it, and a token minted after is answered as search, with no model call.
+    // it, and a token minted after reads the month's limit, with no model call.
     assert_eq!(answer_of(&w.app, with(&second)).await.0, StatusCode::OK);
     // However many calls a question makes (the router, the answer), the four made some.
     let spent = model_calls(&w.proxy).await.len();
     assert!(spent >= 4, "{spent}");
     let (status, body, _) = answer_of(&w.app, with(&third)).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
+    only_the_limit(&body, "Monthly Limit Reached");
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         spent,

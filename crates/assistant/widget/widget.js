@@ -14,9 +14,9 @@
       script: "Skript, ktorý asistent spustil", failed: "Odpoveď sa nepodarilo načítať. Skúste to znova.",
       offline: "Nepodarilo sa spojiť so službou. Skontrolujte pripojenie a skúste to znova.",
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
-      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
+      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", limit: "Asistent dosiahol svoj limit. Skúste to znova neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
-      reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", expand: "Zväčšiť", collapse: "Zmenšiť", copy: "Kopírovať",
+      reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
@@ -37,15 +37,17 @@
       keptNone: "Obsah konverzácií neuchovávame.",
       askHeading: "Otázky k osobným údajom",
       askData: "Chcete sa opýtať na spracúvanie údajov alebo požiadať o prístup, opravu či vymazanie? Napíšte nám:",
-      documents: "Informácie o ochrane osobných údajov", moreInfo: "Viac", lessInfo: "Menej", tabTable: "Tabuľka", tabMap: "Mapa", chart: "Graf" },
+      documents: "Informácie o ochrane osobných údajov", moreInfo: "Viac", lessInfo: "Menej", tabTable: "Tabuľka", tabMap: "Mapa", chart: "Graf",
+      dock: "Pripnúť k okraju", undock: "Plávajúce okno", follow: "Otvárať dataset automaticky",
+      opened: "Otvoril som dataset {title}", back: "Späť", changed: "Stránka zmenená na dataset {title}" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
       offline: "The service could not be reached. Check your connection and try again.",
       busy: "You asked many questions at once. Wait a moment and try again.",
-      paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
+      paused: "The assistant is not answering right now. Try again later.", limit: "The assistant has reached its limit. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
-      reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", expand: "Expand", collapse: "Collapse", copy: "Copy",
+      reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
@@ -66,15 +68,17 @@
       keptNone: "We keep no conversation content.",
       askHeading: "Questions about personal data",
       askData: "Want to ask about how data is processed, or request access, correction or erasure? Write to us:",
-      documents: "Privacy information", moreInfo: "More", lessInfo: "Less", tabTable: "Table", tabMap: "Map", chart: "Chart" },
+      documents: "Privacy information", moreInfo: "More", lessInfo: "Less", tabTable: "Table", tabMap: "Map", chart: "Chart",
+      dock: "Dock to the side", undock: "Floating window", follow: "Open the dataset automatically",
+      opened: "I opened the dataset {title}", back: "Back", changed: "The page changed to the dataset {title}" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
       offline: "Službu se nepodařilo zastihnout. Zkontrolujte připojení a zkuste to znovu.",
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
-      paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
+      paused: "Asistent teď neodpovídá. Zkuste to později.", limit: "Asistent dosáhl svého limitu. Zkuste to znovu později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
-      reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", expand: "Zvětšit", collapse: "Zmenšit", copy: "Kopírovat",
+      reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
@@ -95,7 +99,9 @@
       keptNone: "Obsah konverzací neuchováváme.",
       askHeading: "Dotazy k osobním údajům",
       askData: "Chcete se zeptat na zpracování údajů nebo požádat o přístup, opravu či smazání? Napište nám:",
-      documents: "Informace o ochraně osobních údajů", moreInfo: "Více", lessInfo: "Méně", tabTable: "Tabulka", tabMap: "Mapa", chart: "Graf" }
+      documents: "Informace o ochraně osobních údajů", moreInfo: "Více", lessInfo: "Méně", tabTable: "Tabulka", tabMap: "Mapa", chart: "Graf",
+      dock: "Připnout k okraji", undock: "Plovoucí okno", follow: "Otevírat dataset automaticky",
+      opened: "Otevřel jsem dataset {title}", back: "Zpět", changed: "Stránka změněna na dataset {title}" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -161,6 +167,8 @@
     close: "M6 6l12 12M18 6L6 18",
     expand: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
     collapse: "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5",
+    dock: "M4 4h16v16H4zM14 4v16",
+    undock: "M4 4h16v16H4zM11 11h6v6h-6z",
     chat: "M4 5h16v11H9l-5 4z",
     send: "M5 12h13M12 5l7 7-7 7",
     stop: "M7 7h10v10H7z",
@@ -232,11 +240,29 @@
   var fresh = iconButton("jc-fresh", "fresh", "fresh");
   actions.appendChild(fresh);
   // Embedded, the panel grows to the full window and back (T-4658); on a phone it already fills
-  // the screen, so the button is left out there.
+  // the screen, so the button is left out there. A host that frames it with `dock=1` (the
+  // catalogue, T-4685) docks it to its right edge on a wide screen, docked by default.
   var size = null;
+  var dock = null;
+  var placed = null;
+  try { placed = sessionStorage.getItem("jc-chat-size:" + config.publicId); } catch (e) { /* panel */ }
+  var docking = embedded && params.get("dock") === "1" && screen.width >= 1100;
   var expanded = false;
+  var docked = docking && placed !== "panel";
+  if (docking) {
+    dock = el("button", "jc-icon-button jc-dock");
+    dock.type = "button";
+    dock.appendChild(icon(docked ? "undock" : "dock"));
+    var docks = function () { return w[docked ? "undock" : "dock"]; };
+    words(dock, docks, "ariaLabel");
+    words(dock, docks, "title");
+    dock.setAttribute("aria-pressed", String(docked));
+    dock.addEventListener("click", function () { place(docked ? "panel" : "dock"); });
+    actions.appendChild(dock);
+  }
   if (embedded && screen.width >= 600) {
-    try { expanded = sessionStorage.getItem("jc-chat-size:" + config.publicId) === "full"; } catch (e) { /* panel */ }
+    expanded = placed === "full";
+    if (dock) dock.hidden = expanded;
     size = el("button", "jc-icon-button jc-size");
     size.type = "button";
     size.appendChild(icon(expanded ? "collapse" : "expand"));
@@ -336,8 +362,28 @@
   rememberLabel.appendChild(rememberBox);
   rememberLabel.appendChild(words(el("span"), "remember"));
   var rememberHint = words(el("p", "jc-hint"), "rememberHint");
+  // On a docking host (T-4685): whether a done answer about one dataset opens it beside the
+  // panel; on by default, kept in this browser.
+  var FOLLOW = "jc-chat-follow:" + config.publicId;
+  var followLabel = el("label", "jc-remember");
+  var followBox = el("input");
+  followBox.type = "checkbox";
+  followBox.setAttribute("role", "switch");
+  followBox.checked = following();
+  followBox.addEventListener("change", function () {
+    try {
+      if (followBox.checked) localStorage.removeItem(FOLLOW);
+      else localStorage.setItem(FOLLOW, "off");
+    } catch (e) { /* this page only */ }
+  });
+  followLabel.appendChild(followBox);
+  followLabel.appendChild(words(el("span"), "follow"));
   var aboutClose = button("jc-about-close", "close");
-  [aboutTitle, aboutLead, rememberLabel, rememberHint, aboutBody, aboutClose].forEach(function (n) { about.appendChild(n); });
+  [aboutTitle, aboutLead, rememberLabel, rememberHint].concat(docking ? [followLabel] : [], [aboutBody, aboutClose])
+    .forEach(function (n) { about.appendChild(n); });
+  function following() {
+    try { return localStorage.getItem(FOLLOW) !== "off"; } catch (e) { return true; }
+  }
 
   root.appendChild(head);
   if (tools) root.appendChild(tools);
@@ -435,6 +481,15 @@
   }
 
   // The empty chat: the greeting and the suggested questions, nothing else above the fold.
+  // Once asked, the greeting stays above the conversation and its suggestions go.
+  function greeted() {
+    if (!intro) return;
+    var list = intro.querySelector(".jc-suggest");
+    if (list) list.remove();
+    if (intro.children.length === 0) intro.remove();
+    intro = null;
+  }
+
   function welcome() {
     intro = el("li", "jc-intro");
     var hello = JCRender.greeting(config.greeting, config.languages, lang, w.hello);
@@ -573,7 +628,7 @@
       item.replaceChild(body, item.streaming);
       item.streaming = null;
     } else {
-      item.appendChild(body);
+      item.insertBefore(body, item.visuals || null);
     }
     announce.textContent = body.textContent;
     // One row under the answer (T-4364): who and when, copy, thumbs, then the sources' badges and
@@ -784,7 +839,7 @@
     frame.title = title;
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox");
     frame.setAttribute("referrerpolicy", "no-referrer");
-    var message = { type: "jc-viz-show", spec: JCRender.vizSpec(payload.spec, lang), rows: payload.rows, lang: lang };
+    var message = { type: "jc-viz-show", spec: JCRender.vizSpec(payload.spec, lang, payload.labels), rows: payload.rows, lang: lang };
     frame.addEventListener("load", function () {
       frame.contentWindow.postMessage(message, VIZ);
     });
@@ -809,7 +864,7 @@
     var figure = el("figure", "jc-data jc-viz-card");
     var title = typeof data.spec.title === "string" && data.spec.title ? data.spec.title : w.chart;
     figure.appendChild(vizFrame(data, title, function () { figure.remove(); }));
-    item.insertBefore(figure, item.status && item.status.parentNode === item ? item.status : null);
+    visual(item, figure);
   }
 
   // "Table | Map" over a data card whose rows have places; the map loads when it is first shown,
@@ -847,16 +902,30 @@
     pick(JCRender.mapFirst(data));
   }
 
+  // An answer's visuals sit under its text (T-4682): one box the text is put before, and with more
+  // than one visual each is folded to its caption.
+  function visual(item, figure) {
+    if (!item.visuals) {
+      item.visuals = el("div", "jc-visuals");
+      item.insertBefore(item.visuals, item.status && item.status.parentNode === item ? item.status : null);
+    }
+    item.visuals.appendChild(figure);
+    var folds = item.visuals.querySelectorAll("details.jc-data");
+    if (item.visuals.children.length > 1) Array.prototype.forEach.call(folds, function (d) { d.open = false; });
+  }
+
   function showData(item, data) {
     var shown = JCRender.table(data, lang);
     if (!shown) return;
-    var figure = el("figure", "jc-data");
+    var figure = el("details", "jc-data");
+    figure.open = true;
+    figure.appendChild(el("summary", "", shown.caption || w.table));
     var scroll = el("div", "jc-data-scroll");
     scroll.tabIndex = 0;
     scroll.setAttribute("role", "region");
     scroll.setAttribute("aria-label", w.table);
     var table = el("table");
-    if (shown.caption) table.appendChild(el("caption", "", shown.caption));
+    if (shown.caption) table.appendChild(el("caption", "jc-sr", shown.caption));
     var headRow = el("tr");
     shown.columns.forEach(function (c, i) {
       var th = el("th", shown.numeric[i] ? "jc-num" : "", c);
@@ -870,6 +939,12 @@
       row.forEach(function (cell, i) {
         // A long text keeps two lines; the whole of it is its title.
         var td = tr.appendChild(el("td", shown.numeric[i] ? "jc-num" : "", ""));
+        if (cell && typeof cell === "object") {
+          // A long address reads as one short word, the whole of it its title (T-4682).
+          var a = td.appendChild(link(cell.href, cell.text));
+          a.title = cell.href;
+          return;
+        }
         var text = td.appendChild(el("span", "jc-cell", cell));
         if (cell.length > 40) text.title = cell;
       });
@@ -881,24 +956,27 @@
     if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
     if (shown.dataset || shown.download) {
       var links = el("p", "jc-data-links");
-      if (shown.dataset) links.appendChild(link(shown.dataset, w.dataset));
+      // More rows than the panel shows: the dataset holds them all (T-4682).
+      var more = typeof data.total === "number" && data.total > shown.rows.length;
+      if (shown.dataset) links.appendChild(link(shown.dataset, more ? w.allRows : w.dataset));
       if (shown.download) links.appendChild(link(shown.download, w.download));
       figure.appendChild(links);
     }
-    item.insertBefore(figure, item.status && item.status.parentNode === item ? item.status : null);
+    visual(item, figure);
     item.data = figure;
   }
 
   // A failed answer as one quiet line in the visitor's language and a Retry that asks the same
-  // question again, through the same route and its per-visitor limit (T-4253).
-  function fail(item, word) {
+  // question again, through the same route and its per-visitor limit (T-4253); a limit offers no
+  // Retry, since nothing changes before it resets (T-4671).
+  function fail(item, word, detail) {
     if (item.status) item.status.remove();
     if (item.streaming) {
       item.streaming.remove();
       item.streaming = null;
     }
     item.classList.add("jc-error");
-    var p = el("p", "", w[word]);
+    var p = el("p", "", JCRender.said(word, detail, lang, w));
     p.setAttribute("role", "alert");
     item.appendChild(p);
     if (word === "full") {
@@ -944,8 +1022,10 @@
       conversation = data.id;
       asked += 1;
       item.turn = asked;
+      // The turn a page change resumes (T-4685, API/05 §1.6.2).
+      if (typeof data.turn === "string") item.resumable = data.turn;
     } else if (name === "stage" && item.status) {
-      (item.stages = item.stages || []).push(data);
+      (item.stages = item.stages || []).push(Object.assign({}, data, { ms: Date.now() - (item.startedMs || Date.now()) }));
       var line = JCRender.stage(data, lang);
       if (line) {
         item.status.textContent = line;
@@ -971,7 +1051,7 @@
       }
       if (!item.streaming) {
         item.streaming = el("div", "jc-answer jc-streaming");
-        item.appendChild(item.streaming);
+        item.insertBefore(item.streaming, item.visuals || null);
       }
       item.text = (item.text || "") + data.text;
       if (!item.frame) item.frame = requestAnimationFrame(function () { paint(item); });
@@ -985,6 +1065,7 @@
       history.push({ role: "assistant", text: item.pending.slice(0, 4000) });
     } else if (name === "citations") {
       var cited = Array.isArray(data) ? data : [];
+      item.cited = cited;
       show(item, item.pending || "", cited, item.turn);
       var took = JCRender.steps(item.stages, lang);
       if (took) {
@@ -999,8 +1080,14 @@
       item.pending = null;
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
+      // Kept with the answer, so a page change shows them again under the last one (T-4685).
+      var last = kept && kept.turns[kept.turns.length - 1];
+      if (last && last.turn === item.turn && conversation === kept.conversation) {
+        last.followups = JCRender.followups(data);
+        keep();
+      }
     } else if (name === "error") {
-      fail(item, JCRender.trouble(data.status, data.title));
+      fail(item, JCRender.trouble(data.status, data.title), data.detail);
     }
   }
 
@@ -1074,9 +1161,28 @@
     var response = await post(held);
     // A token the service no longer knows (a restart, an hour gone) is earned again, once.
     if (response.status === 401) response = await post(await visitorToken(true));
+    await read(response, item);
+  }
+
+  // A resumed answer (T-4685): every event of the turn again, into an item whose text starts
+  // empty, so nothing shows twice and nothing is asked again.
+  async function replay(id, item, signal) {
+    var held = await visitorToken();
+    var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/turns/" +
+      encodeURIComponent(id) + "/resume?after=0", {
+      headers: { Accept: "text/event-stream", "X-JC-Visitor": held.token },
+      credentials: "omit",
+      signal: signal
+    });
+    await read(response, item);
+  }
+
+  // The answer's events as they stream, then its final view and, when it is about one dataset,
+  // the host is asked to open it.
+  async function read(response, item) {
     if (!response.ok || !response.body) {
       var problem = await response.json().catch(function () { return {}; });
-      fail(item, refusal(response.status, problem.title));
+      fail(item, refusal(response.status, problem.title), problem.detail);
       return;
     }
     var reader = response.body.getReader();
@@ -1085,9 +1191,9 @@
     for (;;) {
       var chunk = await reader.read();
       if (chunk.done) break;
-      var read = JCRender.events(buffer + decoder.decode(chunk.value, { stream: true }));
-      buffer = read.rest;
-      read.events.forEach(function (event) { handle(item, event.name, event.data); });
+      var parsed = JCRender.events(buffer + decoder.decode(chunk.value, { stream: true }));
+      buffer = parsed.rest;
+      parsed.events.forEach(function (event) { handle(item, event.name, event.data); });
     }
     if (item.pending !== null && item.pending !== undefined) {
       show(item, item.pending, [], item.turn);
@@ -1097,7 +1203,39 @@
       show(item, item.text, [], item.turn);
     }
     log.scrollTop = log.scrollHeight;
+    follow(item);
   }
+
+  // T-4685, API/05 §1.6.1: a done answer whose citations link one dataset, an empty input and
+  // the visitor's switch on; the host checks the rest and answers `jc-assistant-opened`.
+  var opening = null;
+  function follow(item) {
+    var target = docking && following() && input.value.trim() === "" ? JCRender.dataset(item.cited) : null;
+    if (!target) return;
+    opening = { item: item, target: target };
+    toParent({ type: "jc-assistant-dataset", url: target.url, title: target.title });
+  }
+  function openedLine(item, target) {
+    var name = function () { return target.title || target.url; };
+    var line = el("p", "jc-opened");
+    line.appendChild(words(el("span"), function () { return w.opened.replace("{title}", name()) + " · "; }));
+    var back = button("jc-more", "back");
+    back.addEventListener("click", function () { toParent({ type: "jc-assistant-back" }); });
+    line.appendChild(back);
+    item.appendChild(line);
+  }
+  window.addEventListener("message", function (event) {
+    var data = event.data || {};
+    if (!embedded || event.source !== window.parent || data.type !== "jc-assistant-opened" ||
+        !opening || data.url !== opening.target.url ||
+        JCRender.closeTargets(location.ancestorOrigins, config.frameOrigins).indexOf(event.origin) < 0) return;
+    var done = opening;
+    opening = null;
+    openedLine(done.item, done.target);
+    (kept ? kept.turns : []).forEach(function (t) { if (t.turn === done.item.turn) t.opened = done.target; });
+    keep();
+    announce.textContent = w.changed.replace("{title}", done.target.title || done.target.url);
+  });
 
   function settle() {
     busy = null;
@@ -1109,12 +1247,7 @@
   function submit(question) {
     question = String(question || "").trim();
     if (!question || busy) return;
-    if (intro) {
-      var list = intro.querySelector(".jc-suggest");
-      if (list) list.remove();
-      if (intro.children.length === 0) intro.remove();
-      intro = null;
-    }
+    greeted();
     Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
     var mine = turn("jc-you", "you");
     mine.appendChild(el("p", "", question));
@@ -1129,11 +1262,19 @@
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
     item.appendChild(item.status);
+    item.startedMs = Date.now();
+    run(item, function (signal) { return ask(question, item, signal); });
+  }
+
+  // One answer at a time, `start` reading it; Stop keeps what arrived.
+  var live = null;
+  function run(item, start) {
     busy = new AbortController();
+    live = item;
     send.hidden = true;
     stop.hidden = false;
     var controller = busy;
-    ask(question, item, controller.signal).catch(function (error) {
+    start(controller.signal).catch(function (error) {
       if (controller.signal.aborted) {
         // What arrived stays; the visitor sees that they stopped it.
         if (item.status) item.status.remove();
@@ -1161,14 +1302,26 @@
     });
   }
 
-  // The launcher sizes the panel; the state lives in this tab's sessionStorage (T-4658).
+  // The launcher sizes the panel; the state lives in this tab's sessionStorage (T-4658):
+  // `full`, `dock` (T-4685) or `panel`. Collapsed, a docking host docks it again.
   function resize(full) {
-    expanded = full;
-    try { sessionStorage.setItem("jc-chat-size:" + config.publicId, full ? "full" : "panel"); } catch (e) { /* this open only */ }
-    size.replaceChild(icon(full ? "collapse" : "expand"), size.firstChild);
-    size.setAttribute("aria-pressed", String(full));
+    place(full ? "full" : docked ? "dock" : "panel");
+  }
+  function place(mode) {
+    expanded = mode === "full";
+    if (!expanded) docked = mode === "dock";
+    try { sessionStorage.setItem("jc-chat-size:" + config.publicId, mode); } catch (e) { /* this open only */ }
+    if (size) {
+      size.replaceChild(icon(expanded ? "collapse" : "expand"), size.firstChild);
+      size.setAttribute("aria-pressed", String(expanded));
+    }
+    if (dock) {
+      dock.replaceChild(icon(docked ? "undock" : "dock"), dock.firstChild);
+      dock.setAttribute("aria-pressed", String(docked));
+      dock.hidden = expanded;
+    }
     relabel(lang);
-    toParent({ type: "jc-assistant-size", size: full ? "full" : "panel" });
+    toParent({ type: "jc-assistant-size", size: mode });
   }
 
   form.addEventListener("submit", function (event) {
@@ -1207,20 +1360,25 @@
   });
 
   relabel(lang);
-  if (expanded) toParent({ type: "jc-assistant-size", size: "full" });
+  if (expanded || docking) toParent({ type: "jc-assistant-size", size: expanded ? "full" : docked ? "dock" : "panel" });
   // The conversation open before a page change on the host site, shown again as it was.
   kept = config.enabled === false ? null : kept0();
   if (kept && kept.turns.length > 0) {
     conversation = kept.conversation;
     asked = kept.asked;
+    // As the panel looked: the greeting above, no suggestions (T-4685).
     log.textContent = "";
-    intro = null;
-    kept.turns.forEach(function (t) {
+    welcome();
+    greeted();
+    kept.turns.forEach(function (t, i) {
       var mine = turn("jc-you", "you");
       mine.appendChild(el("p", "", t.question));
       var time = when(t.askedAt);
       if (time) mine.appendChild(time);
-      show(turn("jc-bot", "assistant"), t.text, t.citations, t.turn, t.at || null);
+      var answered = turn("jc-bot", "assistant");
+      show(answered, t.text, t.citations, t.turn, t.at || null);
+      if (t.opened) openedLine(answered, t.opened);
+      if (t.followups && i === kept.turns.length - 1) chips(answered, t.followups);
       history.push({ role: "user", text: t.question });
       history.push({ role: "assistant", text: t.text });
     });
@@ -1234,6 +1392,55 @@
     log.appendChild(paused);
     form.hidden = true;
     fresh.hidden = true;
+  }
+  // The draft, its caret, the scroll and an answer still streaming, as they were before a page
+  // change on the host site (T-4685, API/05 §1.6.1); the answer goes on through its resume.
+  var VIEW = "jc-chat-view:" + config.publicId;
+  var view = null;
+  try {
+    view = JCRender.view(sessionStorage.getItem(VIEW));
+    sessionStorage.removeItem(VIEW);
+  } catch (e) { /* storage off */ }
+  if (view && config.enabled !== false) {
+    var resumed = view.streaming;
+    if (resumed && (!kept || kept.conversation === resumed.conversation)) resume(resumed);
+    input.value = view.draft;
+    grow();
+    input.setSelectionRange(view.caret, view.caret);
+    if (view.scroll !== null) log.scrollTop = view.scroll;
+    if (view.focused) input.focus();
+  }
+  window.addEventListener("pagehide", function () {
+    var now = { draft: input.value, caret: input.selectionStart, scroll: log.scrollTop, focused: document.activeElement === input };
+    if (busy && live && live.resumable && conversation) {
+      now.streaming = { turn: live.resumable, conversation: conversation, number: live.turn, question: live.question,
+        text: live.text || "", askedAt: live.askedAt };
+    }
+    try { sessionStorage.setItem(VIEW, JSON.stringify(now)); } catch (e) { /* not kept */ }
+  });
+  function resume(s) {
+    greeted();
+    conversation = s.conversation;
+    asked = Math.max(asked, s.number);
+    var mine = turn("jc-you", "you");
+    mine.appendChild(el("p", "", s.question));
+    var time = when(s.askedAt);
+    if (time) mine.appendChild(time);
+    history.push({ role: "user", text: s.question });
+    var item = turn("jc-bot", "assistant");
+    item.question = s.question;
+    item.askedAt = s.askedAt;
+    item.turn = s.number;
+    item.resumable = s.turn;
+    item.startedMs = Date.now();
+    if (s.text) {
+      item.streaming = el("div", "jc-answer jc-streaming");
+      item.appendChild(item.streaming);
+      item.text = s.text;
+      paint(item);
+    }
+    item.text = "";
+    run(item, function (signal) { return replay(s.turn, item, signal); });
   }
   if (config.enabled) visitorToken().catch(function () {});
   if (JCRender.asksLanguage({ mode: mode, offered: offered, stored: stored, kept: Boolean(kept && kept.turns.length > 0),

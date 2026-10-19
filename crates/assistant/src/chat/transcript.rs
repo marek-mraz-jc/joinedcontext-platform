@@ -624,6 +624,7 @@ mod tests {
                 units: vec![None],
                 labels: vec![None],
                 summary: vec![false],
+                enums: Vec::new(),
                 total: None,
                 dataset: None,
                 download: None,
