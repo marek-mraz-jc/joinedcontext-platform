@@ -127,7 +127,7 @@ body { font: 15px/1.5 var(--font, system-ui, -apple-system, "Segoe UI", Roboto, 
    badges and count; icon actions keep a visible outline, so they read as buttons. */
 .jc-answer-tools { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .jc-by { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.jc-answer-tools .jc-by .jc-icon { width: 14px; height: 14px; color: var(--accent); }
+.jc-answer-tools .jc-by .jc-icon { width: 14px; height: 14px; color: var(--link); }
 .jc-by .jc-time { font-size: 12px; }
 .jc-opened { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
 .jc-sources { margin-left: auto; min-height: 32px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px;
