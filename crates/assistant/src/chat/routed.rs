@@ -2745,7 +2745,7 @@ async fn answer_routed(
     }
     let missing = missing_for(&routing, missing);
 
-    let Some(tables) = read_tables(ask, &wanted, read, events).await else {
+    let Some(tables) = tables_or_none(q, &routing, &wanted, read).await else {
         return spent;
     };
     let (best, rounds, searches) = if routing.catalogue {
@@ -3132,6 +3132,33 @@ async fn shown(tables: &[Table], events: &Sender<Event>) {
     for table in tables {
         send(events, Event::Data(table.clone())).await;
     }
+}
+
+/// [`read_tables`], or `None` once the turn is over: the client is gone, or the catalogue's own
+/// read answered no rows and "none" was the answer, not a model's guess (T-4746).
+async fn tables_or_none(
+    q: Question<'_, '_>,
+    routing: &Routing,
+    wanted: &[(Read, &Connected)],
+    read: Vec<Result<Table, String>>,
+) -> Option<Vec<Table>> {
+    let none = match wanted {
+        [(w, _)] if is_catalogue(&w.endpoint) && !routing.rag => read
+            .iter()
+            .all(|r| r.as_ref().is_ok_and(|t| t.rows.is_empty()))
+            .then(|| w.kind.clone()),
+        _ => None,
+    };
+    let tables = read_tables(q.ask, wanted, read, q.events).await?;
+    let Some(kind) = none else {
+        return Some(tables);
+    };
+    let first = q.ask.languages.first().map_or("sk", String::as_str);
+    let lang = super::scope::language(q.question, None, first);
+    let text = super::publishers::none(lang, &kind).to_owned();
+    send(q.events, Event::Answer(text)).await;
+    send(q.events, Event::Citations(Vec::new())).await;
+    None
 }
 
 /// The reads' steps, streamed in the router's order, and their tables in that order, so the tables
