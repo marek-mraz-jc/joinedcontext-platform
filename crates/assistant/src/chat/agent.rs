@@ -12,6 +12,7 @@ use tokio::sync::mpsc::Sender;
 
 use super::mcp::{cut, Surface, Tool, MAX_RESULT_CHARS, READ_ONLY_TOOLS};
 use super::model::{CallError, Completion, Model};
+pub(super) use super::standard::{fits, quoted};
 use crate::embed::Embedder;
 use crate::Search;
 
@@ -236,13 +237,6 @@ pub struct Ask<'a> {
     pub title: Option<&'a jc_core::kinds::Localised>,
 }
 
-/// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
-pub(super) fn quoted(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 /// `search` when the deployment has sources, `run_script` when it has the sandbox, then the
 /// standard data tools, the Endpoint an argument (T-4748).
 fn tool_specs(searchable: bool, scripts: bool, connectors: &[Connected]) -> Vec<Value> {
@@ -278,7 +272,7 @@ fn tool_specs(searchable: bool, scripts: bool, connectors: &[Connected]) -> Vec<
             }
         }));
     }
-    tools.extend(super::data::standard(connectors));
+    tools.extend(super::standard::standard(connectors));
     tools
 }
 
@@ -750,37 +744,6 @@ async fn answer_in_scope(
     spent
 }
 
-/// Whether `arguments` satisfy `schema`; else where and which rule they break, never the value,
-/// which goes back to the model. A schema that does not compile admits nothing.
-pub(super) fn fits(schema: &Value, arguments: &Value) -> Result<(), String> {
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|_| "the tool's schema cannot be read, so no call is made to it".to_owned())?;
-    let problems: Vec<String> = validator
-        .iter_errors(arguments)
-        .take(5)
-        .map(|error| {
-            let rule = match error.kind() {
-                jsonschema::error::ValidationErrorKind::Required { property } => {
-                    format!("{} is required", property.as_str().unwrap_or("an argument"))
-                }
-                jsonschema::error::ValidationErrorKind::AdditionalProperties { unexpected } => {
-                    format!("no argument is called {}", unexpected.join(", "))
-                }
-                kind => format!("breaks the schema's {}", kind.keyword()),
-            };
-            match error.instance_path().to_string() {
-                at if at.is_empty() => rule,
-                at => format!("{at}: {rule}"),
-            }
-        })
-        .collect();
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.join("; "))
-    }
-}
-
 /// One tool call of the model, refused unless it names an offered tool (AG-105).
 async fn run_tool(
     ask: &Ask<'_>,
@@ -882,7 +845,7 @@ async fn run_tool(
         // Its Endpoint named and the arguments checked against that Endpoint's own schema before
         // anything is sent (T-3314, T-4748).
         let (connector, tool, arguments) =
-            match super::data::resolved(ask.connectors, name, arguments) {
+            match super::standard::resolved(ask.connectors, name, arguments) {
                 Ok(resolved) => resolved,
                 Err(why) => return why,
             };
