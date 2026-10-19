@@ -64,6 +64,7 @@ fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoi
         declared_types: None,
         roles: Default::default(),
         slug: slug.to_owned(),
+        manifest_name: String::new(),
         title: [("en".to_owned(), format!("Air {slug}"))].into(),
         description: Default::default(),
         space: format!("space-{}", &slug[..4]),
