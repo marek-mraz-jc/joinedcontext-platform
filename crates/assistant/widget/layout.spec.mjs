@@ -24,9 +24,10 @@ const CONFIG = {
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 // The deployment's `widget` the next page is served with (T-4343); none is `browser`, toggle on.
 let WIDGET;
+let TITLE;
 const PAGE = () => `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/d/widget.css"></head>
-<body><main id="jc-chat" class="jc-chat" data-config="${attr(JSON.stringify({ ...CONFIG, widget: WIDGET }))}"></main>
+<body><main id="jc-chat" class="jc-chat" data-config="${attr(JSON.stringify({ ...CONFIG, ...(TITLE ? { title: TITLE } : {}), widget: WIDGET }))}"></main>
 <script src="/d/widget.js" defer></script></body></html>`;
 const HOST = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -253,14 +254,15 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     expect(line, "the footer line is whole").toEqual({ text: "Please verify important information. · Privacy", wraps: true, cut: false });
     await expect(frame.locator(".jc-disclaimer")).toHaveCount(0);
 
-    // The name and its subtitle keep one line each, whole, at every size.
+    // The name is whole at every size, on one line or wrapped to two (T-4711), with its subtitle.
     const header = await frame.locator(".jc-title").evaluate((title) => {
       const name = title.querySelector(".jc-name");
-      return { whole: name.scrollWidth <= name.clientWidth, lines: Math.round(name.offsetHeight / parseFloat(getComputedStyle(name).lineHeight)),
+      return { whole: name.scrollWidth <= name.clientWidth && name.scrollHeight <= name.clientHeight + 1, lines: Math.round(name.offsetHeight / parseFloat(getComputedStyle(name).lineHeight)),
         role: getComputedStyle(title.querySelector(".jc-role")).display !== "none" };
     });
     // 320 px is here for the footer row (T-4364); the header's name is cut there today, its own finding.
-    if (width >= 375) expect(header, "the header name is one whole line with its subtitle").toEqual({ whole: true, lines: 1, role: true });
+    if (width >= 375) expect({ ...header, lines: header.lines <= 2 }, "the header name is whole, on at most two lines, with its subtitle")
+      .toEqual({ whole: true, lines: true, role: true });
 
     // A three-screen answer: the conversation scrolls, the page does not, header and composer stay.
     await frame.locator("#jc-question").fill("Kedy má otvorené klientske centrum?");
@@ -646,7 +648,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
 
 test.describe("docked beside the catalogue (T-4685)", () => {
   test.beforeEach(() => { DOCKED = true; CHATS = 0; RESUMES = 0; WIDGET = undefined; });
-  test.afterEach(() => { DOCKED = false; });
+  test.afterEach(() => { DOCKED = false; TITLE = undefined; });
 
   test("an answer about one dataset opens it behind the panel, which keeps its conversation, draft and Back", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -714,6 +716,19 @@ test.describe("docked beside the catalogue (T-4685)", () => {
     await expect(chat.locator(".jc-you")).toHaveCount(1);
     expect(await answer.evaluate((a) => (a.textContent.match(/Máme/g) || []).length), "the text once").toBe(1);
     expect([CHATS, RESUMES]).toEqual([1, 1]);
+  });
+
+  test("the docked header shows the whole name, wrapped to two lines rather than cut (T-4711)", async ({ page }) => {
+    TITLE = "Otvorené dáta Banská Bystrica";
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${base}/dataset/start`);
+    const chat = page.frameLocator("#jc");
+    await expect(chat.locator(".jc-dock")).toBeVisible();
+    const name = await chat.locator(".jc-name").evaluate((n) => ({ text: n.textContent,
+      whole: n.scrollWidth <= n.clientWidth && n.scrollHeight <= n.clientHeight + 1,
+      lines: Math.round(n.offsetHeight / parseFloat(getComputedStyle(n).lineHeight)) }));
+    expect({ ...name, lines: name.lines <= 2 }).toEqual({ text: TITLE, whole: true, lines: true });
+    await expect(chat.locator(".jc-langs button")).toHaveCount(2);
   });
 
   test("below 1100 px there is no dock button", async ({ page }) => {
