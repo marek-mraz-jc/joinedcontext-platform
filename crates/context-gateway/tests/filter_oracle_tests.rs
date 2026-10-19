@@ -140,6 +140,7 @@ fn endpoint(projected: bool, hidden: &[&str]) -> Endpoint {
             context: None,
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy()],
     }
 }

@@ -82,6 +82,7 @@ fn endpoint(slug: &str, policies: Vec<PolicySpec>) -> Endpoint {
             context: None,
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies,
     }
 }

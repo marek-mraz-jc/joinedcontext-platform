@@ -107,6 +107,7 @@ fn endpoint(slug: &str, space: &str, representations: Vec<Representation>) -> En
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: public_grant(space),
     }
 }

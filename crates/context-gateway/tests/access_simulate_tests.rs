@@ -119,6 +119,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names,
+        manifest_name: String::new(),
         policies,
     }
 }
