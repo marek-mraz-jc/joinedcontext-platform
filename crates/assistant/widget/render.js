@@ -669,6 +669,13 @@ var JCRender = (function () {
   };
   // The stages that are one step of the answer's work, listed under it (T-4294).
   var STEPS = ["searching", "reading", "history", "schema"];
+  // The `done` event's `stagesMs`, in the order they run, by name (T-4729).
+  var TIMED = ["route", "search", "judge", "answer"];
+  var TIMED_WORDS = {
+    sk: { route: "Výber zdroja", search: "Vyhľadávanie v zdrojoch", judge: "Kontrola nájdeného", answer: "Odpoveď" },
+    en: { route: "Choosing the sources", search: "Searching the sources", judge: "Checking what was found", answer: "Answer" },
+    cs: { route: "Výběr zdroje", search: "Vyhledávání ve zdrojích", judge: "Kontrola nalezeného", answer: "Odpověď" }
+  };
 
   /**
    * The progress line of a `stage` event (T-4155): fixed words per step, a search or a read
@@ -690,10 +697,20 @@ var JCRender = (function () {
 
 
   /**
-   * The steps an answer took, for the collapsed list under it (T-4294): the line of each stage
-   * that did work, in order; null for fewer than two, which need no list.
+   * The steps an answer took, for the collapsed list under it (T-4294): with the `done` event's
+   * `stagesMs`, each stage that ran by its name and how long it took (T-4729); without them, the
+   * line of each stage that did work, in order; null for fewer than two, which need no list.
    */
-  function steps(stages, lang) {
+  function steps(stages, lang, timed) {
+    var seconds = new Intl.NumberFormat(YES_NO[lang] ? lang : "en", { maximumFractionDigits: 1 });
+    var words = TIMED_WORDS[lang] || TIMED_WORDS.en;
+    var named = TIMED.filter(function (name) {
+      var ms = timed && typeof timed === "object" ? timed[name] : undefined;
+      return typeof ms === "number" && isFinite(ms) && ms > 0;
+    }).map(function (name) { return words[name] + " " + seconds.format(timed[name] / 1000) + " s"; });
+    if (named.length >= 2) {
+      return { summary: (STAGES[lang] || STAGES.en).steps + " (" + named.length + ")", lines: named };
+    }
     var lines = (Array.isArray(stages) ? stages : [])
       .filter(function (data) { return data && STEPS.indexOf(data.stage) >= 0; })
       .map(function (data) {

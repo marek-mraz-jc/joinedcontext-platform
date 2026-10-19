@@ -599,6 +599,23 @@ test("the data loop's stages name their data in words, never a slug, and two or 
   assert.equal(steps(undefined, "en"), null);
 });
 
+test("with the done event's stage times the steps are named stages with their durations, never bare searches (T-4729)", () => {
+  const searches = [{ stage: "searching", topic: "a", ms: 0 }, { stage: "searching", topic: "b", ms: 0 }];
+  assert.deepEqual(steps(searches, "sk", { route: 2575, search: 2160, answer: 5219 }),
+    { summary: "Postup (3)", lines: ["Výber zdroja 2,6 s", "Vyhľadávanie v zdrojoch 2,2 s", "Odpoveď 5,2 s"] });
+  assert.deepEqual(steps([], "en", { search: 6846, judge: 2440, route: 2944, answer: 5579 }).lines,
+    ["Choosing the sources 2.9 s", "Searching the sources 6.8 s", "Checking what was found 2.4 s", "Answer 5.6 s"]);
+  // A stage without a positive number is left out; one stage, or a cached answer's none, is no list.
+  assert.equal(steps([], "cs", { route: 0, answer: 900, search: "x" }), null);
+  assert.equal(steps([], "de", {}), null);
+  assert.equal(steps(searches, "fi", { route: 10, answer: 20 }).lines[0], "Choosing the sources 0 s");
+  // Without stage times the progress lines stand, as before.
+  assert.equal(steps(searches, "en", null).lines.length, 2);
+  const widget = require("node:fs").readFileSync(require("node:path").join(__dirname, "widget.js"), "utf8");
+  assert.match(widget, /name === "done" && data && data\.stagesMs/);
+  assert.match(widget, /JCRender\.steps\(item\.stages, lang, item\.timed\)/);
+});
+
 test("a message's time is the visitor's HH:MM with the UTC minute beside it, kept across a page change (T-4339)", () => {
   const at = stamp("2026-10-16T12:05:59.123Z", "sk");
   assert.equal(at.datetime, "2026-10-16T12:05Z");
