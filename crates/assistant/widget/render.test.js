@@ -875,14 +875,14 @@ test("an answer about one dataset opens it, a broad or an outside one never (T-4
 });
 
 test("the panel's view comes back after a page change: draft, caret, scroll and a streaming answer (T-4685)", () => {
-  const saved = { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320,
+  const saved = { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320, focused: true,
     streaming: { turn: T, conversation: C, number: 2, question: "Aké cyklotrasy?", text: "Cyklotrasy sú", askedAt: "2026-10-19T08:00:00Z" } };
-  assert.deepEqual(view(JSON.stringify(saved)), { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320,
+  assert.deepEqual(view(JSON.stringify(saved)), { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320, focused: true,
     streaming: { turn: T, conversation: C, number: 2, question: "Aké cyklotrasy?", text: "Cyklotrasy sú", askedAt: "2026-10-19T08:00Z" } });
   // A caret past the draft is at its end; a bad scroll is none; a turn that is no UUID streams nothing.
   assert.deepEqual(view(JSON.stringify({ draft: "ab", caret: 9, scroll: -1, streaming: { ...saved.streaming, turn: "../x" } })),
-    { draft: "ab", caret: 2, scroll: null, streaming: null });
-  assert.deepEqual(view(JSON.stringify({ draft: 7 })), { draft: "", caret: 0, scroll: null, streaming: null });
+    { draft: "ab", caret: 2, scroll: null, focused: false, streaming: null });
+  assert.deepEqual(view(JSON.stringify({ draft: 7, focused: "yes" })), { draft: "", caret: 0, scroll: null, focused: false, streaming: null });
   assert.equal(view("not json"), null);
   assert.equal(view(null), null);
   assert.equal(view(JSON.stringify("x")), null);

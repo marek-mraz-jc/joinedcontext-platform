@@ -710,6 +710,8 @@ var JCRender = (function () {
       if (at) turn.at = at.datetime;
       var opened = t.opened && dataset([{ url: t.opened.url, title: t.opened.title }]);
       if (opened) turn.opened = opened;
+      var more = followups({ questions: t.followups });
+      if (more.length > 0) turn.followups = more;
       return turn;
     });
     var asked = Number.isInteger(kept.asked) && kept.asked >= 0 ? kept.asked : 0;
@@ -933,7 +935,8 @@ var JCRender = (function () {
 
   /**
    * The panel's view kept across a page change (T-4685) read back from `raw`: the draft, its
-   * caret, the scroll and an answer still streaming; null when it is not of that shape.
+   * caret, the scroll, whether the input had focus and an answer still streaming; null when it
+   * is not of that shape.
    */
   function view(raw) {
     var v;
@@ -944,6 +947,7 @@ var JCRender = (function () {
       draft: draft,
       caret: Number.isInteger(v.caret) ? Math.max(0, Math.min(v.caret, draft.length)) : draft.length,
       scroll: typeof v.scroll === "number" && isFinite(v.scroll) && v.scroll >= 0 ? v.scroll : null,
+      focused: v.focused === true,
       streaming: null
     };
     var s = v.streaming;

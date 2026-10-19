@@ -481,6 +481,15 @@
   }
 
   // The empty chat: the greeting and the suggested questions, nothing else above the fold.
+  // Once asked, the greeting stays above the conversation and its suggestions go.
+  function greeted() {
+    if (!intro) return;
+    var list = intro.querySelector(".jc-suggest");
+    if (list) list.remove();
+    if (intro.children.length === 0) intro.remove();
+    intro = null;
+  }
+
   function welcome() {
     intro = el("li", "jc-intro");
     var hello = JCRender.greeting(config.greeting, config.languages, lang, w.hello);
@@ -1070,6 +1079,12 @@
       item.pending = null;
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
+      // Kept with the answer, so a page change shows them again under the last one (T-4685).
+      var last = kept && kept.turns[kept.turns.length - 1];
+      if (last && last.turn === item.turn && conversation === kept.conversation) {
+        last.followups = JCRender.followups(data);
+        keep();
+      }
     } else if (name === "error") {
       fail(item, JCRender.trouble(data.status, data.title));
     }
@@ -1231,12 +1246,7 @@
   function submit(question) {
     question = String(question || "").trim();
     if (!question || busy) return;
-    if (intro) {
-      var list = intro.querySelector(".jc-suggest");
-      if (list) list.remove();
-      if (intro.children.length === 0) intro.remove();
-      intro = null;
-    }
+    greeted();
     Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
     var mine = turn("jc-you", "you");
     mine.appendChild(el("p", "", question));
@@ -1355,9 +1365,11 @@
   if (kept && kept.turns.length > 0) {
     conversation = kept.conversation;
     asked = kept.asked;
+    // As the panel looked: the greeting above, no suggestions (T-4685).
     log.textContent = "";
-    intro = null;
-    kept.turns.forEach(function (t) {
+    welcome();
+    greeted();
+    kept.turns.forEach(function (t, i) {
       var mine = turn("jc-you", "you");
       mine.appendChild(el("p", "", t.question));
       var time = when(t.askedAt);
@@ -1365,6 +1377,7 @@
       var answered = turn("jc-bot", "assistant");
       show(answered, t.text, t.citations, t.turn, t.at || null);
       if (t.opened) openedLine(answered, t.opened);
+      if (t.followups && i === kept.turns.length - 1) chips(answered, t.followups);
       history.push({ role: "user", text: t.question });
       history.push({ role: "assistant", text: t.text });
     });
@@ -1394,9 +1407,10 @@
     grow();
     input.setSelectionRange(view.caret, view.caret);
     if (view.scroll !== null) log.scrollTop = view.scroll;
+    if (view.focused) input.focus();
   }
   window.addEventListener("pagehide", function () {
-    var now = { draft: input.value, caret: input.selectionStart, scroll: log.scrollTop };
+    var now = { draft: input.value, caret: input.selectionStart, scroll: log.scrollTop, focused: document.activeElement === input };
     if (busy && live && live.resumable && conversation) {
       now.streaming = { turn: live.resumable, conversation: conversation, number: live.turn, question: live.question,
         text: live.text || "", askedAt: live.askedAt };
@@ -1404,8 +1418,7 @@
     try { sessionStorage.setItem(VIEW, JSON.stringify(now)); } catch (e) { /* not kept */ }
   });
   function resume(s) {
-    if (!kept || kept.turns.length === 0) log.textContent = "";
-    intro = null;
+    greeted();
     conversation = s.conversation;
     asked = Math.max(asked, s.number);
     var mine = turn("jc-you", "you");
