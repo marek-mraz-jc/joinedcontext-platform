@@ -163,6 +163,10 @@ pub struct Table {
     pub dataset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<String>,
+    /// The one area's outline as the Endpoint serves it in GeoJSON (OGC API Features), when the
+    /// table is a single polygon row (T-4697).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<String>,
     /// The map spec of the located rows (ADR-N-053 §2.9), when the deployment has a renderer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub map: Option<Value>,

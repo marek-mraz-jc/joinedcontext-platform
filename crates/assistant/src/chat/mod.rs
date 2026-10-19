@@ -16,8 +16,10 @@ pub mod documents;
 pub mod mcp;
 pub mod model;
 pub mod redact;
+pub mod resume;
 pub mod routed;
 pub mod script;
+pub mod shape;
 pub mod trace;
 pub mod transcript;
 pub mod visitor;
@@ -29,8 +31,8 @@ use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -106,6 +108,8 @@ pub struct ChatState {
     pub organization: String,
     /// What each public deployment knows, computed at most once a minute (T-4692).
     pub contexts: std::sync::Mutex<context::Held>,
+    /// Visitors' answers held for a resume after a page change (T-4685).
+    pub turns: resume::Turns,
 }
 
 /// The most keys [`Limits`] counts at once (T-3314).
@@ -402,12 +406,20 @@ pub fn router(state: Arc<ChatState>) -> Router {
             post(token).options(preflight),
         )
         .route(
+            "/api/v1/d/{public_id}/turns/{turn}/resume",
+            get(resume).options(preflight),
+        )
+        .route(
             "/api/v1/d/{public_id}/feedback",
             post(feedback).options(preflight),
         )
         .route(
             "/api/v1/d/{public_id}/context",
             get(context::document).options(preflight),
+        )
+        .route(
+            "/api/v1/d/{public_id}/config",
+            get(configuration).options(preflight),
         )
         .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat",
@@ -1211,6 +1223,14 @@ async fn chat(
     with_cors(response, origin)
 }
 
+/// The `conversation` event's data: a visitor's carries the turn to resume (T-4685).
+fn opened(conversation: &str, at: &str, turn: Option<&str>) -> serde_json::Value {
+    match turn {
+        Some(turn) => json!({"id": conversation, "at": at, "turn": turn}),
+        None => json!({"id": conversation, "at": at}),
+    }
+}
+
 /// The visitor token's header (API/05 §1.2.1).
 pub const VISITOR_HEADER: &str = "x-jc-visitor";
 /// How many visitors' minutes one address may fill at once: people behind one network each have
@@ -1233,6 +1253,30 @@ fn utc_of(unix: u64) -> String {
 }
 
 /// A challenge whose proof earns a visitor token; harder while the deployment is busy (T-4653).
+/// `GET /api/v1/d/{publicId}/config`: what the widget's page carries in `data-config`, for a
+/// copy of the widget another host serves (T-4694); a browser elsewhere than the deployment's
+/// origins is refused, like the chat.
+async fn configuration(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let mut response = Json(widget::configuration(&state, &deployment)).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60"),
+    );
+    with_cors(response, origin)
+}
+
 async fn challenge(
     State(state): State<Arc<ChatState>>,
     Path(public_id): Path<String>,
@@ -1330,6 +1374,96 @@ async fn token(
         }
     };
     with_cors(response, origin)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct After {
+    #[serde(default)]
+    after: usize,
+}
+
+/// `GET /api/v1/d/{publicId}/turns/{turn}/resume?after=n` (API/05 §1.6.2).
+async fn resume(
+    State(state): State<Arc<ChatState>>,
+    Path((public_id, id)): Path<(String, String)>,
+    query: Result<Query<After>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let response = match query {
+        Err(_) => problem(400, "after: the number of events already read, 0 or more"),
+        Ok(Query(After { after })) => {
+            replay(&state, &deployment, &public_id, &id, after, &headers).await
+        }
+    };
+    with_cors(response, origin)
+}
+
+async fn replay(
+    state: &ChatState,
+    deployment: &Deployment,
+    public_id: &str,
+    id: &str,
+    after: usize,
+    headers: &HeaderMap,
+) -> Response {
+    let token = headers
+        .get(VISITOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let mut limits = state.limits.lock().await;
+    if limits
+        .signer
+        .visitor(public_id, token, unix_now())
+        .is_none()
+    {
+        return problem(
+            401,
+            "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
+        );
+    }
+    let visitor = limits.visitor(&client_of(headers), today());
+    let key = format!(
+        "{}/{}\u{0}{visitor}\u{0}resume",
+        deployment.project, deployment.name
+    );
+    let admitted = limits.admit(
+        &[(&key, resume::RESUMES_PER_MINUTE, MINUTE)],
+        Instant::now(),
+    );
+    drop(limits);
+    if let Err(retry) = admitted {
+        return too_many(
+            retry,
+            "Z tejto siete prišlo veľa obnovení za krátky čas. Počkajte chvíľu a skúste to znova.",
+        );
+    }
+    let turn = match state.turns.find(public_id, &visitor, id, Instant::now()) {
+        resume::Found::Live(turn) => turn,
+        resume::Found::Gone => {
+            return problem(410, "This answer can no longer be resumed; ask again.")
+        }
+        resume::Found::Missing => return problem(404, "No such answer of this visitor."),
+    };
+    let anonymous = deployment.spec.channel.is_anonymous();
+    let stream = futures_util::StreamExt::map(turn.events_from(after), move |(index, event)| {
+        Ok::<_, Infallible>(sse(&event, anonymous).id(index.to_string()))
+    });
+    let mut response: Response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
+    let h = response.headers_mut();
+    h.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn feedback(
@@ -1753,6 +1887,16 @@ async fn ask(
     let task_state = Arc::clone(state);
     let conversation_id = conversation.clone();
     let started_from = origin.map(str::to_owned);
+    // A visitor's answer is held for a resume on the next page and runs to its end (T-4685). It
+    // is bound to the address that asked: the visitor token lives in the page's memory, so the
+    // next page earns a new one.
+    let held = token.and_then(|_| {
+        state
+            .turns
+            .start(&deployment.spec.public_id, &client_hash, Instant::now())
+    });
+    let turn_id = held.as_ref().map(|(id, _)| id.clone());
+    let held = held.map(|(_, turn)| turn);
     tokio::spawn(async move {
         // Held until the answer is done, whether or not anyone still reads it.
         let _permit = permit;
@@ -1793,6 +1937,9 @@ async fn ask(
         // The token reached the surfaces that need it; nothing else holds it past this point.
         drop(person);
         for event in failed {
+            if let Some(turn) = &held {
+                turn.push(&event);
+            }
             let _ = tx.send(event).await;
         }
         let name = format!("{}/{}", deployment.project, deployment.name);
@@ -1869,8 +2016,12 @@ async fn ask(
             while let Some(event) = passing.recv().await {
                 seen.see(&event);
                 trace.visual(&event);
-                // A reader who left closes the answer's channel too, so the loop stops as it did.
-                if tx.send(event).await.is_err() {
+                if let Some(turn) = &held {
+                    turn.push(&event);
+                }
+                // A reader who left closes the answer's channel too, so the loop stops as it did;
+                // a held turn goes on for its resume.
+                if tx.send(event).await.is_err() && held.is_none() {
                     passing.close();
                 }
             }
@@ -1888,6 +2039,9 @@ async fn ask(
                         .into(),
                 };
                 seen.see(&cut);
+                if let Some(turn) = &held {
+                    turn.push(&cut);
+                }
                 let _ = tx.send(cut).await;
                 // The calls made before the cut, so the day's cost and the timings hold them.
                 let spent = so_far.lock().map(|s| s.clone()).unwrap_or_default();
@@ -1940,14 +2094,19 @@ async fn ask(
             limits.close_stream(&holder);
         }
         drop(limits);
-        let _ = tx.send(Event::Done(spent, total_ms)).await;
+        let done = Event::Done(spent, total_ms);
+        if let Some(turn) = &held {
+            turn.push(&done);
+            turn.finish(Instant::now());
+        }
+        let _ = tx.send(done).await;
     });
 
     let first = futures_util::stream::once(async move {
         Ok::<_, Infallible>(
             SseEvent::default()
                 .event("conversation")
-                .data(json!({"id": conversation, "at": utc_second(asked_at)}).to_string()),
+                .data(opened(&conversation, &utc_second(asked_at), turn_id.as_deref()).to_string()),
         )
     });
     let rest = futures_util::stream::unfold(rx, move |mut rx| async move {
@@ -2049,6 +2208,7 @@ mod tests {
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,
+            geojson: None,
             map: None,
             geometries: Vec::new(),
         });
@@ -2499,8 +2659,11 @@ mod tests {
         let visitor = key("198.51.100.9, 10.0.0.1");
         assert_eq!(visitor, key("6.6.6.6, 198.51.100.9, 10.0.0.1"));
         assert_ne!(visitor, key("198.51.100.10, 10.0.0.1"));
+        // 16 hex digits and nothing of the address: a bare "198" can occur in any hash.
         assert!(
-            !visitor.contains("198") && !visitor.contains('.'),
+            visitor.len() == 16
+                && visitor.bytes().all(|b| b.is_ascii_hexdigit())
+                && !visitor.contains("19851100"),
             "{visitor}"
         );
         assert_ne!(

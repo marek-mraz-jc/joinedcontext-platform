@@ -432,6 +432,7 @@ mod tests {
             total: None,
             dataset: Some("https://data.dev.example.org/dataset/ovzdusie".into()),
             download: None,
+            geojson: None,
             map: None,
             geometries: vec![
                 Some(json!({"type": "Point", "coordinates": [19.146234, 48.736318]})),

@@ -745,12 +745,13 @@ fn covers(hits: &[Hit]) -> bool {
     hits.iter().any(|hit| hit.score >= COVERED_SCORE)
 }
 
-/// Adds a round's hits, each passage once with its best score.
+/// Adds a search's hits, each passage once, its scores summed over the searches that found it:
+/// reciprocal rank fusion across queries (T-4688), so the passage that both the question's own
+/// words and the router's search in the sources' language find ranks above either one's best.
 pub fn merge(found: &mut Vec<Hit>, hits: Vec<Hit>) {
     for hit in hits {
         match found.iter_mut().find(|f| f.chunk == hit.chunk) {
-            Some(known) if known.score < hit.score => known.score = hit.score,
-            Some(_) => {}
+            Some(known) => known.score += hit.score,
             None => found.push(hit),
         }
     }
@@ -1585,9 +1586,16 @@ pub(super) async fn table(
         total,
         dataset,
         download,
+        geojson: None,
         map: None,
         geometries: super::viz::geometries(text, READ_ROWS),
     };
+    // Polygon rows read their area and perimeter and draw a simpler outline (T-4697).
+    if super::shape::measured(&mut table) && table.rows.len() == 1 {
+        table.geojson = ask
+            .endpoint_base
+            .and_then(|base| super::shape::item_link(base, slug, kind, text));
+    }
     // Located rows get a map unasked when there is a renderer to draw it (T-4657).
     if let Some(domain) = ask.viz.and_then(super::viz::domain) {
         table.map = super::viz::default_map(&table, domain);
@@ -2886,6 +2894,7 @@ mod tests {
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
             download: None,
+            geojson: None,
             map: None,
             geometries: Vec::new(),
         };
@@ -3599,16 +3608,33 @@ mod tests {
     }
 
     #[test]
-    fn passages_are_kept_once_with_their_best_score_and_ranked() {
+    fn passages_are_kept_once_their_scores_summed_over_the_queries_and_ranked() {
         let mut found = vec![hit(1, ONE), hit(2, BOTH)];
         merge(&mut found, vec![hit(1, BOTH), hit(3, ONE), hit(2, ONE)]);
         assert_eq!(
             found.iter().map(|h| (h.chunk, h.score)).collect::<Vec<_>>(),
-            [(1, BOTH), (2, BOTH), (3, ONE)]
+            [(1, ONE + BOTH), (2, BOTH + ONE), (3, ONE)]
         );
         let best = top(&found, 2);
         assert_eq!(best.iter().map(|h| h.chunk).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(top(&[], ANSWER_PASSAGES), Vec::<Hit>::new());
+    }
+
+    /// The rerank across queries (T-4688): an English question over Slovak pages ranks a topic
+    /// page first on its own words, and the router's Slovak search ranks the fact page first; the
+    /// page both searches find comes first, ahead of either search's own best.
+    #[test]
+    fn the_passage_both_searches_find_outranks_each_searchs_own_best() {
+        let rank = |r: u32| 1.0 / (60.0 + f64::from(r));
+        // the question's own words: topic page 1 first, the fact page 9 third, page 4 fifth
+        let mut found = vec![hit(1, rank(1) + rank(2)), hit(4, rank(5)), hit(9, rank(3))];
+        // the Slovak query: page 7 first, the fact page 9 second; it never finds page 1
+        merge(
+            &mut found,
+            vec![hit(7, rank(1) + rank(1)), hit(9, rank(2) + rank(1))],
+        );
+        let order: Vec<i64> = top(&found, 3).iter().map(|h| h.chunk).collect();
+        assert_eq!(order, [9, 7, 1]);
     }
 
     #[test]

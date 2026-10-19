@@ -68,6 +68,7 @@ const STREAMED = ["## Doprava", "", "Máme **tri** zdroje [1, 2]:", "", "- **`ty
   "| Zdroj | Stav |", "|---|---|", "| **Parkoviská** | `live` |", "", "```", "GET /ngsi-ld/v1/entities?type=OffStreetParking", "```",
   "Pozor na <script>alert(1)</script> a <img src=x onerror=alert(1)> [docs](https://example.sk/a).", ""].join("\n");
 let SLOW = false;
+let DOCKED = false;
 async function slow(res) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -78,6 +79,51 @@ async function slow(res) {
   }
   // A moment for the last frame, so the test can hold it against the final view.
   await new Promise((done) => setTimeout(done, 100));
+  send("answer", { text: STREAMED });
+  send("citations", [1, 2, 3].map((n) => ({ n, url: `https://example.sk/strana-${n}`, title: `Source ${n}` })));
+  res.end();
+}
+
+// T-4685: a catalogue page that docks the panel, as the CKAN theme does: it opens a dataset the
+// widget names on its own origin, answers `jc-assistant-opened` first, and goes back on
+// `jc-assistant-back`.
+const DOCK_HOST = (name) => `<!doctype html><html lang="sk"><head><meta charset="utf-8"><title>${name}</title></head>
+<body style="margin:0 480px 0 0;font:16px sans-serif"><main id="main"><h1>Dataset ${name}</h1>
+<a id="next" href="/dataset/zastavky">Zastávky</a> <input id="search" aria-label="Hľadať"></main>
+<iframe id="jc" src="/d/bb/widget?embed=1&amp;dock=1&amp;lang=sk" title="Asistent" style="position:fixed;top:0;right:0;width:480px;height:100vh;border:0"></iframe>
+<script>addEventListener("message", (e) => {
+  const frame = document.getElementById("jc");
+  const d = e.data || {};
+  if (e.source !== frame.contentWindow) return;
+  if (d.type === "jc-assistant-dataset") {
+    const to = new URL(d.url);
+    if (to.origin !== location.origin || !/^[/]dataset[/][a-z0-9_-]+$/.test(to.pathname) || to.pathname === location.pathname) return;
+    frame.contentWindow.postMessage({ type: "jc-assistant-opened", url: d.url }, e.origin);
+    location.assign(to.pathname);
+  }
+  if (d.type === "jc-assistant-back") history.back();
+});</script></body></html>`;
+const UUIDS = { c: "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11", t: "0a1b2c3d-4e5f-4a7b-8c9d-0e1f2a3b4c5d" };
+let CHATS = 0;
+let RESUMES = 0;
+// One dataset cited first, or two datasets; or a slow streamed answer a page change cuts.
+async function docked(res, asked) {
+  res.writeHead(200, { "Content-Type": "text/event-stream" });
+  const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  send("conversation", { id: UUIDS.c, at: "2026-10-19T08:00:00Z", turn: UUIDS.t });
+  if (asked.includes("dlho")) return streamTo(res, send, 40);
+  const one = asked.includes("cyklotrasy");
+  send("answer", { text: one ? "V kraji je 42 cyklotrás [1]." : "Máme dáta o zastávkach [1] a parkoviskách [2]." });
+  send("citations", one ? [{ n: 1, url: `${base}/dataset/cyklotrasy-bbsk`, title: "Cyklotrasy BBSK" }]
+    : [{ n: 1, url: `${base}/dataset/zastavky`, title: "Zastávky" }, { n: 2, url: `${base}/dataset/parkoviska`, title: "Parkoviská" }]);
+  res.end();
+}
+async function streamTo(res, send, pause) {
+  for (let at = 0; at < STREAMED.length; at += 3) {
+    if (res.destroyed) return;
+    send("delta", { text: STREAMED.slice(at, at + 3) });
+    await new Promise((done) => setTimeout(done, pause));
+  }
   send("answer", { text: STREAMED });
   send("citations", [1, 2, 3].map((n) => ({ n, url: `https://example.sk/strana-${n}`, title: `Source ${n}` })));
   res.end();
@@ -94,6 +140,13 @@ test.beforeAll(async () => {
     if (path === "/d/bb") return res.writeHead(200, { "Content-Type": "text/html" }).end(PAGE().replace("<body>", '<body class="jc-page">'));
     if (path === "/d/bb/embed.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("embed.js"));
     if (path === "/host") return res.writeHead(200, { "Content-Type": "text/html" }).end(HOST);
+    if (path.startsWith("/dataset/")) return res.writeHead(200, { "Content-Type": "text/html" }).end(DOCK_HOST(path.slice(9)));
+    if (path === `/api/v1/d/bb/turns/${UUIDS.t}/resume`) {
+      // Every event of the turn again, the server's answer having gone on.
+      RESUMES += 1;
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      return streamTo(res, (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`), 0);
+    }
     if (path === "/d/visitor.js") return res.writeHead(200, { "Content-Type": "text/javascript" }).end(read("visitor.js"));
     if (path === "/api/v1/d/bb/challenge") {
       return res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ challenge: "c0ffee.1.8.5a", difficulty: 8, expiresAt: "2099-01-01T00:00:00Z" }));
@@ -114,6 +167,12 @@ test.beforeAll(async () => {
       // T-4653: every question carries the token the worker's proof earned; the newest alone holds.
       if (req.headers["x-jc-visitor"] !== `visitor-${TOKENS}`) return res.writeHead(401, { "Content-Type": "application/json" }).end("{}");
       if (SLOW) return slow(res);
+      if (DOCKED) {
+        CHATS += 1;
+        let asked = "";
+        req.on("data", (chunk) => { asked += chunk; });
+        return req.on("end", () => docked(res, asked));
+      }
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
       // The question asked now, not the history the request carries beside it.
@@ -532,7 +591,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   await expect(page.locator(".jc-privacy-line")).toHaveText("Dôležité informácie si prosím overte. · Súkromie");
   const open = page.locator(".jc-privacy-line .jc-more");
   await open.click();
-  const dialog = page.locator("dialog.jc-about");
+  const dialog = page.locator("dialog.jc-about:not(.jc-connect)");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator("h2")).toHaveText("O tomto asistentovi");
   await expect(dialog.locator("p").first()).toHaveText(CONFIG.disclaimer.sk);
@@ -569,7 +628,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   await later.goto(`${base}/d/bb?lang=sk`);
   await expect(later.locator(".jc-log")).toContainText("V pracovné dni od 8:00.");
   await later.locator(".jc-privacy-line .jc-more").click();
-  const laterToggle = later.locator('dialog.jc-about input[role="switch"]');
+  const laterToggle = later.locator('dialog.jc-about:not(.jc-connect) input[role="switch"]');
   await expect(laterToggle).toBeChecked();
   await laterToggle.uncheck();
   expect(await later.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
@@ -583,4 +642,84 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   await expect(stale.locator("#jc-question")).toBeVisible();
   await expect(stale.locator(".jc-log")).not.toContainText("V pracovné dni od 8:00.");
   expect(await stale.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
+});
+
+test.describe("docked beside the catalogue (T-4685)", () => {
+  test.beforeEach(() => { DOCKED = true; CHATS = 0; RESUMES = 0; WIDGET = undefined; });
+  test.afterEach(() => { DOCKED = false; });
+
+  test("an answer about one dataset opens it behind the panel, which keeps its conversation, draft and Back", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${base}/dataset/start`);
+    const chat = page.frameLocator("#jc");
+    await expect(chat.locator(".jc-dock")).toHaveAttribute("aria-pressed", "true");
+    // A broad answer that links two datasets stays where it is.
+    await chat.locator("#jc-question").fill("Aké dáta máte o doprave?");
+    await chat.locator("#jc-question").press("Enter");
+    await expect(chat.locator(".jc-bot .jc-answer")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect(new URL(page.url()).pathname).toBe("/dataset/start");
+    // One dataset: the page behind moves to it, the panel shows the same turns and the line.
+    await chat.locator("#jc-question").fill("Aké cyklotrasy sú v Banskobystrickom kraji?");
+    await chat.locator("#jc-question").press("Enter");
+    await page.waitForURL(`${base}/dataset/cyklotrasy-bbsk`);
+    await expect(chat.locator(".jc-bot .jc-answer")).toHaveCount(2);
+    await expect(chat.locator(".jc-opened")).toHaveText("Otvoril som dataset Cyklotrasy BBSK · Späť");
+    expect(CHATS).toBe(2);
+    // A link on the page keeps the draft and its caret.
+    await chat.locator("#jc-question").fill("rozpísaná otázka");
+    await page.locator("#next").click();
+    await page.waitForURL(`${base}/dataset/zastavky`);
+    await expect(chat.locator("#jc-question")).toHaveValue("rozpísaná otázka");
+    await expect(chat.locator(".jc-bot .jc-answer")).toHaveCount(2);
+    // "Späť" and the browser's Back both return, the panel intact.
+    await page.goBack();
+    await page.waitForURL(`${base}/dataset/cyklotrasy-bbsk`);
+    await expect(chat.locator(".jc-bot .jc-answer")).toHaveCount(2);
+    await chat.locator(".jc-opened button").click();
+    await page.waitForURL(`${base}/dataset/start`);
+    await expect(chat.locator(".jc-opened")).toHaveCount(1);
+  });
+
+  test("the switch off keeps the page; a typed draft holds it too", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${base}/dataset/start`);
+    const chat = page.frameLocator("#jc");
+    await chat.locator(".jc-privacy-line .jc-more").click();
+    const follow = chat.locator(".jc-about .jc-remember").nth(1);
+    await expect(follow).toHaveText("Otvárať dataset automaticky");
+    await expect(follow.locator("input")).toBeChecked();
+    await follow.locator("input").uncheck();
+    await chat.locator(".jc-about-close").click();
+    await chat.locator("#jc-question").fill("Aké cyklotrasy sú v kraji?");
+    await chat.locator("#jc-question").press("Enter");
+    await expect(chat.locator(".jc-bot .jc-answer")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect(new URL(page.url()).pathname).toBe("/dataset/start");
+    await expect(chat.locator(".jc-opened")).toHaveCount(0);
+  });
+
+  test("an answer streaming when a link is clicked finishes on the next page, never asked again or shown twice", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${base}/dataset/start`);
+    const chat = page.frameLocator("#jc");
+    await chat.locator("#jc-question").fill("Odpovedaj dlho o doprave");
+    await chat.locator("#jc-question").press("Enter");
+    await expect(chat.locator(".jc-streaming")).toContainText("Doprava");
+    await page.locator("#next").click();
+    await page.waitForURL(`${base}/dataset/zastavky`);
+    const answer = chat.locator(".jc-bot .jc-answer").last();
+    await expect(answer.locator("pre")).toHaveText("GET /ngsi-ld/v1/entities?type=OffStreetParking");
+    await expect(chat.locator(".jc-streaming")).toHaveCount(0);
+    await expect(chat.locator(".jc-you")).toHaveCount(1);
+    expect(await answer.evaluate((a) => (a.textContent.match(/Máme/g) || []).length), "the text once").toBe(1);
+    expect([CHATS, RESUMES]).toEqual([1, 1]);
+  });
+
+  test("below 1100 px there is no dock button", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await page.goto(`${base}/dataset/start`);
+    await expect(page.frameLocator("#jc").locator("#jc-question")).toBeVisible();
+    await expect(page.frameLocator("#jc").locator(".jc-dock")).toHaveCount(0);
+  });
 });

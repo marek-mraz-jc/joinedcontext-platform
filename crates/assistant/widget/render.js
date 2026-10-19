@@ -329,7 +329,7 @@ var JCRender = (function () {
 
   /**
    * A `data` event as a table to show (T-4138, T-4140): its columns and at most 50 rows of
-   * text, and its dataset and download links when they are http(s); null when nothing to show.
+   * text, and its dataset, download and GeoJSON links when they are http(s); null when nothing to show.
    */
   // Headers a person reads (T-4650): the common Smart Data Models attributes and types in the
   // widget's languages; any other key is spelt out from its camelCase.
@@ -502,7 +502,8 @@ var JCRender = (function () {
       numeric: numeric,
       rows: rows,
       dataset: safeUrl(data.dataset),
-      download: safeUrl(data.download)
+      download: safeUrl(data.download),
+      geojson: safeUrl(data.geojson)
     };
   }
 
@@ -708,6 +709,10 @@ var JCRender = (function () {
       var at = typeof t.at === "string" && stamp(t.at);
       if (askedAt) turn.askedAt = askedAt.datetime;
       if (at) turn.at = at.datetime;
+      var opened = t.opened && dataset([{ url: t.opened.url, title: t.opened.title }]);
+      if (opened) turn.opened = opened;
+      var more = followups({ questions: t.followups });
+      if (more.length > 0) turn.followups = more;
       return turn;
     });
     var asked = Number.isInteger(kept.asked) && kept.asked >= 0 ? kept.asked : 0;
@@ -919,6 +924,56 @@ var JCRender = (function () {
    * framed by (its `frame-ancestors`); a target that is not the parent drops the message.
    * Anything but an http(s) origin is left out.
    */
+  // A catalogue dataset page (T-4685): https (http on this machine alone), a path
+  // /dataset/{name}, nothing after it.
+  var DATASET = /^(?:https:\/\/[a-z0-9.-]+|http:\/\/(?:localhost|127\.0\.0\.1))(?::\d{1,5})?\/dataset\/[a-z0-9_-]{2,100}\/?$/i;
+
+  /**
+   * The one dataset an answer is about (T-4685, API/05 §1.6.1): `{ url, title }` when the
+   * citations link exactly one catalogue dataset page and the first citation is it; null for a
+   * broad answer that links several, or none.
+   */
+  function dataset(citations) {
+    var pages = (Array.isArray(citations) ? citations : []).filter(function (c) {
+      return c && typeof c.url === "string" && DATASET.test(c.url.split(/[?#]/)[0]);
+    }).map(function (c) {
+      return { url: c.url.split(/[?#]/)[0].replace(/\/$/, ""), title: typeof c.title === "string" ? c.title.slice(0, 200) : "" };
+    });
+    if (pages.length === 0 || !citations[0] || typeof citations[0].url !== "string") return null;
+    var first = pages[0];
+    var one = pages.every(function (p) { return p.url === first.url; });
+    return one && citations[0].url.split(/[?#]/)[0].replace(/\/$/, "") === first.url ? first : null;
+  }
+
+  /**
+   * The panel's view kept across a page change (T-4685) read back from `raw`: the draft, its
+   * caret, the scroll, whether the input had focus and an answer still streaming; null when it
+   * is not of that shape.
+   */
+  function view(raw) {
+    var v;
+    try { v = JSON.parse(raw); } catch (e) { return null; }
+    if (!v || typeof v !== "object") return null;
+    var draft = typeof v.draft === "string" ? v.draft.slice(0, 4000) : "";
+    var out = {
+      draft: draft,
+      caret: Number.isInteger(v.caret) ? Math.max(0, Math.min(v.caret, draft.length)) : draft.length,
+      scroll: typeof v.scroll === "number" && isFinite(v.scroll) && v.scroll >= 0 ? v.scroll : null,
+      focused: v.focused === true,
+      streaming: null
+    };
+    var s = v.streaming;
+    if (s && typeof s === "object" && typeof s.turn === "string" && UUID.test(s.turn) &&
+        typeof s.conversation === "string" && UUID.test(s.conversation) &&
+        Number.isInteger(s.number) && s.number >= 1 && typeof s.question === "string") {
+      out.streaming = { turn: s.turn, conversation: s.conversation, number: s.number,
+        question: s.question.slice(0, 4000), text: typeof s.text === "string" ? s.text.slice(0, 64000) : "" };
+      var askedAt = typeof s.askedAt === "string" && stamp(s.askedAt);
+      if (askedAt) out.streaming.askedAt = askedAt.datetime;
+    }
+    return out;
+  }
+
   function closeTargets(ancestors, frameOrigins) {
     var origin = function (value) {
       var match = /^(https?:\/\/[a-z0-9.-]+(?::\d{1,5})?)\/?$/i.exec(String(value || ""));
@@ -928,8 +983,68 @@ var JCRender = (function () {
     return Array.prototype.map.call(listed, origin).filter(Boolean);
   }
 
+  // "Add to your AI assistant" (T-4694): the steps each client documents, as they read on
+  // 2026-10-19 (Claude's help centre, OpenAI's, VS Code's and Cursor's docs). No client publishes
+  // a link that adds a connector in one click, so none is shown.
+  var CONNECT = {
+    sk: {
+      open: "Pridať do svojho AI asistenta",
+      title: "Pridať do svojho AI asistenta",
+      lead: "Tie isté údaje a dokumenty, z ktorých odpovedá tento asistent, môžete čítať aj vo vlastnom AI asistentovi. Konektor len číta, netreba účet ani kľúč.",
+      address: "Adresa konektora", copy: "Kopírovať adresu", copied: "Adresa je skopírovaná.", tryIt: "Skúste sa tam opýtať:",
+      claude: ["V Claude otvorte Customize → Connectors.", "Zvoľte + Add a potom Add custom connector.", "Zadajte názov, vložte adresu a zvoľte Continue.", "Pri prihlásení zvoľte No sign in a potom Add.", "V rozhovore ho zapnete cez + → Connectors. Plán Free dovoľuje jeden vlastný konektor."],
+      chatgpt: ["V ChatGPT otvorte Plugins, zvoľte + a potom Add custom MCP server.", "Zadajte názov, adresu vložte pod Connection a zvoľte prihlásenie bez autentifikácie.", "Potvrďte upozornenie (I understand and want to continue).", "Staršia verzia: Settings → Connectors → Advanced → Developer mode, potom Create. Vlastné servery ChatGPT ponúka len v niektorých plánoch a len na webe."],
+      code: ["VS Code: súbor .vscode/mcp.json v projekte:", "Cursor: súbor .cursor/mcp.json v projekte alebo ~/.cursor/mcp.json:", "Claude Code: v termináli spustite:"]
+    },
+    cs: {
+      open: "Přidat do svého AI asistenta",
+      title: "Přidat do svého AI asistenta",
+      lead: "Stejná data a dokumenty, ze kterých odpovídá tento asistent, můžete číst i ve vlastním AI asistentovi. Konektor jen čte, není potřeba účet ani klíč.",
+      address: "Adresa konektoru", copy: "Kopírovat adresu", copied: "Adresa je zkopírovaná.", tryIt: "Zkuste se tam zeptat:",
+      claude: ["V Claude otevřete Customize → Connectors.", "Zvolte + Add a potom Add custom connector.", "Zadejte název, vložte adresu a zvolte Continue.", "U přihlášení zvolte No sign in a potom Add.", "V konverzaci ho zapnete přes + → Connectors. Plán Free dovoluje jeden vlastní konektor."],
+      chatgpt: ["V ChatGPT otevřete Plugins, zvolte + a potom Add custom MCP server.", "Zadejte název, adresu vložte pod Connection a zvolte přihlášení bez autentizace.", "Potvrďte upozornění (I understand and want to continue).", "Starší verze: Settings → Connectors → Advanced → Developer mode, potom Create. Vlastní servery ChatGPT nabízí jen v některých plánech a jen na webu."],
+      code: ["VS Code: soubor .vscode/mcp.json v projektu:", "Cursor: soubor .cursor/mcp.json v projektu nebo ~/.cursor/mcp.json:", "Claude Code: v terminálu spusťte:"]
+    },
+    en: {
+      open: "Add to your AI assistant",
+      title: "Add to your AI assistant",
+      lead: "The same data and documents this assistant answers from, in your own AI assistant. The connector only reads; it needs no account and no key.",
+      address: "Connector address", copy: "Copy the address", copied: "The address is copied.", tryIt: "Try asking there:",
+      claude: ["In Claude, open Customize → Connectors.", "Choose + Add, then Add custom connector.", "Enter a name, paste the address and choose Continue.", "Under authentication choose No sign in, then Add.", "Turn it on in a chat under + → Connectors. The Free plan allows one custom connector."],
+      chatgpt: ["In ChatGPT, open Plugins, choose + and then Add custom MCP server.", "Enter a name, paste the address under Connection and choose no authentication.", "Confirm the warning (I understand and want to continue).", "An older version: Settings → Connectors → Advanced → Developer mode, then Create. ChatGPT offers custom servers on some plans only, and on the web only."],
+      code: ["VS Code: the file .vscode/mcp.json in your project:", "Cursor: the file .cursor/mcp.json in your project or ~/.cursor/mcp.json:", "Claude Code: run in a terminal:"]
+    }
+  };
+
+  /**
+   * The panel's text for connector `url` (an https address, else null) of deployment `publicId`
+   * in `lang` (Slovak when it has none): the words, and per client its steps, with the snippet a
+   * developer tool takes. The server's name in a snippet is the publicId, which is [a-z0-9-].
+   */
+  function connector(url, publicId, lang) {
+    if (!/^https:\/\/[a-z0-9.-]+(?::\d{1,5})?\/[\x21-\x7e]*$/i.test(String(url || ""))) return null;
+    var name = /^[a-z0-9-]{1,63}$/.test(String(publicId || "")) ? publicId : "assistant";
+    var t = CONNECT[lang] || CONNECT.sk;
+    var server = {};
+    server[name] = { type: "http", url: url };
+    var cursor = {};
+    cursor[name] = { url: url };
+    return {
+      open: t.open, title: t.title, lead: t.lead, address: t.address, copy: t.copy, copied: t.copied, tryIt: t.tryIt,
+      clients: [
+        { name: "Claude", steps: t.claude.map(function (text) { return { text: text }; }) },
+        { name: "ChatGPT", steps: t.chatgpt.map(function (text) { return { text: text }; }) },
+        { name: "VS Code, Cursor, Claude Code", steps: [
+          { text: t.code[0], code: JSON.stringify({ servers: server }, null, 2) },
+          { text: t.code[1], code: JSON.stringify({ mcpServers: cursor }, null, 2) },
+          { text: t.code[2], code: "claude mcp add --transport http " + name + " " + url }
+        ] }
+      ]
+    };
+  }
+
   return {
-    closeTargets: closeTargets,
+    closeTargets: closeTargets, connector: connector, dataset: dataset, view: view,
     monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,

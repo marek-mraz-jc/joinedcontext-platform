@@ -46,6 +46,11 @@ async fn a_question_lands_nearest_the_passage_that_answers_it_across_languages()
         ("Kedy môžem ísť do knižnice?", 0),
         ("Kdy se odváží odpad od rodinných domů?", 1),
         ("When do the town buses run?", 2),
+        // The eval's languages over Slovak text (T-4688): each reaches the Slovak passage.
+        ("When is the library open?", 0),
+        ("Wann ist die Bibliothek geöffnet?", 0),
+        ("Mikor viszik el a vegyes hulladékot a családi házaktól?", 1),
+        ("Коли вивозять змішані відходи від приватних будинків?", 1),
     ] {
         let q = embedder.query(question).await.expect("query");
         let nearest = (0..3)

@@ -8,6 +8,8 @@
   var root = document.getElementById("jc-chat");
   if (!root) return;
   var config = JSON.parse(root.getAttribute("data-config") || "{}");
+  // The chat's own host by default; a copy of the widget on another host names it (T-4694).
+  var api = /^https:\/\/[a-z0-9.-]+(:\d{1,5})?$/i.test(String(config.api || "")) ? config.api : "";
   var WORDS = {
     sk: { ask: "Napíšte otázku", send: "Odoslať", stop: "Zastaviť", stopped: "Odpoveď ste zastavili.",
       tools: "Živé dáta, ktoré smie asistent čítať", thinking: "Hľadám…",
@@ -18,7 +20,7 @@
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
-      dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
+      dataset: "Otvoriť dataset", download: "Stiahnuť údaje", geojson: "Stiahnuť GeoJSON", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
       missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
       thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup", retry: "Skúsiť znova",
@@ -37,7 +39,9 @@
       keptNone: "Obsah konverzácií neuchovávame.",
       askHeading: "Otázky k osobným údajom",
       askData: "Chcete sa opýtať na spracúvanie údajov alebo požiadať o prístup, opravu či vymazanie? Napíšte nám:",
-      documents: "Informácie o ochrane osobných údajov", moreInfo: "Viac", lessInfo: "Menej", tabTable: "Tabuľka", tabMap: "Mapa", chart: "Graf" },
+      documents: "Informácie o ochrane osobných údajov", moreInfo: "Viac", lessInfo: "Menej", tabTable: "Tabuľka", tabMap: "Mapa", chart: "Graf",
+      dock: "Pripnúť k okraju", undock: "Plávajúce okno", follow: "Otvárať dataset automaticky",
+      opened: "Otvoril som dataset {title}", back: "Späť", changed: "Stránka zmenená na dataset {title}" },
     en: { ask: "Type your question", send: "Send", stop: "Stop", stopped: "You stopped the answer.",
       tools: "Live data the assistant may read", thinking: "Looking it up…",
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
@@ -47,7 +51,7 @@
       hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
-      dataset: "Open the dataset", download: "Download the data", language: "Language",
+      dataset: "Open the dataset", download: "Download the data", geojson: "Download GeoJSON", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
       missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
       thanks: "Thank you for the feedback.", more: "More questions", contact: "Contact", map: "Show on the map", steps: "Steps", retry: "Try again",
@@ -66,7 +70,9 @@
       keptNone: "We keep no conversation content.",
       askHeading: "Questions about personal data",
       askData: "Want to ask about how data is processed, or request access, correction or erasure? Write to us:",
-      documents: "Privacy information", moreInfo: "More", lessInfo: "Less", tabTable: "Table", tabMap: "Map", chart: "Chart" },
+      documents: "Privacy information", moreInfo: "More", lessInfo: "Less", tabTable: "Table", tabMap: "Map", chart: "Chart",
+      dock: "Dock to the side", undock: "Floating window", follow: "Open the dataset automatically",
+      opened: "I opened the dataset {title}", back: "Back", changed: "The page changed to the dataset {title}" },
     cs: { ask: "Napište otázku", send: "Odeslat", stop: "Zastavit", stopped: "Odpověď jste zastavili.",
       tools: "Živá data, která smí asistent číst", thinking: "Hledám…",
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
@@ -76,7 +82,7 @@
       hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
-      dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
+      dataset: "Otevřít dataset", download: "Stáhnout data", geojson: "Stáhnout GeoJSON", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
       missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
       thanks: "Děkujeme za hodnocení.", more: "Další otázky", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup", retry: "Zkusit znovu",
@@ -95,7 +101,9 @@
       keptNone: "Obsah konverzací neuchováváme.",
       askHeading: "Dotazy k osobním údajům",
       askData: "Chcete se zeptat na zpracování údajů nebo požádat o přístup, opravu či smazání? Napište nám:",
-      documents: "Informace o ochraně osobních údajů", moreInfo: "Více", lessInfo: "Méně", tabTable: "Tabulka", tabMap: "Mapa", chart: "Graf" }
+      documents: "Informace o ochraně osobních údajů", moreInfo: "Více", lessInfo: "Méně", tabTable: "Tabulka", tabMap: "Mapa", chart: "Graf",
+      dock: "Připnout k okraji", undock: "Plovoucí okno", follow: "Otevírat dataset automaticky",
+      opened: "Otevřel jsem dataset {title}", back: "Zpět", changed: "Stránka změněna na dataset {title}" }
   };
   // Each language's name in itself, for the toggle's labels and the `ask` mode's chooser (T-4283).
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
@@ -161,7 +169,10 @@
     close: "M6 6l12 12M18 6L6 18",
     expand: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
     collapse: "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5",
+    dock: "M4 4h16v16H4zM14 4v16",
+    undock: "M4 4h16v16H4zM11 11h6v6h-6z",
     chat: "M4 5h16v11H9l-5 4z",
+    plug: "M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4",
     send: "M5 12h13M12 5l7 7-7 7",
     stop: "M7 7h10v10H7z",
     copy: "M9 9h10v10H9zM5 15V5h10",
@@ -229,14 +240,44 @@
     });
     actions.appendChild(picker);
   }
+  // "Add to your AI assistant" (T-4694): a public deployment's own MCP connector.
+  var connectOpen = null;
+  if (JCRender.connector(config.mcp, config.publicId, lang)) {
+    connectOpen = el("button", "jc-icon-button jc-connect-open");
+    connectOpen.type = "button";
+    connectOpen.appendChild(icon("plug"));
+    connectOpen.setAttribute("aria-haspopup", "dialog");
+    var connectWord = function () { return JCRender.connector(config.mcp, config.publicId, lang).open; };
+    words(connectOpen, connectWord, "ariaLabel");
+    words(connectOpen, connectWord, "title");
+    actions.appendChild(connectOpen);
+  }
   var fresh = iconButton("jc-fresh", "fresh", "fresh");
   actions.appendChild(fresh);
   // Embedded, the panel grows to the full window and back (T-4658); on a phone it already fills
-  // the screen, so the button is left out there.
+  // the screen, so the button is left out there. A host that frames it with `dock=1` (the
+  // catalogue, T-4685) docks it to its right edge on a wide screen, docked by default.
   var size = null;
+  var dock = null;
+  var placed = null;
+  try { placed = sessionStorage.getItem("jc-chat-size:" + config.publicId); } catch (e) { /* panel */ }
+  var docking = embedded && params.get("dock") === "1" && screen.width >= 1100;
   var expanded = false;
+  var docked = docking && placed !== "panel";
+  if (docking) {
+    dock = el("button", "jc-icon-button jc-dock");
+    dock.type = "button";
+    dock.appendChild(icon(docked ? "undock" : "dock"));
+    var docks = function () { return w[docked ? "undock" : "dock"]; };
+    words(dock, docks, "ariaLabel");
+    words(dock, docks, "title");
+    dock.setAttribute("aria-pressed", String(docked));
+    dock.addEventListener("click", function () { place(docked ? "panel" : "dock"); });
+    actions.appendChild(dock);
+  }
   if (embedded && screen.width >= 600) {
-    try { expanded = sessionStorage.getItem("jc-chat-size:" + config.publicId) === "full"; } catch (e) { /* panel */ }
+    expanded = placed === "full";
+    if (dock) dock.hidden = expanded;
     size = el("button", "jc-icon-button jc-size");
     size.type = "button";
     size.appendChild(icon(expanded ? "collapse" : "expand"));
@@ -336,14 +377,92 @@
   rememberLabel.appendChild(rememberBox);
   rememberLabel.appendChild(words(el("span"), "remember"));
   var rememberHint = words(el("p", "jc-hint"), "rememberHint");
+  // On a docking host (T-4685): whether a done answer about one dataset opens it beside the
+  // panel; on by default, kept in this browser.
+  var FOLLOW = "jc-chat-follow:" + config.publicId;
+  var followLabel = el("label", "jc-remember");
+  var followBox = el("input");
+  followBox.type = "checkbox";
+  followBox.setAttribute("role", "switch");
+  followBox.checked = following();
+  followBox.addEventListener("change", function () {
+    try {
+      if (followBox.checked) localStorage.removeItem(FOLLOW);
+      else localStorage.setItem(FOLLOW, "off");
+    } catch (e) { /* this page only */ }
+  });
+  followLabel.appendChild(followBox);
+  followLabel.appendChild(words(el("span"), "follow"));
   var aboutClose = button("jc-about-close", "close");
-  [aboutTitle, aboutLead, rememberLabel, rememberHint, aboutBody, aboutClose].forEach(function (n) { about.appendChild(n); });
+  [aboutTitle, aboutLead, rememberLabel, rememberHint].concat(docking ? [followLabel] : [], [aboutBody, aboutClose])
+    .forEach(function (n) { about.appendChild(n); });
+  function following() {
+    try { return localStorage.getItem(FOLLOW) !== "off"; } catch (e) { return true; }
+  }
+
+  var connect = el("dialog", "jc-about jc-connect");
+  connect.setAttribute("aria-labelledby", "jc-connect-title");
+  function fillConnect() {
+    var text = JCRender.connector(config.mcp, config.publicId, lang);
+    connect.textContent = "";
+    var heading = el("h2", "", text.title);
+    heading.id = "jc-connect-title";
+    connect.appendChild(heading);
+    connect.appendChild(el("p", "", text.lead));
+    var field = el("label", "jc-connect-address");
+    field.appendChild(el("span", "", text.address));
+    var address = el("input");
+    address.type = "text";
+    address.readOnly = true;
+    address.value = config.mcp;
+    address.addEventListener("focus", function () { address.select(); });
+    field.appendChild(address);
+    connect.appendChild(field);
+    var copied = el("p", "jc-sr");
+    copied.setAttribute("aria-live", "polite");
+    var copyIt = el("button", "jc-about-close", text.copy);
+    copyIt.type = "button";
+    copyIt.addEventListener("click", function () {
+      var done = function () { copied.textContent = text.copied; };
+      if (navigator.clipboard) navigator.clipboard.writeText(config.mcp).then(done, function () { address.select(); });
+      else address.select();
+    });
+    connect.appendChild(copyIt);
+    connect.appendChild(copied);
+    text.clients.forEach(function (client) {
+      var part = el("details");
+      part.appendChild(el("summary", "", client.name));
+      var list = el("ol");
+      client.steps.forEach(function (step) {
+        var item = el("li", "", step.text);
+        if (step.code) item.appendChild(el("pre", "jc-connect-code", step.code));
+        list.appendChild(item);
+      });
+      part.appendChild(list);
+      connect.appendChild(part);
+    });
+    var first = JCRender.suggestions(config.suggestions, lang, [])[0];
+    if (first) {
+      connect.appendChild(el("p", "jc-hint", text.tryIt));
+      connect.appendChild(el("p", "jc-connect-try", first));
+    }
+    var shut = button("jc-about-close", "close");
+    shut.addEventListener("click", function () { connect.close(); });
+    connect.appendChild(shut);
+  }
+  if (connectOpen) {
+    connectOpen.addEventListener("click", function () {
+      fillConnect();
+      connect.showModal();
+    });
+  }
 
   root.appendChild(head);
   if (tools) root.appendChild(tools);
   root.appendChild(log);
   root.appendChild(foot);
   root.appendChild(about);
+  root.appendChild(connect);
   root.appendChild(announce);
 
   var conversation = null;
@@ -435,6 +554,15 @@
   }
 
   // The empty chat: the greeting and the suggested questions, nothing else above the fold.
+  // Once asked, the greeting stays above the conversation and its suggestions go.
+  function greeted() {
+    if (!intro) return;
+    var list = intro.querySelector(".jc-suggest");
+    if (list) list.remove();
+    if (intro.children.length === 0) intro.remove();
+    intro = null;
+  }
+
   function welcome() {
     intro = el("li", "jc-intro");
     var hello = JCRender.greeting(config.greeting, config.languages, lang, w.hello);
@@ -467,6 +595,7 @@
     }
     if (named) retitle();
     if (about.open) fillAbout();
+    if (connect.open) fillConnect();
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
       welcome();
@@ -678,7 +807,7 @@
       var body = { conversation: of, turn: turn, verdict: verdict };
       if (note) body.note = note;
       try {
-        var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
+        var response = await fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "omit",
@@ -899,12 +1028,14 @@
     var drawn = plot(JCRender.chart(data));
     if (drawn) figure.appendChild(drawn);
     if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
-    if (shown.dataset || shown.download) {
+    if (shown.dataset || shown.download || shown.geojson) {
       var links = el("p", "jc-data-links");
       // More rows than the panel shows: the dataset holds them all (T-4682).
       var more = typeof data.total === "number" && data.total > shown.rows.length;
       if (shown.dataset) links.appendChild(link(shown.dataset, more ? w.allRows : w.dataset));
       if (shown.download) links.appendChild(link(shown.download, w.download));
+      // One area's own outline, as the Endpoint serves it (T-4697).
+      if (shown.geojson) links.appendChild(link(shown.geojson, w.geojson));
       figure.appendChild(links);
     }
     visual(item, figure);
@@ -967,6 +1098,8 @@
       conversation = data.id;
       asked += 1;
       item.turn = asked;
+      // The turn a page change resumes (T-4685, API/05 §1.6.2).
+      if (typeof data.turn === "string") item.resumable = data.turn;
     } else if (name === "stage" && item.status) {
       (item.stages = item.stages || []).push(Object.assign({}, data, { ms: Date.now() - (item.startedMs || Date.now()) }));
       var line = JCRender.stage(data, lang);
@@ -1008,6 +1141,7 @@
       history.push({ role: "assistant", text: item.pending.slice(0, 4000) });
     } else if (name === "citations") {
       var cited = Array.isArray(data) ? data : [];
+      item.cited = cited;
       show(item, item.pending || "", cited, item.turn);
       var took = JCRender.steps(item.stages, lang);
       if (took) {
@@ -1022,6 +1156,12 @@
       item.pending = null;
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
+      // Kept with the answer, so a page change shows them again under the last one (T-4685).
+      var last = kept && kept.turns[kept.turns.length - 1];
+      if (last && last.turn === item.turn && conversation === kept.conversation) {
+        last.followups = JCRender.followups(data);
+        keep();
+      }
     } else if (name === "error") {
       fail(item, JCRender.trouble(data.status, data.title), data.detail);
     }
@@ -1055,12 +1195,12 @@
   }
 
   async function earn() {
-    var base = "/api/v1/d/" + encodeURIComponent(config.publicId);
+    var base = api + "/api/v1/d/" + encodeURIComponent(config.publicId);
     var asked = await fetch(base + "/challenge", { credentials: "omit" });
     if (!asked.ok) throw new TypeError("no challenge");
     var challenge = await asked.json();
     var nonce = await new Promise(function (done, failed) {
-      var worker = new Worker("/d/visitor.js");
+      var worker = new Worker((config.assets || "/d/") + "visitor.js");
       worker.onmessage = function (event) { worker.terminate(); done(event.data); };
       worker.onerror = function () { worker.terminate(); failed(new TypeError("no proof")); };
       worker.postMessage({ challenge: challenge.challenge, difficulty: challenge.difficulty });
@@ -1084,7 +1224,7 @@
     }
     history.push({ role: "user", text: question });
     var post = function (held) {
-      return fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
+      return fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream", "X-JC-Visitor": held.token },
         credentials: "omit",
@@ -1097,6 +1237,25 @@
     var response = await post(held);
     // A token the service no longer knows (a restart, an hour gone) is earned again, once.
     if (response.status === 401) response = await post(await visitorToken(true));
+    await read(response, item);
+  }
+
+  // A resumed answer (T-4685): every event of the turn again, into an item whose text starts
+  // empty, so nothing shows twice and nothing is asked again.
+  async function replay(id, item, signal) {
+    var held = await visitorToken();
+    var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/turns/" +
+      encodeURIComponent(id) + "/resume?after=0", {
+      headers: { Accept: "text/event-stream", "X-JC-Visitor": held.token },
+      credentials: "omit",
+      signal: signal
+    });
+    await read(response, item);
+  }
+
+  // The answer's events as they stream, then its final view and, when it is about one dataset,
+  // the host is asked to open it.
+  async function read(response, item) {
     if (!response.ok || !response.body) {
       var problem = await response.json().catch(function () { return {}; });
       fail(item, refusal(response.status, problem.title), problem.detail);
@@ -1108,9 +1267,9 @@
     for (;;) {
       var chunk = await reader.read();
       if (chunk.done) break;
-      var read = JCRender.events(buffer + decoder.decode(chunk.value, { stream: true }));
-      buffer = read.rest;
-      read.events.forEach(function (event) { handle(item, event.name, event.data); });
+      var parsed = JCRender.events(buffer + decoder.decode(chunk.value, { stream: true }));
+      buffer = parsed.rest;
+      parsed.events.forEach(function (event) { handle(item, event.name, event.data); });
     }
     if (item.pending !== null && item.pending !== undefined) {
       show(item, item.pending, [], item.turn);
@@ -1120,7 +1279,39 @@
       show(item, item.text, [], item.turn);
     }
     log.scrollTop = log.scrollHeight;
+    follow(item);
   }
+
+  // T-4685, API/05 §1.6.1: a done answer whose citations link one dataset, an empty input and
+  // the visitor's switch on; the host checks the rest and answers `jc-assistant-opened`.
+  var opening = null;
+  function follow(item) {
+    var target = docking && following() && input.value.trim() === "" ? JCRender.dataset(item.cited) : null;
+    if (!target) return;
+    opening = { item: item, target: target };
+    toParent({ type: "jc-assistant-dataset", url: target.url, title: target.title });
+  }
+  function openedLine(item, target) {
+    var name = function () { return target.title || target.url; };
+    var line = el("p", "jc-opened");
+    line.appendChild(words(el("span"), function () { return w.opened.replace("{title}", name()) + " · "; }));
+    var back = button("jc-more", "back");
+    back.addEventListener("click", function () { toParent({ type: "jc-assistant-back" }); });
+    line.appendChild(back);
+    item.appendChild(line);
+  }
+  window.addEventListener("message", function (event) {
+    var data = event.data || {};
+    if (!embedded || event.source !== window.parent || data.type !== "jc-assistant-opened" ||
+        !opening || data.url !== opening.target.url ||
+        JCRender.closeTargets(location.ancestorOrigins, config.frameOrigins).indexOf(event.origin) < 0) return;
+    var done = opening;
+    opening = null;
+    openedLine(done.item, done.target);
+    (kept ? kept.turns : []).forEach(function (t) { if (t.turn === done.item.turn) t.opened = done.target; });
+    keep();
+    announce.textContent = w.changed.replace("{title}", done.target.title || done.target.url);
+  });
 
   function settle() {
     busy = null;
@@ -1132,12 +1323,7 @@
   function submit(question) {
     question = String(question || "").trim();
     if (!question || busy) return;
-    if (intro) {
-      var list = intro.querySelector(".jc-suggest");
-      if (list) list.remove();
-      if (intro.children.length === 0) intro.remove();
-      intro = null;
-    }
+    greeted();
     Array.prototype.forEach.call(log.querySelectorAll(".jc-followups"), function (l) { l.remove(); });
     var mine = turn("jc-you", "you");
     mine.appendChild(el("p", "", question));
@@ -1153,11 +1339,18 @@
     item.status.setAttribute("role", "status");
     item.appendChild(item.status);
     item.startedMs = Date.now();
+    run(item, function (signal) { return ask(question, item, signal); });
+  }
+
+  // One answer at a time, `start` reading it; Stop keeps what arrived.
+  var live = null;
+  function run(item, start) {
     busy = new AbortController();
+    live = item;
     send.hidden = true;
     stop.hidden = false;
     var controller = busy;
-    ask(question, item, controller.signal).catch(function (error) {
+    start(controller.signal).catch(function (error) {
       if (controller.signal.aborted) {
         // What arrived stays; the visitor sees that they stopped it.
         if (item.status) item.status.remove();
@@ -1185,14 +1378,26 @@
     });
   }
 
-  // The launcher sizes the panel; the state lives in this tab's sessionStorage (T-4658).
+  // The launcher sizes the panel; the state lives in this tab's sessionStorage (T-4658):
+  // `full`, `dock` (T-4685) or `panel`. Collapsed, a docking host docks it again.
   function resize(full) {
-    expanded = full;
-    try { sessionStorage.setItem("jc-chat-size:" + config.publicId, full ? "full" : "panel"); } catch (e) { /* this open only */ }
-    size.replaceChild(icon(full ? "collapse" : "expand"), size.firstChild);
-    size.setAttribute("aria-pressed", String(full));
+    place(full ? "full" : docked ? "dock" : "panel");
+  }
+  function place(mode) {
+    expanded = mode === "full";
+    if (!expanded) docked = mode === "dock";
+    try { sessionStorage.setItem("jc-chat-size:" + config.publicId, mode); } catch (e) { /* this open only */ }
+    if (size) {
+      size.replaceChild(icon(expanded ? "collapse" : "expand"), size.firstChild);
+      size.setAttribute("aria-pressed", String(expanded));
+    }
+    if (dock) {
+      dock.replaceChild(icon(docked ? "undock" : "dock"), dock.firstChild);
+      dock.setAttribute("aria-pressed", String(docked));
+      dock.hidden = expanded;
+    }
     relabel(lang);
-    toParent({ type: "jc-assistant-size", size: full ? "full" : "panel" });
+    toParent({ type: "jc-assistant-size", size: mode });
   }
 
   form.addEventListener("submit", function (event) {
@@ -1231,20 +1436,25 @@
   });
 
   relabel(lang);
-  if (expanded) toParent({ type: "jc-assistant-size", size: "full" });
+  if (expanded || docking) toParent({ type: "jc-assistant-size", size: expanded ? "full" : docked ? "dock" : "panel" });
   // The conversation open before a page change on the host site, shown again as it was.
   kept = config.enabled === false ? null : kept0();
   if (kept && kept.turns.length > 0) {
     conversation = kept.conversation;
     asked = kept.asked;
+    // As the panel looked: the greeting above, no suggestions (T-4685).
     log.textContent = "";
-    intro = null;
-    kept.turns.forEach(function (t) {
+    welcome();
+    greeted();
+    kept.turns.forEach(function (t, i) {
       var mine = turn("jc-you", "you");
       mine.appendChild(el("p", "", t.question));
       var time = when(t.askedAt);
       if (time) mine.appendChild(time);
-      show(turn("jc-bot", "assistant"), t.text, t.citations, t.turn, t.at || null);
+      var answered = turn("jc-bot", "assistant");
+      show(answered, t.text, t.citations, t.turn, t.at || null);
+      if (t.opened) openedLine(answered, t.opened);
+      if (t.followups && i === kept.turns.length - 1) chips(answered, t.followups);
       history.push({ role: "user", text: t.question });
       history.push({ role: "assistant", text: t.text });
     });
@@ -1258,6 +1468,55 @@
     log.appendChild(paused);
     form.hidden = true;
     fresh.hidden = true;
+  }
+  // The draft, its caret, the scroll and an answer still streaming, as they were before a page
+  // change on the host site (T-4685, API/05 §1.6.1); the answer goes on through its resume.
+  var VIEW = "jc-chat-view:" + config.publicId;
+  var view = null;
+  try {
+    view = JCRender.view(sessionStorage.getItem(VIEW));
+    sessionStorage.removeItem(VIEW);
+  } catch (e) { /* storage off */ }
+  if (view && config.enabled !== false) {
+    var resumed = view.streaming;
+    if (resumed && (!kept || kept.conversation === resumed.conversation)) resume(resumed);
+    input.value = view.draft;
+    grow();
+    input.setSelectionRange(view.caret, view.caret);
+    if (view.scroll !== null) log.scrollTop = view.scroll;
+    if (view.focused) input.focus();
+  }
+  window.addEventListener("pagehide", function () {
+    var now = { draft: input.value, caret: input.selectionStart, scroll: log.scrollTop, focused: document.activeElement === input };
+    if (busy && live && live.resumable && conversation) {
+      now.streaming = { turn: live.resumable, conversation: conversation, number: live.turn, question: live.question,
+        text: live.text || "", askedAt: live.askedAt };
+    }
+    try { sessionStorage.setItem(VIEW, JSON.stringify(now)); } catch (e) { /* not kept */ }
+  });
+  function resume(s) {
+    greeted();
+    conversation = s.conversation;
+    asked = Math.max(asked, s.number);
+    var mine = turn("jc-you", "you");
+    mine.appendChild(el("p", "", s.question));
+    var time = when(s.askedAt);
+    if (time) mine.appendChild(time);
+    history.push({ role: "user", text: s.question });
+    var item = turn("jc-bot", "assistant");
+    item.question = s.question;
+    item.askedAt = s.askedAt;
+    item.turn = s.number;
+    item.resumable = s.turn;
+    item.startedMs = Date.now();
+    if (s.text) {
+      item.streaming = el("div", "jc-answer jc-streaming");
+      item.appendChild(item.streaming);
+      item.text = s.text;
+      paint(item);
+    }
+    item.text = "";
+    run(item, function (signal) { return replay(s.turn, item, signal); });
   }
   if (config.enabled) visitorToken().catch(function () {});
   if (JCRender.asksLanguage({ mode: mode, offered: offered, stored: stored, kept: Boolean(kept && kept.turns.length > 0),
