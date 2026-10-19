@@ -20,7 +20,7 @@
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", selected: "Odpoveď je označená: stlačte Ctrl+C.", close: "Zavrieť", suggested: "Môžete sa opýtať",
-      dataset: "Otvoriť dataset", download: "Stiahnuť údaje", geojson: "Stiahnuť GeoJSON", language: "Jazyk",
+      dataset: "Otvoriť dataset", address: "Adresa údajov pre aplikácie", download: "Stiahnuť údaje", geojson: "Stiahnuť GeoJSON", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
       missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
       thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup", retry: "Skúsiť znova",
@@ -51,7 +51,7 @@
       hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", selected: "The answer is selected: press Ctrl+C.", close: "Close", suggested: "You can ask",
-      dataset: "Open the dataset", download: "Download the data", geojson: "Download GeoJSON", language: "Language",
+      dataset: "Open the dataset", address: "Data address for apps", download: "Download the data", geojson: "Download GeoJSON", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
       missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
       thanks: "Thank you for the feedback.", more: "More questions", contact: "Contact", map: "Show on the map", steps: "Steps", retry: "Try again",
@@ -82,7 +82,7 @@
       hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", selected: "Odpověď je označená: stiskněte Ctrl+C.", close: "Zavřít", suggested: "Můžete se zeptat",
-      dataset: "Otevřít dataset", download: "Stáhnout data", geojson: "Stáhnout GeoJSON", language: "Jazyk",
+      dataset: "Otevřít dataset", address: "Adresa dat pro aplikace", download: "Stáhnout data", geojson: "Stáhnout GeoJSON", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
       missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
       thanks: "Děkujeme za hodnocení.", more: "Další otázky", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup", retry: "Zkusit znovu",
@@ -109,6 +109,9 @@
   var NATIVE = { sk: "Slovensky", en: "English", cs: "Česky" };
   var params = new URLSearchParams(location.search);
   var embedded = params.get("embed") === "1" && window.parent !== window;
+  // A light host page asks for the light scheme (T-4761): a cross-origin frame never inherits
+  // the host's colours, so a dark system would paint a dark chat inside a light page.
+  if (params.get("scheme") === "light") document.documentElement.setAttribute("data-scheme", "light");
   var page = document.body.classList.contains("jc-page");
   var offered = JCRender.ordered((config.languages || []).filter(function (l) { return WORDS[l]; }));
   // How the chat picks its language and whether it shows the toggle, the deployment's
@@ -1070,7 +1073,7 @@
     var drawn = plot(JCRender.chart(data));
     if (drawn) figure.appendChild(drawn);
     if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
-    if (shown.dataset || shown.download || shown.geojson) {
+    if (shown.dataset || shown.download || shown.geojson || shown.address) {
       var links = el("p", "jc-data-links");
       // More rows than the panel shows: the dataset holds them all (T-4682).
       var more = typeof data.total === "number" && data.total > shown.rows.length;
@@ -1078,6 +1081,11 @@
       if (shown.download) links.appendChild(link(shown.download, w.download));
       // One area's own outline, as the Endpoint serves it (T-4697).
       if (shown.geojson) links.appendChild(link(shown.geojson, w.geojson));
+      // An address for programs is text to copy, never a link a person opens (T-4761).
+      if (shown.address) {
+        var address = links.appendChild(el("span", "jc-address", w.address + ": "));
+        address.appendChild(el("code", "", shown.address));
+      }
       figure.appendChild(links);
     }
     visual(item, figure);
