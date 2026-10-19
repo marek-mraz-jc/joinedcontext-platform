@@ -25,6 +25,9 @@ jobs:
       # and the image build failed on main while this lane stayed green).
       - name: the Dockerfile copies every workspace member
         run: python3 scripts/ci/check-dockerfile-members.py
+      # Crate edges follow the layers of docs Architecture/14-components.md section 4 (T-4770).
+      - name: every crate edge follows the layers
+        run: python3 scripts/ci/check-crate-layers.py --selftest && python3 scripts/ci/check-crate-layers.py
       # A file a crate embeds (include_str!) that .dockerignore keeps out compiles here and
       # fails only in the image build (T-4267: mcp/primer.md under **/*.md).
       - name: every file a crate embeds reaches the image build
