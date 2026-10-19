@@ -44,7 +44,7 @@ const DATA_RULES: &str = "\n\nYou may read more live data before you answer, wit
 
 /// The data rules for a deployment whose loop ends after `steps` tool calls.
 pub fn data_rules(steps: usize) -> String {
-    DATA_RULES.replace("{steps}", &steps.to_string())
+    DATA_RULES.replace("{steps}", &steps.to_string()) + super::query_card::LEGEND
 }
 
 /// The Endpoints the data tools read, for the rules (T-4748): the router's [`catalogue`] under a
@@ -159,6 +159,8 @@ pub async fn answer(
     // A call repeated with the same arguments is answered from the question's own results.
     let mut seen: HashMap<String, String> = HashMap::new();
     let mut forced = false;
+    // The Endpoints and types whose query card a result of this question carried (T-4759).
+    let mut given = super::query_card::Given::default();
     let called_before = spent.calls;
     loop {
         if events.is_closed() {
@@ -332,11 +334,18 @@ pub async fn answer(
         }))
         .await;
         let mut contents: Vec<String> = Vec::new();
+        let mut cards: Vec<String> = Vec::new();
         for (reply, out) in replies.iter().zip(outs) {
             let content = match (reply, out) {
-                (Reply::Run(c, key), Some(out)) => {
+                (Reply::Run(c, key), Some((out, model))) => {
                     let content = recorded(ask, c, out, &mut citations, &mut tables, events).await;
                     seen.insert(key.clone(), content.clone());
+                    cards.extend(given.card(
+                        c.connector,
+                        &c.tool.name,
+                        &c.arguments,
+                        model.as_deref(),
+                    ));
                     content
                 }
                 (Reply::Same(earlier), _) => contents.get(*earlier).cloned().unwrap_or_default(),
@@ -353,6 +362,11 @@ pub async fn answer(
         }
         for ((id, _, _), content) in completion.calls.iter().zip(contents) {
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
+        }
+        // The query cards of the Endpoints first read here, as text after the results they go
+        // with, so each result stays the JSON the rules describe (T-4759).
+        if !cards.is_empty() {
+            messages.push(json!({"role": "user", "content": cards.join("\n\n")}));
         }
     }
 }
@@ -452,8 +466,22 @@ async fn started(c: &Checked<'_>, events: &Sender<Event>) {
 
 /// Sends a checked call and makes a read's table, waiting at most `left` of the question's data
 /// seconds: each waiting out its connector's own timeout took a question to the 45 s cut
-/// (T-4663). Sends no event, so the calls of one reply run at once (T-4731).
-async fn sent(ask: &Ask<'_>, c: &Checked<'_>, left: Duration) -> Sent {
+/// (T-4663). Sends no event, so the calls of one reply run at once (T-4731). Beside it, the
+/// Endpoint's LinkML for its query card (T-4759), read once per deployment and kept.
+async fn sent(
+    ask: &Ask<'_>,
+    c: &Checked<'_>,
+    left: Duration,
+) -> (Sent, Option<std::sync::Arc<str>>) {
+    let (sent, model) = tokio::join!(
+        call_of(ask, c, left),
+        super::routed::model_of(ask, c.connector)
+    );
+    (sent, model)
+}
+
+/// The call [`sent`] makes and the table of a read.
+async fn call_of(ask: &Ask<'_>, c: &Checked<'_>, left: Duration) -> Sent {
     let Checked {
         connector,
         tool,
