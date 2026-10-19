@@ -8,8 +8,6 @@
 //! an entity without them is not an entity; every other member survives only if the
 //! constraint set names it.
 
-use super::evaluator::Constraints;
-use super::grants::{self, Shown};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -51,135 +49,6 @@ pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>, hidden: &B
     });
 }
 
-/// The same, by the constraint set, so each entity is stripped by the slots of its own type
-/// (MP-02, T-1862).
-///
-/// `constraints.attrs` is the union the broker was given, which is a superset for every entity
-/// whose type owns only part of it. Where a projection says which slots each class has, the
-/// answer is cut by the entity's own types instead: a `Vehicle` in an answer to
-/// `type=User,Vehicle` keeps `weight` and never the `age` the projection gives to a `User`.
-pub fn project_by_type(body: &mut Value, constraints: &Constraints) {
-    // The same areas the answer itself is filtered by, so an entity the broker inlined under
-    // a Relationship is judged by every rule a top-level one is (T-1859).
-    let areas = super::geo::Areas::of(&constraints.geo_grants, constraints.geo_caller.as_deref());
-    match body {
-        Value::Array(entities) => {
-            for entity in entities {
-                entity_by_type(entity, constraints, areas.as_ref());
-            }
-        }
-        entity => entity_by_type(entity, constraints, areas.as_ref()),
-    }
-}
-
-/// One entity, stripped by the attributes its own types may serve, and then by what a join
-/// inlined into it.
-fn entity_by_type(
-    entity: &mut Value,
-    constraints: &Constraints,
-    areas: Option<&super::geo::Areas>,
-) {
-    retain_by_type(entity, constraints);
-    narrow_joined(entity, constraints, areas, JOIN_DEPTH);
-}
-
-/// The deepest chain of inlined entities the gateway walks, which is the bound the read
-/// surface clamps `joinLevel` to (CIM 009 clause 6.3.11, [`crate::query`]).
-const JOIN_DEPTH: usize = 3;
-
-/// An entity the broker inlined under a Relationship (`join=inline`) is an entity the caller
-/// reads, so it is judged and cut exactly like a top-level one (EP-26, R9, T-1859).
-///
-/// The projection above retains whole members, and an inlined entity travels inside one: a
-/// granted Relationship would otherwise carry a whole entity of a type, a space or an area no
-/// grant reaches. What stays either way is the Relationship's `object`, the URN — the link is
-/// not the secret, the entity behind it is.
-fn narrow_joined(
-    entity: &mut Value,
-    constraints: &Constraints,
-    areas: Option<&super::geo::Areas>,
-    depth: usize,
-) {
-    let Some(members) = entity.as_object_mut() else {
-        return;
-    };
-    for value in members.values_mut() {
-        // An attribute is one instance or, with `datasetId`, a list of them.
-        let instances: Vec<&mut Value> = match value {
-            Value::Array(list) => list.iter_mut().collect(),
-            other => vec![other],
-        };
-        for instance in instances {
-            let Some(attribute) = instance.as_object_mut() else {
-                continue;
-            };
-            let Some(joined) = attribute.get_mut("entity") else {
-                continue;
-            };
-            if depth == 0
-                || !permitted_inline(joined, constraints)
-                || !areas.is_none_or(|areas| areas.admits(joined))
-            {
-                attribute.remove("entity");
-                continue;
-            }
-            retain_by_type(joined, constraints);
-            narrow_joined(joined, constraints, areas, depth - 1);
-        }
-    }
-}
-
-/// One entity, stripped by the attributes its own types may serve and by what the grants it
-/// matches show (T-3530).
-fn retain_by_type(entity: &mut Value, constraints: &Constraints) {
-    match grants::shown(entity, &constraints.grants) {
-        Some(Shown::Whole) => {}
-        Some(Shown::Only(names)) => project_entity_to(entity, &names, &BTreeSet::new()),
-        // Nothing it matches: its identity only, for whatever reached here without `permitted`.
-        None => project_entity_to(entity, &BTreeSet::new(), &BTreeSet::new()),
-    }
-    if constraints.attrs_by_type.is_empty() {
-        project_entity(entity, &constraints.attrs, &constraints.hidden);
-        return;
-    }
-    // A type the map does not name is a type this endpoint serves nothing of: identity only,
-    // never the union. An entity with several types keeps the union over the ones it is granted,
-    // because each of them is a type the caller may read it as.
-    let mut allowed: BTreeSet<String> = BTreeSet::new();
-    for name in types_of(entity) {
-        if let Some(slots) = constraints.attrs_by_type.get(&name) {
-            allowed.extend(slots.iter().cloned());
-        }
-    }
-    project_entity_to(entity, &allowed, &constraints.hidden);
-}
-
-/// The type or types one entity declares, as plain names.
-fn types_of(entity: &Value) -> Vec<String> {
-    match entity.get("type").or_else(|| entity.get("@type")) {
-        Some(Value::String(one)) => vec![one.clone()],
-        Some(Value::Array(many)) => many
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// [`project_entity`] with no "empty means everything" rule: an empty `allowed` set is an
-/// entity cut to its identity, which is what a type outside the projection gets.
-fn project_entity_to(entity: &mut Value, allowed: &BTreeSet<String>, hidden: &BTreeSet<String>) {
-    let Some(members) = entity.as_object_mut() else {
-        return;
-    };
-    members.retain(|name, _| {
-        STRUCTURAL.contains(&name.as_str())
-            || SYSTEM.contains(&name.as_str())
-            || (allowed.contains(name) && !hidden.contains(name))
-    });
-}
-
 /// The attributes an entity carries that the grants do not cover (R9, GW17).
 ///
 /// A read strips them; a write that touches any of them is denied whole, because silently
@@ -198,88 +67,6 @@ pub fn ungranted<'a>(entity: &'a Value, granted: &BTreeSet<String>) -> Vec<&'a s
         .collect()
 }
 
-/// Whether an entity may be returned at all, given the types and the anchored id patterns of
-/// the matching grants (EP-26, R24, GW11).
-///
-/// The one door every read goes through, which is why both halves live here: a query is
-/// narrowed upstream with `?type=`, but a retrieve by id carries no type at all, and a broker
-/// is free to answer an entity of any type it likes. The broker is not the authority on what a
-/// caller may read, so the type of what came back is judged here (T-2130).
-pub fn permitted(entity: &Value, constraints: &Constraints) -> bool {
-    // Only an object is an entity. An array, a string or a number carries no type and no id to
-    // judge, so under a grant that narrows neither — an ordinary attribute grant — both halves
-    // below would say yes to it, and `project_entity_to` leaves anything but an object alone:
-    // a nested array would reach the caller with every attribute it carries (T-2335, T-2131).
-    if !entity.is_object() {
-        return false;
-    }
-    // The caller's `attrs` selects the entities that carry one of them (CIM 009).
-    let asked = constraints.attrs_asked.is_empty()
-        || constraints
-            .attrs_asked
-            .iter()
-            .any(|name| entity.get(name).is_some());
-    asked
-        && type_granted(entity, constraints)
-        && ids_permitted(entity, constraints)
-        // Served only under a grant whose own conditions it meets, and only when everything the
-        // request selects or orders on is something those grants show it with: whether it
-        // matched would otherwise say what the hidden value is (T-3530).
-        && grants::shown(entity, &constraints.grants).is_some_and(|shown| {
-            constraints
-                .referenced
-                .iter()
-                .all(|name| shown.shows(name))
-        })
-}
-
-/// [`permitted`] for an entity the broker inlined under a Relationship: judged by the grants
-/// like any other, but not by the request's selection, which is about the entities it lists.
-fn permitted_inline(entity: &Value, constraints: &Constraints) -> bool {
-    entity.is_object()
-        && type_granted(entity, constraints)
-        && ids_permitted(entity, constraints)
-        && grants::shown(entity, &constraints.grants).is_some()
-}
-
-/// The id patterns, judged per grant where the set carries its grants: a grant without a pattern
-/// reaches every id, which one union of every grant's patterns cannot say (T-3530).
-fn ids_permitted(entity: &Value, constraints: &Constraints) -> bool {
-    !constraints.grants.is_empty() || id_permitted(entity, &constraints.id_patterns)
-}
-
-/// Whether the type the answer declares is one the grants name (EP-26).
-///
-/// An empty set is a grant over every type the endpoint serves. An entity carrying several
-/// types is granted when any one of them is, which is how NGSI-LD multi-typing works: the
-/// grant is a statement about a type, not about a type being the only one. An answer with no
-/// type at all cannot be judged, so under a type grant it is not served. Types compare as IRIs
-/// ([`type_named`]), so another vocabulary's `Depot` is not the grant's (T-3473).
-fn type_granted(entity: &Value, constraints: &Constraints) -> bool {
-    types_granted(entity, &constraints.types, &constraints.type_iris)
-}
-
-/// [`type_granted`] by one set of granted names and the IRIs the models make of them, which is
-/// also how one grant alone judges an entity (T-3530).
-pub(crate) fn types_granted(
-    entity: &Value,
-    types: &BTreeSet<String>,
-    type_iris: &BTreeSet<String>,
-) -> bool {
-    if types.is_empty() {
-        return true;
-    }
-    let declared = entity.get("type").or_else(|| entity.get("@type"));
-    match declared {
-        Some(Value::String(one)) => named_in(types, type_iris, one),
-        Some(Value::Array(several)) => several
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|one| named_in(types, type_iris, one)),
-        _ => false,
-    }
-}
-
 /// The NGSI-LD default vocabulary: where the core context puts a term it does not define.
 const DEFAULT_VOCAB: &str = "https://uri.etsi.org/ngsi-ld/default-context/";
 
@@ -295,15 +82,6 @@ pub fn type_iri(name: &str) -> Option<String> {
         return None;
     }
     Some(format!("{DEFAULT_VOCAB}{name}"))
-}
-
-fn named_in(types: &BTreeSet<String>, type_iris: &BTreeSet<String>, name: &str) -> bool {
-    type_iri(name).is_some_and(|asked| {
-        type_iris.contains(&asked)
-            || types
-                .iter()
-                .any(|one| type_iri(one).is_some_and(|grant| grant == asked))
-    })
 }
 
 /// What the type names `types` stand for under the `@context` of each model: the term's own

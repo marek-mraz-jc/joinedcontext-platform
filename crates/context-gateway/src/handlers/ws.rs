@@ -162,13 +162,20 @@ pub(crate) async fn endpoint_ws(
         .hubs
         .join(&gateway, Arc::clone(&endpoint), subject, principal.clone());
     // Held until the upgrade runs: a failed upgrade drops it, and the connection leaves the hub.
-    let Ok(joined) = joined else {
-        return ProblemDetails::new(503, "space-full", "Service Unavailable")
-            .with_detail(format!(
-                "a space holds at most {} WebSocket connections at once",
-                crate::fanout::socket::per_space()
-            ))
-            .into_response();
+    let joined = match joined {
+        Ok(joined) => joined,
+        Err(crate::fanout::socket::Refused::SpaceFull) => {
+            return ProblemDetails::new(503, "space-full", "Service Unavailable")
+                .with_detail(format!(
+                    "a space holds at most {} WebSocket connections at once",
+                    crate::fanout::socket::per_space()
+                ))
+                .into_response();
+        }
+        Err(crate::fanout::socket::Refused::NoIdentity) => {
+            tracing::error!(space = %endpoint.space, "endpoint names an unusable space");
+            return ProblemDetails::internal().into_response();
+        }
     };
     tracing::info!(slug = %endpoint.slug, space = %endpoint.space, %principal, "WebSocket opened on the fan-out");
     upgrade
