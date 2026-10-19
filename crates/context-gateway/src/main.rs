@@ -150,6 +150,11 @@ async fn main() -> ExitCode {
         _ => gateway,
     };
 
+    let gateway = match &config.personal_keys {
+        Some(dir) => gateway.personal_keys_in(dir.clone()),
+        None => gateway,
+    };
+
     // A read over a space with `identity: caller` registrations exchanges the caller's token,
     // as the gateway's own client, for the member brokers' audiences (T-3999, ADR-N-047 §2.4).
     // Without a client such a read answers 503; it is never forwarded as anyone else.

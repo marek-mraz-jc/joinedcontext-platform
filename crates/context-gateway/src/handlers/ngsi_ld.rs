@@ -542,7 +542,63 @@ pub(crate) async fn serve_ngsi_ld_view(
     if let Some(restricted) = headers.remove(ANTARES_RESTRICTED) {
         headers.insert(RESULTS_RESTRICTED, restricted);
     }
+    if !operation.is_write() && answer.status().is_success() {
+        answer = logged_read(answer, &endpoint, &subject).await;
+    }
     with_filled_units(answer, &units_filled)
+}
+
+/// DM-128: a read through an Endpoint that serves personal attributes leaves one line with the
+/// reader, the Endpoint and the Entities' URNs; the time is the line's own, and no value is
+/// written. An answer too large to list is refused, never served unlogged.
+async fn logged_read(
+    answer: Response<Body>,
+    endpoint: &Endpoint,
+    subject: &Subject,
+) -> Response<Body> {
+    let personal = endpoint.personal_attributes();
+    if personal.is_empty() {
+        return answer;
+    }
+    let (parts, body) = answer.into_parts();
+    let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
+        let mut refused = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
+            .with_detail("the answer holds personal data and is too large to log who read it; ask for fewer Entities")
+            .into_response();
+        *refused.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+        return refused;
+    };
+    tracing::info!(
+        target: "personal_read",
+        slug = %endpoint.slug,
+        space = %endpoint.space,
+        principal = %principal_of(subject),
+        attributes = %personal.join(","),
+        entities = %read_entities(&held).join(","),
+        "personal attributes read"
+    );
+    proxy::with_body(parts, held.to_vec())
+}
+
+/// The URNs of the Entities an NGSI-LD answer holds: one Entity, a list of them, or a GeoJSON
+/// FeatureCollection.
+fn read_entities(body: &[u8]) -> Vec<String> {
+    let Ok(answer) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let items = match &answer {
+        Value::Array(items) => items.as_slice(),
+        Value::Object(members) => match members.get("features").and_then(Value::as_array) {
+            Some(features) => features.as_slice(),
+            None => std::slice::from_ref(&answer),
+        },
+        _ => &[],
+    };
+    items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
@@ -653,6 +709,40 @@ fn federated_refusal(
     )
 }
 
+/// A delete of context data names why in `JC-Reason` (ADR-N-054 2.3, DM-113); without it the
+/// answer is `400 reason-required`. DM-113's other half, every write from the Portal's UI,
+/// turns on with T-4667, which gives the Portal's forms their reason field: enforced before
+/// that, it would refuse every form the Portal sends today.
+fn reason_refusal(
+    operation: Operation,
+    subject: &Subject,
+    headers: &axum::http::HeaderMap,
+) -> Option<Response<Body>> {
+    // The Portal's own delete (ui/src/components/entities/filters.ts) asks no reason yet: a
+    // delete through the UI is held to it with the reason field, as every UI write is (DM-113).
+    if tenancy::provenance(subject).0 == "ui" {
+        return None;
+    }
+    let deletes = matches!(
+        operation,
+        Operation::DeleteAttrs
+            | Operation::DeleteEntity
+            | Operation::DeleteBatch
+            | Operation::DeleteAttrsTemporal
+            | Operation::DeleteAttrInstanceTemporal
+            | Operation::DeleteTemporal
+    );
+    let given = headers
+        .get(tenancy::REASON)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|r| !r.trim().is_empty());
+    (deletes && !given).then(|| {
+        ProblemDetails::new(400, "reason-required", "Reason required")
+            .with_detail("a delete names why in JC-Reason")
+            .into_response()
+    })
+}
+
 pub(crate) async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -682,12 +772,28 @@ pub(crate) async fn view_request(
             return Err(Box::new(ProblemDetails::from(refusal).into_response()));
         }
     }
+    if let Some(refusal) = reason_refusal(operation, subject, request.headers()) {
+        tracing::info!(slug = %endpoint.slug, %operation, "write refused: no reason given");
+        return Err(Box::new(refusal));
+    }
     tenancy::pin_caller(request, &endpoint.space, subject).map_err(|problem| {
         tracing::error!(space = %endpoint.space, %problem, "endpoint names an unusable space");
         Box::new(ProblemDetails::internal().into_response())
     })?;
     if let Some(federated) = federated {
         request.headers_mut().insert(AUTHORIZATION, federated);
+    }
+    // ADR-N-054 2.4: the broker answers `versions=all` only on this grant (DM-114)
+    if crate::pdp::evaluator::grants_action(
+        subject,
+        jc_core::kinds::PlatformAction::ReadVersions,
+        &endpoint.policies,
+        crate::pdp::now(),
+    ) {
+        request.headers_mut().insert(
+            tenancy::READ_VERSIONS,
+            axum::http::HeaderValue::from_static("true"),
+        );
     }
     Ok(())
 }
@@ -848,6 +954,15 @@ pub(crate) async fn view_payload(
             })?;
         }
     }
+    // Last, so every check above judged the value the caller sent and only the broker sees it
+    // minimised (DM-121): MCP writes pass here too.
+    if operation.is_write() && !sent.is_empty() {
+        if let Some(schema) = declared.and_then(|declared| declared.schema.as_deref()) {
+            crate::handlers::writes::minimised(gateway, endpoint, path, schema, sent)
+                .await
+                .map_err(|problem| answer(*problem))?;
+        }
+    }
     if sent.len() != before {
         headers.remove(CONTENT_LENGTH);
         headers.insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
@@ -863,4 +978,26 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         .route("/api/endpoint/{slug}/ngsi-ld/v1/", get(ngsi_ld_entry))
         .route("/api/endpoint/{slug}/ngsi-ld/v1/{*rest}", any(ngsi_ld))
         .route("/cs/{space}/ngsi-ld/v1/{*rest}", any(space_ngsi_ld))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_entities;
+
+    /// DM-128: the URNs of one Entity, a list and a FeatureCollection; nothing from what is none.
+    #[test]
+    fn a_read_names_the_entities_of_every_answer_shape() {
+        let ids = |body: &str| read_entities(body.as_bytes());
+        assert_eq!(ids(r#"{"id":"urn:a:1","type":"T"}"#), ["urn:a:1"]);
+        assert_eq!(
+            ids(r#"[{"id":"urn:a:1"},{"type":"T"},{"id":"urn:a:2"}]"#),
+            ["urn:a:1", "urn:a:2"]
+        );
+        assert_eq!(
+            ids(r#"{"type":"FeatureCollection","features":[{"id":"urn:a:3"}]}"#),
+            ["urn:a:3"]
+        );
+        assert!(ids("not json").is_empty());
+        assert!(ids("7").is_empty());
+    }
 }

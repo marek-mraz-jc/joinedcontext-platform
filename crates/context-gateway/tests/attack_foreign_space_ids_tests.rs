@@ -143,6 +143,8 @@ async fn send_with(
     if let Some(tenant) = tenant {
         request = request.header("NGSILD-Tenant", tenant);
     }
+    // a delete names why (DM-113); the attack is about ids, not reasons
+    request = request.header("jc-reason", "attack%20test");
     let response = router(gateway)
         .oneshot(
             request

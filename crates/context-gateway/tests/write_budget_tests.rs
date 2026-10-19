@@ -216,6 +216,8 @@ fn delete(n: usize) -> Request<Body> {
         .uri(format!(
             "/api/endpoint/{SLUG}/ngsi-ld/v1/entities/urn:ngsi-ld:AirQualityObserved:{DOMAIN}:{SPACE}:st-{n}"
         ))
+        // a delete names why (DM-113)
+        .header("jc-reason", "test")
         .body(Body::empty())
         .expect("a request")
 }

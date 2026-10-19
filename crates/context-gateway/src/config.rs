@@ -94,6 +94,9 @@ pub struct Config {
     /// Hosts inside the platform's own networks a subscription may still name as its target
     /// (`JC_GATEWAY_EGRESS_PRIVATE_HOSTS`, comma-separated); empty refuses them all (T-1302).
     pub egress_private_hosts: Vec<String>,
+    /// The directory the reconciler mounts each space's `spec.personalData.keyRef` in, one file
+    /// per space (`JC_GATEWAY_PERSONAL_KEYS`, DM-121); absent refuses every write a model hashes.
+    pub personal_keys: Option<PathBuf>,
     /// `report` or `enforce` (`JC_GATEWAY_DOMAIN_VERIFICATION`, default `report`): whether a
     /// write waits for the Organization's verified domain (PF-41, Architecture/03 §3).
     pub domain_verification: crate::domain_gate::Mode,
@@ -313,6 +316,7 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            personal_keys: non_empty("JC_GATEWAY_PERSONAL_KEYS").map(PathBuf::from),
         })
     }
 }
@@ -409,6 +413,7 @@ mod tests {
             oauth_redirect_hosts: vec!["claude.ai".to_owned()],
             egress_ca_bundle: None,
             egress_private_hosts: Vec::new(),
+            personal_keys: None,
             domain_verification: crate::domain_gate::Mode::Report,
             domain_verifications_url: None,
             write_budget_mib: crate::app::WRITE_BUDGET_MIB,

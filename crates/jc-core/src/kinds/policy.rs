@@ -603,6 +603,18 @@ pub struct Validity {
     pub to: Option<DateTime<Utc>>,
 }
 
+/// What a Policy grants beyond CIM 009's operations (ADR-N-054 2.4, 2.6; T-4666).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum PlatformAction {
+    /// `versions=all` on a temporal query (DM-114).
+    ReadVersions,
+    /// The data subject's rights on the space: export, rectification, erasure (DM-124..DM-126).
+    PersonalData,
+}
+
 /// Desired specification of a [`Policy`][crate::kinds::Policy] resource (ADR 002, R1..R9).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -616,8 +628,13 @@ pub struct PolicySpec {
     pub assigner: String,
     /// Grantee principal receiving permissions.
     pub assignee: Principal,
-    /// Granted CIM 009 operations or operation groups (R8).
+    /// Granted CIM 009 operations or operation groups (R8); empty when the Policy grants
+    /// `actions` alone.
+    #[serde(default)]
     pub operations: Vec<OperationRef>,
+    /// Granted platform actions CIM 009 has no operation for (ADR-N-054, T-4666).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<PlatformAction>,
     /// Target entity types and attribute whitelist (R6, R9).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub information: Vec<RegistrationInfo>,
@@ -684,12 +701,22 @@ impl PolicySpec {
             });
         }
 
-        if self.operations.is_empty() {
+        if self.operations.is_empty() && self.actions.is_empty() {
             return Err(Error::Name {
                 field: "spec.operations",
                 value: String::new(),
-                reason: "operations must not be empty",
+                reason: "a policy grants at least one operation or action",
             });
+        }
+        let mut seen_actions = std::collections::BTreeSet::new();
+        for action in &self.actions {
+            if !seen_actions.insert(*action) {
+                return Err(Error::Name {
+                    field: "spec.actions",
+                    value: format!("{action:?}"),
+                    reason: "duplicate action in actions list",
+                });
+            }
         }
 
         let mut seen_ops = std::collections::BTreeSet::new();

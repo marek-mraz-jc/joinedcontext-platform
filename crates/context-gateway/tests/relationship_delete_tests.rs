@@ -416,6 +416,8 @@ async fn send(
     let request = Request::builder()
         .method(method)
         .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1{uri}"))
+        // a delete names why (DM-113)
+        .header("jc-reason", "test")
         .header("content-type", "application/ld+json")
         .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
         .expect("a request");
