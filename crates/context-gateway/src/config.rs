@@ -107,6 +107,16 @@ pub struct Config {
     /// (`JC_GATEWAY_WRITE_BUDGET_MIB`, default `16`, [`crate::app::WRITE_BUDGET_MIB`]); a write past
     /// it is answered 503 with `Retry-After` (T-4077).
     pub write_budget_mib: usize,
+    /// How many requests the gateway works on at once (`JC_GATEWAY_MAX_IN_FLIGHT`, default
+    /// `128`, [`crate::middleware::in_flight::MAX_IN_FLIGHT`]); one past it is answered 503 with
+    /// `Retry-After` (T-4782).
+    pub max_in_flight: usize,
+    /// How many of them one caller may hold (`JC_GATEWAY_MAX_IN_FLIGHT_PER_CALLER`, default
+    /// `32`, [`crate::middleware::in_flight::MAX_IN_FLIGHT_PER_CALLER`]).
+    pub max_in_flight_per_caller: usize,
+    /// How many `file.csv` downloads are built at once (`JC_GATEWAY_MAX_DOWNLOADS`, default `2`,
+    /// [`crate::middleware::in_flight::MAX_DOWNLOADS`]).
+    pub max_downloads: usize,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -216,18 +226,31 @@ impl Config {
             return Err(ConfigError::Missing("JC_GATEWAY_DOMAIN_VERIFICATIONS_URL"));
         }
 
-        let write_budget_mib = match std::env::var("JC_GATEWAY_WRITE_BUDGET_MIB") {
-            Ok(value) if !value.trim().is_empty() => match value.trim().parse::<usize>() {
-                Ok(mib) if mib > 0 => mib,
-                _ => {
-                    return Err(ConfigError::Invalid {
-                        name: "JC_GATEWAY_WRITE_BUDGET_MIB",
-                        reason: format!("{value:?} is not a positive number of MiB"),
-                    })
-                }
-            },
-            _ => crate::app::WRITE_BUDGET_MIB,
-        };
+        let write_budget_mib = positive(
+            "JC_GATEWAY_WRITE_BUDGET_MIB",
+            std::env::var("JC_GATEWAY_WRITE_BUDGET_MIB"),
+            "MiB",
+            crate::app::WRITE_BUDGET_MIB,
+        )?;
+        use crate::middleware::in_flight;
+        let max_in_flight = positive(
+            "JC_GATEWAY_MAX_IN_FLIGHT",
+            std::env::var("JC_GATEWAY_MAX_IN_FLIGHT"),
+            "requests",
+            in_flight::MAX_IN_FLIGHT,
+        )?;
+        let max_in_flight_per_caller = positive(
+            "JC_GATEWAY_MAX_IN_FLIGHT_PER_CALLER",
+            std::env::var("JC_GATEWAY_MAX_IN_FLIGHT_PER_CALLER"),
+            "requests",
+            in_flight::MAX_IN_FLIGHT_PER_CALLER,
+        )?;
+        let max_downloads = positive(
+            "JC_GATEWAY_MAX_DOWNLOADS",
+            std::env::var("JC_GATEWAY_MAX_DOWNLOADS"),
+            "downloads",
+            in_flight::MAX_DOWNLOADS,
+        )?;
 
         let public_url = std::env::var("JC_GATEWAY_PUBLIC_URL")
             .ok()
@@ -261,6 +284,9 @@ impl Config {
             oauth_key,
             oauth_redirect_hosts,
             write_budget_mib,
+            max_in_flight,
+            max_in_flight_per_caller,
+            max_downloads,
             domain_verification,
             domain_verifications_url,
             bind,
@@ -326,6 +352,25 @@ impl Config {
 /// The forwarded path is always built by the gateway from the route it matched, so a base
 /// that carried a path of its own would silently prefix every request; refusing it here is
 /// cheaper than debugging it later.
+/// `name`, as `read` from the environment, as a positive whole number of `unit`, `default` when it is unset or blank.
+fn positive(
+    name: &'static str,
+    read: Result<String, std::env::VarError>,
+    unit: &str,
+    default: usize,
+) -> Result<usize, ConfigError> {
+    match read {
+        Ok(value) if !value.trim().is_empty() => match value.trim().parse::<usize>() {
+            Ok(number) if number > 0 => Ok(number),
+            _ => Err(ConfigError::Invalid {
+                name,
+                reason: format!("{value:?} is not a positive number of {unit}"),
+            }),
+        },
+        _ => Ok(default),
+    }
+}
+
 fn normalize_broker_url(raw: &str) -> Result<String, ConfigError> {
     let invalid = |reason: &str| ConfigError::Invalid {
         name: "JC_GATEWAY_BROKER_URL",
@@ -417,6 +462,9 @@ mod tests {
             domain_verification: crate::domain_gate::Mode::Report,
             domain_verifications_url: None,
             write_budget_mib: crate::app::WRITE_BUDGET_MIB,
+            max_in_flight: crate::middleware::in_flight::MAX_IN_FLIGHT,
+            max_in_flight_per_caller: crate::middleware::in_flight::MAX_IN_FLIGHT_PER_CALLER,
+            max_downloads: crate::middleware::in_flight::MAX_DOWNLOADS,
         }
     }
 

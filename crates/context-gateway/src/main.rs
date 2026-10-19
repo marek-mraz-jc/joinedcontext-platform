@@ -102,7 +102,12 @@ async fn main() -> ExitCode {
         },
     };
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone())
-        .budget_writes(config.write_budget_mib);
+        .budget_writes(config.write_budget_mib)
+        .limit_in_flight(
+            config.max_in_flight,
+            config.max_in_flight_per_caller,
+            config.max_downloads,
+        );
     let gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
