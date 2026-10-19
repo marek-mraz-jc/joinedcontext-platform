@@ -1177,6 +1177,8 @@ information:
                 .uri(format!(
                     "/api/endpoint/{WRITER_SLUG}/ngsi-ld/v1/entities/{STATION}"
                 ))
+                // Refused without a reason (T-4666), so a rerun would not start clean.
+                .header("jc-reason", "cleanup")
                 .body(Body::empty())
                 .expect("a request"),
             &granted,
