@@ -178,26 +178,37 @@ impl Index {
         facts: &HashMap<String, Facts>,
     ) -> Self {
         let mut index = Index::default();
+        let entities: Vec<&Value> = entities.into_iter().collect();
+        // A Dataset's publisher is a place a question names: `Banská Bystrica`, `hel.fi`.
+        let publishers: HashMap<&str, &str> = entities
+            .iter()
+            .filter(|e| e["type"] == "Organization")
+            .filter_map(|e| Some((e["id"].as_str()?, e["name"]["value"].as_str()?)))
+            .collect();
         for entity in entities.into_iter().filter(|e| e["type"] == "Dataset") {
-            let slugs: Vec<String> = entity["dataService"]["value"]
-                .as_array()
-                .map(|links| {
-                    links
-                        .iter()
-                        .filter_map(|link| link["identifier"].as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let slugs: Vec<String> = entity["refDataService"]["object"]
+                .as_str()
+                .and_then(|id| id.strip_prefix("urn:ngsi-ld:DataService:"))
+                .map(str::to_owned)
+                .into_iter()
+                .collect();
             let mut text = entity["searchText"]["value"]
                 .as_str()
                 .unwrap_or("")
                 .to_owned();
-            if let Some(names) = entity["publisher"]["value"]["name"].as_object() {
-                for name in names.values().filter_map(Value::as_str) {
-                    text.push(' ');
-                    text.push_str(name);
-                    index.places.extend(terms(name));
-                }
+            // A CKAN dataset names its Organization; an Endpoint's own, its record's publisher.
+            let names: Vec<&str> = match entity["refPublisher"]["object"].as_str() {
+                Some(id) => publishers.get(id).copied().into_iter().collect(),
+                None => entity["publisher"]["value"]["name"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|names| names.values().filter_map(Value::as_str))
+                    .collect(),
+            };
+            for name in names {
+                text.push(' ');
+                text.push_str(name);
+                index.places.extend(terms(name));
             }
             // A keyword whose every word is capitalised is a proper name: `Banská Bystrica`,
             // never `air quality`, nor `PM10`, which has no small letter.
@@ -210,12 +221,22 @@ impl Index {
                     index.places.extend(terms(&keyword));
                 }
             }
+            // A harvested Dataset carries CKAN's title alone, in no language it states.
+            let title: Map<String, Value> = match entity["title"]["languageMap"].as_object() {
+                Some(titles) => titles.clone(),
+                None => entity["name"]["value"]
+                    .as_str()
+                    .map(|name| Map::from_iter([("und".to_owned(), json!(name))]))
+                    .unwrap_or_default(),
+            };
+            let titled = title
+                .values()
+                .filter_map(Value::as_str)
+                .flat_map(terms)
+                .collect();
             let mut doc = Doc {
                 dataset: entity["id"].as_str().unwrap_or("").to_owned(),
-                title: entity["title"]["languageMap"]
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
+                title,
                 slugs,
                 types: Vec::new(),
                 served: Vec::new(),
@@ -224,12 +245,7 @@ impl Index {
                     .iter()
                     .filter_map(|iri| iri.rsplit('/').next().map(str::to_owned))
                     .collect(),
-                titled: entity["title"]["languageMap"]
-                    .as_object()
-                    .into_iter()
-                    .flat_map(|titles| titles.values().filter_map(Value::as_str))
-                    .flat_map(terms)
-                    .collect(),
+                titled,
                 terms: HashMap::new(),
                 len: 0,
             };
@@ -564,7 +580,7 @@ mod tests {
                     "id": format!("urn:ngsi-ld:Dataset:mesto-s{n}"), "type": "Dataset",
                     "title": { "languageMap": { "en": format!("Air quality station {n}"), "sk": format!("Kvalita ovzdušia, stanica {n}") } },
                     "searchText": { "value": format!("air quality station {n} kvalita ovzdusia stanica {n} banska bystrica mesto-s{n}") },
-                    "dataService": { "value": [{ "identifier": format!("{n:0>26}") }] },
+                    "refDataService": { "type": "Relationship", "object": format!("urn:ngsi-ld:DataService:{n:0>26}") },
                 })
             })
             .collect();
@@ -603,7 +619,7 @@ mod tests {
                 "id": format!("urn:ngsi-ld:Dataset:{n}"), "type": "Dataset",
                 "title": { "languageMap": { "en": en, "sk": sk } },
                 "searchText": { "value": text },
-                "dataService": { "value": [{ "identifier": n }] },
+                "refDataService": { "type": "Relationship", "object": format!("urn:ngsi-ld:DataService:{n}") },
             })
         };
         let entities = [
