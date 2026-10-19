@@ -141,6 +141,8 @@ fn config(
         "title": spec.theme.as_ref().and_then(|t| t.title.clone()),
         "greeting": spec.theme.as_ref().and_then(|t| t.greeting.clone()),
         "color": spec.theme.as_ref().and_then(|t| t.primary_color.clone()),
+        "subtitle": spec.theme.as_ref().and_then(|t| t.subtitle.clone()),
+        "font": spec.theme.as_ref().and_then(|t| t.font.clone()),
         // A visitor gets no picker: the assistant chooses among all its connectors, and their
         // Endpoint names stay off an anonymous page (T-4253). An internal channel keeps it.
         "connectors": if spec.channel.is_anonymous() {
@@ -384,6 +386,17 @@ mod tests {
         let told = super::config(&named, &[], None);
         assert_eq!(told["transcriptDays"], json!(7));
         assert_eq!(told["privacy"], json!({"contact": "dpo@banskabystrica.sk"}));
+        // T-4740: the subtitle and the font reach the page; neither is there when not set.
+        assert_eq!(config["subtitle"], json!(null));
+        assert_eq!(config["font"], json!(null));
+        named.spec.theme = Some(jc_core::kinds::assistant::Theme {
+            subtitle: Some(jc_core::kinds::assistant::Localised::Text("Ukážka".into())),
+            font: Some("Arial, sans-serif".into()),
+            ..Default::default()
+        });
+        let themed = super::config(&named, &[], None);
+        assert_eq!(themed["subtitle"], json!("Ukážka"));
+        assert_eq!(themed["font"], json!("Arial, sans-serif"));
         // T-4343: a deployment that names no widget opens in the browser's language, toggle on.
         assert_eq!(
             config["widget"],

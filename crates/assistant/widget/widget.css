@@ -16,14 +16,14 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; }
-body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: var(--bg); }
+body { font: 15px/1.5 var(--font, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif); color: var(--fg); background: var(--bg); }
 .jc-chat { display: flex; flex-direction: column; height: 100%; height: 100dvh; }
 .jc-page .jc-chat { max-width: 760px; margin: 0 auto; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .jc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .jc-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-/* The header: the body's monogram and name, the language toggle, New conversation. */
+/* The header: the chat icon and the body's name, the language toggle, New conversation. */
 .jc-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 10px max(12px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left));
   border-bottom: 1px solid var(--line); background: var(--bg); }
@@ -126,7 +126,8 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
 /* One quiet row under the answer (T-4364): who and when, copy, the verdict, then the sources'
    badges and count; icon actions keep a visible outline, so they read as buttons. */
 .jc-answer-tools { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.jc-by { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.jc-by { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.jc-answer-tools .jc-by .jc-icon { width: 14px; height: 14px; color: var(--accent); }
 .jc-by .jc-time { font-size: 12px; }
 .jc-opened { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
 .jc-sources { margin-left: auto; min-height: 32px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px;
@@ -134,11 +135,8 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   white-space: nowrap; cursor: pointer; }
 .jc-sources:hover { background: var(--soft); }
 .jc-badges { display: inline-flex; }
-.jc-badge { width: 18px; height: 18px; margin-left: -5px; border: 2px solid var(--bg); border-radius: 50%;
-  background: var(--badge, var(--accent)); color: #fff; font-size: 10px; font-weight: 700; line-height: 18px; text-align: center;
-  box-sizing: content-box; }
-.jc-badge::before { content: attr(data-letter); }
-.jc-badge:first-child { margin-left: 0; }
+.jc-badges { gap: 2px; }
+.jc-answer-tools .jc-sources .jc-badge { width: 16px; height: 16px; color: var(--fg); }
 .jc-chevron { width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
   transform: translateY(-2px) rotate(45deg); }
 .jc-sources[aria-expanded="true"] .jc-chevron { transform: translateY(2px) rotate(-135deg); }
@@ -254,7 +252,7 @@ body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; 
   color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
 
 /* A phone's full screen: the header keeps one line for the name and its subtitle, with a smaller
-   monogram and tighter gaps beside the 44 px controls; a name longer than that ends in an ellipsis
+   icon and tighter gaps beside the 44 px controls; a name longer than that ends in an ellipsis
    and is whole in its tooltip. */
 @media (max-width: 390px) {
   .jc-brand { gap: 6px; }
