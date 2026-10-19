@@ -851,12 +851,21 @@ async fn visitor_token(state: &ChatState, public_id: &str, nonce: &str) -> Strin
 }
 
 fn resume_of(turn: &str, after: Option<usize>, token: Option<&str>) -> Request<Body> {
+    resume_from(turn, after, token, "203.0.113.7")
+}
+
+fn resume_from(
+    turn: &str,
+    after: Option<usize>,
+    token: Option<&str>,
+    client: &str,
+) -> Request<Body> {
     let query = after.map(|n| format!("?after={n}")).unwrap_or_default();
     let mut request = Request::builder()
         .uri(format!(
             "/api/v1/d/hronov-obcania/turns/{turn}/resume{query}"
         ))
-        .header("x-forwarded-for", "203.0.113.7, 10.0.0.1");
+        .header("x-forwarded-for", format!("{client}, 10.0.0.1"));
     if let Some(token) = token {
         request = request.header(VISITOR_HEADER, token);
     }
@@ -878,7 +887,7 @@ async fn ids_of(app: &axum::Router, request: Request<Body>) -> Vec<usize> {
 
 /// T-4685 (was T-3314's stop): a visitor who leaves mid-answer, a link clicked on the host page,
 /// leaves the answer running to its end; the next page reads it again from the index it reached,
-/// nothing repeated, and the turn is that visitor's alone.
+/// nothing repeated, and the turn is that address's alone.
 #[tokio::test]
 async fn an_answer_whose_visitor_left_runs_to_its_end_and_resumes_on_the_next_page() {
     let w = world("chatgone", deployment(Channel::Public, 50_000, 10)).await;
@@ -933,15 +942,18 @@ async fn an_answer_whose_visitor_left_runs_to_its_end_and_resumes_on_the_next_pa
     );
     let calls = model_calls(&w.proxy).await;
     assert_eq!(calls_of(&calls, None).len(), 1, "the answer call ran");
-    // Another visitor, no token, an unknown turn and a bad index are refused.
+    // The next page's new token reads it from the same address; another address, no token, an
+    // unknown turn and a bad index are refused.
     let other = visitor_token(&w.state, "hronov-obcania", "1").await;
     assert_ne!(other, token);
     let app = &w.app;
     let refused = |request| async move { answer_of(app, request).await.0 };
     assert_eq!(
         refused(resume_of(&turn, None, Some(&other))).await,
-        StatusCode::NOT_FOUND
+        StatusCode::OK
     );
+    let elsewhere = resume_from(&turn, None, Some(&other), "198.51.100.9");
+    assert_eq!(refused(elsewhere).await, StatusCode::NOT_FOUND);
     assert_eq!(
         refused(resume_of(&turn, None, None)).await,
         StatusCode::UNAUTHORIZED

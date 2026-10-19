@@ -1679,11 +1679,13 @@ async fn ask(
     let task_state = Arc::clone(state);
     let conversation_id = conversation.clone();
     let started_from = origin.map(str::to_owned);
-    // A visitor's answer is held for a resume on the next page and runs to its end (T-4685).
-    let held = token.and_then(|id| {
+    // A visitor's answer is held for a resume on the next page and runs to its end (T-4685). It
+    // is bound to the address that asked: the visitor token lives in the page's memory, so the
+    // next page earns a new one.
+    let held = token.and_then(|_| {
         state
             .turns
-            .start(&deployment.spec.public_id, id, Instant::now())
+            .start(&deployment.spec.public_id, &client_hash, Instant::now())
     });
     let turn_id = held.as_ref().map(|(id, _)| id.clone());
     let held = held.map(|(_, turn)| turn);

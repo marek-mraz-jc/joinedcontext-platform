@@ -1,7 +1,9 @@
 //! An answer that outlives its page (T-4685, API/05 §1.6.2): a visitor's answer runs to its end
 //! even when the reader leaves, its events are held here until 2 minutes after `done`, and the
 //! widget on the next page reads them again from the index it reached. A turn belongs to the
-//! visitor id of the token that asked; its random id is never the authorization.
+//! address that asked (its salted daily hash) and is read with any current visitor token: the
+//! token lives in the page's memory, so the next page earns a new one. Its random id is never
+//! the authorization.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -221,17 +223,20 @@ async fn replay(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let mut limits = state.limits.lock().await;
-    let Some(visitor) = limits.signer.visitor(public_id, token, unix_now()) else {
+    if limits
+        .signer
+        .visitor(public_id, token, unix_now())
+        .is_none()
+    {
         return problem(
             401,
             "Overenie prehliadača vypršalo. Obnovte stránku a skúste to znova.",
         );
-    };
+    }
+    let visitor = limits.visitor(&client_of(headers), today());
     let key = format!(
-        "{}/{}\u{0}{}\u{0}resume",
-        deployment.project,
-        deployment.name,
-        limits.visitor(&client_of(headers), today())
+        "{}/{}\u{0}{visitor}\u{0}resume",
+        deployment.project, deployment.name
     );
     let admitted = limits.admit(&[(&key, RESUMES_PER_MINUTE, MINUTE)], Instant::now());
     drop(limits);
