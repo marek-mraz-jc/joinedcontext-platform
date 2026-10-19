@@ -520,6 +520,54 @@ pub async fn erase(pool: &PgPool, project: &str, conversation: &str) -> Result<b
     Ok(gone > 0)
 }
 
+/// The most terms one erasure searches for, and the length bounds of one.
+pub const MAX_TERMS: usize = 1001;
+const TERM_CHARS: std::ops::RangeInclusive<usize> = 3..=1024;
+
+/// Why `terms` cannot be searched for, if they cannot: 1 to [`MAX_TERMS`] of 3 to 1024
+/// characters, none a control character.
+pub fn terms_refusal(terms: &[String]) -> Option<String> {
+    if terms.is_empty() || terms.len() > MAX_TERMS {
+        return Some(format!("terms names 1 to {MAX_TERMS} texts"));
+    }
+    terms
+        .iter()
+        .any(|t| !TERM_CHARS.contains(&t.trim().chars().count()) || t.chars().any(char::is_control))
+        .then(|| "each term is 3 to 1024 characters of plain text".to_owned())
+}
+
+/// Erases every stored conversation of `project` one of whose turns mentions one of `terms`
+/// (case-insensitively in the question, the answer, what it showed, its history or a step's
+/// input or output), with its feedback: the data subject's erasure (DM-126, API/01 §46,
+/// T-4668). The terms are bound, never spliced. Returns the conversations erased.
+pub async fn erase_mentioning(
+    pool: &PgPool,
+    project: &str,
+    terms: &[String],
+) -> Result<u64, crate::Error> {
+    let terms: Vec<String> = terms.iter().map(|t| t.trim().to_lowercase()).collect();
+    let mut tx = crate::project_scope(pool, project).await?;
+    let gone: i64 = sqlx::query_scalar(
+        "WITH hit AS ( \
+           SELECT DISTINCT t.conversation FROM turns t, unnest($1::text[]) AS term(v) \
+           WHERE strpos(lower(t.question), term.v) > 0 OR strpos(lower(t.answer), term.v) > 0 \
+              OR strpos(lower(t.blocks::text), term.v) > 0 \
+              OR strpos(lower(t.history::text), term.v) > 0 \
+              OR EXISTS (SELECT 1 FROM turn_steps s WHERE s.turn_id = t.id \
+                         AND (strpos(lower(coalesce(s.input, '')), term.v) > 0 \
+                              OR strpos(lower(coalesce(s.output, '')), term.v) > 0))), \
+         said AS (DELETE FROM feedback WHERE conversation IN (SELECT conversation FROM hit)), \
+         gone AS (DELETE FROM turns WHERE conversation IN (SELECT conversation FROM hit) \
+                  RETURNING conversation) \
+         SELECT count(DISTINCT conversation) FROM gone",
+    )
+    .bind(&terms)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(u64::try_from(gone).unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

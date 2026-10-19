@@ -317,3 +317,62 @@ async fn the_sweep_drops_expired_turns_and_erase_drops_one_conversation() {
 
     db::drop_database(admin, pool, &name).await;
 }
+
+#[tokio::test]
+async fn an_erasure_takes_every_conversation_mentioning_the_subject_and_no_other() {
+    let (admin, pool, name) = db::database("transcript_erase_mentioning").await;
+    let quiet = seen(&[Event::Answer("Úrad má otvorené do 15:00.".into())]);
+    let named = seen(&[Event::Answer("Jazdu má Ján Nováček.".into())]);
+    let trip = [tool(
+        "get_entity",
+        r#"{"id":"urn:ngsi-ld:BikeTrip:hel.fi:t-42","rider":"x"}"#,
+    )];
+    transcript::store(&pool, &record(RAG, "Kedy má úrad otvorené?", &quiet, &[]))
+        .await
+        .expect("stored");
+    transcript::store(&pool, &record(DATA, "Kto jazdí?", &named, &[]))
+        .await
+        .expect("stored");
+    transcript::store(&pool, &record(LATE, "Ukáž jazdu t-42", &quiet, &trip))
+        .await
+        .expect("stored");
+
+    // The subject's words, in another case, and an Entity's URN found in a step's output.
+    let terms = [
+        "JÁN NOVÁČEK".to_owned(),
+        "urn:ngsi-ld:BikeTrip:hel.fi:t-42".to_owned(),
+    ];
+    assert_eq!(
+        transcript::erase_mentioning(&pool, "elsewhere", &terms)
+            .await
+            .expect("another project searches"),
+        0
+    );
+    assert_eq!(
+        transcript::erase_mentioning(&pool, PROJECT, &terms)
+            .await
+            .expect("erases"),
+        2
+    );
+    let (items, _) = transcript::list(&pool, PROJECT, &Filter::default())
+        .await
+        .expect("lists");
+    assert_eq!(
+        items.iter().map(|i| i["id"].clone()).collect::<Vec<_>>(),
+        [json!(RAG)]
+    );
+    // A term is data: LIKE's wildcards and a quote match only themselves.
+    let wild = ["%%%".to_owned(), "' OR 1=1 --".to_owned()];
+    assert_eq!(
+        transcript::erase_mentioning(&pool, PROJECT, &wild)
+            .await
+            .expect("searches"),
+        0
+    );
+    assert!(transcript::terms_refusal(&[]).is_some());
+    assert!(transcript::terms_refusal(&["ab".to_owned()]).is_some());
+    assert!(transcript::terms_refusal(&["a\u{0}bc".to_owned()]).is_some());
+    assert!(transcript::terms_refusal(&terms).is_none());
+
+    db::drop_database(admin, pool, &name).await;
+}

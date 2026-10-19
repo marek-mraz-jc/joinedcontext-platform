@@ -377,6 +377,12 @@ async fn only_the_portals_service_account_is_answered() {
         ),
         (
             "POST",
+            format!("{k}/erasures"),
+            format!("{BASE}/erasures"),
+            Some(json!({"terms": ["urn:ngsi-ld:BikeTrip:t-0"]})),
+        ),
+        (
+            "POST",
             format!("{k}/deployments/{{deployment}}/chat"),
             format!("{BASE}/deployments/obcania/chat"),
             Some(json!({"message": "Kedy je zber?"})),
