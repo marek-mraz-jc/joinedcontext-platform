@@ -828,21 +828,24 @@ async fn connected(
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
             token,
         };
-        reachable.push((connector, endpoint.title.clone(), surface));
+        let near = siblings(&snapshot.endpoints, &resolved.project, &endpoint.space);
+        reachable.push((connector, endpoint.title.clone(), near, surface));
     }
     // Every listing at once, so a question waits for the slowest connector, not their sum (T-4680).
-    let listed = futures_util::future::join_all(reachable.iter().map(|(connector, _, surface)| {
-        surface.tools(&state.http, &state.listings, &connector.tools)
-    }))
-    .await;
+    let listed =
+        futures_util::future::join_all(reachable.iter().map(|(connector, _, _, surface)| {
+            surface.tools(&state.http, &state.listings, &connector.tools)
+        }))
+        .await;
     let mut connected = Vec::new();
-    for ((connector, title, surface), listed) in reachable.into_iter().zip(listed) {
+    for ((connector, title, near, surface), listed) in reachable.into_iter().zip(listed) {
         match listed {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
                 title,
                 surface,
                 tools,
+                siblings: near,
             }),
             Ok(_) => {
                 tracing::warn!(endpoint = %connector.endpoint, "the Endpoint offers none of the connector's tools")
@@ -951,6 +954,7 @@ async fn lent(
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
+                siblings: Vec::new(),
             }),
             Ok(_) => {}
             Err(why) => {
@@ -958,6 +962,19 @@ async fn lent(
             }
         }
     }
+}
+
+/// The slugs of `project`'s Endpoints over `space` (T-4625); none when the space is unknown.
+fn siblings(
+    endpoints: &std::collections::BTreeMap<(String, String), crate::worker::EndpointRef>,
+    project: &str,
+    space: &str,
+) -> Vec<String> {
+    endpoints
+        .iter()
+        .filter(|((p, _), e)| p == project && !space.is_empty() && e.space == space)
+        .map(|(_, e)| e.slug.clone())
+        .collect()
 }
 
 /// How long a named server's listing and each lent Endpoint's call may take: a connector's
@@ -1920,6 +1937,27 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4625: an Endpoint's siblings are its project's Endpoints over the same space, itself
+    /// included; an unknown space has none.
+    #[test]
+    fn siblings_are_the_projects_endpoints_over_one_space() {
+        let at = |slug: &str, space: &str| crate::worker::EndpointRef {
+            slug: slug.into(),
+            audience: "public".into(),
+            space: space.into(),
+            title: None,
+        };
+        let endpoints = std::collections::BTreeMap::from([
+            (("bb".into(), "verejne".into()), at("rpfq", "verejne")),
+            (("bb".into(), "skoly".into()), at("bkc4", "verejne")),
+            (("bb".into(), "ovzdusie".into()), at("mluy", "ovzdusie")),
+            (("bbsk".into(), "kraj".into()), at("6b4y", "verejne")),
+            (("bb".into(), "bez".into()), at("none", "")),
+        ]);
+        assert_eq!(siblings(&endpoints, "bb", "verejne"), ["bkc4", "rpfq"]);
+        assert!(siblings(&endpoints, "bb", "").is_empty());
+    }
 
     #[test]
     fn a_visitor_s_stream_carries_no_slug_and_no_spending_but_a_signed_in_one_does() {

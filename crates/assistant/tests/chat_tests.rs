@@ -186,6 +186,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
     let public = |slug: &str| EndpointRef {
         slug: slug.into(),
         audience: "public".into(),
+        space: String::new(),
         title: None,
     };
     snapshot.endpoints = BTreeMap::from([
@@ -195,6 +196,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                space: String::new(),
                 title: None,
             },
         ),
@@ -204,6 +206,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: SLUG.into(),
                 audience: "public".into(),
+                space: String::new(),
                 title: None,
             },
         ),
@@ -212,6 +215,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
             EndpointRef {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
+                space: String::new(),
                 title: None,
             },
         ),

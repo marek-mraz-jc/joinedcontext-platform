@@ -55,6 +55,8 @@ pub struct EndpointRef {
     pub slug: String,
     /// The Endpoint's `spec.audience`: `public`, `organization` or `project-list`.
     pub audience: String,
+    /// The context space it reads (`spec.contextSpaceRef`), empty when the manifest names none.
+    pub space: String,
     /// What it holds, in its manifest's words (`metadata.title`, English first), so the router
     /// tells apart Endpoints that serve the same type (T-4680).
     pub title: Option<String>,
@@ -642,9 +644,16 @@ fn endpoint_ref(
     let slug = spec.get("slug").and_then(|v| v.as_str())?;
     let audience = spec.get("audience").and_then(|v| v.as_str())?;
     jc_core::kinds::endpoint::EndpointSlug::new(slug).ok()?;
+    let space = spec.get("contextSpaceRef");
+    let space = space
+        .and_then(|s| s.get("name"))
+        .or(space)
+        .and_then(|s| s.as_str())
+        .unwrap_or_default();
     Some(EndpointRef {
         slug: slug.to_owned(),
         audience: audience.to_owned(),
+        space: space.to_owned(),
         title: title.and_then(title_line),
     })
 }
@@ -671,6 +680,23 @@ fn title_line(title: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4625: the space is read in either form of `contextSpaceRef`, and is empty without one.
+    #[test]
+    fn an_endpoints_space_is_read_in_either_form() {
+        let slug = "bkc4g3zfirh6zae3owdike7am2upayjs";
+        let space = |reference: serde_json::Value| {
+            endpoint_ref(&serde_json::json!({"slug": slug, "audience": "public", "contextSpaceRef": reference}), None)
+                .expect("an Endpoint")
+                .space
+        };
+        assert_eq!(space(serde_json::json!("verejne")), "verejne");
+        assert_eq!(
+            space(serde_json::json!({"kind": "ContextSpace", "name": "verejne"})),
+            "verejne"
+        );
+        assert_eq!(space(serde_json::Value::Null), "");
+    }
 
     /// T-4680: an Endpoint's title reaches the router as one short line, English first.
     #[test]
@@ -771,6 +797,7 @@ mod tests {
                     slug: slug.into(),
                     audience: audience.into(),
                     title: None,
+                    space: String::new(),
                 },
             );
             if let Some(theme) = themes {

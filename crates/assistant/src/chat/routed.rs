@@ -1196,6 +1196,46 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
 }
 
+/// The entity type a `query_entities` call with `arguments` reads; `None` for any other tool.
+pub(super) fn queried_type(tool: &str, arguments: &Value) -> Option<String> {
+    (tool == "query_entities")
+        .then(|| super::data::type_of(arguments))
+        .flatten()
+}
+
+/// The page a visitor opens about the rows of `kind` read from `connector`: the CKAN dataset
+/// page of an Endpoint over the same space that publishes the type (T-4625), else the page the
+/// sources hold about the connector's own Endpoint; `None` when neither is found.
+pub(super) async fn dataset_of(ask: &Ask<'_>, connector: &Connected, kind: &str) -> Option<String> {
+    let found = async {
+        match crate::dataset_page_projects(
+            ask.pool,
+            &connector.siblings,
+            kind,
+            ask.sources,
+            ask.public_only,
+        )
+        .await?
+        {
+            Some(page) => Ok(Some(page)),
+            None => {
+                crate::endpoint_page_projects(
+                    ask.pool,
+                    &connector.surface.slug,
+                    ask.sources,
+                    ask.public_only,
+                )
+                .await
+            }
+        }
+    }
+    .await;
+    found.unwrap_or_else(|why: crate::Error| {
+        tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
+        None
+    })
+}
+
 /// How long the assistant waits for an Endpoint's model; past it the table keeps the name order.
 const MODEL_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -1246,12 +1286,7 @@ pub(super) async fn table(
     let (columns, rows, units, fields) = table_of(text, READ_ROWS, asked, model.as_deref())?;
     let enums = enums_of(model.as_deref(), kind, &columns);
     let slug = connector.surface.slug.as_str();
-    let dataset = crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
-        .await
-        .unwrap_or_else(|why| {
-        tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
-        None
-    });
+    let dataset = dataset_of(ask, connector, kind).await;
     let download = ask.endpoint_base.and_then(|base| {
         let mut url = base
             .join(&format!("api/endpoint/{slug}/ngsi-ld/v1/entities"))
@@ -2624,6 +2659,7 @@ mod tests {
                 token: None,
             },
             tools: vec![tool("list_types"), tool("query_entities")],
+            siblings: Vec::new(),
         };
         let cache = AnswerCache::default();
         let connectors = [connector("slow"), connector("down")];
@@ -2673,6 +2709,7 @@ mod tests {
                 token: None,
             },
             tools: vec![tool("list_types"), tool("query_entities")],
+            siblings: Vec::new(),
         }];
         let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
         let named = |live: &Live| {
