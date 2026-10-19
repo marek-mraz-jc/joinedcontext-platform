@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
+const { notice, closeTargets, connector, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -865,6 +865,23 @@ test("the privacy dialog leads with the deployment's disclaimer, says what is ke
   assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "https://x.sk/gdpr" }).length, 2, "no contact, no section");
   assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "javascript:alert(1)" }).length, 3);
   assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "http://x.sk/gdpr" }).length, 3, "https only");
+});
+
+test("the connector panel gives each client's steps for an https address and nothing else (T-4694)", () => {
+  const url = "https://api.dev.joinedcontext.com/api/mcp/d/bb-doprava";
+  const panel = connector(url, "bb-doprava", "en");
+  assert.deepEqual(panel.clients.map((c) => c.name), ["Claude", "ChatGPT", "VS Code, Cursor, Claude Code"]);
+  const code = panel.clients[2].steps.map((s) => s.code);
+  assert.deepEqual(JSON.parse(code[0]), { servers: { "bb-doprava": { type: "http", url } } });
+  assert.deepEqual(JSON.parse(code[1]), { mcpServers: { "bb-doprava": { url } } });
+  assert.equal(code[2], "claude mcp add --transport http bb-doprava " + url);
+  // No step is a link: no client documents a one-click add.
+  for (const client of panel.clients) for (const step of client.steps) assert.ok(!("href" in step));
+  assert.equal(connector(url, "bb-doprava", "de").title, connector(url, "bb-doprava", "sk").title, "Slovak for a language it lacks");
+  assert.equal(connector(url, "x\"; rm -rf /", "en").clients[2].steps[2].code, "claude mcp add --transport http assistant " + url);
+  for (const bad of [null, "", "http://api.example/api/mcp/d/x", "javascript:alert(1)", "https://a b/x", "https://api.example/x y"]) {
+    assert.equal(connector(bad, "x", "en"), null, String(bad));
+  }
 });
 
 const C = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
