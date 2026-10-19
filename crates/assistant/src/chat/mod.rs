@@ -18,6 +18,7 @@ pub mod model;
 pub mod redact;
 pub mod resume;
 pub mod routed;
+pub(crate) mod scope;
 pub mod script;
 pub mod shape;
 pub mod trace;
@@ -1992,6 +1993,13 @@ async fn ask(
             now: asked_at,
             zone: clock::Zone::of(&deployment.spec.languages),
             trace: &trace,
+            languages: &deployment.spec.languages,
+            suggestions: &deployment.spec.suggestions,
+            title: deployment
+                .spec
+                .theme
+                .as_ref()
+                .and_then(|t| t.title.as_ref()),
         };
         let started = Instant::now();
         let so_far = Arc::new(std::sync::Mutex::new(Spent::default()));
