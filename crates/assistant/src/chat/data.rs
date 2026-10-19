@@ -196,15 +196,24 @@ pub struct Start {
     pub started: Instant,
 }
 
+/// What the loop answered.
+pub struct Answered {
+    pub text: String,
+    pub citations: Vec<Citation>,
+    /// Whether its call ended on its own.
+    pub whole: bool,
+    /// How many tables with rows it cites; when any, every table read was sent before it returned.
+    pub tables: usize,
+}
+
 /// Runs the loop to its answer; every outcome reaches `events`, and `spent` counts each call.
-/// Returns the answer's text, its citations and whether its call ended on its own, or `None` when
-/// an error was sent instead.
+/// Returns what it answered, or `None` when an error was sent instead.
 pub async fn answer(
     ask: &Ask<'_>,
     start: Start,
     spent: &mut Spent,
     events: &Sender<Event>,
-) -> Option<(String, Vec<Citation>, bool)> {
+) -> Option<Answered> {
     let Start {
         mut messages,
         mut citations,
@@ -257,6 +266,7 @@ pub async fn answer(
             messages.push(json!({"role": "user", "content": budget(left, ask.data_steps, secs)}));
         }
         if over && spent.calls == called_before {
+            tables_read(&tables, events).await;
             send(
                 events,
                 Event::Error {
@@ -301,6 +311,7 @@ pub async fn answer(
         let completion = match stepped {
             Ok(completion) => completion,
             Err(err) => {
+                tables_read(&tables, events).await;
                 send(events, super::routed::refusal(ask, &err)).await;
                 return None;
             }
@@ -309,11 +320,13 @@ pub async fn answer(
         spent.served(Stage::Answer, &completion);
         if completion.calls.is_empty() || !allow {
             if completion.declined() {
+                tables_read(&tables, events).await;
                 send(events, super::agent::declined()).await;
                 return None;
             }
             let text = completion.text.trim().to_owned();
             if text.is_empty() {
+                tables_read(&tables, events).await;
                 send(events, super::agent::no_answer(spent)).await;
                 return None;
             }
@@ -323,10 +336,22 @@ pub async fn answer(
             let used = markers(&text);
             citations.retain(|c| used.contains(&c.n));
             name_sources(ask, &mut citations).await;
+            // The tables are shown once the answer is written, and only when it cites one of them
+            // (T-4741): an answer that found nothing came beside two tables of other indicators
+            // on prod. An answer that cites one keeps every table read, as before.
+            let cited = tables.iter().filter(|(n, _)| used.contains(n)).count();
+            if cited > 0 {
+                tables_read(&tables, events).await;
+            }
             // Whether the model stopped early or ran into the cap (T-4651).
             let steps_left_at_answer = ask.data_steps.saturating_sub(steps);
             tracing::info!(deployment = %ask.deployment, steps, steps_left_at_answer, calls = spent.calls, tokens = spent.total, reasoning = spent.reasoning.answer.unwrap_or_default(), ms = started.elapsed().as_millis() as u64, cited = citations.len(), "data loop answered");
-            return Some((text, citations, completion.whole()));
+            return Some(Answered {
+                text,
+                citations,
+                whole: completion.whole(),
+                tables: cited,
+            });
         }
         let calls: Vec<Value> = completion
             .calls
@@ -417,6 +442,14 @@ pub async fn answer(
         for ((id, _, _), content) in completion.calls.iter().zip(contents) {
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
         }
+    }
+}
+
+/// Sends every table the loop read, in their order: beside an answer that cites one, or beside
+/// the error when no answer came, as they were shown before an answer existed (T-4741).
+async fn tables_read(tables: &[(usize, Table)], events: &Sender<Event>) {
+    for (_, table) in tables {
+        send(events, Event::Data(table.clone())).await;
     }
 }
 
@@ -569,8 +602,7 @@ async fn recorded(
                 rows = Some(table.rows.len());
                 dataset = table.dataset.clone();
                 if !table.rows.is_empty() {
-                    tables.push((citations.len() + 1, table.clone()));
-                    send(events, Event::Data(table)).await;
+                    tables.push((citations.len() + 1, table));
                 }
             }
             // What a step did, never what it read (T-4294's per-step record).
