@@ -1,0 +1,14 @@
+{
+  "about": "T-4768: the owner's Trnava assistant transcript (2026-10-19T20:35Z) as eval inputs. small-talk gets one fixed line, clarify asks what the person looks for, data goes to the router; neither of the first two searches or reads.",
+  "cases": [
+    {"input": "Ahoj ako sa mas?", "class": "small-talk"},
+    {"input": "s nicim", "class": "small-talk"},
+    {"input": "dobre", "class": "small-talk"},
+    {"input": "a", "class": "clarify"},
+    {"input": "b", "class": "clarify"},
+    {"input": "e", "class": "clarify"},
+    {"input": "ddd", "class": "clarify"},
+    {"input": "?", "class": "clarify"},
+    {"input": "Koľko mostov spravuje BBSK v okrese Zvolen?", "class": "data"}
+  ]
+}

@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod agent;
+pub mod brief;
 pub mod cards;
 pub mod clock;
 pub mod context;

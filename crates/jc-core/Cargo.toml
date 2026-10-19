@@ -32,6 +32,12 @@ arc-swap = { version = "1", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 hyper-util = { version = "0.1", optional = true, features = ["client-legacy", "http1", "tokio"] }
 tokio = { version = "1", optional = true, features = ["time"] }
+# `outbound` (T-4776): the guarded client for URLs from outside the installation; the version and
+# TLS stack every reqwest of the workspace already locks.
+reqwest = { version = "0.12", optional = true, default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 
 [build-dependencies]
 serde_json = "1"
@@ -40,4 +46,5 @@ serde_json = "1"
 default = []
 axum = ["dep:axum"]
 logs = ["dep:tracing", "dep:tracing-subscriber"]
+outbound = ["dep:reqwest", "dep:tokio", "tokio/net"]
 auth = ["axum", "dep:tracing", "dep:arc-swap", "dep:jsonwebtoken", "dep:hyper-util", "dep:tokio"]

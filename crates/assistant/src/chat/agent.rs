@@ -610,6 +610,11 @@ pub async fn answer(
         super::scope::refuse(ask, question, None, events).await;
         return Spent::default();
     }
+    // Small talk and a message with no content word get a fixed line, no search (T-4768).
+    if let Some((kind, lang)) = super::brief::brief(question) {
+        super::brief::answer(ask, question, kind, lang, events).await;
+        return Spent::default();
+    }
     answer_in_scope(ask, history, question, events).await
 }
 
