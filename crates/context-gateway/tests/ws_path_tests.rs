@@ -1,6 +1,6 @@
 //! `{endpoint}/ws` is served by the Endpoint's fan-out (EP-106, EP-107, EP-114, ADR-N-049): one
-//! broker subscription per Endpoint, its changes cut to each caller's grant and matched to each
-//! client's filters in the gateway. The gateway serves on a real socket, because an upgrade needs
+//! broker subscription per Endpoint and caller identity, cut to that caller by the broker's view
+//! (T-4755) and matched to each client's filters in the gateway. The gateway serves on a real socket, because an upgrade needs
 //! one, in front of a stub broker that records each upgrade it is asked for, welcomes the
 //! gateway, accepts its one subscription and sends whatever notification a test pushes.
 
@@ -377,8 +377,8 @@ async fn a_disabled_websocket_is_404() {
 }
 
 /// EP-106, EP-114: a browser's token rides as a subprotocol entry and the answer names only
-/// `ngsi-ld-ws`. The broker sees one upstream on the gateway's own account, never the caller or
-/// the token, and the caller receives exactly the change its grant and its filter allow.
+/// `ngsi-ld-ws`. The broker sees one upstream as the verified caller, never the token, and the
+/// caller receives exactly the change its filter allows of what the broker sent.
 #[tokio::test]
 async fn a_subscriber_receives_what_its_grant_and_filter_allow() {
     let realm = common::Realm::new();
@@ -434,8 +434,11 @@ async fn a_subscriber_receives_what_its_grant_and_filter_allow() {
 
     let upgrade = stub.upgrades()[0].clone();
     assert_eq!(upgrade["ngsild-tenant"], "helsinki");
-    assert_eq!(upgrade["x-jc-client"], "context-gateway");
-    assert!(!upgrade.contains_key("x-jc-subject"));
+    assert_eq!(upgrade["x-jc-subject"], "someone-of-hel-mobility");
+    assert!(
+        !upgrade.contains_key("x-jc-client"),
+        "never the gateway's account: {upgrade:?}"
+    );
     assert!(!upgrade.contains_key("authorization"));
     assert!(!upgrade.contains_key("origin"));
     assert!(
