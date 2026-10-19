@@ -591,7 +591,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   await expect(page.locator(".jc-privacy-line")).toHaveText("Dôležité informácie si prosím overte. · Súkromie");
   const open = page.locator(".jc-privacy-line .jc-more");
   await open.click();
-  const dialog = page.locator("dialog.jc-about");
+  const dialog = page.locator("dialog.jc-about:not(.jc-connect)");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator("h2")).toHaveText("O tomto asistentovi");
   await expect(dialog.locator("p").first()).toHaveText(CONFIG.disclaimer.sk);
@@ -628,7 +628,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   await later.goto(`${base}/d/bb?lang=sk`);
   await expect(later.locator(".jc-log")).toContainText("V pracovné dni od 8:00.");
   await later.locator(".jc-privacy-line .jc-more").click();
-  const laterToggle = later.locator('dialog.jc-about input[role="switch"]');
+  const laterToggle = later.locator('dialog.jc-about:not(.jc-connect) input[role="switch"]');
   await expect(laterToggle).toBeChecked();
   await laterToggle.uncheck();
   expect(await later.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();

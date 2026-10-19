@@ -8,6 +8,8 @@
   var root = document.getElementById("jc-chat");
   if (!root) return;
   var config = JSON.parse(root.getAttribute("data-config") || "{}");
+  // The chat's own host by default; a copy of the widget on another host names it (T-4694).
+  var api = /^https:\/\/[a-z0-9.-]+(:\d{1,5})?$/i.test(String(config.api || "")) ? config.api : "";
   var WORDS = {
     sk: { ask: "Napíšte otázku", send: "Odoslať", stop: "Zastaviť", stopped: "Odpoveď ste zastavili.",
       tools: "Živé dáta, ktoré smie asistent čítať", thinking: "Hľadám…",
@@ -18,7 +20,7 @@
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
-      dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
+      dataset: "Otvoriť dataset", download: "Stiahnuť údaje", geojson: "Stiahnuť GeoJSON", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
       missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
       thanks: "Ďakujeme za hodnotenie.", more: "Ďalšie otázky", contact: "Kontakt", map: "Zobraziť na mape", steps: "Postup", retry: "Skúsiť znova",
@@ -49,7 +51,7 @@
       hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
-      dataset: "Open the dataset", download: "Download the data", language: "Language",
+      dataset: "Open the dataset", download: "Download the data", geojson: "Download GeoJSON", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
       missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
       thanks: "Thank you for the feedback.", more: "More questions", contact: "Contact", map: "Show on the map", steps: "Steps", retry: "Try again",
@@ -80,7 +82,7 @@
       hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
-      dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
+      dataset: "Otevřít dataset", download: "Stáhnout data", geojson: "Stáhnout GeoJSON", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
       missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
       thanks: "Děkujeme za hodnocení.", more: "Další otázky", contact: "Kontakt", map: "Zobrazit na mapě", steps: "Postup", retry: "Zkusit znovu",
@@ -170,6 +172,7 @@
     dock: "M4 4h16v16H4zM14 4v16",
     undock: "M4 4h16v16H4zM11 11h6v6h-6z",
     chat: "M4 5h16v11H9l-5 4z",
+    plug: "M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4",
     send: "M5 12h13M12 5l7 7-7 7",
     stop: "M7 7h10v10H7z",
     copy: "M9 9h10v10H9zM5 15V5h10",
@@ -236,6 +239,18 @@
       picker.appendChild(option);
     });
     actions.appendChild(picker);
+  }
+  // "Add to your AI assistant" (T-4694): a public deployment's own MCP connector.
+  var connectOpen = null;
+  if (JCRender.connector(config.mcp, config.publicId, lang)) {
+    connectOpen = el("button", "jc-icon-button jc-connect-open");
+    connectOpen.type = "button";
+    connectOpen.appendChild(icon("plug"));
+    connectOpen.setAttribute("aria-haspopup", "dialog");
+    var connectWord = function () { return JCRender.connector(config.mcp, config.publicId, lang).open; };
+    words(connectOpen, connectWord, "ariaLabel");
+    words(connectOpen, connectWord, "title");
+    actions.appendChild(connectOpen);
   }
   var fresh = iconButton("jc-fresh", "fresh", "fresh");
   actions.appendChild(fresh);
@@ -385,11 +400,69 @@
     try { return localStorage.getItem(FOLLOW) !== "off"; } catch (e) { return true; }
   }
 
+  var connect = el("dialog", "jc-about jc-connect");
+  connect.setAttribute("aria-labelledby", "jc-connect-title");
+  function fillConnect() {
+    var text = JCRender.connector(config.mcp, config.publicId, lang);
+    connect.textContent = "";
+    var heading = el("h2", "", text.title);
+    heading.id = "jc-connect-title";
+    connect.appendChild(heading);
+    connect.appendChild(el("p", "", text.lead));
+    var field = el("label", "jc-connect-address");
+    field.appendChild(el("span", "", text.address));
+    var address = el("input");
+    address.type = "text";
+    address.readOnly = true;
+    address.value = config.mcp;
+    address.addEventListener("focus", function () { address.select(); });
+    field.appendChild(address);
+    connect.appendChild(field);
+    var copied = el("p", "jc-sr");
+    copied.setAttribute("aria-live", "polite");
+    var copyIt = el("button", "jc-about-close", text.copy);
+    copyIt.type = "button";
+    copyIt.addEventListener("click", function () {
+      var done = function () { copied.textContent = text.copied; };
+      if (navigator.clipboard) navigator.clipboard.writeText(config.mcp).then(done, function () { address.select(); });
+      else address.select();
+    });
+    connect.appendChild(copyIt);
+    connect.appendChild(copied);
+    text.clients.forEach(function (client) {
+      var part = el("details");
+      part.appendChild(el("summary", "", client.name));
+      var list = el("ol");
+      client.steps.forEach(function (step) {
+        var item = el("li", "", step.text);
+        if (step.code) item.appendChild(el("pre", "jc-connect-code", step.code));
+        list.appendChild(item);
+      });
+      part.appendChild(list);
+      connect.appendChild(part);
+    });
+    var first = JCRender.suggestions(config.suggestions, lang, [])[0];
+    if (first) {
+      connect.appendChild(el("p", "jc-hint", text.tryIt));
+      connect.appendChild(el("p", "jc-connect-try", first));
+    }
+    var shut = button("jc-about-close", "close");
+    shut.addEventListener("click", function () { connect.close(); });
+    connect.appendChild(shut);
+  }
+  if (connectOpen) {
+    connectOpen.addEventListener("click", function () {
+      fillConnect();
+      connect.showModal();
+    });
+  }
+
   root.appendChild(head);
   if (tools) root.appendChild(tools);
   root.appendChild(log);
   root.appendChild(foot);
   root.appendChild(about);
+  root.appendChild(connect);
   root.appendChild(announce);
 
   var conversation = null;
@@ -522,6 +595,7 @@
     }
     if (named) retitle();
     if (about.open) fillAbout();
+    if (connect.open) fillConnect();
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
       welcome();
@@ -733,7 +807,7 @@
       var body = { conversation: of, turn: turn, verdict: verdict };
       if (note) body.note = note;
       try {
-        var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
+        var response = await fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "omit",
@@ -954,12 +1028,14 @@
     var drawn = plot(JCRender.chart(data));
     if (drawn) figure.appendChild(drawn);
     if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
-    if (shown.dataset || shown.download) {
+    if (shown.dataset || shown.download || shown.geojson) {
       var links = el("p", "jc-data-links");
       // More rows than the panel shows: the dataset holds them all (T-4682).
       var more = typeof data.total === "number" && data.total > shown.rows.length;
       if (shown.dataset) links.appendChild(link(shown.dataset, more ? w.allRows : w.dataset));
       if (shown.download) links.appendChild(link(shown.download, w.download));
+      // One area's own outline, as the Endpoint serves it (T-4697).
+      if (shown.geojson) links.appendChild(link(shown.geojson, w.geojson));
       figure.appendChild(links);
     }
     visual(item, figure);
@@ -1119,12 +1195,12 @@
   }
 
   async function earn() {
-    var base = "/api/v1/d/" + encodeURIComponent(config.publicId);
+    var base = api + "/api/v1/d/" + encodeURIComponent(config.publicId);
     var asked = await fetch(base + "/challenge", { credentials: "omit" });
     if (!asked.ok) throw new TypeError("no challenge");
     var challenge = await asked.json();
     var nonce = await new Promise(function (done, failed) {
-      var worker = new Worker("/d/visitor.js");
+      var worker = new Worker((config.assets || "/d/") + "visitor.js");
       worker.onmessage = function (event) { worker.terminate(); done(event.data); };
       worker.onerror = function () { worker.terminate(); failed(new TypeError("no proof")); };
       worker.postMessage({ challenge: challenge.challenge, difficulty: challenge.difficulty });
@@ -1148,7 +1224,7 @@
     }
     history.push({ role: "user", text: question });
     var post = function (held) {
-      return fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
+      return fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream", "X-JC-Visitor": held.token },
         credentials: "omit",

@@ -1310,9 +1310,16 @@ pub(super) async fn table(
         total,
         dataset,
         download,
+        geojson: None,
         map: None,
         geometries: super::viz::geometries(text, READ_ROWS),
     };
+    // Polygon rows read their area and perimeter and draw a simpler outline (T-4697).
+    if super::shape::measured(&mut table) && table.rows.len() == 1 {
+        table.geojson = ask
+            .endpoint_base
+            .and_then(|base| super::shape::item_link(base, slug, kind, text));
+    }
     // Located rows get a map unasked when there is a renderer to draw it (T-4657).
     if let Some(domain) = ask.viz.and_then(super::viz::domain) {
         table.map = super::viz::default_map(&table, domain);
@@ -2604,6 +2611,7 @@ mod tests {
             total: Some(900),
             dataset: Some("https://data.city.test/air".into()),
             download: None,
+            geojson: None,
             map: None,
             geometries: Vec::new(),
         };
