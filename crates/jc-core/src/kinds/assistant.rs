@@ -2428,8 +2428,21 @@ mod deployment_spec_tests {
             refused(with(|s| s["theme"]["subtitle"] = json!("x".repeat(81))).theme_fields()),
             "theme.subtitle"
         );
+        // Every character outside letters, digits, space, hyphen, comma and quotes is refused.
+        let long = "a".repeat(201);
         for font in [
             "",
+            " ",
+            "Arial\nsans",
+            "Arial\tsans",
+            "Arial/x",
+            "Arial\\66",
+            "Arial:x",
+            "Arial !important",
+            "Arial.x",
+            "<style>",
+            "Arial*",
+            long.as_str(),
             "Arial; color: red",
             "url(https://evil.example/f.woff)",
             "a{}",
