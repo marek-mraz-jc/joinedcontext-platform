@@ -161,7 +161,7 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: node --test crates/assistant/widget/render.test.js
+      - run: node --test crates/assistant/widget/render.test.js crates/assistant/widget/app/app.test.mjs
   widget-layout:
     # T-4283: the widget in Chromium at 1280, 768 and 375 px against a stand-in server: one
     # scroll area, header and composer whole, the panel fitted to its content, the language asked

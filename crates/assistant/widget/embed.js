@@ -1,5 +1,7 @@
 // The one-line launcher a city site includes (T-4138, Architecture/23 §3):
 //   <script src="https://assistant.{domain}/d/{publicId}/embed.js" defer></script>
+// or, from the standalone app (T-4694):
+//   <script src="https://ai.{domain}/embed.js" data-deployment="{publicId}" defer></script>
 // One round button in the corner opens the chat page of this host in an iframe; the button and
 // the panel live in a shadow root, so neither the site's styles nor ours leak. It carries no
 // secret: the chat answers only on the deployment's allowed origins, and the iframe's own page
@@ -13,6 +15,12 @@
   if (!me || !me.src) return;
   var src = new URL(me.src);
   var match = /^\/d\/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)\/embed\.js$/.exec(src.pathname);
+  // The standalone app (T-4694) serves one embed.js for every deployment and opens
+  // `/{publicId}` of its own host; its script tag names the deployment.
+  var standalone = !match && src.pathname === "/embed.js";
+  if (standalone) {
+    match = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$/.exec(String(me.getAttribute("data-deployment") || ""));
+  }
   if (!match) return;
   var publicId = match[1];
   var pageLang = String(me.getAttribute("data-lang") || "").slice(0, 2).toLowerCase();
@@ -114,7 +122,7 @@
       frame.title = words.title;
       frame.allow = "clipboard-write";
       frame.referrerPolicy = "no-referrer";
-      frame.src = src.origin + "/d/" + publicId + "/widget?embed=1" + (pageLang ? "&lang=" + encodeURIComponent(pageLang) : "");
+      frame.src = src.origin + (standalone ? "/" + publicId + "?embed=1" : "/d/" + publicId + "/widget?embed=1") + (pageLang ? "&lang=" + encodeURIComponent(pageLang) : "");
       panel.appendChild(frame);
     }
     panel.hidden = false;

@@ -229,7 +229,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
         questions: Arc::new(tokio::sync::Semaphore::new(assistant::chat::MAX_QUESTIONS)),
         answers: Default::default(),
         listings: Default::default(),
-        endpoint_base: None,
+        endpoint_base: Some(url::Url::parse("https://api.example.sk/").expect("a url")),
         viz: None,
         organization: "banskabystrica".into(),
         contexts: Default::default(),
@@ -404,5 +404,40 @@ async fn an_internal_disabled_or_unknown_deployment_has_no_public_context() {
         let (status, _, body) = get(&app, uri, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
     }
+    drop(database).await;
+}
+
+/// T-4694: a copy of the widget on another host reads the page's configuration from the chat's
+/// host: the deployment's own origins only, with the MCP connector a visitor adds to their own
+/// assistant, and nothing a visitor should not read.
+#[tokio::test]
+async fn the_configuration_answers_the_deployment_s_origins_with_its_connector() {
+    let (app, _gateway, _realm, database) = app("context_config").await;
+    let (status, headers, body) = get(&app, "/api/v1/d/bb-doprava/config", Some(ORIGIN)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+    let config: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(config["publicId"], "bb-doprava");
+    assert_eq!(config["mcp"], "https://api.example.sk/api/mcp/d/bb-doprava");
+    assert_eq!(config["frameOrigins"], json!([ORIGIN]));
+    assert!(
+        !body.contains("systemPrompt") && !body.contains("staff"),
+        "{body}"
+    );
+
+    let (status, headers, _) = get(
+        &app,
+        "/api/v1/d/bb-doprava/config",
+        Some("https://evil.example"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "another site's page is refused"
+    );
+    assert!(!headers.contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN));
+    let (status, _, _) = get(&app, "/api/v1/d/nikto/config", Some(ORIGIN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     drop(database).await;
 }

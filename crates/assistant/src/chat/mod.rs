@@ -382,6 +382,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             get(context::document).options(preflight),
         )
         .route(
+            "/api/v1/d/{public_id}/config",
+            get(configuration).options(preflight),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat",
             post(chat_in_portal),
         )
@@ -1158,6 +1162,30 @@ fn utc_of(unix: u64) -> String {
 }
 
 /// A challenge whose proof earns a visitor token; harder while the deployment is busy (T-4653).
+/// `GET /api/v1/d/{publicId}/config`: what the widget's page carries in `data-config`, for a
+/// copy of the widget another host serves (T-4694); a browser elsewhere than the deployment's
+/// origins is refused, like the chat.
+async fn configuration(
+    State(state): State<Arc<ChatState>>,
+    Path(public_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(deployment) = deployment_of(&state, &public_id) else {
+        return problem(404, "No assistant is published under this id.");
+    };
+    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return not_placed_here(),
+    };
+    let mut response = Json(widget::configuration(&state, &deployment)).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=60"),
+    );
+    with_cors(response, origin)
+}
+
 async fn challenge(
     State(state): State<Arc<ChatState>>,
     Path(public_id): Path<String>,

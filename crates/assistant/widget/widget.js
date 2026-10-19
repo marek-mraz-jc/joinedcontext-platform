@@ -8,6 +8,8 @@
   var root = document.getElementById("jc-chat");
   if (!root) return;
   var config = JSON.parse(root.getAttribute("data-config") || "{}");
+  // The chat's own host by default; a copy of the widget on another host names it (T-4694).
+  var api = /^https:\/\/[a-z0-9.-]+(:\d{1,5})?$/i.test(String(config.api || "")) ? config.api : "";
   var WORDS = {
     sk: { ask: "Napíšte otázku", send: "Odoslať", stop: "Zastaviť", stopped: "Odpoveď ste zastavili.",
       tools: "Živé dáta, ktoré smie asistent čítať", thinking: "Hľadám…",
@@ -162,6 +164,7 @@
     expand: "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5",
     collapse: "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5",
     chat: "M4 5h16v11H9l-5 4z",
+    plug: "M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4",
     send: "M5 12h13M12 5l7 7-7 7",
     stop: "M7 7h10v10H7z",
     copy: "M9 9h10v10H9zM5 15V5h10",
@@ -228,6 +231,18 @@
       picker.appendChild(option);
     });
     actions.appendChild(picker);
+  }
+  // "Add to your AI assistant" (T-4694): a public deployment's own MCP connector.
+  var connectOpen = null;
+  if (JCRender.connector(config.mcp, config.publicId, lang)) {
+    connectOpen = el("button", "jc-icon-button jc-connect-open");
+    connectOpen.type = "button";
+    connectOpen.appendChild(icon("plug"));
+    connectOpen.setAttribute("aria-haspopup", "dialog");
+    var connectWord = function () { return JCRender.connector(config.mcp, config.publicId, lang).open; };
+    words(connectOpen, connectWord, "ariaLabel");
+    words(connectOpen, connectWord, "title");
+    actions.appendChild(connectOpen);
   }
   var fresh = iconButton("jc-fresh", "fresh", "fresh");
   actions.appendChild(fresh);
@@ -339,11 +354,69 @@
   var aboutClose = button("jc-about-close", "close");
   [aboutTitle, aboutLead, rememberLabel, rememberHint, aboutBody, aboutClose].forEach(function (n) { about.appendChild(n); });
 
+  var connect = el("dialog", "jc-about jc-connect");
+  connect.setAttribute("aria-labelledby", "jc-connect-title");
+  function fillConnect() {
+    var text = JCRender.connector(config.mcp, config.publicId, lang);
+    connect.textContent = "";
+    var heading = el("h2", "", text.title);
+    heading.id = "jc-connect-title";
+    connect.appendChild(heading);
+    connect.appendChild(el("p", "", text.lead));
+    var field = el("label", "jc-connect-address");
+    field.appendChild(el("span", "", text.address));
+    var address = el("input");
+    address.type = "text";
+    address.readOnly = true;
+    address.value = config.mcp;
+    address.addEventListener("focus", function () { address.select(); });
+    field.appendChild(address);
+    connect.appendChild(field);
+    var copied = el("p", "jc-sr");
+    copied.setAttribute("aria-live", "polite");
+    var copyIt = el("button", "jc-about-close", text.copy);
+    copyIt.type = "button";
+    copyIt.addEventListener("click", function () {
+      var done = function () { copied.textContent = text.copied; };
+      if (navigator.clipboard) navigator.clipboard.writeText(config.mcp).then(done, function () { address.select(); });
+      else address.select();
+    });
+    connect.appendChild(copyIt);
+    connect.appendChild(copied);
+    text.clients.forEach(function (client) {
+      var part = el("details");
+      part.appendChild(el("summary", "", client.name));
+      var list = el("ol");
+      client.steps.forEach(function (step) {
+        var item = el("li", "", step.text);
+        if (step.code) item.appendChild(el("pre", "jc-connect-code", step.code));
+        list.appendChild(item);
+      });
+      part.appendChild(list);
+      connect.appendChild(part);
+    });
+    var first = JCRender.suggestions(config.suggestions, lang, [])[0];
+    if (first) {
+      connect.appendChild(el("p", "jc-hint", text.tryIt));
+      connect.appendChild(el("p", "jc-connect-try", first));
+    }
+    var shut = button("jc-about-close", "close");
+    shut.addEventListener("click", function () { connect.close(); });
+    connect.appendChild(shut);
+  }
+  if (connectOpen) {
+    connectOpen.addEventListener("click", function () {
+      fillConnect();
+      connect.showModal();
+    });
+  }
+
   root.appendChild(head);
   if (tools) root.appendChild(tools);
   root.appendChild(log);
   root.appendChild(foot);
   root.appendChild(about);
+  root.appendChild(connect);
   root.appendChild(announce);
 
   var conversation = null;
@@ -467,6 +540,7 @@
     }
     if (named) retitle();
     if (about.open) fillAbout();
+    if (connect.open) fillConnect();
     if (turns === 0 && !busy && config.enabled !== false) {
       log.textContent = "";
       welcome();
@@ -678,7 +752,7 @@
       var body = { conversation: of, turn: turn, verdict: verdict };
       if (note) body.note = note;
       try {
-        var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
+        var response = await fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/feedback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "omit",
@@ -1032,12 +1106,12 @@
   }
 
   async function earn() {
-    var base = "/api/v1/d/" + encodeURIComponent(config.publicId);
+    var base = api + "/api/v1/d/" + encodeURIComponent(config.publicId);
     var asked = await fetch(base + "/challenge", { credentials: "omit" });
     if (!asked.ok) throw new TypeError("no challenge");
     var challenge = await asked.json();
     var nonce = await new Promise(function (done, failed) {
-      var worker = new Worker("/d/visitor.js");
+      var worker = new Worker((config.assets || "/d/") + "visitor.js");
       worker.onmessage = function (event) { worker.terminate(); done(event.data); };
       worker.onerror = function () { worker.terminate(); failed(new TypeError("no proof")); };
       worker.postMessage({ challenge: challenge.challenge, difficulty: challenge.difficulty });
@@ -1061,7 +1135,7 @@
     }
     history.push({ role: "user", text: question });
     var post = function (held) {
-      return fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
+      return fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream", "X-JC-Visitor": held.token },
         credentials: "omit",

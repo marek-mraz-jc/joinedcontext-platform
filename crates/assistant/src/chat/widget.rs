@@ -164,12 +164,7 @@ fn config(
 }
 
 /// The page of one public deployment: the panel, or with `full` the page of its own.
-pub fn html(
-    deployment: &Deployment,
-    link_hosts: &[String],
-    full: bool,
-    viz: Option<&url::Url>,
-) -> String {
+pub fn html(deployment: &Deployment, config: &serde_json::Value, full: bool) -> String {
     let spec = &deployment.spec;
     // The first of `languages` is the one the chat opens in (MF-52, T-4281); Slovak when none.
     let lang = spec.languages.first().map_or("sk", String::as_str);
@@ -183,8 +178,32 @@ pub fn html(
         lang = escaped(lang),
         title = escaped(&spec.public_id),
         class = if full { " class=\"jc-page\"" } else { "" },
-        config = escaped(&config(deployment, link_hosts, viz).to_string()),
+        config = escaped(&config.to_string()),
     )
+}
+
+/// [`config`] as this host serves it, with the deployment's own MCP connector: the address a
+/// visitor adds to their own AI assistant (T-4694, T-4691), offered by a public deployment only,
+/// since an internal one answers no anonymous client.
+pub fn configuration(state: &ChatState, deployment: &Deployment) -> serde_json::Value {
+    let hosts = state
+        .snapshot
+        .read()
+        .map(|snapshot| link_hosts(deployment, &snapshot.sources))
+        .unwrap_or_default();
+    let mut config = config(deployment, &hosts, state.viz.as_ref());
+    config["mcp"] = json!(mcp_url(state.endpoint_base.as_ref(), deployment));
+    config
+}
+
+/// `https://api.{domain}/api/mcp/d/{publicId}` for a public deployment, else `None`.
+fn mcp_url(api: Option<&url::Url>, deployment: &Deployment) -> Option<String> {
+    if !deployment.spec.channel.is_anonymous() {
+        return None;
+    }
+    api?.join(&format!("api/mcp/d/{}", deployment.spec.public_id))
+        .ok()
+        .map(String::from)
 }
 
 fn published(state: &ChatState, public_id: &str) -> Option<Deployment> {
@@ -254,18 +273,13 @@ fn serve(state: &ChatState, public_id: &str, full: bool) -> Response {
     let Some(deployment) = published(state, public_id) else {
         return missing_page();
     };
-    let hosts = state
-        .snapshot
-        .read()
-        .map(|snapshot| link_hosts(&deployment, &snapshot.sources))
-        .unwrap_or_default();
     let mut response = (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        html(&deployment, &hosts, full, state.viz.as_ref()),
+        html(&deployment, &configuration(state, &deployment), full),
     )
         .into_response();
     if let Ok(value) = HeaderValue::from_str(&policy(&deployment, state.viz.as_ref())) {
@@ -292,6 +306,22 @@ mod tests {
     /// a visitor should not read; the full page and the panel differ only in their layout.
     /// T-4657: with a chart renderer the page may frame that one origin and nothing else; the
     /// rest of the policy stays as it was, and without one nothing changes.
+    /// T-4694: the connector is a public deployment's alone; an internal one answers no
+    /// anonymous client, and without the public API's address there is none to show.
+    #[test]
+    fn only_a_public_deployment_offers_its_mcp_connector() {
+        let api = url::Url::parse("https://api.dev.joinedcontext.com/").expect("url");
+        let public = deployment(json!({"publicId": "bb", "channel": "public", "sources": ["web"]}));
+        let internal =
+            deployment(json!({"publicId": "bb-staff", "channel": "internal", "sources": ["web"]}));
+        assert_eq!(
+            mcp_url(Some(&api), &public).as_deref(),
+            Some("https://api.dev.joinedcontext.com/api/mcp/d/bb")
+        );
+        assert_eq!(mcp_url(Some(&api), &internal), None);
+        assert_eq!(mcp_url(None, &public), None);
+    }
+
     #[test]
     fn the_policy_frames_only_the_chart_renderer() {
         let public = deployment(json!({
@@ -368,8 +398,8 @@ mod tests {
             super::config(&asking, &[], None)["widget"],
             json!({"language": "ask", "languageToggle": false})
         );
-        let panel = html(&public, &[], false, None);
-        let page = html(&public, &[], true, None);
+        let panel = html(&public, &super::config(&public, &[], None), false);
+        let page = html(&public, &super::config(&public, &[], None), true);
         assert!(panel.contains("<html lang=\"sk\">") && panel.contains("<body>"));
         assert!(page.contains("<body class=\"jc-page\">"));
         for html in [&panel, &page] {
@@ -395,7 +425,7 @@ mod tests {
         };
         let public = deployment(spec("public"));
         assert_eq!(config(&public, &[], None)["connectors"], json!([]));
-        assert!(!html(&public, &[], false, None).contains("air-quality"));
+        assert!(!html(&public, &config(&public, &[], None), false).contains("air-quality"));
         let internal = deployment(spec("internal"));
         assert_eq!(
             config(&internal, &[], None)["connectors"],
@@ -414,7 +444,7 @@ mod tests {
         }));
         assert_eq!(config(&paused, &[], None)["enabled"], json!(false));
         assert_eq!(config(&paused, &[], None)["questionChars"], json!(null));
-        assert!(html(&paused, &[], true, None).contains("<html lang=\"en\">"));
+        assert!(html(&paused, &config(&paused, &[], None), true).contains("<html lang=\"en\">"));
     }
 
     /// T-4149: links go to the deployment's own sites, its sources and the national portal; a
