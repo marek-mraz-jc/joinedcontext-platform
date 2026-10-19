@@ -1,0 +1,70 @@
+name: promote
+# The release tier (T-4721): `ship` (image.yml) publishes `dev-<N>`, built and smoke-tested. When
+# ci-full is green on a commit, this adds `:<N>` and `:latest` to the digests ship published for
+# that commit, with no rebuild: the cosign signature and the SBOM attestation are bound to the
+# digest and carry over. It also attests `full-tests/v1` on each digest, the attestation a
+# `tier=production` namespace requires at admission. A red ci-full promotes nothing.
+on:
+  workflow_run:
+    workflows: [ci-full]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha: { description: "commit on main whose ship images to promote (its ci-full must be green)", required: true }
+permissions: { contents: read }
+concurrency: { group: promote, cancel-in-progress: false }
+jobs:
+  promote:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { contents: read, actions: read, packages: write, id-token: write }
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.event.workflow_run.head_sha || inputs.sha }}
+      FULL_RUN: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - name: promote the ship images of the commit
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "not a full commit sha: $SHA"; exit 1; }
+          runs() { gh api "repos/$REPO/actions/runs?head_sha=$SHA&branch=main&status=success&per_page=50" \
+                     --jq "[.workflow_runs[] | select(.name == \"$1\")] | .[0] // empty"; }
+          if [ -z "$FULL_RUN" ]; then
+            FULL_RUN=$(runs ci-full | jq -r .id)
+            [ -n "$FULL_RUN" ] || { echo "no green ci-full on $SHA: nothing is promoted"; exit 1; }
+          fi
+          N=$(runs ship | jq -r .run_number)
+          if [ -z "$N" ]; then
+            echo "::notice::no green ship run on $SHA yet; the next green ci-full promotes"; exit 0
+          fi
+          predicate=$(jq -n --arg sha "$SHA" --arg run "$FULL_RUN" --arg repo "$REPO" \
+            '{commit: $sha, suites: [{name: "ci-full", run: "https://github.com/\($repo)/actions/runs/\($run)"}]}')
+          echo "$predicate" > full-tests.json
+          for path in "" /checkouts /model-tools; do
+            img="ghcr.io/$REPO$path"
+            # The commit's own tag; checkouts and model-tools exist only when the commit built them.
+            digest=$(docker buildx imagetools inspect "$img:$SHA" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest) || digest=""
+            if [ -z "$digest" ]; then
+              [ -z "$path" ] && { echo "$img:$SHA does not exist"; exit 1; }
+              continue
+            fi
+            [ "$(docker buildx imagetools inspect "$img:dev-$N" --format '{{json .Manifest}}' | jq -r .digest)" = "$digest" ] \
+              || { echo "$img:dev-$N is not the digest of $img:$SHA"; exit 1; }
+            cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/$REPO/.github/workflows/image.yml@refs/heads/main" \
+              "$img@$digest" > /dev/null
+            docker buildx imagetools create --tag "$img:$N" --tag "$img:latest" "$img@$digest"
+            for tag in "$N" latest; do
+              [ "$(docker buildx imagetools inspect "$img:$tag" --format '{{json .Manifest}}' | jq -r .digest)" = "$digest" ] \
+                || { echo "$img:$tag does not point at $digest"; exit 1; }
+            done
+            cosign attest --yes --type https://joinedcontext.com/attestations/full-tests/v1 \
+              --predicate full-tests.json "$img@$digest"
+            echo "promoted \`$img@$digest\` (dev-$N) to \`:$N\` and \`:latest\`, full-tests attested" >> "$GITHUB_STEP_SUMMARY"
+          done
