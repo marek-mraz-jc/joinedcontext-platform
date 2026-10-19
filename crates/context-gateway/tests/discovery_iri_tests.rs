@@ -173,6 +173,7 @@ fn endpoint(context: Option<Value>, whitelist: bool) -> Endpoint {
             context: context.map(Into::into),
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
     }
 }

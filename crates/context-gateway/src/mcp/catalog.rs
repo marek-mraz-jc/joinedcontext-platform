@@ -616,6 +616,7 @@ mod tests {
             base_path: String::new(),
             models: Vec::new(),
             policy_names: Vec::new(),
+            manifest_name: String::new(),
             policies: Vec::new(),
         }
     }

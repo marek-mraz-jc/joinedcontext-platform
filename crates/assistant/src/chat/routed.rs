@@ -1683,6 +1683,25 @@ fn sentences(text: &str) -> Vec<&str> {
     out
 }
 
+/// [`answer_rules`], the Endpoints the data loop reads when it reads any (T-4748) and the
+/// catalogue rule when the route asks it.
+fn routed_rules(
+    routing: &Routing,
+    steps: usize,
+    no_tables: bool,
+    missing: &[String],
+    live: &[Shown],
+) -> String {
+    let mut more = answer_rules(routing.data, steps, no_tables, missing);
+    if routing.data && !live.is_empty() {
+        more.push_str(&super::data::endpoints(live));
+    }
+    if routing.catalogue {
+        more.push_str(CATALOGUE_RULE);
+    }
+    more
+}
+
 /// The answer model's extra rules: the data loop's when the route reads data, and the sources
 /// that missed the routing deadline only when no table came back. With rows in hand the question
 /// is answered, and a "could not be reached" sentence is noise citing a dataset that does not say
@@ -2007,6 +2026,27 @@ fn written_in(languages: &[String]) -> String {
     }
 }
 
+/// One line per connector that can be read: its name, its title, its types and the attributes a
+/// `q` may test. The router picks from it, and the data loop names its `endpoint` from it
+/// (T-4748): the one short summary of the data in place of every tool of every Endpoint.
+pub fn catalogue(live: &[Shown]) -> String {
+    let mut out = String::new();
+    for shown in live {
+        out.push_str(&format!("- {}", shown.endpoint));
+        if let Some(title) = &shown.title {
+            out.push_str(&format!(" ({title})"));
+        }
+        out.push_str(&format!(": {}", shown.types.join(", ")));
+        if shown.attributes.is_empty() {
+            out.push_str("; no attributes listed, so no q narrows it");
+        } else {
+            out.push_str(&format!("; {}", shown.attributes.join(", ")));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// The router's messages for the first round; `live` lists the data it may name, `languages`
 /// the languages the sources are written in.
 pub fn router_messages(
@@ -2021,19 +2061,7 @@ pub fn router_messages(
     let mut asked = written_in(languages);
     if !live.is_empty() {
         asked.push_str("Live data you are shown (endpoint (what it holds): types; the attributes a q may test):\n");
-        for shown in live {
-            asked.push_str(&format!("- {}", shown.endpoint));
-            if let Some(title) = &shown.title {
-                asked.push_str(&format!(" ({title})"));
-            }
-            asked.push_str(&format!(": {}", shown.types.join(", ")));
-            if shown.attributes.is_empty() {
-                asked.push_str("; no attributes listed, so no q narrows it");
-            } else {
-                asked.push_str(&format!("; {}", shown.attributes.join(", ")));
-            }
-            asked.push('\n');
-        }
+        asked.push_str(&catalogue(live));
     }
     let own = format!(
         "{}{now}\nThe question:\n{}",
@@ -2738,10 +2766,7 @@ async fn answer_routed(
         )
     };
     let (citations, passages, data) = evidence(&best, &tables);
-    let mut more = answer_rules(routing.data, ask.data_steps, tables.is_empty(), &missing);
-    if routing.catalogue {
-        more.push_str(CATALOGUE_RULE);
-    }
+    let more = routed_rules(&routing, ask.data_steps, tables.is_empty(), &missing, &live);
     let messages = messages_with(
         ask.system_prompt,
         &more,
@@ -2772,7 +2797,6 @@ async fn answer_routed(
             citations,
             steps: routing.reads.len(),
             started,
-            named: routing.reads.iter().map(|r| r.endpoint.clone()).collect(),
         };
         let first = key.is_some();
         let answering = answer_data(q, &mut spent, start, routing.followups, &missing, first);

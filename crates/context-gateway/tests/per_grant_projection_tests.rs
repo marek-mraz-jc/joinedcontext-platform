@@ -358,6 +358,7 @@ fn a_models_type_iri_admits_an_entity_to_its_own_grant_only() {
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         base_path: "/api/endpoint/per-grant-iris".to_owned(),
         models: vec![Model {
             name: "fleet".to_owned(),

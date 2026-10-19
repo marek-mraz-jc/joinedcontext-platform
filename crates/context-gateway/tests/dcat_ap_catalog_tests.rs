@@ -89,6 +89,7 @@ fn endpoint(audience: Audience, catalog: Option<Catalog>) -> Endpoint {
         view_mapping: None,
         catalog: catalog.map(Arc::new),
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy("public"), policy("steward")],
     }
 }

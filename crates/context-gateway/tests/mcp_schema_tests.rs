@@ -201,6 +201,7 @@ fn endpoint() -> Endpoint {
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } }).into()),
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
     }
 }
@@ -250,6 +251,7 @@ fn big_endpoint() -> Endpoint {
             context: Some(json!({ "@context": { "@vocab": "https://hel.fi/schema/" } }).into()),
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
         ..endpoint()
     }
