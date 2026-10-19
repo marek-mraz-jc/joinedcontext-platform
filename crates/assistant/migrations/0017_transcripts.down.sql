@@ -1,0 +1,3 @@
+-- T-4670
+DROP TABLE IF EXISTS turn_steps;
+DROP TABLE IF EXISTS turns;

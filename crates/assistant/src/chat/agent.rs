@@ -213,6 +213,8 @@ pub struct Ask<'a> {
     pub now: time::OffsetDateTime,
     /// The deployment's local time zone; UTC only when `None`.
     pub zone: Option<super::clock::Zone>,
+    /// What the turn did, step by step, for its stored transcript (AG-99, T-4670).
+    pub trace: &'a super::trace::Trace,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
@@ -634,7 +636,8 @@ pub async fn answer(
             // on the last call and its text came back empty, "No Answer" on dev (T-3205).
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
         }
-        let completion = match ask
+        let at = std::time::Instant::now();
+        let completed = ask
             .model
             .complete(
                 ask.deployment,
@@ -643,8 +646,10 @@ pub async fn answer(
                 &tools,
                 allow_tools,
             )
-            .await
-        {
+            .await;
+        ask.trace
+            .model("agent", ask.model.name(), at, completed.as_ref());
+        let completion = match completed {
             Ok(completion) => completion,
             // A spent day answers as search, never as a refusal (T-4286).
             Err(CallError::DaySpent(_)) => {
@@ -871,11 +876,19 @@ async fn run_tool(
             },
         )
         .await;
-        match connector
+        let began = std::time::Instant::now();
+        let answered = connector
             .surface
-            .call(ask.http, &tool.name, arguments)
-            .await
-        {
+            .call(ask.http, &tool.name, arguments.clone())
+            .await;
+        ask.trace.tool(
+            &tool.name,
+            endpoint.as_deref(),
+            &arguments,
+            began,
+            &answered,
+        );
+        match answered {
             Ok(text) => {
                 send(
                     events,

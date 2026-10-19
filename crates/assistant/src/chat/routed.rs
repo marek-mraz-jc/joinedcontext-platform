@@ -322,6 +322,28 @@ pub fn routing(reply: &str, question: &str, live: &[Shown]) -> Routing {
     }
 }
 
+/// The route a turn takes, with its queries and reads, as the transcript's `route` step (T-4670).
+fn note_route(ask: &Ask<'_>, routing: &Routing) {
+    let name = match (routing.direct, routing.rag, routing.data) {
+        (true, ..) => "direct",
+        (false, true, true) => "both",
+        (false, false, true) => "data",
+        _ => "rag",
+    };
+    let reads: Vec<String> = routing
+        .reads
+        .iter()
+        .map(|r| format!("{}/{} {}", r.endpoint, r.kind, r.q.as_deref().unwrap_or("")))
+        .collect();
+    let plan = format!(
+        "queries: {}\nreads: {}",
+        routing.queries.join(" | "),
+        reads.join(" | ")
+    );
+    ask.trace
+        .note("route", name, Instant::now(), None, Some(plan.trim_end()));
+}
+
 /// A type name as the router may be shown it: an NGSI-LD type, short form or IRI.
 fn is_type_name(name: &str) -> bool {
     !name.is_empty()
@@ -913,6 +935,22 @@ async fn digest(ask: &Ask<'_>) -> Result<String, crate::Error> {
 }
 
 async fn search(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
+    let began = Instant::now();
+    let found = search_index(ask, query).await;
+    let output = match &found {
+        Ok(hits) => hits
+            .iter()
+            .map(|hit| format!("{:.3} {}", hit.score, hit.url))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(why) => format!("failed: {why}"),
+    };
+    ask.trace
+        .note("search", "search", began, Some(query), Some(&output));
+    found
+}
+
+async fn search_index(ask: &Ask<'_>, query: &str) -> Result<Vec<Hit>, crate::Error> {
     let vector = ask.embedder.query(query).await?;
     crate::search_projects(
         ask.pool,
@@ -1116,10 +1154,15 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         let arguments = read_arguments(&tool.input_schema, kind, q);
         async move {
             fits(&tool.input_schema, &arguments)?;
-            connector
+            let began = Instant::now();
+            let result = connector
                 .surface
-                .call(ask.http, "query_entities", arguments)
-                .await
+                .call(ask.http, "query_entities", arguments.clone())
+                .await;
+            let endpoint = Some(connector.endpoint.as_str());
+            ask.trace
+                .tool("query_entities", endpoint, &arguments, began, &result);
+            result
         }
     };
     // A `q` the gateway refuses (an attribute the type lacks, a broken expression) costs the
@@ -1620,6 +1663,8 @@ async fn route_beside_search(
             .model
             .ask(ask.deployment, ask.tokens_per_day, router, messages)
             .await;
+        let model = router.model.unwrap_or(ask.model.name());
+        ask.trace.model("router", model, at, reply.as_ref());
         (reply, at.elapsed())
     };
     let search = search_first(q, spent, judge, reserve);
@@ -1791,7 +1836,9 @@ pub async fn answer(
         Ok(reply) => {
             count(&mut spent, &reply);
             spent.served(Stage::Route, &reply);
-            routing(&reply.text, question, &live)
+            let routing = routing(&reply.text, question, &live);
+            note_route(ask, &routing);
+            routing
         }
         Err(CallError::DaySpent(_)) => {
             return with_search(spent, search_only(ask, &Cap::Day, question, events).await)
@@ -1951,6 +1998,8 @@ async fn search_first(
                     .model
                     .ask(q.ask.deployment, q.ask.tokens_per_day, judge, &messages)
                     .await;
+                let model = judge.model.unwrap_or(q.ask.model.name());
+                q.ask.trace.model("judge", model, at, reply.as_ref());
                 Some((reply, at.elapsed()))
             } else {
                 None
@@ -2111,6 +2160,8 @@ async fn search_rounds(
             .model
             .ask(q.ask.deployment, q.ask.tokens_per_day, judge, &messages)
             .await;
+        let model = judge.model.unwrap_or(q.ask.model.name());
+        q.ask.trace.model("judge", model, at, reply.as_ref());
         Stages::add(&mut spent.stages.judge, at);
         match reply {
             Ok(reply) => {
@@ -2235,6 +2286,9 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         .model
         .stream(ask.deployment, ask.tokens_per_day, &call, &messages, events)
         .await;
+    let model = call.model.unwrap_or(ask.model.name());
+    ask.trace
+        .model("answer", model, at, streamed.as_ref().map(|(done, _)| done));
     Stages::add(&mut spent.stages.answer, at);
     let (completion, first) = match streamed {
         Ok(streamed) => streamed,
