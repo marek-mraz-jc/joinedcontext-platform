@@ -228,6 +228,12 @@ pub struct Ask<'a> {
     pub zone: Option<super::clock::Zone>,
     /// What the turn did, step by step, for its stored transcript (AG-99, T-4670).
     pub trace: &'a super::trace::Trace,
+    /// The deployment's languages, first the one it answers in when it cannot tell.
+    pub languages: &'a [String],
+    /// The chat's example questions by language: what a refusal offers instead (T-4730).
+    pub suggestions: &'a std::collections::BTreeMap<String, Vec<String>>,
+    /// The body's name in the chat's header: the publisher a refusal names (T-4730).
+    pub title: Option<&'a jc_core::kinds::Localised>,
 }
 
 /// Data for the model: `<` and `>` escaped, so an earlier turn cannot close its own block.
@@ -606,6 +612,21 @@ pub async fn answer(
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
+    // A bare sum or an order to drop the rules is refused before any model call (T-4730).
+    if super::scope::obvious(question) {
+        super::scope::refuse(ask, question, None, events).await;
+        return Spent::default();
+    }
+    answer_in_scope(ask, history, question, events).await
+}
+
+/// [`answer`] for a question the pre-check let through: the routed or the model-driven loop.
+async fn answer_in_scope(
+    ask: &Ask<'_>,
+    history: &[Turn],
+    question: &str,
+    events: &Sender<Event>,
+) -> Spent {
     if ask.public_only && ask.functions.is_none() {
         return super::routed::answer(ask, history, question, events).await;
     }
@@ -692,6 +713,7 @@ pub async fn answer(
             }
             let (text, dangling) = without_dangling(&text, &citations);
             spent.dangling += dangling;
+            let text = super::scope::checked_scripts(ask, question, &text, &citations);
             let used = markers(&text);
             citations.retain(|c| used.contains(&c.n));
             name_sources(ask, &mut citations).await;
