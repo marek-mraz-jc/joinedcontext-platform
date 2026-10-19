@@ -469,10 +469,29 @@ fn served_routes() -> BTreeSet<String> {
         "app::router merges a surface this sweep does not read"
     );
     let mut routes = BTreeSet::new();
-    for (_, source) in SURFACES {
+    for (name, source) in SURFACES {
+        unmounted_routers_refused(name, source);
         routes.extend(routes_in(source));
     }
     routes
+}
+
+/// A router mounted by `.nest`, `.nest_service` or `.route_service` serves paths no `.route(`
+/// names, so this sweep would pass it without a row (T-4774): refused instead.
+fn unmounted_routers_refused(name: &str, source: &str) {
+    let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+    for mount in [".nest(", ".nest_service(", ".route_service("] {
+        assert!(
+            !source.contains(mount),
+            "{name} mounts a router by `{mount}`, whose routes this sweep cannot read"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "whose routes this sweep cannot read")]
+fn a_nested_router_is_refused_not_swept_blind() {
+    unmounted_routers_refused("fixture", r#"Router::new().nest("/internal", internal())"#);
 }
 
 fn routes_in(source: &str) -> BTreeSet<String> {

@@ -3549,6 +3549,7 @@ dependencies = [
  "jsonschema",
  "jsonwebtoken",
  "regex",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",
