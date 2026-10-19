@@ -365,6 +365,43 @@ async fn store(pool: &PgPool, catalogue: Catalogue<'_>, page: Written<'_>) -> Re
     Ok(page_id)
 }
 
+/// What each indexed page was written from: its `last_modified` and content hash, by URL.
+type Known = HashMap<String, (Option<String>, Option<String>)>;
+
+/// Whether the page at `url` was written from this `modified` and this content (T-4366).
+fn unchanged(known: &Known, url: &str, modified: &Option<String>, hash: &str) -> bool {
+    known.get(url).is_some_and(|(held_modified, held)| {
+        held_modified.is_some() && held_modified == modified && held.as_deref() == Some(hash)
+    })
+}
+
+/// Writes the how-to the interfaces share, once, at the catalogue's own address (T-4747), when
+/// it changed; returns that address, which the sweep keeps.
+async fn store_connect(
+    pool: &PgPool,
+    catalogue: Catalogue<'_>,
+    base: &Url,
+    known: &Known,
+    html: &str,
+    sink: &mut impl Sink,
+) -> Result<String, Error> {
+    let url = base.to_string();
+    let hash = hex::encode(Sha256::digest(html.as_bytes()));
+    if known
+        .get(&url)
+        .is_none_or(|(_, held)| held.as_deref() != Some(hash.as_str()))
+    {
+        let written = Written {
+            url: &url,
+            hash: &hash,
+            modified: None,
+        };
+        let page_id = store(pool, catalogue, written).await?;
+        sink.page(page_id, &url, catalogue.language, html).await;
+    }
+    Ok(url)
+}
+
 /// Reads the public datasets of `catalogue` into its site, handing each new or changed dataset
 /// to `sink` as a page.
 pub async fn sync_ckan(
@@ -384,7 +421,7 @@ pub async fn sync_ckan(
     let base = base_of(ckan_url)?;
     // What each indexed dataset was written from, and the page it became: a dataset is written
     // again when either changed, so a new page format reaches the unchanged ones too (T-4366).
-    let known: HashMap<String, (Option<String>, Option<String>)> = {
+    let known: Known = {
         let mut tx = crate::project_scope(pool, project).await?;
         let rows: Vec<(String, Option<String>, Option<String>)> =
             sqlx::query_as("SELECT url, last_modified, content_hash FROM pages WHERE site_id = $1")
@@ -423,11 +460,7 @@ pub async fn sync_ckan(
             }
             let html = dataset_html(&dataset);
             let hash = hex::encode(Sha256::digest(html.as_bytes()));
-            if known.get(&url).is_some_and(|(modified, held)| {
-                modified.is_some()
-                    && *modified == dataset.metadata_modified
-                    && held.as_deref() == Some(hash.as_str())
-            }) {
+            if unchanged(&known, &url, &dataset.metadata_modified, &hash) {
                 continue;
             }
             let written = Written {
@@ -446,23 +479,8 @@ pub async fn sync_ckan(
     }
     report.datasets = listed.len();
 
-    // The how-to the interfaces share, once, at the catalogue's own address (T-4747).
     if let Some(html) = connect {
-        let url = base.to_string();
-        let hash = hex::encode(Sha256::digest(html.as_bytes()));
-        if known
-            .get(&url)
-            .is_none_or(|(_, held)| held.as_deref() != Some(hash.as_str()))
-        {
-            let written = Written {
-                url: &url,
-                hash: &hash,
-                modified: None,
-            };
-            let page_id = store(pool, catalogue, written).await?;
-            sink.page(page_id, &url, language, &html).await;
-        }
-        listed.insert(url);
+        listed.insert(store_connect(pool, catalogue, &base, &known, &html, sink).await?);
     }
 
     // The whole listing was read: what it no longer names goes, with its passages.
