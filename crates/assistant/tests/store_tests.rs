@@ -805,3 +805,77 @@ async fn a_news_page_ranks_below_the_same_passage_elsewhere() {
     assert_eq!(order, vec![ids[1], ids[0]]);
     drop_database(admin, pool, &name).await;
 }
+
+/// T-4747: an Endpoint that serves many types is named by every dataset page that publishes one
+/// of them; none of those is "its" page, so none is lent to a citation of another type (bike
+/// routes were cited as "Členovia samosprávy"). An Endpoint with one dataset keeps its page.
+#[tokio::test]
+async fn an_endpoint_named_by_two_dataset_pages_lends_neither() {
+    let (admin, pool, name) = database("endpoint_shared").await;
+    let v = || embedding(0, None);
+    let pages = site(
+        &pool,
+        "bbsk",
+        "bbsk-ckan",
+        &[
+            (
+                "# Členovia samosprávy\n\nNGSI-LD (https://gw.example/api/endpoint/bbsk-all/ngsi-ld/v1/entities?type=Person)",
+                "sk",
+                "public",
+                v(),
+            ),
+            (
+                "# Stredné školy\n\nNGSI-LD (https://gw.example/api/endpoint/bbsk-all/ngsi-ld/v1/entities?type=School)",
+                "sk",
+                "public",
+                v(),
+            ),
+            (
+                "# Ovzdušie\n\nNGSI-LD (https://gw.example/api/endpoint/bbsk-air/ngsi-ld/v1/entities?type=AirQualityObserved)",
+                "sk",
+                "public",
+                v(),
+            ),
+        ],
+    )
+    .await;
+    for (id, dataset) in pages.iter().zip(["clenovia", "stredne-skoly", "ovzdusie"]) {
+        sqlx::query("UPDATE chunks SET url = $2 WHERE id = $1")
+            .bind(id)
+            .bind(format!("https://opendata.example/dataset/{dataset}"))
+            .execute(&pool)
+            .await
+            .expect("the dataset page's url");
+    }
+    let mut tx = project_scope(&pool, "bbsk").await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+    let ckan = ["bbsk-ckan".to_owned()];
+    let shared = endpoint_page(&mut tx, "bbsk-all", &ckan, true)
+        .await
+        .expect("page");
+    assert_eq!(
+        shared, None,
+        "no dataset page of a shared Endpoint is its page"
+    );
+    let own = endpoint_page(&mut tx, "bbsk-air", &ckan, true)
+        .await
+        .expect("page");
+    assert_eq!(
+        own.as_deref(),
+        Some("https://opendata.example/dataset/ovzdusie"),
+        "an Endpoint with one dataset keeps it"
+    );
+    let typed = dataset_page(&mut tx, &["bbsk-all".to_owned()], "School", &ckan, true)
+        .await
+        .expect("page");
+    assert_eq!(
+        typed.as_deref(),
+        Some("https://opendata.example/dataset/stredne-skoly"),
+        "the type finds its own page"
+    );
+    tx.rollback().await.expect("rollback");
+    drop_database(admin, pool, &name).await;
+}
