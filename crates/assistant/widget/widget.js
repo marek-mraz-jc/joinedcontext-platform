@@ -16,9 +16,9 @@
       script: "Skript, ktorý asistent spustil", failed: "Odpoveď sa nepodarilo načítať. Skúste to znova.",
       offline: "Nepodarilo sa spojiť so službou. Skontrolujte pripojenie a skúste to znova.",
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
-      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
+      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", limit: "Asistent dosiahol svoj limit. Skúste to znova neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
-      reading: "Čítam", live: "Živé dáta", source: "Zdroj", fresh: "Nová konverzácia", expand: "Zväčšiť", collapse: "Zmenšiť", copy: "Kopírovať",
+      reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
@@ -45,9 +45,9 @@
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
       offline: "The service could not be reached. Check your connection and try again.",
       busy: "You asked many questions at once. Wait a moment and try again.",
-      paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
+      paused: "The assistant is not answering right now. Try again later.", limit: "The assistant has reached its limit. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
-      reading: "Reading", live: "Live data", source: "Source", fresh: "New conversation", expand: "Expand", collapse: "Collapse", copy: "Copy",
+      reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
@@ -74,9 +74,9 @@
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
       offline: "Službu se nepodařilo zastihnout. Zkontrolujte připojení a zkuste to znovu.",
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
-      paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
+      paused: "Asistent teď neodpovídá. Zkuste to později.", limit: "Asistent dosáhl svého limitu. Zkuste to znovu později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
-      reading: "Čtu", live: "Živá data", source: "Zdroj", fresh: "Nová konverzace", expand: "Zvětšit", collapse: "Zmenšit", copy: "Kopírovat",
+      reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
@@ -647,7 +647,7 @@
       item.replaceChild(body, item.streaming);
       item.streaming = null;
     } else {
-      item.appendChild(body);
+      item.insertBefore(body, item.visuals || null);
     }
     announce.textContent = body.textContent;
     // One row under the answer (T-4364): who and when, copy, thumbs, then the sources' badges and
@@ -858,7 +858,7 @@
     frame.title = title;
     frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox");
     frame.setAttribute("referrerpolicy", "no-referrer");
-    var message = { type: "jc-viz-show", spec: JCRender.vizSpec(payload.spec, lang), rows: payload.rows, lang: lang };
+    var message = { type: "jc-viz-show", spec: JCRender.vizSpec(payload.spec, lang, payload.labels), rows: payload.rows, lang: lang };
     frame.addEventListener("load", function () {
       frame.contentWindow.postMessage(message, VIZ);
     });
@@ -883,7 +883,7 @@
     var figure = el("figure", "jc-data jc-viz-card");
     var title = typeof data.spec.title === "string" && data.spec.title ? data.spec.title : w.chart;
     figure.appendChild(vizFrame(data, title, function () { figure.remove(); }));
-    item.insertBefore(figure, item.status && item.status.parentNode === item ? item.status : null);
+    visual(item, figure);
   }
 
   // "Table | Map" over a data card whose rows have places; the map loads when it is first shown,
@@ -921,16 +921,30 @@
     pick(JCRender.mapFirst(data));
   }
 
+  // An answer's visuals sit under its text (T-4682): one box the text is put before, and with more
+  // than one visual each is folded to its caption.
+  function visual(item, figure) {
+    if (!item.visuals) {
+      item.visuals = el("div", "jc-visuals");
+      item.insertBefore(item.visuals, item.status && item.status.parentNode === item ? item.status : null);
+    }
+    item.visuals.appendChild(figure);
+    var folds = item.visuals.querySelectorAll("details.jc-data");
+    if (item.visuals.children.length > 1) Array.prototype.forEach.call(folds, function (d) { d.open = false; });
+  }
+
   function showData(item, data) {
     var shown = JCRender.table(data, lang);
     if (!shown) return;
-    var figure = el("figure", "jc-data");
+    var figure = el("details", "jc-data");
+    figure.open = true;
+    figure.appendChild(el("summary", "", shown.caption || w.table));
     var scroll = el("div", "jc-data-scroll");
     scroll.tabIndex = 0;
     scroll.setAttribute("role", "region");
     scroll.setAttribute("aria-label", w.table);
     var table = el("table");
-    if (shown.caption) table.appendChild(el("caption", "", shown.caption));
+    if (shown.caption) table.appendChild(el("caption", "jc-sr", shown.caption));
     var headRow = el("tr");
     shown.columns.forEach(function (c, i) {
       var th = el("th", shown.numeric[i] ? "jc-num" : "", c);
@@ -944,6 +958,12 @@
       row.forEach(function (cell, i) {
         // A long text keeps two lines; the whole of it is its title.
         var td = tr.appendChild(el("td", shown.numeric[i] ? "jc-num" : "", ""));
+        if (cell && typeof cell === "object") {
+          // A long address reads as one short word, the whole of it its title (T-4682).
+          var a = td.appendChild(link(cell.href, cell.text));
+          a.title = cell.href;
+          return;
+        }
         var text = td.appendChild(el("span", "jc-cell", cell));
         if (cell.length > 40) text.title = cell;
       });
@@ -955,24 +975,27 @@
     if (VIZ && data.map && typeof data.map === "object") mapTabs(figure, scroll, drawn, data);
     if (shown.dataset || shown.download) {
       var links = el("p", "jc-data-links");
-      if (shown.dataset) links.appendChild(link(shown.dataset, w.dataset));
+      // More rows than the panel shows: the dataset holds them all (T-4682).
+      var more = typeof data.total === "number" && data.total > shown.rows.length;
+      if (shown.dataset) links.appendChild(link(shown.dataset, more ? w.allRows : w.dataset));
       if (shown.download) links.appendChild(link(shown.download, w.download));
       figure.appendChild(links);
     }
-    item.insertBefore(figure, item.status && item.status.parentNode === item ? item.status : null);
+    visual(item, figure);
     item.data = figure;
   }
 
   // A failed answer as one quiet line in the visitor's language and a Retry that asks the same
-  // question again, through the same route and its per-visitor limit (T-4253).
-  function fail(item, word) {
+  // question again, through the same route and its per-visitor limit (T-4253); a limit offers no
+  // Retry, since nothing changes before it resets (T-4671).
+  function fail(item, word, detail) {
     if (item.status) item.status.remove();
     if (item.streaming) {
       item.streaming.remove();
       item.streaming = null;
     }
     item.classList.add("jc-error");
-    var p = el("p", "", w[word]);
+    var p = el("p", "", JCRender.said(word, detail, lang, w));
     p.setAttribute("role", "alert");
     item.appendChild(p);
     if (word === "full") {
@@ -1019,7 +1042,7 @@
       asked += 1;
       item.turn = asked;
     } else if (name === "stage" && item.status) {
-      (item.stages = item.stages || []).push(data);
+      (item.stages = item.stages || []).push(Object.assign({}, data, { ms: Date.now() - (item.startedMs || Date.now()) }));
       var line = JCRender.stage(data, lang);
       if (line) {
         item.status.textContent = line;
@@ -1045,7 +1068,7 @@
       }
       if (!item.streaming) {
         item.streaming = el("div", "jc-answer jc-streaming");
-        item.appendChild(item.streaming);
+        item.insertBefore(item.streaming, item.visuals || null);
       }
       item.text = (item.text || "") + data.text;
       if (!item.frame) item.frame = requestAnimationFrame(function () { paint(item); });
@@ -1074,7 +1097,7 @@
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
     } else if (name === "error") {
-      fail(item, JCRender.trouble(data.status, data.title));
+      fail(item, JCRender.trouble(data.status, data.title), data.detail);
     }
   }
 
@@ -1150,7 +1173,7 @@
     if (response.status === 401) response = await post(await visitorToken(true));
     if (!response.ok || !response.body) {
       var problem = await response.json().catch(function () { return {}; });
-      fail(item, refusal(response.status, problem.title));
+      fail(item, refusal(response.status, problem.title), problem.detail);
       return;
     }
     var reader = response.body.getReader();
@@ -1203,6 +1226,7 @@
     item.status = el("p", "jc-status", w.thinking);
     item.status.setAttribute("role", "status");
     item.appendChild(item.status);
+    item.startedMs = Date.now();
     busy = new AbortController();
     send.hidden = true;
     stop.hidden = false;
