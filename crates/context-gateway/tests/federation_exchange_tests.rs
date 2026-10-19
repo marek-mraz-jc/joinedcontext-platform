@@ -78,6 +78,7 @@ fn endpoint(slug: &str, space: &str, audience: Audience) -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy(space), writer(space)],
     }
 }

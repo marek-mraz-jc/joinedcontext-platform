@@ -84,6 +84,7 @@ fn endpoint(
             context: None,
         }],
         policy_names: Vec::new(),
+        manifest_name: title.to_lowercase().replace(' ', "-"),
         policies: vec![policy],
     }
 }
@@ -326,7 +327,7 @@ async fn each_row_says_enough_to_pick_the_endpoint() {
         "{text}"
     );
     let (status, _, body) = raw(
-        app,
+        app.clone(),
         rpc(None, call("get_endpoint", json!({ "endpoint": OPEN }))),
     )
     .await;
@@ -334,10 +335,9 @@ async fn each_row_says_enough_to_pick_the_endpoint() {
     let answer: Value = serde_json::from_str(&body).expect("JSON");
     let row = &answer["result"]["structuredContent"]["endpoint"];
     assert_eq!(row["slug"], json!(OPEN));
-    assert_eq!(
-        row["attributes"],
-        json!({ "AirQualityObserved": ["location", "name"] })
-    );
+    // T-4748: short by default, the attributes of one type on request.
+    assert!(row.get("attributes").is_none(), "{row}");
+    assert_eq!(row["types"], json!(["AirQualityObserved"]));
     assert_eq!(row["temporal"], json!(true));
     assert_eq!(row["description"], json!({ "sk": "Dáta: Air quality" }));
     assert_eq!(row["dcat"], json!(format!("{HOST}/api/endpoint/{OPEN}/")));
@@ -347,6 +347,82 @@ async fn each_row_says_enough_to_pick_the_endpoint() {
             "{HOST}/api/endpoint/{OPEN}/schema/v1/model.linkml.yaml"
         ))
     );
+    let base = format!("{HOST}/api/endpoint/{OPEN}/schema");
+    assert_eq!(
+        row["schemas"],
+        json!({
+            "index": format!("{base}/index.json"),
+            "linkml": format!("{base}/v1/model.linkml.yaml"),
+            "shacl": format!("{base}/v1/model.shacl.ttl"),
+            "jsonSchema": format!("{base}/v1/model.schema.json"),
+            "context": format!("{base}/v1/context.jsonld"),
+        })
+    );
+    let whole = answer["result"]["structuredContent"].to_string();
+    assert!(whole.len() < 2_000, "{} bytes: {whole}", whole.len());
+
+    // The readable {project}/{name} names it too, without case.
+    let by_name = call_ok(app.clone(), json!({ "endpoint": "Mesto/air-quality" })).await;
+    assert_eq!(by_name["endpoint"]["slug"], json!(OPEN));
+    let detail = call_ok(
+        app.clone(),
+        json!({ "endpoint": OPEN, "detail": "attributes", "type": "AirQualityObserved" }),
+    )
+    .await;
+    assert_eq!(
+        detail["endpoint"]["attributes"],
+        json!({ "AirQualityObserved": ["location", "name"] })
+    );
+    for (arguments, says) in [
+        (
+            json!({ "endpoint": OPEN, "detail": "attributes" }),
+            "comes with one `type`",
+        ),
+        (
+            json!({ "endpoint": OPEN, "type": "AirQualityObserved" }),
+            "comes with one `type`",
+        ),
+        (
+            json!({ "endpoint": OPEN, "detail": "attributes", "type": "Bike" }),
+            "is no type of this Endpoint",
+        ),
+        (
+            json!({ "endpoint": OPEN, "detail": "everything" }),
+            "`detail` is",
+        ),
+        // The internal Endpoint is not found by its readable name without a token.
+        (
+            json!({ "endpoint": "mesto/bike-stations" }),
+            "no Endpoint you may read",
+        ),
+    ] {
+        let (_, _, body) = raw(
+            app.clone(),
+            rpc(None, call("get_endpoint", arguments.clone())),
+        )
+        .await;
+        let answer: Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(
+            answer["result"]["isError"],
+            json!(true),
+            "{arguments}: {body}"
+        );
+        assert!(body.contains(says), "{arguments}: {body}");
+        assert!(!body.contains(INNER), "{arguments}: {body}");
+    }
+}
+
+/// The structured half of a get_endpoint call that answered.
+async fn call_ok(app: Router, arguments: Value) -> Value {
+    let (status, _, body) = raw(app, rpc(None, call("get_endpoint", arguments.clone()))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("JSON");
+    assert_ne!(
+        answer["result"]["isError"],
+        json!(true),
+        "{arguments}: {body}"
+    );
+    answer["result"]["structuredContent"].clone()
 }
 
 #[tokio::test]

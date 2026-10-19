@@ -531,6 +531,7 @@ fn endpoint(base_path: String) -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names: vec!["readers".to_owned()],
+        manifest_name: String::new(),
         policies: vec![serde_norway::from_str(GRANT).expect("the policy parses")],
     }
 }

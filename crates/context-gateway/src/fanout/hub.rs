@@ -763,6 +763,7 @@ pub(crate) mod tests_support {
             base_path: "/api/endpoint/s".to_owned(),
             models: Vec::new(),
             policy_names: Vec::new(),
+            manifest_name: String::new(),
             policies: Vec::new(),
         })
     }
