@@ -821,7 +821,7 @@ async fn connected(
             timeout: Duration::from_secs(u64::from(connector.timeout_seconds)),
             token,
         };
-        let near = siblings(&snapshot.endpoints, project, &endpoint.space);
+        let near = siblings(&snapshot.endpoints, &resolved.project, &endpoint.space);
         reachable.push((connector, endpoint.title.clone(), near, surface));
     }
     // Every listing at once, so a question waits for the slowest connector, not their sum (T-4680).

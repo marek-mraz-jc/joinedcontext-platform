@@ -797,6 +797,7 @@ mod tests {
                     slug: slug.into(),
                     audience: audience.into(),
                     title: None,
+                    space: String::new(),
                 },
             );
             if let Some(theme) = themes {
