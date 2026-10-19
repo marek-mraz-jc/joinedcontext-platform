@@ -508,16 +508,48 @@ async fn call_of(ask: &Ask<'_>, c: &Checked<'_>, left: Duration) -> Sent {
     if let (Ok(text), "query_entities", Some(kind)) =
         (&answered, tool.name.as_str(), type_of(arguments))
     {
-        table = super::routed::table(
-            ask,
-            connector,
-            &kind,
-            text,
-            &super::routed::asked_of(arguments),
-        )
-        .await;
+        let asked = super::routed::asked_of(arguments);
+        table = super::routed::table(ask, connector, &kind, text, &asked).await;
+        if let Some(wider) = table.as_ref().and_then(|t| widened(arguments, t)) {
+            let more = Instant::now();
+            let read = tokio::time::timeout(
+                left.saturating_sub(began.elapsed()),
+                connector.surface.call(ask.http, &tool.name, wider.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| Err("the source did not answer within the question's time".into()));
+            ask.trace
+                .tool(&tool.name, Some(&connector.endpoint), &wider, more, &read);
+            if let Ok(text) = read {
+                let shown = super::routed::table(ask, connector, &kind, &text, &asked).await;
+                if shown.as_ref().map_or(0, |t| t.rows.len())
+                    > table.as_ref().map_or(0, |t| t.rows.len())
+                {
+                    table = shown;
+                }
+            }
+        }
     }
     (answered, table, began.elapsed().as_millis() as u64)
+}
+
+/// The arguments that read a visitor's table again with a full page (T-4761), when the model
+/// asked fewer rows than match and the table can show: a count asked with `limit: 1` showed
+/// "first 1 of 47" and one row. The model's own result stays as it asked. None for a page
+/// further on (`offset`, `cursor`) or a table that already shows what fits.
+fn widened(arguments: &Value, table: &Table) -> Option<Value> {
+    if arguments.get("offset").is_some() || arguments.get("cursor").is_some() {
+        return None;
+    }
+    let page = usize::try_from(table.total?)
+        .unwrap_or(usize::MAX)
+        .min(super::routed::READ_ROWS);
+    if table.rows.len() >= page {
+        return None;
+    }
+    let mut wider = arguments.clone();
+    wider["limit"] = json!(page);
+    Some(wider)
 }
 
 /// A sent call's result, in the order of the reply's calls: its `tool` event, its table, and the
@@ -1055,6 +1087,28 @@ mod tests {
             ("reading", None)
         );
         assert_eq!(type_of(&json!({"type": []})), None);
+    }
+
+    /// T-4761: `limit: 1, count: true` on 47 bridges showed "first 1 of 47" and one row; the
+    /// visitor's table is read again with min(total, 50) rows, and only then.
+    #[test]
+    fn a_count_asked_with_one_row_is_shown_with_a_full_page() {
+        let table = |rows: usize, total: Option<u64>| Table {
+            rows: vec![vec![json!("Most")]; rows],
+            total,
+            ..Default::default()
+        };
+        let asked = json!({"type": ["Bridge"], "q": "age>100", "limit": 1, "count": true});
+        assert_eq!(
+            widened(&asked, &table(1, Some(47))),
+            Some(json!({"type": ["Bridge"], "q": "age>100", "limit": 47, "count": true}))
+        );
+        assert_eq!(widened(&asked, &table(1, Some(1031))).unwrap()["limit"], 50);
+        assert_eq!(widened(&asked, &table(1, Some(1))), None);
+        assert_eq!(widened(&asked, &table(50, Some(1031))), None);
+        assert_eq!(widened(&asked, &table(1, None)), None);
+        let further = json!({"type": ["Bridge"], "limit": 1, "offset": 10, "count": true});
+        assert_eq!(widened(&further, &table(1, Some(47))), None);
     }
 
     /// T-4657: an accepted call sends one `visualization` event; a second call in the answer and
