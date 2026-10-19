@@ -93,6 +93,17 @@ const SYNONYMS: &[(&str, &str)] = &[
     ("udalosti", "events"),
     ("parkovanie", "parking"),
     ("doprava", "transport traffic"),
+    // Public transport in Slovak and Czech, to the words and the Gtfs types an operator's
+    // Endpoint serves (T-4734).
+    ("mhd", "public transport gtfs"),
+    ("hromadna doprava", "public transport gtfs"),
+    ("verejna doprava", "public transport gtfs"),
+    ("autobus", "bus public transport gtfs"),
+    ("elektricka", "tram public transport gtfs"),
+    ("tramvaj", "tram public transport gtfs"),
+    ("cestovny poriadok", "timetable departures gtfs"),
+    ("jizdni rad", "timetable departures gtfs"),
+    ("zastavky", "stops"),
     ("pocasie", "weather"),
     ("skoly", "schools"),
     ("zmluvy", "contracts"),
@@ -580,5 +591,80 @@ mod tests {
         assert!(question("ovzdušie").contains(&"quali".to_owned()));
         assert!(question("air quality").contains(&"ovzdu".to_owned()));
         assert!(question("events Zilina").contains(&"poduj".to_owned()));
+    }
+
+    /// T-4734: on dev "mestská hromadná doprava" ranked "Compare districts" and Praha's city data
+    /// above HSL. The Slovak and Czech public-transport words find the Endpoint serving Gtfs
+    /// types first.
+    #[test]
+    fn public_transport_words_find_the_gtfs_endpoint_first() {
+        let dataset = |n: &str, en: &str, sk: &str, text: &str| {
+            json!({
+                "id": format!("urn:ngsi-ld:Dataset:{n}"), "type": "Dataset",
+                "title": { "languageMap": { "en": en, "sk": sk } },
+                "searchText": { "value": text },
+                "dataService": { "value": [{ "identifier": n }] },
+            })
+        };
+        let entities = [
+            dataset(
+                "districts",
+                "Compare districts",
+                "Porovnanie mestských častí",
+                "compare districts porovnanie mestskych casti doprava obyvatelstvo",
+            ),
+            dataset(
+                "praha",
+                "Praha city data",
+                "Údaje mesta Praha",
+                "praha mestska data predajne cestovnych listkov doprava parkovanie",
+            ),
+            dataset(
+                "roads",
+                "Road transport statistics",
+                "Cestná doprava",
+                "cestna nakladna a osobna doprava statistika",
+            ),
+            dataset(
+                "hsl",
+                "HSL public transport",
+                "Verejná doprava HSL",
+                "hsl public transport vehicles stops departures alerts park and ride",
+            ),
+        ];
+        let mut facts = HashMap::new();
+        facts.insert(
+            "hsl".to_owned(),
+            Facts {
+                types: ["GtfsStop", "GtfsRoute", "Vehicle", "Alert"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                ..Facts::default()
+            },
+        );
+        let index = Index::build(&entities, &facts);
+        for asked in [
+            "mestská hromadná doprava",
+            "Máte dáta o MHD?",
+            "verejná doprava",
+            "autobus a električka",
+            "cestovný poriadok",
+            "městská hromadná doprava",
+            "jízdní řád",
+        ] {
+            let hits = index
+                .search(
+                    &json!({ "query": asked })
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+                .expect("a search");
+            assert_eq!(
+                hits["structuredContent"]["hits"][0]["endpoint"],
+                json!("hsl"),
+                "{asked}: {hits}"
+            );
+        }
     }
 }
