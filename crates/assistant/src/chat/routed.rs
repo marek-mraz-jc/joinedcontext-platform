@@ -2405,10 +2405,19 @@ pub async fn answer(
     events: &Sender<Event>,
 ) -> Spent {
     let started = Instant::now();
-    let Some(key) = cache_key(ask, history, question).await else {
-        return answer_routed(ask, history, question, events, None, &Keep::default()).await;
+    // The cache key and the connectors' lists are read at once (T-4731): one after another they
+    // took about 2.4 s before the router started on dev. A cache hit does not wait for the lists.
+    let listing = listed(ask, history);
+    tokio::pin!(listing);
+    let mut early = None;
+    let key = tokio::select! {
+        key = cache_key(ask, history, question) => key,
+        out = &mut listing => {
+            early = Some(out);
+            cache_key(ask, history, question).await
+        }
     };
-    if let Some((replay, age)) = ask.cache.get(&key) {
+    if let Some((replay, age)) = key.and_then(|key| ask.cache.get(&key)) {
         let mut spent = Spent {
             cached: true,
             first_token_ms: Some(started.elapsed().as_millis() as u64),
@@ -2423,12 +2432,28 @@ pub async fn answer(
         }
         return spent;
     }
+    let listed = match early {
+        Some(listed) => listed,
+        None => listing.await,
+    };
+    let Some(key) = key else {
+        return answer_routed(
+            ask,
+            history,
+            question,
+            events,
+            None,
+            &Keep::default(),
+            listed,
+        )
+        .await;
+    };
     // What the visitor is sent passes through here, so a whole answer is kept as it was sent.
     let keep = Keep::default();
     let keeping = &keep;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(32);
     let answering = async move {
-        let spent = answer_routed(ask, history, question, &tx, Some(key), keeping).await;
+        let spent = answer_routed(ask, history, question, &tx, Some(key), keeping, listed).await;
         drop(tx);
         spent
     };
@@ -2455,8 +2480,40 @@ pub async fn answer(
     spent
 }
 
-/// [`answer`] past the cache: `key` is the question's cache key when it has one, and `keep` is
-/// told how long a whole answer may be kept.
+/// What the router is told besides the question: the connectors that answered with their types,
+/// those that did not, and the sources' languages.
+struct Listed {
+    live: Live,
+    missing: Vec<String>,
+    languages: Vec<String>,
+}
+
+/// The connectors' type lists and the sources' languages, read at once before the router may
+/// start: a step of the turn's own, so their wait is never untracked time (T-4729).
+async fn listed(ask: &Ask<'_>, history: &[Turn]) -> Listed {
+    let began = Instant::now();
+    let said = history
+        .iter()
+        .rev()
+        .find(|turn| turn.role == "assistant")
+        .map(|turn| turn.text.as_str());
+    let ((live, missing), languages) = tokio::join!(live(ask, said), languages(ask));
+    let listed = format!(
+        "{} connectors listed, {} did not answer",
+        live.len(),
+        missing.len()
+    );
+    ask.trace
+        .note("tool", "connectors", began, None, Some(&listed));
+    Listed {
+        live,
+        missing,
+        languages,
+    }
+}
+
+/// [`answer`] past the cache: `key` is the question's cache key when it has one, `keep` is told
+/// how long a whole answer may be kept, and `listed` is what [`listed`] read.
 async fn answer_routed(
     ask: &Ask<'_>,
     history: &[Turn],
@@ -2464,6 +2521,11 @@ async fn answer_routed(
     events: &Sender<Event>,
     key: Option<[u8; 32]>,
     keep: &Keep,
+    Listed {
+        live,
+        missing,
+        languages,
+    }: Listed,
 ) -> Spent {
     let started = Instant::now();
     let now = super::clock::now_line(ask.now, ask.zone);
@@ -2480,23 +2542,6 @@ async fn answer_routed(
         reasoning: ask.reasoning.judge.unwrap_or_default(),
         ..router
     };
-    // The connectors' type lists and the sources' languages, before the router may start: a step
-    // of the turn's own, so their wait is never untracked time (T-4729).
-    let began = Instant::now();
-    let said = history
-        .iter()
-        .rev()
-        .find(|turn| turn.role == "assistant")
-        .map(|turn| turn.text.as_str());
-    let (live, missing) = live(ask, said).await;
-    let languages = languages(ask).await;
-    let listed = format!(
-        "{} connectors listed, {} did not answer",
-        live.len(),
-        missing.len()
-    );
-    ask.trace
-        .note("tool", "connectors", began, None, Some(&listed));
     let q = Question {
         ask,
         history,
