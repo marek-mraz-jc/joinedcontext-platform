@@ -347,12 +347,8 @@ impl Config {
     }
 }
 
-/// Reduces the configured broker URL to `scheme://authority`, with no trailing slash.
-///
-/// The forwarded path is always built by the gateway from the route it matched, so a base
-/// that carried a path of its own would silently prefix every request; refusing it here is
-/// cheaper than debugging it later.
-/// `name`, as `read` from the environment, as a positive whole number of `unit`, `default` when it is unset or blank.
+/// `name`, as `read` from the environment, as a positive whole number of `unit`, `default` when
+/// it is unset or blank.
 fn positive(
     name: &'static str,
     read: Result<String, std::env::VarError>,
@@ -371,6 +367,11 @@ fn positive(
     }
 }
 
+/// Reduces the configured broker URL to `scheme://authority`, with no trailing slash.
+///
+/// The forwarded path is always built by the gateway from the route it matched, so a base
+/// that carried a path of its own would silently prefix every request; refusing it here is
+/// cheaper than debugging it later.
 fn normalize_broker_url(raw: &str) -> Result<String, ConfigError> {
     let invalid = |reason: &str| ConfigError::Invalid {
         name: "JC_GATEWAY_BROKER_URL",
