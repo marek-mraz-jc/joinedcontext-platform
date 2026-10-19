@@ -45,3 +45,7 @@ tower = { version = "0.5", features = ["util"] }
 # Captures the proxy's log lines, to prove no token is written to one; already in the tree via jc-core.
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 wiremock = "0.6"
+
+[package.metadata.cargo-machete]
+# Declared only to turn on its getrandom feature for argon2's OsRng (data_credential.rs).
+ignored = ["rand_core"]
