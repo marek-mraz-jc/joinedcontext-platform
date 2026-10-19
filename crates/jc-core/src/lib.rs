@@ -23,6 +23,8 @@ pub mod kpi;
 pub mod logs;
 pub mod names;
 pub mod ngsi_catalog;
+#[cfg(feature = "outbound")]
+pub mod outbound;
 pub mod project;
 pub mod qb;
 pub mod quality;

@@ -14,6 +14,7 @@ use crate::secrets::SecretValue;
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::{StatusCode, Url};
 use serde_json::{json, Value};
+use std::io::Read;
 use std::time::Duration;
 
 /// How long a connection may take to open.
@@ -22,6 +23,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one action may take end to end. A `datastore_upsert` of a full table is the
 /// slow one, and CKAN writes it in one transaction.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The longest answer read from the catalogue: a package or a field list is kilobytes, so a host
+/// that streams more is cut off rather than filling the publisher's memory (T-4776).
+const MAX_ANSWER: u64 = 32 * 1024 * 1024;
 
 /// How much of a non-JSON answer an error repeats: enough to see a proxy's error page,
 /// not enough to flood a log.
@@ -64,7 +69,13 @@ impl HttpCkan {
                 "the CKAN API token is empty".to_owned(),
             ));
         }
+        // The manifest names the instance, so a redirect is judged like an outside URL: never to
+        // an address inside the cluster or the cloud's metadata, never from https down to http
+        // (T-4776). The first URL stays the operator's to choose, a local CKAN included.
         let client = Client::builder()
+            .redirect(jc_core::outbound::redirects(
+                jc_core::outbound::MAX_REDIRECTS,
+            ))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .user_agent(super::ckan::GENERATOR)
@@ -105,9 +116,16 @@ impl HttpCkan {
             .send()
             .map_err(|e| CkanError::Unavailable(transport(action, &e)))?;
         let status = response.status();
-        let text = response
-            .text()
-            .map_err(|e| CkanError::Unavailable(transport(action, &e)))?;
+        let mut body = Vec::new();
+        std::io::Read::take(response, MAX_ANSWER + 1)
+            .read_to_end(&mut body)
+            .map_err(|e| CkanError::Unavailable(format!("{action} broke off: {e}")))?;
+        if body.len() as u64 > MAX_ANSWER {
+            return Err(CkanError::Unavailable(format!(
+                "{action} answered more than {MAX_ANSWER} bytes; the answer is not read"
+            )));
+        }
+        let text = String::from_utf8_lossy(&body);
         let envelope: Value = match serde_json::from_str(&text) {
             Ok(envelope) => envelope,
             Err(_) if status == StatusCode::NOT_FOUND => return Ok(None),

@@ -52,19 +52,11 @@ pub async fn handler(
 
     let status =
         StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
-
-    if (resp_bytes.len() as u64) > run.max_response_bytes {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            jc_core::ProblemDetails::new(
-                413,
-                "payload-too-large",
-                "package download exceeds byte limit",
-            ),
-        )
-            .into_response();
-    }
+    let resp_bytes =
+        match super::fetch::body_within(upstream_resp, run.max_response_bytes, &reached).await {
+            Ok(body) => body,
+            Err(problem) => return *problem,
+        };
 
     log_request(&AuditEntry {
         run_id: &run.id,

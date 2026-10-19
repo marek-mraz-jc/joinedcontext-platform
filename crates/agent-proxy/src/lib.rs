@@ -85,6 +85,8 @@ pub fn no_redirect_client(timeout: Option<std::time::Duration>) -> reqwest::Clie
 /// private, loopback or link-local address reaches nothing (AG-65, T-1304).
 pub fn egress_client() -> reqwest::Client {
     reqwest::Client::builder()
+        // A proxy from the environment would resolve the name itself, past the resolver below.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(30))
         .dns_resolver(Arc::new(public_dns::PublicOnly))
