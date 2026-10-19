@@ -470,10 +470,19 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
     };
     out.insert(key("urls"), sequence(&urls));
     out.insert(key("topics"), sequence(&connection.topics));
-    out.insert(
-        key("client_id"),
-        text(&format!("jc-{}-{}", context.project, context.pipeline)),
-    );
+    // A broker outside the platform sees every installation that reads it: each needs its own
+    // client id, or the broker drops one session for the other's in a loop (dev and smartcity on
+    // mqtt.hsl.fi, T-4678). The runner fills its namespace, as for the internal URL.
+    let client_id = match &connection.broker_ref {
+        Some(_) => format!("jc-{}-{}", context.project, context.pipeline),
+        None => format!(
+            "jc-{}-{}-${{{}}}",
+            context.project,
+            context.pipeline,
+            mqtt_broker::NAMESPACE_VARIABLE
+        ),
+    };
+    out.insert(key("client_id"), text(&client_id));
     if let Some(qos) = connection.qos {
         out.insert(key("qos"), Value::Number(qos.into()));
     }

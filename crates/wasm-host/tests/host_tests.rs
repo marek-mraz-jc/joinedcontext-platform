@@ -252,6 +252,30 @@ async fn an_app_that_never_ends_is_stopped_at_its_wall_time_and_others_go_on() {
     assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
 }
 
+/// T-4591: spinning guest code never yields, and on one worker thread a tokio clock would stop
+/// with it, so the wall time never fired and fuel ended the run instead. The clock is a thread of
+/// its own and each tick yields: the spin is stopped as a timeout, and another request is answered
+/// on the same worker while it spins.
+#[tokio::test(flavor = "current_thread")]
+async fn a_spin_on_the_only_worker_thread_is_stopped_at_its_wall_time_and_yields_meanwhile() {
+    let world = World::new("loop-one-thread", Limits::default(), None);
+    let app = world.place("spin", guest());
+    let spinning = world.get(&app, "/api/loop", None);
+    let other = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = Instant::now();
+        let answer = world.get(&app, "/api/hello", None).await.unwrap().0;
+        (answer, started.elapsed())
+    };
+    let (stopped, (answer, waited)) = tokio::join!(spinning, other);
+    assert_eq!(stopped.unwrap_err(), Failure::Timeout);
+    assert_eq!(answer, 200);
+    assert!(
+        waited < Duration::from_secs(4),
+        "the other request waited {waited:?} behind the spin"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_app_asking_for_more_than_its_memory_fails_alone() {
     let world = World::new("alloc", fast(), None);

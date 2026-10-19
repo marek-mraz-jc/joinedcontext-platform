@@ -45,6 +45,7 @@ struct World {
 fn source_spec() -> KnowledgeSourceSpec {
     KnowledgeSourceSpec {
         source: SourceType::Website,
+        categories: Vec::new(),
         start_urls: vec!["https://hronov.example/".into()],
         ckan_instance_ref: None,
         context_spaces: Vec::new(),
@@ -138,6 +139,7 @@ async fn world(test: &str) -> World {
                 name: "subory".into(),
                 spec: KnowledgeSourceSpec {
                     source: SourceType::Upload,
+                    categories: Vec::new(),
                     start_urls: Vec::new(),
                     upload: Some(UploadLimits {
                         max_bytes: 64 * 1024,
@@ -297,6 +299,12 @@ async fn only_the_portals_service_account_is_answered() {
         ),
         (
             "GET",
+            format!("{k}/sources/{{source}}/search"),
+            format!("{BASE}/sources/web/search?q=odpad"),
+            None,
+        ),
+        (
+            "GET",
             format!("{k}/sources/{{source}}/pages/{{page}}/links"),
             format!("{BASE}/sources/web/pages/{}/links", w.root),
             None,
@@ -414,6 +422,11 @@ async fn the_inventory_reads_level_by_level() {
         (json!("web"), json!(3), json!(1), json!(4))
     );
     assert_eq!(web["lastCrawl"], "2026-10-06T03:00:00Z");
+    assert_eq!(
+        web["languages"],
+        json!({"sk": 4}),
+        "passages per language (UI-99)"
+    );
 
     let (_, roots) = call(&w.app, "GET", &format!("{BASE}/sources/web/pages"), t, None).await;
     let roots = roots["items"].as_array().expect("items").clone();
@@ -515,6 +528,145 @@ async fn the_inventory_reads_level_by_level() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
     }
     db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// UI-99, AG-120 (T-4659): pages carry what they state of themselves, a page search reads the
+/// whole source by title or address with case and diacritics ignored, and the source's search
+/// answers what `search_documents` would, internal passages included for the administration.
+#[tokio::test]
+async fn pages_are_found_by_title_or_address_and_the_source_answers_a_trial_search() {
+    let w = world("adminsearch").await;
+    let t = Some(PORTAL_TOKEN);
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    sqlx::query("UPDATE pages SET title = 'Úvodná stránka', description = 'Mesto Hronov', modified = '2026-09-30T08:12:00Z' WHERE id = $1")
+        .bind(w.root).execute(&mut *tx).await.expect("root metadata");
+    sqlx::query("UPDATE documents SET title = 'VZN o odpade', published = '2025-12-01T08:30:00Z' WHERE id = $1")
+        .bind(w.document).execute(&mut *tx).await.expect("document metadata");
+    sqlx::query("UPDATE chunks SET visibility = 'internal' WHERE page_id = $1")
+        .bind(w.grandchild)
+        .execute(&mut *tx)
+        .await
+        .expect("an internal passage");
+    tx.commit().await.expect("commit");
+
+    let (_, roots) = call(&w.app, "GET", &format!("{BASE}/sources/web/pages"), t, None).await;
+    let root = &roots["items"][0];
+    assert_eq!(
+        (
+            &root["title"],
+            &root["description"],
+            &root["modified"],
+            &root["published"]
+        ),
+        (
+            &json!("Úvodná stránka"),
+            &json!("Mesto Hronov"),
+            &json!("2026-09-30T08:12:00Z"),
+            &Value::Null
+        ),
+        "{roots}"
+    );
+    let (_, documents) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/web/documents"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(documents["items"][0]["title"], "VZN o odpade");
+    assert_eq!(documents["items"][0]["published"], "2025-12-01T08:30:00Z");
+
+    let found = |body: &Value| -> Vec<i64> {
+        body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|p| p["id"].as_i64().expect("id"))
+            .collect()
+    };
+    for (q, ids) in [
+        ("UVODNA", vec![w.root]),
+        ("zbér", vec![w.grandchild]),
+        ("odpad", vec![w.child, w.grandchild]),
+        ("nikde-nic", vec![]),
+    ] {
+        let (status, body) = call(
+            &w.app,
+            "GET",
+            &format!("{BASE}/sources/web/pages?q={}", urlencoding(q)),
+            t,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{q}: {body}");
+        assert_eq!(found(&body), ids, "{q}");
+    }
+    for q in ["x", &"a".repeat(101)] {
+        let (status, _) = call(
+            &w.app,
+            "GET",
+            &format!("{BASE}/sources/web/pages?q={q}"),
+            t,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{q}");
+    }
+
+    let (status, tried) = call(
+        &w.app,
+        "GET",
+        &format!(
+            "{BASE}/sources/web/search?q={}&limit=3",
+            urlencoding("ráno zber")
+        ),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tried}");
+    assert_eq!(
+        tried["hits"][0]["text"], "Zber je ráno.",
+        "the internal passage too: {tried}"
+    );
+    assert_eq!(tried["hits"][0]["publisher"], "hronov");
+    let (_, tried) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/web/search?q={}", urlencoding("nariadenie")),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(tried["hits"][0]["title"], "VZN o odpade", "{tried}");
+    assert_eq!(tried["hits"][0]["published"], "2025-12-01T08:30:00Z");
+    for uri in [
+        format!("{BASE}/sources/web/search"),
+        format!("{BASE}/sources/web/search?q=odpad&limit=11"),
+        format!("{BASE}/sources/web/search?q=odpad&limit=0"),
+        format!("{BASE}/sources/web/search?q=%20"),
+    ] {
+        let (status, _) = call(&w.app, "GET", &uri, t, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+    }
+    let (status, _) = call(
+        &w.app,
+        "GET",
+        &format!("{BASE}/sources/nikde/search?q=odpad"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// `text` as a query value.
+fn urlencoding(text: &str) -> String {
+    url::form_urlencoded::byte_serialize(text.as_bytes()).collect()
 }
 
 /// AG-113: excluding a subtree removes the passages of its pages and their documents at once,

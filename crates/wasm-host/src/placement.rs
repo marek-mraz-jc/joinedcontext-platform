@@ -67,13 +67,9 @@ pub fn is_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// An Endpoint's slug: lowercase letters and digits, 1 to 64 of them (the gateway's own rule).
+/// An Endpoint's slug as the Portal mints it (EP-02, the kind's own rule), at most 64 characters.
 pub fn is_slug(slug: &str) -> bool {
-    !slug.is_empty()
-        && slug.len() <= 64
-        && slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    slug.len() <= 64 && jc_core::kinds::EndpointSlug::new(slug).is_ok()
 }
 
 /// `sha256:` and 64 lowercase hex digits.
@@ -164,9 +160,21 @@ mod tests {
                 r#"{{"name": "notes", "id": "a1", "tenant": "t", "digest": "{D}", "endpoint": "{slug}"}}"#
             ))
         };
-        let apps = Placement::parse(&with("ab12"), "s1").unwrap();
-        assert_eq!(apps["notes"].endpoint.as_deref(), Some("ab12"));
-        for bad in ["", "AB", "a-b", "a/b", "../x", "a%2f", &"a".repeat(65)] {
+        let minted = "bikesq6epqkx364lprho5uaigu";
+        let apps = Placement::parse(&with(minted), "s1").unwrap();
+        assert_eq!(apps["notes"].endpoint.as_deref(), Some(minted));
+        // T-4591: the gateway's slug is the kind's, so a short or non-base32 one is refused too.
+        for bad in [
+            "",
+            "ab12",
+            "bikesq6epqkx364lprho5uaig0",
+            "AB",
+            "a-b",
+            "a/b",
+            "../x",
+            "a%2f",
+            &"a".repeat(65),
+        ] {
             assert!(Placement::parse(&with(bad), "s1").is_err(), "{bad}");
         }
     }

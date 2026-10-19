@@ -185,6 +185,7 @@ fn server_of(connector: &Connector) -> Option<McpServer> {
         spaces: select.spaces,
         domains: select.domains,
         themes: select.themes,
+        types: None,
         access_level: select.access_level,
     });
     server.endpoints = select.endpoints;
