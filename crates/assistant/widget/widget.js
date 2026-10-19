@@ -873,6 +873,7 @@
       list.appendChild(li);
     });
     item.appendChild(list);
+    item.chips = list;
   }
 
   // A data round's one numeric column as a small line or bar chart under its table (T-4198). The
@@ -1145,17 +1146,13 @@
       var cited = Array.isArray(data) ? data : [];
       item.cited = cited;
       show(item, item.pending || "", cited, item.turn);
-      var took = JCRender.steps(item.stages, lang);
-      if (took) {
-        var list = el("details", "jc-steps");
-        list.appendChild(el("summary", "", took.summary));
-        var ol = el("ol");
-        took.lines.forEach(function (line) { ol.appendChild(el("li", "", line)); });
-        list.appendChild(ol);
-        item.appendChild(list);
-      }
+      stepsPanel(item);
       saved(item, item.pending || "", cited);
       item.pending = null;
+    } else if (name === "done" && data && data.stagesMs) {
+      // The stages by name and duration replace the progress lines (T-4729).
+      item.timed = data.stagesMs;
+      if (item.cited) stepsPanel(item);
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
       // Kept with the answer, so a page change shows them again under the last one (T-4685).
@@ -1167,6 +1164,21 @@
     } else if (name === "error") {
       fail(item, JCRender.trouble(data.status, data.title), data.detail);
     }
+  }
+
+  // The collapsed list of the steps an answer took, made again when its stage times arrive.
+  function stepsPanel(item) {
+    var took = JCRender.steps(item.stages, lang, item.timed);
+    if (item.stepsList) item.stepsList.remove();
+    item.stepsList = null;
+    if (!took) return;
+    var list = el("details", "jc-steps");
+    list.appendChild(el("summary", "", took.summary));
+    var ol = el("ol");
+    took.lines.forEach(function (line) { ol.appendChild(el("li", "", line)); });
+    list.appendChild(ol);
+    item.insertBefore(list, item.chips || null);
+    item.stepsList = list;
   }
 
   // The answered turn into the panel's sessionStorage, with the question it answered.

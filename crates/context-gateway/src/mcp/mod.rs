@@ -15,6 +15,7 @@ pub mod jsonrpc;
 pub mod personal;
 pub mod search;
 pub mod server;
+pub mod titles;
 pub mod tools;
 pub mod units;
 pub mod writes;
@@ -121,6 +122,58 @@ mod tests {
             })
             .collect();
         assert!(unexplained.is_empty(), "not in the primer: {unexplained:?}");
+    }
+
+    /// T-4732: every tool the hub or an Endpoint lists carries a title of at most 64 characters,
+    /// the same at the top and in `annotations`, no two alike, beside its read-only hints; the
+    /// names stay as they were.
+    #[test]
+    fn every_listed_tool_has_a_unique_short_title_and_its_hints() {
+        let mut listed: Vec<Value> = tools::TOOLS
+            .iter()
+            .map(|tool| {
+                serde_json::json!({ "name": tool.name, "annotations": {
+                    "readOnlyHint": tool.read_only(), "destructiveHint": tool.destructive() } })
+            })
+            .collect();
+        listed.extend([
+            super::search::tool(),
+            hub::list_endpoints_tool(),
+            hub::get_endpoint_tool(),
+            super::documents::tool(""),
+        ]);
+        let names: Vec<Value> = listed.iter().map(|tool| tool["name"].clone()).collect();
+        super::titles::titled(&mut listed);
+        let mut titles = std::collections::HashSet::new();
+        for (tool, name) in listed.iter().zip(&names) {
+            assert_eq!(&tool["name"], name, "the name never changes");
+            let title = tool["title"].as_str().unwrap_or_default();
+            assert!(
+                !title.trim().is_empty() && title.chars().count() <= 64,
+                "{tool}"
+            );
+            assert_eq!(tool["annotations"]["title"], tool["title"], "{tool}");
+            assert!(titles.insert(title.to_owned()), "two tools titled {title}");
+            assert!(tool["annotations"]["readOnlyHint"].is_boolean(), "{tool}");
+        }
+        assert_eq!(listed[0]["title"], "Append attributes");
+
+        // A broker's tool as its view lists it: none, its own or a blank title.
+        let mut broker = vec![
+            serde_json::json!({ "name": "query_temporal" }),
+            serde_json::json!({ "name": "get_entity", "title": "Read one entity" }),
+            serde_json::json!({ "name": "list_types", "title": " ", "annotations": null }),
+        ];
+        super::titles::titled(&mut broker);
+        assert_eq!(broker[0]["title"], "Query temporal");
+        assert_eq!(
+            broker[0]["annotations"],
+            serde_json::json!({ "title": "Query temporal" })
+        );
+        assert_eq!(broker[1]["title"], "Read one entity");
+        assert_eq!(broker[1]["annotations"]["title"], "Read one entity");
+        assert_eq!(broker[2]["title"], "List types");
+        assert_eq!(broker[2]["annotations"]["title"], "List types");
     }
 
     /// T-4501, T-4502: the hub's own lines stay short, and the whole primer under 5,000 bytes.
