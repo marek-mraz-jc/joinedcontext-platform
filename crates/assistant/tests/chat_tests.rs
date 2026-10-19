@@ -1514,7 +1514,7 @@ async fn each_type_of_a_shared_endpoint_cites_its_own_page_or_its_listing() {
     )
     .await;
     let calls: Vec<Value> = ["Person", "School", "CycleRoute"].iter().enumerate()
-        .map(|(n, kind)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": [kind]}).to_string()}}))
+        .map(|(n, kind)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "query_entities", "arguments": json!({"endpoint": "ovzdusie", "type": [kind]}).to_string()}}))
         .collect();
     script(
         &w.proxy,
