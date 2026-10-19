@@ -89,3 +89,49 @@ fn an_inputs_processors_are_held_to_the_step_rules() {
     );
     assert!(msg.contains("subprocess"), "{msg}");
 }
+
+/// `awk`, `javascript` and `template` ship with the runner and read its files or environment
+/// (measured on the pinned image: `awk`'s `getline`, `ENVIRON` and `system()`, `javascript`'s
+/// `require` and `bento.v0_fetch`, `template`'s Sprig `env`): refused at the top of a step and
+/// nested, and never offered in the refusal's list of accepted processors.
+#[test]
+fn processors_that_read_the_runner_are_refused_in_a_step() {
+    use jc_core::kinds::pipeline::validate_processor;
+    for processor in [
+        serde_json::json!({ "awk": { "codec": "text", "program": "BEGIN { system(\"id\") }" } }),
+        serde_json::json!({ "javascript": { "code": "require('/data/other.json')" } }),
+        serde_json::json!({ "template": { "text": "{{ env \"JC_CLIENT_SECRET\" }}" } }),
+        serde_json::json!({ "try": [{ "awk": { "program": "{ print ENVIRON[\"X\"] }" } }] }),
+        serde_json::json!({ "branch": { "processors": [{ "javascript": { "code": "1" } }] } }),
+    ] {
+        let err = validate_processor("spec.steps.processor", &processor)
+            .expect_err(&processor.to_string())
+            .to_string();
+        assert!(
+            ["awk", "javascript", "template"]
+                .iter()
+                .any(|p| err.contains(p)),
+            "{processor}: {err}"
+        );
+    }
+    let unknown = validate_processor("spec.steps.processor", &serde_json::json!({ "nope": {} }))
+        .expect_err("unknown")
+        .to_string();
+    assert!(
+        unknown.contains("mapping") && !unknown.contains("awk") && !unknown.contains("javascript"),
+        "{unknown}"
+    );
+}
+
+/// `file_rel_json` reads a file like `file` does (the pinned image returns the file's JSON).
+#[test]
+fn a_mapping_cannot_read_a_file_with_file_rel_json() {
+    use jc_core::kinds::pipeline::validate_processor;
+    let err = validate_processor(
+        "spec.steps.processor",
+        &serde_json::json!({ "mapping": "root = file_rel_json(\"/data/other.json\")" }),
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(err.contains("file_rel_json"), "{err}");
+}
