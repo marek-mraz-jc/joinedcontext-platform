@@ -737,7 +737,7 @@ fn reason_refusal(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|r| !r.trim().is_empty());
     (deletes && !given).then(|| {
-        ProblemDetails::new(400, "reason-required", "Reason required")
+        ProblemDetails::new(400, "reason-required", "Reason Required")
             .with_detail("a delete names why in JC-Reason")
             .into_response()
     })
